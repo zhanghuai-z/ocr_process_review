@@ -1,3 +1,4 @@
+"""全局枚举定义。"""
 from enum import Enum, auto
 
 
@@ -33,3 +34,40 @@ class ProofStatus(str, Enum):
     AUTO_FLAGGED = "auto_flagged" # 自动标记（低置信度）
     MODIFIED = "modified"         # 人工已修改
     OK = "ok"                     # 确认无误
+
+
+class PageStatus(str, Enum):
+    """页面级别的状态枚举。"""
+    IMPORTED = "imported"
+    PREPROCESSED = "preprocessed"
+    LAYOUT_DONE = "layout_done"
+    LAYOUT_CONFIRMED = "layout_confirmed"
+    OCR_DONE = "ocr_done"
+    PRE_REVIEW_DONE = "pre_review_done"
+    PROOFING = "proofing"
+    PROOF_DONE = "proof_done"
+    ERROR = "error"
+
+
+class BlockSource(str, Enum):
+    """块来源枚举。"""
+    AUTO_LAYOUT = "auto_layout"
+    MANUAL_DRAW = "manual_draw"
+    AUTO_TIGHTENED = "auto_tightened"
+    USER_EDITED = "user_edited"
+
+
+class LlmReviewStatus(str, Enum):
+    """LLM 预审状态枚举。"""
+    DISABLED = "disabled"
+    PENDING = "pending"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class CanvasMode(str, Enum):
+    """编辑画布交互模式。"""
+    PAN = "pan"
+    SELECT = "select"
+    DRAW_BLOCK = "draw_block"
+    EDIT_BLOCK = "edit_block"

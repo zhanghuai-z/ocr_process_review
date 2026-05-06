@@ -1,7 +1,10 @@
-from .enums import BlockType, ProofStatus
-from .project import BBox, Char, Line, Block, Page, OcrProject
+from .enums import (
+    BlockSource, BlockType, CanvasMode, LlmReviewStatus, PageStatus, ProofStatus,
+)
+from .project import BBox, Block, Char, Line, OcrProject, Page
 
 __all__ = [
-    "BlockType", "ProofStatus",
+    "BlockType", "ProofStatus", "PageStatus", "BlockSource",
+    "LlmReviewStatus", "CanvasMode",
     "BBox", "Char", "Line", "Block", "Page", "OcrProject",
 ]

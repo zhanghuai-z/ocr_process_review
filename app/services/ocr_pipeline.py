@@ -1,0 +1,186 @@
+"""OCR 管线：遍历 page/block，调用 engine，转换坐标。
+
+职责：
+- 遍历 page/block
+- 跳过不可识别块
+- 裁剪 block ROI
+- 调用 OCR engine
+- 将行 bbox 从 crop 坐标转换回 page 坐标
+- 设置 proof status
+- 记录失败
+- 发出进度
+"""
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Protocol
+
+import cv2
+import numpy as np
+
+from app.engines import OcrContext
+from app.engines.fake_ocr_engine import FakeOcrEngine
+from app.models import (
+    Block, BlockType, BBox, Line, OcrProject, Page, ProofStatus,
+)
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+# 非文字块类型默认不送 OCR
+NON_OCR_BLOCK_TYPES = {BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN}
+
+# 自动标记低置信行阈值
+AUTO_FLAG_THRESHOLD = 0.80
+
+
+@dataclass
+class OcrProgress:
+    """OCR 进度信息。"""
+    current_page: int = 0
+    total_pages: int = 0
+    current_block: int = 0
+    total_blocks: int = 0
+    message: str = ""
+
+
+@dataclass
+class OcrResult:
+    """OCR 处理结果。"""
+    pages: List[Page] = field(default_factory=list)
+    failed_blocks: List[tuple[int, int, str]] = field(default_factory=list)  # (page_idx, block_idx, error)
+
+
+class OcrPipeline:
+    """OCR 管线。"""
+
+    def __init__(self, engine: Optional[object] = None):
+        """初始化 OCR 管线。
+
+        Args:
+            engine: OcrEngine 实现。如果为 None，使用 FakeOcrEngine。
+        """
+        self._engine = engine or FakeOcrEngine()
+
+    def process_project(
+        self,
+        project: OcrProject,
+        progress_callback: Optional[Callable[[OcrProgress], None]] = None,
+    ) -> OcrResult:
+        """处理项目所有页的所有可识别块。"""
+        result = OcrResult()
+        total_pages = len(project.pages)
+
+        for page_idx, page in enumerate(project.pages):
+            img = cv2.imread(page.cache_image_path or page.image_path)
+            if img is None:
+                logger.warning("Cannot read image: %s", page.image_path)
+                for block in page.blocks:
+                    if block.recognizable:
+                        result.failed_blocks.append(
+                            (page_idx, block.order, f"Cannot read image: {page.image_path}")
+                        )
+                continue
+
+            total_blocks = len([b for b in page.blocks if b.recognizable])
+            block_idx = 0
+
+            for block in page.blocks:
+                if not block.recognizable:
+                    continue
+
+                if progress_callback:
+                    progress_callback(OcrProgress(
+                        current_page=page_idx + 1,
+                        total_pages=total_pages,
+                        current_block=block_idx + 1,
+                        total_blocks=total_blocks,
+                        message=f"第 {page_idx + 1}/{total_pages} 页，块 {block_idx + 1}/{total_blocks}",
+                    ))
+
+                try:
+                    lines = self._process_block(img, block, page, page_idx)
+                    block.lines = lines
+                except Exception as e:
+                    logger.error(
+                        "OCR failed: page=%d block=%d: %s",
+                        page_idx, block.order, e,
+                    )
+                    result.failed_blocks.append(
+                        (page_idx, block.order, str(e))
+                    )
+
+                block_idx += 1
+
+            result.pages.append(page)
+
+        return result
+
+    def process_block(
+        self,
+        block: Block,
+        page_image_path: str,
+    ) -> Block:
+        """处理单个块（用于块级重跑）。"""
+        img = cv2.imread(page_image_path)
+        if img is None:
+            logger.warning("Cannot read image: %s", page_image_path)
+            return block
+
+        page = Page(image_path=page_image_path, width=0, height=0)
+        lines = self._process_block(img, block, page, 0)
+        block.lines = lines
+        return block
+
+    def _process_block(
+        self,
+        img: np.ndarray,
+        block: Block,
+        page: Page,
+        page_idx: int,
+    ) -> List[Line]:
+        """处理单个块的 OCR。"""
+        if block.block_type in NON_OCR_BLOCK_TYPES:
+            return []
+
+        bb = block.bbox
+        # clamp to image boundaries
+        x1 = max(0, bb.x)
+        y1 = max(0, bb.y)
+        x2 = min(img.shape[1], bb.x + bb.w)
+        y2 = min(img.shape[0], bb.y + bb.h)
+
+        if x2 <= x1 or y2 <= y1:
+            return []
+
+        crop = img[y1:y2, x1:x2]
+        if crop.size == 0:
+            return []
+
+        context = OcrContext(
+            page_image_path=page.cache_image_path or page.image_path,
+            page_number=page.page_number,
+            block_id=block.id,
+            block_type=block.block_type,
+        )
+
+        lines = self._engine.recognize(crop, context)
+
+        # 转换 bbox 从 crop 坐标到 page 坐标
+        for line in lines:
+            line.bbox = BBox(
+                x=line.bbox.x + x1,
+                y=line.bbox.y + y1,
+                w=line.bbox.w,
+                h=line.bbox.h,
+            )
+            # 设置 proof status
+            if line.confidence < AUTO_FLAG_THRESHOLD:
+                if line.proof_status == ProofStatus.UNCHECKED:
+                    line.proof_status = ProofStatus.AUTO_FLAGGED
+            # 保存 OCR 原文
+            if not line.ocr_text:
+                line.ocr_text = line.text
+            if not line.original_text:
+                line.original_text = line.text
+
+        return lines

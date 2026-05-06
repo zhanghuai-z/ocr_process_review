@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import time
 
-from .enums import BlockType, ProofStatus
+from .enums import (
+    BlockSource, BlockType, LlmReviewStatus, PageStatus, ProofStatus,
+)
 
 
 @dataclass
@@ -14,6 +16,26 @@ class BBox:
     w: int
     h: int
 
+    @property
+    def x1(self) -> int:
+        return self.x
+
+    @property
+    def y1(self) -> int:
+        return self.y
+
+    @property
+    def x2(self) -> int:
+        return self.x + self.w
+
+    @property
+    def y2(self) -> int:
+        return self.y + self.h
+
+    @property
+    def area(self) -> int:
+        return self.w * self.h
+
     @classmethod
     def from_xyxy(cls, x1: int, y1: int, x2: int, y2: int) -> "BBox":
         return cls(x=int(x1), y=int(y1), w=int(x2 - x1), h=int(y2 - y1))
@@ -23,6 +45,38 @@ class BBox:
 
     def to_dict(self) -> dict:
         return {"x": self.x, "y": self.y, "w": self.w, "h": self.h}
+
+    def clamp(self, max_w: int, max_h: int) -> "BBox":
+        """裁剪到图像边界内。"""
+        x1 = max(0, min(self.x, max_w))
+        y1 = max(0, min(self.y, max_h))
+        x2 = max(x1, min(self.x + self.w, max_w))
+        y2 = max(y1, min(self.y + self.h, max_h))
+        return BBox(x1, y1, x2 - x1, y2 - y1)
+
+    def normalize(self) -> "BBox":
+        """确保宽高为正数（处理右下到左上拖拽）。"""
+        x = min(self.x, self.x + self.w)
+        y = min(self.y, self.y + self.h)
+        return BBox(x, y, abs(self.w), abs(self.h))
+
+    def expand(self, pad: int) -> "BBox":
+        """等量扩边。"""
+        return BBox(self.x - pad, self.y - pad, self.w + 2 * pad, self.h + 2 * pad)
+
+    def iou(self, other: "BBox") -> float:
+        """计算与另一个 BBox 的交并比。"""
+        x1 = max(self.x, other.x)
+        y1 = max(self.y, other.y)
+        x2 = min(self.x2, other.x2)
+        y2 = min(self.y2, other.y2)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        union = self.area + other.area - inter
+        return inter / union if union > 0 else 0.0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "BBox":
+        return cls(x=int(d["x"]), y=int(d["y"]), w=int(d["w"]), h=int(d["h"]))
 
 
 @dataclass
@@ -45,11 +99,31 @@ class Line:
     original_text: str = ""    # 修改前的原始文字（保留用于对比）
     id: Optional[int] = None
 
+    # --- Phase 1 新增字段 ---
+    ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
+    llm_suggestion: str = ""              # LLM 预审建议文本
+    llm_reason: str = ""                  # LLM 修改原因
+    llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
+    review_flags: List[str] = field(default_factory=list)  # 疑点标签
+
     def update_text(self, new_text: str) -> None:
         if self.original_text == "":
             self.original_text = self.text
         self.text = new_text
         self.proof_status = ProofStatus.MODIFIED
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text,
+            "confidence": self.confidence,
+            "bbox": self.bbox.to_dict(),
+            "proof_status": self.proof_status.value,
+            "original_text": self.original_text,
+            "ocr_text": self.ocr_text,
+            "llm_suggestion": self.llm_suggestion,
+            "llm_reason": self.llm_reason,
+            "llm_review_status": self.llm_review_status.value,
+        }
 
 
 @dataclass
@@ -60,6 +134,12 @@ class Block:
     lines: List[Line] = field(default_factory=list)
     order: int = 0             # 阅读顺序（从版面分析得到）
     id: Optional[int] = None
+
+    # --- Phase 1 新增字段 ---
+    source: BlockSource = BlockSource.AUTO_LAYOUT  # 块来源
+    is_locked: bool = False                         # 锁定后自动分析不覆盖
+    recognizable: bool = True                       # 是否送 OCR
+    note: str = ""                                  # 用户备注或系统说明
 
     @property
     def full_text(self) -> str:
@@ -82,6 +162,15 @@ class Page:
     page_number: int = 1
     id: Optional[int] = None
 
+    # --- Phase 1 新增字段 ---
+    source_path: str = ""                   # 原始导入文件路径
+    source_type: str = "image"              # "image" | "pdf"
+    source_page_index: int = 1              # PDF 页码（1-based）
+    cache_image_path: str = ""              # 处理后的实际工作图片路径
+    thumbnail_path: str = ""                # 缩略图路径
+    status: PageStatus = PageStatus.IMPORTED
+    error_message: str = ""                 # 当前页失败原因
+
     @property
     def is_analyzed(self) -> bool:
         return len(self.blocks) > 0
@@ -91,6 +180,32 @@ class Page:
         return [b for b in self.blocks if b.block_type in (
             BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE
         )]
+
+    @property
+    def recognizable_blocks(self) -> List[Block]:
+        """返回可送 OCR 的块。"""
+        return [b for b in self.blocks if b.recognizable]
+
+    @property
+    def total_lines(self) -> int:
+        return sum(len(b.lines) for b in self.blocks)
+
+    @property
+    def proofed_lines(self) -> int:
+        """已校对行数。"""
+        return sum(
+            1 for b in self.blocks for l in b.lines
+            if l.proof_status in (ProofStatus.OK, ProofStatus.MODIFIED)
+        )
+
+    @property
+    def flagged_lines(self) -> int:
+        """低置信或疑点标记行数。"""
+        return sum(
+            1 for b in self.blocks for l in b.lines
+            if l.proof_status == ProofStatus.AUTO_FLAGGED
+            or (l.review_flags and l.proof_status != ProofStatus.OK)
+        )
 
 
 @dataclass
@@ -109,13 +224,36 @@ class OcrProject:
 
     @property
     def total_lines(self) -> int:
-        return sum(
-            len(b.lines) for p in self.pages for b in p.blocks
-        )
+        return sum(p.total_lines for p in self.pages)
 
     @property
-    def flagged_lines(self) -> int:
-        return sum(
-            1 for p in self.pages for b in p.blocks
-            for l in b.lines if l.proof_status == ProofStatus.AUTO_FLAGGED
+    def total_flagged_lines(self) -> int:
+        return sum(p.flagged_lines for p in self.pages)
+
+    @property
+    def total_unproofed_lines(self) -> int:
+        return self.total_lines - sum(p.proofed_lines for p in self.pages)
+
+    @property
+    def ocr_completed(self) -> bool:
+        return any(p.total_lines > 0 for p in self.pages)
+
+    @property
+    def has_unrecognized_blocks(self) -> bool:
+        return any(
+            b.recognizable and not b.lines
+            for p in self.pages for b in p.blocks
         )
+
+    def get_export_summary(self) -> dict:
+        """导出前状态摘要。"""
+        return {
+            "total_pages": self.page_count,
+            "total_lines": self.total_lines,
+            "unproofed_lines": self.total_unproofed_lines,
+            "flagged_lines": self.total_flagged_lines,
+            "unrecognized_blocks": sum(
+                1 for p in self.pages for b in p.blocks
+                if b.recognizable and not b.lines
+            ),
+        }

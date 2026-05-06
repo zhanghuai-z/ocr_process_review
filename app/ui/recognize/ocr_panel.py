@@ -17,9 +17,12 @@ class OcrPanel(QWidget):
     """
     步骤3: OCR 识别结果展示。
     左：图像预览；右：结果树（Block → Line → Char）。
-    发出 recognition_done 信号，携带更新后的 pages。
+
+    信号：
+    - go_to_proof_requested: 用户点击"进入校对"按钮（纯导航意图）
+      （注意：不要在按钮点击中重新发射 OCR 完成信号）
     """
-    recognition_done = Signal(list)   # List[Page]
+    go_to_proof_requested = Signal()   # 纯导航意图
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -78,7 +81,7 @@ class OcrPanel(QWidget):
         self._btn_next = QPushButton("进入校对 →")
         self._btn_next.setEnabled(False)
         self._btn_next.setStyleSheet("font-size:14px; padding:8px;")
-        self._btn_next.clicked.connect(lambda: self.recognition_done.emit(self._pages))
+        self._btn_next.clicked.connect(self.go_to_proof_requested.emit)
         btn_row.addWidget(self._btn_next)
         layout.addLayout(btn_row)
 

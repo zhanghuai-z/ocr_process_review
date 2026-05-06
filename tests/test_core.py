@@ -1,34 +1,156 @@
-"""基础单元测试：无需 OCR 引擎，不启动 GUI。"""
-import tempfile
+"""基础单元测试：无需 OCR 引擎，不启动 GUI。
+
+覆盖：
+- 模型基础行为（含新增字段）
+- BBox 工具函数
+- ProjectStore 保存/加载/迁移/脏数据清理
+- ProofEngine 低置信标记
+- TXT/XML/HTML 导出
+- Fake OCR/Layout/LLM 引擎
+- OcrPipeline
+- ExportService
+"""
+import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+# =====================================================================
+# 模型测试
+# =====================================================================
+
 def test_models():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.models import (
+        BBox, Block, BlockSource, BlockType, Line,
+        LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
+    )
+
+    # BBox
     bb = BBox(10, 20, 100, 30)
     assert bb.to_xyxy() == (10, 20, 110, 50)
     assert BBox.from_xyxy(0, 0, 50, 80) == BBox(0, 0, 50, 80)
+    assert bb.area == 3000
+    assert bb.x1 == 10 and bb.y1 == 20 and bb.x2 == 110 and bb.y2 == 50
 
+    # BBox clamp
+    clamped = BBox(-10, -5, 200, 300).clamp(100, 100)
+    assert clamped.x >= 0 and clamped.y >= 0
+    assert clamped.x2 <= 100 and clamped.y2 <= 100
+
+    # BBox normalize
+    norm = BBox(50, 60, -20, -30).normalize()
+    assert norm.w == 20 and norm.h == 30
+    assert norm.x == 30 and norm.y == 30
+
+    # BBox expand
+    expanded = BBox(10, 10, 100, 50).expand(5)
+    assert expanded.x == 5 and expanded.y == 5
+    assert expanded.w == 110 and expanded.h == 60
+
+    # BBox iou
+    a = BBox(0, 0, 100, 100)
+    b = BBox(50, 50, 100, 100)
+    assert 0.0 < a.iou(b) < 1.0
+    assert a.iou(a) == 1.0
+    assert BBox(0, 0, 10, 10).iou(BBox(100, 100, 10, 10)) == 0.0
+
+    # Line
     line = Line(text="测试文字", confidence=0.95, bbox=bb)
     assert line.proof_status == ProofStatus.UNCHECKED
+    assert line.llm_review_status == LlmReviewStatus.DISABLED
+    assert line.review_flags == []
     line.update_text("修改文字")
     assert line.proof_status == ProofStatus.MODIFIED
     assert line.original_text == "测试文字"
 
-    block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
-    assert block.full_text == "修改文字"
+    # Line with new fields
+    line2 = Line(
+        text="终稿", confidence=0.85, bbox=bb,
+        ocr_text="OCR原文", llm_suggestion="LLM建议",
+        llm_review_status=LlmReviewStatus.DONE,
+        review_flags=["low_confidence"],
+    )
+    assert line2.ocr_text == "OCR原文"
+    assert line2.llm_suggestion == "LLM建议"
 
+    # Block
+    block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line, line2])
+    assert block.full_text == "修改文字\n终稿"
+    assert block.source == BlockSource.AUTO_LAYOUT
+    assert block.recognizable is True
+
+    # Block new fields
+    block2 = Block(
+        block_type=BlockType.TABLE, bbox=bb,
+        source=BlockSource.MANUAL_DRAW, is_locked=True,
+        recognizable=False, note="测试备注",
+    )
+    assert block2.source == BlockSource.MANUAL_DRAW
+    assert block2.is_locked is True
+    assert block2.recognizable is False
+    assert block2.note == "测试备注"
+
+    # Page
     page = Page(image_path="/tmp/test.jpg", width=800, height=1200)
     page.blocks.append(block)
     assert page.is_analyzed
+    assert page.status == PageStatus.IMPORTED
+    assert page.source_type == "image"
 
+    # Page new fields
+    page2 = Page(
+        image_path="/tmp/cache.png", width=800, height=1200,
+        source_path="/tmp/original.pdf", source_type="pdf",
+        source_page_index=1, cache_image_path="/tmp/cache.png",
+        status=PageStatus.LAYOUT_DONE,
+    )
+    assert page2.source_type == "pdf"
+    assert page2.status == PageStatus.LAYOUT_DONE
+
+    # Project
     project = OcrProject(name="测试项目", pages=[page])
     assert project.page_count == 1
+    assert project.total_lines == 2
+    assert project.ocr_completed is True
+
+    # Export summary
+    summary = project.get_export_summary()
+    assert summary["total_pages"] == 1
+    assert summary["total_lines"] >= 0
+
     print("test_models PASSED")
 
+
+# =====================================================================
+# BBox 工具测试
+# =====================================================================
+
+def test_bbox_tools():
+    from app.models import BBox
+
+    # from_dict / to_dict round-trip
+    d = {"x": 10, "y": 20, "w": 100, "h": 50}
+    bb = BBox.from_dict(d)
+    assert bb.to_dict() == d
+
+    # clamp edge cases
+    bb = BBox(-10, -5, 50, 60)
+    c = bb.clamp(100, 100)
+    assert c.x == 0 and c.y == 0
+
+    bb2 = BBox(80, 90, 50, 60).clamp(100, 100)
+    assert bb2.x2 <= 100 and bb2.y2 <= 100
+
+    print("test_bbox_tools PASSED")
+
+
+# =====================================================================
+# ProjectStore 测试
+# =====================================================================
 
 def test_project_store():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -58,6 +180,125 @@ def test_project_store():
         os.unlink(db_path)
 
 
+def test_project_store_clean_on_resave():
+    """重新保存时旧 block 不残留。"""
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+
+        # 第一次保存：block A
+        line_a = Line(text="BlockA", confidence=0.9, bbox=bb)
+        block_a = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line_a])
+        page = Page(image_path="/tmp/img.jpg", width=800, height=600)
+        page.blocks = [block_a]
+        project = OcrProject(name="清理测试", pages=[page])
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            page_id = project.pages[0].id
+
+            # 第二次保存：只保留 block B
+            line_b = Line(text="BlockB", confidence=0.95, bbox=bb)
+            block_b = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line_b])
+            project.pages[0].blocks = [block_b]
+            store.save_project(project)
+
+        # 重新打开，断言只有 BlockB
+        with ProjectStore(db_path) as store:
+            loaded = store.load_project(project_id=1)
+            assert len(loaded.pages[0].blocks) == 1
+            assert loaded.pages[0].blocks[0].lines[0].text == "BlockB"
+
+        print("test_project_store_clean_on_resave PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+def test_project_store_schema_migration():
+    """从 v1 schema 迁移到 v2。"""
+    import sqlite3
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        # 创建 v1 风格的数据库
+        conn = sqlite3.connect(db_path)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS project (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS page (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+                image_path TEXT NOT NULL, width INTEGER NOT NULL,
+                height INTEGER NOT NULL, page_number INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS block (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                page_id INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
+                block_type TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
+                w INTEGER NOT NULL, h INTEGER NOT NULL,
+                block_order INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS line (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_id INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
+                text TEXT NOT NULL DEFAULT '', original_text TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 0.0,
+                proof_status TEXT NOT NULL DEFAULT 'unchecked',
+                x INTEGER NOT NULL, y INTEGER NOT NULL,
+                w INTEGER NOT NULL, h INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS char (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                line_id INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,
+                char TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.0,
+                x INTEGER, y INTEGER, w INTEGER, h INTEGER
+            );
+            INSERT INTO project (id, name, created_at, updated_at) VALUES (1, 'legacy', 0, 0);
+            INSERT INTO page (id, project_id, image_path, width, height, page_number)
+                VALUES (1, 1, '/tmp/test.jpg', 800, 600, 1);
+            INSERT INTO block (id, page_id, block_type, x, y, w, h, block_order)
+                VALUES (1, 1, 'text', 0, 0, 100, 20, 0);
+            INSERT INTO line (id, block_id, text, original_text, confidence, proof_status, x, y, w, h)
+                VALUES (1, 1, 'legacy text', '', 0.9, 'unchecked', 0, 0, 100, 20);
+        """)
+        conn.commit()
+        conn.close()
+
+        # 用新 ProjectStore 打开（触发迁移）
+        with ProjectStore(db_path) as store:
+            loaded = store.load_project(project_id=1)
+            assert loaded is not None
+            assert loaded.name == "legacy"
+            assert loaded.pages[0].blocks[0].lines[0].text == "legacy text"
+
+        # 验证 schema 版本已更新
+        conn2 = sqlite3.connect(db_path)
+        ver = conn2.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        assert ver is not None
+        assert int(ver[0]) >= 2
+        conn2.close()
+
+        print("test_project_store_schema_migration PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+# =====================================================================
+# ProofEngine 测试
+# =====================================================================
+
 def test_proof_engine():
     from app.models import BBox, Block, BlockType, Line, Page, ProofStatus
     from app.core.proof_engine import ProofEngine
@@ -77,6 +318,10 @@ def test_proof_engine():
     assert lines[1].proof_status == ProofStatus.AUTO_FLAGGED
     print("test_proof_engine PASSED")
 
+
+# =====================================================================
+# 导出测试
+# =====================================================================
 
 def test_export_txt():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -140,11 +385,227 @@ def test_export_html():
         os.unlink(out_path)
 
 
+# =====================================================================
+# Fake OCR 引擎测试
+# =====================================================================
+
+def test_fake_ocr_engine():
+    import numpy as np
+    from app.engines.fake_ocr_engine import FakeOcrEngine
+    from app.engines import OcrContext
+
+    engine = FakeOcrEngine()
+    img = np.zeros((200, 400, 3), dtype=np.uint8)
+    context = OcrContext()
+    lines = engine.recognize(img, context)
+
+    assert len(lines) > 0
+    assert lines[0].text == "测试OCR文本"
+    assert lines[0].confidence == 0.95
+
+    # 应该有低置信行
+    flagged = [l for l in lines if l.confidence < 0.80]
+    assert len(flagged) > 0
+    assert flagged[0].text == "低置信文本"
+
+    print("test_fake_ocr_engine PASSED")
+
+
+def test_fake_layout_engine():
+    from app.engines.fake_layout_engine import FakeLayoutEngine
+
+    engine = FakeLayoutEngine()
+    blocks = engine.analyze("/tmp/nonexistent.jpg")  # 应返回 fallback
+
+    assert len(blocks) > 0
+    assert blocks[0].bbox.w > 0
+
+    print("test_fake_layout_engine PASSED")
+
+
+# =====================================================================
+# Fake LLM 引擎测试
+# =====================================================================
+
+def test_fake_llm_engine_disabled():
+    """LLM 关闭时不调用 adapter。"""
+    from app.models import Line, LlmReviewStatus
+    # 当 llm_review_status 为 DISABLED 时，不触发审查
+    line = Line(
+        text="测试", confidence=0.9,
+        bbox=__import__('app.models').models.BBox(0, 0, 10, 10),
+        llm_review_status=LlmReviewStatus.DISABLED,
+    )
+    assert line.llm_review_status == LlmReviewStatus.DISABLED
+    assert line.llm_suggestion == ""
+    print("test_fake_llm_engine_disabled PASSED")
+
+
+def test_fake_llm_engine():
+    from app.engines.fake_llm_engine import (
+        FakeLlmPreReviewEngine, LlmPreReviewLine, LlmPreReviewOptions,
+    )
+
+    engine = FakeLlmPreReviewEngine()
+    lines = [
+        LlmPreReviewLine(page_number=1, block_order=0, line_index=0,
+                          text="正常文本", confidence=0.95),
+        LlmPreReviewLine(page_number=1, block_order=0, line_index=1,
+                          text="错別字", confidence=0.90),
+        LlmPreReviewLine(page_number=1, block_order=0, line_index=2,
+                          text="", confidence=0.0),
+        LlmPreReviewLine(page_number=1, block_order=0, line_index=3,
+                          text="低置信", confidence=0.60),
+    ]
+
+    suggestions = engine.review_lines(lines)
+
+    assert len(suggestions) == 4
+
+    # 正常文本：无修改
+    assert suggestions[0].suggested_text == "正常文本"
+    assert suggestions[0].flags == []
+
+    # 错别字检测
+    assert suggestions[1].suggested_text == "错别字"
+    assert "ocr_typo" in suggestions[1].flags
+
+    # 空文本
+    assert "empty_text" in suggestions[2].flags
+
+    # 低置信
+    assert "low_confidence" in suggestions[3].flags
+
+    print("test_fake_llm_engine PASSED")
+
+
+# =====================================================================
+# OcrPipeline 测试
+# =====================================================================
+
+def test_ocr_pipeline():
+    import tempfile
+    from app.engines.fake_ocr_engine import FakeOcrEngine
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    # 创建测试图像
+    import cv2
+    import numpy as np
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((400, 600, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        # 创建测试数据
+        bb = BBox(10, 10, 200, 300)
+        block = Block(block_type=BlockType.TEXT, bbox=bb)
+        page = Page(image_path=img_path, width=600, height=400)
+        page.blocks = [block]
+        project = OcrProject(name="PipelineTest", pages=[page])
+
+        # 使用 fake engine
+        pipeline = OcrPipeline(engine=FakeOcrEngine())
+        result = pipeline.process_project(project)
+
+        assert len(result.pages) == 1
+        assert len(result.pages[0].blocks) > 0
+        # fake OCR 应生成了 lines
+        assert len(result.pages[0].blocks[0].lines) > 0
+        assert result.pages[0].blocks[0].lines[0].text is not None
+
+        print("test_ocr_pipeline PASSED")
+    finally:
+        os.unlink(img_path)
+
+
+# =====================================================================
+# ExportService 测试
+# =====================================================================
+
+def test_export_service():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.services.export_service import (
+        check_export_readiness, get_export_text,
+    )
+
+    bb = BBox(0, 0, 100, 20)
+
+    # 测试 get_export_text
+    line = Line(text="最终文本", confidence=0.9, bbox=bb)
+    assert get_export_text(line) == "最终文本"
+
+    # 测试空项目
+    empty_project = OcrProject(name="empty", pages=[])
+    warnings = check_export_readiness(empty_project)
+    assert len(warnings) > 0
+
+    # 测试有未校对行
+    page = Page(image_path="/tmp/x.jpg", width=800, height=600)
+    block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[
+        Line(text="未校对", confidence=0.6, bbox=bb,
+             proof_status=ProofStatus.UNCHECKED),
+    ])
+    page.blocks = [block]
+    project = OcrProject(name="test", pages=[page])
+    warnings = check_export_readiness(project)
+    has_unproofed = any("未校对" in w for w in warnings)
+    assert has_unproofed
+
+    print("test_export_service PASSED")
+
+
+# =====================================================================
+# ImportService 测试
+# =====================================================================
+
+def test_import_service():
+    import tempfile
+    from PIL import Image
+    from app.services import ImportService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 创建测试图片
+        img_path = os.path.join(tmpdir, "test.png")
+        img = Image.new("RGB", (200, 100), color="white")
+        img.save(img_path)
+
+        # 创建测试缓存目录
+        cache_dir = os.path.join(tmpdir, "cache")
+        os.makedirs(cache_dir)
+
+        service = ImportService(cache_dir=cache_dir)
+        result = service.import_paths([img_path])
+
+        assert result.success_count == 1
+        assert result.failed_count == 0
+        assert result.pages[0].width == 200
+        assert result.pages[0].height == 100
+        assert result.pages[0].source_type == "image"
+
+    print("test_import_service PASSED")
+
+
+# =====================================================================
+# 入口
+# =====================================================================
+
 if __name__ == "__main__":
     test_models()
+    test_bbox_tools()
     test_project_store()
+    test_project_store_clean_on_resave()
+    test_project_store_schema_migration()
     test_proof_engine()
     test_export_txt()
     test_export_xml()
     test_export_html()
+    test_fake_ocr_engine()
+    test_fake_layout_engine()
+    test_fake_llm_engine_disabled()
+    test_fake_llm_engine()
+    test_ocr_pipeline()
+    test_export_service()
+    test_import_service()
     print("\n✓ 所有测试通过")

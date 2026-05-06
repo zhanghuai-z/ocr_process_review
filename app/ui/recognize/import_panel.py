@@ -123,3 +123,7 @@ class ImportPanel(QWidget):
 
     def _emit_ready(self) -> None:
         self.images_ready.emit(list(self._paths))
+
+    def reset(self) -> None:
+        """清空导入面板（新建项目时调用）。"""
+        self._clear()

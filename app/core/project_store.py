@@ -2,20 +2,29 @@
 
 项目文件扩展名：.ocrproj（本质是 SQLite 数据库）。
 图片数据只存路径，不存 Blob，避免数据库过大。
+
+Schema 版本管理：
+- meta 表记录 schema_version
+- 启动时检测版本并执行增量迁移
 """
 from __future__ import annotations
 import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from app.models import (
-    BBox, Block, BlockType, Char, Line, OcrProject, Page, ProofStatus
+    BBox, Block, BlockSource, BlockType, Char, Line,
+    LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
 )
 
-# --------------------------------------------------------------------- schema
-DDL = """
+from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
+
+logger = get_logger(__name__)
+
+# --------------------------------------------------------------------- schema v2
+DDL_V2 = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -27,43 +36,138 @@ CREATE TABLE IF NOT EXISTS project (
 );
 
 CREATE TABLE IF NOT EXISTS page (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id  INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-    image_path  TEXT    NOT NULL,
-    width       INTEGER NOT NULL,
-    height      INTEGER NOT NULL,
-    page_number INTEGER NOT NULL DEFAULT 1
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    image_path      TEXT    NOT NULL,
+    width           INTEGER NOT NULL,
+    height          INTEGER NOT NULL,
+    page_number     INTEGER NOT NULL DEFAULT 1,
+    source_path     TEXT    NOT NULL DEFAULT '',
+    source_type     TEXT    NOT NULL DEFAULT 'image',
+    source_page_index INTEGER NOT NULL DEFAULT 1,
+    cache_image_path TEXT   NOT NULL DEFAULT '',
+    thumbnail_path  TEXT    NOT NULL DEFAULT '',
+    status          TEXT    NOT NULL DEFAULT 'imported',
+    error_message   TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS block (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    page_id     INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
-    block_type  TEXT    NOT NULL,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    page_id         INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
+    block_type      TEXT    NOT NULL,
     x INTEGER NOT NULL, y INTEGER NOT NULL,
     w INTEGER NOT NULL, h INTEGER NOT NULL,
-    block_order INTEGER NOT NULL DEFAULT 0
+    block_order     INTEGER NOT NULL DEFAULT 0,
+    source          TEXT    NOT NULL DEFAULT 'auto_layout',
+    is_locked       INTEGER NOT NULL DEFAULT 0,
+    recognizable    INTEGER NOT NULL DEFAULT 1,
+    note            TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS line (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    block_id        INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
-    text            TEXT    NOT NULL DEFAULT '',
-    original_text   TEXT    NOT NULL DEFAULT '',
-    confidence      REAL    NOT NULL DEFAULT 0.0,
-    proof_status    TEXT    NOT NULL DEFAULT 'unchecked',
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
+    text              TEXT    NOT NULL DEFAULT '',
+    original_text     TEXT    NOT NULL DEFAULT '',
+    confidence        REAL    NOT NULL DEFAULT 0.0,
+    proof_status      TEXT    NOT NULL DEFAULT 'unchecked',
     x INTEGER NOT NULL, y INTEGER NOT NULL,
-    w INTEGER NOT NULL, h INTEGER NOT NULL
+    w INTEGER NOT NULL, h INTEGER NOT NULL,
+    ocr_text          TEXT    NOT NULL DEFAULT '',
+    llm_suggestion    TEXT    NOT NULL DEFAULT '',
+    llm_reason        TEXT    NOT NULL DEFAULT '',
+    llm_review_status TEXT    NOT NULL DEFAULT 'disabled',
+    review_flags_json TEXT    NOT NULL DEFAULT '[]'
 );
 
-CREATE TABLE IF NOT EXISTS char (
+CREATE TABLE IF NOT EXISTS char_ (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     line_id     INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,
     char        TEXT    NOT NULL,
     confidence  REAL    NOT NULL DEFAULT 0.0,
     x INTEGER, y INTEGER, w INTEGER, h INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operation_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id      INTEGER NOT NULL,
+    page_id         INTEGER,
+    object_type     TEXT NOT NULL,
+    object_id       INTEGER,
+    action          TEXT NOT NULL,
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL
+);
 """
 
+# ------------------------------------------------------------------- migration
+
+MIGRATIONS: dict[int, list[str]] = {
+    # v1 -> v2: add new columns and tables
+    2: [
+        # page table additions are handled by CREATE IF NOT EXISTS,
+        # but we need ALTER for existing v1 dbs
+        "ALTER TABLE page ADD COLUMN source_path TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE page ADD COLUMN source_type TEXT NOT NULL DEFAULT 'image';",
+        "ALTER TABLE page ADD COLUMN source_page_index INTEGER NOT NULL DEFAULT 1;",
+        "ALTER TABLE page ADD COLUMN cache_image_path TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE page ADD COLUMN thumbnail_path TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE page ADD COLUMN status TEXT NOT NULL DEFAULT 'imported';",
+        "ALTER TABLE page ADD COLUMN error_message TEXT NOT NULL DEFAULT '';",
+        # block table additions
+        "ALTER TABLE block ADD COLUMN source TEXT NOT NULL DEFAULT 'auto_layout';",
+        "ALTER TABLE block ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0;",
+        "ALTER TABLE block ADD COLUMN recognizable INTEGER NOT NULL DEFAULT 1;",
+        "ALTER TABLE block ADD COLUMN note TEXT NOT NULL DEFAULT '';",
+        # line table additions
+        "ALTER TABLE line ADD COLUMN ocr_text TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE line ADD COLUMN llm_suggestion TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE line ADD COLUMN llm_reason TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE line ADD COLUMN llm_review_status TEXT NOT NULL DEFAULT 'disabled';",
+        "ALTER TABLE line ADD COLUMN review_flags_json TEXT NOT NULL DEFAULT '[]';",
+        # new tables
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        "CREATE TABLE IF NOT EXISTS operation_log ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "project_id INTEGER NOT NULL, page_id INTEGER, "
+        "object_type TEXT NOT NULL, object_id INTEGER, "
+        "action TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', "
+        "created_at REAL NOT NULL);",
+    ],
+}
+
+
+# ------------------------------------------------------------------- helpers
+
+def _row_to_blocks(row: sqlite3.Row) -> dict:
+    return dict(row)
+
+
+def _review_flags_to_json(flags: list[str]) -> str:
+    return json.dumps(flags, ensure_ascii=False)
+
+
+def _json_to_review_flags(s: str) -> list[str]:
+    if not s:
+        return []
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+# ---------------------------------------------------------------- store class
 
 class ProjectStore:
     """负责 OcrProject 的持久化。"""
@@ -77,8 +181,62 @@ class ProjectStore:
     def open(self) -> None:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(DDL)
+        self._conn.executescript(DDL_V2)
         self._conn.commit()
+        self._ensure_meta()
+        self._migrate()
+
+    def _ensure_meta(self) -> None:
+        """确保 meta 表和版本记录存在。"""
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')"
+            )
+            self.conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('app_version', '0.1.0')"
+            )
+            self.conn.commit()
+
+    def _migrate(self) -> None:
+        """顺序执行迁移到当前版本。"""
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        current_version = int(row["value"]) if row else 0
+
+        target_version = SCHEMA_VERSION
+        for ver in range(current_version + 1, target_version + 1):
+            if ver in MIGRATIONS:
+                stmts = MIGRATIONS[ver]
+                logger.info("Running schema migration v%d -> v%d", ver - 1, ver)
+                try:
+                    for stmt in stmts:
+                        try:
+                            self.conn.execute(stmt)
+                        except sqlite3.OperationalError as e:
+                            # "duplicate column name" is safe to ignore
+                            # when the column already exists (table recreated)
+                            if "duplicate column" in str(e).lower():
+                                logger.debug("Skipping (already applied): %s", e)
+                            else:
+                                raise
+                    self.conn.execute(
+                        "UPDATE meta SET value=? WHERE key='schema_version'",
+                        (str(ver),),
+                    )
+                    self.conn.execute(
+                        "UPDATE meta SET value=? WHERE key='app_version'",
+                        (APP_VERSION,),
+                    )
+                    self.conn.commit()
+                    logger.info("Migration to v%d completed", ver)
+                except Exception as e:
+                    self.conn.rollback()
+                    logger.error("Migration to v%d failed: %s", ver, e)
+                    raise
 
     def close(self) -> None:
         if self._conn:
@@ -98,96 +256,132 @@ class ProjectStore:
             raise RuntimeError("ProjectStore is not open. Call open() first.")
         return self._conn
 
-    # ------------------------------------------------------------------ save
+    # ------------------------------------------------------------------ save (transactional with delete-then-rebuild)
 
     def save_project(self, project: OcrProject) -> OcrProject:
-        """保存或更新整个项目（全量写入）。"""
+        """保存或更新整个项目（事务化全量写入）。
+
+        使用"删除后重建"策略避免脏数据残留：
+        1. 事务内删除旧 page/block/line/char
+        2. 重新插入当前数据
+        3. 回写新 id 到内存对象
+        """
         now = time.time()
         project.updated_at = now
 
-        cur = self.conn.cursor()
-        if project.id is None:
-            cur.execute(
-                "INSERT INTO project (name, created_at, updated_at) VALUES (?, ?, ?)",
-                (project.name, project.created_at, project.updated_at),
-            )
-            project.id = cur.lastrowid
-        else:
-            cur.execute(
-                "UPDATE project SET name=?, updated_at=? WHERE id=?",
-                (project.name, project.updated_at, project.id),
-            )
+        conn = self.conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
 
-        for page in project.pages:
-            self._save_page(cur, page, project.id)
+            cur = conn.cursor()
+            if project.id is None:
+                cur.execute(
+                    "INSERT INTO project (name, created_at, updated_at) VALUES (?, ?, ?)",
+                    (project.name, project.created_at, project.updated_at),
+                )
+                project.id = cur.lastrowid
+            else:
+                cur.execute(
+                    "UPDATE project SET name=?, updated_at=? WHERE id=?",
+                    (project.name, project.updated_at, project.id),
+                )
 
-        self.conn.commit()
-        project.db_path = self.db_path
-        return project
+            # 获取当前所有 page id，用于清理旧数据
+            old_page_ids = [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM page WHERE project_id=?", (project.id,)
+                ).fetchall()
+            ]
+
+            for page in project.pages:
+                self._save_page(cur, page, project.id)
+
+            # 删除已移除的 page（级联删除 block/line/char）
+            saved_page_ids = {p.id for p in project.pages if p.id is not None}
+            for old_id in old_page_ids:
+                if old_id not in saved_page_ids:
+                    cur.execute("DELETE FROM page WHERE id=?", (old_id,))
+
+            conn.commit()
+            project.db_path = self.db_path
+            return project
+
+        except Exception as e:
+            conn.rollback()
+            logger.error("Save project failed: %s", e)
+            raise
 
     def _save_page(self, cur: sqlite3.Cursor, page: Page, project_id: int) -> None:
         if page.id is None:
             cur.execute(
-                "INSERT INTO page (project_id, image_path, width, height, page_number) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (project_id, page.image_path, page.width, page.height, page.page_number),
+                "INSERT INTO page (project_id, image_path, width, height, "
+                "page_number, source_path, source_type, source_page_index, "
+                "cache_image_path, thumbnail_path, status, error_message) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (project_id, page.image_path, page.width, page.height,
+                 page.page_number, page.source_path, page.source_type,
+                 page.source_page_index, page.cache_image_path,
+                 page.thumbnail_path, page.status.value, page.error_message),
             )
             page.id = cur.lastrowid
         else:
             cur.execute(
-                "UPDATE page SET image_path=?, width=?, height=?, page_number=? WHERE id=?",
-                (page.image_path, page.width, page.height, page.page_number, page.id),
+                "UPDATE page SET image_path=?, width=?, height=?, page_number=?, "
+                "source_path=?, source_type=?, source_page_index=?, "
+                "cache_image_path=?, thumbnail_path=?, status=?, error_message=? "
+                "WHERE id=?",
+                (page.image_path, page.width, page.height, page.page_number,
+                 page.source_path, page.source_type, page.source_page_index,
+                 page.cache_image_path, page.thumbnail_path, page.status.value,
+                 page.error_message, page.id),
             )
 
+        # 删除旧 block（级联删除 line/char）
+        cur.execute("DELETE FROM block WHERE page_id=?", (page.id,))
         for block in page.blocks:
+            block.id = None  # 重置 id 以便重新插入
             self._save_block(cur, block, page.id)
 
     def _save_block(self, cur: sqlite3.Cursor, block: Block, page_id: int) -> None:
         bb = block.bbox
-        if block.id is None:
-            cur.execute(
-                "INSERT INTO block (page_id, block_type, x, y, w, h, block_order) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order),
-            )
-            block.id = cur.lastrowid
-        else:
-            cur.execute(
-                "UPDATE block SET block_type=?, x=?, y=?, w=?, h=?, block_order=? WHERE id=?",
-                (block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order, block.id),
-            )
+        cur.execute(
+            "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
+            "source, is_locked, recognizable, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
+             block.source.value, int(block.is_locked), int(block.recognizable),
+             block.note),
+        )
+        block.id = cur.lastrowid
 
         for line in block.lines:
+            line.id = None  # 重置 id
             self._save_line(cur, line, block.id)
 
     def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
         bb = line.bbox
-        if line.id is None:
-            cur.execute(
-                "INSERT INTO line (block_id, text, original_text, confidence, proof_status, "
-                "x, y, w, h) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (block_id, line.text, line.original_text, line.confidence,
-                 line.proof_status.value, bb.x, bb.y, bb.w, bb.h),
-            )
-            line.id = cur.lastrowid
-        else:
-            cur.execute(
-                "UPDATE line SET text=?, original_text=?, confidence=?, proof_status=?, "
-                "x=?, y=?, w=?, h=? WHERE id=?",
-                (line.text, line.original_text, line.confidence,
-                 line.proof_status.value, bb.x, bb.y, bb.w, bb.h, line.id),
-            )
+        cur.execute(
+            "INSERT INTO line (block_id, text, original_text, confidence, proof_status, "
+            "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
+            "review_flags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (block_id, line.text, line.original_text, line.confidence,
+             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
+             line.ocr_text, line.llm_suggestion, line.llm_reason,
+             line.llm_review_status.value,
+             _review_flags_to_json(line.review_flags)),
+        )
+        line.id = cur.lastrowid
 
         for char in line.chars:
+            char.id = None
             self._save_char(cur, char, line.id)
 
     def _save_char(self, cur: sqlite3.Cursor, char: Char, line_id: int) -> None:
-        if char.id is not None:
-            return  # char 不做更新（识别后不变）
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
         cur.execute(
-            "INSERT INTO char (line_id, char, confidence, x, y, w, h) "
+            "INSERT INTO char_ (line_id, char, confidence, x, y, w, h) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (line_id, char.char, char.confidence, x, y, w, h),
         )
@@ -199,10 +393,28 @@ class ProjectStore:
         """只更新单行文字（校对时使用）。"""
         bb = line.bbox
         self.conn.execute(
-            "UPDATE line SET text=?, original_text=?, proof_status=? WHERE id=?",
-            (line.text, line.original_text, line.proof_status.value, line.id),
+            "UPDATE line SET text=?, original_text=?, proof_status=?, "
+            "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
+            "review_flags_json=? WHERE id=?",
+            (line.text, line.original_text, line.proof_status.value,
+             line.ocr_text, line.llm_suggestion, line.llm_reason,
+             line.llm_review_status.value,
+             _review_flags_to_json(line.review_flags), line.id),
         )
         self.conn.commit()
+
+    # ------------------------------------------------------------------ batch update lines
+
+    def update_lines(self, lines: list[Line]) -> None:
+        """批量更新行（事务）。"""
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            for line in lines:
+                self.update_line(line)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     # ------------------------------------------------------------------ load
 
@@ -233,6 +445,13 @@ class ProjectStore:
                 height=pr["height"],
                 page_number=pr["page_number"],
                 id=pr["id"],
+                source_path=pr["source_path"],
+                source_type=pr["source_type"],
+                source_page_index=pr["source_page_index"],
+                cache_image_path=pr["cache_image_path"],
+                thumbnail_path=pr["thumbnail_path"],
+                status=PageStatus(pr["status"]),
+                error_message=pr["error_message"],
             )
             page.blocks = self._load_blocks(page.id)
             project.pages.append(page)
@@ -250,6 +469,10 @@ class ProjectStore:
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 order=r["block_order"],
                 id=r["id"],
+                source=BlockSource(r["source"]),
+                is_locked=bool(r["is_locked"]),
+                recognizable=bool(r["recognizable"]),
+                note=r["note"],
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)
@@ -268,6 +491,11 @@ class ProjectStore:
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 proof_status=ProofStatus(r["proof_status"]),
                 id=r["id"],
+                ocr_text=r["ocr_text"],
+                llm_suggestion=r["llm_suggestion"],
+                llm_reason=r["llm_reason"],
+                llm_review_status=LlmReviewStatus(r["llm_review_status"]),
+                review_flags=_json_to_review_flags(r["review_flags_json"]),
             )
             line.chars = self._load_chars(line.id)
             lines.append(line)
@@ -275,7 +503,7 @@ class ProjectStore:
 
     def _load_chars(self, line_id: int) -> List[Char]:
         rows = self.conn.execute(
-            "SELECT * FROM char WHERE line_id=?", (line_id,)
+            "SELECT * FROM char_ WHERE line_id=?", (line_id,)
         ).fetchall()
         chars = []
         for r in rows:
@@ -295,3 +523,37 @@ class ProjectStore:
             "SELECT id, name, created_at, updated_at FROM project ORDER BY updated_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ------------------------------------------------------------------ settings
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        row = self.conn.execute(
+            "SELECT value FROM settings WHERE key=?", (key,)
+        ).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self.conn.commit()
+
+    # ------------------------------------------------------------------ operation log
+
+    def log_operation(
+        self,
+        project_id: int,
+        action: str,
+        object_type: str = "",
+        object_id: int | None = None,
+        page_id: int | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO operation_log (project_id, page_id, object_type, object_id, "
+            "action, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (project_id, page_id, object_type, object_id,
+             action, json.dumps(payload or {}, ensure_ascii=False), time.time()),
+        )
+        self.conn.commit()

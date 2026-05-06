@@ -1,19 +1,30 @@
-"""主窗口：步骤导航栏 + QStackedWidget + 全局工作流控制。"""
+"""主窗口：步骤导航栏 + QStackedWidget + 全局工作流控制。
+
+核心变更：
+- 业务逻辑委托给 WorkflowController
+- UI 只发出用户意图，不直接管理项目状态
+- 步骤按钮根据 controller 状态启用
+- OCR 完成事件与"进入校对"导航意图严格分离
+"""
 from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
     QStatusBar, QVBoxLayout, QWidget,
 )
 
+from app.controllers.workflow_controller import (
+    WorkflowController, STEP_IMPORT, STEP_LAYOUT, STEP_OCR,
+    STEP_HPROOF, STEP_VPROOF,
+)
+from app.core.logging import get_logger
 from app.models import OcrProject, Page
-from app.core.project_store import ProjectStore
-from app.core.proof_engine import ProofEngine
+from app.services import ImportService
 from app.ui.recognize.import_panel import ImportPanel
 from app.ui.recognize.layout_panel import LayoutPanel
 from app.ui.recognize.ocr_panel import OcrPanel
@@ -21,37 +32,7 @@ from app.ui.proof.h_proof import HProofPanel
 from app.ui.proof.v_proof import VProofPanel
 from app.ui.export.export_dialog import ExportDialog
 
-
-# ── 步骤常量 ──────────────────────────────────────────────────
-STEP_IMPORT  = 0
-STEP_LAYOUT  = 1
-STEP_OCR     = 2
-STEP_HPROOF  = 3
-STEP_VPROOF  = 4
-STEP_EXPORT  = 5  # 导出不是单独页面，通过对话框触发
-
-
-# ── 版面分析 Worker ────────────────────────────────────────────
-class LayoutWorker(QThread):
-    page_done = Signal(int, int)
-    all_done  = Signal(list)   # List[Page]
-    error     = Signal(str)
-
-    def __init__(self, pages: List[Page], parent=None):
-        super().__init__(parent)
-        self._pages = pages
-
-    def run(self) -> None:
-        try:
-            from app.core.layout_analyzer import LayoutAnalyzer
-            analyzer = LayoutAnalyzer()
-            total = len(self._pages)
-            for i, page in enumerate(self._pages):
-                analyzer.analyze(page)
-                self.page_done.emit(i, total)
-            self.all_done.emit(self._pages)
-        except Exception as e:
-            self.error.emit(str(e))
+logger = get_logger(__name__)
 
 
 # ── 步骤导航按钮 ───────────────────────────────────────────────
@@ -105,7 +86,8 @@ class StepBar(QWidget):
 
     def set_enabled_up_to(self, max_step: int) -> None:
         for btn in self._buttons:
-            btn.setEnabled(btn.step <= max_step)
+            can_enable = btn.step <= max_step
+            btn.setEnabled(can_enable)
 
 
 # ── 主窗口 ─────────────────────────────────────────────────────
@@ -113,16 +95,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self._project: Optional[OcrProject] = None
-        self._store: Optional[ProjectStore] = None
-        self._layout_worker: Optional[LayoutWorker] = None
-        self._ocr_worker = None
-        self._proof_engine = ProofEngine()
+        self._controller = WorkflowController()
 
         self.setWindowTitle("OCR 后处理")
         self.resize(1280, 800)
         self._build_ui()
         self._build_menu()
+        self._connect_signals()
         self._go_to_step(STEP_IMPORT)
 
     # ── UI 构建 ────────────────────────────────────────────────
@@ -142,7 +121,7 @@ class MainWindow(QMainWindow):
         h_layout.setContentsMargins(8, 0, 12, 0)
 
         self._step_bar = StepBar()
-        self._step_bar.step_clicked.connect(self._go_to_step)
+        self._step_bar.step_clicked.connect(self._on_step_clicked)
         h_layout.addWidget(self._step_bar)
 
         self._project_lbl = QLabel("（无项目）")
@@ -173,18 +152,41 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._stack)
 
-        # 信号连接
-        self._import_panel.images_ready.connect(self._on_images_ready)
-        self._layout_panel.analysis_confirmed.connect(self._start_ocr)
-        self._layout_panel.run_button.clicked.connect(self._start_layout_analysis)
-        self._ocr_panel.recognition_done.connect(self._on_ocr_done)
-        self._hproof_panel.proof_saved.connect(self._auto_save)
-        self._vproof_panel.proof_saved.connect(self._auto_save)
-
         # 状态栏
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
         self._status_bar.showMessage("就绪")
+
+    def _connect_signals(self) -> None:
+        """连接所有信号，包括 controller 和面板之间的信号。"""
+
+        # ----- 面板信号 -> Controller -----
+
+        # 导入面板：图片/PDF 准备就绪
+        self._import_panel.images_ready.connect(self._on_images_ready)
+
+        # 版面面板：运行分析按钮 -> 启动分析
+        self._layout_panel.run_button.clicked.connect(self._start_layout_analysis)
+
+        # 版面面板：用户确认分析结果 -> 启动 OCR（如果尚未识别则自动启动识别）
+        self._layout_panel.analysis_confirmed.connect(self._start_ocr)
+
+        # OCR 面板："进入校对"按钮 -> 只发导航请求（不触发完成逻辑）
+        self._ocr_panel.go_to_proof_requested.connect(self._on_go_to_proof)
+
+        # 校对面板：保存修改
+        self._hproof_panel.proof_saved.connect(self._auto_save)
+        self._vproof_panel.proof_saved.connect(self._auto_save)
+
+        # ----- Controller 信号 -> UI -----
+
+        self._controller.project_changed.connect(self._on_project_changed)
+        self._controller.step_enabled_changed.connect(self._step_bar.set_enabled_up_to)
+        self._controller.step_requested.connect(self._go_to_step)
+        self._controller.ocr_finished.connect(self._on_ocr_finished)
+        self._controller.layout_finished.connect(self._on_layout_finished)
+        self._controller.worker_error.connect(self._on_worker_error)
+        self._controller.status_message.connect(self._status_bar.showMessage)
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -218,15 +220,37 @@ class MainWindow(QMainWindow):
         help_m = menu.addMenu("帮助(&H)")
         act_about = QAction("关于", self)
         act_about.triggered.connect(lambda: QMessageBox.about(
-            self, "关于", "OCR 后处理软件 v0.1.0\n基于 PaddleOCR + PySide6"
+            self, "关于", "OCR 后处理软件 v0.2.0\n基于 PaddleOCR + PySide6"
         ))
         help_m.addAction(act_about)
 
     # ── 步骤切换 ───────────────────────────────────────────────
 
     def _go_to_step(self, step: int) -> None:
+        """直接跳转到步骤（不经过 controller 校验）。"""
         self._stack.setCurrentIndex(step)
         self._step_bar.set_active(step)
+
+    def _on_step_clicked(self, step: int) -> None:
+        """用户点击步骤栏按钮 → 让 controller 判断是否允许跳转。"""
+        self._controller.request_step(step)
+
+    # ── Controller 回调 ─────────────────────────────────────────
+
+    def _on_project_changed(self, project: OcrProject) -> None:
+        self._project_lbl.setText(f"项目：{project.name}")
+
+    def _on_layout_finished(self, pages: List[Page]) -> None:
+        self._layout_panel.show_analysis_result(pages)
+
+    def _on_ocr_finished(self, pages: List[Page]) -> None:
+        """OCR 完成（由 controller 发出，业务事件）。"""
+        self._ocr_panel.on_recognition_complete(pages)
+        self._hproof_panel.load_pages(pages)
+        self._vproof_panel.load_pages(pages)
+
+    def _on_worker_error(self, msg: str) -> None:
+        QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
 
     # ── 文件操作 ───────────────────────────────────────────────
 
@@ -239,16 +263,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        if self._store:
-            self._store.close()
-        self._store = ProjectStore(path)
-        self._store.open()
-        self._project = OcrProject(name=name, db_path=path)
-        self._project = self._store.save_project(self._project)
-        self._project_lbl.setText(f"项目：{name}")
-        self._step_bar.set_enabled_up_to(STEP_IMPORT)
-        self._go_to_step(STEP_IMPORT)
-        self._status_bar.showMessage(f"新建项目：{path}")
+        if self._controller.new_project(name, path):
+            self._go_to_step(STEP_IMPORT)
+            self._import_panel.reset()
 
     def _open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -256,126 +273,115 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        if self._store:
-            self._store.close()
-        self._store = ProjectStore(path)
-        self._store.open()
-        self._project = self._store.load_project(project_id=1)
-        if not self._project:
-            QMessageBox.warning(self, "错误", "项目文件无效或为空")
-            return
-        self._project_lbl.setText(f"项目：{self._project.name}")
-        self._step_bar.set_enabled_up_to(STEP_VPROOF)
-
-        if self._project.pages:
-            self._layout_panel.set_pages(self._project.pages)
-            if all(p.is_analyzed for p in self._project.pages):
-                self._layout_panel.show_analysis_result(self._project.pages)
-                self._ocr_panel.set_pages(self._project.pages)
-                self._hproof_panel.load_pages(self._project.pages)
-                self._vproof_panel.load_pages(self._project.pages)
-
-        self._go_to_step(STEP_LAYOUT)
-        self._status_bar.showMessage(f"已打开：{path}")
+        if self._controller.open_project(path):
+            project = self._controller.project
+            if project and project.pages:
+                self._layout_panel.set_pages(project.pages)
+                if all(p.is_analyzed for p in project.pages):
+                    self._layout_panel.show_analysis_result(project.pages)
+                    self._ocr_panel.set_pages(project.pages)
+                    self._hproof_panel.load_pages(project.pages)
+                    self._vproof_panel.load_pages(project.pages)
+            self._go_to_step(STEP_LAYOUT)
 
     def _save_project(self) -> None:
-        if not self._project or not self._store:
+        if not self._controller.project:
             QMessageBox.information(self, "提示", "当前无项目，请先新建或打开项目")
             return
-        self._store.save_project(self._project)
-        self._status_bar.showMessage("项目已保存")
+        self._controller.save_project()
 
     def _auto_save(self) -> None:
-        """校对时自动保存修改行。"""
-        if self._project and self._store:
-            # 只更新有修改的行
-            from app.models import ProofStatus
-            for page in self._project.pages:
-                for block in page.blocks:
-                    for line in block.lines:
-                        if line.id and line.proof_status in (
-                            ProofStatus.MODIFIED, ProofStatus.OK
-                        ):
-                            self._store.update_line(line)
+        self._controller.auto_save()
 
-    # ── 工作流控制 ─────────────────────────────────────────────
+    # ── 工作流事件处理 ──────────────────────────────────────────
 
     def _on_images_ready(self, paths: List[str]) -> None:
-        """图片选择完成 → 构建 Page 对象 → 跳到版面分析步骤。"""
-        if not self._project:
-            # 自动建立临时项目（无保存路径）
-            self._project = OcrProject(name="未命名项目")
+        """导入文件 → 使用 ImportService 创建 Page 对象 → 交给 controller。"""
+        project = self._controller.project
+        if not project:
+            self._controller._project = OcrProject(name="未命名项目")
 
-        from PIL import Image
-        pages = []
-        for i, path in enumerate(paths):
-            try:
-                with Image.open(path) as img:
-                    w, h = img.size
-            except Exception:
-                w, h = 0, 0
-            page = Page(image_path=path, width=w, height=h, page_number=i + 1)
-            pages.append(page)
+        try:
+            from pathlib import Path
+            cache_dir = Path(self._controller._project.db_path or ".").parent / ".cache"
+            importer = ImportService(cache_dir=cache_dir)
+            result = importer.import_paths(paths)
 
-        self._project.pages = pages
-        self._layout_panel.set_pages(pages)
-        self._step_bar.set_enabled_up_to(STEP_LAYOUT)
+            if not result.pages:
+                QMessageBox.warning(
+                    self, "导入失败",
+                    "所有文件导入失败，详见日志。\n" +
+                    "\n".join(f"• {p}: {r}" for p, r in result.failed[:5])
+                )
+                return
+
+            self._controller.on_images_ready(result.pages)
+
+            if result.failed:
+                fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
+                self._status_bar.showMessage(
+                    f"导入完成：{result.success_count} 页成功，{result.failed_count} 个失败"
+                )
+                QMessageBox.information(
+                    self, "导入完成",
+                    f"成功导入 {result.success_count} 页。\n"
+                    f"{result.failed_count} 个文件失败：\n{fail_msg}"
+                )
+            else:
+                self._status_bar.showMessage(f"导入 {result.success_count} 页")
+
+        except Exception as e:
+            logger.error("Import failed: %s", e)
+            QMessageBox.critical(self, "导入错误", f"导入过程出错：{e}")
+            return
+
+        self._layout_panel.set_pages(result.pages)
         self._go_to_step(STEP_LAYOUT)
 
     def _start_layout_analysis(self) -> None:
-        if not self._project or not self._project.pages:
+        if not self._controller.project or not self._controller.project.pages:
             return
         self._layout_panel.run_button.setEnabled(False)
-        self._status_bar.showMessage("版面分析中…")
-        self._layout_worker = LayoutWorker(self._project.pages)
-        self._layout_worker.all_done.connect(self._on_layout_done)
-        self._layout_worker.error.connect(self._on_worker_error)
-        self._layout_worker.start()
-
-    def _on_layout_done(self, pages: List[Page]) -> None:
-        self._project.pages = pages
-        self._layout_panel.show_analysis_result(pages)
-        self._layout_panel.run_button.setEnabled(True)
-        self._step_bar.set_enabled_up_to(STEP_OCR)
-        self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
-        if self._store:
-            self._store.save_project(self._project)
+        self._controller.start_layout_analysis(self._controller.project.pages)
 
     def _start_ocr(self) -> None:
-        if not self._project or not self._project.pages:
+        """OCR 启动（由用户确认版面后触发）。"""
+        if not self._controller.project or not self._controller.project.pages:
             return
-        from app.core.ocr_runner import OcrWorker
-        self._ocr_panel.set_pages(self._project.pages)
+        pages = self._controller.project.pages
+        self._ocr_panel.set_pages(pages)
         self._go_to_step(STEP_OCR)
-        self._ocr_worker = OcrWorker(self._project.pages)
-        self._ocr_worker.page_done.connect(self._ocr_panel.on_progress)
-        self._ocr_worker.all_done.connect(self._on_ocr_done)
-        self._ocr_worker.error.connect(self._on_worker_error)
-        self._ocr_worker.start()
-        self._status_bar.showMessage("OCR 识别中…")
+        self._controller.start_ocr(pages, notify_page_callback=self._ocr_panel.on_progress)
 
-    def _on_ocr_done(self, pages: List[Page]) -> None:
-        self._project.pages = pages
-        flagged = self._proof_engine.auto_flag(pages)
-        self._ocr_panel.on_recognition_complete(pages)
-        self._hproof_panel.load_pages(pages)
-        self._vproof_panel.load_pages(pages)
-        self._step_bar.set_enabled_up_to(STEP_VPROOF)
-        self._status_bar.showMessage(
-            f"识别完成，自动标记 {flagged} 行低置信度内容"
-        )
-        if self._store:
-            self._store.save_project(self._project)
+    def _on_go_to_proof(self) -> None:
+        """用户点击"进入校对" → 只做导航，不触发 OCR 完成逻辑。"""
+        self._controller.request_step(STEP_HPROOF)
 
-    def _on_worker_error(self, msg: str) -> None:
-        QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
-        self._status_bar.showMessage("处理失败")
+    # ── 导出 ────────────────────────────────────────────────────
 
     def _show_export_dialog(self) -> None:
-        if not self._project or not self._project.pages:
+        project = self._controller.project
+        if not project or not project.pages:
             QMessageBox.information(self, "提示", "请先完成 OCR 识别再导出")
             return
-        dlg = ExportDialog(self._project, self)
+
+        # 导出前检查
+        summary = project.get_export_summary()
+        warnings = []
+        if summary["unrecognized_blocks"] > 0:
+            warnings.append(f"{summary['unrecognized_blocks']} 个块未识别")
+        if summary["unproofed_lines"] > 0:
+            warnings.append(f"{summary['unproofed_lines']} 行未校对")
+        if summary["flagged_lines"] > 0:
+            warnings.append(f"{summary['flagged_lines']} 行低置信度")
+
+        if warnings:
+            msg = "导出前请注意：\n" + "\n".join(f"  • {w}" for w in warnings)
+            msg += "\n\n是否继续导出？"
+            if QMessageBox.question(self, "导出确认", msg) != QMessageBox.StandardButton.Yes:
+                return
+
+        dlg = ExportDialog(project, self)
         dlg.exec()
 
     # ── 辅助 ───────────────────────────────────────────────────
@@ -386,8 +392,7 @@ class MainWindow(QMainWindow):
         return name.strip() or "新项目", ok
 
     def closeEvent(self, event) -> None:
-        if self._store:
-            self._store.close()
+        self._controller.close()
         super().closeEvent(event)
 
     def _show_ocr_settings(self) -> None:
