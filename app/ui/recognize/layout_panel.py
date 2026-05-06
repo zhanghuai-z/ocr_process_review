@@ -138,9 +138,11 @@ class LayoutPanel(QWidget):
             self._page_list.setCurrentRow(0)
 
     def show_analysis_result(self, pages: List[Page]) -> None:
-        """版面分析完成后，更新显示。"""
+        """版面分析完成后，更新显示（保持当前选中页）。"""
         self._pages = pages
-        self._update_viewer(0)
+        # 保持当前页索引，不跳回第 0 页
+        current_idx = min(self._current_page_idx, len(pages) - 1)
+        self._update_viewer(current_idx)
         self._btn_next.setEnabled(True)
         total_blocks = sum(len(p.blocks) for p in pages)
         self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")

@@ -229,13 +229,18 @@ class WorkflowController(QObject):
     # ------------------------------------------------------------------ worker management
 
     def start_layout_analysis(self, pages: List[Page]) -> None:
-        """启动版面分析 worker。"""
+        """启动版面分析 worker（带进度反馈）。"""
         from app.core.layout_analyzer import LayoutWorker
         self._layout_worker = LayoutWorker(pages)
+        self._layout_worker.page_done.connect(self._on_layout_progress)
         self._layout_worker.all_done.connect(self.on_layout_done)
         self._layout_worker.error.connect(self._on_worker_error)
         self._layout_worker.start()
         self.status_message.emit("版面分析中…")
+
+    def _on_layout_progress(self, current: int, total: int) -> None:
+        """版面分析进度更新。"""
+        self.status_message.emit(f"版面分析中… 第 {current + 1}/{total} 页")
 
     def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> None:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""

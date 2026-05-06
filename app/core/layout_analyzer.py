@@ -14,7 +14,31 @@ from __future__ import annotations
 import base64
 from typing import List
 
+from PySide6.QtCore import QThread, Signal
+
 from app.models import BBox, Block, BlockType, Page
+
+
+class LayoutWorker(QThread):
+    """版面分析 Worker 线程，避免阻塞 UI。"""
+    page_done = Signal(int, int)   # (current_index, total)
+    all_done  = Signal(list)       # List[Page]
+    error     = Signal(str)
+
+    def __init__(self, pages: List[Page], parent=None):
+        super().__init__(parent)
+        self._pages = pages
+
+    def run(self) -> None:
+        try:
+            analyzer = LayoutAnalyzer()
+            total = len(self._pages)
+            for i, page in enumerate(self._pages):
+                analyzer.analyze(page)
+                self.page_done.emit(i, total)
+            self.all_done.emit(self._pages)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class LayoutAnalyzer:

@@ -241,7 +241,10 @@ class MainWindow(QMainWindow):
         self._project_lbl.setText(f"项目：{project.name}")
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
+        """版面分析完成，更新 UI 并恢复按钮。"""
         self._layout_panel.show_analysis_result(pages)
+        self._layout_panel.run_button.setEnabled(True)
+        self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。"""
@@ -250,6 +253,10 @@ class MainWindow(QMainWindow):
         self._vproof_panel.load_pages(pages)
 
     def _on_worker_error(self, msg: str) -> None:
+        """Worker 出错时恢复所有按钮状态并显示错误。"""
+        self._layout_panel.run_button.setEnabled(True)
+        if hasattr(self._layout_panel, '_btn_ocr'):
+            self._layout_panel._btn_ocr.setEnabled(True)
         QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
 
     # ── 文件操作 ───────────────────────────────────────────────
