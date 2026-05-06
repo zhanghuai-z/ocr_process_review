@@ -1,0 +1,32 @@
+# Build outputs
+build/
+dist/
+# Keep root .spec files (needed for PyInstaller build)
+# *.spec  — not ignoring, ocr_process.spec is tracked
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project cache (created at runtime)
+*.ocrproj
+
+# Archives (large sample files)
+*.rar
+
+# Environment
+.env
+*.token

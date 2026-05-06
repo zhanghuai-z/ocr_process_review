@@ -1,0 +1,150 @@
+"""图像查看器：支持缩放、平移，以及 BBox 框叠加显示。"""
+from __future__ import annotations
+from typing import List, Optional, Tuple
+
+from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import (
+    QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
+    QGraphicsScene, QGraphicsView,
+)
+
+from app.models import BBox, Block, BlockType
+
+# 各块类型对应的边框颜色
+BLOCK_COLORS: dict[BlockType, QColor] = {
+    BlockType.TEXT:           QColor(0x4C, 0xAF, 0x50),  # 绿
+    BlockType.TITLE:          QColor(0x21, 0x96, 0xF3),  # 蓝
+    BlockType.FIGURE:         QColor(0xFF, 0x98, 0x00),  # 橙
+    BlockType.FIGURE_CAPTION: QColor(0xFF, 0xC1, 0x07),  # 黄
+    BlockType.TABLE:          QColor(0x9C, 0x27, 0xB0),  # 紫
+    BlockType.TABLE_CAPTION:  QColor(0xE0, 0x91, 0xFF),  # 浅紫
+    BlockType.REFERENCE:      QColor(0x00, 0xBC, 0xD4),  # 青
+    BlockType.EQUATION:       QColor(0xF4, 0x43, 0x36),  # 红
+    BlockType.UNKNOWN:        QColor(0x9E, 0x9E, 0x9E),  # 灰
+}
+
+_LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)   # 低置信度行高亮（半透明红）
+_LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)   # 已确认行（半透明绿）
+
+
+class BBoxItem(QGraphicsRectItem):
+    """可选中的包围盒矩形。"""
+
+    def __init__(self, rect: QRectF, color: QColor, label: str = "", parent=None):
+        super().__init__(rect, parent)
+        pen = QPen(color, 2)
+        self.setPen(pen)
+        self.setToolTip(label)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self._color = color
+
+    def paint(self, painter: QPainter, option, widget=None):
+        # 选中时填充半透明背景
+        if self.isSelected():
+            fill = QColor(self._color)
+            fill.setAlpha(40)
+            painter.fillRect(self.rect(), fill)
+        super().paint(painter, option, widget)
+
+
+class ImageViewer(QGraphicsView):
+    """
+    通用图像查看组件。
+    - Ctrl+滚轮 缩放
+    - 中键/右键 平移
+    - 支持叠加 Block 级别和 Line 级别 BBox
+    """
+
+    block_clicked = Signal(object)   # 点击某个 Block 时发出，payload=Block
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+
+        self._pixmap_item: Optional[QGraphicsPixmapItem] = None
+        self._block_items: List[Tuple[BBoxItem, Block]] = []
+
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    # ------------------------------------------------------------------ public API
+
+    def set_image(self, image_path: str) -> None:
+        """加载图片到视图。"""
+        self._scene.clear()
+        self._block_items.clear()
+        pixmap = QPixmap(image_path)
+        self._pixmap_item = self._scene.addPixmap(pixmap)
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_image_from_qimage(self, qimage: QImage) -> None:
+        self._scene.clear()
+        self._block_items.clear()
+        pixmap = QPixmap.fromImage(qimage)
+        self._pixmap_item = self._scene.addPixmap(pixmap)
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def show_blocks(self, blocks: List[Block]) -> None:
+        """在图像上叠加版面块 BBox。"""
+        self._clear_overlays()
+        for block in blocks:
+            color = BLOCK_COLORS.get(block.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+            bb = block.bbox
+            rect = QRectF(bb.x, bb.y, bb.w, bb.h)
+            label = f"[{block.block_type.value}] 置信度: {block.avg_confidence:.2f}"
+            item = BBoxItem(rect, color, label)
+            item.setData(0, block)   # 存入 block 引用
+            self._scene.addItem(item)
+            self._block_items.append((item, block))
+
+    def show_line_highlight(self, bbox: BBox, flagged: bool = False) -> QGraphicsRectItem:
+        """高亮单行，返回 item 以便外部移除。"""
+        color = _LINE_HIGHLIGHT if flagged else _LINE_OK_COLOR
+        rect_item = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
+        pen = QPen(Qt.PenStyle.NoPen)
+        rect_item.setPen(pen)
+        rect_item.setBrush(color)
+        rect_item.setZValue(1)
+        self._scene.addItem(rect_item)
+        return rect_item
+
+    def clear_overlays(self) -> None:
+        self._clear_overlays()
+
+    def fit_to_window(self) -> None:
+        if self._pixmap_item:
+            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    # ------------------------------------------------------------------ events
+
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(factor, factor)
+        else:
+            super().wheelEvent(event)
+
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = self.mapToScene(event.pos())
+            for item, block in self._block_items:
+                if item.rect().contains(pos) and item.isSelected():
+                    self.block_clicked.emit(block)
+                    break
+
+    # ------------------------------------------------------------------ private
+
+    def _clear_overlays(self) -> None:
+        for item, _ in self._block_items:
+            self._scene.removeItem(item)
+        self._block_items.clear()
