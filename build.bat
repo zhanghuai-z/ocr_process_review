@@ -1,24 +1,20 @@
 @echo off
-chcp 65001 > nul
 REM ============================================================
-REM  OCR Post-Processing - Windows Build Script (增量模式)
+REM  OCR Post-Processing - Build Script
 REM
-REM  用法:
-REM    build.bat           增量打包（跳过已完成步骤，速度快）
-REM    build.bat --clean   全量重新打包（彻底清理后从零构建）
-REM    build.bat --help    显示帮助
+REM  Usage:
+REM    build.bat           Incremental build (fast)
+REM    build.bat --clean   Full rebuild (clean)
+REM    build.bat --help    Show help
 REM
-REM  增量原理：
-REM    - PyInstaller 不使用 --clean 时会缓存分析结果
-REM    - 不删除 build/ 目录，只更新有变化的文件
-REM    - pip 只检查缺少的依赖，不重复安装
+REM  First run: pip installs dependencies automatically.
+REM  Subsequent runs: skip pip if already installed.
 REM ============================================================
 setlocal EnableDelayedExpansion
 
 set PROJ_ROOT=%~dp0
 cd /d "%PROJ_ROOT%"
 
-REM 解析参数
 set CLEAN_BUILD=0
 if "%1"=="--clean" set CLEAN_BUILD=1
 if "%1"=="-c" set CLEAN_BUILD=1
@@ -27,25 +23,25 @@ if "%1"=="-h" goto :help
 if "%1"=="/?" goto :help
 
 echo ============================================================
-echo  OCR 后处理 — 打包脚本
+echo  OCR Post-Processing - Build
 if %CLEAN_BUILD%==1 (
-    echo  模式：全量打包 (--clean)
+    echo  Mode: FULL rebuild (--clean)
 ) else (
-    echo  模式：增量打包（首次或改依赖时建议用 --clean）
+    echo  Mode: INCREMENTAL (use --clean for full rebuild)
 )
 echo ============================================================
 echo.
 
-REM ── [1/4] 检查 Python ────────────────────────────────────────
+REM -- [1/4] Check Python -----------------------------------------
 echo [1/4] Checking Python...
 python --version > nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found. Install Python 3.10+ from python.org and add to PATH.
+    echo [ERROR] Python not found. Install Python 3.10+ from python.org.
     pause & exit /b 1
 )
 for /f "tokens=*" %%v in ('python --version') do echo   Found: %%v
 
-REM ── [2/4] 检查 PyInstaller ───────────────────────────────────
+REM -- [2/4] Check PyInstaller ------------------------------------
 echo [2/4] Checking PyInstaller...
 python -m PyInstaller --version > nul 2>&1
 if errorlevel 1 (
@@ -55,7 +51,7 @@ if errorlevel 1 (
 )
 for /f "tokens=*" %%v in ('python -m PyInstaller --version') do echo   Found: PyInstaller %%v
 
-REM ── [3/4] 检查核心依赖（增量检查）────────────────────────────
+REM -- [3/4] Check dependencies (incremental) ---------------------
 echo [3/4] Checking core dependencies...
 python -c "import PySide6, lxml, fpdf, docx, jinja2, PIL, cv2, fitz, numpy, requests" > nul 2>&1
 if errorlevel 1 (
@@ -69,14 +65,13 @@ if errorlevel 1 (
     echo   All core dependencies satisfied.
 )
 
-REM PaddleOCR（可选，失败不影响打包）
+REM PaddleOCR (optional)
 python -c "import paddleocr" > nul 2>&1
 if errorlevel 1 (
-    echo [INFO] PaddleOCR not found — skipping (optional).
-    echo        Install: pip install paddlepaddle paddleocr
+    echo [INFO] PaddleOCR not found - skipping (optional).
 )
 
-REM ── [4/4] 运行 PyInstaller ───────────────────────────────────
+REM -- [4/4] Run PyInstaller --------------------------------------
 echo [4/4] Running PyInstaller...
 
 if %CLEAN_BUILD%==1 (
@@ -85,35 +80,35 @@ if %CLEAN_BUILD%==1 (
     if exist build\ocr_process rmdir /s /q build\ocr_process
     python -m PyInstaller ocr_process.spec --noconfirm --clean
 ) else (
-    REM 增量模式：保留 build/ 缓存，不做 --clean
+    REM Incremental: keep build/ cache
     python -m PyInstaller ocr_process.spec --noconfirm
 )
 
 if errorlevel 1 (
-    echo [ERROR] Build failed. Try "build.bat --clean" for a full rebuild.
+    echo [ERROR] Build failed. Try: build.bat --clean
     pause & exit /b 1
 )
 
 echo.
 echo ============================================================
 echo  Build complete!
-echo  输出: %PROJ_ROOT%dist\ocr_process\
-echo  运行: %PROJ_ROOT%dist\ocr_process\ocr_process.exe
+echo  Output: %PROJ_ROOT%dist\ocr_process\
+echo  Run:    %PROJ_ROOT%dist\ocr_process\ocr_process.exe
 echo.
-echo  提示：第二次打包用 "build.bat" 即可（增量模式）
-echo        出问题时用 "build.bat --clean" 全量重来
+echo  Tip: Use "build.bat" for fast incremental rebuilds.
+echo       Use "build.bat --clean" if you hit strange errors.
 echo ============================================================
 explorer "%PROJ_ROOT%dist\ocr_process"
 pause & exit /b 0
 
 :help
 echo.
-echo OCR 后处理 — 打包脚本使用说明
+echo OCR Post-Processing - Build Script
 echo.
-echo   build.bat             增量打包（跳过已完成的步骤）
-echo   build.bat --clean     全量重新打包（清理所有缓存）
-echo   build.bat --help      显示此帮助
+echo   build.bat             Incremental build (default)
+echo   build.bat --clean     Full rebuild from scratch
+echo   build.bat --help      Show this help
 echo.
-echo  输出目录：dist\ocr_process\
+echo  Output: dist\ocr_process\
 echo.
 pause & exit /b 0

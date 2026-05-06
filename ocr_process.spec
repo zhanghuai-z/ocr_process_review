@@ -1,12 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for OCR后处理
-# 用法（在 Windows 的 cmd/PowerShell 下执行）:
-#   pyinstaller ocr_process.spec --noconfirm --clean
+# PyInstaller spec for OCR Process
 #
-# 说明：
-#   - 使用 onedir 模式（dist/ocr_process/ 整个文件夹可复制分发）
-#   - PaddleOCR 模型首次运行时自动下载到 %USERPROFILE%\.paddleocr\
-#   - UPX 默认关闭（upx=False），安装 UPX 后可改为 True 减小体积
+# Usage (Windows cmd/PowerShell):
+#   pyinstaller ocr_process.spec --noconfirm
+#
+# Notes:
+#   - onedir mode: dist/ocr_process/ is portable
+#   - PaddleOCR model downloads to %%USERPROFILE%%\.paddleocr\ on first run
+#   - UPX disabled by default; set upx=True after installing UPX
 
 import sys
 from pathlib import Path
@@ -14,10 +15,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 PROJECT_ROOT = Path(SPECPATH)
 
-# ── 数据文件 ──────────────────────────────────────────────────
+# -- Data files -------------------------------------------------------
 datas = []
 
-# qt-material 主题和资源文件
+# qt-material themes and resources
 try:
     import qt_material
     qt_dir = Path(qt_material.__file__).parent
@@ -28,28 +29,28 @@ try:
 except ImportError:
     pass
 
-# 项目字体（CJK 字体供 fpdf2 使用）
+# CJK fonts for fpdf2
 fonts_dir = PROJECT_ROOT / "resources" / "fonts"
 if fonts_dir.exists():
     for f in fonts_dir.iterdir():
         if f.suffix.lower() in (".ttf", ".ttc", ".otf"):
             datas.append((str(f), "resources/fonts"))
 
-# Jinja2 / fpdf2 内置数据
+# Jinja2 / fpdf2 built-in data
 datas += collect_data_files("jinja2")
 datas += collect_data_files("fpdf")
 
-# ── 隐式导入 ─────────────────────────────────────────────────
+# -- Hidden imports ---------------------------------------------------
 hiddenimports = [
-    # ── PySide6 核心 ──
+    # PySide6 core
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
     "PySide6.QtSvg",
     "PySide6.QtSvgWidgets",
-    # ── qt-material ──
+    # qt-material
     "qt_material",
-    # ── 导出依赖 ──
+    # Export dependencies
     "lxml",
     "lxml.etree",
     "lxml._elementpath",
@@ -63,33 +64,33 @@ hiddenimports = [
     "docx.enum.text",
     "jinja2",
     "jinja2.ext",
-    # ── 图像处理 ──
+    # Image processing
     "PIL",
     "PIL.Image",
     "PIL.ImageQt",
     "cv2",
     "fitz",         # PyMuPDF
-    # ── 核心 ──
+    # Core
     "sqlite3",
     "numpy",
     "numpy.core._multiarray_umath",
 ]
 
-# 收集所有 app.* 子模块（关键：避免面板/导出器被遗漏）
+# Collect all app.* submodules
 hiddenimports += collect_submodules("app")
 
-# PaddleOCR（按需取消注释，体积约 +1 GB）
+# PaddleOCR (uncomment if needed, ~+1 GB)
 # hiddenimports += collect_submodules("paddle")
 # hiddenimports += collect_submodules("paddleocr")
 
-# ── 主程序分析 ─────────────────────────────────────────────────
+# -- Analysis ---------------------------------------------------------
 a = Analysis(
     [str(PROJECT_ROOT / "main.py")],
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],           # 无自定义 hooks
+    hookspath=[],
     runtime_hooks=[],
     excludes=[
         "tkinter",
@@ -115,8 +116,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,              # 不依赖外部 UPX；有 UPX 时改为 True
-    console=False,          # 不弹出命令行窗口
+    upx=False,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
