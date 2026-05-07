@@ -1,4 +1,4 @@
-"""Helpers for AIStudio OCR/layout API endpoints and response parsing."""
+"""Helpers for AIStudio OCR/layout API endpoints, presets, and response parsing."""
 from __future__ import annotations
 
 from typing import Iterator
@@ -7,6 +7,62 @@ from app.core.bbox_utils import bbox_from_quad, sanitize_xyxy_bbox
 from app.models import BBox
 
 KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing")
+DEFAULT_API_MODEL_PROFILE = "pp-ocrv5"
+API_MODEL_PROFILES: dict[str, dict[str, str]] = {
+    "pp-ocrv5": {
+        "label": "PP-OCRv5",
+        "url": "https://n6z9feddjca4l7b5.aistudio-app.com/ocr",
+    },
+    "pp-structurev3": {
+        "label": "PP-StructureV3",
+        "url": "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
+    },
+    "paddleocr-vl": {
+        "label": "PaddleOCR-VL",
+        "url": "https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing",
+    },
+    "paddleocr-vl-1.5": {
+        "label": "PaddleOCR-VL-1.5",
+        "url": "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+    },
+}
+
+
+def normalize_api_model_profile(profile: str | None) -> str:
+    if isinstance(profile, str) and profile in API_MODEL_PROFILES:
+        return profile
+    return DEFAULT_API_MODEL_PROFILE
+
+
+def get_api_model_profile(profile: str | None) -> dict[str, str]:
+    return API_MODEL_PROFILES[normalize_api_model_profile(profile)]
+
+
+def get_api_model_profile_options() -> list[tuple[str, str]]:
+    return [(key, value["label"]) for key, value in API_MODEL_PROFILES.items()]
+
+
+def get_api_model_profile_url(profile: str | None) -> str:
+    return get_api_model_profile(profile)["url"]
+
+
+def get_api_model_profile_label(profile: str | None) -> str:
+    return get_api_model_profile(profile)["label"]
+
+
+def match_api_model_profile_from_url(api_url: str | None) -> str | None:
+    normalized_url = (api_url or "").strip().rstrip("/")
+    for key, spec in API_MODEL_PROFILES.items():
+        if spec["url"].rstrip("/") == normalized_url:
+            return key
+    return None
+
+
+def infer_api_model_profile_from_url(api_url: str | None) -> str:
+    matched = match_api_model_profile_from_url(api_url)
+    if matched:
+        return matched
+    return DEFAULT_API_MODEL_PROFILE
 
 
 def resolve_api_endpoint(api_url: str | None, default_suffix: str = "/layout-parsing") -> str:

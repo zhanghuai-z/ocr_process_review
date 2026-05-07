@@ -644,6 +644,50 @@ def test_api_ocr_engine_falls_back_to_markdown_text():
     print("test_api_ocr_engine_falls_back_to_markdown_text PASSED")
 
 
+def test_api_model_profile_helpers():
+    from app.core.api_response_utils import (
+        get_api_model_profile_options,
+        get_api_model_profile_url,
+        infer_api_model_profile_from_url,
+        match_api_model_profile_from_url,
+    )
+
+    options = get_api_model_profile_options()
+    assert [label for _, label in options] == [
+        "PP-OCRv5",
+        "PP-StructureV3",
+        "PaddleOCR-VL",
+        "PaddleOCR-VL-1.5",
+    ]
+    assert get_api_model_profile_url("pp-ocrv5").endswith("/ocr")
+    assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
+    assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
+    assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
+    assert infer_api_model_profile_from_url("https://example.com/custom-layout") == "pp-ocrv5"
+
+    print("test_api_model_profile_helpers PASSED")
+
+
+def test_app_config_tracks_api_model_profile():
+    from app.core.app_config import get_config, update_config
+
+    update_config(
+        mode="api",
+        api_model_profile="paddleocr-vl-1.5",
+        api_url="https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+        api_token="demo",
+        api_timeout=12,
+    )
+    cfg = get_config()
+    assert cfg["api_model_profile"] == "paddleocr-vl-1.5"
+    assert cfg["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing"
+    assert cfg["api_timeout"] == 12
+    assert cfg["api_token"] == "demo"
+    update_config(mode="local", api_model_profile="pp-ocrv5", api_url="", api_token="", api_timeout=30)
+
+    print("test_app_config_tracks_api_model_profile PASSED")
+
+
 # =====================================================================
 # Fake LLM 引擎测试
 # =====================================================================
@@ -1148,6 +1192,8 @@ if __name__ == "__main__":
     test_local_ocr_engine_parses_predict_result()
     test_api_ocr_engine_parses_ocr_results_response()
     test_api_ocr_engine_falls_back_to_markdown_text()
+    test_api_model_profile_helpers()
+    test_app_config_tracks_api_model_profile()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
