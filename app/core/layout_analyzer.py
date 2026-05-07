@@ -26,6 +26,15 @@ from app.core.bbox_utils import (
     scale_bbox_to_page,
 )
 from app.core.logging import get_logger
+from app.core.paddle_result_utils import (
+    DEFAULT_LOCAL_LANG,
+    DEFAULT_LOCAL_LAYOUT_MODEL,
+    DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
+    DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
+    DEFAULT_LOCAL_OCR_VERSION,
+    prepare_paddle_runtime_env,
+    results_to_dicts,
+)
 from app.models import Block, BlockType, Page
 
 logger = get_logger(__name__)
@@ -64,40 +73,70 @@ class LayoutAnalyzer:
 
     def _get_engine(self):
         if self._engine is None:
-            from paddleocr import PaddleOCR
+            prepare_paddle_runtime_env()
+            from paddleocr import PPStructureV3
+            from app.core.ocr_config import get_config
+
+            cfg = get_config()
+            layout_model_name = cfg.get("local_layout_model_name", DEFAULT_LOCAL_LAYOUT_MODEL).strip()
             logger.info(
-                "Initializing PaddleOCR layout engine: lang=ch, "
-                "use_angle_cls=False, layout=True, table=False, ocr=False, "
-                "models=package defaults"
+                "Initializing PPStructureV3 layout engine: lang=%s, "
+                "layout_detection_model_name=%s, text_det=%s, text_rec=%s, "
+                "engine=paddle_static, enable_mkldnn=False, "
+                "use_doc_orientation_classify=False, use_doc_unwarping=False, "
+                "use_textline_orientation=False, use_table_recognition=False, "
+                "use_formula_recognition=False, use_chart_recognition=False, "
+                "use_region_detection=False, format_block_content=False",
+                DEFAULT_LOCAL_LANG,
+                layout_model_name or DEFAULT_LOCAL_LAYOUT_MODEL,
+                DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
+                DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
             )
-            self._engine = PaddleOCR(
-                use_angle_cls=False,
-                lang="ch",
-                show_log=False,
-                layout=True,
-                table=False,
-                ocr=False,
+            self._engine = PPStructureV3(
+                layout_detection_model_name=layout_model_name or DEFAULT_LOCAL_LAYOUT_MODEL,
+                text_detection_model_name=DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
+                text_recognition_model_name=DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
+                engine="paddle_static",
+                enable_mkldnn=False,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                use_table_recognition=False,
+                use_formula_recognition=False,
+                use_chart_recognition=False,
+                use_region_detection=False,
+                format_block_content=False,
             )
         return self._engine
 
     def _unwrap_layout_items(self, result) -> List[dict]:
         """兼容不同 Paddle 结果包装结构。"""
-        if result is None:
-            return []
-        if isinstance(result, dict):
-            if isinstance(result.get("layout"), list):
-                return result["layout"]
-            if isinstance(result.get("result"), list):
-                return result["result"]
-            return [result]
-        if isinstance(result, list):
-            if len(result) == 1 and isinstance(result[0], dict):
-                wrapped = result[0]
-                if isinstance(wrapped.get("layout"), list):
-                    return wrapped["layout"]
-                if isinstance(wrapped.get("result"), list):
-                    return wrapped["result"]
-            return [item for item in result if isinstance(item, dict)]
+        items: List[dict] = []
+        for payload in results_to_dicts(result):
+            if isinstance(payload.get("layout"), list):
+                items.extend(item for item in payload["layout"] if isinstance(item, dict))
+                continue
+            if isinstance(payload.get("result"), list):
+                items.extend(item for item in payload["result"] if isinstance(item, dict))
+                continue
+            if isinstance(payload.get("layoutParsingResults"), list):
+                items.extend(item for item in payload["layoutParsingResults"] if isinstance(item, dict))
+                continue
+            items.append(payload)
+        return items
+
+    def _extract_layout_boxes(self, item: dict) -> List[dict]:
+        for payload in (
+            item,
+            item.get("prunedResult", {}) if isinstance(item, dict) else {},
+        ):
+            if not isinstance(payload, dict):
+                continue
+            layout_det_res = payload.get("layout_det_res", {})
+            if isinstance(layout_det_res, dict) and isinstance(layout_det_res.get("boxes"), list):
+                return [box for box in layout_det_res["boxes"] if isinstance(box, dict)]
+        if isinstance(item, dict) and item.get("bbox") is not None:
+            return [item]
         return []
 
     def _extract_int_pair(self, value) -> Optional[tuple[int, int]]:
@@ -252,12 +291,12 @@ class LayoutAnalyzer:
             payload["model_name"] = model_name
         return payload
 
-    def _write_api_debug_response(self, page: Page, data: dict) -> None:
-        """把 API 原始响应落到工作图旁边，方便复盘漂移页。"""
+    def _write_debug_response(self, page: Page, data: object, suffix: str) -> None:
+        """把布局结果落到工作图旁边，方便复盘漂移页。"""
         image_path = page.display_image_path
         if not image_path:
             return
-        debug_path = Path(image_path).with_suffix(".layout-api.json")
+        debug_path = Path(image_path).with_suffix(suffix)
         payload = {
             "page": {
                 "display_image_path": image_path,
@@ -270,11 +309,37 @@ class LayoutAnalyzer:
         }
         try:
             debug_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=lambda obj: obj.tolist() if hasattr(obj, "tolist") else str(obj),
+                ),
                 encoding="utf-8",
             )
         except OSError as exc:
-            logger.warning("Failed to write API layout debug response: %s", exc)
+            logger.warning("Failed to write layout debug response: %s", exc)
+
+    def _write_api_debug_response(self, page: Page, data: dict) -> None:
+        self._write_debug_response(page, data, ".layout-api.json")
+
+    def _write_local_debug_response(self, page: Page, data: object) -> None:
+        self._write_debug_response(page, data, ".layout-local.json")
+
+    def _build_local_debug_payload(self, payloads: List[dict]) -> List[dict]:
+        slim_payloads: List[dict] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            slim_payloads.append({
+                "input_path": payload.get("input_path"),
+                "page_index": payload.get("page_index"),
+                "width": payload.get("width"),
+                "height": payload.get("height"),
+                "layout_det_res": payload.get("layout_det_res"),
+                "parsing_res_list": payload.get("parsing_res_list"),
+            })
+        return slim_payloads
 
     def _write_bbox_overlay(
         self,
@@ -375,33 +440,61 @@ class LayoutAnalyzer:
             block.bbox = scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height)
 
     def _local_analyze(self, page: Page) -> Page:
-        import cv2
+        from PIL import Image
 
         engine = self._get_engine()
-        img = cv2.imread(page.display_image_path)
-        if img is None:
-            raise RuntimeError(f"Cannot read image: {page.display_image_path}")
-        page.height, page.width = img.shape[:2]
+        try:
+            with Image.open(page.display_image_path) as image:
+                page.width, page.height = image.size
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read image: {page.display_image_path}") from exc
         result = engine.predict(page.display_image_path)
-        items = self._unwrap_layout_items(result)
-        coordinate_space = self._resolve_coordinate_space(page, data=result)
+        raw_payloads = results_to_dicts(result)
+        self._write_local_debug_response(page, self._build_local_debug_payload(raw_payloads))
+        items = self._unwrap_layout_items(raw_payloads)
         page.blocks = []
-        for i, item in enumerate(items):
-            raw_type = item.get("type") or item.get("label") or "unknown"
-            bbox_raw = item.get("bbox", [0, 0, 0, 0])
-            bbox = self._extract_bbox_from_coordinate(
-                bbox_raw,
-                page,
-                coordinate_space=coordinate_space,
-            )
-            if bbox.area <= 0:
-                continue
-            page.blocks.append(Block(
-                block_type=BlockType.from_paddle(raw_type),
-                bbox=bbox,
-                order=i,
-            ))
+        raw_overlay_items: List[tuple[str, object]] = []
+        order = 0
+        for item in items:
+            coordinate_space = self._resolve_coordinate_space(page, data=item, layout_item=item)
+            layout_boxes = self._extract_layout_boxes(item)
+            for box in layout_boxes:
+                raw_type = box.get("label") or box.get("type") or item.get("type") or item.get("label") or "unknown"
+                bbox_raw = box.get("coordinate") or box.get("bbox") or item.get("bbox", [0, 0, 0, 0])
+                bbox = self._extract_bbox_from_coordinate(
+                    bbox_raw,
+                    page,
+                    coordinate_space=self._resolve_coordinate_space(
+                        page,
+                        data=item,
+                        layout_item=item,
+                        box_item=box,
+                    ) or coordinate_space,
+                )
+                if not bbox or bbox.area <= 0:
+                    continue
+                raw_overlay_items.append((raw_type, bbox))
+                page.blocks.append(Block(
+                    block_type=BlockType.from_paddle(raw_type),
+                    bbox=bbox,
+                    order=order,
+                ))
+                order += 1
+        del raw_payloads
+        del items
+        self._write_bbox_overlay(
+            page,
+            items=raw_overlay_items,
+            suffix=".layout-local-raw.png",
+            color=(0, 165, 255),
+        )
         self._rescale_blocks_if_suspicious(page)
+        self._write_bbox_overlay(
+            page,
+            items=[(block.block_type.value, block.bbox) for block in page.blocks],
+            suffix=".layout-local-app-overlay.png",
+            color=(80, 220, 80),
+        )
         return page
 
     # ── api mode ───────────────────────────────────────────────

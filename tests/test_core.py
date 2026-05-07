@@ -193,9 +193,14 @@ def test_block_type_mapping():
 
     assert BlockType.from_paddle("paragraph") == BlockType.TEXT
     assert BlockType.from_paddle("doc_title") == BlockType.TITLE
+    assert BlockType.from_paddle("page_number") == BlockType.TEXT
+    assert BlockType.from_paddle("sidebar_text") == BlockType.TEXT
     assert BlockType.from_paddle("image_caption") == BlockType.FIGURE_CAPTION
+    assert BlockType.from_paddle("figure_title") == BlockType.FIGURE_CAPTION
     assert BlockType.from_paddle("table_body") == BlockType.TABLE
+    assert BlockType.from_paddle("table_title") == BlockType.TABLE_CAPTION
     assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
+    assert BlockType.from_paddle("formula_number") == BlockType.EQUATION
 
     print("test_block_type_mapping PASSED")
 
@@ -488,6 +493,50 @@ def test_fake_layout_engine():
     assert blocks[0].bbox.w > 0
 
     print("test_fake_layout_engine PASSED")
+
+
+def test_local_ocr_engine_parses_predict_result():
+    import types
+    import numpy as np
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import LocalOcrEngine
+
+    class FakeResult:
+        def __init__(self, payload):
+            self.json = {"res": payload}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def predict(self, image_bgr):
+            return [FakeResult({
+                "rec_texts": ["第一行", "第二行"],
+                "rec_scores": [0.93, 88],
+                "rec_boxes": [
+                    [10, 15, 110, 35],
+                    [[20, 45], [120, 45], [120, 70], [20, 70]],
+                ],
+            })]
+
+    original = sys.modules.get("paddleocr")
+    sys.modules["paddleocr"] = types.SimpleNamespace(PaddleOCR=FakePaddleOCR)
+    try:
+        engine = LocalOcrEngine()
+        lines = engine.recognize(np.zeros((100, 200, 3), dtype=np.uint8), OcrContext())
+        assert engine._engine.kwargs["ocr_version"] == "PP-OCRv5"
+        assert len(lines) == 2
+        assert lines[0].text == "第一行"
+        assert lines[0].bbox.to_xyxy() == (10, 15, 110, 35)
+        assert lines[1].confidence == 0.88
+        assert lines[1].bbox.to_xyxy() == (20, 45, 120, 70)
+    finally:
+        if original is None:
+            sys.modules.pop("paddleocr", None)
+        else:
+            sys.modules["paddleocr"] = original
+
+    print("test_local_ocr_engine_parses_predict_result PASSED")
 
 
 # =====================================================================
@@ -863,6 +912,56 @@ def test_layout_analyzer_builds_api_payload():
     print("test_layout_analyzer_builds_api_payload PASSED")
 
 
+def test_layout_analyzer_reads_local_ppstructurev3_result():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, BlockType, Page
+
+    class FakeResult:
+        def __init__(self, payload):
+            self.json = {"res": payload}
+
+    class FakeEngine:
+        def predict(self, image_path):
+            return [FakeResult({
+                "prunedResult": {
+                    "layout_det_res": {
+                        "boxes": [
+                            {
+                                "label": "table_title",
+                                "coordinate": [0.1, 0.2, 0.5, 0.4],
+                            }
+                        ]
+                    }
+                }
+            })]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((100, 200, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        page = Page(image_path=img_path, width=0, height=0)
+        analyzer = LayoutAnalyzer()
+        analyzer._engine = FakeEngine()
+        result = analyzer.analyze(page)
+
+        assert len(result.blocks) == 1
+        assert result.blocks[0].block_type == BlockType.TABLE_CAPTION
+        assert result.blocks[0].bbox == BBox(20, 20, 80, 20)
+    finally:
+        os.unlink(img_path)
+        for suffix in (".layout-local.json", ".layout-local-raw.png", ".layout-local-app-overlay.png"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_reads_local_ppstructurev3_result PASSED")
+
+
 # =====================================================================
 # 入口
 # =====================================================================
@@ -881,6 +980,7 @@ if __name__ == "__main__":
     test_fake_ocr_engine()
     test_confidence_normalization()
     test_fake_layout_engine()
+    test_local_ocr_engine_parses_predict_result()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
@@ -896,4 +996,5 @@ if __name__ == "__main__":
     test_layout_analyzer_scales_bbox_from_response_size()
     test_layout_analyzer_resolves_coordinate_space()
     test_layout_analyzer_builds_api_payload()
+    test_layout_analyzer_reads_local_ppstructurev3_result()
     print("\n✓ 所有测试通过")

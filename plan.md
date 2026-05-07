@@ -150,6 +150,7 @@
 - 已补齐 API 漂移排查抓手：`/layout-parsing` 原始响应会落为 `*.layout-api.json`，并自动输出 `*.layout-api-raw.png`（官方原始 bbox 叠图）与 `*.layout-app-overlay.png`（程序当前实际 bbox 叠图）；API 设置中增加可选 `model_name` 透传字段，便于显式固定版面模型。
 - 已修复 OCR 主流程瘫痪的一类根因：补全 Paddle/PP-Structure 标签映射，避免 `paragraph`、`doc_title` 等标签大量落入 `UNKNOWN` 后被 OCR pipeline 跳过。
 - 已补齐置信度归一化：兼容 `0~1` 与 `0~100`，自动低置信标记、置信度徽章与后续校对链路恢复一致。
+- 已完成 PaddleOCR 3.x 本地链路迁移验证：块级识别显式切到 `PaddleOCR(ocr_version=\"PP-OCRv5\")` + `predict()`；本地版面分析切到独立 `PPStructureV3`，并采用 `PP-DocLayout-M` + `PP-OCRv5_mobile_*` 子模型、`paddle_static`/`paddle_dynamic` 分离引擎、关闭 PaddleX 模型源连通性检查。基于真实样本 `file/244771纵校/120166.tif` 已验证：块级 OCR 可正常返回文本与框，本地 PP-StructureV3 的 `layout_det_res.boxes.coordinate` 已直接落在输入页 `2356x3424` 像素空间，不再是固定 `800x608` 画布坐标。
 - 已建立多人协作协议：新增 `AGENT.md`，明确 `git worktree`、共享 `plan.md`、角色分工、热点文件所有权、handoff 模板与集成节奏，后续可按 Coordinator + Agent A + Agent B 并行开发。
 - 当前仍未完成的下一阶段重点：人工可编辑画布、粗画框自动收紧、块级重跑/失败重试、校对工作台快捷键与疑点队列、工作台式 UI 重构。
 
