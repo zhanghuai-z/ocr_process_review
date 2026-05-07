@@ -4,8 +4,19 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLabel
 
 
+def normalize_badge_score(score: float) -> float:
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+    if value > 1.0 and value <= 100.0:
+        value /= 100.0
+    return max(0.0, min(value, 1.0))
+
+
 def confidence_color(score: float) -> str:
     """返回 CSS 颜色字符串。"""
+    score = normalize_badge_score(score)
     if score >= 0.90:
         return "#4CAF50"   # 绿
     elif score >= 0.75:
@@ -24,12 +35,12 @@ class ConfidenceBadge(QLabel):
         self.setMinimumWidth(52)
 
     def set_score(self, score: float) -> None:
-        self._score = score
-        color = confidence_color(score)
-        pct = int(score * 100)
+        self._score = normalize_badge_score(score)
+        color = confidence_color(self._score)
+        pct = int(self._score * 100)
         self.setText(f"{pct}%")
         self.setStyleSheet(
             f"background:{color}; color:#fff; border-radius:4px;"
             f"padding:1px 5px; font-size:11px; font-weight:bold;"
         )
-        self.setToolTip(f"置信度: {score:.4f}")
+        self.setToolTip(f"置信度: {self._score:.4f}")

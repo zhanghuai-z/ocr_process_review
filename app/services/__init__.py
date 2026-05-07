@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 import shutil
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -103,28 +104,29 @@ class ImportService:
                 "Import completed with %d failures", result.failed_count
             )
 
+        # 统一按最终导入顺序重排页码，避免多张图片都显示为第 1 页
+        for page_number, page in enumerate(result.pages, start=1):
+            page.page_number = page_number
+
         return result
 
     def _import_image(self, path: str, p: Path) -> Page:
         """处理单张图片。"""
+        work_path = self._materialize_image(path, p)
         from PIL import Image
-
-        img = Image.open(path)
-        w, h = img.size
-        img.close()
-
-        cache_path = self._copy_to_cache(path, p)
-        thumb_path = self._generate_thumbnail(path, p)
+        with Image.open(work_path) as img:
+            w, h = img.size
+        thumb_path = self._generate_thumbnail(work_path, Path(work_path))
 
         return Page(
-            image_path=cache_path or path,
+            image_path=work_path,
             width=w,
             height=h,
             page_number=1,
             source_path=path,
             source_type="image",
             source_page_index=1,
-            cache_image_path=cache_path or path,
+            cache_image_path=work_path,
             thumbnail_path=thumb_path or "",
             status=PageStatus.IMPORTED,
         )
@@ -165,7 +167,7 @@ class ImportService:
                     source_type="pdf",
                     source_page_index=index + 1,
                     cache_image_path=str(out_path),
-                    thumbnail_path="",
+                    thumbnail_path=self._generate_thumbnail(str(out_path), Path(out_name)) or "",
                     status=PageStatus.IMPORTED,
                 ))
             except Exception as e:
@@ -175,13 +177,23 @@ class ImportService:
         doc.close()
         return result
 
-    def _copy_to_cache(self, src_path: str, src: Path) -> Optional[str]:
-        """将图片复制到缓存目录。"""
+    def _materialize_image(self, src_path: str, src: Path) -> str:
+        """生成统一工作图，消除 EXIF/格式差异带来的坐标漂移。"""
         if not self._cache_dir:
-            return None
-        dst = self._get_cache_path() / src.name
+            return src_path
+
+        from PIL import Image, ImageOps
+
+        digest = hashlib.sha1(str(src.resolve()).encode("utf-8")).hexdigest()[:10]
+        dst = self._get_cache_path() / f"{src.stem}_{digest}.png"
         if not dst.exists():
-            shutil.copy2(src_path, str(dst))
+            with Image.open(src_path) as img:
+                normalized = ImageOps.exif_transpose(img)
+                if normalized.mode not in ("RGB", "RGBA", "L"):
+                    normalized = normalized.convert("RGB")
+                elif normalized.mode == "RGBA":
+                    normalized = normalized.convert("RGB")
+                normalized.save(str(dst), "PNG")
         return str(dst)
 
     def _generate_thumbnail(self, src_path: str, src: Path) -> Optional[str]:
@@ -189,15 +201,19 @@ class ImportService:
         if not self._cache_dir:
             return None
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
             thumb_dir = self._get_thumbnail_path()
-            thumb_path = thumb_dir / src.name
+            thumb_path = thumb_dir / f"{src.stem}.png"
 
             if not thumb_path.exists():
-                img = Image.open(src_path)
-                img.thumbnail((200, 200))
-                img.save(str(thumb_path), "PNG")
-                img.close()
+                with Image.open(src_path) as img:
+                    normalized = ImageOps.exif_transpose(img)
+                    normalized.thumbnail((200, 200))
+                    if normalized.mode not in ("RGB", "RGBA", "L"):
+                        normalized = normalized.convert("RGB")
+                    elif normalized.mode == "RGBA":
+                        normalized = normalized.convert("RGB")
+                    normalized.save(str(thumb_path), "PNG")
 
             return str(thumb_path)
         except Exception as e:

@@ -141,6 +141,57 @@
 
 第一阶段验收口径已确认：优先保证“导入 → 版面分析/人工确认 → OCR → 校对 → 导出 → 保存/再打开”完整闭环稳定走通，再推进人工画框增强、自动收紧、UI 美化和高级导出。
 
+### 当前阶段进展
+
+- 第一阶段最小闭环已基本收口：`requests` 依赖、README/技术文档、QSettings 配置桥接、PDF 转图导入、项目缓存图路径统一、SQLite schema v2 与迁移、删除后重建式保存、OCR 完成跳转校对、导出前状态检查，以及“`build.bat` 为唯一 EXE 打包入口、`build.sh` 仅作 WSL 桥接”的打包策略都已落地。
+- 已修复 OCR 坐标漂移主因：版面分析、OCR、画布渲染、横校/纵校裁图统一使用 `Page.display_image_path`，并在 `ImageViewer` 换图时重置视图变换。
+- 已增加 BBox 规整层：版面分析结果统一做 `xyxy -> normalize -> clamp`，OCR 行框回写时区分 crop 局部坐标与整页坐标，避免重复偏移导致“字框/属性框漂移”。
+- 已进一步收紧版面分析输入/输出：导入图片统一转为去 EXIF 差异的缓存 PNG，本地 layout 结果兼容包装结构解包，并对疑似停留在 `800x608` 模型画布上的 bbox 做分轴缩放回整页坐标，优先修复“越往后越偏”的版面框漂移。
+- 已补齐 API 漂移排查抓手：`/layout-parsing` 原始响应会落为 `*.layout-api.json`，并自动输出 `*.layout-api-raw.png`（官方原始 bbox 叠图）与 `*.layout-app-overlay.png`（程序当前实际 bbox 叠图）；API 设置中增加可选 `model_name` 透传字段，便于显式固定版面模型。
+- 已修复 OCR 主流程瘫痪的一类根因：补全 Paddle/PP-Structure 标签映射，避免 `paragraph`、`doc_title` 等标签大量落入 `UNKNOWN` 后被 OCR pipeline 跳过。
+- 已补齐置信度归一化：兼容 `0~1` 与 `0~100`，自动低置信标记、置信度徽章与后续校对链路恢复一致。
+- 已建立多人协作协议：新增 `AGENT.md`，明确 `git worktree`、共享 `plan.md`、角色分工、热点文件所有权、handoff 模板与集成节奏，后续可按 Coordinator + Agent A + Agent B 并行开发。
+- 当前仍未完成的下一阶段重点：人工可编辑画布、粗画框自动收紧、块级重跑/失败重试、校对工作台快捷键与疑点队列、工作台式 UI 重构。
+
+## 多 Agent 协作执行板
+
+### 推荐分工
+
+| 角色 | 当前主任务 | 主要文件面 | 说明 |
+| --- | --- | --- | --- |
+| Coordinator | 集成、计划、冲突处理、回归门禁 | `plan.md`, `AGENT.md`, `README.md`, 热点文件 | 单写 `plan.md`，统一回填进度 |
+| Agent A | `ocr-pipeline` | `app/core/`, `app/services/`, `app/engines/`, `app/models/` | 引擎链、bbox、API/存储 |
+| Agent B | `editable-canvas` | `app/ui/` | 画布、属性联动、交互基础 |
+
+### 热点文件规则
+
+- `plan.md`：Coordinator 独占
+- `app/ui/main_window.py`：短事务修改，默认由 Coordinator 协调
+- `app/controllers/workflow_controller.py`：默认 Coordinator 协调后分配
+- `tests/test_core.py`：允许 agent 扩展，但最终集成版本由 Coordinator 收口
+
+### 推荐 worktree 布局
+
+```bash
+cd /mnt/d/project/ocr_process
+mkdir -p ../ocr_process_wt
+
+git worktree add ../ocr_process_wt/coord    -b coord/phase1-stabilization
+git worktree add ../ocr_process_wt/agent-a  -b agent-a/ocr-pipeline
+git worktree add ../ocr_process_wt/agent-b  -b agent-b/editable-canvas
+```
+
+### 交接格式
+
+每次 agent 交接只同步：
+
+1. 做了什么
+2. 改了哪些文件
+3. 为什么这样改
+4. 当前结果/剩余问题
+5. 复现或验证命令
+6. 下一位 agent 可直接承接什么
+
 1. 先修通最小闭环：依赖、PDF 导入、状态机、OCR 完成跳转、项目保存清理。
 2. 再做人工画框：先能画、选、改、删、保存，再接自动收紧。
 3. 然后重构 OCR 管线：统一 engine adapter、块级重跑、失败重试。

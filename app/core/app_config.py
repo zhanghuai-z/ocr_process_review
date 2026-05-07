@@ -16,6 +16,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "api_url": "",
     "api_timeout": 30,
     "api_token": "",
+    "api_layout_model_name": "",
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -95,6 +96,7 @@ def get_config() -> dict[str, Any]:
         "api_url": cfg.get("api_url", ""),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),
+        "api_layout_model_name": cfg.get("api_layout_model_name", ""),
     }
 
 
@@ -106,6 +108,7 @@ def update_config(**kwargs: Any) -> None:
         "api_url": "api_url",
         "api_timeout": "api_timeout",
         "api_token": "api_token",
+        "api_layout_model_name": "api_layout_model_name",
     }
     for k, v in kwargs.items():
         if k in mapping:

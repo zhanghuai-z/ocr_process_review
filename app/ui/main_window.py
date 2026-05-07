@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._connect_signals()
+        self._step_bar.set_enabled_up_to(self._controller.max_step)
         self._go_to_step(STEP_IMPORT)
 
     # ── UI 构建 ────────────────────────────────────────────────
@@ -286,10 +287,13 @@ class MainWindow(QMainWindow):
                 self._layout_panel.set_pages(project.pages)
                 if all(p.is_analyzed for p in project.pages):
                     self._layout_panel.show_analysis_result(project.pages)
-                    self._ocr_panel.set_pages(project.pages)
+                if project.ocr_completed:
+                    self._ocr_panel.on_recognition_complete(project.pages)
                     self._hproof_panel.load_pages(project.pages)
                     self._vproof_panel.load_pages(project.pages)
-            self._go_to_step(STEP_LAYOUT)
+                else:
+                    self._ocr_panel.set_pages(project.pages)
+            self._go_to_step(self._controller.get_open_step())
 
     def _save_project(self) -> None:
         if not self._controller.project:
@@ -306,7 +310,7 @@ class MainWindow(QMainWindow):
         """导入文件 → 使用 ImportService 创建 Page 对象 → 交给 controller。"""
         project = self._controller.project
         if not project:
-            self._controller._project = OcrProject(name="未命名项目")
+            self._controller.ensure_transient_project("未命名项目")
 
         try:
             from pathlib import Path
@@ -349,16 +353,21 @@ class MainWindow(QMainWindow):
         if not self._controller.project or not self._controller.project.pages:
             return
         self._layout_panel.run_button.setEnabled(False)
-        self._controller.start_layout_analysis(self._controller.project.pages)
+        if not self._controller.start_layout_analysis(self._controller.project.pages):
+            self._layout_panel.run_button.setEnabled(True)
 
     def _start_ocr(self) -> None:
         """OCR 启动（由用户确认版面后触发）。"""
         if not self._controller.project or not self._controller.project.pages:
             return
         pages = self._controller.project.pages
+        if self._controller.get_recognizable_block_count() == 0:
+            QMessageBox.information(self, "提示", "当前没有可识别的文字块，请先完成版面分析或补充文字区域。")
+            return
         self._ocr_panel.set_pages(pages)
         self._go_to_step(STEP_OCR)
-        self._controller.start_ocr(pages, notify_page_callback=self._ocr_panel.on_progress)
+        if not self._controller.start_ocr(pages, notify_page_callback=self._ocr_panel.on_progress):
+            return
 
     def _on_go_to_proof(self) -> None:
         """用户点击"进入校对" → 只做导航，不触发 OCR 完成逻辑。"""
@@ -405,10 +414,8 @@ class MainWindow(QMainWindow):
     def _show_ocr_settings(self) -> None:
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
         from app.core.ocr_config import get_config
+        from app.engines.real_ocr_adapter import get_engine_description
         dlg = ApiSettingsDialog(self)
         if dlg.exec():
             cfg = get_config()
-            if cfg["mode"] == "api":
-                self._status_bar.showMessage(f"OCR 引擎：API 模式（{cfg['api_url']}）")
-            else:
-                self._status_bar.showMessage("OCR 引擎：本地模型")
+            self._status_bar.showMessage(f"OCR 引擎：{get_engine_description(cfg['mode'])}")

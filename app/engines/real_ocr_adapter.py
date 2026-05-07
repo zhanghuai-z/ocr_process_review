@@ -7,11 +7,47 @@ from typing import List
 
 import numpy as np
 
+from app.core.bbox_utils import bbox_from_xyxy, sanitize_xyxy_bbox
 from app.engines import OcrContext
+from app.core.logging import get_logger
 from app.models import BBox, Line, ProofStatus
 from app.core.app_config import get_config
 
 AUTO_FLAG_THRESHOLD = 0.80
+logger = get_logger(__name__)
+
+
+def normalize_confidence(score) -> float:
+    """统一把引擎分数归一化到 0~1。
+
+    有些服务可能返回 0~1，也可能返回 0~100；这里统一处理，避免
+    置信度链路断掉后影响自动标记、UI 徽章和后续校对流程。
+    """
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if value > 1.0 and value <= 100.0:
+        value = value / 100.0
+    return max(0.0, min(value, 1.0))
+
+
+def get_engine_description(mode: str = "") -> str:
+    """返回当前 OCR 引擎描述。"""
+    if not mode:
+        mode = get_config().get("mode", "local")
+    if mode == "api":
+        cfg = get_config()
+        api_url = cfg.get("api_url", "")
+        return f"API OCR（/layout-parsing, {api_url or '未配置 URL'}）"
+    if mode == "mock":
+        return "Mock OCR（FakeOcrEngine）"
+    return (
+        "PaddleOCR 本地默认中文模型组合"
+        "（lang=ch, use_angle_cls=True, layout=False, table=False；"
+        "未显式固定 det/rec/cls 模型名）"
+    )
 
 
 class LocalOcrEngine:
@@ -23,6 +59,11 @@ class LocalOcrEngine:
     def _get_engine(self):
         if self._engine is None:
             from paddleocr import PaddleOCR
+            logger.info(
+                "Initializing PaddleOCR text engine: lang=ch, "
+                "use_angle_cls=True, layout=False, table=False, "
+                "models=package defaults"
+            )
             self._engine = PaddleOCR(
                 use_angle_cls=True,
                 lang="ch",
@@ -36,18 +77,25 @@ class LocalOcrEngine:
         engine = self._get_engine()
         result = engine.ocr(image_bgr, cls=True)
         lines: List[Line] = []
+        crop_h, crop_w = image_bgr.shape[:2]
         if not result or not result[0]:
             return lines
         for line_data in result[0]:
             pts, (text, score) = line_data
+            score = normalize_confidence(score)
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
-            lx, ly = int(min(xs)), int(min(ys))
-            lw, lh = int(max(xs) - min(xs)), int(max(ys) - min(ys))
+            bbox = sanitize_xyxy_bbox(
+                [min(xs), min(ys), max(xs), max(ys)],
+                crop_w,
+                crop_h,
+            )
+            if bbox.area <= 0:
+                continue
             lines.append(Line(
                 text=text,
                 confidence=float(score),
-                bbox=BBox(lx, ly, lw, lh),
+                bbox=bbox,
                 proof_status=(
                     ProofStatus.AUTO_FLAGGED
                     if score < AUTO_FLAG_THRESHOLD
@@ -100,17 +148,15 @@ class ApiOcrEngine:
             scores = ocr_res.get("rec_scores", [])
             boxes = ocr_res.get("rec_boxes", [])
             for idx, text in enumerate(texts):
-                score = float(scores[idx]) if idx < len(scores) else 0.0
+                score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
                 if idx < len(boxes):
-                    b = boxes[idx]
-                    lx, ly = int(b[0]), int(b[1])
-                    lw, lh = int(b[2]) - lx, int(b[3]) - ly
+                    bbox = bbox_from_xyxy(boxes[idx])
                 else:
-                    lx = ly = lw = lh = 0
+                    bbox = BBox(0, 0, 0, 0)
                 lines.append(Line(
                     text=text,
                     confidence=score,
-                    bbox=BBox(lx, ly, lw, lh),
+                    bbox=bbox,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
                         if score < AUTO_FLAG_THRESHOLD

@@ -141,7 +141,7 @@ class HProofPanel(QWidget):
         import numpy as np
         from PySide6.QtGui import QImage
 
-        img = cv2.imread(page.image_path)
+        img = cv2.imread(page.display_image_path)
         if img is not None:
             bb = line.bbox
             pad = 4

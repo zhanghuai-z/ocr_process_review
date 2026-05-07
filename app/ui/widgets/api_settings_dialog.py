@@ -78,6 +78,19 @@ class ApiSettingsDialog(QDialog):
         self._timeout_spin.setSuffix(" 秒")
         form.addRow("请求超时：", self._timeout_spin)
 
+        self._layout_model_edit = QLineEdit()
+        self._layout_model_edit.setPlaceholderText("例如：PP-DocLayout-L / PP-DocLayout_plus-L")
+        self._layout_model_edit.setToolTip("将以 model_name 透传给 /layout-parsing；需要服务端支持该参数。")
+        form.addRow("版面模型名：", self._layout_model_edit)
+
+        model_note = QLabel(
+            "<small>官方新版本 layout detection 模块支持显式 model_name。"
+            "如果你的 API 服务端支持透传，这里可固定为 PP-DocLayout-L 或 PP-DocLayout_plus-L。</small>"
+        )
+        model_note.setWordWrap(True)
+        model_note.setTextFormat(Qt.TextFormat.RichText)
+        form.addRow("", model_note)
+
         self._btn_test = QPushButton("测试连接")
         self._btn_test.clicked.connect(self._test_connection)
         form.addRow("", self._btn_test)
@@ -105,6 +118,7 @@ class ApiSettingsDialog(QDialog):
         self._url_edit.setText(cfg.get("api_url", ""))
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
+        self._layout_model_edit.setText(cfg.get("api_layout_model_name", ""))
         self._on_mode_changed()
 
     def _on_mode_changed(self) -> None:
@@ -125,6 +139,7 @@ class ApiSettingsDialog(QDialog):
             api_url=self._url_edit.text().strip().rstrip("/"),
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
+            api_layout_model_name=self._layout_model_edit.text().strip(),
         )
         self.accept()
 
@@ -136,6 +151,7 @@ class ApiSettingsDialog(QDialog):
         url = self._url_edit.text().strip().rstrip("/") + "/layout-parsing"
         token = self._token_edit.text().strip()
         timeout = self._timeout_spin.value()
+        layout_model = self._layout_model_edit.text().strip()
 
         # Build a 200x400 gray image with text — small enough to be fast,
         # large enough that the server won't reject it as invalid.
@@ -159,9 +175,12 @@ class ApiSettingsDialog(QDialog):
             headers["Authorization"] = f"token {token}"
 
         try:
+            payload = {"file": file_b64, "fileType": 1}
+            if layout_model:
+                payload["model_name"] = layout_model
             resp = requests.post(
                 url,
-                json={"file": file_b64, "fileType": 1},
+                json=payload,
                 headers=headers,
                 timeout=timeout,
             )

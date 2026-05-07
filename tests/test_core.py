@@ -110,6 +110,7 @@ def test_models():
     )
     assert page2.source_type == "pdf"
     assert page2.status == PageStatus.LAYOUT_DONE
+    assert page2.display_image_path == "/tmp/cache.png"
 
     # Project
     project = OcrProject(name="测试项目", pages=[page])
@@ -130,6 +131,9 @@ def test_models():
 # =====================================================================
 
 def test_bbox_tools():
+    from app.core.bbox_utils import (
+        bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
+    )
     from app.models import BBox
 
     # from_dict / to_dict round-trip
@@ -145,7 +149,42 @@ def test_bbox_tools():
     bb2 = BBox(80, 90, 50, 60).clamp(100, 100)
     assert bb2.x2 <= 100 and bb2.y2 <= 100
 
+    parsed = bbox_from_xyxy([120.4, 30.2, 10.1, 60.9])
+    assert parsed == BBox(10, 30, 110, 31)
+
+    sanitized = sanitize_xyxy_bbox([-10, -5, 120, 60], 100, 50)
+    assert sanitized == BBox(0, 0, 100, 50)
+
+    assert is_crop_relative_bbox(BBox(5, 5, 40, 10), 100, 50) is True
+    assert is_crop_relative_bbox(BBox(105, 5, 40, 10), 100, 50) is False
+
+    page_bbox = project_line_bbox(
+        BBox(10, 5, 40, 10),
+        crop_origin_x=100,
+        crop_origin_y=50,
+        crop_w=80,
+        crop_h=40,
+        page_w=400,
+        page_h=300,
+    )
+    assert page_bbox == BBox(110, 55, 40, 10)
+
+    scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
+    assert scaled == BBox(20, 30, 60, 60)
+
     print("test_bbox_tools PASSED")
+
+
+def test_block_type_mapping():
+    from app.models import BlockType
+
+    assert BlockType.from_paddle("paragraph") == BlockType.TEXT
+    assert BlockType.from_paddle("doc_title") == BlockType.TITLE
+    assert BlockType.from_paddle("image_caption") == BlockType.FIGURE_CAPTION
+    assert BlockType.from_paddle("table_body") == BlockType.TABLE
+    assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
+
+    print("test_block_type_mapping PASSED")
 
 
 # =====================================================================
@@ -411,6 +450,21 @@ def test_fake_ocr_engine():
     print("test_fake_ocr_engine PASSED")
 
 
+def test_confidence_normalization():
+    from app.engines.real_ocr_adapter import normalize_confidence
+    from app.ui.widgets.confidence_badge import normalize_badge_score
+
+    assert normalize_confidence(0.87) == 0.87
+    assert normalize_confidence(87) == 0.87
+    assert normalize_confidence("95") == 0.95
+    assert normalize_confidence(None) == 0.0
+
+    assert normalize_badge_score(88) == 0.88
+    assert normalize_badge_score("0.76") == 0.76
+
+    print("test_confidence_normalization PASSED")
+
+
 def test_fake_layout_engine():
     from app.engines.fake_layout_engine import FakeLayoutEngine
 
@@ -520,6 +574,64 @@ def test_ocr_pipeline():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_keeps_page_relative_boxes():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class PageCoordEngine:
+        def recognize(self, image_bgr, context):
+            return [Line(text="整页坐标", confidence=0.92, bbox=BBox(120, 70, 80, 18))]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((240, 320, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 150, 80))
+        page = Page(image_path=img_path, width=320, height=240, blocks=[block])
+        project = OcrProject(name="PageCoords", pages=[page])
+
+        result = OcrPipeline(engine=PageCoordEngine()).process_project(project)
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert line.bbox == BBox(120, 70, 80, 18)
+    finally:
+        os.unlink(img_path)
+
+
+def test_ocr_pipeline_offsets_crop_relative_boxes():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class CropCoordEngine:
+        def recognize(self, image_bgr, context):
+            return [Line(text="局部坐标", confidence=0.92, bbox=BBox(20, 10, 80, 18))]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((240, 320, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 150, 80))
+        page = Page(image_path=img_path, width=320, height=240, blocks=[block])
+        project = OcrProject(name="CropCoords", pages=[page])
+
+        result = OcrPipeline(engine=CropCoordEngine()).process_project(project)
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert line.bbox == BBox(120, 70, 80, 18)
+    finally:
+        os.unlink(img_path)
+
+
 # =====================================================================
 # ExportService 测试
 # =====================================================================
@@ -583,8 +695,87 @@ def test_import_service():
         assert result.pages[0].width == 200
         assert result.pages[0].height == 100
         assert result.pages[0].source_type == "image"
+        assert result.pages[0].cache_image_path.endswith(".png")
+        assert os.path.exists(result.pages[0].cache_image_path)
 
     print("test_import_service PASSED")
+
+
+def test_import_service_sequential_page_numbers():
+    import tempfile
+    from PIL import Image
+    from app.services import ImportService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = os.path.join(tmpdir, "a.png")
+        second = os.path.join(tmpdir, "b.png")
+        Image.new("RGB", (120, 80), color="white").save(first)
+        Image.new("RGB", (140, 90), color="white").save(second)
+
+        cache_dir = os.path.join(tmpdir, "cache")
+        os.makedirs(cache_dir)
+
+        service = ImportService(cache_dir=cache_dir)
+        result = service.import_paths([first, second])
+
+        assert result.success_count == 2
+        assert [page.page_number for page in result.pages] == [1, 2]
+        assert result.pages[0].source_path == first
+        assert result.pages[1].source_path == second
+
+    print("test_import_service_sequential_page_numbers PASSED")
+
+
+def test_layout_analyzer_rescales_suspicious_blocks():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Block, BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2400, height=3200)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(50, 40, 300, 80)),
+        Block(block_type=BlockType.TEXT, bbox=BBox(60, 180, 320, 120)),
+        Block(block_type=BlockType.TEXT, bbox=BBox(80, 420, 400, 120)),
+    ]
+
+    analyzer._rescale_blocks_if_suspicious(page)
+
+    assert page.blocks[0].bbox.x > 100
+    assert page.blocks[-1].bbox.y > 1500
+    assert page.blocks[-1].bbox.y2 <= page.height
+
+    print("test_layout_analyzer_rescales_suspicious_blocks PASSED")
+
+
+def test_layout_analyzer_extracts_api_polygon_bbox():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [[10, 20], [210, 20], [210, 120], [10, 120]],
+        page,
+    )
+
+    assert bbox == BBox(10, 20, 200, 100)
+
+    print("test_layout_analyzer_extracts_api_polygon_bbox PASSED")
+
+
+def test_layout_analyzer_builds_api_payload():
+    from app.core.layout_analyzer import LayoutAnalyzer
+
+    analyzer = LayoutAnalyzer()
+    payload = analyzer._build_api_payload("abc123", 1, "PP-DocLayout-L")
+    assert payload["file"] == "abc123"
+    assert payload["fileType"] == 1
+    assert payload["model_name"] == "PP-DocLayout-L"
+
+    payload_without_model = analyzer._build_api_payload("abc123", 1, "")
+    assert "model_name" not in payload_without_model
+
+    print("test_layout_analyzer_builds_api_payload PASSED")
 
 
 # =====================================================================
@@ -594,6 +785,7 @@ def test_import_service():
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
+    test_block_type_mapping()
     test_project_store()
     test_project_store_clean_on_resave()
     test_project_store_schema_migration()
@@ -602,10 +794,17 @@ if __name__ == "__main__":
     test_export_xml()
     test_export_html()
     test_fake_ocr_engine()
+    test_confidence_normalization()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
+    test_ocr_pipeline_keeps_page_relative_boxes()
+    test_ocr_pipeline_offsets_crop_relative_boxes()
     test_export_service()
     test_import_service()
+    test_import_service_sequential_page_numbers()
+    test_layout_analyzer_rescales_suspicious_blocks()
+    test_layout_analyzer_extracts_api_polygon_bbox()
+    test_layout_analyzer_builds_api_payload()
     print("\n✓ 所有测试通过")

@@ -64,6 +64,10 @@ class BBox:
         """等量扩边。"""
         return BBox(self.x - pad, self.y - pad, self.w + 2 * pad, self.h + 2 * pad)
 
+    def translated(self, dx: int, dy: int) -> "BBox":
+        """平移坐标。"""
+        return BBox(self.x + dx, self.y + dy, self.w, self.h)
+
     def iou(self, other: "BBox") -> float:
         """计算与另一个 BBox 的交并比。"""
         x1 = max(self.x, other.x)
@@ -174,6 +178,14 @@ class Page:
     @property
     def is_analyzed(self) -> bool:
         return len(self.blocks) > 0
+
+    @property
+    def display_image_path(self) -> str:
+        """当前用于渲染和裁剪的工作图路径。
+
+        OCR、版面分析和画布渲染都必须基于同一张图，否则坐标会漂移。
+        """
+        return self.cache_image_path or self.image_path
 
     @property
     def text_blocks(self) -> List[Block]:

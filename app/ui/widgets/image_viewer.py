@@ -83,6 +83,7 @@ class ImageViewer(QGraphicsView):
         pixmap = QPixmap(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_image_from_qimage(self, qimage: QImage) -> None:
@@ -91,6 +92,7 @@ class ImageViewer(QGraphicsView):
         pixmap = QPixmap.fromImage(qimage)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def show_blocks(self, blocks: List[Block]) -> None:

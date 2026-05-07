@@ -68,6 +68,26 @@ class WorkflowController(QObject):
     def max_step(self) -> int:
         return self._max_step
 
+    def ensure_transient_project(self, name: str = "未命名项目") -> OcrProject:
+        """确保存在一个临时项目对象，便于未保存状态下也能走通工作流。"""
+        if self._project is None:
+            self._project = OcrProject(name=name)
+            self.project_changed.emit(self._project)
+        return self._project
+
+    def get_open_step(self) -> int:
+        """打开项目后的推荐落点。"""
+        if self._max_step >= STEP_HPROOF:
+            return STEP_HPROOF
+        if self._max_step >= STEP_LAYOUT:
+            return STEP_LAYOUT
+        return STEP_IMPORT
+
+    def get_recognizable_block_count(self) -> int:
+        if not self._project:
+            return 0
+        return sum(len(page.recognizable_blocks) for page in self._project.pages)
+
     def new_project(self, name: str, db_path: str) -> bool:
         """创建新项目。"""
         try:
@@ -191,6 +211,9 @@ class WorkflowController(QObject):
         self.project_changed.emit(self._project)
         self.status_message.emit(f"已导入 {len(pages)} 页")
 
+        if self._store:
+            self.save_project()
+
     def on_layout_done(self, pages: List[Page]) -> None:
         """版面分析完成后的处理。"""
         self._project.pages = pages
@@ -222,14 +245,18 @@ class WorkflowController(QObject):
         self._update_max_step()
         self.ocr_finished.emit(pages)
         self.status_message.emit(f"识别完成，自动标记 {flagged} 行低置信度内容")
+        self.step_requested.emit(STEP_HPROOF)
 
         if self._store:
             self.save_project()
 
     # ------------------------------------------------------------------ worker management
 
-    def start_layout_analysis(self, pages: List[Page]) -> None:
+    def start_layout_analysis(self, pages: List[Page]) -> bool:
         """启动版面分析 worker（带进度反馈）。"""
+        if not pages:
+            self.status_message.emit("当前没有可分析的页面")
+            return False
         from app.core.layout_analyzer import LayoutWorker
         self._layout_worker = LayoutWorker(pages)
         self._layout_worker.page_done.connect(self._on_layout_progress)
@@ -237,13 +264,20 @@ class WorkflowController(QObject):
         self._layout_worker.error.connect(self._on_worker_error)
         self._layout_worker.start()
         self.status_message.emit("版面分析中…")
+        return True
 
     def _on_layout_progress(self, current: int, total: int) -> None:
         """版面分析进度更新。"""
         self.status_message.emit(f"版面分析中… 第 {current + 1}/{total} 页")
 
-    def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> None:
+    def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> bool:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""
+        recognizable_blocks = sum(len(page.recognizable_blocks) for page in pages)
+        if recognizable_blocks == 0:
+            self.worker_error.emit("当前没有可识别的文字块，请先完成版面分析或补充文字区域。")
+            self.status_message.emit("没有可识别的文字块")
+            return False
+
         # 根据配置创建引擎
         engine = create_engine()
         pipeline = OcrPipeline(engine=engine)
@@ -255,6 +289,7 @@ class WorkflowController(QObject):
         self._ocr_worker.error.connect(self._on_worker_error)
         self._ocr_worker.start()
         self.status_message.emit("OCR 识别中…")
+        return True
 
     def _on_worker_error(self, msg: str) -> None:
         logger.error("Worker error: %s", msg)

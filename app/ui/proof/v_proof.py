@@ -111,7 +111,7 @@ class VProofPanel(QWidget):
         block, page = self._blocks[idx]
 
         # 裁剪块图片
-        img = cv2.imread(page.image_path)
+        img = cv2.imread(page.display_image_path)
         if img is not None:
             bb = block.bbox
             pad = 8

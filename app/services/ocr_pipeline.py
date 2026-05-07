@@ -17,6 +17,7 @@ from typing import Callable, List, Optional, Protocol
 import cv2
 import numpy as np
 
+from app.core.bbox_utils import project_line_bbox
 from app.engines import OcrContext
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
@@ -71,13 +72,13 @@ class OcrPipeline:
         total_pages = len(project.pages)
 
         for page_idx, page in enumerate(project.pages):
-            img = cv2.imread(page.cache_image_path or page.image_path)
+            img = cv2.imread(page.display_image_path)
             if img is None:
-                logger.warning("Cannot read image: %s", page.image_path)
+                logger.warning("Cannot read image: %s", page.display_image_path)
                 for block in page.blocks:
                     if block.recognizable:
                         result.failed_blocks.append(
-                            (page_idx, block.order, f"Cannot read image: {page.image_path}")
+                            (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
                         )
                 continue
 
@@ -142,7 +143,8 @@ class OcrPipeline:
         if block.block_type in NON_OCR_BLOCK_TYPES:
             return []
 
-        bb = block.bbox
+        bb = block.bbox.normalize().clamp(img.shape[1], img.shape[0])
+        block.bbox = bb
         # clamp to image boundaries
         x1 = max(0, bb.x)
         y1 = max(0, bb.y)
@@ -157,7 +159,7 @@ class OcrPipeline:
             return []
 
         context = OcrContext(
-            page_image_path=page.cache_image_path or page.image_path,
+            page_image_path=page.display_image_path,
             page_number=page.page_number,
             block_id=block.id,
             block_type=block.block_type,
@@ -167,11 +169,14 @@ class OcrPipeline:
 
         # 转换 bbox 从 crop 坐标到 page 坐标
         for line in lines:
-            line.bbox = BBox(
-                x=line.bbox.x + x1,
-                y=line.bbox.y + y1,
-                w=line.bbox.w,
-                h=line.bbox.h,
+            line.bbox = project_line_bbox(
+                line.bbox,
+                crop_origin_x=x1,
+                crop_origin_y=y1,
+                crop_w=crop.shape[1],
+                crop_h=crop.shape[0],
+                page_w=img.shape[1],
+                page_h=img.shape[0],
             )
             # 设置 proof status
             if line.confidence < AUTO_FLAG_THRESHOLD:

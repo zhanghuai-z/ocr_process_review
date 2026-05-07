@@ -19,8 +19,8 @@
 ├── tests/             # 当前基础单元测试
 ├── main.py            # 程序入口
 ├── pyproject.toml     # Python 项目配置
-├── build.bat          # Windows 打包脚本
-└── build.sh           # WSL 调用 Windows 打包脚本
+├── build.bat          # Windows .exe 唯一正式打包入口
+└── build.sh           # WSL 下转调 build.bat 的桥接脚本
 ```
 
 ## 环境要求
@@ -45,6 +45,24 @@ python main.py
 ```
 
 如果本地 PaddleOCR 安装困难，可以先使用 API/mock 方案推进工作流。真实 OCR 引擎不应成为 UI、存储、导出和回归测试的阻塞条件。
+
+## 打包
+
+Windows `.exe` **只使用 `build.bat`**：
+
+```bat
+build.bat
+build.bat --clean
+```
+
+如果你在 WSL 中工作，可以运行：
+
+```bash
+./build.sh
+./build.sh --clean
+```
+
+但 `build.sh` 现在只是桥接到 `build.bat`，**不会再自行运行 Linux PyInstaller**，也不再尝试生成 Linux 二进制后冒充 Windows 打包结果。
 
 ## 当前可执行测试
 
@@ -78,6 +96,17 @@ python -m pytest -q
 - `docs/technical-implementation.md`：重构级技术实施文档，包含模块设计、数据模型、工作流、易错点和交接说明。
 - `docs/llm-pre-review.md`：LLM 文本流预审功能设计，强调可关闭、预审不覆盖人工终审。
 - `docs/regression-test-plan.md`：回归测试方案，包含单元、集成、UI、OCR fake adapter、LLM fake adapter 和样本测试建议。
+- `AGENT.md`：双 agent / 多 agent 协作协议，包含 worktree、分支命名、共享 `plan.md`、交接模板和集成节奏。
+
+## 多 agent 协作
+
+当前项目推荐使用 **Coordinator + Agent A + Agent B** 的并行模式：
+
+1. Coordinator：计划、集成、冲突处理、回归门禁
+2. Agent A：OCR / 版面 / bbox / 数据流
+3. Agent B：UI / 交互 / 画布 / 校对工作台
+
+建议使用 `git worktree` 并行工作，而不是多个 agent 共用一个工作区。完整规则见 `AGENT.md`。
 
 ## 重要原则
 

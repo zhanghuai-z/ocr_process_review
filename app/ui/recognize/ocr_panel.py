@@ -90,7 +90,7 @@ class OcrPanel(QWidget):
     def set_pages(self, pages: List[Page]) -> None:
         self._pages = pages
         if pages:
-            self._viewer.set_image(pages[0].image_path)
+            self._viewer.set_image(pages[0].display_image_path)
 
     def on_progress(self, page_idx: int, total: int) -> None:
         self._progress.setVisible(True)
@@ -148,12 +148,12 @@ class OcrPanel(QWidget):
         obj = current.data(0, Qt.ItemDataRole.UserRole)
         from app.models import Line, Page as PageModel
         if isinstance(obj, PageModel):
-            self._viewer.set_image(obj.image_path)
+            self._viewer.set_image(obj.display_image_path)
             self._viewer.show_blocks(obj.blocks)
         elif isinstance(obj, Block):
             # 找到对应页面
             for page in self._pages:
                 if obj in page.blocks:
-                    self._viewer.set_image(page.image_path)
+                    self._viewer.set_image(page.display_image_path)
                     self._viewer.show_blocks([obj])
                     break

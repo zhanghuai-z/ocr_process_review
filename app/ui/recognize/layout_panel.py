@@ -132,7 +132,9 @@ class LayoutPanel(QWidget):
         self._page_list.clear()
         for i, page in enumerate(pages):
             from pathlib import Path
-            self._page_list.addItem(f"第 {page.page_number} 页\n{Path(page.image_path).name}")
+            self._page_list.addItem(
+                f"第 {page.page_number} 页\n{Path(page.source_path or page.image_path).name}"
+            )
         self._btn_run.setEnabled(bool(pages))
         if pages:
             self._page_list.setCurrentRow(0)
@@ -163,7 +165,7 @@ class LayoutPanel(QWidget):
         if not self._pages:
             return
         page = self._pages[idx]
-        self._viewer.set_image(page.image_path)
+        self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._viewer.show_blocks(page.blocks)
         self._prop_panel.clear()
