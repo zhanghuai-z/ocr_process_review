@@ -43,9 +43,12 @@ class BlockPropertyPanel(QWidget):
     def show_block(self, block: Block) -> None:
         bb = block.bbox
         self._type_lbl.setText(f"类型：{block.block_type.value}")
-        self._conf_lbl.set_score(block.avg_confidence)
+        if block.lines:
+            self._conf_lbl.set_score(block.avg_confidence)
+        else:
+            self._conf_lbl.set_unavailable()
         self._bbox_lbl.setText(f"位置：x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
-        self._text_edit.setPlainText(block.full_text)
+        self._text_edit.setPlainText(block.full_text or block.note)
 
     def clear(self) -> None:
         self._type_lbl.setText("类型：—")

@@ -353,6 +353,8 @@ class LayoutAnalyzer:
                 )
                 if not bbox or bbox.area <= 0:
                     continue
+                if self._looks_like_page_number(text or "", bbox, page):
+                    continue
                 block_type = BlockType.TEXT
                 overlay_items.append((block_type.value, bbox))
                 blocks.append(Block(
@@ -364,6 +366,12 @@ class LayoutAnalyzer:
                 order += 1
 
         return blocks, overlay_items
+
+    def _looks_like_page_number(self, text: str, bbox: BBox, page: Page) -> bool:
+        normalized = (text or "").strip()
+        if not normalized or not normalized.isdigit():
+            return False
+        return bbox.y1 >= page.height * 0.88 and bbox.w <= page.width * 0.12
 
     def _union_block_bboxes(self, blocks: list[Block], page: Page) -> BBox:
         x1 = min(block.bbox.x1 for block in blocks)
@@ -431,13 +439,24 @@ class LayoutAnalyzer:
         merged_blocks: list[Block] = []
         for order, group in enumerate(groups):
             text = "\n".join(block.note for block in group if block.note)
+            bbox = self._union_block_bboxes(group, page)
+            if self._looks_like_page_number(text, bbox, page):
+                continue
             merged_blocks.append(Block(
                 block_type=self._infer_plain_text_block_type(text),
-                bbox=self._union_block_bboxes(group, page),
-                order=order,
+                bbox=bbox,
+                order=len(merged_blocks),
                 note=text[:200],
             ))
         return merged_blocks
+
+    def _is_decorative_api_block(self, raw_type: str, content: str, bbox: BBox, page: Page) -> bool:
+        normalized_type = (raw_type or "").strip().lower().replace("-", "_")
+        if normalized_type in {"number", "page_number", "formula_number"}:
+            return True
+        if normalized_type in {"footer", "footnote", "footer_image", "header_image"}:
+            return True
+        return self._looks_like_page_number(content, bbox, page)
 
     def _extract_api_parsing_blocks(
         self,
@@ -491,11 +510,13 @@ class LayoutAnalyzer:
                 or ""
             )
             block_type = BlockType.from_paddle(raw_type)
+            if self._is_decorative_api_block(raw_type, str(content), bbox, page):
+                continue
             overlay_items.append((raw_type, bbox))
             blocks.append(Block(
                 block_type=block_type,
                 bbox=bbox,
-                order=start_order + offset,
+                order=start_order + len(blocks),
                 note=str(content)[:200],
             ))
 

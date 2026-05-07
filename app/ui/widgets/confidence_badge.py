@@ -44,3 +44,12 @@ class ConfidenceBadge(QLabel):
             f"padding:1px 5px; font-size:11px; font-weight:bold;"
         )
         self.setToolTip(f"置信度: {self._score:.4f}")
+
+    def set_unavailable(self, text: str = "未OCR") -> None:
+        self._score = 0.0
+        self.setText(text)
+        self.setStyleSheet(
+            "background:#607D8B; color:#fff; border-radius:4px;"
+            "padding:1px 5px; font-size:11px; font-weight:bold;"
+        )
+        self.setToolTip("版面分析阶段尚未产生 OCR 置信度")

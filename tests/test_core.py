@@ -1219,6 +1219,12 @@ def test_layout_analyzer_reads_api_parsing_res_list_blocks():
                                         "block_label": "paragraph_title",
                                         "block_order": 1,
                                     },
+                                    {
+                                        "block_bbox": [300, 3300, 360, 3340],
+                                        "block_content": "166",
+                                        "block_label": "number",
+                                        "block_order": 2,
+                                    },
                                 ],
                             },
                             "markdown": {
@@ -1347,6 +1353,7 @@ def test_layout_analyzer_groups_many_api_ocr_lines_for_layout():
         Block(block_type=BlockType.TEXT, bbox=BBox(80, 230, 120, 24), order=4, note="三、标题"),
         Block(block_type=BlockType.TEXT, bbox=BBox(10, 310, 300, 20), order=5, note="第二段第一行"),
         Block(block_type=BlockType.TEXT, bbox=BBox(10, 345, 300, 20), order=6, note="第二段第二行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(20, 540, 35, 20), order=7, note="166"),
     ]
 
     grouped = analyzer._merge_ocr_line_blocks_for_layout(line_blocks, page)
