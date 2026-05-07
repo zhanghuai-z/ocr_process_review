@@ -1009,6 +1009,24 @@ def test_layout_analyzer_extracts_relative_polygon_bbox():
     print("test_layout_analyzer_extracts_relative_polygon_bbox PASSED")
 
 
+def test_layout_analyzer_relative_bbox_ignores_response_size():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [0.1, 0.1, 0.3, 0.2],
+        page,
+        coordinate_space=(800, 608),
+    )
+
+    assert bbox == BBox(100, 200, 200, 200)
+
+    print("test_layout_analyzer_relative_bbox_ignores_response_size PASSED")
+
+
 def test_layout_analyzer_scales_bbox_from_response_size():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Page
@@ -1025,6 +1043,24 @@ def test_layout_analyzer_scales_bbox_from_response_size():
     assert bbox == BBox(240, 316, 960, 316)
 
     print("test_layout_analyzer_scales_bbox_from_response_size PASSED")
+
+
+def test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2356, height=3424)
+
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [292, 259, 1270, 329],
+        page,
+        coordinate_space=(800, 608),
+    )
+
+    assert bbox == BBox(292, 259, 978, 70)
+
+    print("test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size PASSED")
 
 
 def test_layout_analyzer_resolves_coordinate_space():
@@ -1044,6 +1080,28 @@ def test_layout_analyzer_resolves_coordinate_space():
     assert size == (800, 608)
 
     print("test_layout_analyzer_resolves_coordinate_space PASSED")
+
+
+def test_layout_analyzer_resolves_aistudio_data_info_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2356, height=3424)
+    data = {
+        "result": {
+            "dataInfo": {
+                "width": 2356,
+                "height": 3424,
+                "type": "image",
+            },
+        },
+    }
+
+    size = analyzer._resolve_coordinate_space(page, data=data)
+    assert size == (2356, 3424)
+
+    print("test_layout_analyzer_resolves_aistudio_data_info_space PASSED")
 
 
 def test_layout_analyzer_builds_api_payload():
@@ -1119,6 +1177,88 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
                 debug_path.unlink()
 
     print("test_layout_analyzer_reads_api_ocr_result_as_text_block PASSED")
+
+
+def test_layout_analyzer_reads_api_parsing_res_list_blocks():
+    import types
+    import cv2
+    import numpy as np
+    from app.core.app_config import update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "dataInfo": {
+                        "width": 2356,
+                        "height": 3424,
+                        "type": "image",
+                    },
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "width": 2356,
+                                "height": 3424,
+                                "parsing_res_list": [
+                                    {
+                                        "block_bbox": [292, 259, 1270, 329],
+                                        "block_content": "期刊页眉",
+                                        "block_label": "header",
+                                        "block_order": 0,
+                                    },
+                                    {
+                                        "block_bbox": [1036, 1290, 1413, 1360],
+                                        "block_content": "一、标题",
+                                        "block_label": "paragraph_title",
+                                        "block_order": 1,
+                                    },
+                                ],
+                            },
+                            "markdown": {
+                                "text": "# 不应走 markdown 回退",
+                                "images": {},
+                            },
+                        }
+                    ],
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((3424, 2356, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/layout-parsing", api_token="", api_timeout=9)
+        page = Page(image_path=img_path, width=0, height=0)
+        result = LayoutAnalyzer().analyze(page)
+        assert len(result.blocks) == 2
+        assert [block.block_type for block in result.blocks] == [BlockType.TEXT, BlockType.TITLE]
+        assert result.blocks[0].bbox.to_xyxy() == (292, 259, 1270, 329)
+        assert result.blocks[0].note == "期刊页眉"
+        assert result.blocks[1].bbox.to_xyxy() == (1036, 1290, 1413, 1360)
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        os.unlink(img_path)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_reads_api_parsing_res_list_blocks PASSED")
 
 
 def test_layout_analyzer_splits_markdown_into_paragraph_blocks():
@@ -1269,10 +1409,14 @@ if __name__ == "__main__":
     test_layout_analyzer_does_not_rescale_sparse_top_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_relative_polygon_bbox()
+    test_layout_analyzer_relative_bbox_ignores_response_size()
     test_layout_analyzer_scales_bbox_from_response_size()
+    test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size()
     test_layout_analyzer_resolves_coordinate_space()
+    test_layout_analyzer_resolves_aistudio_data_info_space()
     test_layout_analyzer_builds_api_payload()
     test_layout_analyzer_reads_api_ocr_result_as_text_block()
+    test_layout_analyzer_reads_api_parsing_res_list_blocks()
     test_layout_analyzer_splits_markdown_into_paragraph_blocks()
     test_layout_analyzer_reads_local_ppstructurev3_result()
     print("\n✓ 所有测试通过")

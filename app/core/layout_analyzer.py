@@ -125,6 +125,21 @@ class LayoutAnalyzer:
             return [item]
         return []
 
+    def _extract_parsing_items(self, item: dict) -> List[dict]:
+        """读取 AIStudio layout-parsing 的结构化段落块。"""
+        if not isinstance(item, dict):
+            return []
+
+        candidates = (
+            item,
+            item.get("prunedResult", {}) if isinstance(item.get("prunedResult"), dict) else {},
+        )
+        for payload in candidates:
+            parsing_res_list = payload.get("parsing_res_list")
+            if isinstance(parsing_res_list, list):
+                return [entry for entry in parsing_res_list if isinstance(entry, dict)]
+        return []
+
     def _extract_int_pair(self, value) -> Optional[tuple[int, int]]:
         if isinstance(value, (list, tuple)) and len(value) >= 2:
             try:
@@ -207,10 +222,47 @@ class LayoutAnalyzer:
                 return size
             result = data.get("result", {})
             if isinstance(result, dict):
-                size = self._extract_size_from_payload(result)
-                if size:
-                    return size
+                for payload in (
+                    result,
+                    result.get("dataInfo", {}),
+                ):
+                    size = self._extract_size_from_payload(payload)
+                    if size:
+                        return size
         return None
+
+    def _should_scale_bbox_to_page(
+        self,
+        bbox: BBox,
+        page: Page,
+        coordinate_space: tuple[int, int],
+    ) -> bool:
+        source_w, source_h = coordinate_space
+        if source_w <= 0 or source_h <= 0:
+            return False
+        if source_w == page.width and source_h == page.height:
+            return False
+
+        tolerance = 2
+        bbox_exceeds_source = bbox.x2 > source_w + tolerance or bbox.y2 > source_h + tolerance
+        bbox_fits_page = (
+            bbox.x1 >= -tolerance
+            and bbox.y1 >= -tolerance
+            and bbox.x2 <= page.width + tolerance
+            and bbox.y2 <= page.height + tolerance
+        )
+        if bbox_exceeds_source and bbox_fits_page:
+            logger.debug(
+                "API bbox already fits page pixels; ignoring conflicting coordinate space "
+                "bbox=%s page=%dx%d source=%dx%d",
+                bbox.to_xyxy(),
+                page.width,
+                page.height,
+                source_w,
+                source_h,
+            )
+            return False
+        return True
 
     def _extract_bbox_from_coordinate(
         self,
@@ -224,16 +276,17 @@ class LayoutAnalyzer:
             return None
 
         bbox = None
+        is_relative_coord = False
         if len(coord) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in coord[:4]):
             flat_points = coord[:4]
             try:
-                is_relative = all(
+                is_relative_coord = all(
                     0.0 <= float(point[0]) <= 1.0 and 0.0 <= float(point[1]) <= 1.0
                     for point in flat_points
                 )
             except (TypeError, ValueError):
-                is_relative = False
-            if is_relative:
+                is_relative_coord = False
+            if is_relative_coord:
                 bbox = bbox_from_quad([
                     (float(point[0]) * page.width, float(point[1]) * page.height)
                     for point in flat_points
@@ -243,10 +296,10 @@ class LayoutAnalyzer:
         elif len(coord) >= 4:
             values = coord[:4]
             try:
-                is_relative = all(0.0 <= float(value) <= 1.0 for value in values)
+                is_relative_coord = all(0.0 <= float(value) <= 1.0 for value in values)
             except (TypeError, ValueError):
-                is_relative = False
-            if is_relative:
+                is_relative_coord = False
+            if is_relative_coord:
                 bbox = bbox_from_xyxy([
                     float(values[0]) * page.width,
                     float(values[1]) * page.height,
@@ -258,7 +311,11 @@ class LayoutAnalyzer:
         if bbox is None:
             return None
 
-        if coordinate_space:
+        if coordinate_space and not is_relative_coord and self._should_scale_bbox_to_page(
+            bbox,
+            page,
+            coordinate_space,
+        ):
             source_w, source_h = coordinate_space
             bbox = scale_bbox_to_page(
                 bbox,
@@ -305,6 +362,68 @@ class LayoutAnalyzer:
                     note=(text or "")[:200],
                 ))
                 order += 1
+
+        return blocks, overlay_items
+
+    def _extract_api_parsing_blocks(
+        self,
+        item: dict,
+        page: Page,
+        *,
+        coordinate_space: Optional[tuple[int, int]] = None,
+        start_order: int = 0,
+    ) -> tuple[list[Block], list[tuple[str, object]]]:
+        parsing_items = self._extract_parsing_items(item)
+        if not parsing_items:
+            return [], []
+
+        def sort_key(index_and_entry: tuple[int, dict]) -> tuple[int, int]:
+            index, entry = index_and_entry
+            try:
+                return 0, int(entry.get("block_order"))
+            except (TypeError, ValueError):
+                try:
+                    return 0, int(entry.get("order"))
+                except (TypeError, ValueError):
+                    return 1, index
+
+        blocks: list[Block] = []
+        overlay_items: list[tuple[str, object]] = []
+        for offset, (_, entry) in enumerate(sorted(enumerate(parsing_items), key=sort_key)):
+            coord = (
+                entry.get("block_bbox")
+                or entry.get("block_polygon_points")
+                or entry.get("coordinate")
+                or entry.get("bbox")
+            )
+            bbox = self._extract_bbox_from_coordinate(
+                coord,
+                page,
+                coordinate_space=coordinate_space,
+            )
+            if not bbox or bbox.area <= 0:
+                continue
+
+            raw_type = (
+                entry.get("block_label")
+                or entry.get("label")
+                or entry.get("type")
+                or "unknown"
+            )
+            content = (
+                entry.get("block_content")
+                or entry.get("content")
+                or entry.get("text")
+                or ""
+            )
+            block_type = BlockType.from_paddle(raw_type)
+            overlay_items.append((raw_type, bbox))
+            blocks.append(Block(
+                block_type=block_type,
+                bbox=bbox,
+                order=start_order + offset,
+                note=str(content)[:200],
+            ))
 
         return blocks, overlay_items
 
@@ -651,6 +770,18 @@ class LayoutAnalyzer:
                         order=order,
                     ))
                     order += 1
+                continue
+
+            parsing_blocks, parsing_overlay_items = self._extract_api_parsing_blocks(
+                item,
+                page,
+                coordinate_space=coordinate_space,
+                start_order=order,
+            )
+            if parsing_blocks:
+                page.blocks.extend(parsing_blocks)
+                raw_overlay_items.extend(parsing_overlay_items)
+                order += len(parsing_blocks)
                 continue
 
             line_blocks, line_overlay_items = self._extract_api_line_blocks(
