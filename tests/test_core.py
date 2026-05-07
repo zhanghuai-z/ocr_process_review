@@ -726,6 +726,93 @@ def test_import_service_sequential_page_numbers():
     print("test_import_service_sequential_page_numbers PASSED")
 
 
+def test_api_model_profile_helpers():
+    from app.ui.widgets.api_settings_dialog import (
+        get_api_model_profile_options,
+        get_api_model_profile_url,
+        match_api_model_profile_from_url,
+    )
+
+    options = get_api_model_profile_options()
+    assert [label for _, label in options] == [
+        "PP-OCRv5",
+        "PP-StructureV3",
+        "PaddleOCR-VL",
+        "PaddleOCR-VL-1.5",
+    ]
+    assert get_api_model_profile_url("pp-ocrv5").endswith("/ocr")
+    assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
+    assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
+    assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
+
+    print("test_api_model_profile_helpers PASSED")
+
+
+def test_app_config_tracks_api_model_profile():
+    from app.core.app_config import AppConfig, get_config, update_config
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="paddleocr-vl-1.5",
+        api_url="https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+        api_token="demo",
+        api_timeout=12,
+        api_layout_model_name="",
+    )
+    current = get_config()
+    assert current["api_model_profile"] == "paddleocr-vl-1.5"
+    assert current["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing"
+    assert current["api_timeout"] == 12
+    assert current["api_token"] == "demo"
+    assert current["api_layout_model_name"] == ""
+    cfg.reset_to_defaults()
+
+    print("test_app_config_tracks_api_model_profile PASSED")
+
+
+def test_api_settings_dialog_syncs_model_and_url():
+    from PySide6.QtWidgets import QApplication
+
+    from app.core.app_config import AppConfig, update_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-structurev3",
+        api_url="https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
+        api_token="",
+        api_timeout=30,
+        api_layout_model_name="",
+    )
+
+    dialog = ApiSettingsDialog()
+    assert dialog._api_model_combo.currentData() == "pp-structurev3"
+    assert dialog._url_edit.text() == "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing"
+
+    index = dialog._api_model_combo.findData("pp-ocrv5")
+    dialog._api_model_combo.setCurrentIndex(index)
+    assert dialog._url_edit.text() == "https://n6z9feddjca4l7b5.aistudio-app.com/ocr"
+
+    dialog._url_edit.setText("https://example.com/custom-layout")
+    dialog._sync_model_from_url()
+    assert dialog._api_model_combo.currentIndex() == -1
+
+    dialog._url_edit.setText("https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing")
+    dialog._sync_model_from_url()
+    assert dialog._api_model_combo.currentData() == "paddleocr-vl"
+
+    cfg.reset_to_defaults()
+
+    print("test_api_settings_dialog_syncs_model_and_url PASSED")
+
+
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -804,6 +891,9 @@ if __name__ == "__main__":
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()
+    test_api_model_profile_helpers()
+    test_app_config_tracks_api_model_profile()
+    test_api_settings_dialog_syncs_model_and_url()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_builds_api_payload()

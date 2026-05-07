@@ -11,12 +11,80 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from app.core.ocr_config import get_config, update_config
+
+KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing")
+API_MODEL_PROFILES: dict[str, dict[str, str]] = {
+    "pp-ocrv5": {
+        "label": "PP-OCRv5",
+        "url": "https://n6z9feddjca4l7b5.aistudio-app.com/ocr",
+    },
+    "pp-structurev3": {
+        "label": "PP-StructureV3",
+        "url": "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
+    },
+    "paddleocr-vl": {
+        "label": "PaddleOCR-VL",
+        "url": "https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing",
+    },
+    "paddleocr-vl-1.5": {
+        "label": "PaddleOCR-VL-1.5",
+        "url": "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+    },
+}
+
+
+def get_api_model_profile_options() -> list[tuple[str, str]]:
+    return [(key, value["label"]) for key, value in API_MODEL_PROFILES.items()]
+
+
+def get_api_model_profile_url(profile: str | None) -> str:
+    if isinstance(profile, str) and profile in API_MODEL_PROFILES:
+        return API_MODEL_PROFILES[profile]["url"]
+    return API_MODEL_PROFILES["pp-ocrv5"]["url"]
+
+
+def match_api_model_profile_from_url(api_url: str | None) -> str | None:
+    normalized_url = (api_url or "").strip().rstrip("/")
+    for key, spec in API_MODEL_PROFILES.items():
+        if spec["url"].rstrip("/") == normalized_url:
+            return key
+    return None
+
+
+def resolve_api_endpoint(api_url: str | None, default_suffix: str = "/layout-parsing") -> str:
+    url = (api_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if any(url.endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
+        return url
+    return f"{url}{default_suffix}"
+
+
+def build_api_payload(file_b64: str, file_type: int) -> dict[str, object]:
+    return {
+        "file": file_b64,
+        "fileType": file_type,
+    }
+
+
+def detect_api_result_kind(data: dict) -> str:
+    if not isinstance(data, dict):
+        return "unknown"
+    result = data.get("result", {})
+    if not isinstance(result, dict):
+        return "unknown"
+    if isinstance(result.get("ocrResults"), list):
+        return "ocr"
+    if isinstance(result.get("layoutParsingResults"), list):
+        return "layout"
+    return "unknown"
 
 
 class ApiSettingsDialog(QDialog):
@@ -47,16 +115,23 @@ class ApiSettingsDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         url_note = QLabel(
-            "AiStudio 应用地址示例：<b>https://xxxxx.aistudio-app.com</b><br>"
-            "自部署 Serving 示例：<b>http://localhost:8080</b><br>"
-            "<small>不需要加 /layout-parsing 路径后缀</small>"
+            "AiStudio 端点示例：<b>https://xxxxx.aistudio-app.com/ocr</b> 或 "
+            "<b>https://xxxxx.aistudio-app.com/layout-parsing</b><br>"
+            "自部署 Serving 同样建议填写完整端点。<br>"
+            "<small>推荐直接填完整 URL；若只填应用根地址，将默认补成 /layout-parsing。</small>"
         )
         url_note.setWordWrap(True)
         url_note.setTextFormat(Qt.TextFormat.RichText)
         form.addRow(url_note)
 
+        self._api_model_combo = QComboBox()
+        for key, label in get_api_model_profile_options():
+            self._api_model_combo.addItem(label, key)
+        self._api_model_combo.setCurrentIndex(-1)
+        form.addRow("官方模型：", self._api_model_combo)
+
         self._url_edit = QLineEdit()
-        self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com")
+        self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com/layout-parsing")
         form.addRow("API 地址：", self._url_edit)
 
         token_row = QWidget()
@@ -78,19 +153,6 @@ class ApiSettingsDialog(QDialog):
         self._timeout_spin.setSuffix(" 秒")
         form.addRow("请求超时：", self._timeout_spin)
 
-        self._layout_model_edit = QLineEdit()
-        self._layout_model_edit.setPlaceholderText("例如：PP-DocLayout-L / PP-DocLayout_plus-L")
-        self._layout_model_edit.setToolTip("将以 model_name 透传给 /layout-parsing；需要服务端支持该参数。")
-        form.addRow("版面模型名：", self._layout_model_edit)
-
-        model_note = QLabel(
-            "<small>官方新版本 layout detection 模块支持显式 model_name。"
-            "如果你的 API 服务端支持透传，这里可固定为 PP-DocLayout-L 或 PP-DocLayout_plus-L。</small>"
-        )
-        model_note.setWordWrap(True)
-        model_note.setTextFormat(Qt.TextFormat.RichText)
-        form.addRow("", model_note)
-
         self._btn_test = QPushButton("测试连接")
         self._btn_test.clicked.connect(self._test_connection)
         form.addRow("", self._btn_test)
@@ -106,6 +168,8 @@ class ApiSettingsDialog(QDialog):
 
         self._radio_local.toggled.connect(self._on_mode_changed)
         self._radio_api.toggled.connect(self._on_mode_changed)
+        self._api_model_combo.currentIndexChanged.connect(self._on_api_model_changed)
+        self._url_edit.editingFinished.connect(self._sync_model_from_url)
 
     # ── logic ──────────────────────────────────────────────────
 
@@ -115,14 +179,36 @@ class ApiSettingsDialog(QDialog):
             self._radio_api.setChecked(True)
         else:
             self._radio_local.setChecked(True)
-        self._url_edit.setText(cfg.get("api_url", ""))
+        profile_key = cfg.get("api_model_profile", "")
+        if not profile_key:
+            profile_key = match_api_model_profile_from_url(cfg.get("api_url", ""))
+        index = self._api_model_combo.findData(profile_key)
+        self._api_model_combo.blockSignals(True)
+        self._api_model_combo.setCurrentIndex(index if index >= 0 else -1)
+        self._api_model_combo.blockSignals(False)
+        api_url = cfg.get("api_url", "")
+        if not api_url and index >= 0:
+            api_url = get_api_model_profile_url(profile_key)
+        self._url_edit.setText(api_url)
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
-        self._layout_model_edit.setText(cfg.get("api_layout_model_name", ""))
         self._on_mode_changed()
 
     def _on_mode_changed(self) -> None:
         self._api_group.setEnabled(self._radio_api.isChecked())
+
+    def _on_api_model_changed(self) -> None:
+        profile_key = self._api_model_combo.currentData()
+        if not profile_key:
+            return
+        self._url_edit.setText(get_api_model_profile_url(profile_key))
+
+    def _sync_model_from_url(self) -> None:
+        profile_key = match_api_model_profile_from_url(self._url_edit.text().strip())
+        index = self._api_model_combo.findData(profile_key) if profile_key else -1
+        self._api_model_combo.blockSignals(True)
+        self._api_model_combo.setCurrentIndex(index if index >= 0 else -1)
+        self._api_model_combo.blockSignals(False)
 
     def _toggle_token_visibility(self, checked: bool) -> None:
         if checked:
@@ -134,12 +220,15 @@ class ApiSettingsDialog(QDialog):
 
     def _save_and_accept(self) -> None:
         mode = "api" if self._radio_api.isChecked() else "local"
+        api_url = self._url_edit.text().strip().rstrip("/")
+        api_model_profile = self._api_model_combo.currentData() or match_api_model_profile_from_url(api_url) or ""
         update_config(
             mode=mode,
-            api_url=self._url_edit.text().strip().rstrip("/"),
+            api_model_profile=api_model_profile,
+            api_url=api_url,
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
-            api_layout_model_name=self._layout_model_edit.text().strip(),
+            api_layout_model_name="",
         )
         self.accept()
 
@@ -148,10 +237,9 @@ class ApiSettingsDialog(QDialog):
         import base64
         import requests
 
-        url = self._url_edit.text().strip().rstrip("/") + "/layout-parsing"
+        url = resolve_api_endpoint(self._url_edit.text().strip(), default_suffix="/layout-parsing")
         token = self._token_edit.text().strip()
         timeout = self._timeout_spin.value()
-        layout_model = self._layout_model_edit.text().strip()
 
         # Build a 200x400 gray image with text — small enough to be fast,
         # large enough that the server won't reject it as invalid.
@@ -175,9 +263,7 @@ class ApiSettingsDialog(QDialog):
             headers["Authorization"] = f"token {token}"
 
         try:
-            payload = {"file": file_b64, "fileType": 1}
-            if layout_model:
-                payload["model_name"] = layout_model
+            payload = build_api_payload(file_b64, 1)
             resp = requests.post(
                 url,
                 json=payload,
@@ -194,7 +280,13 @@ class ApiSettingsDialog(QDialog):
                 err_msg  = resp.text[:300]
 
             if code == 200 and err_code == 0:
-                QMessageBox.information(self, "测试成功", "连接正常，API 响应成功！")
+                kind = detect_api_result_kind(body) if isinstance(body, dict) else "unknown"
+                kind_label = {
+                    "ocr": "PP-OCRv5 /ocr",
+                    "layout": "PP-StructureV3 / VL /layout-parsing",
+                    "unknown": "未知结构",
+                }.get(kind, kind)
+                QMessageBox.information(self, "测试成功", f"连接正常，API 响应成功！\n识别到响应类型：{kind_label}")
             elif code in (401, 403) or err_code in (401, 403):
                 QMessageBox.warning(
                     self, "鉴权失败",

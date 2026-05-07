@@ -13,6 +13,7 @@ from PySide6.QtCore import QSettings
 _DEFAULT_CONFIG: dict[str, Any] = {
     # OCR 引擎
     "ocr_mode": "local",           # "local" | "api" | "mock"
+    "api_model_profile": "pp-ocrv5",
     "api_url": "",
     "api_timeout": 30,
     "api_token": "",
@@ -93,6 +94,7 @@ def get_config() -> dict[str, Any]:
     cfg = AppConfig.instance()
     return {
         "mode": cfg.get("ocr_mode", "local"),
+        "api_model_profile": cfg.get("api_model_profile", "pp-ocrv5"),
         "api_url": cfg.get("api_url", ""),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),
@@ -105,6 +107,7 @@ def update_config(**kwargs: Any) -> None:
     cfg = AppConfig.instance()
     mapping = {
         "mode": "ocr_mode",
+        "api_model_profile": "api_model_profile",
         "api_url": "api_url",
         "api_timeout": "api_timeout",
         "api_token": "api_token",
