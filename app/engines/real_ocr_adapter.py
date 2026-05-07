@@ -7,23 +7,9 @@ from typing import List
 
 import numpy as np
 
-from app.core.api_response_utils import (
-    build_api_payload,
-    detect_api_result_kind,
-    extract_api_markdown_text,
-    extract_bbox_from_box_data,
-    get_api_result_items,
-    iter_api_ocr_payloads,
-    resolve_api_endpoint,
-    split_markdown_lines,
-)
+from app.core.bbox_utils import bbox_from_xyxy, sanitize_xyxy_bbox
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.core.paddle_result_utils import (
-    get_local_ocr_init_kwargs,
-    prepare_paddle_runtime_env,
-    results_to_dicts,
-)
 from app.models import BBox, Line, ProofStatus
 from app.core.app_config import get_config
 
@@ -53,29 +39,59 @@ def get_engine_description(mode: str = "") -> str:
         mode = get_config().get("mode", "local")
     if mode == "api":
         cfg = get_config()
-        api_url = resolve_api_endpoint(cfg.get("api_url", ""), default_suffix="/layout-parsing")
-        return f"API OCR（{api_url or '未配置 URL'}）"
+        api_url = cfg.get("api_url", "")
+        return f"API OCR（/layout-parsing, {api_url or '未配置 URL'}）"
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
-    return "PaddleOCR 本地默认模型（3.x predict API）"
+    return (
+        "PaddleOCR 本地默认中文模型组合"
+        "（lang=ch, use_angle_cls=True, layout=False, table=False；"
+        "未显式固定 det/rec/cls 模型名）"
+    )
 
 
-def _extract_api_lines(item: dict, crop_w: int, crop_h: int) -> List[Line]:
-    lines: List[Line] = []
+class LocalOcrEngine:
+    """本地 PaddleOCR 引擎适配器。"""
 
-    for payload in iter_api_ocr_payloads(item):
-        texts = payload.get("rec_texts", [])
-        scores = payload.get("rec_scores", [])
-        boxes = payload.get("rec_boxes", [])
-        polys = payload.get("rec_polys", [])
-        for idx, text in enumerate(texts):
-            if not text:
-                continue
-            score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-            box_data = boxes[idx] if idx < len(boxes) else (polys[idx] if idx < len(polys) else None)
-            bbox = extract_bbox_from_box_data(box_data, crop_w, crop_h)
+    def __init__(self) -> None:
+        self._engine = None
+
+    def _get_engine(self):
+        if self._engine is None:
+            from paddleocr import PaddleOCR
+            logger.info(
+                "Initializing PaddleOCR text engine: lang=ch, "
+                "use_angle_cls=True, layout=False, table=False, "
+                "models=package defaults"
+            )
+            self._engine = PaddleOCR(
+                use_angle_cls=True,
+                lang="ch",
+                show_log=False,
+                layout=False,
+                table=False,
+            )
+        return self._engine
+
+    def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
+        engine = self._get_engine()
+        result = engine.ocr(image_bgr, cls=True)
+        lines: List[Line] = []
+        crop_h, crop_w = image_bgr.shape[:2]
+        if not result or not result[0]:
+            return lines
+        for line_data in result[0]:
+            pts, (text, score) = line_data
+            score = normalize_confidence(score)
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            bbox = sanitize_xyxy_bbox(
+                [min(xs), min(ys), max(xs), max(ys)],
+                crop_w,
+                crop_h,
+            )
             if bbox.area <= 0:
-                bbox = BBox(0, 0, crop_w, crop_h)
+                continue
             lines.append(Line(
                 text=text,
                 confidence=float(score),
@@ -86,86 +102,11 @@ def _extract_api_lines(item: dict, crop_w: int, crop_h: int) -> List[Line]:
                     else ProofStatus.UNCHECKED
                 ),
             ))
-
-    if lines:
-        return lines
-
-    markdown_text = extract_api_markdown_text(item)
-    fallback_bbox = BBox(0, 0, crop_w, crop_h)
-    return [
-        Line(text=text, confidence=1.0, bbox=fallback_bbox, proof_status=ProofStatus.UNCHECKED)
-        for text in split_markdown_lines(markdown_text)
-    ]
-
-
-class LocalOcrEngine:
-    """本地 PaddleOCR 引擎适配器。"""
-
-    def __init__(self) -> None:
-        self._engine = None
-
-    def close(self) -> None:
-        import gc
-
-        engine = self._engine
-        self._engine = None
-        if engine is not None and hasattr(engine, "close"):
-            engine.close()
-        gc.collect()
-
-    def _get_engine(self):
-        if self._engine is None:
-            prepare_paddle_runtime_env()
-            from paddleocr import PaddleOCR
-            init_kwargs = get_local_ocr_init_kwargs()
-            logger.info(
-                "Initializing PaddleOCR text engine: "
-                "text_det_limit_side_len=%s, text_det_limit_type=%s, "
-                "use_doc_orientation_classify=False, use_doc_unwarping=False, "
-                "use_textline_orientation=%s",
-                init_kwargs["text_det_limit_side_len"],
-                init_kwargs["text_det_limit_type"],
-                init_kwargs["use_textline_orientation"],
-            )
-            self._engine = PaddleOCR(**init_kwargs)
-        return self._engine
-
-    def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
-        engine = self._get_engine()
-        result = engine.predict(image_bgr)
-        lines: List[Line] = []
-        crop_h, crop_w = image_bgr.shape[:2]
-        for payload in results_to_dicts(result):
-            texts = payload.get("rec_texts", [])
-            scores = payload.get("rec_scores", [])
-            boxes = payload.get("rec_boxes", [])
-            polys = payload.get("rec_polys", [])
-            for idx, text in enumerate(texts):
-                if not text:
-                    continue
-                score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-                box_data = boxes[idx] if idx < len(boxes) else (polys[idx] if idx < len(polys) else None)
-                bbox = extract_bbox_from_box_data(box_data, crop_w, crop_h)
-                if bbox.area <= 0:
-                    continue
-                lines.append(Line(
-                    text=text,
-                    confidence=float(score),
-                    bbox=bbox,
-                    proof_status=(
-                        ProofStatus.AUTO_FLAGGED
-                        if score < AUTO_FLAG_THRESHOLD
-                        else ProofStatus.UNCHECKED
-                    ),
-                ))
         return lines
 
 
 class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
-
-    def close(self) -> None:
-        return None
 
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64
@@ -174,7 +115,7 @@ class ApiOcrEngine:
         from app.core.app_config import get_config
 
         cfg = get_config()
-        url = resolve_api_endpoint(cfg["api_url"], default_suffix="/layout-parsing")
+        url = cfg["api_url"].rstrip("/") + "/layout-parsing"
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
 
@@ -203,10 +144,32 @@ class ApiOcrEngine:
         resp.raise_for_status()
         data = resp.json()
 
+        layout_results = data.get("result", {}).get("layoutParsingResults", [])
         lines: List[Line] = []
-        for item in get_api_result_items(data):
-            lines.extend(_extract_api_lines(item, image_bgr.shape[1], image_bgr.shape[0]))
-        logger.info("Parsed AIStudio API response: endpoint=%s kind=%s lines=%d", url, detect_api_result_kind(data), len(lines))
+        for item in layout_results:
+            ocr_res = (
+                item.get("prunedResult", {})
+                    .get("overall_ocr_res", {})
+            )
+            texts = ocr_res.get("rec_texts", [])
+            scores = ocr_res.get("rec_scores", [])
+            boxes = ocr_res.get("rec_boxes", [])
+            for idx, text in enumerate(texts):
+                score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
+                if idx < len(boxes):
+                    bbox = bbox_from_xyxy(boxes[idx])
+                else:
+                    bbox = BBox(0, 0, 0, 0)
+                lines.append(Line(
+                    text=text,
+                    confidence=score,
+                    bbox=bbox,
+                    proof_status=(
+                        ProofStatus.AUTO_FLAGGED
+                        if score < AUTO_FLAG_THRESHOLD
+                        else ProofStatus.UNCHECKED
+                    ),
+                ))
         return lines
 
 

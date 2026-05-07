@@ -8,17 +8,15 @@ from typing import Any
 
 from PySide6.QtCore import QSettings
 
-from app.core.api_response_utils import DEFAULT_API_MODEL_PROFILE, normalize_api_model_profile
-
 
 # 默认配置
 _DEFAULT_CONFIG: dict[str, Any] = {
     # OCR 引擎
-    "ocr_mode": "api",             # "local" | "api" | "mock"
-    "api_model_profile": DEFAULT_API_MODEL_PROFILE,
+    "ocr_mode": "local",           # "local" | "api" | "mock"
     "api_url": "",
     "api_timeout": 30,
     "api_token": "",
+    "api_layout_model_name": "",
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -93,15 +91,12 @@ class AppConfig:
 def get_config() -> dict[str, Any]:
     """兼容旧 OCR 配置接口，返回 dict。"""
     cfg = AppConfig.instance()
-    api_model_profile = normalize_api_model_profile(
-        cfg.get("api_model_profile", None)
-    )
     return {
-        "mode": cfg.get("ocr_mode", "api"),
-        "api_model_profile": api_model_profile,
+        "mode": cfg.get("ocr_mode", "local"),
         "api_url": cfg.get("api_url", ""),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),
+        "api_layout_model_name": cfg.get("api_layout_model_name", ""),
     }
 
 
@@ -110,10 +105,10 @@ def update_config(**kwargs: Any) -> None:
     cfg = AppConfig.instance()
     mapping = {
         "mode": "ocr_mode",
-        "api_model_profile": "api_model_profile",
         "api_url": "api_url",
         "api_timeout": "api_timeout",
         "api_token": "api_token",
+        "api_layout_model_name": "api_layout_model_name",
     }
     for k, v in kwargs.items():
         if k in mapping:
