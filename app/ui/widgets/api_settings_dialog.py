@@ -11,11 +11,16 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
+from app.core.paddle_result_utils import (
+    get_local_model_profile,
+    get_local_model_profile_options,
+)
 from app.core.ocr_config import get_config, update_config
 
 
@@ -41,6 +46,27 @@ class ApiSettingsDialog(QDialog):
         mode_h.addWidget(self._radio_local)
         mode_h.addWidget(self._radio_api)
         root.addWidget(mode_group)
+
+        self._local_group = QGroupBox("本地模型")
+        local_form = QFormLayout(self._local_group)
+        local_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        self._local_model_combo = QComboBox()
+        for key, label in get_local_model_profile_options():
+            spec = get_local_model_profile(key)
+            self._local_model_combo.addItem(f"{label} - {spec['description']}", key)
+        local_form.addRow("OCR 模型：", self._local_model_combo)
+
+        local_note = QLabel(
+            "<small>当前环境已确认可用的 PaddleOCR 3.x 参数为："
+            "<code>text_detection_model_name</code>、<code>text_recognition_model_name</code>，"
+            "版面分析使用独立 <code>PPStructureV3</code>。旧版 <code>layout=True</code> "
+            "在当前 3.5.0 环境下不可直接作为后备路径。</small>"
+        )
+        local_note.setWordWrap(True)
+        local_note.setTextFormat(Qt.TextFormat.RichText)
+        local_form.addRow("", local_note)
+        root.addWidget(self._local_group)
 
         self._api_group = QGroupBox("API 参数")
         form = QFormLayout(self._api_group)
@@ -115,6 +141,9 @@ class ApiSettingsDialog(QDialog):
             self._radio_api.setChecked(True)
         else:
             self._radio_local.setChecked(True)
+        profile_key = cfg.get("local_model_profile", "")
+        index = self._local_model_combo.findData(profile_key)
+        self._local_model_combo.setCurrentIndex(index if index >= 0 else 0)
         self._url_edit.setText(cfg.get("api_url", ""))
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
@@ -122,6 +151,7 @@ class ApiSettingsDialog(QDialog):
         self._on_mode_changed()
 
     def _on_mode_changed(self) -> None:
+        self._local_group.setEnabled(self._radio_local.isChecked())
         self._api_group.setEnabled(self._radio_api.isChecked())
 
     def _toggle_token_visibility(self, checked: bool) -> None:
@@ -136,6 +166,7 @@ class ApiSettingsDialog(QDialog):
         mode = "api" if self._radio_api.isChecked() else "local"
         update_config(
             mode=mode,
+            local_model_profile=self._local_model_combo.currentData(),
             api_url=self._url_edit.text().strip().rstrip("/"),
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),

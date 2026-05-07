@@ -11,8 +11,9 @@ from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bb
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.core.paddle_result_utils import (
-    DEFAULT_LOCAL_LANG,
-    DEFAULT_LOCAL_OCR_VERSION,
+    get_local_ocr_init_kwargs,
+    get_local_model_profile,
+    get_local_model_profile_label,
     prepare_paddle_runtime_env,
     results_to_dicts,
 )
@@ -50,11 +51,12 @@ def get_engine_description(mode: str = "") -> str:
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
     cfg = get_config()
-    ocr_version = cfg.get("local_ocr_version", DEFAULT_LOCAL_OCR_VERSION)
+    profile = get_local_model_profile(cfg.get("local_model_profile"))
     return (
         "PaddleOCR 本地显式模型"
-        f"（lang={DEFAULT_LOCAL_LANG}, ocr_version={ocr_version}；"
-        "新 3.x predict API）"
+        f"（{get_local_model_profile_label(cfg.get('local_model_profile'))}："
+        f"{profile['ocr_text_detection_model_name']} + {profile['ocr_text_recognition_model_name']}；"
+        "3.x predict API）"
     )
 
 
@@ -77,27 +79,35 @@ class LocalOcrEngine:
     def __init__(self) -> None:
         self._engine = None
 
+    def close(self) -> None:
+        import gc
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None and hasattr(engine, "close"):
+            engine.close()
+        gc.collect()
+
     def _get_engine(self):
         if self._engine is None:
             prepare_paddle_runtime_env()
             from paddleocr import PaddleOCR
             cfg = get_config()
-            ocr_version = cfg.get("local_ocr_version", DEFAULT_LOCAL_OCR_VERSION)
+            profile = get_local_model_profile(cfg.get("local_model_profile"))
+            init_kwargs = get_local_ocr_init_kwargs(cfg.get("local_model_profile"))
             logger.info(
-                "Initializing PaddleOCR text engine: lang=%s, "
-                "ocr_version=%s, use_doc_orientation_classify=False, "
-                "use_doc_unwarping=False, use_textline_orientation=True",
-                DEFAULT_LOCAL_LANG,
-                ocr_version,
+                "Initializing PaddleOCR text engine: "
+                "text_detection_model_name=%s, text_recognition_model_name=%s, "
+                "text_det_limit_side_len=%s, text_det_limit_type=%s, "
+                "use_doc_orientation_classify=False, use_doc_unwarping=False, "
+                "use_textline_orientation=%s",
+                profile["ocr_text_detection_model_name"],
+                profile["ocr_text_recognition_model_name"],
+                init_kwargs["text_det_limit_side_len"],
+                init_kwargs["text_det_limit_type"],
+                init_kwargs["use_textline_orientation"],
             )
-            self._engine = PaddleOCR(
-                lang=DEFAULT_LOCAL_LANG,
-                ocr_version=ocr_version,
-                engine="paddle_dynamic",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=True,
-            )
+            self._engine = PaddleOCR(**init_kwargs)
         return self._engine
 
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
@@ -133,6 +143,9 @@ class LocalOcrEngine:
 
 class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
+
+    def close(self) -> None:
+        return None
 
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64

@@ -524,7 +524,11 @@ def test_local_ocr_engine_parses_predict_result():
     try:
         engine = LocalOcrEngine()
         lines = engine.recognize(np.zeros((100, 200, 3), dtype=np.uint8), OcrContext())
-        assert engine._engine.kwargs["ocr_version"] == "PP-OCRv5"
+        assert engine._engine.kwargs["text_detection_model_name"] == "PP-OCRv5_server_det"
+        assert engine._engine.kwargs["text_recognition_model_name"] == "PP-OCRv5_server_rec"
+        assert engine._engine.kwargs["text_det_limit_side_len"] == 960
+        assert engine._engine.kwargs["text_det_limit_type"] == "max"
+        assert engine._engine.kwargs["use_textline_orientation"] is False
         assert len(lines) == 2
         assert lines[0].text == "第一行"
         assert lines[0].bbox.to_xyxy() == (10, 15, 110, 35)
@@ -537,6 +541,31 @@ def test_local_ocr_engine_parses_predict_result():
             sys.modules["paddleocr"] = original
 
     print("test_local_ocr_engine_parses_predict_result PASSED")
+
+
+def test_local_model_profile_defaults():
+    from app.core.paddle_result_utils import (
+        get_local_model_profile,
+        get_local_model_profile_label,
+        normalize_local_model_profile,
+    )
+
+    assert normalize_local_model_profile("standard") == "standard"
+    assert normalize_local_model_profile("unknown") == "standard"
+
+    standard = get_local_model_profile("standard")
+    fast = get_local_model_profile("fast")
+
+    assert standard["ocr_text_detection_model_name"] == "PP-OCRv5_server_det"
+    assert standard["ocr_text_recognition_model_name"] == "PP-OCRv5_server_rec"
+    assert standard["ocr_text_det_limit_side_len"] == 960
+    assert standard["layout_detection_model_name"] == "PP-DocLayout-M"
+    assert fast["ocr_text_detection_model_name"] == "PP-OCRv5_server_det"
+    assert fast["ocr_text_recognition_model_name"] == "PP-OCRv5_server_rec"
+    assert fast["ocr_text_det_limit_side_len"] == 736
+    assert get_local_model_profile_label("fast") == "快速（更省内存）"
+
+    print("test_local_model_profile_defaults PASSED")
 
 
 # =====================================================================
@@ -981,6 +1010,7 @@ if __name__ == "__main__":
     test_confidence_normalization()
     test_fake_layout_engine()
     test_local_ocr_engine_parses_predict_result()
+    test_local_model_profile_defaults()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()

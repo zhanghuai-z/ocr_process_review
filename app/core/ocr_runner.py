@@ -18,8 +18,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.bbox_utils import bbox_from_quad, sanitize_xyxy_bbox
 from app.core.paddle_result_utils import (
-    DEFAULT_LOCAL_LANG,
-    DEFAULT_LOCAL_OCR_VERSION,
+    get_local_ocr_init_kwargs,
     prepare_paddle_runtime_env,
     results_to_dicts,
 )
@@ -41,14 +40,7 @@ class OcrRunner:
             prepare_paddle_runtime_env()
             from paddleocr import PaddleOCR
             cfg = get_config()
-            self._engine = PaddleOCR(
-                lang=DEFAULT_LOCAL_LANG,
-                ocr_version=cfg.get("local_ocr_version", DEFAULT_LOCAL_OCR_VERSION),
-                engine="paddle_dynamic",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=True,
-            )
+            self._engine = PaddleOCR(**get_local_ocr_init_kwargs(cfg.get("local_model_profile")))
         return self._engine
 
     def _local_ocr(self, crop_bgr) -> List[Line]:
