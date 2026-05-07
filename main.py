@@ -15,38 +15,9 @@ def main() -> None:
     app.setApplicationName("OCR 后处理")
     app.setOrganizationName("ocr_process")
 
-    # 应用深色主题
-    try:
-        from qt_material import apply_stylesheet
-        apply_stylesheet(app, theme="dark_teal.xml", invert_secondary=False)
-    except ImportError:
-        # qt_material 未安装时降级到简单样式
-        app.setStyle("Fusion")
-        app.setStyleSheet("""
-            QWidget { background:#1e1e1e; color:#d4d4d4; }
-            QMenuBar  { background:#252526; }
-            QMenu     { background:#2d2d30; border:1px solid #3c3c3c; }
-            QStatusBar{ background:#007acc; color:#fff; }
-            QPushButton {
-                background:#0e639c; color:#fff; border-radius:4px;
-                padding:4px 12px; border:none;
-            }
-            QPushButton:hover   { background:#1177bb; }
-            QPushButton:disabled{ background:#3c3c3c; color:#666; }
-            QLineEdit, QPlainTextEdit, QTextEdit {
-                background:#252526; border:1px solid #3c3c3c;
-                border-radius:3px; color:#d4d4d4;
-            }
-            QListWidget, QTreeWidget {
-                background:#252526; border:1px solid #3c3c3c;
-                color:#d4d4d4;
-            }
-            QSplitter::handle { background:#3c3c3c; }
-            QProgressBar {
-                background:#3c3c3c; border-radius:3px; color:#fff;
-            }
-            QProgressBar::chunk { background:#007acc; border-radius:3px; }
-        """)
+    # 应用浅色主题（参考 ui.jpg）
+    from app.ui.style import apply_light_theme
+    apply_light_theme(app)
 
     from app.ui.main_window import MainWindow
     win = MainWindow()
