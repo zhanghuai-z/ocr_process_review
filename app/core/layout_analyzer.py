@@ -1,15 +1,4 @@
-"""PP-StructureV3 layout analysis wrapper. Supports local / api modes.
-
-AiStudio Serving API (confirmed):
-  POST {api_url}/layout-parsing
-  Authorization: token <api_token>
-  Body: {"file": "<base64_JPEG>", "fileType": 1}
-  Response:
-    result.layoutParsingResults[0].prunedResult:
-      layout_det_res.boxes[]:
-        label:      str  (e.g. "doc_title", "paragraph", ...)
-        coordinate: [x1, y1, x2, y2]  (float, page coords)
-"""
+"""PP-StructureV3 layout analysis wrapper. Supports local / api modes."""
 from __future__ import annotations
 import base64
 import json
@@ -18,6 +7,15 @@ from typing import Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.api_response_utils import (
+    build_api_payload,
+    collect_api_text_bboxes,
+    extract_api_markdown_text,
+    get_api_result_items,
+    resolve_api_endpoint,
+    split_markdown_lines,
+    union_bboxes,
+)
 from app.core.bbox_utils import (
     bbox_from_quad,
     bbox_from_xyxy,
@@ -27,12 +25,11 @@ from app.core.bbox_utils import (
 )
 from app.core.logging import get_logger
 from app.core.paddle_result_utils import (
-    get_local_model_profile,
-    get_local_model_profile_label,
+    get_local_layout_init_kwargs,
     prepare_paddle_runtime_env,
     results_to_dicts,
 )
-from app.models import Block, BlockType, Page
+from app.models import BBox, Block, BlockType, Page
 
 logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
@@ -85,38 +82,18 @@ class LayoutAnalyzer:
         if self._engine is None:
             prepare_paddle_runtime_env()
             from paddleocr import PPStructureV3
-            from app.core.ocr_config import get_config
 
-            cfg = get_config()
-            profile = get_local_model_profile(cfg.get("local_model_profile"))
+            init_kwargs = get_local_layout_init_kwargs()
             logger.info(
                 "Initializing PPStructureV3 layout engine: profile=%s, "
-                "layout_detection_model_name=%s, text_det=%s, text_rec=%s, "
                 "engine=paddle_static, enable_mkldnn=False, "
                 "use_doc_orientation_classify=False, use_doc_unwarping=False, "
                 "use_textline_orientation=False, use_table_recognition=False, "
                 "use_formula_recognition=False, use_chart_recognition=False, "
                 "use_region_detection=False, format_block_content=False",
-                get_local_model_profile_label(cfg.get("local_model_profile")),
-                profile["layout_detection_model_name"],
-                profile["layout_text_detection_model_name"],
-                profile["layout_text_recognition_model_name"],
+                "default",
             )
-            self._engine = PPStructureV3(
-                layout_detection_model_name=profile["layout_detection_model_name"],
-                text_detection_model_name=profile["layout_text_detection_model_name"],
-                text_recognition_model_name=profile["layout_text_recognition_model_name"],
-                engine="paddle_static",
-                enable_mkldnn=False,
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-                use_table_recognition=False,
-                use_formula_recognition=False,
-                use_chart_recognition=False,
-                use_region_detection=False,
-                format_block_content=False,
-            )
+            self._engine = PPStructureV3(**init_kwargs)
         return self._engine
 
     def _unwrap_layout_items(self, result) -> List[dict]:
@@ -295,11 +272,8 @@ class LayoutAnalyzer:
             bbox = bbox.clamp(page.width, page.height)
         return bbox
 
-    def _build_api_payload(self, file_b64: str, file_type: int, model_name: str = "") -> dict:
-        payload = {"file": file_b64, "fileType": file_type}
-        if model_name:
-            payload["model_name"] = model_name
-        return payload
+    def _build_api_payload(self, file_b64: str, file_type: int) -> dict:
+        return build_api_payload(file_b64, file_type)
 
     def _write_debug_response(self, page: Page, data: object, suffix: str) -> None:
         """把布局结果落到工作图旁边，方便复盘漂移页。"""
@@ -510,16 +484,15 @@ class LayoutAnalyzer:
     # ── api mode ───────────────────────────────────────────────
 
     def _api_analyze(self, page: Page) -> Page:
-        """Call AiStudio /layout-parsing; raises on network/auth errors."""
+        """Call AiStudio OCR/layout endpoint; raises on network/auth errors."""
         import cv2
         import requests
         from app.core.ocr_config import get_config
 
         cfg = get_config()
-        url = cfg["api_url"].rstrip("/") + "/layout-parsing"
+        url = resolve_api_endpoint(cfg["api_url"], default_suffix="/layout-parsing")
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
-        layout_model_name = cfg.get("api_layout_model_name", "").strip()
 
         img = cv2.imread(page.display_image_path)
         if img is None:
@@ -536,7 +509,7 @@ class LayoutAnalyzer:
 
         resp = requests.post(
             url,
-            json=self._build_api_payload(file_b64, 1, layout_model_name),
+            json=self._build_api_payload(file_b64, 1),
             headers=headers,
             timeout=timeout,
         )
@@ -544,12 +517,11 @@ class LayoutAnalyzer:
         data = resp.json()
         self._write_api_debug_response(page, data)
 
-        # result.layoutParsingResults[0].prunedResult.layout_det_res.boxes
-        layout_results = data.get("result", {}).get("layoutParsingResults", [])
+        result_items = get_api_result_items(data)
         page.blocks = []
         raw_overlay_items: List[tuple[str, object]] = []
         order = 0
-        for item in layout_results:
+        for item in result_items:
             boxes = (
                 item.get("prunedResult", {})
                     .get("layout_det_res", {})
@@ -560,20 +532,47 @@ class LayoutAnalyzer:
                 data=data,
                 layout_item=item,
             )
-            for box in boxes:
-                coord = box.get("coordinate", [0, 0, 0, 0])
-                bbox = self._extract_bbox_from_coordinate(
-                    coord,
-                    page,
-                    coordinate_space=coordinate_space,
-                )
-                if not bbox or bbox.area <= 0:
-                    continue
-                raw_type = box.get("label", "unknown")
-                raw_overlay_items.append((raw_type, bbox))
+            if boxes:
+                for box in boxes:
+                    coord = box.get("coordinate", [0, 0, 0, 0])
+                    bbox = self._extract_bbox_from_coordinate(
+                        coord,
+                        page,
+                        coordinate_space=coordinate_space,
+                    )
+                    if not bbox or bbox.area <= 0:
+                        continue
+                    raw_type = box.get("label", "unknown")
+                    raw_overlay_items.append((raw_type, bbox))
+                    page.blocks.append(Block(
+                        block_type=BlockType.from_paddle(raw_type),
+                        bbox=bbox,
+                        order=order,
+                    ))
+                    order += 1
+                continue
+
+            text_box_bbox = union_bboxes(
+                collect_api_text_bboxes(item, page.width, page.height),
+                page.width,
+                page.height,
+            )
+            if text_box_bbox and text_box_bbox.area > 0:
+                raw_overlay_items.append(("text", text_box_bbox))
                 page.blocks.append(Block(
-                    block_type=BlockType.from_paddle(raw_type),
-                    bbox=bbox,
+                    block_type=BlockType.TEXT,
+                    bbox=text_box_bbox,
+                    order=order,
+                ))
+                order += 1
+                continue
+
+            if split_markdown_lines(extract_api_markdown_text(item)):
+                fallback_bbox = BBox(0, 0, page.width, page.height)
+                raw_overlay_items.append(("text", fallback_bbox))
+                page.blocks.append(Block(
+                    block_type=BlockType.TEXT,
+                    bbox=fallback_bbox,
                     order=order,
                 ))
                 order += 1

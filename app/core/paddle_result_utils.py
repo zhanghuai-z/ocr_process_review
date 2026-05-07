@@ -1,39 +1,9 @@
-"""Helpers for PaddleOCR 3.x result objects and local model profiles."""
+"""Helpers for PaddleOCR 3.x runtime setup and result normalization."""
 from __future__ import annotations
 
 import json
 import os
 from typing import Any, Iterable
-
-
-DEFAULT_LOCAL_LANG = "ch"
-DEFAULT_LOCAL_MODEL_PROFILE = "standard"
-LOCAL_MODEL_PROFILES: dict[str, dict[str, Any]] = {
-    "standard": {
-        "label": "标准（推荐）",
-        "description": "PP-OCRv5 Server + PP-DocLayout-M，稳定优先",
-        "ocr_text_detection_model_name": "PP-OCRv5_server_det",
-        "ocr_text_recognition_model_name": "PP-OCRv5_server_rec",
-        "ocr_text_det_limit_side_len": 960,
-        "ocr_text_det_limit_type": "max",
-        "ocr_use_textline_orientation": False,
-        "layout_detection_model_name": "PP-DocLayout-M",
-        "layout_text_detection_model_name": "PP-OCRv5_mobile_det",
-        "layout_text_recognition_model_name": "PP-OCRv5_mobile_rec",
-    },
-    "fast": {
-        "label": "快速（更省内存）",
-        "description": "PP-OCRv5 Server + PP-DocLayout-M，更小检测边长",
-        "ocr_text_detection_model_name": "PP-OCRv5_server_det",
-        "ocr_text_recognition_model_name": "PP-OCRv5_server_rec",
-        "ocr_text_det_limit_side_len": 736,
-        "ocr_text_det_limit_type": "max",
-        "ocr_use_textline_orientation": False,
-        "layout_detection_model_name": "PP-DocLayout-M",
-        "layout_text_detection_model_name": "PP-OCRv5_mobile_det",
-        "layout_text_recognition_model_name": "PP-OCRv5_mobile_rec",
-    },
-}
 
 
 def prepare_paddle_runtime_env() -> None:
@@ -42,38 +12,29 @@ def prepare_paddle_runtime_env() -> None:
     os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "BOS")
 
 
-def normalize_local_model_profile(profile: str | None) -> str:
-    if isinstance(profile, str) and profile in LOCAL_MODEL_PROFILES:
-        return profile
-    return DEFAULT_LOCAL_MODEL_PROFILE
-
-
-def get_local_model_profile(profile: str | None) -> dict[str, Any]:
-    return LOCAL_MODEL_PROFILES[normalize_local_model_profile(profile)]
-
-
-def get_local_model_profile_options() -> list[tuple[str, str]]:
-    return [
-        (key, spec["label"])
-        for key, spec in LOCAL_MODEL_PROFILES.items()
-    ]
-
-
-def get_local_model_profile_label(profile: str | None) -> str:
-    return get_local_model_profile(profile)["label"]
-
-
-def get_local_ocr_init_kwargs(profile: str | None) -> dict[str, Any]:
-    spec = get_local_model_profile(profile)
+def get_local_ocr_init_kwargs() -> dict[str, Any]:
     return {
-        "text_detection_model_name": spec["ocr_text_detection_model_name"],
-        "text_recognition_model_name": spec["ocr_text_recognition_model_name"],
         "engine": "paddle_dynamic",
-        "text_det_limit_side_len": spec["ocr_text_det_limit_side_len"],
-        "text_det_limit_type": spec["ocr_text_det_limit_type"],
+        "text_det_limit_side_len": 960,
+        "text_det_limit_type": "max",
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
-        "use_textline_orientation": spec["ocr_use_textline_orientation"],
+        "use_textline_orientation": False,
+    }
+
+
+def get_local_layout_init_kwargs() -> dict[str, Any]:
+    return {
+        "engine": "paddle_static",
+        "enable_mkldnn": False,
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+        "use_table_recognition": False,
+        "use_formula_recognition": False,
+        "use_chart_recognition": False,
+        "use_region_detection": False,
+        "format_block_content": False,
     }
 
 
