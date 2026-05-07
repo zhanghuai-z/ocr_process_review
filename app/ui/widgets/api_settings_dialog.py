@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
@@ -14,6 +15,9 @@ from PySide6.QtWidgets import (
 from app.core.api_response_utils import (
     build_api_payload,
     detect_api_result_kind,
+    get_api_model_profile_options,
+    get_api_model_profile_url,
+    match_api_model_profile_from_url,
     resolve_api_endpoint,
 )
 from app.core.ocr_config import get_config, update_config
@@ -68,6 +72,11 @@ class ApiSettingsDialog(QDialog):
         url_note.setTextFormat(Qt.TextFormat.RichText)
         form.addRow(url_note)
 
+        self._api_model_combo = QComboBox()
+        for key, label in get_api_model_profile_options():
+            self._api_model_combo.addItem(label, key)
+        form.addRow("官方模型：", self._api_model_combo)
+
         self._url_edit = QLineEdit()
         self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com/layout-parsing")
         form.addRow("API 地址：", self._url_edit)
@@ -106,6 +115,8 @@ class ApiSettingsDialog(QDialog):
 
         self._radio_local.toggled.connect(self._on_mode_changed)
         self._radio_api.toggled.connect(self._on_mode_changed)
+        self._api_model_combo.currentIndexChanged.connect(self._on_api_model_changed)
+        self._url_edit.editingFinished.connect(self._sync_model_from_url)
 
     # ── logic ──────────────────────────────────────────────────
 
@@ -115,6 +126,11 @@ class ApiSettingsDialog(QDialog):
             self._radio_api.setChecked(True)
         else:
             self._radio_local.setChecked(True)
+        profile_key = match_api_model_profile_from_url(cfg.get("api_url", "")) if cfg.get("api_url", "") else cfg.get("api_model_profile", "")
+        if not profile_key:
+            profile_key = cfg.get("api_model_profile", "")
+        profile_index = self._api_model_combo.findData(profile_key)
+        self._api_model_combo.setCurrentIndex(profile_index if profile_index >= 0 else 0)
         self._url_edit.setText(cfg.get("api_url", ""))
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
@@ -123,6 +139,20 @@ class ApiSettingsDialog(QDialog):
     def _on_mode_changed(self) -> None:
         self._local_group.setEnabled(self._radio_local.isChecked())
         self._api_group.setEnabled(self._radio_api.isChecked())
+
+    def _on_api_model_changed(self) -> None:
+        profile_key = self._api_model_combo.currentData()
+        if not profile_key:
+            return
+        self._url_edit.setText(get_api_model_profile_url(profile_key))
+
+    def _sync_model_from_url(self) -> None:
+        profile_key = match_api_model_profile_from_url(self._url_edit.text().strip())
+        if not profile_key:
+            return
+        index = self._api_model_combo.findData(profile_key)
+        if index >= 0:
+            self._api_model_combo.setCurrentIndex(index)
 
     def _toggle_token_visibility(self, checked: bool) -> None:
         if checked:
@@ -134,9 +164,12 @@ class ApiSettingsDialog(QDialog):
 
     def _save_and_accept(self) -> None:
         mode = "api" if self._radio_api.isChecked() else "local"
+        api_url = self._url_edit.text().strip().rstrip("/")
+        api_model_profile = match_api_model_profile_from_url(api_url) or self._api_model_combo.currentData()
         update_config(
             mode=mode,
-            api_url=self._url_edit.text().strip().rstrip("/"),
+            api_model_profile=api_model_profile,
+            api_url=api_url,
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
         )
