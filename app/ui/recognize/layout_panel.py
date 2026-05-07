@@ -97,6 +97,7 @@ class LayoutPanel(QWidget):
         # 中：图像查看器
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
+        self._viewer.block_moved.connect(self._on_block_moved)
         splitter.addWidget(self._viewer)
 
         # 右：属性面板（可折叠，默认宽度缩小）
@@ -115,17 +116,27 @@ class LayoutPanel(QWidget):
 
         # 底部按钮
         btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(12, 8, 12, 8)
-        self._btn_run = QPushButton("运行版面分析")
+        btn_row.setContentsMargins(12, 6, 12, 8)
+        btn_row.setSpacing(8)
+        self._btn_run = QPushButton("▶ 分析")
+        self._btn_run.setToolTip("运行版面分析")
         self._btn_run.setEnabled(False)
+        self._btn_run.setStyleSheet("padding:6px 14px;")
         self._btn_run.clicked.connect(self._request_analysis)
 
-        self._btn_next = QPushButton("开始 OCR 识别 →")
+        self._btn_edit = QPushButton("✎ 编辑框")
+        self._btn_edit.setToolTip("切换编辑模式：开启后可拖动/选中 BBox")
+        self._btn_edit.setCheckable(True)
+        self._btn_edit.setStyleSheet("padding:6px 14px;")
+        self._btn_edit.toggled.connect(self._viewer.set_edit_mode)
+
+        self._btn_next = QPushButton("→ 开始 OCR")
         self._btn_next.setEnabled(False)
         self._btn_next.clicked.connect(self.analysis_confirmed)
-        self._btn_next.setStyleSheet("font-size:14px; padding:8px;")
+        self._btn_next.setStyleSheet("font-size:14px; padding:8px 16px;")
 
         btn_row.addWidget(self._btn_run)
+        btn_row.addWidget(self._btn_edit)
         btn_row.addStretch()
         btn_row.addWidget(self._btn_next)
         main_layout.addLayout(btn_row)
@@ -177,6 +188,10 @@ class LayoutPanel(QWidget):
         self._prop_panel.clear()
 
     def _on_block_clicked(self, block: Block) -> None:
+        self._prop_panel.show_block(block)
+
+    def _on_block_moved(self, block: Block) -> None:
+        # 拖动调整后实时刷新属性面板坐标显示
         self._prop_panel.show_block(block)
 
     @property

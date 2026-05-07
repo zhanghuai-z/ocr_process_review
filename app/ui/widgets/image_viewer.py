@@ -1,8 +1,13 @@
-"""图像查看器：支持缩放、平移，以及 BBox 框叠加显示。"""
+"""图像查看器：支持缩放、平移，以及 BBox 框叠加显示与编辑。
+
+模式：
+- view 模式（默认）：ScrollHandDrag，鼠标拖拽=平移
+- edit 模式：RubberBandDrag，BBox 可拖动；移动后发出 block_moved
+"""
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
@@ -13,70 +18,99 @@ from app.models import BBox, Block, BlockType
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
-    """通过 cv2 加载图片并转为 QPixmap。
-
-    Qt6 的 QPixmap(path) 会根据 JPEG EXIF 自动旋转，
-    但版面分析/OCR 均用 cv2.imread（不处理 EXIF）。
-    统一使用 cv2 保证显示与分析坐标系一致，避免 BBox 偏移。
-    """
+    """通过 cv2 加载图片并转为 QPixmap，避免 EXIF 自动旋转造成的坐标错位。"""
     import cv2
-
     img = cv2.imread(image_path)
     if img is None:
-        return QPixmap(image_path)  # 路径无效时退回原生加载
+        return QPixmap(image_path)
     h, w = img.shape[:2]
     rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # tobytes() 确保 QImage 持有独立副本，不依赖 numpy 数组生命周期
     qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
 
-# 各块类型对应的边框颜色
 BLOCK_COLORS: dict[BlockType, QColor] = {
-    BlockType.TEXT:           QColor(0x4C, 0xAF, 0x50),  # 绿
-    BlockType.TITLE:          QColor(0x21, 0x96, 0xF3),  # 蓝
-    BlockType.FIGURE:         QColor(0xFF, 0x98, 0x00),  # 橙
-    BlockType.FIGURE_CAPTION: QColor(0xFF, 0xC1, 0x07),  # 黄
-    BlockType.TABLE:          QColor(0x9C, 0x27, 0xB0),  # 紫
-    BlockType.TABLE_CAPTION:  QColor(0xE0, 0x91, 0xFF),  # 浅紫
-    BlockType.REFERENCE:      QColor(0x00, 0xBC, 0xD4),  # 青
-    BlockType.EQUATION:       QColor(0xF4, 0x43, 0x36),  # 红
-    BlockType.UNKNOWN:        QColor(0x9E, 0x9E, 0x9E),  # 灰
+    BlockType.TEXT:           QColor(0x4C, 0xAF, 0x50),
+    BlockType.TITLE:          QColor(0x21, 0x96, 0xF3),
+    BlockType.FIGURE:         QColor(0xFF, 0x98, 0x00),
+    BlockType.FIGURE_CAPTION: QColor(0xFF, 0xC1, 0x07),
+    BlockType.TABLE:          QColor(0x9C, 0x27, 0xB0),
+    BlockType.TABLE_CAPTION:  QColor(0xE0, 0x91, 0xFF),
+    BlockType.REFERENCE:      QColor(0x00, 0xBC, 0xD4),
+    BlockType.EQUATION:       QColor(0xF4, 0x43, 0x36),
+    BlockType.UNKNOWN:        QColor(0x9E, 0x9E, 0x9E),
 }
 
-_LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)   # 低置信度行高亮（半透明红）
-_LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)   # 已确认行（半透明绿）
+_LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)
+_LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)
+
+
+class _BBoxSignals(QObject):
+    """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
+    moved = Signal(object)  # payload = block
 
 
 class BBoxItem(QGraphicsRectItem):
-    """可选中的包围盒矩形。"""
+    """可选中、可拖动的包围盒矩形。
+
+    坐标方案：item.rect() 始终为 QRectF(0,0,w,h)，位置由 item.setPos(x,y) 决定。
+    sceneBoundingRect() 返回的就是 block.bbox 在场景中的真实位置。
+    """
 
     def __init__(self, rect: QRectF, color: QColor, label: str = "", parent=None):
         super().__init__(rect, parent)
         pen = QPen(color, 2)
         self.setPen(pen)
-        self.setToolTip(label)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self._label = label
         self._color = color
+        self._block: Optional[Block] = None
+        self.signals = _BBoxSignals()
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setAcceptHoverEvents(True)
+        self._update_tooltip()
+
+    def set_block(self, block: Block) -> None:
+        self._block = block
+
+    def set_editable(self, editable: bool) -> None:
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, editable)
+        if editable:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.unsetCursor()
+
+    def _update_tooltip(self) -> None:
+        r = self.sceneBoundingRect()
+        coord = f"x={int(r.x())} y={int(r.y())} w={int(r.width())} h={int(r.height())}"
+        if self._label:
+            self.setToolTip(f"{self._label}\n{coord}")
+        else:
+            self.setToolTip(coord)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            self._update_tooltip()
+            if self._block is not None:
+                r = self.sceneBoundingRect()
+                bb = self._block.bbox
+                self._block.bbox = BBox(int(r.x()), int(r.y()), bb.w, bb.h)
+                self.signals.moved.emit(self._block)
+        return super().itemChange(change, value)
 
     def paint(self, painter: QPainter, option, widget=None):
-        # 选中时填充半透明背景
         if self.isSelected():
             fill = QColor(self._color)
-            fill.setAlpha(40)
+            fill.setAlpha(60)
             painter.fillRect(self.rect(), fill)
         super().paint(painter, option, widget)
 
 
 class ImageViewer(QGraphicsView):
-    """
-    通用图像查看组件。
-    - Ctrl+滚轮 缩放
-    - 中键/右键 平移
-    - 支持叠加 Block 级别和 Line 级别 BBox
-    """
+    """通用图像查看组件。"""
 
-    block_clicked = Signal(object)   # 点击某个 Block 时发出，payload=Block
+    block_clicked = Signal(object)
+    block_moved   = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,6 +119,7 @@ class ImageViewer(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
+        self._edit_mode: bool = False
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -94,10 +129,9 @@ class ImageViewer(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    # ------------------------------------------------------------------ public API
+    # ------------------------------------------------------------------ public
 
     def set_image(self, image_path: str) -> None:
-        """加载图片到视图（经 cv2 加载，与分析坐标系一致）。"""
         self._scene.clear()
         self._block_items.clear()
         pixmap = _pixmap_from_path(image_path)
@@ -116,20 +150,22 @@ class ImageViewer(QGraphicsView):
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def show_blocks(self, blocks: List[Block]) -> None:
-        """在图像上叠加版面块 BBox。"""
         self._clear_overlays()
         for block in blocks:
             color = BLOCK_COLORS.get(block.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
             bb = block.bbox
-            rect = QRectF(bb.x, bb.y, bb.w, bb.h)
+            rect = QRectF(0, 0, bb.w, bb.h)
             label = f"[{block.block_type.value}] 置信度: {block.avg_confidence:.2f}"
             item = BBoxItem(rect, color, label)
-            item.setData(0, block)   # 存入 block 引用
+            item.setPos(bb.x, bb.y)
+            item.set_block(block)
+            item.set_editable(self._edit_mode)
+            item.setData(0, block)
+            item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
 
     def show_line_highlight(self, bbox: BBox, flagged: bool = False) -> QGraphicsRectItem:
-        """高亮单行，返回 item 以便外部移除。"""
         color = _LINE_HIGHLIGHT if flagged else _LINE_OK_COLOR
         rect_item = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
         pen = QPen(Qt.PenStyle.NoPen)
@@ -146,19 +182,26 @@ class ImageViewer(QGraphicsView):
         if self._pixmap_item:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
+    def set_edit_mode(self, on: bool) -> None:
+        """切换编辑模式：开启后 BBox 可拖动，关闭后只能浏览/平移。"""
+        self._edit_mode = bool(on)
+        if self._edit_mode:
+            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        for item, _ in self._block_items:
+            item.set_editable(self._edit_mode)
+
     # ------------------------------------------------------------------ events
 
     def wheelEvent(self, event):
         mods = event.modifiers()
         dy = event.angleDelta().y()
         dx = event.angleDelta().x()
-
         if mods & Qt.KeyboardModifier.ShiftModifier:
-            # Shift+滚轮 → 水平滚动
             bar = self.horizontalScrollBar()
             bar.setValue(bar.value() - (dy or dx))
         else:
-            # 直接滚轮缩放（去掉 Ctrl 要求）
             factor = 1.15 if dy > 0 else 1 / 1.15
             self.scale(factor, factor)
 
@@ -167,7 +210,7 @@ class ImageViewer(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self.mapToScene(event.pos())
             for item, block in self._block_items:
-                if item.rect().contains(pos) and item.isSelected():
+                if item.sceneBoundingRect().contains(pos) and item.isSelected():
                     self.block_clicked.emit(block)
                     break
 

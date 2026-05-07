@@ -118,6 +118,124 @@ class LayoutAnalyzer:
             payload["model_name"] = model_name
         return payload
 
+    # PaddleX 服务侧默认会做方向分类 / 去畸变 / 文本行方向判断，
+    # 这些都会让返回坐标落在「预处理后的图」而不是我们传入的原图，
+    # 也是导致 bbox 整体偏移的根本原因。统一关闭。
+    _PIPELINE_DISABLE_FLAGS = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useTextlineOrientation": False,
+    }
+
+    def _build_api_request_body(
+        self, file_b64: str, file_type: int, model_name: str = ""
+    ) -> dict:
+        body = self._build_api_payload(file_b64, file_type, model_name)
+        body.update(self._PIPELINE_DISABLE_FLAGS)
+        return body
+
+    def _detect_api_canvas_scale(
+        self, page: Page, item: dict
+    ) -> tuple[float, float]:
+        """根据 API 返回内容反推坐标空间，返回 (scale_x, scale_y)。
+
+        优先级：
+          1) prunedResult.input_img_shape / doc_preprocessor_res 实际尺寸（若有）
+          2) overall_ocr_res.rec_boxes 的最大坐标外推
+          3) layout_det_res.boxes 的最大坐标外推
+          4) (1.0, 1.0)
+        """
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+
+        # (1) 显式的预处理输出尺寸
+        for key in ("input_img_shape", "img_shape", "image_shape"):
+            shape = pruned.get(key)
+            if (
+                isinstance(shape, (list, tuple))
+                and len(shape) >= 2
+                and shape[0]
+                and shape[1]
+                and page.width
+                and page.height
+            ):
+                api_h, api_w = float(shape[0]), float(shape[1])
+                if api_w > 0 and api_h > 0:
+                    return page.width / api_w, page.height / api_h
+
+        doc_pre = pruned.get("doc_preprocessor_res") or {}
+        if isinstance(doc_pre, dict):
+            for key in ("output_img_shape", "img_shape"):
+                shape = doc_pre.get(key)
+                if (
+                    isinstance(shape, (list, tuple))
+                    and len(shape) >= 2
+                    and shape[0]
+                    and shape[1]
+                ):
+                    api_h, api_w = float(shape[0]), float(shape[1])
+                    if api_w > 0 and api_h > 0:
+                        return page.width / api_w, page.height / api_h
+
+        # (2)/(3) 用最大坐标外推
+        ocr_res = pruned.get("overall_ocr_res") or {}
+        layout_res = pruned.get("layout_det_res") or {}
+
+        max_x_candidates: List[float] = []
+        max_y_candidates: List[float] = []
+
+        for box in ocr_res.get("rec_boxes", []) or []:
+            if isinstance(box, (list, tuple)) and len(box) >= 4:
+                max_x_candidates.append(float(box[2]))
+                max_y_candidates.append(float(box[3]))
+
+        for box in layout_res.get("boxes", []) or []:
+            if not isinstance(box, dict):
+                continue
+            coord = box.get("coordinate")
+            if not isinstance(coord, (list, tuple)):
+                continue
+            if (
+                len(coord) >= 4
+                and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in coord[:4])
+            ):
+                max_x_candidates.append(max(float(p[0]) for p in coord[:4]))
+                max_y_candidates.append(max(float(p[1]) for p in coord[:4]))
+            elif len(coord) >= 4:
+                max_x_candidates.append(float(coord[2]))
+                max_y_candidates.append(float(coord[3]))
+
+        if not max_x_candidates or not max_y_candidates or page.width <= 0 or page.height <= 0:
+            return 1.0, 1.0
+
+        api_max_x = max(max_x_candidates)
+        api_max_y = max(max_y_candidates)
+        if api_max_x <= 0 or api_max_y <= 0:
+            return 1.0, 1.0
+
+        # 若坐标已经接近原图尺寸（误差 < 5%），认为坐标空间一致
+        if (
+            api_max_x >= page.width * 0.6
+            and api_max_y >= page.height * 0.6
+            and api_max_x <= page.width * 1.05
+            and api_max_y <= page.height * 1.05
+        ):
+            return 1.0, 1.0
+
+        # 否则用「实际能到的最大坐标 ≈ 处理画布」推回
+        scale_x = page.width / api_max_x
+        scale_y = page.height / api_max_y
+
+        # 仅当 X / Y 比例接近时才认为是均匀缩放（防止把方向问题误判成缩放）
+        ratio_gap = max(scale_x, scale_y) / max(min(scale_x, scale_y), 1e-6)
+        if ratio_gap > 1.4:
+            logger.warning(
+                "API canvas scale 非均匀 (sx=%.3f sy=%.3f)，可能存在方向/裁剪问题；"
+                "暂按 1.0 处理，请检查 .layout-api.json: %s",
+                scale_x, scale_y, page.display_image_path,
+            )
+            return 1.0, 1.0
+        return scale_x, scale_y
+
     def _write_api_debug_response(self, page: Page, data: dict) -> None:
         """把 API 原始响应落到工作图旁边，方便复盘漂移页。"""
         image_path = page.display_image_path
@@ -292,7 +410,7 @@ class LayoutAnalyzer:
 
         resp = requests.post(
             url,
-            json=self._build_api_payload(file_b64, 1, layout_model_name),
+            json=self._build_api_request_body(file_b64, 1, layout_model_name),
             headers=headers,
             timeout=timeout,
         )
@@ -306,6 +424,12 @@ class LayoutAnalyzer:
         raw_overlay_items: List[tuple[str, object]] = []
         order = 0
         for item in layout_results:
+            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
+            if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+                logger.info(
+                    "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
+                    scale_x, scale_y, page.display_image_path,
+                )
             boxes = (
                 item.get("prunedResult", {})
                     .get("layout_det_res", {})
@@ -316,6 +440,12 @@ class LayoutAnalyzer:
                 bbox = self._extract_bbox_from_coordinate(coord, page)
                 if not bbox or bbox.area <= 0:
                     continue
+                if scale_x != 1.0 or scale_y != 1.0:
+                    bbox = scale_bbox(bbox, scale_x, scale_y).clamp(
+                        page.width, page.height,
+                    )
+                    if bbox.area <= 0:
+                        continue
                 raw_type = box.get("label", "unknown")
                 raw_overlay_items.append((raw_type, bbox))
                 page.blocks.append(Block(
@@ -330,7 +460,9 @@ class LayoutAnalyzer:
             suffix=".layout-api-raw.png",
             color=(0, 165, 255),
         )
-        self._rescale_blocks_if_suspicious(page)
+        # 注意：不再调用 _rescale_blocks_if_suspicious()——
+        # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，
+        # 再走通用启发式只会引入二次缩放。
         self._write_bbox_overlay(
             page,
             items=[(block.block_type.value, block.bbox) for block in page.blocks],

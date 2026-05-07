@@ -130,7 +130,14 @@ class ApiOcrEngine:
 
         resp = requests.post(
             url,
-            json={"file": file_b64, "fileType": 1},
+            json={
+                "file": file_b64,
+                "fileType": 1,
+                # 关闭服务侧预处理，避免坐标偏移（与 LayoutAnalyzer 保持一致）
+                "useDocOrientationClassify": False,
+                "useDocUnwarping": False,
+                "useTextlineOrientation": False,
+            },
             headers=headers,
             timeout=timeout,
         )
