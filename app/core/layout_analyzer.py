@@ -9,12 +9,11 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.api_response_utils import (
     build_api_payload,
-    collect_api_text_bboxes,
     extract_api_markdown_text,
     get_api_result_items,
+    iter_api_ocr_payloads,
     resolve_api_endpoint,
-    split_markdown_lines,
-    union_bboxes,
+    split_markdown_paragraphs,
 )
 from app.core.bbox_utils import (
     bbox_from_quad,
@@ -271,6 +270,108 @@ class LayoutAnalyzer:
         else:
             bbox = bbox.clamp(page.width, page.height)
         return bbox
+
+    def _extract_api_line_blocks(
+        self,
+        item: dict,
+        page: Page,
+        *,
+        coordinate_space: Optional[tuple[int, int]] = None,
+        start_order: int = 0,
+    ) -> tuple[list[Block], list[tuple[str, object]]]:
+        blocks: list[Block] = []
+        overlay_items: list[tuple[str, object]] = []
+        order = start_order
+
+        for payload in iter_api_ocr_payloads(item):
+            texts = payload.get("rec_texts", [])
+            boxes = payload.get("rec_boxes", [])
+            polys = payload.get("rec_polys", [])
+            for idx, text in enumerate(texts):
+                box_data = boxes[idx] if idx < len(boxes) else (polys[idx] if idx < len(polys) else None)
+                bbox = self._extract_bbox_from_coordinate(
+                    box_data,
+                    page,
+                    coordinate_space=coordinate_space,
+                )
+                if not bbox or bbox.area <= 0:
+                    continue
+                block_type = BlockType.TEXT
+                overlay_items.append((block_type.value, bbox))
+                blocks.append(Block(
+                    block_type=block_type,
+                    bbox=bbox,
+                    order=order,
+                    note=(text or "")[:200],
+                ))
+                order += 1
+
+        return blocks, overlay_items
+
+    def _infer_markdown_block_type(self, paragraph: str) -> BlockType:
+        text = (paragraph or "").lstrip()
+        if not text:
+            return BlockType.UNKNOWN
+        if text.startswith("#"):
+            return BlockType.TITLE
+        if text.startswith("|") or "\n|" in text:
+            return BlockType.TABLE
+        if text.startswith("!["):
+            return BlockType.FIGURE
+        return BlockType.TEXT
+
+    def _build_markdown_fallback_blocks(
+        self,
+        item: dict,
+        page: Page,
+        *,
+        start_order: int = 0,
+    ) -> tuple[list[Block], list[tuple[str, object]]]:
+        paragraphs = split_markdown_paragraphs(extract_api_markdown_text(item))
+        if not paragraphs:
+            return [], []
+
+        blocks: list[Block] = []
+        overlay_items: list[tuple[str, object]] = []
+
+        margin_x = max(12, int(page.width * 0.04))
+        top_margin = max(12, int(page.height * 0.04))
+        bottom_margin = max(12, int(page.height * 0.04))
+        gap = max(8, int(page.height * 0.015))
+        available_height = max(page.height - top_margin - bottom_margin - gap * (len(paragraphs) - 1), len(paragraphs) * 24)
+
+        weights = [max(1, paragraph.count("\n") + 1) for paragraph in paragraphs]
+        total_weight = sum(weights) or len(paragraphs)
+        heights = [max(24, round(available_height * weight / total_weight)) for weight in weights]
+
+        overflow = sum(heights) - available_height
+        idx = len(heights) - 1
+        while overflow > 0 and idx >= 0:
+            shrink = min(overflow, max(0, heights[idx] - 24))
+            heights[idx] -= shrink
+            overflow -= shrink
+            idx -= 1
+
+        y = top_margin
+        for offset, paragraph in enumerate(paragraphs):
+            height = heights[offset]
+            bbox = BBox(
+                margin_x,
+                y,
+                max(1, page.width - 2 * margin_x),
+                max(24, min(height, page.height - y - bottom_margin)),
+            ).clamp(page.width, page.height)
+            block_type = self._infer_markdown_block_type(paragraph)
+            overlay_items.append((block_type.value, bbox))
+            blocks.append(Block(
+                block_type=block_type,
+                bbox=bbox,
+                order=start_order + offset,
+                note=paragraph[:200],
+            ))
+            y += bbox.h + gap
+
+        return blocks, overlay_items
 
     def _build_api_payload(self, file_b64: str, file_type: int) -> dict:
         return build_api_payload(file_b64, file_type)
@@ -552,30 +653,27 @@ class LayoutAnalyzer:
                     order += 1
                 continue
 
-            text_box_bbox = union_bboxes(
-                collect_api_text_bboxes(item, page.width, page.height),
-                page.width,
-                page.height,
+            line_blocks, line_overlay_items = self._extract_api_line_blocks(
+                item,
+                page,
+                coordinate_space=coordinate_space,
+                start_order=order,
             )
-            if text_box_bbox and text_box_bbox.area > 0:
-                raw_overlay_items.append(("text", text_box_bbox))
-                page.blocks.append(Block(
-                    block_type=BlockType.TEXT,
-                    bbox=text_box_bbox,
-                    order=order,
-                ))
-                order += 1
+            if line_blocks:
+                page.blocks.extend(line_blocks)
+                raw_overlay_items.extend(line_overlay_items)
+                order += len(line_blocks)
                 continue
 
-            if split_markdown_lines(extract_api_markdown_text(item)):
-                fallback_bbox = BBox(0, 0, page.width, page.height)
-                raw_overlay_items.append(("text", fallback_bbox))
-                page.blocks.append(Block(
-                    block_type=BlockType.TEXT,
-                    bbox=fallback_bbox,
-                    order=order,
-                ))
-                order += 1
+            markdown_blocks, markdown_overlay_items = self._build_markdown_fallback_blocks(
+                item,
+                page,
+                start_order=order,
+            )
+            if markdown_blocks:
+                page.blocks.extend(markdown_blocks)
+                raw_overlay_items.extend(markdown_overlay_items)
+                order += len(markdown_blocks)
         self._write_bbox_overlay(
             page,
             items=raw_overlay_items,

@@ -1100,9 +1100,12 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
         update_config(mode="api", api_url="https://demo.aistudio-app.com/ocr", api_token="", api_timeout=9)
         page = Page(image_path=img_path, width=0, height=0)
         result = LayoutAnalyzer().analyze(page)
-        assert len(result.blocks) == 1
-        assert result.blocks[0].block_type == BlockType.TEXT
-        assert result.blocks[0].bbox.to_xyxy() == (10, 20, 85, 92)
+        assert len(result.blocks) == 2
+        assert [block.block_type for block in result.blocks] == [BlockType.TEXT, BlockType.TEXT]
+        assert result.blocks[0].bbox.to_xyxy() == (10, 20, 80, 45)
+        assert result.blocks[0].note == "第一行"
+        assert result.blocks[1].bbox.to_xyxy() == (12, 60, 85, 92)
+        assert result.blocks[1].note == "第二行"
     finally:
         update_config(mode="local", api_url="", api_token="", api_timeout=30)
         os.unlink(img_path)
@@ -1116,6 +1119,66 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
                 debug_path.unlink()
 
     print("test_layout_analyzer_reads_api_ocr_result_as_text_block PASSED")
+
+
+def test_layout_analyzer_splits_markdown_into_paragraph_blocks():
+    import types
+    import cv2
+    import numpy as np
+    from app.core.app_config import update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "markdown": {
+                                "text": "# 标题\n\n第一段内容\n第二行\n\n| 列1 | 列2 |\n| --- | --- |\n| A | B |",
+                                "images": {},
+                            }
+                        }
+                    ]
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((300, 200, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/layout-parsing", api_token="", api_timeout=9)
+        page = Page(image_path=img_path, width=0, height=0)
+        result = LayoutAnalyzer().analyze(page)
+        assert len(result.blocks) == 3
+        assert [block.block_type for block in result.blocks] == [BlockType.TITLE, BlockType.TEXT, BlockType.TABLE]
+        assert result.blocks[0].note == "# 标题"
+        assert result.blocks[1].note == "第一段内容\n第二行"
+        assert result.blocks[2].note.startswith("| 列1 | 列2 |")
+        assert result.blocks[0].bbox.y1 < result.blocks[1].bbox.y1 < result.blocks[2].bbox.y1
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        os.unlink(img_path)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_splits_markdown_into_paragraph_blocks PASSED")
 
 
 def test_layout_analyzer_reads_local_ppstructurev3_result():
@@ -1210,5 +1273,6 @@ if __name__ == "__main__":
     test_layout_analyzer_resolves_coordinate_space()
     test_layout_analyzer_builds_api_payload()
     test_layout_analyzer_reads_api_ocr_result_as_text_block()
+    test_layout_analyzer_splits_markdown_into_paragraph_blocks()
     test_layout_analyzer_reads_local_ppstructurev3_result()
     print("\n✓ 所有测试通过")
