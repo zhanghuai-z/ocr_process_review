@@ -27,11 +27,8 @@ from app.core.bbox_utils import (
 )
 from app.core.logging import get_logger
 from app.core.paddle_result_utils import (
-    DEFAULT_LOCAL_LANG,
-    DEFAULT_LOCAL_LAYOUT_MODEL,
-    DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
-    DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
-    DEFAULT_LOCAL_OCR_VERSION,
+    get_local_model_profile,
+    get_local_model_profile_label,
     prepare_paddle_runtime_env,
     results_to_dicts,
 )
@@ -53,6 +50,7 @@ class LayoutWorker(QThread):
         self._pages = pages
 
     def run(self) -> None:
+        analyzer = None
         try:
             analyzer = LayoutAnalyzer()
             total = len(self._pages)
@@ -62,12 +60,24 @@ class LayoutWorker(QThread):
             self.all_done.emit(self._pages)
         except Exception as e:
             self.error.emit(str(e))
+        finally:
+            if analyzer is not None:
+                analyzer.close()
 
 
 class LayoutAnalyzer:
 
     def __init__(self) -> None:
         self._engine = None
+
+    def close(self) -> None:
+        import gc
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None and hasattr(engine, "close"):
+            engine.close()
+        gc.collect()
 
     # ── local mode ─────────────────────────────────────────────
 
@@ -78,24 +88,24 @@ class LayoutAnalyzer:
             from app.core.ocr_config import get_config
 
             cfg = get_config()
-            layout_model_name = cfg.get("local_layout_model_name", DEFAULT_LOCAL_LAYOUT_MODEL).strip()
+            profile = get_local_model_profile(cfg.get("local_model_profile"))
             logger.info(
-                "Initializing PPStructureV3 layout engine: lang=%s, "
+                "Initializing PPStructureV3 layout engine: profile=%s, "
                 "layout_detection_model_name=%s, text_det=%s, text_rec=%s, "
                 "engine=paddle_static, enable_mkldnn=False, "
                 "use_doc_orientation_classify=False, use_doc_unwarping=False, "
                 "use_textline_orientation=False, use_table_recognition=False, "
                 "use_formula_recognition=False, use_chart_recognition=False, "
                 "use_region_detection=False, format_block_content=False",
-                DEFAULT_LOCAL_LANG,
-                layout_model_name or DEFAULT_LOCAL_LAYOUT_MODEL,
-                DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
-                DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
+                get_local_model_profile_label(cfg.get("local_model_profile")),
+                profile["layout_detection_model_name"],
+                profile["layout_text_detection_model_name"],
+                profile["layout_text_recognition_model_name"],
             )
             self._engine = PPStructureV3(
-                layout_detection_model_name=layout_model_name or DEFAULT_LOCAL_LAYOUT_MODEL,
-                text_detection_model_name=DEFAULT_LOCAL_LAYOUT_TEXT_DET_MODEL,
-                text_recognition_model_name=DEFAULT_LOCAL_LAYOUT_TEXT_REC_MODEL,
+                layout_detection_model_name=profile["layout_detection_model_name"],
+                text_detection_model_name=profile["layout_text_detection_model_name"],
+                text_recognition_model_name=profile["layout_text_recognition_model_name"],
                 engine="paddle_static",
                 enable_mkldnn=False,
                 use_doc_orientation_classify=False,

@@ -62,6 +62,11 @@ class OcrPipeline:
         """
         self._engine = engine or FakeOcrEngine()
 
+    def close(self) -> None:
+        engine = self._engine
+        if engine is not None and hasattr(engine, "close"):
+            engine.close()
+
     def process_project(
         self,
         project: OcrProject,
@@ -71,48 +76,51 @@ class OcrPipeline:
         result = OcrResult()
         total_pages = len(project.pages)
 
-        for page_idx, page in enumerate(project.pages):
-            img = cv2.imread(page.display_image_path)
-            if img is None:
-                logger.warning("Cannot read image: %s", page.display_image_path)
-                for block in page.blocks:
-                    if block.recognizable:
-                        result.failed_blocks.append(
-                            (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
-                        )
-                continue
-
-            total_blocks = len([b for b in page.blocks if b.recognizable])
-            block_idx = 0
-
-            for block in page.blocks:
-                if not block.recognizable:
+        try:
+            for page_idx, page in enumerate(project.pages):
+                img = cv2.imread(page.display_image_path)
+                if img is None:
+                    logger.warning("Cannot read image: %s", page.display_image_path)
+                    for block in page.blocks:
+                        if block.recognizable:
+                            result.failed_blocks.append(
+                                (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
+                            )
                     continue
 
-                if progress_callback:
-                    progress_callback(OcrProgress(
-                        current_page=page_idx + 1,
-                        total_pages=total_pages,
-                        current_block=block_idx + 1,
-                        total_blocks=total_blocks,
-                        message=f"第 {page_idx + 1}/{total_pages} 页，块 {block_idx + 1}/{total_blocks}",
-                    ))
+                total_blocks = len([b for b in page.blocks if b.recognizable])
+                block_idx = 0
 
-                try:
-                    lines = self._process_block(img, block, page, page_idx)
-                    block.lines = lines
-                except Exception as e:
-                    logger.error(
-                        "OCR failed: page=%d block=%d: %s",
-                        page_idx, block.order, e,
-                    )
-                    result.failed_blocks.append(
-                        (page_idx, block.order, str(e))
-                    )
+                for block in page.blocks:
+                    if not block.recognizable:
+                        continue
 
-                block_idx += 1
+                    if progress_callback:
+                        progress_callback(OcrProgress(
+                            current_page=page_idx + 1,
+                            total_pages=total_pages,
+                            current_block=block_idx + 1,
+                            total_blocks=total_blocks,
+                            message=f"第 {page_idx + 1}/{total_pages} 页，块 {block_idx + 1}/{total_blocks}",
+                        ))
 
-            result.pages.append(page)
+                    try:
+                        lines = self._process_block(img, block, page, page_idx)
+                        block.lines = lines
+                    except Exception as e:
+                        logger.error(
+                            "OCR failed: page=%d block=%d: %s",
+                            page_idx, block.order, e,
+                        )
+                        result.failed_blocks.append(
+                            (page_idx, block.order, str(e))
+                        )
+
+                    block_idx += 1
+
+                result.pages.append(page)
+        finally:
+            self.close()
 
         return result
 
