@@ -1,5 +1,7 @@
 """图像查看器：支持缩放、平移，以及 BBox 框叠加显示。"""
 from __future__ import annotations
+import json
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QRectF, Signal
@@ -9,7 +11,11 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
 )
 
+from app.core.build_info import BUILD_MARKER
+from app.core.logging import get_logger
 from app.models import BBox, Block, BlockType
+
+logger = get_logger(__name__)
 
 # 各块类型对应的边框颜色
 BLOCK_COLORS: dict[BlockType, QColor] = {
@@ -65,6 +71,7 @@ class ImageViewer(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
+        self._image_path: str = ""
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -81,8 +88,11 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         pixmap = QPixmap(image_path)
+        pixmap.setDevicePixelRatio(1.0)
+        self._image_path = image_path
         self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self._pixmap_item.setPos(0, 0)
+        self._scene.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -90,8 +100,11 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         pixmap = QPixmap.fromImage(qimage)
+        pixmap.setDevicePixelRatio(1.0)
+        self._image_path = ""
         self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._scene.setSceneRect(self._pixmap_item.boundingRect())
+        self._pixmap_item.setPos(0, 0)
+        self._scene.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -107,6 +120,7 @@ class ImageViewer(QGraphicsView):
             item.setData(0, block)   # 存入 block 引用
             self._scene.addItem(item)
             self._block_items.append((item, block))
+        self._write_viewer_debug(blocks)
 
     def show_line_highlight(self, bbox: BBox, flagged: bool = False) -> QGraphicsRectItem:
         """高亮单行，返回 item 以便外部移除。"""
@@ -150,3 +164,58 @@ class ImageViewer(QGraphicsView):
         for item, _ in self._block_items:
             self._scene.removeItem(item)
         self._block_items.clear()
+
+    def _rect_to_dict(self, rect: QRectF) -> dict[str, float]:
+        return {
+            "x": rect.x(),
+            "y": rect.y(),
+            "w": rect.width(),
+            "h": rect.height(),
+        }
+
+    def _write_viewer_debug(self, blocks: List[Block]) -> None:
+        if not self._image_path or not self._pixmap_item:
+            return
+
+        pixmap = self._pixmap_item.pixmap()
+        transform = self.transform()
+        payload = {
+            "build": BUILD_MARKER,
+            "image_path": self._image_path,
+            "pixmap": {
+                "width": pixmap.width(),
+                "height": pixmap.height(),
+                "device_pixel_ratio": pixmap.devicePixelRatio(),
+                "item_bounding_rect": self._rect_to_dict(self._pixmap_item.boundingRect()),
+            },
+            "scene_rect": self._rect_to_dict(self._scene.sceneRect()),
+            "viewport": {
+                "width": self.viewport().width(),
+                "height": self.viewport().height(),
+                "transform_m11": transform.m11(),
+                "transform_m22": transform.m22(),
+                "horizontal_scroll": self.horizontalScrollBar().value(),
+                "vertical_scroll": self.verticalScrollBar().value(),
+            },
+            "blocks": [
+                {
+                    "order": block.order,
+                    "type": block.block_type.value,
+                    "bbox": {
+                        "x": block.bbox.x,
+                        "y": block.bbox.y,
+                        "w": block.bbox.w,
+                        "h": block.bbox.h,
+                        "xyxy": list(block.bbox.to_xyxy()),
+                    },
+                }
+                for block in blocks
+            ],
+        }
+        try:
+            Path(self._image_path).with_suffix(".viewer-debug.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("Failed to write viewer debug file: %s", exc)
