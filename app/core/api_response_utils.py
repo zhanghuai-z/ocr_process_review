@@ -194,3 +194,25 @@ def split_markdown_lines(text: str) -> list[str]:
         return lines
     text = text.strip()
     return [text] if text else []
+
+
+def split_markdown_paragraphs(text: str) -> list[str]:
+    if not isinstance(text, str):
+        return []
+
+    paragraphs: list[str] = []
+    current: list[str] = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if line.strip():
+            current.append(line)
+            continue
+        if current:
+            paragraphs.append("\n".join(current).strip())
+            current = []
+
+    if current:
+        paragraphs.append("\n".join(current).strip())
+
+    return [paragraph for paragraph in paragraphs if paragraph]
