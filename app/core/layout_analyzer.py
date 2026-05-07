@@ -365,6 +365,80 @@ class LayoutAnalyzer:
 
         return blocks, overlay_items
 
+    def _union_block_bboxes(self, blocks: list[Block], page: Page) -> BBox:
+        x1 = min(block.bbox.x1 for block in blocks)
+        y1 = min(block.bbox.y1 for block in blocks)
+        x2 = max(block.bbox.x2 for block in blocks)
+        y2 = max(block.bbox.y2 for block in blocks)
+        return bbox_from_xyxy([x1, y1, x2, y2]).clamp(page.width, page.height)
+
+    def _infer_plain_text_block_type(self, text: str) -> BlockType:
+        stripped = (text or "").strip()
+        if not stripped:
+            return BlockType.TEXT
+        if stripped.startswith(("一、", "二、", "三、", "四、", "五、", "六、", "七、", "八、", "九、", "十、")):
+            return BlockType.TITLE
+        if stripped.startswith(("（一）", "（二）", "（三）", "（四）", "（五）", "(", "（")) and len(stripped) <= 24:
+            return BlockType.TITLE
+        return BlockType.TEXT
+
+    def _merge_ocr_line_blocks_for_layout(
+        self,
+        line_blocks: list[Block],
+        page: Page,
+    ) -> list[Block]:
+        """PP-OCRv5 只有文字行框，版面阶段需要聚合成更易操作的段落块。"""
+        if len(line_blocks) < 6:
+            return line_blocks
+
+        sorted_blocks = sorted(line_blocks, key=lambda block: (block.bbox.y1, block.bbox.x1))
+        heights = sorted(block.bbox.h for block in sorted_blocks if block.bbox.h > 0)
+        if not heights:
+            return line_blocks
+        median_h = heights[len(heights) // 2]
+        max_line_gap = max(12, int(round(median_h * 0.85)))
+        page_left = min(block.bbox.x1 for block in sorted_blocks)
+        indent_threshold = max(40, int(round(median_h * 1.2)))
+
+        groups: list[list[Block]] = []
+        current: list[Block] = []
+        for block in sorted_blocks:
+            if not current:
+                current = [block]
+                continue
+            previous_bbox = current[-1].bbox
+            vertical_gap = block.bbox.y1 - previous_bbox.y2
+            starts_indented_paragraph = (
+                len(current) >= 2
+                and block.bbox.x1 - page_left > indent_threshold
+            )
+            previous_is_short_heading = (
+                len(current) == 1
+                and current[-1].bbox.w <= page.width * 0.45
+                and vertical_gap > max(8, int(round(median_h * 0.3)))
+            )
+            if vertical_gap > max_line_gap or starts_indented_paragraph or previous_is_short_heading:
+                groups.append(current)
+                current = [block]
+            else:
+                current.append(block)
+        if current:
+            groups.append(current)
+
+        if len(groups) == len(line_blocks):
+            return line_blocks
+
+        merged_blocks: list[Block] = []
+        for order, group in enumerate(groups):
+            text = "\n".join(block.note for block in group if block.note)
+            merged_blocks.append(Block(
+                block_type=self._infer_plain_text_block_type(text),
+                bbox=self._union_block_bboxes(group, page),
+                order=order,
+                note=text[:200],
+            ))
+        return merged_blocks
+
     def _extract_api_parsing_blocks(
         self,
         item: dict,
@@ -752,6 +826,19 @@ class LayoutAnalyzer:
                 data=data,
                 layout_item=item,
             )
+
+            parsing_blocks, parsing_overlay_items = self._extract_api_parsing_blocks(
+                item,
+                page,
+                coordinate_space=coordinate_space,
+                start_order=order,
+            )
+            if parsing_blocks:
+                page.blocks.extend(parsing_blocks)
+                raw_overlay_items.extend(parsing_overlay_items)
+                order += len(parsing_blocks)
+                continue
+
             if boxes:
                 for box in boxes:
                     coord = box.get("coordinate", [0, 0, 0, 0])
@@ -772,18 +859,6 @@ class LayoutAnalyzer:
                     order += 1
                 continue
 
-            parsing_blocks, parsing_overlay_items = self._extract_api_parsing_blocks(
-                item,
-                page,
-                coordinate_space=coordinate_space,
-                start_order=order,
-            )
-            if parsing_blocks:
-                page.blocks.extend(parsing_blocks)
-                raw_overlay_items.extend(parsing_overlay_items)
-                order += len(parsing_blocks)
-                continue
-
             line_blocks, line_overlay_items = self._extract_api_line_blocks(
                 item,
                 page,
@@ -791,6 +866,8 @@ class LayoutAnalyzer:
                 start_order=order,
             )
             if line_blocks:
+                line_blocks = self._merge_ocr_line_blocks_for_layout(line_blocks, page)
+                line_overlay_items = [(block.block_type.value, block.bbox) for block in line_blocks]
                 page.blocks.extend(line_blocks)
                 raw_overlay_items.extend(line_overlay_items)
                 order += len(line_blocks)
