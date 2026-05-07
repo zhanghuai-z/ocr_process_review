@@ -16,6 +16,14 @@ from typing import List
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.bbox_utils import bbox_from_quad, sanitize_xyxy_bbox
+from app.core.paddle_result_utils import (
+    DEFAULT_LOCAL_LANG,
+    DEFAULT_LOCAL_OCR_VERSION,
+    prepare_paddle_runtime_env,
+    results_to_dicts,
+)
+from app.core.ocr_config import get_config
 from app.models import BBox, Block, BlockType, Line, Page, ProofStatus
 
 AUTO_FLAG_THRESHOLD = 0.80
@@ -30,38 +38,53 @@ class OcrRunner:
 
     def _get_engine(self):
         if self._engine is None:
+            prepare_paddle_runtime_env()
             from paddleocr import PaddleOCR
+            cfg = get_config()
             self._engine = PaddleOCR(
-                use_angle_cls=True,
-                lang="ch",
-                show_log=False,
-                layout=False,
-                table=False,
+                lang=DEFAULT_LOCAL_LANG,
+                ocr_version=cfg.get("local_ocr_version", DEFAULT_LOCAL_OCR_VERSION),
+                engine="paddle_dynamic",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=True,
             )
         return self._engine
 
     def _local_ocr(self, crop_bgr) -> List[Line]:
         engine = self._get_engine()
-        result = engine.ocr(crop_bgr, cls=True)
+        result = engine.predict(crop_bgr)
         lines: List[Line] = []
-        if not result or not result[0]:
-            return lines
-        for line_data in result[0]:
-            pts, (text, score) = line_data
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            lx, ly = int(min(xs)), int(min(ys))
-            lw, lh = int(max(xs) - min(xs)), int(max(ys) - min(ys))
-            lines.append(Line(
-                text=text,
-                confidence=float(score),
-                bbox=BBox(lx, ly, lw, lh),
-                proof_status=(
-                    ProofStatus.AUTO_FLAGGED
-                    if score < AUTO_FLAG_THRESHOLD
-                    else ProofStatus.UNCHECKED
-                ),
-            ))
+        crop_h, crop_w = crop_bgr.shape[:2]
+        for payload in results_to_dicts(result):
+            texts = payload.get("rec_texts", [])
+            scores = payload.get("rec_scores", [])
+            boxes = payload.get("rec_boxes", [])
+            polys = payload.get("rec_polys", [])
+            for idx, text in enumerate(texts):
+                score = float(scores[idx]) if idx < len(scores) else 0.0
+                box_data = boxes[idx] if idx < len(boxes) else (polys[idx] if idx < len(polys) else None)
+                if hasattr(box_data, "tolist"):
+                    box_data = box_data.tolist()
+                if isinstance(box_data, (list, tuple)) and len(box_data) >= 4:
+                    if all(isinstance(point, (list, tuple)) and len(point) >= 2 for point in box_data[:4]):
+                        bbox = bbox_from_quad(box_data[:4]).clamp(crop_w, crop_h)
+                    else:
+                        bbox = sanitize_xyxy_bbox(box_data[:4], crop_w, crop_h)
+                else:
+                    bbox = BBox(0, 0, 0, 0)
+                if bbox.area <= 0:
+                    continue
+                lines.append(Line(
+                    text=text,
+                    confidence=float(score),
+                    bbox=bbox,
+                    proof_status=(
+                        ProofStatus.AUTO_FLAGGED
+                        if score < AUTO_FLAG_THRESHOLD
+                        else ProofStatus.UNCHECKED
+                    ),
+                ))
         return lines
 
     # ── api mode ───────────────────────────────────────────────
@@ -70,8 +93,6 @@ class OcrRunner:
         """Call AiStudio /layout-parsing; raises on network/auth errors."""
         import cv2
         import requests
-        from app.core.ocr_config import get_config
-
         cfg = get_config()
         url = cfg["api_url"].rstrip("/") + "/layout-parsing"
         timeout = cfg["api_timeout"]
@@ -129,7 +150,6 @@ class OcrRunner:
     # ── common interface ───────────────────────────────────────
 
     def _run_ocr(self, crop_bgr) -> List[Line]:
-        from app.core.ocr_config import get_config
         if get_config()["mode"] == "api":
             return self._api_ocr(crop_bgr)
         return self._local_ocr(crop_bgr)
