@@ -14,11 +14,17 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
-from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
+from app.core.bbox_utils import (
+    bbox_from_quad,
+    bbox_from_xyxy,
+    sanitize_xyxy_bbox,
+    scale_bbox,
+    scale_bbox_to_page,
+)
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
 
@@ -94,23 +100,151 @@ class LayoutAnalyzer:
             return [item for item in result if isinstance(item, dict)]
         return []
 
-    def _extract_bbox_from_coordinate(self, coord, page: Page):
-        """兼容 API 返回的 xyxy 或四点坐标。"""
+    def _extract_int_pair(self, value) -> Optional[tuple[int, int]]:
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            try:
+                return int(round(float(value[0]))), int(round(float(value[1])))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _extract_size_from_payload(self, payload) -> Optional[tuple[int, int]]:
+        """从任意层级 payload 中提取坐标空间尺寸。"""
+        if not isinstance(payload, dict):
+            return None
+
+        pair_keys = (
+            "image_size",
+            "original_image_size",
+            "orig_size",
+            "page_size",
+            "coord_size",
+            "coordinate_size",
+        )
+        for key in pair_keys:
+            pair = self._extract_int_pair(payload.get(key))
+            if pair and pair[0] > 0 and pair[1] > 0:
+                return pair
+
+        width_keys = ("width", "image_width", "imageWidth", "orig_width", "page_width")
+        height_keys = ("height", "image_height", "imageHeight", "orig_height", "page_height")
+        width = next((payload.get(key) for key in width_keys if payload.get(key) is not None), None)
+        height = next((payload.get(key) for key in height_keys if payload.get(key) is not None), None)
+        try:
+            if width is not None and height is not None:
+                width = int(round(float(width)))
+                height = int(round(float(height)))
+                if width > 0 and height > 0:
+                    return width, height
+        except (TypeError, ValueError):
+            pass
+
+        shape = payload.get("img_shape") or payload.get("input_shape")
+        if isinstance(shape, (list, tuple)) and len(shape) >= 2:
+            try:
+                first = int(round(float(shape[0])))
+                second = int(round(float(shape[1])))
+            except (TypeError, ValueError):
+                return None
+            if first > 0 and second > 0:
+                # img_shape 常见为 [h, w]
+                return second, first
+        return None
+
+    def _resolve_coordinate_space(
+        self,
+        page: Page,
+        *,
+        data: Optional[dict] = None,
+        layout_item: Optional[dict] = None,
+        box_item: Optional[dict] = None,
+    ) -> Optional[tuple[int, int]]:
+        """优先从响应元数据中解析 bbox 所属坐标空间尺寸。"""
+        for payload in (box_item, layout_item):
+            size = self._extract_size_from_payload(payload)
+            if size:
+                return size
+
+        if isinstance(layout_item, dict):
+            pruned = layout_item.get("prunedResult", {})
+            for payload in (
+                pruned,
+                pruned.get("layout_det_res", {}),
+                pruned.get("overall_ocr_res", {}),
+            ):
+                size = self._extract_size_from_payload(payload)
+                if size:
+                    return size
+
+        if isinstance(data, dict):
+            size = self._extract_size_from_payload(data)
+            if size:
+                return size
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                size = self._extract_size_from_payload(result)
+                if size:
+                    return size
+        return None
+
+    def _extract_bbox_from_coordinate(
+        self,
+        coord,
+        page: Page,
+        *,
+        coordinate_space: Optional[tuple[int, int]] = None,
+    ):
+        """兼容 API 返回的 xyxy、四点坐标、相对坐标与其他坐标空间。"""
         if not isinstance(coord, (list, tuple)):
             return None
 
+        bbox = None
         if len(coord) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in coord[:4]):
-            xs = [float(pt[0]) for pt in coord[:4]]
-            ys = [float(pt[1]) for pt in coord[:4]]
-            return sanitize_xyxy_bbox(
-                [min(xs), min(ys), max(xs), max(ys)],
-                page.width,
-                page.height,
-            )
+            flat_points = coord[:4]
+            try:
+                is_relative = all(
+                    0.0 <= float(point[0]) <= 1.0 and 0.0 <= float(point[1]) <= 1.0
+                    for point in flat_points
+                )
+            except (TypeError, ValueError):
+                is_relative = False
+            if is_relative:
+                bbox = bbox_from_quad([
+                    (float(point[0]) * page.width, float(point[1]) * page.height)
+                    for point in flat_points
+                ])
+            else:
+                bbox = bbox_from_quad(flat_points)
+        elif len(coord) >= 4:
+            values = coord[:4]
+            try:
+                is_relative = all(0.0 <= float(value) <= 1.0 for value in values)
+            except (TypeError, ValueError):
+                is_relative = False
+            if is_relative:
+                bbox = bbox_from_xyxy([
+                    float(values[0]) * page.width,
+                    float(values[1]) * page.height,
+                    float(values[2]) * page.width,
+                    float(values[3]) * page.height,
+                ])
+            else:
+                bbox = bbox_from_xyxy(values)
+        if bbox is None:
+            return None
 
-        if len(coord) >= 4:
-            return sanitize_xyxy_bbox(coord[:4], page.width, page.height)
-        return None
+        if coordinate_space:
+            source_w, source_h = coordinate_space
+            bbox = scale_bbox_to_page(
+                bbox,
+                source_w=source_w,
+                source_h=source_h,
+                page_w=page.width,
+                page_h=page.height,
+            )
+        else:
+            bbox = bbox.clamp(page.width, page.height)
+        return bbox
 
     def _build_api_payload(self, file_b64: str, file_type: int, model_name: str = "") -> dict:
         payload = {"file": file_b64, "fileType": file_type}
@@ -199,6 +333,7 @@ class LayoutAnalyzer:
             and page.height > LOCAL_LAYOUT_CANVAS_H * 1.2
             and max_x2 <= LOCAL_LAYOUT_CANVAS_W * 1.05
             and max_y2 <= LOCAL_LAYOUT_CANVAS_H * 1.05
+            and (max_x2 >= LOCAL_LAYOUT_CANVAS_W * 0.72 or max_y2 >= LOCAL_LAYOUT_CANVAS_H * 0.72)
         )
         if looks_like_local_model_canvas:
             scale_x = page.width / LOCAL_LAYOUT_CANVAS_W
@@ -226,6 +361,7 @@ class LayoutAnalyzer:
             and scale_x <= 6.0
             and scale_y <= 6.0
             and ratio_gap <= 1.2
+            and (max_x2 >= page.width * 0.35 or max_y2 >= page.height * 0.35)
         )
         if not suspicious_uniform_scale:
             return
@@ -248,11 +384,16 @@ class LayoutAnalyzer:
         page.height, page.width = img.shape[:2]
         result = engine.predict(page.display_image_path)
         items = self._unwrap_layout_items(result)
+        coordinate_space = self._resolve_coordinate_space(page, data=result)
         page.blocks = []
         for i, item in enumerate(items):
-            raw_type = item.get("type", "unknown")
+            raw_type = item.get("type") or item.get("label") or "unknown"
             bbox_raw = item.get("bbox", [0, 0, 0, 0])
-            bbox = sanitize_xyxy_bbox(bbox_raw, page.width, page.height)
+            bbox = self._extract_bbox_from_coordinate(
+                bbox_raw,
+                page,
+                coordinate_space=coordinate_space,
+            )
             if bbox.area <= 0:
                 continue
             page.blocks.append(Block(
@@ -311,9 +452,18 @@ class LayoutAnalyzer:
                     .get("layout_det_res", {})
                     .get("boxes", [])
             )
+            coordinate_space = self._resolve_coordinate_space(
+                page,
+                data=data,
+                layout_item=item,
+            )
             for box in boxes:
                 coord = box.get("coordinate", [0, 0, 0, 0])
-                bbox = self._extract_bbox_from_coordinate(coord, page)
+                bbox = self._extract_bbox_from_coordinate(
+                    coord,
+                    page,
+                    coordinate_space=coordinate_space,
+                )
                 if not bbox or bbox.area <= 0:
                     continue
                 raw_type = box.get("label", "unknown")

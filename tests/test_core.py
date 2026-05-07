@@ -132,7 +132,8 @@ def test_models():
 
 def test_bbox_tools():
     from app.core.bbox_utils import (
-        bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
+        bbox_from_quad, bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox,
+        sanitize_xyxy_bbox, scale_bbox, scale_bbox_to_page,
     )
     from app.models import BBox
 
@@ -171,6 +172,18 @@ def test_bbox_tools():
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
+
+    quad = bbox_from_quad([[10, 20], [50, 20], [50, 60], [10, 60]])
+    assert quad == BBox(10, 20, 40, 40)
+
+    scaled_to_page = scale_bbox_to_page(
+        BBox(100, 50, 200, 100),
+        source_w=800,
+        source_h=600,
+        page_w=1600,
+        page_h=1200,
+    )
+    assert scaled_to_page == BBox(200, 100, 400, 200)
 
     print("test_bbox_tools PASSED")
 
@@ -747,6 +760,25 @@ def test_layout_analyzer_rescales_suspicious_blocks():
     print("test_layout_analyzer_rescales_suspicious_blocks PASSED")
 
 
+def test_layout_analyzer_does_not_rescale_sparse_top_blocks():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Block, BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2400, height=3200)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(50, 40, 300, 80)),
+        Block(block_type=BlockType.TEXT, bbox=BBox(60, 180, 320, 120)),
+    ]
+    original = [block.bbox for block in page.blocks]
+
+    analyzer._rescale_blocks_if_suspicious(page)
+
+    assert [block.bbox for block in page.blocks] == original
+
+    print("test_layout_analyzer_does_not_rescale_sparse_top_blocks PASSED")
+
+
 def test_layout_analyzer_extracts_api_polygon_bbox():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Page
@@ -761,6 +793,59 @@ def test_layout_analyzer_extracts_api_polygon_bbox():
     assert bbox == BBox(10, 20, 200, 100)
 
     print("test_layout_analyzer_extracts_api_polygon_bbox PASSED")
+
+
+def test_layout_analyzer_extracts_relative_polygon_bbox():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [[0.1, 0.1], [0.3, 0.1], [0.3, 0.2], [0.1, 0.2]],
+        page,
+    )
+
+    assert bbox == BBox(100, 200, 200, 200)
+
+    print("test_layout_analyzer_extracts_relative_polygon_bbox PASSED")
+
+
+def test_layout_analyzer_scales_bbox_from_response_size():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2400, height=3200)
+
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [80, 60, 400, 120],
+        page,
+        coordinate_space=(800, 608),
+    )
+
+    assert bbox == BBox(240, 316, 960, 316)
+
+    print("test_layout_analyzer_scales_bbox_from_response_size PASSED")
+
+
+def test_layout_analyzer_resolves_coordinate_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2400, height=3200)
+    data = {
+        "result": {
+            "image_size": [800, 608],
+            "layoutParsingResults": [],
+        }
+    }
+
+    size = analyzer._resolve_coordinate_space(page, data=data)
+    assert size == (800, 608)
+
+    print("test_layout_analyzer_resolves_coordinate_space PASSED")
 
 
 def test_layout_analyzer_builds_api_payload():
@@ -805,6 +890,10 @@ if __name__ == "__main__":
     test_import_service()
     test_import_service_sequential_page_numbers()
     test_layout_analyzer_rescales_suspicious_blocks()
+    test_layout_analyzer_does_not_rescale_sparse_top_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
+    test_layout_analyzer_extracts_relative_polygon_bbox()
+    test_layout_analyzer_scales_bbox_from_response_size()
+    test_layout_analyzer_resolves_coordinate_space()
     test_layout_analyzer_builds_api_payload()
     print("\n✓ 所有测试通过")
