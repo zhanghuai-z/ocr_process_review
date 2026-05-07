@@ -130,7 +130,8 @@ class MainWindow(QMainWindow):
         self._project_lbl.setStyleSheet("color:#666; font-size:12px;")
         h_layout.addWidget(self._project_lbl)
 
-        btn_export = QPushButton("导出…")
+        btn_export = QPushButton("⤓ 导出")
+        btn_export.setToolTip("导出 TXT / XML / HTML")
         btn_export.setStyleSheet("padding:4px 12px;")
         btn_export.clicked.connect(self._show_export_dialog)
         h_layout.addWidget(btn_export)
