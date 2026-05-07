@@ -22,6 +22,7 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_LAYOUT, STEP_OCR,
     STEP_HPROOF, STEP_VPROOF,
 )
+from app.core.build_info import BUILD_MARKER
 from app.core.logging import get_logger
 from app.models import OcrProject, Page
 from app.services import ImportService
@@ -97,7 +98,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = WorkflowController()
 
-        self.setWindowTitle("OCR 后处理")
+        self.setWindowTitle(f"OCR 后处理 - {BUILD_MARKER}")
         self.resize(1280, 800)
         self._build_ui()
         self._build_menu()
@@ -156,7 +157,7 @@ class MainWindow(QMainWindow):
         # 状态栏
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage("就绪")
+        self._status_bar.showMessage(f"就绪 | {BUILD_MARKER}")
 
     def _connect_signals(self) -> None:
         """连接所有信号，包括 controller 和面板之间的信号。"""

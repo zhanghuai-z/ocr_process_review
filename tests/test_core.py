@@ -1009,6 +1009,24 @@ def test_layout_analyzer_extracts_relative_polygon_bbox():
     print("test_layout_analyzer_extracts_relative_polygon_bbox PASSED")
 
 
+def test_layout_analyzer_relative_bbox_ignores_response_size():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [0.1, 0.1, 0.3, 0.2],
+        page,
+        coordinate_space=(800, 608),
+    )
+
+    assert bbox == BBox(100, 200, 200, 200)
+
+    print("test_layout_analyzer_relative_bbox_ignores_response_size PASSED")
+
+
 def test_layout_analyzer_scales_bbox_from_response_size():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Page
@@ -1025,6 +1043,24 @@ def test_layout_analyzer_scales_bbox_from_response_size():
     assert bbox == BBox(240, 316, 960, 316)
 
     print("test_layout_analyzer_scales_bbox_from_response_size PASSED")
+
+
+def test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2356, height=3424)
+
+    bbox = analyzer._extract_bbox_from_coordinate(
+        [292, 259, 1270, 329],
+        page,
+        coordinate_space=(800, 608),
+    )
+
+    assert bbox == BBox(292, 259, 978, 70)
+
+    print("test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size PASSED")
 
 
 def test_layout_analyzer_resolves_coordinate_space():
@@ -1044,6 +1080,28 @@ def test_layout_analyzer_resolves_coordinate_space():
     assert size == (800, 608)
 
     print("test_layout_analyzer_resolves_coordinate_space PASSED")
+
+
+def test_layout_analyzer_resolves_aistudio_data_info_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=2356, height=3424)
+    data = {
+        "result": {
+            "dataInfo": {
+                "width": 2356,
+                "height": 3424,
+                "type": "image",
+            },
+        },
+    }
+
+    size = analyzer._resolve_coordinate_space(page, data=data)
+    assert size == (2356, 3424)
+
+    print("test_layout_analyzer_resolves_aistudio_data_info_space PASSED")
 
 
 def test_layout_analyzer_builds_api_payload():
@@ -1106,6 +1164,11 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
         assert result.blocks[0].note == "第一行"
         assert result.blocks[1].bbox.to_xyxy() == (12, 60, 85, 92)
         assert result.blocks[1].note == "第二行"
+        blocks_debug_path = Path(img_path).with_suffix(".layout-app-blocks.json")
+        assert blocks_debug_path.exists()
+        debug_payload = json.loads(blocks_debug_path.read_text(encoding="utf-8"))
+        assert debug_payload["build"]
+        assert debug_payload["response"]["blocks"][0]["bbox"]["xyxy"] == [10, 20, 80, 45]
     finally:
         update_config(mode="local", api_url="", api_token="", api_timeout=30)
         os.unlink(img_path)
@@ -1113,12 +1176,202 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
 
     print("test_layout_analyzer_reads_api_ocr_result_as_text_block PASSED")
+
+
+def test_layout_analyzer_reads_api_parsing_res_list_blocks():
+    import types
+    import cv2
+    import numpy as np
+    from app.core.app_config import update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "dataInfo": {
+                        "width": 2356,
+                        "height": 3424,
+                        "type": "image",
+                    },
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "width": 2356,
+                                "height": 3424,
+                                "parsing_res_list": [
+                                    {
+                                        "block_bbox": [292, 259, 1270, 329],
+                                        "block_content": "期刊页眉",
+                                        "block_label": "header",
+                                        "block_order": 0,
+                                    },
+                                    {
+                                        "block_bbox": [1036, 1290, 1413, 1360],
+                                        "block_content": "一、标题",
+                                        "block_label": "paragraph_title",
+                                        "block_order": 1,
+                                    },
+                                    {
+                                        "block_bbox": [300, 3300, 360, 3340],
+                                        "block_content": "166",
+                                        "block_label": "number",
+                                        "block_order": 2,
+                                    },
+                                ],
+                            },
+                            "markdown": {
+                                "text": "# 不应走 markdown 回退",
+                                "images": {},
+                            },
+                        }
+                    ],
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((3424, 2356, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/layout-parsing", api_token="", api_timeout=9)
+        page = Page(image_path=img_path, width=0, height=0)
+        result = LayoutAnalyzer().analyze(page)
+        assert len(result.blocks) == 2
+        assert [block.block_type for block in result.blocks] == [BlockType.TEXT, BlockType.TITLE]
+        assert result.blocks[0].bbox.to_xyxy() == (292, 259, 1270, 329)
+        assert result.blocks[0].note == "期刊页眉"
+        assert result.blocks[1].bbox.to_xyxy() == (1036, 1290, 1413, 1360)
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        os.unlink(img_path)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_reads_api_parsing_res_list_blocks PASSED")
+
+
+def test_layout_analyzer_prefers_api_parsing_blocks_over_raw_layout_boxes():
+    import types
+    import cv2
+    import numpy as np
+    from app.core.app_config import update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "dataInfo": {"width": 300, "height": 200, "type": "image"},
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "width": 300,
+                                "height": 200,
+                                "layout_det_res": {
+                                    "boxes": [
+                                        {"label": "text", "coordinate": [10, 10, 60, 30]},
+                                        {"label": "formula", "coordinate": [70, 10, 100, 30]},
+                                    ],
+                                },
+                                "parsing_res_list": [
+                                    {
+                                        "block_bbox": [10, 10, 100, 30],
+                                        "block_content": "合并后的正文",
+                                        "block_label": "text",
+                                        "block_order": 0,
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((200, 300, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/layout-parsing", api_token="", api_timeout=9)
+        result = LayoutAnalyzer().analyze(Page(image_path=img_path, width=0, height=0))
+        assert len(result.blocks) == 1
+        assert result.blocks[0].block_type == BlockType.TEXT
+        assert result.blocks[0].bbox.to_xyxy() == (10, 10, 100, 30)
+        assert result.blocks[0].note == "合并后的正文"
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        os.unlink(img_path)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_prefers_api_parsing_blocks_over_raw_layout_boxes PASSED")
+
+
+def test_layout_analyzer_groups_many_api_ocr_lines_for_layout():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Block, BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=400, height=600)
+    line_blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 300, 20), order=0, note="页眉"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 80, 300, 20), order=1, note="第一段第一行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 115, 300, 20), order=2, note="第一段第二行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 150, 120, 20), order=3, note="第一段第三行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(80, 230, 120, 24), order=4, note="三、标题"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 310, 300, 20), order=5, note="第二段第一行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 345, 300, 20), order=6, note="第二段第二行"),
+        Block(block_type=BlockType.TEXT, bbox=BBox(20, 540, 35, 20), order=7, note="166"),
+    ]
+
+    grouped = analyzer._merge_ocr_line_blocks_for_layout(line_blocks, page)
+
+    assert len(grouped) == 4
+    assert grouped[0].note == "页眉"
+    assert grouped[1].bbox.to_xyxy() == (10, 80, 310, 170)
+    assert grouped[1].note == "第一段第一行\n第一段第二行\n第一段第三行"
+    assert grouped[2].block_type == BlockType.TITLE
+    assert grouped[2].note == "三、标题"
+    assert grouped[3].bbox.to_xyxy() == (10, 310, 310, 365)
+
+    print("test_layout_analyzer_groups_many_api_ocr_lines_for_layout PASSED")
 
 
 def test_layout_analyzer_splits_markdown_into_paragraph_blocks():
@@ -1173,7 +1426,7 @@ def test_layout_analyzer_splits_markdown_into_paragraph_blocks():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1226,7 +1479,7 @@ def test_layout_analyzer_reads_local_ppstructurev3_result():
         assert result.blocks[0].bbox == BBox(20, 20, 80, 20)
     finally:
         os.unlink(img_path)
-        for suffix in (".layout-local.json", ".layout-local-raw.png", ".layout-local-app-overlay.png"):
+        for suffix in (".layout-local.json", ".layout-local-raw.png", ".layout-local-app-overlay.png", ".layout-local-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1269,10 +1522,16 @@ if __name__ == "__main__":
     test_layout_analyzer_does_not_rescale_sparse_top_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_relative_polygon_bbox()
+    test_layout_analyzer_relative_bbox_ignores_response_size()
     test_layout_analyzer_scales_bbox_from_response_size()
+    test_layout_analyzer_keeps_page_pixel_bbox_with_conflicting_response_size()
     test_layout_analyzer_resolves_coordinate_space()
+    test_layout_analyzer_resolves_aistudio_data_info_space()
     test_layout_analyzer_builds_api_payload()
     test_layout_analyzer_reads_api_ocr_result_as_text_block()
+    test_layout_analyzer_reads_api_parsing_res_list_blocks()
+    test_layout_analyzer_prefers_api_parsing_blocks_over_raw_layout_boxes()
+    test_layout_analyzer_groups_many_api_ocr_lines_for_layout()
     test_layout_analyzer_splits_markdown_into_paragraph_blocks()
     test_layout_analyzer_reads_local_ppstructurev3_result()
     print("\n✓ 所有测试通过")
