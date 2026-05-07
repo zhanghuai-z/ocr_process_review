@@ -11,6 +11,26 @@ from PySide6.QtWidgets import (
 
 from app.models import BBox, Block, BlockType
 
+
+def _pixmap_from_path(image_path: str) -> QPixmap:
+    """通过 cv2 加载图片并转为 QPixmap。
+
+    Qt6 的 QPixmap(path) 会根据 JPEG EXIF 自动旋转，
+    但版面分析/OCR 均用 cv2.imread（不处理 EXIF）。
+    统一使用 cv2 保证显示与分析坐标系一致，避免 BBox 偏移。
+    """
+    import cv2
+
+    img = cv2.imread(image_path)
+    if img is None:
+        return QPixmap(image_path)  # 路径无效时退回原生加载
+    h, w = img.shape[:2]
+    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # tobytes() 确保 QImage 持有独立副本，不依赖 numpy 数组生命周期
+    qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(qimg)
+
+
 # 各块类型对应的边框颜色
 BLOCK_COLORS: dict[BlockType, QColor] = {
     BlockType.TEXT:           QColor(0x4C, 0xAF, 0x50),  # 绿
@@ -77,10 +97,10 @@ class ImageViewer(QGraphicsView):
     # ------------------------------------------------------------------ public API
 
     def set_image(self, image_path: str) -> None:
-        """加载图片到视图。"""
+        """加载图片到视图（经 cv2 加载，与分析坐标系一致）。"""
         self._scene.clear()
         self._block_items.clear()
-        pixmap = QPixmap(image_path)
+        pixmap = _pixmap_from_path(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
         self.resetTransform()
