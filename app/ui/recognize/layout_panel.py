@@ -23,7 +23,7 @@ class BlockPropertyPanel(QWidget):
         layout.setSpacing(6)
 
         hdr = QLabel("块属性")
-        hdr.setStyleSheet("font-weight:bold; font-size:13px;")
+        hdr.setObjectName("sectionTitle")
         layout.addWidget(hdr)
 
         self._type_lbl = QLabel("类型：—")
@@ -75,12 +75,12 @@ class LayoutPanel(QWidget):
         # 标题行
         title_row = QHBoxLayout()
         title_lbl = QLabel("② 版面分析")
-        title_lbl.setStyleSheet("font-size:18px; font-weight:bold; padding:12px;")
+        title_lbl.setObjectName("pageTitle"); title_lbl.setStyleSheet("padding:12px;")
         title_row.addWidget(title_lbl)
         title_row.addStretch()
 
         self._status_lbl = QLabel("请先导入文件并运行版面分析")
-        self._status_lbl.setStyleSheet("color:#aaa;")
+        self._status_lbl.setObjectName("muted")
         title_row.addWidget(self._status_lbl)
         main_layout.addLayout(title_row)
 
@@ -121,19 +121,19 @@ class LayoutPanel(QWidget):
         self._btn_run = QPushButton("▶ 分析")
         self._btn_run.setToolTip("运行版面分析")
         self._btn_run.setEnabled(False)
-        self._btn_run.setStyleSheet("padding:6px 14px;")
+        self._btn_run.setObjectName("ghostBtn")
         self._btn_run.clicked.connect(self._request_analysis)
 
         self._btn_edit = QPushButton("✎ 编辑框")
         self._btn_edit.setToolTip("切换编辑模式：开启后可拖动/选中 BBox")
         self._btn_edit.setCheckable(True)
-        self._btn_edit.setStyleSheet("padding:6px 14px;")
+        self._btn_edit.setObjectName("ghostBtn")
         self._btn_edit.toggled.connect(self._viewer.set_edit_mode)
 
         self._btn_next = QPushButton("→ 开始 OCR")
         self._btn_next.setEnabled(False)
         self._btn_next.clicked.connect(self.analysis_confirmed)
-        self._btn_next.setStyleSheet("font-size:14px; padding:8px 16px;")
+        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(34)
 
         btn_row.addWidget(self._btn_run)
         btn_row.addWidget(self._btn_edit)

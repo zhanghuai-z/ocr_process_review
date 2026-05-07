@@ -20,9 +20,10 @@ class DropArea(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
         self.setMinimumHeight(120)
+        self.setObjectName("dropArea")
         self.setStyleSheet(
-            "border: 2px dashed #555; border-radius: 8px;"
-            "color: #aaa; font-size: 14px;"
+            "QLabel#dropArea{border:2px dashed #b8d4ff; border-radius:8px;"
+            "background:#fafcff; color:#1a73e8; font-size:14px;}"
         )
 
     def dragEnterEvent(self, event):
@@ -60,7 +61,7 @@ class ImportPanel(QWidget):
 
         # 标题
         title = QLabel("① 导入文件")
-        title.setStyleSheet("font-size:18px; font-weight:bold;")
+        title.setObjectName("pageTitle")
         layout.addWidget(title)
 
         # 拖拽区
@@ -81,7 +82,7 @@ class ImportPanel(QWidget):
 
         # 文件列表
         list_label = QLabel("已选文件")
-        list_label.setStyleSheet("color:#aaa; font-size:12px;")
+        list_label.setObjectName("noteLabel")
         layout.addWidget(list_label)
 
         self._list = QListWidget()
@@ -93,7 +94,7 @@ class ImportPanel(QWidget):
         # 下一步按钮
         self._btn_next = QPushButton("开始版面分析 →")
         self._btn_next.setEnabled(False)
-        self._btn_next.setStyleSheet("font-size:14px; padding:8px;")
+        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(34)
         self._btn_next.clicked.connect(self._emit_ready)
         layout.addWidget(self._btn_next, alignment=Qt.AlignmentFlag.AlignRight)
 

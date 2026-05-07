@@ -40,37 +40,37 @@ class StepButton(QPushButton):
     def __init__(self, label: str, step: int, parent=None):
         super().__init__(label, parent)
         self.step = step
+        self.setObjectName("stepBtn")
         self.setCheckable(True)
-        self.setMinimumWidth(90)
-        self.setStyleSheet("""
-            QPushButton {
-                border: none; border-radius: 6px;
-                padding: 8px 12px; font-size: 13px;
-                color: #aaa; background: transparent;
-            }
-            QPushButton:checked {
-                background: #37373d; color: #fff; font-weight: bold;
-            }
-            QPushButton:hover:!checked { background: #2d2d30; color: #ccc; }
-        """)
+        self.setMinimumWidth(140)
+        self.setMinimumHeight(38)
 
 
 class StepBar(QWidget):
+    """左侧垂直步骤导航。"""
     step_clicked = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("sidebarBar")
+        self.setFixedWidth(168)
         self._buttons: List[StepButton] = []
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(2)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 12, 10, 10)
+        layout.setSpacing(4)
+
+        brand = QLabel("OCR 后处理")
+        brand.setStyleSheet(
+            "color:#1a73e8; font-size:15px; font-weight:bold; padding:6px 8px 14px 8px;"
+        )
+        layout.addWidget(brand)
 
         steps = [
-            ("① 导入", STEP_IMPORT),
-            ("② 版面", STEP_LAYOUT),
-            ("③ OCR",  STEP_OCR),
-            ("④ 横校", STEP_HPROOF),
-            ("⑤ 纵校", STEP_VPROOF),
+            ("①  导入",       STEP_IMPORT),
+            ("②  版面分析",   STEP_LAYOUT),
+            ("③  OCR 识别",   STEP_OCR),
+            ("④  横向校对",   STEP_HPROOF),
+            ("⑤  纵向校对",   STEP_VPROOF),
         ]
         for label, step in steps:
             btn = StepButton(label, step)
@@ -79,6 +79,10 @@ class StepBar(QWidget):
             layout.addWidget(btn)
 
         layout.addStretch()
+
+        ver = QLabel("v0.2.0")
+        ver.setStyleSheet("color:#aaa; font-size:11px; padding:6px 8px;")
+        layout.addWidget(ver)
 
     def set_active(self, step: int) -> None:
         for btn in self._buttons:
@@ -110,32 +114,40 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        outer = QHBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # 顶部：步骤栏 + 项目名 + 导出按钮
-        header = QWidget()
-        header.setFixedHeight(48)
-        header.setStyleSheet("background:#252526; border-bottom:1px solid #3c3c3c;")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(8, 0, 12, 0)
-
+        # 左侧：垂直步骤导航
         self._step_bar = StepBar()
         self._step_bar.step_clicked.connect(self._on_step_clicked)
-        h_layout.addWidget(self._step_bar)
+        outer.addWidget(self._step_bar)
+
+        # 右侧：顶部 header + stack
+        right = QWidget()
+        right_v = QVBoxLayout(right)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("headerBar")
+        header.setFixedHeight(52)
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(20, 0, 16, 0)
 
         self._project_lbl = QLabel("（无项目）")
-        self._project_lbl.setStyleSheet("color:#666; font-size:12px;")
+        self._project_lbl.setStyleSheet("color:#222; font-size:14px; font-weight:500;")
         h_layout.addWidget(self._project_lbl)
+
+        h_layout.addStretch()
 
         btn_export = QPushButton("⤓ 导出")
         btn_export.setToolTip("导出 TXT / XML / HTML")
-        btn_export.setStyleSheet("padding:4px 12px;")
+        btn_export.setObjectName("ghostBtn")
         btn_export.clicked.connect(self._show_export_dialog)
         h_layout.addWidget(btn_export)
 
-        root.addWidget(header)
+        right_v.addWidget(header)
 
         # 中：QStackedWidget
         self._stack = QStackedWidget()
@@ -152,7 +164,8 @@ class MainWindow(QMainWindow):
         ):
             self._stack.addWidget(w)
 
-        root.addWidget(self._stack)
+        right_v.addWidget(self._stack)
+        outer.addWidget(right, 1)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -192,7 +205,6 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
-        menu.setStyleSheet("background:#252526; color:#ccc;")
 
         file_m = menu.addMenu("文件(&F)")
         act_new  = QAction("新建项目(&N)", self)
