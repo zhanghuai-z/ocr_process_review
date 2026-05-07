@@ -1164,6 +1164,11 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
         assert result.blocks[0].note == "第一行"
         assert result.blocks[1].bbox.to_xyxy() == (12, 60, 85, 92)
         assert result.blocks[1].note == "第二行"
+        blocks_debug_path = Path(img_path).with_suffix(".layout-app-blocks.json")
+        assert blocks_debug_path.exists()
+        debug_payload = json.loads(blocks_debug_path.read_text(encoding="utf-8"))
+        assert debug_payload["build"]
+        assert debug_payload["response"]["blocks"][0]["bbox"]["xyxy"] == [10, 20, 80, 45]
     finally:
         update_config(mode="local", api_url="", api_token="", api_timeout=30)
         os.unlink(img_path)
@@ -1171,7 +1176,7 @@ def test_layout_analyzer_reads_api_ocr_result_as_text_block():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1259,7 +1264,7 @@ def test_layout_analyzer_reads_api_parsing_res_list_blocks():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1331,7 +1336,7 @@ def test_layout_analyzer_prefers_api_parsing_blocks_over_raw_layout_boxes():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1421,7 +1426,7 @@ def test_layout_analyzer_splits_markdown_into_paragraph_blocks():
             sys.modules.pop("requests", None)
         else:
             sys.modules["requests"] = original
-        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png", ".layout-app-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()
@@ -1474,7 +1479,7 @@ def test_layout_analyzer_reads_local_ppstructurev3_result():
         assert result.blocks[0].bbox == BBox(20, 20, 80, 20)
     finally:
         os.unlink(img_path)
-        for suffix in (".layout-local.json", ".layout-local-raw.png", ".layout-local-app-overlay.png"):
+        for suffix in (".layout-local.json", ".layout-local-raw.png", ".layout-local-app-overlay.png", ".layout-local-blocks.json"):
             debug_path = Path(img_path).with_suffix(suffix)
             if debug_path.exists():
                 debug_path.unlink()

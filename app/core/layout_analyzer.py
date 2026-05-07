@@ -22,6 +22,7 @@ from app.core.bbox_utils import (
     scale_bbox,
     scale_bbox_to_page,
 )
+from app.core.build_info import BUILD_MARKER
 from app.core.logging import get_logger
 from app.core.paddle_result_utils import (
     get_local_layout_init_kwargs,
@@ -597,6 +598,7 @@ class LayoutAnalyzer:
             return
         debug_path = Path(image_path).with_suffix(suffix)
         payload = {
+            "build": BUILD_MARKER,
             "page": {
                 "display_image_path": image_path,
                 "source_path": page.source_path,
@@ -624,6 +626,35 @@ class LayoutAnalyzer:
 
     def _write_local_debug_response(self, page: Page, data: object) -> None:
         self._write_debug_response(page, data, ".layout-local.json")
+
+    def _write_final_blocks_debug_response(self, page: Page, suffix: str) -> None:
+        payload = {
+            "build": BUILD_MARKER,
+            "page": {
+                "display_image_path": page.display_image_path,
+                "source_path": page.source_path,
+                "width": page.width,
+                "height": page.height,
+                "page_number": page.page_number,
+            },
+            "blocks": [
+                {
+                    "order": block.order,
+                    "type": block.block_type.value,
+                    "bbox": {
+                        "x": block.bbox.x,
+                        "y": block.bbox.y,
+                        "w": block.bbox.w,
+                        "h": block.bbox.h,
+                        "xyxy": list(block.bbox.to_xyxy()),
+                    },
+                    "recognizable": block.recognizable,
+                    "note": block.note,
+                }
+                for block in page.blocks
+            ],
+        }
+        self._write_debug_response(page, payload, suffix)
 
     def _build_local_debug_payload(self, payloads: List[dict]) -> List[dict]:
         slim_payloads: List[dict] = []
@@ -794,6 +825,7 @@ class LayoutAnalyzer:
             suffix=".layout-local-app-overlay.png",
             color=(80, 220, 80),
         )
+        self._write_final_blocks_debug_response(page, ".layout-local-blocks.json")
         return page
 
     # ── api mode ───────────────────────────────────────────────
@@ -916,6 +948,7 @@ class LayoutAnalyzer:
             suffix=".layout-app-overlay.png",
             color=(80, 220, 80),
         )
+        self._write_final_blocks_debug_response(page, ".layout-app-blocks.json")
         return page
 
     # ── common interface ───────────────────────────────────────
