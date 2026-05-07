@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import cv2
+import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import (
@@ -120,10 +121,12 @@ class VProofPanel(QWidget):
             x2 = min(img.shape[1], bb.x + bb.w + pad)
             y2 = min(img.shape[0], bb.y + bb.h + pad)
             crop = img[y1:y2, x1:x2]
-            h, w, ch = crop.shape
-            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            qimg = QImage(rgb.data, w, h, w * ch, QImage.Format.Format_RGB888)
-            self._viewer.set_image_from_qimage(qimg)
+            if crop.size > 0:
+                h, w = crop.shape[:2]
+                # 用 np.ascontiguousarray 确保内存连续，tobytes() 确保 QImage 持有独立副本
+                rgb = cv2.cvtColor(np.ascontiguousarray(crop), cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+                self._viewer.set_image_from_qimage(qimg)
 
         self._text_edit.setPlainText(block.full_text)
         self._conf_badge.set_score(block.avg_confidence)
