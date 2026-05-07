@@ -149,11 +149,18 @@ class ImageViewer(QGraphicsView):
     # ------------------------------------------------------------------ events
 
     def wheelEvent(self, event):
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            self.scale(factor, factor)
+        mods = event.modifiers()
+        dy = event.angleDelta().y()
+        dx = event.angleDelta().x()
+
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            # Shift+滚轮 → 水平滚动
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - (dy or dx))
         else:
-            super().wheelEvent(event)
+            # 直接滚轮缩放（去掉 Ctrl 要求）
+            factor = 1.15 if dy > 0 else 1 / 1.15
+            self.scale(factor, factor)
 
     def mousePressEvent(self, event):
         super().mousePressEvent(event)

@@ -87,9 +87,10 @@ class LayoutPanel(QWidget):
         # 主区域（三栏）
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左：页面列表
+        # 左：页面列表（缩窄）
         self._page_list = QListWidget()
-        self._page_list.setMaximumWidth(160)
+        self._page_list.setMaximumWidth(110)
+        self._page_list.setMinimumWidth(60)
         self._page_list.currentRowChanged.connect(self._on_page_selected)
         splitter.addWidget(self._page_list)
 
@@ -98,13 +99,18 @@ class LayoutPanel(QWidget):
         self._viewer.block_clicked.connect(self._on_block_clicked)
         splitter.addWidget(self._viewer)
 
-        # 右：属性面板
+        # 右：属性面板（可折叠，默认宽度缩小）
         self._prop_panel = BlockPropertyPanel()
-        self._prop_panel.setMinimumWidth(200)
-        self._prop_panel.setMaximumWidth(300)
+        self._prop_panel.setMinimumWidth(0)
+        self._prop_panel.setMaximumWidth(240)
         splitter.addWidget(self._prop_panel)
 
-        splitter.setStretchFactor(1, 3)
+        # 左:中:右 = 1:7:2，中间画布获得最多空间
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 7)
+        splitter.setStretchFactor(2, 2)
+        # 设置初始尺寸（像素），用户可拖拽调整
+        splitter.setSizes([90, 9999, 200])
         main_layout.addWidget(splitter)
 
         # 底部按钮
