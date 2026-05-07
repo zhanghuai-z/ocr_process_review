@@ -524,8 +524,8 @@ def test_local_ocr_engine_parses_predict_result():
     try:
         engine = LocalOcrEngine()
         lines = engine.recognize(np.zeros((100, 200, 3), dtype=np.uint8), OcrContext())
-        assert engine._engine.kwargs["text_detection_model_name"] == "PP-OCRv5_server_det"
-        assert engine._engine.kwargs["text_recognition_model_name"] == "PP-OCRv5_server_rec"
+        assert "text_detection_model_name" not in engine._engine.kwargs
+        assert "text_recognition_model_name" not in engine._engine.kwargs
         assert engine._engine.kwargs["text_det_limit_side_len"] == 960
         assert engine._engine.kwargs["text_det_limit_type"] == "max"
         assert engine._engine.kwargs["use_textline_orientation"] is False
@@ -543,29 +543,105 @@ def test_local_ocr_engine_parses_predict_result():
     print("test_local_ocr_engine_parses_predict_result PASSED")
 
 
-def test_local_model_profile_defaults():
-    from app.core.paddle_result_utils import (
-        get_local_model_profile,
-        get_local_model_profile_label,
-        normalize_local_model_profile,
-    )
+def test_api_ocr_engine_parses_ocr_results_response():
+    import types
+    import numpy as np
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.core.app_config import update_config
 
-    assert normalize_local_model_profile("standard") == "standard"
-    assert normalize_local_model_profile("unknown") == "standard"
+    class FakeResponse:
+        status_code = 200
 
-    standard = get_local_model_profile("standard")
-    fast = get_local_model_profile("fast")
+        def raise_for_status(self):
+            return None
 
-    assert standard["ocr_text_detection_model_name"] == "PP-OCRv5_server_det"
-    assert standard["ocr_text_recognition_model_name"] == "PP-OCRv5_server_rec"
-    assert standard["ocr_text_det_limit_side_len"] == 960
-    assert standard["layout_detection_model_name"] == "PP-DocLayout-M"
-    assert fast["ocr_text_detection_model_name"] == "PP-OCRv5_server_det"
-    assert fast["ocr_text_recognition_model_name"] == "PP-OCRv5_server_rec"
-    assert fast["ocr_text_det_limit_side_len"] == 736
-    assert get_local_model_profile_label("fast") == "快速（更省内存）"
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "rec_texts": ["AIStudio OCR"],
+                                "rec_scores": [0.91],
+                                "rec_boxes": [[10, 15, 120, 40]],
+                            }
+                        }
+                    ]
+                }
+            }
 
-    print("test_local_model_profile_defaults PASSED")
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=fake_post)
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/ocr", api_token="token", api_timeout=9)
+        lines = ApiOcrEngine().recognize(np.zeros((80, 160, 3), dtype=np.uint8), OcrContext())
+        assert captured["url"] == "https://demo.aistudio-app.com/ocr"
+        assert captured["json"]["fileType"] == 1
+        assert lines[0].text == "AIStudio OCR"
+        assert lines[0].bbox.to_xyxy() == (10, 15, 120, 40)
+        assert lines[0].confidence == 0.91
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+
+    print("test_api_ocr_engine_parses_ocr_results_response PASSED")
+
+
+def test_api_ocr_engine_falls_back_to_markdown_text():
+    import types
+    import numpy as np
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.core.app_config import update_config
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "markdown": {
+                                "text": "第一段\n第二段",
+                                "images": {},
+                            }
+                        }
+                    ]
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/layout-parsing", api_token="", api_timeout=9)
+        lines = ApiOcrEngine().recognize(np.zeros((60, 100, 3), dtype=np.uint8), OcrContext())
+        assert [line.text for line in lines] == ["第一段", "第二段"]
+        assert all(line.bbox.to_xyxy() == (0, 0, 100, 60) for line in lines)
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+
+    print("test_api_ocr_engine_falls_back_to_markdown_text PASSED")
 
 
 # =====================================================================
@@ -930,15 +1006,72 @@ def test_layout_analyzer_builds_api_payload():
     from app.core.layout_analyzer import LayoutAnalyzer
 
     analyzer = LayoutAnalyzer()
-    payload = analyzer._build_api_payload("abc123", 1, "PP-DocLayout-L")
+    payload = analyzer._build_api_payload("abc123", 1)
     assert payload["file"] == "abc123"
     assert payload["fileType"] == 1
-    assert payload["model_name"] == "PP-DocLayout-L"
-
-    payload_without_model = analyzer._build_api_payload("abc123", 1, "")
-    assert "model_name" not in payload_without_model
+    assert "model_name" not in payload
 
     print("test_layout_analyzer_builds_api_payload PASSED")
+
+
+def test_layout_analyzer_reads_api_ocr_result_as_text_block():
+    import types
+    import cv2
+    import numpy as np
+    from app.core.app_config import update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "rec_texts": ["第一行", "第二行"],
+                                "rec_boxes": [
+                                    [10, 20, 80, 45],
+                                    [12, 60, 85, 92],
+                                ],
+                            }
+                        }
+                    ]
+                }
+            }
+
+    original = sys.modules.get("requests")
+    sys.modules["requests"] = types.SimpleNamespace(post=lambda *args, **kwargs: FakeResponse())
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((120, 160, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        update_config(mode="api", api_url="https://demo.aistudio-app.com/ocr", api_token="", api_timeout=9)
+        page = Page(image_path=img_path, width=0, height=0)
+        result = LayoutAnalyzer().analyze(page)
+        assert len(result.blocks) == 1
+        assert result.blocks[0].block_type == BlockType.TEXT
+        assert result.blocks[0].bbox.to_xyxy() == (10, 20, 85, 92)
+    finally:
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
+        os.unlink(img_path)
+        if original is None:
+            sys.modules.pop("requests", None)
+        else:
+            sys.modules["requests"] = original
+        for suffix in (".layout-api.json", ".layout-api-raw.png", ".layout-app-overlay.png"):
+            debug_path = Path(img_path).with_suffix(suffix)
+            if debug_path.exists():
+                debug_path.unlink()
+
+    print("test_layout_analyzer_reads_api_ocr_result_as_text_block PASSED")
 
 
 def test_layout_analyzer_reads_local_ppstructurev3_result():
@@ -973,6 +1106,9 @@ def test_layout_analyzer_reads_local_ppstructurev3_result():
         cv2.imwrite(img_path, img)
 
     try:
+        from app.core.app_config import update_config
+
+        update_config(mode="local", api_url="", api_token="", api_timeout=30)
         page = Page(image_path=img_path, width=0, height=0)
         analyzer = LayoutAnalyzer()
         analyzer._engine = FakeEngine()
@@ -1010,7 +1146,8 @@ if __name__ == "__main__":
     test_confidence_normalization()
     test_fake_layout_engine()
     test_local_ocr_engine_parses_predict_result()
-    test_local_model_profile_defaults()
+    test_api_ocr_engine_parses_ocr_results_response()
+    test_api_ocr_engine_falls_back_to_markdown_text()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
@@ -1026,5 +1163,6 @@ if __name__ == "__main__":
     test_layout_analyzer_scales_bbox_from_response_size()
     test_layout_analyzer_resolves_coordinate_space()
     test_layout_analyzer_builds_api_payload()
+    test_layout_analyzer_reads_api_ocr_result_as_text_block()
     test_layout_analyzer_reads_local_ppstructurev3_result()
     print("\n✓ 所有测试通过")
