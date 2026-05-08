@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
+
+import cv2
+import numpy as np
 
 from app.models import BBox, Char, Line
 
@@ -54,13 +57,172 @@ def split_line_bbox_into_char_bboxes(line_bbox: BBox, text: str) -> List[BBox]:
     return char_bboxes
 
 
-def ensure_line_char_bboxes(line: Line) -> List[Char]:
+def _foreground_mask(image: np.ndarray) -> np.ndarray:
+    gray = image
+    if image.ndim == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, thresh = cv2.threshold(
+        blurred,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+    )
+    return thresh > 0
+
+
+def _nonzero_bounds(projection: np.ndarray) -> Optional[tuple[int, int]]:
+    nonzero = np.flatnonzero(projection > 0)
+    if nonzero.size == 0:
+        return None
+    return int(nonzero[0]), int(nonzero[-1]) + 1
+
+
+def _nearest_projection_valley(
+    projection: np.ndarray,
+    target: int,
+    *,
+    left_bound: int,
+    right_bound: int,
+    search_radius: int,
+) -> int:
+    left = max(left_bound, target - search_radius)
+    right = min(right_bound, target + search_radius)
+    window = projection[left:right + 1]
+    if window.size == 0:
+        return target
+    smoothed = np.convolve(window, np.ones(5) / 5.0, mode="same")
+    min_value = float(smoothed.min())
+    candidate_offsets = np.flatnonzero(np.isclose(smoothed, min_value))
+    best_offset = min(candidate_offsets, key=lambda idx: abs((left + int(idx)) - target))
+    return left + int(best_offset)
+
+
+def _projection_guided_boundaries(
+    projection: np.ndarray,
+    segment_count: int,
+) -> List[int]:
+    primary_len = int(projection.shape[0])
+    if segment_count <= 1 or primary_len <= segment_count:
+        return [0, primary_len]
+
+    avg_span = max(primary_len / float(segment_count), 1.0)
+    search_radius = max(2, int(round(avg_span * 0.6)))
+    boundaries = [0]
+    for boundary_idx in range(1, segment_count):
+        target = int(round(boundary_idx * primary_len / float(segment_count)))
+        min_boundary = boundaries[-1] + 1
+        max_boundary = primary_len - (segment_count - boundary_idx)
+        refined = _nearest_projection_valley(
+            projection,
+            target,
+            left_bound=min_boundary,
+            right_bound=max_boundary,
+            search_radius=search_radius,
+        )
+        boundaries.append(min(max(refined, min_boundary), max_boundary))
+    boundaries.append(primary_len)
+    return boundaries
+
+
+def _tighten_segment_to_foreground(
+    mask: np.ndarray,
+    segment_bbox: BBox,
+) -> BBox:
+    if mask.size == 0 or not mask.any():
+        return segment_bbox
+
+    rows = np.flatnonzero(mask.sum(axis=1) > 0)
+    cols = np.flatnonzero(mask.sum(axis=0) > 0)
+    if rows.size == 0 or cols.size == 0:
+        return segment_bbox
+
+    pad = 1
+    x1 = max(0, int(cols[0]) - pad)
+    y1 = max(0, int(rows[0]) - pad)
+    x2 = min(mask.shape[1], int(cols[-1]) + 1 + pad)
+    y2 = min(mask.shape[0], int(rows[-1]) + 1 + pad)
+    return BBox(
+        segment_bbox.x + x1,
+        segment_bbox.y + y1,
+        max(1, x2 - x1),
+        max(1, y2 - y1),
+    )
+
+
+def refine_line_char_bboxes(
+    line_bbox: BBox,
+    text: str,
+    page_image: np.ndarray,
+) -> List[BBox]:
+    """根据真实墨迹收紧字符框，减少按整行均分导致的切图偏差。"""
+    base_boxes = split_line_bbox_into_char_bboxes(line_bbox, text)
+    if not text or page_image.size == 0 or not base_boxes:
+        return base_boxes
+
+    bbox = line_bbox.normalize().clamp(page_image.shape[1], page_image.shape[0])
+    if bbox.w <= 0 or bbox.h <= 0:
+        return base_boxes
+
+    crop = page_image[bbox.y:bbox.y2, bbox.x:bbox.x2]
+    if crop.size == 0:
+        return base_boxes
+
+    mask = _foreground_mask(crop)
+    if not mask.any():
+        return base_boxes
+
+    direction = infer_line_direction(bbox, len(text))
+    primary_projection = mask.sum(axis=0) if direction == LINE_DIRECTION_HORIZONTAL else mask.sum(axis=1)
+    secondary_projection = mask.sum(axis=1) if direction == LINE_DIRECTION_HORIZONTAL else mask.sum(axis=0)
+    primary_bounds = _nonzero_bounds(primary_projection)
+    secondary_bounds = _nonzero_bounds(secondary_projection)
+    if primary_bounds is None or secondary_bounds is None:
+        return base_boxes
+
+    p0, p1 = primary_bounds
+    s0, s1 = secondary_bounds
+    if direction == LINE_DIRECTION_HORIZONTAL:
+        tight_mask = mask[s0:s1, p0:p1]
+    else:
+        tight_mask = mask[p0:p1, s0:s1]
+    if tight_mask.size == 0 or not tight_mask.any():
+        return base_boxes
+
+    tight_primary_projection = (
+        tight_mask.sum(axis=0)
+        if direction == LINE_DIRECTION_HORIZONTAL
+        else tight_mask.sum(axis=1)
+    )
+    boundaries = _projection_guided_boundaries(tight_primary_projection, len(text))
+    refined_boxes: List[BBox] = []
+    for idx in range(len(text)):
+        start = boundaries[idx]
+        end = boundaries[idx + 1]
+        if direction == LINE_DIRECTION_HORIZONTAL:
+            segment_bbox = BBox(bbox.x + p0 + start, bbox.y + s0, max(1, end - start), max(1, s1 - s0))
+            segment_mask = tight_mask[:, start:end]
+        else:
+            segment_bbox = BBox(bbox.x + s0, bbox.y + p0 + start, max(1, s1 - s0), max(1, end - start))
+            segment_mask = tight_mask[start:end, :]
+        refined_boxes.append(_tighten_segment_to_foreground(segment_mask, segment_bbox))
+    return refined_boxes
+
+
+def ensure_line_char_bboxes(
+    line: Line,
+    page_image: Optional[np.ndarray] = None,
+) -> List[Char]:
     """确保 line.chars 至少拥有与文本长度一致的 page-space bbox。"""
     if not line.text:
         line.chars = []
         return []
 
-    split_bboxes = split_line_bbox_into_char_bboxes(line.bbox, line.text)
+    split_bboxes = (
+        refine_line_char_bboxes(line.bbox, line.text, page_image)
+        if page_image is not None
+        else split_line_bbox_into_char_bboxes(line.bbox, line.text)
+    )
     chars: List[Char] = []
     for idx, glyph in enumerate(line.text):
         existing = line.chars[idx] if idx < len(line.chars) else None

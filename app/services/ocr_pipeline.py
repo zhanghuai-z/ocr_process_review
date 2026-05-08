@@ -227,6 +227,6 @@ class OcrPipeline:
                 line.ocr_text = line.text
             if not line.original_text:
                 line.original_text = line.text
-            ensure_line_char_bboxes(line)
+            ensure_line_char_bboxes(line, page_image=img)
 
         return lines
