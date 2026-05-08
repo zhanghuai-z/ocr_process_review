@@ -181,6 +181,20 @@ QPushButton#dangerBtn {
 }
 QPushButton#dangerBtn:hover { background: #fff0f0; }
 
+/* 版面分析绿色三角启动按钮 */
+QPushButton#runBtn {
+    background: #34a853;
+    color: #ffffff;
+    border: none;
+    border-radius: 18px;
+    font-size: 15px;
+    font-weight: bold;
+    padding: 0;
+}
+QPushButton#runBtn:hover { background: #2d9248; }
+QPushButton#runBtn:pressed { background: #267040; }
+QPushButton#runBtn:disabled { background: #b8d4bc; color: #888; }
+
 /* ---------- 滚动条 ---------- */
 QScrollBar:vertical {
     background: transparent; width: 10px; margin: 2px;
