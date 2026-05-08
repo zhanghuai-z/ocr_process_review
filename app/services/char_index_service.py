@@ -54,6 +54,24 @@ def _sort_key(char: str) -> Tuple[int, str, str]:
     return kind, label, char
 
 
+def _is_vertical_line(bbox: BBox) -> bool:
+    if bbox.w <= 0:
+        return True
+    return bbox.h >= bbox.w * 1.5
+
+
+def _estimate_char_bbox(line: Line, idx: int, total: int) -> Optional[BBox]:
+    """兼容旧测试与旧纵校路径的字符框估算。"""
+    if total <= 0:
+        return None
+    bbox = line.bbox
+    if _is_vertical_line(bbox):
+        char_h = max(bbox.h / total, 1)
+        return BBox(bbox.x, int(bbox.y + idx * char_h), bbox.w, int(char_h))
+    char_w = max(bbox.w / total, 1)
+    return BBox(int(bbox.x + idx * char_w), bbox.y, int(char_w), bbox.h)
+
+
 @dataclass
 class CharEntry:
     """单个字符索引记录，兼容旧纵校 UI 与新 proof 链路。"""
