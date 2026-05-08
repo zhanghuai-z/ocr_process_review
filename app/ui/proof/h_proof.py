@@ -1,17 +1,27 @@
-"""横校面板（PRD 3.2）：上图下文，相邻行上下文，全键盘操作。
+"""横校面板（PRD 3.2）：滚动列表，每行显示【图像行 + 识别文本】对。
 
-快捷键（在文本编辑框内有效）：
+布局（参照 ui-2.jpg）：
+  ┌────────────────────────────────────────────────────────────┐
+  │  ↑上一行  ↓下一行  [保存 Ctrl+S]  [标记 F5]  [跳过 F6]     │ ← 工具栏
+  ├────────────────────────────────────────────────────────────┤
+  │ 图像行  1 │ [扫描图像行] ─────────────────────────────────  │
+  │ 识别文本 1│  识别出的文字文本                           ●待确认 │
+  │───────────────────────────────────────────────────────────│
+  │ 图像行  2 │ [扫描图像行]                                    │
+  │ 识别文本 2│  文字文本                                   ●已确认 │
+  │  ─ ─ ─ ─ ─ ─ ─ ─ active row: 蓝色左边框 ─ ─ ─ ─ ─ ─ ─ ─ ─│
+  │▌图像行  3 │ [扫描图像行]                                    │  ← active
+  │▌识别文本 3│▶ [可编辑文本区]                             1处差异│  ← active
+  └────────────────────────────────────────────────────────────┘
+  状态栏：总字数 12,523 | 差异 128 (1.02%)  ● 与原文一致 ● 疑似 ● 不确认 ● 已标记
+
+快捷键（文本编辑框内有效）：
   Enter       — 确认当前行并跳到下一行
-  Ctrl+↑      — 上一行
-  Ctrl+↓      — 下一行（等同 Enter 但不确认）
-  F5          — 跳到下一疑点
+  Ctrl+↑/↓    — 上一行 / 下一行（不确认）
+  F5          — 跳到下一疑点 / 标记当前行
+  F6          — 跳过本行（状态不变）
   Escape      — 还原当前行到 OCR 原始文本
   Ctrl+S      — 保存全部修改
-
-上下文图像渲染：
-  - 当前行及上下各 2 行裁自同一页图，纵向堆叠
-  - 上下文行 55% 透明灰化；当前行橙色 2px 边框高亮
-  - 点击上下文行可直接跳转
 """
 from __future__ import annotations
 
@@ -19,14 +29,14 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QImage, QKeySequence, QPixmap, QShortcut,
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QPushButton, QPlainTextEdit,
-    QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.models import Block, Line, Page, ProofStatus
@@ -34,54 +44,12 @@ from app.core.page_image_cache import PageImageCache
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
-CONTEXT_LINES = 2
-ROW_PAD_Y = 6
-GAP = 8
-DIM_ALPHA = 0.55
-HIGHLIGHT_COLOR = (255, 140, 0)   # BGR orange
-LOW_CONF = 0.80
-
-
-# ─────────────────────────────────────────────────────────────
-# 自定义文本编辑：拦截专用快捷键
-# ─────────────────────────────────────────────────────────────
-
-class _ProofEdit(QPlainTextEdit):
-    """QPlainTextEdit 子类：Enter/Ctrl+↑↓/F5/Escape 发信号而非默认行为。"""
-
-    confirm_requested    = Signal()
-    prev_requested       = Signal()
-    next_requested       = Signal()
-    flagged_requested    = Signal()
-    revert_requested     = Signal()
-
-    def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        key = event.key()
-        mod = event.modifiers()
-        no_mod = mod == Qt.KeyboardModifier.NoModifier
-        ctrl   = mod == Qt.KeyboardModifier.ControlModifier
-
-        if key == Qt.Key.Key_Return and no_mod:
-            self.confirm_requested.emit()
-            return
-        if key == Qt.Key.Key_Up and ctrl:
-            self.prev_requested.emit()
-            return
-        if key == Qt.Key.Key_Down and ctrl:
-            self.next_requested.emit()
-            return
-        if key == Qt.Key.Key_F5:
-            self.flagged_requested.emit()
-            return
-        if key == Qt.Key.Key_Escape:
-            self.revert_requested.emit()
-            return
-        super().keyPressEvent(event)
-
-
-# ─────────────────────────────────────────────────────────────
-# 状态色标
-# ─────────────────────────────────────────────────────────────
+# ── 样式常量 ──────────────────────────────────────────────────
+ROW_PAD_Y    = 4     # 裁图上下各加 4px
+IMAGE_ROW_H  = 52    # 行图像显示高度（px）
+LABEL_W      = 88    # 左侧行号列宽
+STATUS_W     = 80    # 右侧状态列宽
+LOW_CONF     = 0.80
 
 _STATUS_COLOR = {
     ProofStatus.OK:           "#4CAF50",
@@ -92,96 +60,321 @@ _STATUS_COLOR = {
 _STATUS_LABEL = {
     ProofStatus.OK:           "已确认",
     ProofStatus.MODIFIED:     "已修改",
-    ProofStatus.AUTO_FLAGGED: "疑点",
+    ProofStatus.AUTO_FLAGGED: "⚑ 疑点",
     ProofStatus.UNCHECKED:    "待确认",
 }
 
 
-def _status_dot(status: ProofStatus) -> str:
-    color = _STATUS_COLOR.get(status, "#ccc")
-    label = _STATUS_LABEL.get(status, "")
-    return (
-        f"<span style='display:inline-block;width:10px;height:10px;"
-        f"border-radius:5px;background:{color};'></span> {label}"
-    )
+# ─────────────────────────────────────────────────────────────
+# 行内文本编辑器（拦截 Enter/方向键/F 键）
+# ─────────────────────────────────────────────────────────────
+
+class _RowEditor(QPlainTextEdit):
+    """嵌入行内的单行文本编辑器，拦截专用快捷键。"""
+
+    confirm_requested = Signal()
+    prev_requested    = Signal()
+    next_requested    = Signal()
+    flag_requested    = Signal()
+    skip_requested    = Signal()
+    revert_requested  = Signal()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        key = event.key()
+        mod = event.modifiers()
+        no_mod = mod == Qt.KeyboardModifier.NoModifier
+        ctrl   = mod == Qt.KeyboardModifier.ControlModifier
+
+        if key == Qt.Key.Key_Return and no_mod:
+            self.confirm_requested.emit(); return
+        if key == Qt.Key.Key_Up and ctrl:
+            self.prev_requested.emit(); return
+        if key == Qt.Key.Key_Down and ctrl:
+            self.next_requested.emit(); return
+        if key == Qt.Key.Key_F5:
+            self.flag_requested.emit(); return
+        if key == Qt.Key.Key_F6:
+            self.skip_requested.emit(); return
+        if key == Qt.Key.Key_Escape:
+            self.revert_requested.emit(); return
+        super().keyPressEvent(event)
 
 
 # ─────────────────────────────────────────────────────────────
-# 上下文图像渲染
+# 单行对（图像行 + 识别文本行）控件
 # ─────────────────────────────────────────────────────────────
 
-def _render_context_stack(
-    page_path: str,
-    lines: List[Line],
-    current_idx: int,       # 在 lines 列表中的索引
-    display_width: int,
-    cache: PageImageCache,
-) -> Optional[QPixmap]:
-    """将 current_idx ± CONTEXT_LINES 行裁图纵向堆叠，返回 QPixmap。"""
-    img = cache.get_image(page_path)
-    if img is None:
-        return None
-    H, W = img.shape[:2]
+class _LinePair(QFrame):
+    """显示一行的【扫描图像行 + OCR 识别文本】对。"""
 
-    # 收集要渲染的行索引
-    rows: List[Tuple[int, bool]] = []  # (line_idx, is_current)
-    for off in range(-CONTEXT_LINES, CONTEXT_LINES + 1):
-        li = current_idx + off
-        if 0 <= li < len(lines):
-            rows.append((li, off == 0))
+    clicked       = Signal(int)   # 发出自身 idx
+    text_saved    = Signal(int, str)  # (idx, new_text)
+    confirmed     = Signal(int)   # Enter 确认
+    prev_req      = Signal()
+    next_req      = Signal()
+    flag_req      = Signal()
+    skip_req      = Signal()
 
-    if not rows:
-        return None
+    def __init__(
+        self,
+        idx: int,
+        block: Block,
+        line: Line,
+        page: Page,
+        line_in_page: int,   # 在页面内的行序号（1-based，用于显示）
+        cache: PageImageCache,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._idx          = idx
+        self._block        = block
+        self._line         = line
+        self._page         = page
+        self._line_in_page = line_in_page
+        self._cache        = cache
+        self._active       = False
+        self._image_loaded = False
 
-    # 裁剪各行
-    crops: List[Tuple[np.ndarray, bool]] = []
-    for li, is_cur in rows:
-        ln = lines[li]
-        bb = ln.bbox
-        x1 = max(0, bb.x)
+        self.setObjectName("linePair")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._build_ui()
+
+    # ── 构建 ──────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # === 图像行 ===
+        img_row = QWidget()
+        img_row.setFixedHeight(IMAGE_ROW_H + 8)
+        il = QHBoxLayout(img_row)
+        il.setContentsMargins(0, 2, 8, 2)
+        il.setSpacing(0)
+
+        # 蓝色激活条（左边框）
+        self._active_bar = QWidget()
+        self._active_bar.setFixedWidth(4)
+        self._active_bar.setStyleSheet("background: transparent;")
+        il.addWidget(self._active_bar)
+
+        lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
+        lbl_img_hdr.setFixedWidth(LABEL_W)
+        lbl_img_hdr.setObjectName("muted")
+        lbl_img_hdr.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
+        il.addWidget(lbl_img_hdr)
+
+        self._img_lbl = QLabel()
+        self._img_lbl.setFixedHeight(IMAGE_ROW_H)
+        self._img_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._img_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
+        il.addWidget(self._img_lbl, 1)
+
+        root.addWidget(img_row)
+
+        # === 识别文本行 ===
+        txt_row = QWidget()
+        tr = QHBoxLayout(txt_row)
+        tr.setContentsMargins(0, 2, 8, 4)
+        tr.setSpacing(0)
+
+        # 占位（左边框相同宽度）
+        self._active_bar2 = QWidget()
+        self._active_bar2.setFixedWidth(4)
+        self._active_bar2.setStyleSheet("background: transparent;")
+        tr.addWidget(self._active_bar2)
+
+        lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
+        lbl_txt_hdr.setFixedWidth(LABEL_W)
+        lbl_txt_hdr.setObjectName("muted")
+        lbl_txt_hdr.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
+        tr.addWidget(lbl_txt_hdr)
+
+        # 文本展示（非激活）
+        self._text_lbl = QLabel(self._line.text or "")
+        self._text_lbl.setStyleSheet("font-size:15px; padding:2px 0; color:#222;")
+        self._text_lbl.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._text_lbl.setWordWrap(False)
+        self._text_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        tr.addWidget(self._text_lbl, 1)
+
+        # 文本编辑器（激活时可见）
+        self._editor = _RowEditor()
+        self._editor.setStyleSheet("font-size:15px; padding:2px 6px;")
+        self._editor.setMaximumHeight(46)
+        self._editor.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._editor.hide()
+        # 信号转发
+        self._editor.confirm_requested.connect(lambda: self.confirmed.emit(self._idx))
+        self._editor.prev_requested.connect(self.prev_req)
+        self._editor.next_requested.connect(self.next_req)
+        self._editor.flag_requested.connect(self.flag_req)
+        self._editor.skip_requested.connect(self.skip_req)
+        self._editor.revert_requested.connect(self._revert)
+        tr.addWidget(self._editor, 1)
+
+        # 状态标签
+        self._status_lbl = QLabel()
+        self._status_lbl.setFixedWidth(STATUS_W)
+        self._status_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._status_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._refresh_status()
+        tr.addWidget(self._status_lbl)
+
+        root.addWidget(txt_row)
+
+        # 分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#edf0f5; margin:0; padding:0;")
+        root.addWidget(sep)
+
+        # 注册点击区域
+        for w in (self, img_row, txt_row, self._img_lbl, self._text_lbl):
+            w.mousePressEvent = self._on_click  # type: ignore[method-assign]
+
+    # ── 对外接口 ──────────────────────────────────────────────
+
+    def set_active(self, active: bool) -> None:
+        if self._active == active:
+            return
+        self._active = active
+        blue = "#1a73e8"
+        if active:
+            bar_style = f"background:{blue}; border-radius:2px;"
+            bg = "#f0f6ff"
+        else:
+            # 保存编辑内容
+            if self._editor.isVisible():
+                new_text = self._editor.toPlainText()
+                if new_text != self._line.text:
+                    self.text_saved.emit(self._idx, new_text)
+            bar_style = "background:transparent;"
+            bg = "transparent"
+
+        self._active_bar.setStyleSheet(bar_style)
+        self._active_bar2.setStyleSheet(bar_style)
+        self._img_lbl.setStyleSheet(f"background:#fafbfc; padding:2px 0;")
+        self.setStyleSheet(
+            f"QFrame#linePair {{ background:{bg}; }}"
+            if active else ""
+        )
+
+        if active:
+            self._text_lbl.hide()
+            self._editor.setPlainText(self._line.text or "")
+            self._highlight_low_conf()
+            self._editor.show()
+            self._editor.setFocus()
+            # 确保图像已加载
+            self.load_image()
+        else:
+            self._editor.hide()
+            self._text_lbl.setText(self._line.text or "")
+            self._text_lbl.show()
+
+        self._refresh_status()
+
+    def load_image(self) -> None:
+        """懒加载行图像。"""
+        if self._image_loaded:
+            return
+        self._image_loaded = True
+        img = self._cache.get_image(self._page.display_image_path)
+        if img is None:
+            self._img_lbl.setText("（无图像）")
+            return
+        H, W = img.shape[:2]
+        bb = self._line.bbox
         y1 = max(0, bb.y - ROW_PAD_Y)
-        x2 = min(W, bb.x + bb.w)
         y2 = min(H, bb.y + bb.h + ROW_PAD_Y)
+        x1 = max(0, bb.x)
+        x2 = min(W, bb.x + bb.w)
         if x2 <= x1 or y2 <= y1:
-            crops.append((np.zeros((20, max(bb.w, 1), 3), np.uint8), is_cur))
-        else:
-            crops.append((img[y1:y2, x1:x2].copy(), is_cur))
-
-    # 统一宽度（取最宽那行）
-    max_w = max(c.shape[1] for c, _ in crops) if crops else 1
-    padded: List[np.ndarray] = []
-    for crop, is_cur in crops:
+            self._img_lbl.setText("—")
+            return
+        crop = np.ascontiguousarray(img[y1:y2, x1:x2])
         h, w = crop.shape[:2]
-        canvas = np.full((h, max_w, 3), 245, dtype=np.uint8)
-        canvas[:h, :w] = crop
-        if not is_cur:
-            overlay = np.full_like(canvas, 245)
-            canvas = cv2.addWeighted(canvas, 1 - DIM_ALPHA, overlay, DIM_ALPHA, 0)
-        else:
-            cv2.rectangle(canvas, (0, 0), (max_w - 1, h - 1), HIGHLIGHT_COLOR, 2)
-        padded.append(canvas)
+        if h > 0 and h != IMAGE_ROW_H:
+            scale = IMAGE_ROW_H / h
+            new_w = max(1, int(w * scale))
+            crop = cv2.resize(crop, (new_w, IMAGE_ROW_H), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        rh, rw = rgb.shape[:2]
+        qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
+        self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
 
-    # 纵向堆叠
-    gap = np.full((GAP, max_w, 3), 245, dtype=np.uint8)
-    parts: List[np.ndarray] = []
-    for i, p in enumerate(padded):
-        if i:
-            parts.append(gap)
-        parts.append(p)
-    stacked = np.vstack(parts)
+    def refresh_text(self) -> None:
+        """外部更新 line.text 后刷新显示。"""
+        if not self._active:
+            self._text_lbl.setText(self._line.text or "")
+        self._refresh_status()
 
-    # 按显示宽度等比缩放
-    sh, sw = stacked.shape[:2]
-    if display_width > 10 and sw > 0:
-        scale = display_width / sw
-        new_h = max(1, int(sh * scale))
-        stacked = cv2.resize(stacked, (display_width, new_h),
-                             interpolation=cv2.INTER_AREA)
+    @property
+    def line(self) -> Line:
+        return self._line
 
-    rgb = cv2.cvtColor(np.ascontiguousarray(stacked), cv2.COLOR_BGR2RGB)
-    rh, rw = rgb.shape[:2]
-    qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
-    return QPixmap.fromImage(qimg)
+    @property
+    def page(self) -> Page:
+        return self._page
+
+    @property
+    def block(self) -> Block:
+        return self._block
+
+    # ── 私有 ──────────────────────────────────────────────────
+
+    def _on_click(self, event) -> None:
+        self.clicked.emit(self._idx)
+
+    def _revert(self) -> None:
+        original = self._line.original_text or self._line.ocr_text or self._line.text or ""
+        self._editor.blockSignals(True)
+        self._editor.setPlainText(original)
+        self._editor.blockSignals(False)
+
+    def _highlight_low_conf(self) -> None:
+        if not self._line.chars:
+            return
+        red = QTextCharFormat()
+        red.setBackground(QColor(255, 140, 0, 70))
+        normal = QTextCharFormat()
+        text = self._line.text or ""
+        for i, ch in enumerate(self._line.chars):
+            if i >= len(text):
+                break
+            cur = self._editor.textCursor()
+            cur.setPosition(i)
+            cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
+            cur.setCharFormat(red if ch.confidence < LOW_CONF else normal)
+
+    def _refresh_status(self) -> None:
+        status = self._line.proof_status
+        color = _STATUS_COLOR.get(status, "#ccc")
+        label = _STATUS_LABEL.get(status, "")
+        self._status_lbl.setText(
+            f"<span style='color:{color};font-size:11px;'>● {label}</span>"
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -189,52 +382,43 @@ def _render_context_stack(
 # ─────────────────────────────────────────────────────────────
 
 class HProofPanel(QWidget):
-    """横校（横向校对）面板：上图下文 + 上下文行 + 完整快捷键。"""
+    """横校面板：滚动列表 + 工具栏，对照 ui-2.jpg 设计。"""
 
     proof_saved = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # items: (block, line, page, line_idx_in_block)
         self._items: List[Tuple[Block, Line, Page, int]] = []
-        # 当前 block 内的所有行（用于上下文渲染）
-        self._block_lines: List[Line] = []
-        self._block_line_offset: int = 0  # _items 中该 block 起始 idx
+        self._pairs: List[_LinePair] = []
         self._current_idx: int = 0
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
         self._build_ui()
 
-    # ─────────────────── 构建 UI ────────────────────────────
+    # ── UI 构建 ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── 顶部工具栏 ──────────────────────────────────────
+        # ── 工具栏 ─────────────────────────────────────────────
         toolbar = QWidget()
         toolbar.setObjectName("toolbar")
         toolbar.setFixedHeight(46)
         tl = QHBoxLayout(toolbar)
         tl.setContentsMargins(12, 0, 12, 0)
-        tl.setSpacing(6)
+        tl.setSpacing(4)
 
-        title = QLabel("④ 横向校对")
-        title.setObjectName("pageTitle")
-        tl.addWidget(title)
+        self._btn_prev = QPushButton("↑ 上一行")
+        self._btn_next = QPushButton("↓ 下一行")
+        self._btn_save = QPushButton("保存  Ctrl+S")
+        self._btn_save.setObjectName("primaryBtn")
+        self._btn_flag = QPushButton("⚑ 标记  F5")
+        self._btn_skip = QPushButton("跳过  F6")
 
-        tl.addSpacing(16)
-
-        self._btn_prev = QPushButton("⇡ 上一行")
-        self._btn_next = QPushButton("⇣ 下一行")
-        self._btn_ok   = QPushButton("✓ 确认")
-        self._btn_ok.setObjectName("primaryBtn")
-        self._btn_flag = QPushButton("⚑ 下一疑点  F5")
-        self._btn_save = QPushButton("✎ 保存  Ctrl+S")
-
-        for btn in (self._btn_prev, self._btn_next, self._btn_ok,
-                    self._btn_flag, self._btn_save):
+        for btn in (self._btn_prev, self._btn_next, self._btn_save,
+                    self._btn_flag, self._btn_skip):
             btn.setMinimumHeight(30)
             tl.addWidget(btn)
 
@@ -244,200 +428,154 @@ class HProofPanel(QWidget):
         self._progress_lbl.setObjectName("muted")
         tl.addWidget(self._progress_lbl)
 
-        self._conf_badge = ConfidenceBadge(1.0)
-        tl.addWidget(self._conf_badge)
-
-        # 状态色点
-        self._status_dot = QLabel()
-        self._status_dot.setTextFormat(Qt.TextFormat.RichText)
-        tl.addWidget(self._status_dot)
+        # 统计徽章
+        self._stat_lbl = QLabel("")
+        self._stat_lbl.setObjectName("muted")
+        self._stat_lbl.setStyleSheet("font-size:11px; color:#666; margin-left:8px;")
+        tl.addWidget(self._stat_lbl)
 
         root.addWidget(toolbar)
 
-        # ── 主体：上图下文 ───────────────────────────────────
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setHandleWidth(1)
+        # ── 滚动列表 ───────────────────────────────────────────
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
 
-        # 上：上下文行堆叠图
-        img_frame = QWidget()
-        img_frame.setObjectName("card")
-        img_frame.setStyleSheet("QWidget#card{background:#fafbfc; border:none;}")
-        il = QVBoxLayout(img_frame)
-        il.setContentsMargins(8, 8, 8, 8)
+        self._list_widget = QWidget()
+        self._list_layout = QVBoxLayout(self._list_widget)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(0)
+        self._list_layout.addStretch()
 
-        self._context_label = QLabel("（尚未加载）")
-        self._context_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._context_label.setScaledContents(False)
-        self._context_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._context_label.setMinimumHeight(80)
-        il.addWidget(self._context_label)
+        self._scroll.setWidget(self._list_widget)
+        root.addWidget(self._scroll, 1)
 
-        splitter.addWidget(img_frame)
+        # ── 底部状态栏 ─────────────────────────────────────────
+        statusbar = QWidget()
+        statusbar.setFixedHeight(28)
+        statusbar.setStyleSheet("background:#f5f7fb; border-top:1px solid #e3e8ef;")
+        sl = QHBoxLayout(statusbar)
+        sl.setContentsMargins(12, 0, 12, 0)
+        sl.setSpacing(16)
 
-        # 下：文本编辑区
-        bottom = QWidget()
-        bl = QVBoxLayout(bottom)
-        bl.setContentsMargins(12, 8, 12, 8)
-        bl.setSpacing(6)
+        self._total_lbl = QLabel("总字数 0")
+        self._diff_lbl  = QLabel("差异 0 (0%)")
+        for lbl in (self._total_lbl, self._diff_lbl):
+            lbl.setStyleSheet("font-size:11px; color:#666;")
+            sl.addWidget(lbl)
 
-        info_row = QHBoxLayout()
-        self._line_label = QLabel("当前行：—")
-        self._line_label.setObjectName("noteLabel")
-        info_row.addWidget(self._line_label)
-        info_row.addStretch()
-        hint = QLabel("Enter 确认  Ctrl+↑/↓ 切行  F5 疑点  Esc 还原")
-        hint.setObjectName("muted")
-        info_row.addWidget(hint)
-        bl.addLayout(info_row)
+        # 图例
+        for color, label in (
+            ("#4CAF50", "与原文一致"),
+            ("#FF9800", "疑似错误"),
+            ("#c8d0db", "待确认"),
+            ("#1a73e8", "已修改"),
+        ):
+            dot = QLabel(
+                f"<span style='color:{color}'>●</span>"
+                f"<span style='color:#666;font-size:11px;'> {label}</span>"
+            )
+            dot.setTextFormat(Qt.TextFormat.RichText)
+            sl.addWidget(dot)
 
-        self._text_edit = _ProofEdit()
-        self._text_edit.setStyleSheet("font-size:18px; padding:8px 12px;")
-        self._text_edit.setMaximumHeight(120)
-        self._text_edit.confirm_requested.connect(self._mark_ok_and_next)
-        self._text_edit.prev_requested.connect(self._prev)
-        self._text_edit.next_requested.connect(self._next)
-        self._text_edit.flagged_requested.connect(self._next_flagged)
-        self._text_edit.revert_requested.connect(self._revert)
-        bl.addWidget(self._text_edit)
+        sl.addStretch()
+        root.addWidget(statusbar)
 
-        self._status_lbl = QLabel("")
-        self._status_lbl.setObjectName("noteLabel")
-        bl.addWidget(self._status_lbl)
-
-        splitter.addWidget(bottom)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter)
-
-        # ── 信号 ────────────────────────────────────────────
+        # ── 信号 ───────────────────────────────────────────────
         self._btn_prev.clicked.connect(self._prev)
         self._btn_next.clicked.connect(self._next)
-        self._btn_ok.clicked.connect(self._mark_ok_and_next)
-        self._btn_flag.clicked.connect(self._next_flagged)
         self._btn_save.clicked.connect(self._save_current)
+        self._btn_flag.clicked.connect(self._toggle_flag)
+        self._btn_skip.clicked.connect(self._next)
 
-        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_current)
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_all)
 
-    # ─────────────────── 公共 API ───────────────────────────
+    # ── 公共 API ───────────────────────────────────────────────
 
     def load_pages(self, pages: List[Page]) -> None:
-        self._items = []
+        self._items.clear()
+        self._pairs.clear()
+
+        # 清空旧控件
+        while self._list_layout.count() > 1:  # keep the stretch at end
+            item = self._list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        line_num = 1  # 全局行号
         for page in pages:
             for block in page.text_blocks:
                 for li, line in enumerate(block.lines):
                     self._items.append((block, line, page, li))
+                    pair = _LinePair(
+                        len(self._pairs), block, line, page, line_num,
+                        self._cache,
+                    )
+                    pair.clicked.connect(self._on_pair_clicked)
+                    pair.text_saved.connect(self._on_text_saved)
+                    pair.confirmed.connect(self._on_confirmed)
+                    pair.prev_req.connect(self._prev)
+                    pair.next_req.connect(self._next)
+                    pair.flag_req.connect(self._toggle_flag)
+                    pair.skip_req.connect(self._next)
+                    self._pairs.append(pair)
+                    self._list_layout.insertWidget(
+                        self._list_layout.count() - 1, pair
+                    )
+                    line_num += 1
+
         self._current_idx = 0
-        self._show_index(0)
+        self._update_stats()
+        if self._pairs:
+            self._activate(0)
+            # 懒加载前 30 行图像
+            QTimer.singleShot(100, self._load_visible_images)
 
     def reset(self) -> None:
-        self._items.clear()
-        self._block_lines.clear()
-        self._current_idx = 0
+        self.load_pages([])
         self._progress_lbl.setText("0 / 0")
-        self._line_label.setText("当前行：—")
-        self._text_edit.clear()
-        self._context_label.clear()
+        self._stat_lbl.setText("")
+        self._total_lbl.setText("总字数 0")
+        self._diff_lbl.setText("差异 0 (0%)")
 
-    # ─────────────────── 内部逻辑 ───────────────────────────
+    # ── 导航 ───────────────────────────────────────────────────
 
-    def _show_index(self, idx: int) -> None:
-        if not self._items:
-            self.reset()
-            return
-        idx = max(0, min(idx, len(self._items) - 1))
-        # 先保存上一条
-        if 0 <= self._current_idx < len(self._items) and self._current_idx != idx:
-            self._save_current(emit=False, silent=True)
+    def _prev(self) -> None:
+        if self._current_idx > 0:
+            self._save_current(silent=True)
+            self._activate(self._current_idx - 1)
+
+    def _next(self) -> None:
+        if self._current_idx < len(self._pairs) - 1:
+            self._save_current(silent=True)
+            self._activate(self._current_idx + 1)
+
+    def _activate(self, idx: int) -> None:
+        idx = max(0, min(idx, len(self._pairs) - 1))
+        if 0 <= self._current_idx < len(self._pairs) and self._current_idx != idx:
+            self._pairs[self._current_idx].set_active(False)
         self._current_idx = idx
-        block, line, page, line_idx = self._items[idx]
+        pair = self._pairs[idx]
+        pair.set_active(True)
+        # 滚动到可见
+        QTimer.singleShot(30, lambda: self._scroll.ensureWidgetVisible(pair, 0, 40))
+        self._progress_lbl.setText(f"{idx + 1} / {len(self._pairs)}")
 
-        # 收集同 block 的所有行 + 当前行在其中的偏移
-        block_items = [(j, ln) for j, (b, ln, _p, _li) in enumerate(self._items)
-                       if b is block]
-        self._block_lines = [ln for _, ln in block_items]
-        pos_in_block = next(
-            (k for k, (j, _) in enumerate(block_items) if j == idx), 0
-        )
+    def _on_pair_clicked(self, idx: int) -> None:
+        if idx != self._current_idx:
+            self._save_current(silent=True)
+            self._activate(idx)
 
-        # 渲染上下文图
-        display_w = max(self._context_label.width() - 16, 200)
-        pix = _render_context_stack(
-            page.display_image_path,
-            self._block_lines,
-            pos_in_block,
-            display_w,
-            self._cache,
-        )
-        if pix:
-            self._context_label.setPixmap(pix)
-        else:
-            self._context_label.setText("（无图像）")
-
-        # 文本
-        self._text_edit.blockSignals(True)
-        self._text_edit.setPlainText(line.text)
-        self._highlight_low_conf(line)
-        self._text_edit.blockSignals(False)
-        self._text_edit.setFocus()
-
-        self._conf_badge.set_score(line.confidence)
-        flagged = "⚑ " if line.proof_status == ProofStatus.AUTO_FLAGGED else ""
-        self._line_label.setText(
-            f"{flagged}第 {page.page_number} 页 / 块#{block.order} / 行 {line_idx + 1}"
-        )
-        self._progress_lbl.setText(f"{idx + 1} / {len(self._items)}")
-        self._status_dot.setText(_status_dot(line.proof_status))
-        self._status_lbl.setText("")
-
-    def _highlight_low_conf(self, line: Line) -> None:
-        if not line.chars:
-            return
-        red = QTextCharFormat()
-        red.setBackground(QColor(255, 140, 0, 70))
-        normal = QTextCharFormat()
-        for i, ch in enumerate(line.chars):
-            if i >= len(line.text):
-                break
-            cur = self._text_edit.textCursor()
-            cur.setPosition(i)
-            cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
-            cur.setCharFormat(red if ch.confidence < LOW_CONF else normal)
-
-    def _save_current(self, *, emit: bool = True, silent: bool = False) -> None:
+    def _on_confirmed(self, idx: int) -> None:
+        """Enter 键确认当前行。"""
         if not self._items:
             return
-        _, line, page, _ = self._items[self._current_idx]
-        new_text = self._text_edit.toPlainText()
-        changed = new_text != line.text
-        if changed:
-            line.update_text(new_text)
-            self._bus.publish(
-                "line.proof_changed",
-                page_id=page.id,
-                line_id=line.id,
-                status=line.proof_status.value,
-            )
-        if emit:
-            self.proof_saved.emit()
-        if not silent:
-            self._status_lbl.setText("已保存" if changed else "无变更")
-
-    def _revert(self) -> None:
-        if not self._items:
-            return
-        _, line, _, _ = self._items[self._current_idx]
-        original = line.original_text or line.ocr_text or line.text
-        self._text_edit.blockSignals(True)
-        self._text_edit.setPlainText(original)
-        self._text_edit.blockSignals(False)
-        self._status_lbl.setText("已还原到 OCR 原文")
-
-    def _mark_ok_and_next(self) -> None:
-        if not self._items:
-            return
-        self._save_current(emit=False, silent=True)
-        _, line, page, _ = self._items[self._current_idx]
+        _, line, page, _ = self._items[idx]
+        # 先保存文本
+        self._save_current(silent=True)
         line.proof_status = ProofStatus.OK
         self._bus.publish(
             "line.proof_changed",
@@ -446,46 +584,93 @@ class HProofPanel(QWidget):
             status=ProofStatus.OK.value,
         )
         self.proof_saved.emit()
+        self._pairs[idx].refresh_text()
+        self._update_stats()
         self._next()
 
-    def _prev(self) -> None:
-        self._show_index(self._current_idx - 1)
-
-    def _next(self) -> None:
-        self._show_index(self._current_idx + 1)
-
-    def _next_flagged(self) -> None:
-        if not self._items:
+    def _on_text_saved(self, idx: int, new_text: str) -> None:
+        """_LinePair 在 set_active(False) 时保存。"""
+        if idx >= len(self._items):
             return
-        start = self._current_idx + 1
-        for i in range(start, len(self._items)):
-            if self._items[i][1].proof_status == ProofStatus.AUTO_FLAGGED:
-                self._show_index(i)
-                return
-        # 从头找
-        for i in range(0, start):
-            if self._items[i][1].proof_status == ProofStatus.AUTO_FLAGGED:
-                self._show_index(i)
-                self._status_lbl.setText("（已回绕到开头）")
-                return
-        self._status_lbl.setText("无疑点行")
+        _, line, page, _ = self._items[idx]
+        if new_text != line.text:
+            line.update_text(new_text)
+            self._bus.publish(
+                "line.proof_changed",
+                page_id=page.id,
+                line_id=line.id,
+                status=line.proof_status.value,
+            )
+            self.proof_saved.emit()
+            self._update_stats()
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        # 重新渲染以适应新宽度
-        if self._items and 0 <= self._current_idx < len(self._items):
+    def _save_current(self, *, silent: bool = False) -> None:
+        """将当前编辑器内容保存到 line 对象。"""
+        if not self._pairs or self._current_idx >= len(self._pairs):
+            return
+        pair = self._pairs[self._current_idx]
+        if pair._editor.isVisible():
+            new_text = pair._editor.toPlainText()
             _, line, page, _ = self._items[self._current_idx]
-            block_items = [
-                (j, ln) for j, (b, ln, _p, _li) in enumerate(self._items)
-                if b is self._items[self._current_idx][0]
-            ]
-            block_lines = [ln for _, ln in block_items]
-            pos = next(
-                (k for k, (j, _) in enumerate(block_items) if j == self._current_idx), 0
-            )
-            display_w = max(self._context_label.width() - 16, 200)
-            pix = _render_context_stack(
-                page.display_image_path, block_lines, pos, display_w, self._cache
-            )
-            if pix:
-                self._context_label.setPixmap(pix)
+            if new_text != line.text:
+                line.update_text(new_text)
+                self._bus.publish(
+                    "line.proof_changed",
+                    page_id=page.id,
+                    line_id=line.id,
+                    status=line.proof_status.value,
+                )
+                self.proof_saved.emit()
+                pair.refresh_text()
+                self._update_stats()
+
+    def _save_all(self) -> None:
+        self._save_current()
+        self.proof_saved.emit()
+
+    def _toggle_flag(self) -> None:
+        if not self._items or self._current_idx >= len(self._items):
+            return
+        _, line, page, _ = self._items[self._current_idx]
+        new_status = (
+            ProofStatus.UNCHECKED
+            if line.proof_status == ProofStatus.AUTO_FLAGGED
+            else ProofStatus.AUTO_FLAGGED
+        )
+        line.proof_status = new_status
+        self._bus.publish(
+            "line.proof_changed",
+            page_id=page.id,
+            line_id=line.id,
+            status=new_status.value,
+        )
+        self._pairs[self._current_idx].refresh_text()
+        self._update_stats()
+
+    # ── 统计 ───────────────────────────────────────────────────
+
+    def _update_stats(self) -> None:
+        total_chars = sum(len(ln.text or "") for _, ln, _, _ in self._items)
+        diff_count  = sum(
+            1 for _, ln, _, _ in self._items
+            if ln.proof_status in (ProofStatus.MODIFIED, ProofStatus.AUTO_FLAGGED)
+        )
+        pct = (diff_count / max(1, len(self._items))) * 100
+        self._total_lbl.setText(f"总字数 {total_chars:,}")
+        self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
+
+    # ── 懒加载图像 ─────────────────────────────────────────────
+
+    def _load_visible_images(self) -> None:
+        """加载当前视口附近行的图像。"""
+        if not self._pairs:
+            return
+        vp = self._scroll.viewport()
+        vp_top = self._scroll.verticalScrollBar().value()
+        vp_bot = vp_top + vp.height()
+        for pair in self._pairs:
+            y = pair.y()
+            h = pair.height()
+            # 加载视口 ±2 屏范围内的图像
+            if y + h >= vp_top - vp.height() * 2 and y <= vp_bot + vp.height() * 2:
+                pair.load_image()

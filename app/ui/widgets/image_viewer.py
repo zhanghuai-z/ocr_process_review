@@ -233,6 +233,7 @@ class ImageViewer(QGraphicsView):
     block_clicked  = Signal(object)  # Block
     block_moved    = Signal(object)  # Block
     block_created  = Signal(object)  # BBox — 右键拖拽画出新矩形
+    block_deleted  = Signal(object)  # Block — Delete 键删除选中框
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -241,14 +242,14 @@ class ImageViewer(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
-        self._edit_mode: bool = False
         self._highlight_item = None  # highlight_bbox 使用
 
         # 右键拖拽画框状态
         self._draw_start: Optional[QPointF] = None   # scene 坐标
         self._draw_item: Optional[QGraphicsRectItem] = None
 
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -286,11 +287,22 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)
-            item.set_editable(self._edit_mode)
+            item.set_editable(True)  # 始终可编辑
             item.setData(0, block)
             item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
+
+    def delete_selected(self) -> None:
+        """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
+        to_remove = [
+            (item, block) for item, block in self._block_items
+            if item.isSelected()
+        ]
+        for item, block in to_remove:
+            self._scene.removeItem(item)
+            self._block_items.remove((item, block))
+            self.block_deleted.emit(block)
 
     def highlight_bbox(self, bbox: BBox) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
@@ -328,14 +340,8 @@ class ImageViewer(QGraphicsView):
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_edit_mode(self, on: bool) -> None:
-        """切换编辑模式：开启后 BBox 可拖动，关闭后只能浏览/平移。"""
-        self._edit_mode = bool(on)
-        if self._edit_mode:
-            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
-        else:
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        for item, _ in self._block_items:
-            item.set_editable(self._edit_mode)
+        """兼容旧调用，始终保持可编辑状态。"""
+        pass  # 始终 editable，无需切换
 
     # ------------------------------------------------------------------ events
 
@@ -350,8 +356,15 @@ class ImageViewer(QGraphicsView):
             factor = 1.15 if dy > 0 else 1 / 1.15
             self.scale(factor, factor)
 
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Delete:
+            self.delete_selected()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton and self._edit_mode:
+        if event.button() == Qt.MouseButton.RightButton:
             # 右键开始画新框
             self._draw_start = self.mapToScene(event.pos())
             pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
