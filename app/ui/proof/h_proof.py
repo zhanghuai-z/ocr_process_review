@@ -505,10 +505,15 @@ class HProofPanel(QWidget):
         self._pairs.clear()
 
         # 清空旧控件
+        # 注意：takeAt() 只把 widget 从 layout 中移除，widget 仍是 _list_widget 的子
+        # widget，保持原有 geometry 参与绘制。必须 hide() 后再 deleteLater()，
+        # 否则 deleteLater() 延迟删除期间旧 widget 仍可见，导致内容重复显示。
         while self._list_layout.count() > 1:  # keep the stretch at end
             item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.hide()        # 立即隐藏，防止在 deleteLater() 等待期间显示
+                w.deleteLater() # 延迟释放内存
 
         line_num = 1  # 全局行号
         for page in pages:
