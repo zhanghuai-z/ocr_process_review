@@ -189,8 +189,12 @@ def test_block_type_mapping():
 
     assert BlockType.from_paddle("paragraph") == BlockType.TEXT
     assert BlockType.from_paddle("doc_title") == BlockType.TITLE
+    assert BlockType.from_paddle("section_title") == BlockType.TITLE
     assert BlockType.from_paddle("image_caption") == BlockType.FIGURE_CAPTION
+    assert BlockType.from_paddle("table_caption_text") == BlockType.TABLE_CAPTION
     assert BlockType.from_paddle("table_body") == BlockType.TABLE
+    assert BlockType.from_paddle("graphic") == BlockType.FIGURE
+    assert BlockType.from_paddle("isolated_formula") == BlockType.EQUATION
     assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
 
     print("test_block_type_mapping PASSED")
@@ -1120,6 +1124,104 @@ def test_layout_analyzer_extracts_api_polygon_bbox():
     print("test_layout_analyzer_extracts_api_polygon_bbox PASSED")
 
 
+def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "category_name": "section_title",
+                                    "polygon": [10, 20, 210, 20, 210, 120, 10, 120],
+                                    "cls_score": 0.91,
+                                },
+                                {
+                                    "type": "table_caption_text",
+                                    "bbox": {"x": 240, "y": 40, "w": 160, "h": 60},
+                                    "confidence": 0.88,
+                                },
+                                {
+                                    "layout_label": "graphic",
+                                    "points": [[420, 60], [560, 60], [560, 180], [420, 180]],
+                                    "layout_score": "0.75",
+                                },
+                            ],
+                        },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "bibliography",
+                                "block_bbox": [600, 80, 760, 150],
+                                "block_score": 0.81,
+                                "block_content": "参考文献",
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    blocks, overlays = analyzer._extract_api_blocks(page, data)
+
+    assert [block.block_type for block in blocks] == [
+        BlockType.TITLE,
+        BlockType.TABLE_CAPTION,
+        BlockType.FIGURE,
+        BlockType.REFERENCE,
+    ]
+    assert blocks[0].bbox.x == 10 and blocks[0].bbox.y == 20
+    assert blocks[1].bbox.w == 160 and blocks[1].bbox.h == 60
+    assert "score=0.910" in blocks[0].note
+    assert "参考文献" in blocks[3].note
+    assert len(overlays) == 4
+
+    print("test_layout_analyzer_extracts_api_blocks_from_varied_schema PASSED")
+
+
+def test_layout_analyzer_falls_back_to_ocr_results():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["第一行", "第二行"],
+                            "rec_scores": [0.95, 0.83],
+                            "rec_polys": [
+                                [10, 20, 210, 20, 210, 70, 10, 70],
+                                [20, 100, 260, 100, 260, 150, 20, 150],
+                            ],
+                        }
+                    }
+                }
+            ]
+        }
+    }
+
+    blocks, overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 2
+    assert all(block.block_type == BlockType.TEXT for block in blocks)
+    assert blocks[0].bbox == BBox(10, 20, 200, 50)
+    assert "第一行" in blocks[0].note
+    assert "score=0.950" in blocks[0].note
+    assert len(overlays) == 2
+
+    print("test_layout_analyzer_falls_back_to_ocr_results PASSED")
+
+
 def test_layout_analyzer_builds_api_payload():
     from app.core.layout_analyzer import LayoutAnalyzer
 
@@ -1166,5 +1268,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
+    test_layout_analyzer_extracts_api_blocks_from_varied_schema()
+    test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_builds_api_payload()
     print("\n✓ 所有测试通过")

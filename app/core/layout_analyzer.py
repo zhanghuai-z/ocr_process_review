@@ -95,7 +95,31 @@ class LayoutAnalyzer:
         return []
 
     def _extract_bbox_from_coordinate(self, coord, page: Page):
-        """兼容 API 返回的 xyxy 或四点坐标。"""
+        """兼容 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
+        if isinstance(coord, dict):
+            if {"x", "y", "w", "h"} <= set(coord.keys()):
+                return sanitize_xyxy_bbox(
+                    [
+                        coord.get("x", 0),
+                        coord.get("y", 0),
+                        coord.get("x", 0) + coord.get("w", 0),
+                        coord.get("y", 0) + coord.get("h", 0),
+                    ],
+                    page.width,
+                    page.height,
+                )
+            if {"x1", "y1", "x2", "y2"} <= set(coord.keys()):
+                return sanitize_xyxy_bbox(
+                    [
+                        coord.get("x1", 0),
+                        coord.get("y1", 0),
+                        coord.get("x2", 0),
+                        coord.get("y2", 0),
+                    ],
+                    page.width,
+                    page.height,
+                )
+
         if not isinstance(coord, (list, tuple)):
             return None
 
@@ -108,9 +132,214 @@ class LayoutAnalyzer:
                 page.height,
             )
 
+        flat_numbers = [float(v) for v in coord if isinstance(v, (int, float))]
+        if len(flat_numbers) >= 8 and len(flat_numbers) % 2 == 0:
+            xs = flat_numbers[::2]
+            ys = flat_numbers[1::2]
+            return sanitize_xyxy_bbox(
+                [min(xs), min(ys), max(xs), max(ys)],
+                page.width,
+                page.height,
+            )
+
         if len(coord) >= 4:
             return sanitize_xyxy_bbox(coord[:4], page.width, page.height)
         return None
+
+    def _extract_label_from_record(self, record: dict, default: str = "unknown") -> str:
+        for key in (
+            "label", "type", "category", "category_name", "cls_name",
+            "class_name", "block_label", "block_type", "layout_label",
+        ):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return default
+
+    def _extract_score_from_record(self, record: dict) -> float | None:
+        for key in (
+            "score", "confidence", "layout_score", "cls_score",
+            "block_score", "prob", "probability",
+        ):
+            value = record.get(key)
+            try:
+                if value is not None:
+                    return float(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _extract_bbox_from_record(self, record: dict, page: Page):
+        for key in (
+            "coordinate", "bbox", "box", "block_bbox", "block_box",
+            "polygon", "poly", "points", "block_polygon_points",
+            "rec_box", "rec_bbox", "rec_poly", "rec_polys",
+        ):
+            if key in record:
+                bbox = self._extract_bbox_from_coordinate(record.get(key), page)
+                if bbox and bbox.area > 0:
+                    return bbox
+        return None
+
+    def _iter_layout_records_from_item(self, item: dict) -> List[dict]:
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        candidates: List[dict] = []
+
+        for container in (
+            item,
+            pruned,
+            pruned.get("layout_det_res", {}),
+            item.get("layout_det_res", {}),
+        ):
+            if not isinstance(container, dict):
+                continue
+            for key in ("boxes", "layout_boxes", "regions", "blocks"):
+                values = container.get(key)
+                if isinstance(values, list):
+                    candidates.extend(v for v in values if isinstance(v, dict))
+
+        for container in (pruned, item):
+            values = container.get("parsing_res_list", {}) if isinstance(container, dict) else {}
+            if isinstance(values, list):
+                candidates.extend(v for v in values if isinstance(v, dict))
+
+        return candidates
+
+    def _iter_ocr_records_from_item(self, item: dict) -> List[dict]:
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        ocr_res = (
+            pruned.get("overall_ocr_res")
+            or item.get("overall_ocr_res")
+            or pruned
+            or item
+        )
+        if not isinstance(ocr_res, dict):
+            return []
+
+        texts = ocr_res.get("rec_texts") or ocr_res.get("texts") or []
+        scores = ocr_res.get("rec_scores") or ocr_res.get("scores") or []
+        boxes = (
+            ocr_res.get("rec_boxes")
+            or ocr_res.get("rec_polys")
+            or ocr_res.get("rec_polygons")
+            or ocr_res.get("boxes")
+            or ocr_res.get("polys")
+            or ocr_res.get("dt_polys")
+            or []
+        )
+
+        records: List[dict] = []
+        count = max(len(boxes), len(texts))
+        for index in range(count):
+            record = {
+                "label": "text",
+                "text": texts[index] if index < len(texts) else "",
+            }
+            if index < len(boxes):
+                record["bbox"] = boxes[index]
+            if index < len(scores):
+                record["score"] = scores[index]
+            records.append(record)
+        return records
+
+    def _append_api_block(
+        self,
+        *,
+        page: Page,
+        record: dict,
+        scale_x: float,
+        scale_y: float,
+        order: int,
+        seen: set[tuple],
+        page_blocks: List[Block],
+        raw_overlay_items: List[tuple[str, object]],
+        default_label: str = "unknown",
+    ) -> int:
+        bbox = self._extract_bbox_from_record(record, page)
+        if not bbox or bbox.area <= 0:
+            return order
+
+        if scale_x != 1.0 or scale_y != 1.0:
+            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
+            if bbox.area <= 0:
+                return order
+
+        raw_type = self._extract_label_from_record(record, default=default_label)
+        signature = (raw_type, bbox.x, bbox.y, bbox.w, bbox.h)
+        if signature in seen:
+            return order
+        seen.add(signature)
+
+        preview = ""
+        for key in ("block_content", "text", "content", "markdown"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                preview = value.strip()
+                break
+        score = self._extract_score_from_record(record)
+        note_parts = []
+        if preview:
+            note_parts.append(preview[:120])
+        if score is not None:
+            note_parts.append(f"score={score:.3f}")
+
+        raw_overlay_items.append((raw_type, bbox))
+        page_blocks.append(Block(
+            block_type=BlockType.from_paddle(raw_type),
+            bbox=bbox,
+            order=order,
+            note=" | ".join(note_parts),
+        ))
+        return order + 1
+
+    def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        layout_results = result.get("layoutParsingResults", [])
+        page_blocks: List[Block] = []
+        raw_overlay_items: List[tuple[str, object]] = []
+        seen: set[tuple] = set()
+        order = 0
+
+        for item in layout_results if isinstance(layout_results, list) else []:
+            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
+            if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
+                logger.info(
+                    "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
+                    scale_x, scale_y, page.display_image_path,
+                )
+
+            for record in self._iter_layout_records_from_item(item):
+                order = self._append_api_block(
+                    page=page,
+                    record=record,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                    order=order,
+                    seen=seen,
+                    page_blocks=page_blocks,
+                    raw_overlay_items=raw_overlay_items,
+                )
+
+        if page_blocks:
+            return page_blocks, raw_overlay_items
+
+        ocr_results = result.get("ocrResults", [])
+        for item in ocr_results if isinstance(ocr_results, list) else []:
+            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
+            for record in self._iter_ocr_records_from_item(item):
+                order = self._append_api_block(
+                    page=page,
+                    record=record,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                    order=order,
+                    seen=seen,
+                    page_blocks=page_blocks,
+                    raw_overlay_items=raw_overlay_items,
+                    default_label="text",
+                )
+
+        return page_blocks, raw_overlay_items
 
     def _build_api_payload(self, file_b64: str, file_type: int, model_name: str = "") -> dict:
         payload = {"file": file_b64, "fileType": file_type}
@@ -418,42 +647,7 @@ class LayoutAnalyzer:
         data = resp.json()
         self._write_api_debug_response(page, data)
 
-        # result.layoutParsingResults[0].prunedResult.layout_det_res.boxes
-        layout_results = data.get("result", {}).get("layoutParsingResults", [])
-        page.blocks = []
-        raw_overlay_items: List[tuple[str, object]] = []
-        order = 0
-        for item in layout_results:
-            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
-            if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
-                logger.info(
-                    "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
-                    scale_x, scale_y, page.display_image_path,
-                )
-            boxes = (
-                item.get("prunedResult", {})
-                    .get("layout_det_res", {})
-                    .get("boxes", [])
-            )
-            for box in boxes:
-                coord = box.get("coordinate", [0, 0, 0, 0])
-                bbox = self._extract_bbox_from_coordinate(coord, page)
-                if not bbox or bbox.area <= 0:
-                    continue
-                if scale_x != 1.0 or scale_y != 1.0:
-                    bbox = scale_bbox(bbox, scale_x, scale_y).clamp(
-                        page.width, page.height,
-                    )
-                    if bbox.area <= 0:
-                        continue
-                raw_type = box.get("label", "unknown")
-                raw_overlay_items.append((raw_type, bbox))
-                page.blocks.append(Block(
-                    block_type=BlockType.from_paddle(raw_type),
-                    bbox=bbox,
-                    order=order,
-                ))
-                order += 1
+        page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)
         self._write_bbox_overlay(
             page,
             items=raw_overlay_items,
