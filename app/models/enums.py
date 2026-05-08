@@ -22,8 +22,15 @@ class BlockType(str, Enum):
         normalized = label.strip().lower().replace("-", "_").replace(" ", "_")
         mapping = {
             "text": cls.TEXT,
+            "paragraph_text": cls.TEXT,
+            "text_block": cls.TEXT,
+            "text_box": cls.TEXT,
+            "body": cls.TEXT,
             "title": cls.TITLE,
             "doc_title": cls.TITLE,
+            "doc_heading": cls.TITLE,
+            "section_title": cls.TITLE,
+            "chapter_title": cls.TITLE,
             "paragraph_title": cls.TITLE,
             "text_title": cls.TITLE,
             "heading": cls.TITLE,
@@ -36,12 +43,16 @@ class BlockType(str, Enum):
             "content": cls.TEXT,
             "abstract": cls.TEXT,
             "table_of_contents": cls.TEXT,
+            "toc": cls.TEXT,
             "page_number": cls.TEXT,
             "header": cls.TEXT,
             "footer": cls.TEXT,
             "sidebar_text": cls.TEXT,
             "algorithm": cls.TEXT,
             "figure": cls.FIGURE,
+            "graphic": cls.FIGURE,
+            "photo": cls.FIGURE,
+            "logo": cls.FIGURE,
             "image": cls.FIGURE,
             "picture": cls.FIGURE,
             "illustration": cls.FIGURE,
@@ -51,15 +62,27 @@ class BlockType(str, Enum):
             "footer_image": cls.FIGURE,
             "figure_caption": cls.FIGURE_CAPTION,
             "figure_title": cls.FIGURE_CAPTION,
+            "caption": cls.FIGURE_CAPTION,
+            "figure_note": cls.FIGURE_CAPTION,
             "image_caption": cls.FIGURE_CAPTION,
             "table": cls.TABLE,
+            "table_region": cls.TABLE,
+            "table_block": cls.TABLE,
+            "table_cell": cls.TABLE,
             "table_body": cls.TABLE,
             "table_caption": cls.TABLE_CAPTION,
+            "table_caption_text": cls.TABLE_CAPTION,
+            "table_note": cls.TABLE_CAPTION,
             "table_title": cls.TABLE_CAPTION,
             "reference": cls.REFERENCE,
+            "references": cls.REFERENCE,
+            "reference_list": cls.REFERENCE,
             "reference_text": cls.REFERENCE,
             "bibliography": cls.REFERENCE,
             "equation": cls.EQUATION,
+            "equation_block": cls.EQUATION,
+            "isolated_formula": cls.EQUATION,
+            "inline_formula": cls.EQUATION,
             "formula": cls.EQUATION,
             "formula_number": cls.EQUATION,
         }
@@ -70,6 +93,8 @@ class BlockType(str, Enum):
             return cls.TITLE
         if "caption" in normalized and "table" in normalized:
             return cls.TABLE_CAPTION
+        if "note" in normalized and "table" in normalized:
+            return cls.TABLE_CAPTION
         if "caption" in normalized:
             return cls.FIGURE_CAPTION
         if "table" in normalized:
@@ -78,9 +103,9 @@ class BlockType(str, Enum):
             return cls.TEXT
         if any(token in normalized for token in ("reference", "bibliography")):
             return cls.REFERENCE
-        if any(token in normalized for token in ("figure", "image", "picture", "illustration")):
+        if any(token in normalized for token in ("figure", "image", "picture", "illustration", "graphic", "logo", "photo")):
             return cls.FIGURE
-        if any(token in normalized for token in ("equation", "formula")):
+        if any(token in normalized for token in ("equation", "formula", "math")):
             return cls.EQUATION
         return cls.UNKNOWN
 
