@@ -455,6 +455,13 @@ class HProofPanel(QWidget):
         self._list_layout.setSpacing(0)
         self._list_layout.addStretch()
 
+        # 空状态提示（无数据时显示）
+        self._empty_lbl = QLabel("完成 OCR 识别后，横校数据将在此展示")
+        self._empty_lbl.setObjectName("proofEmpty")
+        self._empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_lbl.setMinimumHeight(120)
+        self._list_layout.insertWidget(0, self._empty_lbl)
+
         self._scroll.setWidget(self._list_widget)
         root.addWidget(self._scroll, 1)
 
@@ -497,6 +504,10 @@ class HProofPanel(QWidget):
         self._btn_skip.clicked.connect(self._next)
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_all)
+        # 滚动时触发懒加载
+        self._scroll.verticalScrollBar().valueChanged.connect(
+            lambda _: self._load_visible_images()
+        )
 
     # ── 公共 API ───────────────────────────────────────────────
 
@@ -514,6 +525,11 @@ class HProofPanel(QWidget):
             if w:
                 w.setParent(None)  # 立即从 _list_widget 子控件树中移除
                 w.deleteLater()    # 延迟销毁内存
+
+        # 无数据时显示空状态
+        self._empty_lbl.setVisible(
+            not any(block.lines for page in pages for block in page.text_blocks)
+        )
 
         line_num = 1  # 全局行号
         for page in pages:

@@ -26,6 +26,7 @@ import numpy as np
 from PySide6.QtCore import (
     QAbstractListModel, QModelIndex, QSize, Qt, Signal,
 )
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtGui import (
     QColor, QImage, QIcon, QPainter, QPen, QPixmap,
     QTextCharFormat, QTextCursor,
@@ -264,6 +265,10 @@ class VProofPanel(QWidget):
         self._btn_save.clicked.connect(self._save_page_text)
         self._btn_ok.clicked.connect(self._mark_page_ok)
 
+        QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_page_text)
+        QShortcut(QKeySequence("PageUp"), self, activated=self._prev_page)
+        QShortcut(QKeySequence("PageDown"), self, activated=self._next_page)
+
     def _build_char_list(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -289,6 +294,9 @@ class VProofPanel(QWidget):
         self._char_list.setIconSize(QSize(CHAR_LIST_THUMB, CHAR_LIST_THUMB))
         self._char_list.setSpacing(2)
         self._char_list.itemClicked.connect(self._on_char_clicked)
+        self._char_list.currentItemChanged.connect(
+            lambda cur, _prev: self._on_char_clicked(cur) if cur else None
+        )
         layout.addWidget(self._char_list)
         return box
 
@@ -368,6 +376,7 @@ class VProofPanel(QWidget):
 
         self._text_edit = QPlainTextEdit()
         self._text_edit.setStyleSheet("font-size:16px; padding:8px;")
+        self._text_edit.document().contentsChanged.connect(self._on_text_changed)
         layout.addWidget(self._text_edit)
 
         self._status_lbl = QLabel("")
@@ -451,6 +460,7 @@ class VProofPanel(QWidget):
         self._text_edit.setPlainText(flat_text)
         self._updating = False
         self._status_lbl.setText("")
+        self._status_lbl.setStyleSheet("")
 
     # ─────────────────── 单字列表点击 ───────────────────────
 
@@ -478,16 +488,23 @@ class VProofPanel(QWidget):
 
     def _highlight_char_in_text(self, char: str) -> None:
         doc = self._text_edit.document()
+        # 先清除全文格式
+        clear_cur = QTextCursor(doc)
+        clear_cur.select(QTextCursor.SelectionType.Document)
+        clear_cur.setCharFormat(QTextCharFormat())
+        # 高亮全部出现位置
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#e3f0ff"))
+        fmt.setForeground(QColor("#1a73e8"))
+        first_cursor: Optional[QTextCursor] = None
         cursor = doc.find(char)
-        if not cursor.isNull():
-            fmt = QTextCharFormat()
-            fmt.setBackground(QColor("#e3f0ff"))
-            fmt.setForeground(QColor("#1a73e8"))
-            clear = self._text_edit.textCursor()
-            clear.select(QTextCursor.SelectionType.Document)
-            clear.setCharFormat(QTextCharFormat())
+        while not cursor.isNull():
             cursor.setCharFormat(fmt)
-            self._text_edit.setTextCursor(cursor)
+            if first_cursor is None:
+                first_cursor = QTextCursor(cursor)
+            cursor = doc.find(char, cursor)
+        if first_cursor is not None:
+            self._text_edit.setTextCursor(first_cursor)
             self._text_edit.ensureCursorVisible()
 
     def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
@@ -527,6 +544,11 @@ class VProofPanel(QWidget):
 
     # ─────────────────── 保存 ───────────────────────────────
 
+    def _on_text_changed(self) -> None:
+        if not self._updating:
+            self._status_lbl.setText("\u25cf \u672a\u4fdd\u5b58")
+            self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+
     def _save_page_text(self) -> None:
         if not self._pages:
             return
@@ -551,7 +573,10 @@ class VProofPanel(QWidget):
                 idx += 1
             idx += 1  # 跳过 block 末尾空行
         self.proof_saved.emit()
-        self._status_lbl.setText("已保存" if changed else "无变更")
+        self._status_lbl.setText("✓ 已保存" if changed else "无变更")
+        self._status_lbl.setStyleSheet(
+            "color: #4CAF50; font-size: 12px;" if changed else ""
+        )
         if changed:
             self._char_svc.build(self._pages)
             self._rebuild_char_list()
