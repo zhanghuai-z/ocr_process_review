@@ -720,6 +720,41 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_normalizes_proof_geometry():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class LooseLineEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="甲乙", confidence=0.96, bbox=BBox(10, 44, 160, 40))]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((120, 220, 3), 255, dtype=np.uint8)
+        cv2.rectangle(img, (16, 18), (204, 30), (0, 0, 0), -1)
+        cv2.rectangle(img, (18, 68), (196, 82), (0, 0, 0), -1)
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 220, 120))
+        page = Page(image_path=img_path, width=220, height=120, blocks=[block])
+        result = OcrPipeline(engine=LooseLineEngine()).process_project(
+            OcrProject(name="ProofNormalize", pages=[page])
+        )
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert abs(line.bbox.y - 67) <= 3
+        assert line.bbox.h <= 18
+        assert len(line.chars) == 2
+    finally:
+        os.unlink(img_path)
+
+
 def test_ocr_pipeline_reports_real_page_progress():
     import tempfile
     import cv2
@@ -887,6 +922,55 @@ def test_workflow_controller_emits_ocr_progress_and_navigation():
         workflow_module.create_engine = original_create_engine
 
     print("test_workflow_controller_emits_ocr_progress_and_navigation PASSED")
+
+
+def test_workflow_controller_normalizes_loaded_project_geometry():
+    import tempfile
+    import cv2
+    import numpy as np
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file, \
+            tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
+        db_path = db_file.name
+        img_path = img_file.name
+
+    try:
+        img = np.full((120, 220, 3), 255, dtype=np.uint8)
+        cv2.rectangle(img, (16, 18), (204, 30), (0, 0, 0), -1)
+        cv2.rectangle(img, (18, 68), (196, 82), (0, 0, 0), -1)
+        cv2.imwrite(img_path, img)
+
+        page = Page(
+            image_path=img_path,
+            width=220,
+            height=120,
+            blocks=[Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(0, 0, 220, 120),
+                lines=[Line(text="甲乙", confidence=0.95, bbox=BBox(10, 44, 160, 40))],
+            )],
+        )
+        project = OcrProject(name="LoadedProof", pages=[page], db_path=db_path)
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+
+        controller = WorkflowController()
+        try:
+            assert controller.open_project(db_path) is True
+            loaded_line = controller.project.pages[0].blocks[0].lines[0]
+            assert abs(loaded_line.bbox.y - 67) <= 3
+            assert loaded_line.bbox.h <= 18
+            assert len(loaded_line.chars) == 2
+        finally:
+            controller.close()
+    finally:
+        os.unlink(db_path)
+        os.unlink(img_path)
 
 
 # =====================================================================
@@ -1477,10 +1561,12 @@ if __name__ == "__main__":
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
+    test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_emits_ocr_progress_and_navigation()
+    test_workflow_controller_normalizes_loaded_project_geometry()
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()

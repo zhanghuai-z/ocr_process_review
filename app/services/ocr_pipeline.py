@@ -17,7 +17,6 @@ from typing import Callable, List, Optional, Protocol
 import cv2
 import numpy as np
 
-from app.core.char_bbox_utils import ensure_line_char_bboxes, refine_line_bbox
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
@@ -25,6 +24,7 @@ from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page, ProofStatus,
 )
 from app.core.logging import get_logger
+from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
 
@@ -63,6 +63,7 @@ class OcrPipeline:
             engine: OcrEngine 实现。如果为 None，使用 FakeOcrEngine。
         """
         self._engine = engine or FakeOcrEngine()
+        self._proof_crop_service = ProofCropService()
 
     def close(self) -> None:
         engine = self._engine
@@ -136,9 +137,10 @@ class OcrPipeline:
                         current_block=0,
                         total_blocks=0,
                         completed_pages=page_idx + 1,
-                        message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
+                            message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
                     ))
 
+                self._proof_crop_service.normalize_pages([page])
                 result.pages.append(page)
         finally:
             self.close()
@@ -159,6 +161,7 @@ class OcrPipeline:
         page = Page(image_path=page_image_path, width=0, height=0)
         lines = self._process_block(img, block, page, 0)
         block.lines = lines
+        self._proof_crop_service.normalize_pages([page])
         return block
 
     def _process_block(
@@ -211,7 +214,6 @@ class OcrPipeline:
                 line.bbox,
                 source_space=bbox_space,
             )
-            line.bbox = refine_line_bbox(line.bbox, img)
             for char in line.chars:
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
@@ -228,6 +230,5 @@ class OcrPipeline:
                 line.ocr_text = line.text
             if not line.original_text:
                 line.original_text = line.text
-            ensure_line_char_bboxes(line, page_image=img)
 
         return lines
