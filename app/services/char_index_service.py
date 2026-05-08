@@ -4,6 +4,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import DefaultDict, Optional
 
+import cv2
+
 from app.core.char_bbox_utils import ensure_line_char_bboxes
 from app.models import BBox, Line, OcrProject, Page
 
@@ -42,11 +44,13 @@ class CharIndexService:
         self._frequency.clear()
 
         for page_idx, page in enumerate(pages):
+            page_image = cv2.imread(page.display_image_path, cv2.IMREAD_COLOR)
             for block in page.text_blocks:
                 for line_idx, line in enumerate(block.lines):
                     for entry in self._iter_line_entries(
                         page_idx=page_idx,
                         page=page,
+                        page_image=page_image,
                         block_order=block.order,
                         line_idx=line_idx,
                         line=line,
@@ -80,11 +84,12 @@ class CharIndexService:
         self,
         page_idx: int,
         page: Page,
+        page_image,
         block_order: int,
         line_idx: int,
         line: Line,
     ) -> list[CharEntry]:
-        ensure_line_char_bboxes(line)
+        ensure_line_char_bboxes(line, page_image=page_image)
         if line.chars:
             entries = []
             for char_idx, char in enumerate(line.chars):

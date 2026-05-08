@@ -131,12 +131,16 @@ def test_models():
 # =====================================================================
 
 def test_bbox_tools():
+    import cv2
+    import numpy as np
+
     from app.core.bbox_utils import (
         bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
     )
     from app.core.char_bbox_utils import (
         LINE_DIRECTION_HORIZONTAL, LINE_DIRECTION_VERTICAL,
-        ensure_line_char_bboxes, infer_line_direction, split_line_bbox_into_char_bboxes,
+        ensure_line_char_bboxes, infer_line_direction, refine_line_char_bboxes,
+        split_line_bbox_into_char_bboxes,
     )
     from app.core.coordinate_seam import (
         BBOX_SPACE_CROP, BBOX_SPACE_PAGE, CropCoordinateSeam,
@@ -197,6 +201,29 @@ def test_bbox_tools():
     ensure_line_char_bboxes(line)
     assert len(line.chars) == 4
     assert line.chars[1].bbox == BBox(10, 60, 24, 40)
+
+    img = np.full((100, 180, 3), 255, dtype=np.uint8)
+    glyph_boxes = [
+        BBox(16, 34, 12, 20),
+        BBox(43, 34, 24, 20),
+        BBox(84, 34, 8, 20),
+        BBox(108, 34, 28, 20),
+    ]
+    for bb in glyph_boxes:
+        cv2.rectangle(img, (bb.x, bb.y), (bb.x2, bb.y2), (0, 0, 0), -1)
+
+    refined = refine_line_char_bboxes(BBox(10, 28, 132, 32), "甲乙丙丁", img)
+    for got, expected in zip(refined, glyph_boxes):
+        assert abs(got.x - expected.x) <= 3
+        assert abs(got.w - expected.w) <= 4
+        assert abs(got.y - expected.y) <= 3
+        assert abs(got.h - expected.h) <= 4
+
+    line = Line(text="甲乙丙丁", confidence=0.95, bbox=BBox(10, 28, 132, 32))
+    ensure_line_char_bboxes(line, page_image=img)
+    for got, expected in zip(line.chars, glyph_boxes):
+        assert abs(got.bbox.x - expected.x) <= 3
+        assert abs(got.bbox.w - expected.w) <= 4
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
@@ -1038,26 +1065,42 @@ def test_char_index_service_synthesizes_vertical_char_boxes():
 
 
 def test_char_index_service_legacy_build_contract():
+    import tempfile
+
+    import cv2
+    import numpy as np
+
     from app.models import BBox, Block, BlockType, Line, Page
     from app.services.char_index_service import CharIndexService
 
-    line = Line(text="甲乙", confidence=0.9, bbox=BBox(12, 30, 24, 80))
-    page = Page(
-        image_path="/tmp/legacy-page.png",
-        width=200,
-        height=240,
-        page_number=3,
-        blocks=[Block(block_type=BlockType.TEXT, order=1, bbox=BBox(10, 20, 40, 100), lines=[line])],
-    )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        image = np.full((160, 160, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (14, 36), (27, 74), (0, 0, 0), -1)
+        cv2.rectangle(image, (40, 36), (70, 74), (0, 0, 0), -1)
+        cv2.imwrite(page_path, image)
 
-    service = CharIndexService().build([page])
-    entry = service.first_entry("甲")
+        line = Line(text="甲乙", confidence=0.9, bbox=BBox(12, 30, 80, 50))
+        page = Page(
+            image_path=page_path,
+            width=160,
+            height=160,
+            page_number=3,
+            blocks=[Block(block_type=BlockType.TEXT, order=1, bbox=BBox(10, 20, 90, 70), lines=[line])],
+        )
 
-    assert entry is not None
-    assert entry.page_path == page.display_image_path
-    assert entry.page_number == 3
-    assert entry.line is line
-    assert entry.bbox == BBox(12, 30, 24, 40)
+        service = CharIndexService().build([page])
+        entry = service.first_entry("甲")
+
+        assert entry is not None
+        assert entry.page_path == page.display_image_path
+        assert entry.page_number == 3
+        assert entry.line is line
+        assert abs(entry.bbox.x - 14) <= 3
+        assert abs(entry.bbox.w - 13) <= 4
+    finally:
+        os.unlink(page_path)
 
     print("test_char_index_service_legacy_build_contract PASSED")
 
