@@ -134,6 +134,9 @@ def test_bbox_tools():
     from app.core.bbox_utils import (
         bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
     )
+    from app.core.coordinate_seam import (
+        BBOX_SPACE_CROP, BBOX_SPACE_PAGE, CropCoordinateSeam,
+    )
     from app.models import BBox
 
     # from_dict / to_dict round-trip
@@ -166,8 +169,14 @@ def test_bbox_tools():
         crop_h=40,
         page_w=400,
         page_h=300,
+        source_space=BBOX_SPACE_CROP,
     )
     assert page_bbox == BBox(110, 55, 40, 10)
+
+    seam = CropCoordinateSeam.from_page_bbox(BBox(100, 50, 120, 80), page_w=400, page_h=300)
+    assert seam.to_page_bbox(BBox(12, 8, 40, 12), source_space=BBOX_SPACE_CROP) == BBox(112, 58, 40, 12)
+    assert seam.to_page_bbox(BBox(120, 70, 40, 12), source_space=BBOX_SPACE_PAGE) == BBox(120, 70, 40, 12)
+    assert seam.to_crop_bbox(BBox(120, 70, 40, 12)) == BBox(20, 20, 40, 12)
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
@@ -582,6 +591,8 @@ def test_ocr_pipeline_keeps_page_relative_boxes():
     from app.services.ocr_pipeline import OcrPipeline
 
     class PageCoordEngine:
+        bbox_space = "page"
+
         def recognize(self, image_bgr, context):
             return [Line(text="整页坐标", confidence=0.92, bbox=BBox(120, 70, 80, 18))]
 
@@ -611,6 +622,8 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
     from app.services.ocr_pipeline import OcrPipeline
 
     class CropCoordEngine:
+        bbox_space = "crop"
+
         def recognize(self, image_bgr, context):
             return [Line(text="局部坐标", confidence=0.92, bbox=BBox(20, 10, 80, 18))]
 
@@ -625,6 +638,37 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         project = OcrProject(name="CropCoords", pages=[page])
 
         result = OcrPipeline(engine=CropCoordEngine()).process_project(project)
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert line.bbox == BBox(120, 70, 80, 18)
+    finally:
+        os.unlink(img_path)
+
+
+def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class LargeCropPageCoordEngine:
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="整页坐标", confidence=0.95, bbox=BBox(120, 70, 80, 18))]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((320, 480, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 300, 200))
+        page = Page(image_path=img_path, width=480, height=320, blocks=[block])
+        project = OcrProject(name="NoDoubleShift", pages=[page])
+
+        result = OcrPipeline(engine=LargeCropPageCoordEngine()).process_project(project)
         line = result.pages[0].blocks[0].lines[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
@@ -726,8 +770,232 @@ def test_import_service_sequential_page_numbers():
     print("test_import_service_sequential_page_numbers PASSED")
 
 
+def test_proof_state_bus():
+    from app.core.proof_state_bus import (
+        TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus,
+    )
+
+    bus = get_proof_state_bus()
+    bus.clear()
+    events = []
+
+    unsubscribe = bus.subscribe(TOPIC_LINE_PROOF_CHANGED, events.append)
+    bus.publish(TOPIC_LINE_PROOF_CHANGED, {"line_id": 7, "status": "ok"})
+
+    assert events == [{"line_id": 7, "status": "ok"}]
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == 1
+
+    unsubscribe()
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == 0
+
+    bus.clear()
+    print("test_proof_state_bus PASSED")
+
+
+def test_char_index_service():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    page = Page(image_path="/tmp/page.png", width=400, height=300)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            order=3,
+            bbox=BBox(0, 0, 100, 20),
+            lines=[
+                Line(
+                    text="甲乙",
+                    confidence=0.9,
+                    bbox=BBox(10, 20, 100, 18),
+                    chars=[
+                        Char(char="甲", confidence=0.98, bbox=BBox(10, 20, 20, 18)),
+                        Char(char="乙", confidence=0.97, bbox=BBox(30, 20, 18, 18)),
+                    ],
+                ),
+                Line(text="乙丙", confidence=0.75, bbox=BBox(10, 50, 100, 18)),
+            ],
+        )
+    ]
+    project = OcrProject(name="char-index", pages=[page])
+
+    service = CharIndexService().build_index(project)
+    yi_entries = service.query("乙")
+
+    assert len(yi_entries) == 2
+    assert yi_entries[0].page_idx == 0
+    assert yi_entries[0].block_order == 3
+    assert yi_entries[0].bbox == BBox(30, 20, 18, 18)
+    assert yi_entries[1].char_idx == 0
+    assert yi_entries[1].bbox == BBox(10, 50, 100, 18)
+    assert service.char_frequency() == [("乙", 2), ("丙", 1), ("甲", 1)]
+
+    print("test_char_index_service PASSED")
+
+
+def test_page_image_cache():
+    import tempfile
+    import cv2
+    import numpy as np
+
+    from app.core.coordinate_seam import BBOX_SPACE_CROP, CropCoordinateSeam
+    from app.core.page_image_cache import PageImageCache
+    from app.models import BBox
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = os.path.join(tmpdir, "p1.png")
+        second = os.path.join(tmpdir, "p2.png")
+        third = os.path.join(tmpdir, "p3.png")
+
+        cv2.imwrite(first, np.full((20, 30, 3), 40, dtype=np.uint8))
+        cv2.imwrite(second, np.full((20, 30, 3), 80, dtype=np.uint8))
+        cv2.imwrite(third, np.full((20, 30, 3), 120, dtype=np.uint8))
+
+        cache = PageImageCache(max_pages=2)
+        img1 = cache.get_page_image(first)
+        img1_again = cache.get_page_image(first)
+        crop = cache.get_bbox_crop(first, BBox(5, 6, 10, 8))
+        seam = CropCoordinateSeam.from_page_bbox(BBox(10, 4, 15, 10), page_w=30, page_h=20)
+        seam_crop = cache.get_bbox_crop(
+            first,
+            BBox(3, 2, 4, 5),
+            source_space=BBOX_SPACE_CROP,
+            seam=seam,
+        )
+
+        assert img1.shape == (20, 30, 3)
+        assert img1_again is img1
+        assert crop.shape == (8, 10, 3)
+        assert seam_crop.shape == (5, 4, 3)
+
+        cache.get_page_image(second)
+        cache.get_page_image(third)
+        assert cache.cached_paths() == [second, third]
+
+    print("test_page_image_cache PASSED")
+
+
+def test_proof_stats_service():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.services.proof_stats_service import ProofStatsService
+
+    bb = BBox(0, 0, 100, 20)
+    page = Page(image_path="/tmp/proof.png", width=400, height=300)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=bb,
+            lines=[
+                Line(text="确认", confidence=0.9, bbox=bb, proof_status=ProofStatus.OK),
+                Line(text="修改", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED),
+                Line(
+                    text="疑点", confidence=0.6, bbox=bb,
+                    proof_status=ProofStatus.UNCHECKED, review_flags=["low_confidence"],
+                ),
+                Line(text="待处理", confidence=0.9, bbox=bb, proof_status=ProofStatus.UNCHECKED),
+            ],
+        )
+    ]
+
+    stats = ProofStatsService().summarize(OcrProject(name="proof-stats", pages=[page]))
+
+    assert stats.total_lines == 4
+    assert stats.confirmed_lines == 1
+    assert stats.modified_lines == 1
+    assert stats.flagged_lines == 1
+    assert stats.pending_lines == 1
+    assert stats.to_dict()["flagged_lines"] == 1
+
+    print("test_proof_stats_service PASSED")
+
+
+def test_api_model_profile_helpers():
+    from app.ui.widgets.api_settings_dialog import (
+        get_api_model_profile_options,
+        get_api_model_profile_url,
+        match_api_model_profile_from_url,
+    )
+
+    options = get_api_model_profile_options()
+    assert [label for _, label in options] == [
+        "PP-OCRv5",
+        "PP-StructureV3",
+        "PaddleOCR-VL",
+        "PaddleOCR-VL-1.5",
+    ]
+    assert get_api_model_profile_url("pp-ocrv5").endswith("/ocr")
+    assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
+    assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
+    assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
+
+    print("test_api_model_profile_helpers PASSED")
+
+
+def test_app_config_tracks_api_model_profile():
+    from app.core.app_config import AppConfig, get_config, update_config
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="paddleocr-vl-1.5",
+        api_url="https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+        api_token="demo",
+        api_timeout=12,
+        api_layout_model_name="",
+    )
+    current = get_config()
+    assert current["api_model_profile"] == "paddleocr-vl-1.5"
+    assert current["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing"
+    assert current["api_timeout"] == 12
+    assert current["api_token"] == "demo"
+    assert current["api_layout_model_name"] == ""
+    cfg.reset_to_defaults()
+
+    print("test_app_config_tracks_api_model_profile PASSED")
+
+
+def test_api_settings_dialog_syncs_model_and_url():
+    from PySide6.QtWidgets import QApplication
+
+    from app.core.app_config import AppConfig, update_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-structurev3",
+        api_url="https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
+        api_token="",
+        api_timeout=30,
+        api_layout_model_name="",
+    )
+
+    dialog = ApiSettingsDialog()
+    assert dialog._api_model_combo.currentData() == "pp-structurev3"
+    assert dialog._url_edit.text() == "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing"
+
+    index = dialog._api_model_combo.findData("pp-ocrv5")
+    dialog._api_model_combo.setCurrentIndex(index)
+    assert dialog._url_edit.text() == "https://n6z9feddjca4l7b5.aistudio-app.com/ocr"
+
+    dialog._url_edit.setText("https://example.com/custom-layout")
+    dialog._sync_model_from_url()
+    assert dialog._api_model_combo.currentIndex() == -1
+
+    dialog._url_edit.setText("https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing")
+    dialog._sync_model_from_url()
+    assert dialog._api_model_combo.currentData() == "paddleocr-vl"
+
+    cfg.reset_to_defaults()
+
+    print("test_api_settings_dialog_syncs_model_and_url PASSED")
+
+
 def _get_qapp():
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
@@ -890,6 +1158,7 @@ if __name__ == "__main__":
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
+    test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()

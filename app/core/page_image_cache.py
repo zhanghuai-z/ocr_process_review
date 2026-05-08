@@ -4,8 +4,9 @@
     from app.core.page_image_cache import PageImageCache
 
     cache = PageImageCache.instance()
-    img_bgr = cache.get_image(page_path)          # np.ndarray | None
-    pix = cache.get_char_crop(page_path, bbox, 56) # QPixmap | None
+    img_bgr = cache.get_page_image(page_path)        # np.ndarray | None
+    crop = cache.get_bbox_crop(page_path, bbox)       # np.ndarray | None
+    pix = cache.get_char_crop(page_path, bbox, 56)    # QPixmap | None
 """
 from __future__ import annotations
 
@@ -16,20 +17,22 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from app.core.coordinate_seam import BBOX_SPACE_PAGE, BBoxSpace, CropCoordinateSeam
+from app.models import BBox
+
 logger = logging.getLogger(__name__)
 
 
 class PageImageCache:
-    """单例 LRU 页面图像缓存。
-
-    默认最多缓存 8 张页面的 BGR ndarray；超出则淘汰最旧的。
-    """
+    """单例 LRU 页面图像缓存。"""
 
     _instance: "PageImageCache | None" = None
 
     def __init__(self, max_pages: int = 8) -> None:
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
         self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
-        self._max = max_pages
+        self._max_pages = max_pages
 
     # ------------------------------------------------------------------ 单例
 
@@ -44,59 +47,90 @@ class PageImageCache:
         """测试用：重置单例并清空缓存。"""
         cls._instance = None
 
-    # ------------------------------------------------------------------ API
+    # ------------------------------------------------------------------ 基础图像
+
+    def get_page_image(self, page_path: str) -> Optional[np.ndarray]:
+        """返回 BGR ndarray，失败时返回 None。"""
+        if not page_path:
+            return None
+        cached = self._cache.get(page_path)
+        if cached is not None:
+            self._cache.move_to_end(page_path)
+            return cached
+
+        img = cv2.imread(page_path, cv2.IMREAD_COLOR)
+        if img is None:
+            logger.warning("PageImageCache: cannot read %s", page_path)
+            return None
+
+        self._cache[page_path] = img
+        self._cache.move_to_end(page_path)
+        if len(self._cache) > self._max_pages:
+            self._cache.popitem(last=False)
+        return img
 
     def get_image(self, path: str) -> Optional[np.ndarray]:
-        """返回 BGR ndarray，失败时返回 None。"""
-        if not path:
+        """旧接口别名。"""
+        return self.get_page_image(path)
+
+    def get_bbox_crop(
+        self,
+        page_path: str,
+        bbox: BBox,
+        *,
+        source_space: BBoxSpace = BBOX_SPACE_PAGE,
+        seam: CropCoordinateSeam | None = None,
+    ) -> Optional[np.ndarray]:
+        """返回 bbox 对应的 BGR 裁图。
+
+        若提供 seam，则按 seam 将 crop-space bbox 回写到 page-space。
+        """
+        image = self.get_page_image(page_path)
+        if image is None:
             return None
-        if path in self._cache:
-            self._cache.move_to_end(path)
-            return self._cache[path]
-        img = cv2.imread(path)
-        if img is None:
-            logger.warning("PageImageCache: cannot read %s", path)
+
+        if seam is not None:
+            clamped = seam.to_page_bbox(bbox, source_space=source_space)
+        else:
+            clamped = bbox.normalize().clamp(image.shape[1], image.shape[0])
+
+        if clamped.w <= 0 or clamped.h <= 0:
             return None
-        if len(self._cache) >= self._max:
-            self._cache.popitem(last=False)
-        self._cache[path] = img
-        return img
+        return image[clamped.y:clamped.y2, clamped.x:clamped.x2].copy()
 
     def get_char_crop(
         self,
         page_path: str,
-        bbox,  # app.models.BBox
+        bbox: BBox,
         size: int = 56,
         pad: int = 2,
     ):
-        """裁剪字符区域并缩放为 QPixmap（正方形）。
-
-        返回 QPixmap 或 None（需要 Qt，仅在 Qt 初始化后调用）。
-        """
-        # 延迟导入避免在纯 Python 测试环境中引入 Qt
+        """裁剪字符区域并缩放为 QPixmap（正方形）。"""
         try:
             from PySide6.QtCore import Qt
             from PySide6.QtGui import QImage, QPixmap
         except ImportError:
             return None
 
-        img = self.get_image(page_path)
+        img = self.get_page_image(page_path)
         if img is None:
             return None
-        H, W = img.shape[:2]
+        h, w = img.shape[:2]
         x1 = max(0, bbox.x - pad)
         y1 = max(0, bbox.y - pad)
-        x2 = min(W, bbox.x + bbox.w + pad)
-        y2 = min(H, bbox.y + bbox.h + pad)
+        x2 = min(w, bbox.x + bbox.w + pad)
+        y2 = min(h, bbox.y + bbox.h + pad)
         if x2 <= x1 or y2 <= y1:
             return None
+
         crop = np.ascontiguousarray(img[y1:y2, x1:x2])
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+        ch, cw = rgb.shape[:2]
+        qimg = QImage(rgb.tobytes(), cw, ch, cw * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
         return pix.scaled(
-            size, size,
+            size,
+            size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -104,21 +138,24 @@ class PageImageCache:
     def get_line_crop(
         self,
         page_path: str,
-        bbox,  # app.models.BBox
+        bbox: BBox,
         pad_y: int = 6,
     ) -> Optional[np.ndarray]:
         """裁剪整行 BGR ndarray（含上下额外像素）。"""
-        img = self.get_image(page_path)
+        img = self.get_page_image(page_path)
         if img is None:
             return None
-        H, W = img.shape[:2]
+        h, w = img.shape[:2]
         x1 = max(0, bbox.x)
         y1 = max(0, bbox.y - pad_y)
-        x2 = min(W, bbox.x + bbox.w)
-        y2 = min(H, bbox.y + bbox.h + pad_y)
+        x2 = min(w, bbox.x + bbox.w)
+        y2 = min(h, bbox.y + bbox.h + pad_y)
         if x2 <= x1 or y2 <= y1:
             return None
         return img[y1:y2, x1:x2].copy()
+
+    def cached_paths(self) -> list[str]:
+        return list(self._cache.keys())
 
     def invalidate(self, path: str) -> None:
         """手动淘汰某页缓存（页面重新识别后调用）。"""

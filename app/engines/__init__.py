@@ -7,6 +7,9 @@ import numpy as np
 
 from app.models import Block, BlockType, BBox, Line
 
+OCR_BBOX_SPACE_CROP = "crop"
+OCR_BBOX_SPACE_PAGE = "page"
+
 
 @dataclass
 class OcrContext:
@@ -16,6 +19,9 @@ class OcrContext:
     block_id: Optional[int] = None
     block_type: BlockType = BlockType.TEXT
     language: str = "ch"
+    page_bbox: Optional[BBox] = None
+    crop_bbox: Optional[BBox] = None
+    expected_bbox_space: str = OCR_BBOX_SPACE_CROP
 
 
 class OcrEngine(Protocol):
@@ -36,6 +42,13 @@ class OcrEngine(Protocol):
             坐标是相对 image_bgr 的（调用方负责转换到整页坐标）。
         """
         ...
+
+
+def get_engine_bbox_space(engine: object) -> str:
+    space = getattr(engine, "bbox_space", OCR_BBOX_SPACE_CROP)
+    if space in (OCR_BBOX_SPACE_CROP, OCR_BBOX_SPACE_PAGE):
+        return space
+    return OCR_BBOX_SPACE_CROP
 
 
 class LayoutEngine(Protocol):

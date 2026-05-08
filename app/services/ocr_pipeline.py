@@ -17,8 +17,8 @@ from typing import Callable, List, Optional, Protocol
 import cv2
 import numpy as np
 
-from app.core.bbox_utils import project_line_bbox
-from app.engines import OcrContext
+from app.core.coordinate_seam import CropCoordinateSeam
+from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page, ProofStatus,
@@ -162,29 +162,33 @@ class OcrPipeline:
         if x2 <= x1 or y2 <= y1:
             return []
 
-        crop = img[y1:y2, x1:x2]
+        seam = CropCoordinateSeam.from_page_bbox(
+            bb,
+            page_w=img.shape[1],
+            page_h=img.shape[0],
+        )
+        crop = seam.crop_image(img)
         if crop.size == 0:
             return []
 
+        bbox_space = get_engine_bbox_space(self._engine)
         context = OcrContext(
             page_image_path=page.display_image_path,
             page_number=page.page_number,
             block_id=block.id,
             block_type=block.block_type,
+            page_bbox=bb,
+            crop_bbox=seam.crop_bbox,
+            expected_bbox_space=bbox_space,
         )
 
         lines = self._engine.recognize(crop, context)
 
         # 转换 bbox 从 crop 坐标到 page 坐标
         for line in lines:
-            line.bbox = project_line_bbox(
+            line.bbox = seam.to_page_bbox(
                 line.bbox,
-                crop_origin_x=x1,
-                crop_origin_y=y1,
-                crop_w=crop.shape[1],
-                crop_h=crop.shape[0],
-                page_w=img.shape[1],
-                page_h=img.shape[0],
+                source_space=bbox_space,
             )
             # 设置 proof status
             if line.confidence < AUTO_FLAG_THRESHOLD:
