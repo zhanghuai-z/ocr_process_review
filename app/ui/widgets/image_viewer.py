@@ -3,12 +3,14 @@
 模式：
 - view 模式（默认）：ScrollHandDrag，鼠标拖拽=平移
 - edit 模式：RubberBandDrag，BBox 可拖动；移动后发出 block_moved
+  - 编辑模式额外功能：选中框时出现 8 个缩放手柄（可拖拽四角/四边缩放）
+  - 右键长按拖拽 → 画出新矩形 → 发出 block_created(BBox)
 """
 from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QCursor
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
     QGraphicsScene, QGraphicsView,
@@ -44,6 +46,108 @@ BLOCK_COLORS: dict[BlockType, QColor] = {
 _LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)
 _LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)
 
+# ── 缩放手柄 ──────────────────────────────────────────────────
+
+_TL, _TM, _TR, _ML, _MR, _BL, _BM, _BR = range(8)
+
+_HANDLE_CURSORS = {
+    _TL: Qt.CursorShape.SizeFDiagCursor,
+    _TR: Qt.CursorShape.SizeBDiagCursor,
+    _BL: Qt.CursorShape.SizeBDiagCursor,
+    _BR: Qt.CursorShape.SizeFDiagCursor,
+    _TM: Qt.CursorShape.SizeVerCursor,
+    _BM: Qt.CursorShape.SizeVerCursor,
+    _ML: Qt.CursorShape.SizeHorCursor,
+    _MR: Qt.CursorShape.SizeHorCursor,
+}
+_HS = 7  # handle half-size in pixels
+
+
+class _ResizeHandle(QGraphicsRectItem):
+    """BBoxItem 的缩放手柄（8 个方向）。
+
+    作为 BBoxItem 的子 Item，坐标系为父 item 的本地坐标（原点=bbox左上角）。
+    拖拽时计算新 bbox 并更新父 item。
+    """
+
+    def __init__(self, pos: int, parent: "BBoxItem") -> None:
+        super().__init__(-_HS, -_HS, _HS * 2, _HS * 2, parent)
+        self._pos = pos
+        self._bbox_item = parent
+        pen = QPen(QColor("#1a73e8"), 1)
+        self.setPen(pen)
+        self.setBrush(QColor("#ffffff"))
+        self.setZValue(20)
+        self.setCursor(_HANDLE_CURSORS[pos])
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+        self._drag_start: Optional[QPointF] = None   # scene coords
+        self._orig_scene_rect: Optional[QRectF] = None
+
+    # ------------------------------------------------------------------
+
+    def update_position(self) -> None:
+        """把手柄移到父矩形对应的角/边中心（父本地坐标）。"""
+        r = self._bbox_item.rect()
+        cx = r.width() / 2
+        cy = r.height() / 2
+        p = self._pos
+        if   p == _TL: self.setPos(r.left(),  r.top())
+        elif p == _TM: self.setPos(cx,        r.top())
+        elif p == _TR: self.setPos(r.right(), r.top())
+        elif p == _ML: self.setPos(r.left(),  cy)
+        elif p == _MR: self.setPos(r.right(), cy)
+        elif p == _BL: self.setPos(r.left(),  r.bottom())
+        elif p == _BM: self.setPos(cx,        r.bottom())
+        elif p == _BR: self.setPos(r.right(), r.bottom())
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.scenePos()
+            # 记录父 item 在场景中的原始矩形
+            bi = self._bbox_item
+            sp = bi.scenePos()
+            r  = bi.rect()
+            self._orig_scene_rect = QRectF(
+                sp.x() + r.x(), sp.y() + r.y(), r.width(), r.height()
+            )
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_start is None or self._orig_scene_rect is None:
+            return
+        delta = event.scenePos() - self._drag_start
+        dx, dy = delta.x(), delta.y()
+        r = QRectF(self._orig_scene_rect)
+        p = self._pos
+        if p in (_TL, _TM, _TR): r.setTop(r.top()    + dy)
+        if p in (_BL, _BM, _BR): r.setBottom(r.bottom() + dy)
+        if p in (_TL, _ML, _BL): r.setLeft(r.left()   + dx)
+        if p in (_TR, _MR, _BR): r.setRight(r.right()  + dx)
+        r = r.normalized()
+        if r.width() < 8 or r.height() < 8:
+            return
+        # 更新父 item
+        bi = self._bbox_item
+        bi.prepareGeometryChange()
+        bi.setPos(r.topLeft())
+        bi.setRect(QRectF(0, 0, r.width(), r.height()))
+        for h in bi._handles:
+            h.update_position()
+        # 同步 block
+        if bi._block is not None:
+            bi._block.bbox = BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+            bi.signals.moved.emit(bi._block)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_start = None
+        self._orig_scene_rect = None
+        event.accept()
+
+
+# ── BBoxItem ──────────────────────────────────────────────────
 
 class _BBoxSignals(QObject):
     """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
@@ -51,7 +155,7 @@ class _BBoxSignals(QObject):
 
 
 class BBoxItem(QGraphicsRectItem):
-    """可选中、可拖动的包围盒矩形。
+    """可选中、可拖动、可缩放的包围盒矩形。
 
     坐标方案：item.rect() 始终为 QRectF(0,0,w,h)，位置由 item.setPos(x,y) 决定。
     sceneBoundingRect() 返回的就是 block.bbox 在场景中的真实位置。
@@ -65,10 +169,17 @@ class BBoxItem(QGraphicsRectItem):
         self._color = color
         self._block: Optional[Block] = None
         self.signals = _BBoxSignals()
+        self._handles: List[_ResizeHandle] = []
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
         self._update_tooltip()
+        # 初始创建 8 个手柄（隐藏状态）
+        for pos in range(8):
+            h = _ResizeHandle(pos, self)
+            h.setVisible(False)
+            h.update_position()
+            self._handles.append(h)
 
     def set_block(self, block: Block) -> None:
         self._block = block
@@ -79,6 +190,10 @@ class BBoxItem(QGraphicsRectItem):
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         else:
             self.unsetCursor()
+        # 只在选中且可编辑时显示手柄
+        show_handles = editable and self.isSelected()
+        for h in self._handles:
+            h.setVisible(show_handles)
 
     def _update_tooltip(self) -> None:
         r = self.sceneBoundingRect()
@@ -96,6 +211,12 @@ class BBoxItem(QGraphicsRectItem):
                 bb = self._block.bbox
                 self._block.bbox = BBox(int(r.x()), int(r.y()), bb.w, bb.h)
                 self.signals.moved.emit(self._block)
+        if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
+            # 选中时显示手柄，取消选中时隐藏
+            editable = bool(self.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            show = bool(value) and editable
+            for h in self._handles:
+                h.setVisible(show)
         return super().itemChange(change, value)
 
     def paint(self, painter: QPainter, option, widget=None):
@@ -109,8 +230,9 @@ class BBoxItem(QGraphicsRectItem):
 class ImageViewer(QGraphicsView):
     """通用图像查看组件。"""
 
-    block_clicked = Signal(object)
-    block_moved   = Signal(object)
+    block_clicked  = Signal(object)  # Block
+    block_moved    = Signal(object)  # Block
+    block_created  = Signal(object)  # BBox — 右键拖拽画出新矩形
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -121,6 +243,10 @@ class ImageViewer(QGraphicsView):
         self._block_items: List[Tuple[BBoxItem, Block]] = []
         self._edit_mode: bool = False
         self._highlight_item = None  # highlight_bbox 使用
+
+        # 右键拖拽画框状态
+        self._draw_start: Optional[QPointF] = None   # scene 坐标
+        self._draw_item: Optional[QGraphicsRectItem] = None
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -225,6 +351,19 @@ class ImageViewer(QGraphicsView):
             self.scale(factor, factor)
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton and self._edit_mode:
+            # 右键开始画新框
+            self._draw_start = self.mapToScene(event.pos())
+            pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
+            self._draw_item = QGraphicsRectItem(
+                QRectF(self._draw_start, self._draw_start)
+            )
+            self._draw_item.setPen(pen)
+            self._draw_item.setBrush(QColor(26, 115, 232, 30))
+            self._draw_item.setZValue(50)
+            self._scene.addItem(self._draw_item)
+            event.accept()
+            return
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self.mapToScene(event.pos())
@@ -232,6 +371,36 @@ class ImageViewer(QGraphicsView):
                 if item.sceneBoundingRect().contains(pos) and item.isSelected():
                     self.block_clicked.emit(block)
                     break
+
+    def mouseMoveEvent(self, event):
+        if self._draw_start is not None and self._draw_item is not None:
+            cur = self.mapToScene(event.pos())
+            self._draw_item.setRect(
+                QRectF(self._draw_start, cur).normalized()
+            )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton and self._draw_start is not None:
+            cur = self.mapToScene(event.pos())
+            rect = QRectF(self._draw_start, cur).normalized()
+            # 移除临时画框
+            if self._draw_item is not None:
+                self._scene.removeItem(self._draw_item)
+                self._draw_item = None
+            self._draw_start = None
+            # 最小尺寸过滤
+            if rect.width() >= 10 and rect.height() >= 10:
+                bbox = BBox(
+                    int(rect.x()), int(rect.y()),
+                    int(rect.width()), int(rect.height())
+                )
+                self.block_created.emit(bbox)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     # ------------------------------------------------------------------ private
 

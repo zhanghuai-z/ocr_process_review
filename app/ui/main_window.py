@@ -15,7 +15,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
-    QStatusBar, QVBoxLayout, QWidget,
+    QStatusBar, QVBoxLayout, QWidget, QFrame,
 )
 
 from app.controllers.workflow_controller import (
@@ -42,56 +42,93 @@ class StepButton(QPushButton):
         self.step = step
         self.setObjectName("stepBtn")
         self.setCheckable(True)
-        self.setMinimumWidth(140)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(32)
 
 
-class StepBar(QWidget):
-    """左侧垂直步骤导航。"""
-    step_clicked = Signal(int)
+# (label, target_step, active_on_steps)  — 布局+OCR 共用一个按钮
+_NAV_ITEMS = [
+    ("①  导入",      STEP_IMPORT, frozenset({STEP_IMPORT})),
+    ("②  版面+OCR",  STEP_LAYOUT, frozenset({STEP_LAYOUT, STEP_OCR})),
+    ("③  横向校对",  STEP_HPROOF, frozenset({STEP_HPROOF})),
+    ("④  纵向校对",  STEP_VPROOF, frozenset({STEP_VPROOF})),
+]
+
+
+class TopNavBar(QWidget):
+    """顶部水平导航：← → + 步骤按钮 + 项目名 + 导出按钮。"""
+    step_clicked   = Signal(int)
+    prev_clicked   = Signal()
+    next_clicked   = Signal()
+    export_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("sidebarBar")
-        self.setFixedWidth(168)
-        self._buttons: List[StepButton] = []
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 12, 10, 10)
+        self.setObjectName("headerBar")
+        self.setFixedHeight(46)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 12, 0)
         layout.setSpacing(4)
 
+        # 品牌 logo
         brand = QLabel("OCR 后处理")
         brand.setStyleSheet(
-            "color:#1a73e8; font-size:15px; font-weight:bold; padding:6px 8px 14px 8px;"
+            "color:#1a73e8; font-size:14px; font-weight:bold; margin-right:8px;"
         )
         layout.addWidget(brand)
 
-        steps = [
-            ("①  导入",       STEP_IMPORT),
-            ("②  版面分析",   STEP_LAYOUT),
-            ("③  OCR 识别",   STEP_OCR),
-            ("④  横向校对",   STEP_HPROOF),
-            ("⑤  纵向校对",   STEP_VPROOF),
-        ]
-        for label, step in steps:
-            btn = StepButton(label, step)
-            btn.clicked.connect(lambda _, s=step: self.step_clicked.emit(s))
+        # ← → 箭头
+        self._btn_prev = QPushButton("←")
+        self._btn_next = QPushButton("→")
+        for b in (self._btn_prev, self._btn_next):
+            b.setObjectName("ghostBtn")
+            b.setFixedSize(30, 30)
+        self._btn_prev.setToolTip("上一步")
+        self._btn_next.setToolTip("下一步")
+        self._btn_prev.clicked.connect(self.prev_clicked)
+        self._btn_next.clicked.connect(self.next_clicked)
+        layout.addWidget(self._btn_prev)
+        layout.addWidget(self._btn_next)
+
+        # 分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("color:#e3e8ef; margin:8px 6px;")
+        layout.addWidget(sep)
+
+        # 步骤按钮
+        self._buttons: List[StepButton] = []
+        for label, target_step, _active in _NAV_ITEMS:
+            btn = StepButton(label, target_step)
+            btn.setMinimumWidth(100)
+            btn.clicked.connect(lambda _, s=target_step: self.step_clicked.emit(s))
             self._buttons.append(btn)
             layout.addWidget(btn)
 
         layout.addStretch()
 
-        ver = QLabel("v0.2.0")
-        ver.setStyleSheet("color:#aaa; font-size:11px; padding:6px 8px;")
-        layout.addWidget(ver)
+        # 项目名
+        self._project_lbl = QLabel("（无项目）")
+        self._project_lbl.setStyleSheet("color:#555; font-size:13px; margin-right:8px;")
+        layout.addWidget(self._project_lbl)
+
+        # 导出按钮
+        self._btn_export = QPushButton("⤓ 导出")
+        self._btn_export.setObjectName("ghostBtn")
+        self._btn_export.clicked.connect(self.export_clicked)
+        layout.addWidget(self._btn_export)
 
     def set_active(self, step: int) -> None:
-        for btn in self._buttons:
-            btn.setChecked(btn.step == step)
+        for i, (_, _, active_set) in enumerate(_NAV_ITEMS):
+            self._buttons[i].setChecked(step in active_set)
 
     def set_enabled_up_to(self, max_step: int) -> None:
-        for btn in self._buttons:
-            can_enable = btn.step <= max_step
-            btn.setEnabled(can_enable)
+        for i, (_, target_step, _) in enumerate(_NAV_ITEMS):
+            self._buttons[i].setEnabled(target_step <= max_step)
+
+    def set_project_name(self, name: str) -> None:
+        self._project_lbl.setText(name)
 
 
 # ── 主窗口 ─────────────────────────────────────────────────────
@@ -100,13 +137,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._controller = WorkflowController()
+        self._current_step: int = STEP_IMPORT
 
         self.setWindowTitle("OCR 后处理")
         self.resize(1280, 800)
         self._build_ui()
         self._build_menu()
         self._connect_signals()
-        self._step_bar.set_enabled_up_to(self._controller.max_step)
+        self._top_nav.set_enabled_up_to(self._controller.max_step)
         self._go_to_step(STEP_IMPORT)
 
     # ── UI 构建 ────────────────────────────────────────────────
@@ -114,40 +152,17 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QHBoxLayout(central)
+        outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # 左侧：垂直步骤导航
-        self._step_bar = StepBar()
-        self._step_bar.step_clicked.connect(self._on_step_clicked)
-        outer.addWidget(self._step_bar)
-
-        # 右侧：顶部 header + stack
-        right = QWidget()
-        right_v = QVBoxLayout(right)
-        right_v.setContentsMargins(0, 0, 0, 0)
-        right_v.setSpacing(0)
-
-        header = QWidget()
-        header.setObjectName("headerBar")
-        header.setFixedHeight(52)
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(20, 0, 16, 0)
-
-        self._project_lbl = QLabel("（无项目）")
-        self._project_lbl.setStyleSheet("color:#222; font-size:14px; font-weight:500;")
-        h_layout.addWidget(self._project_lbl)
-
-        h_layout.addStretch()
-
-        btn_export = QPushButton("⤓ 导出")
-        btn_export.setToolTip("导出 TXT / XML / HTML")
-        btn_export.setObjectName("ghostBtn")
-        btn_export.clicked.connect(self._show_export_dialog)
-        h_layout.addWidget(btn_export)
-
-        right_v.addWidget(header)
+        # 顶部导航栏
+        self._top_nav = TopNavBar()
+        self._top_nav.step_clicked.connect(self._on_step_clicked)
+        self._top_nav.prev_clicked.connect(self._prev_step)
+        self._top_nav.next_clicked.connect(self._next_step)
+        self._top_nav.export_clicked.connect(self._show_export_dialog)
+        outer.addWidget(self._top_nav)
 
         # 中：QStackedWidget
         self._stack = QStackedWidget()
@@ -164,8 +179,7 @@ class MainWindow(QMainWindow):
         ):
             self._stack.addWidget(w)
 
-        right_v.addWidget(self._stack)
-        outer.addWidget(right, 1)
+        outer.addWidget(self._stack, 1)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -196,7 +210,7 @@ class MainWindow(QMainWindow):
         # ----- Controller 信号 -> UI -----
 
         self._controller.project_changed.connect(self._on_project_changed)
-        self._controller.step_enabled_changed.connect(self._step_bar.set_enabled_up_to)
+        self._controller.step_enabled_changed.connect(self._top_nav.set_enabled_up_to)
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
@@ -243,16 +257,24 @@ class MainWindow(QMainWindow):
     def _go_to_step(self, step: int) -> None:
         """直接跳转到步骤（不经过 controller 校验）。"""
         self._stack.setCurrentIndex(step)
-        self._step_bar.set_active(step)
+        self._top_nav.set_active(step)
+        self._current_step = step
 
     def _on_step_clicked(self, step: int) -> None:
         """用户点击步骤栏按钮 → 让 controller 判断是否允许跳转。"""
         self._controller.request_step(step)
 
+    def _prev_step(self) -> None:
+        if self._current_step > STEP_IMPORT:
+            self._controller.request_step(self._current_step - 1)
+
+    def _next_step(self) -> None:
+        self._controller.request_step(self._current_step + 1)
+
     # ── Controller 回调 ─────────────────────────────────────────
 
     def _on_project_changed(self, project: OcrProject) -> None:
-        self._project_lbl.setText(f"项目：{project.name}")
+        self._top_nav.set_project_name(f"项目：{project.name}")
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
         """版面分析完成，更新 UI 并恢复按钮。"""

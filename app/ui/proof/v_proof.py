@@ -414,6 +414,13 @@ class VProofPanel(QWidget):
         self._selected_char = char
         entries = self._char_svc.query(char)
         self._gallery_model.set_entries(entries)
+        # gallery 切字时强制滚回顶部并清空选中
+        self._gallery_view.clearSelection()
+        if entries:
+            self._gallery_view.scrollTo(
+                self._gallery_model.index(0, 0),
+                QAbstractItemView.ScrollHint.PositionAtTop,
+            )
         self._gallery_hdr.setText(
             f'"{char}"  共 {len(entries)} 处'
         )
@@ -486,33 +493,25 @@ class VProofPanel(QWidget):
             return
         page = self._pages[self._current_page_idx]
         flat = self._text_edit.toPlainText()
-        # 按位置映射回写各 line
-        changed = False
-        for line, ci, start, end in self._text_map:
-            if start >= len(flat):
-                break
-            new_char = flat[start:end]
-            # 逐行重建文本（当遇到行末换行符时提交）
-        # 简化：按行拆分重建
         lines_text = flat.split("\n")
-        all_lines = [ln for b in page.text_blocks for ln in b.lines]
-        # 过滤掉空 block 分隔行
-        text_lines = [t for t in lines_text if t != "" or True]
-        line_idx = 0
-        for line in all_lines:
-            if line_idx < len(lines_text):
-                new_text = lines_text[line_idx].rstrip()
-                if new_text != line.text:
-                    line.update_text(new_text)
-                    changed = True
-                    self._bus.publish(
-                        "line.proof_changed",
-                        page_id=page.id,
-                        line_id=line.id,
-                        status=line.proof_status.value,
-                    )
-            line_idx += 1
-            # 跳过 block 间的空行（每个 block 后有额外空行）
+        # 按 _build_text_map 的结构遍历：每行占一个 slot，每个 block 末尾占一个 slot
+        changed = False
+        idx = 0
+        for block in page.text_blocks:
+            for line in block.lines:
+                if idx < len(lines_text):
+                    new_text = lines_text[idx].rstrip()
+                    if new_text != line.text:
+                        line.update_text(new_text)
+                        changed = True
+                        self._bus.publish(
+                            "line.proof_changed",
+                            page_id=page.id,
+                            line_id=line.id,
+                            status=line.proof_status.value,
+                        )
+                idx += 1
+            idx += 1  # 跳过 block 末尾的空行分隔符
         self.proof_saved.emit()
         self._status_lbl.setText("已保存" if changed else "无变更")
         # 重建字符索引（文本改变后）
