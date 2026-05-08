@@ -1,12 +1,11 @@
 """版面分析面板：图像 + BBox 叠加可视化，块信息内嵌底部栏。"""
 from __future__ import annotations
 from typing import List, Optional
-import uuid
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from app.models import BBox, Block, BlockSource, BlockType, Page
@@ -34,14 +33,11 @@ class LayoutPanel(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # 标题行（含 ▶ 分析 按钮）
+        # 标题行（含 ▶ 分析 按钮 + 进度条）
         title_row = QHBoxLayout()
-        title_lbl = QLabel("② 版面分析")
-        title_lbl.setObjectName("pageTitle")
-        title_lbl.setStyleSheet("padding:12px;")
-        title_row.addWidget(title_lbl)
+        title_row.setContentsMargins(12, 6, 12, 0)
 
-        self._btn_run = QPushButton("▶ 分析")
+        self._btn_run = QPushButton("▶ 版面分析")
         self._btn_run.setToolTip("运行版面分析")
         self._btn_run.setEnabled(False)
         self._btn_run.setObjectName("ghostBtn")
@@ -49,7 +45,14 @@ class LayoutPanel(QWidget):
         self._btn_run.clicked.connect(self._request_analysis)
         title_row.addWidget(self._btn_run)
 
-        title_row.addStretch()
+        # 进度条（默认隐藏，分析期间显示不确定动画）
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)  # 不确定模式
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.hide()
+        title_row.addWidget(self._progress_bar, 1)
+
         self._status_lbl = QLabel("请先导入文件并运行版面分析")
         self._status_lbl.setObjectName("muted")
         title_row.addWidget(self._status_lbl)
@@ -78,7 +81,7 @@ class LayoutPanel(QWidget):
         splitter.setSizes([90, 9999])
         main_layout.addWidget(splitter)
 
-        # 底部属性栏（无按钮行；仅显示选中块的属性 + 删除/类型操作）
+        # 底部属性栏（Delete 键删除；类型操作分两组）
         bottom = QFrame()
         bottom.setObjectName("toolbar")
         bottom.setFixedHeight(46)
@@ -86,18 +89,25 @@ class LayoutPanel(QWidget):
         bl.setContentsMargins(12, 0, 12, 0)
         bl.setSpacing(8)
 
-        # ✕ 删除框
-        self._btn_delete = QPushButton("✕ 删除框")
-        self._btn_delete.setEnabled(False)
-        self._btn_delete.setObjectName("ghostBtn")
-        self._btn_delete.setMinimumHeight(30)
-        self._btn_delete.clicked.connect(self._delete_selected)
-        bl.addWidget(self._btn_delete)
+        # 新建框类型
+        bl.addWidget(QLabel("新建:"))
+        self._new_type_combo = QComboBox()
+        self._new_type_combo.setMinimumWidth(90)
+        for bt in BlockType:
+            self._new_type_combo.addItem(bt.value, bt)
+        bl.addWidget(self._new_type_combo)
 
-        # 类型下拉
+        sep0 = QFrame()
+        sep0.setFrameShape(QFrame.Shape.VLine)
+        sep0.setFrameShadow(QFrame.Shadow.Sunken)
+        sep0.setStyleSheet("color:#e3e8ef; margin:8px 4px;")
+        bl.addWidget(sep0)
+
+        # 选中块类型
+        bl.addWidget(QLabel("选中:"))
         self._type_combo = QComboBox()
         self._type_combo.setEnabled(False)
-        self._type_combo.setMinimumWidth(100)
+        self._type_combo.setMinimumWidth(90)
         for bt in BlockType:
             self._type_combo.addItem(bt.value, bt)
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
@@ -137,6 +147,7 @@ class LayoutPanel(QWidget):
 
     def show_analysis_result(self, pages: List[Page]) -> None:
         """版面分析完成后，更新显示（保持当前选中页）并自动触发 OCR 流程。"""
+        self._progress_bar.hide()
         self._pages = pages
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
@@ -146,7 +157,9 @@ class LayoutPanel(QWidget):
     # ------------------------------------------------------------------ private
 
     def _request_analysis(self) -> None:
-        pass  # 由主窗口连接到 LayoutAnalyzer Worker
+        """触发版面分析（由主窗口的 run_button.clicked 同时连接），显示进度条。"""
+        self._progress_bar.show()
+        self._status_lbl.setText("正在分析…")
 
     def _on_page_selected(self, idx: int) -> None:
         if 0 <= idx < len(self._pages):
@@ -162,7 +175,6 @@ class LayoutPanel(QWidget):
         if page.is_analyzed:
             self._viewer.show_blocks(page.blocks)
         self._selected_block = None
-        self._btn_delete.setEnabled(False)
         self._type_combo.setEnabled(False)
         self._prop_bbox.setText("")
         self._prop_conf.hide()
@@ -170,7 +182,6 @@ class LayoutPanel(QWidget):
     def _on_block_clicked(self, block: Block) -> None:
         self._selected_block = block
         bb = block.bbox
-        self._btn_delete.setEnabled(True)
         self._type_combo.setEnabled(True)
         # 同步类型下拉到当前块
         self._type_combo.blockSignals(True)
@@ -191,8 +202,9 @@ class LayoutPanel(QWidget):
         if not self._pages:
             return
         page = self._pages[self._current_page_idx]
+        bt = self._new_type_combo.currentData() or BlockType.TEXT
         new_block = Block(
-            block_type=BlockType.TEXT,
+            block_type=bt,
             bbox=bbox,
             source=BlockSource.MANUAL_DRAW,
         )
@@ -207,7 +219,6 @@ class LayoutPanel(QWidget):
         page.blocks = [b for b in page.blocks if b is not block]
         if self._selected_block is block:
             self._selected_block = None
-            self._btn_delete.setEnabled(False)
             self._type_combo.setEnabled(False)
             self._prop_bbox.setText("")
             self._prop_conf.hide()
