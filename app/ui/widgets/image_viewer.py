@@ -128,6 +128,7 @@ class ImageViewer(QGraphicsView):
         self._block_items: List[Tuple[BBoxItem, Block]] = []
         self._image_path: str = ""
         self._edit_mode: bool = False
+        self._highlight_item = None  # highlight_bbox 使用
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -179,6 +180,24 @@ class ImageViewer(QGraphicsView):
             self._scene.addItem(item)
             self._block_items.append((item, block))
         self._write_viewer_debug(blocks)
+
+    def highlight_bbox(self, bbox: BBox) -> None:
+        """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
+        # 清除旧的高亮
+        if hasattr(self, "_highlight_item") and self._highlight_item is not None:
+            if self._highlight_item.scene() is self._scene:
+                self._scene.removeItem(self._highlight_item)
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPen, QColor
+        rect = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
+        pen = QPen(QColor("#FF8C00"), 2)
+        rect.setPen(pen)
+        rect.setBrush(QColor(255, 140, 0, 40))
+        rect.setZValue(10)
+        self._scene.addItem(rect)
+        self._highlight_item = rect
+        # 滚动到该位置
+        self.ensureVisible(rect)
 
     def show_line_highlight(self, bbox: BBox, flagged: bool = False) -> QGraphicsRectItem:
         color = _LINE_HIGHLIGHT if flagged else _LINE_OK_COLOR

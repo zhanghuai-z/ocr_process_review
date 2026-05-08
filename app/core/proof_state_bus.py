@@ -1,55 +1,67 @@
+"""校对事件总线：轻量发布/订阅，用于跨面板通知状态变更。
+
+用法：
+    from app.core.proof_state_bus import ProofStateBus
+
+    # 订阅
+    bus = ProofStateBus.instance()
+    bus.subscribe("line.proof_changed", my_handler)
+
+    # 发布
+    bus.publish("line.proof_changed", page_id=1, line_id=5, status="OK")
+"""
 from __future__ import annotations
 
-from collections import defaultdict
-from threading import RLock
-from typing import Callable, DefaultDict
+import logging
+from typing import Any, Callable, Dict, List
 
-
-ProofStateCallback = Callable[[object], None]
-
-TOPIC_LINE_PROOF_CHANGED = "line.proof_changed"
-TOPIC_PAGE_PROGRESS = "page.progress"
-TOPIC_PROJECT_STATS = "project.stats"
+logger = logging.getLogger(__name__)
 
 
 class ProofStateBus:
-    """纯 Python 的全局校对事件总线。"""
+    """单例事件总线。"""
+
+    _instance: "ProofStateBus | None" = None
 
     def __init__(self) -> None:
-        self._subscribers: DefaultDict[str, list[ProofStateCallback]] = defaultdict(list)
-        self._lock = RLock()
+        self._subscribers: Dict[str, List[Callable[..., Any]]] = {}
 
-    def subscribe(self, topic: str, callback: ProofStateCallback) -> Callable[[], None]:
-        with self._lock:
-            self._subscribers[topic].append(callback)
+    # ------------------------------------------------------------------ 单例
 
-        def _unsubscribe() -> None:
-            with self._lock:
-                callbacks = self._subscribers.get(topic, [])
-                if callback in callbacks:
-                    callbacks.remove(callback)
-                if not callbacks and topic in self._subscribers:
-                    del self._subscribers[topic]
+    @classmethod
+    def instance(cls) -> "ProofStateBus":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
-        return _unsubscribe
+    @classmethod
+    def reset(cls) -> None:
+        """测试用：重置单例。"""
+        cls._instance = None
 
-    def publish(self, topic: str, data: object) -> None:
-        with self._lock:
-            callbacks = list(self._subscribers.get(topic, ()))
-        for callback in callbacks:
-            callback(data)
+    # ------------------------------------------------------------------ API
 
-    def subscriber_count(self, topic: str) -> int:
-        with self._lock:
-            return len(self._subscribers.get(topic, ()))
+    def subscribe(self, event: str, handler: Callable[..., Any]) -> None:
+        """注册事件处理函数。同一 handler 可重复订阅同一事件（会执行多次）。"""
+        self._subscribers.setdefault(event, []).append(handler)
+
+    def unsubscribe(self, event: str, handler: Callable[..., Any]) -> None:
+        """取消注册。若 handler 未注册则忽略。"""
+        bucket = self._subscribers.get(event)
+        if bucket:
+            try:
+                bucket.remove(handler)
+            except ValueError:
+                pass
+
+    def publish(self, event: str, **kwargs: Any) -> None:
+        """发布事件，同步调用所有订阅者。handler 异常不中止其他 handler。"""
+        for handler in list(self._subscribers.get(event, [])):
+            try:
+                handler(**kwargs)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
 
     def clear(self) -> None:
-        with self._lock:
-            self._subscribers.clear()
-
-
-_DEFAULT_BUS = ProofStateBus()
-
-
-def get_proof_state_bus() -> ProofStateBus:
-    return _DEFAULT_BUS
+        """清除所有订阅（测试用）。"""
+        self._subscribers.clear()

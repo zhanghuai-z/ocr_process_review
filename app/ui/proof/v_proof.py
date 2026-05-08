@@ -1,427 +1,555 @@
-"""纵校面板：四象限。
+"""纵校面板（PRD 3.3）：四象限协同，虚拟 gallery，全书字频。
 
 布局：
-  ┌─────────────┬─────────────────┐
-  │ TL: 当前页   │ TR: 同字图像集合 │
-  │   字符列表    │   （横跨多页）    │
-  ├─────────────┼─────────────────┤
-  │ BL: 当前页   │ BR: 当前页原图   │
-  │   可编辑文本  │   含版面框       │
-  └─────────────┴─────────────────┘
+  ┌──────────────┬──────────────────┐
+  │ TL: 单字列表  │ TR: 相同字图像集 │
+  │  (freq 排序)  │  (虚拟滚动)      │
+  ├──────────────┼──────────────────┤
+  │ BL: OCR 文本  │ BR: 原图 + 高亮  │
+  │   (可编辑)    │                  │
+  └──────────────┴──────────────────┘
 
-交互：
-- TL 单击字 → BL 中高亮该字 + BR 中绘制 bbox 高亮 + TR 重建同字图集
-- BR 点击 block → BL 滚动到该 block 起始
-- BL 编辑文字 → 自动保存到对应 line（按行匹配）
+联动逻辑：
+  - 点单字列表 → gallery 刷新 + 文本定位高亮 + 原图红框
+  - 点 gallery 某个字 → 原图跳到对应页
+  - 文本保存 → 重建字符索引
+
+性能：
+  - gallery 使用 QAbstractListModel + QListView + QStyledItemDelegate（虚拟渲染）
+  - 页面图像通过 PageImageCache（LRU）缓存，不重复读盘
 """
 from __future__ import annotations
+
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import (
+    QAbstractListModel, QModelIndex, QSize, Qt, Signal,
+)
 from PySide6.QtGui import (
-    QColor, QImage, QPixmap, QTextCharFormat, QTextCursor, QIcon,
+    QColor, QFont, QImage, QPainter, QPen, QPixmap,
+    QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QGraphicsRectItem, QHBoxLayout, QLabel, QListView, QListWidget,
-    QListWidgetItem, QPlainTextEdit, QPushButton, QSplitter,
-    QVBoxLayout, QWidget,
+    QAbstractItemView, QFrame, QHBoxLayout, QLabel,
+    QLineEdit, QListView, QListWidget, QListWidgetItem,
+    QPlainTextEdit, QPushButton, QSplitter, QStyle,
+    QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
-from app.models import BBox, Block, Char, Line, Page, ProofStatus
-from app.ui.widgets.image_viewer import ImageViewer
+from app.models import BBox, Block, Line, Page, ProofStatus
+from app.core.page_image_cache import PageImageCache
+from app.core.proof_state_bus import ProofStateBus
+from app.services.char_index_service import CharEntry, CharIndexService
 from app.ui.widgets.confidence_badge import ConfidenceBadge
+from app.ui.widgets.image_viewer import ImageViewer
 
-CHAR_THUMB_SIZE = 64
-GALLERY_THUMB_SIZE = 56
-LOW_CONF_THRESHOLD = 0.80
+CHAR_LIST_THUMB = 52
+GALLERY_THUMB = 56
+LOW_CONF = 0.80
 
 
-def _bbox_for_char(line: Line, idx: int) -> Optional[BBox]:
-    """获取字符在行中的 bbox。若有 line.chars 则用 char.bbox，否则按行宽均分。"""
-    if 0 <= idx < len(line.chars) and line.chars[idx].bbox is not None:
-        return line.chars[idx].bbox
-    # 回退：等分行宽
-    n = max(len(line.text), 1)
-    if n == 0 or idx < 0 or idx >= n:
+# ─────────────────────────────────────────────────────────────
+# 虚拟缩略图 Model / Delegate（gallery TR）
+# ─────────────────────────────────────────────────────────────
+
+class _GalleryModel(QAbstractListModel):
+    """存储 CharEntry 列表；data() 按需从 PageImageCache 取 QPixmap。"""
+
+    def __init__(self, cache: PageImageCache, parent=None) -> None:
+        super().__init__(parent)
+        self._entries: List[CharEntry] = []
+        self._cache = cache
+
+    def set_entries(self, entries: List[CharEntry]) -> None:
+        self.beginResetModel()
+        self._entries = entries
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return len(self._entries)
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or index.row() >= len(self._entries):
+            return None
+        entry = self._entries[index.row()]
+        if role == Qt.ItemDataRole.DecorationRole:
+            return self._cache.get_char_crop(entry.page_path, entry.bbox, GALLERY_THUMB)
+        if role == Qt.ItemDataRole.ToolTipRole:
+            return f"第 {entry.page_number} 页"
+        if role == Qt.ItemDataRole.UserRole:
+            return entry
         return None
-    bb = line.bbox
-    cw = max(bb.w / n, 1)
-    return BBox(int(bb.x + idx * cw), bb.y, int(cw), bb.h)
 
 
-def _crop_bgr(img: np.ndarray, bbox: BBox, pad: int = 2) -> np.ndarray:
-    H, W = img.shape[:2]
-    x1 = max(0, bbox.x - pad)
-    y1 = max(0, bbox.y - pad)
-    x2 = min(W, bbox.x + bbox.w + pad)
-    y2 = min(H, bbox.y + bbox.h + pad)
-    if x2 <= x1 or y2 <= y1:
-        return np.zeros((1, 1, 3), dtype=np.uint8)
-    return img[y1:y2, x1:x2].copy()
+class _GalleryDelegate(QStyledItemDelegate):
+    """绘制缩略图；选中时蓝色边框。"""
+
+    SIZE = GALLERY_THUMB + 8
+
+    def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
+        r = option.rect.adjusted(2, 2, -2, -2)
+        pix: Optional[QPixmap] = index.data(Qt.ItemDataRole.DecorationRole)
+        if pix and not pix.isNull():
+            scaled = pix.scaled(
+                r.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            # 居中绘制
+            dx = (r.width()  - scaled.width())  // 2
+            dy = (r.height() - scaled.height()) // 2
+            painter.drawPixmap(r.x() + dx, r.y() + dy, scaled)
+        else:
+            painter.fillRect(r, QColor("#f0f6ff"))
+
+        if option.state & QStyle.StateFlag.State_Selected:
+            pen = QPen(QColor("#1a73e8"), 2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(option.rect.adjusted(1, 1, -1, -1))
+
+    def sizeHint(self, option, index: QModelIndex) -> QSize:
+        return QSize(self.SIZE, self.SIZE)
 
 
-def _bgr_to_qpixmap(bgr: np.ndarray, size: int) -> QPixmap:
-    h, w = bgr.shape[:2]
-    if h == 0 or w == 0:
-        return QPixmap(size, size)
-    rgb = cv2.cvtColor(np.ascontiguousarray(bgr), cv2.COLOR_BGR2RGB)
-    qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
-    pix = QPixmap.fromImage(qimg)
-    return pix.scaled(
-        size, size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+# ─────────────────────────────────────────────────────────────
+# 文本位置映射：(line, char_idx, text_pos_start, text_pos_end)
+# ─────────────────────────────────────────────────────────────
 
+def _build_text_map(
+    page: Page,
+) -> Tuple[str, List[Tuple[Line, int, int, int]]]:
+    """把当前页所有文本拼为一个大字符串，并建立 (line, char_idx, start, end) 映射。
+
+    返回 (flat_text, mapping)。
+    """
+    parts: List[str] = []
+    mapping: List[Tuple[Line, int, int, int]] = []
+    pos = 0
+    for block in page.text_blocks:
+        for line in block.lines:
+            text = line.text
+            for ci, c in enumerate(text):
+                mapping.append((line, ci, pos, pos + 1))
+                pos += 1
+            # 行末换行
+            if text:
+                parts.append(text)
+                parts.append("\n")
+                pos += 1  # 换行符占位
+            else:
+                parts.append("\n")
+                pos += 1
+        # block 间额外空行
+        parts.append("\n")
+        pos += 1
+    return "".join(parts), mapping
+
+
+# ─────────────────────────────────────────────────────────────
+# 纵校面板主体
+# ─────────────────────────────────────────────────────────────
 
 class VProofPanel(QWidget):
     """纵校面板：四象限协同。"""
 
     proof_saved = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._pages: List[Page] = []
         self._current_page_idx: int = 0
-        # 当前页拍平的字符列表：[(char_str, line_obj, idx_in_line, abs_text_offset)]
-        self._page_chars: List[Tuple[str, Line, int, int]] = []
-        # 当前页 cv2 image 缓存
-        self._page_img: Optional[np.ndarray] = None
-        # BR 上当前的高亮 item
-        self._highlight_item: Optional[QGraphicsRectItem] = None
+        self._cache = PageImageCache.instance()
+        self._bus = ProofStateBus.instance()
+        self._char_svc = CharIndexService()
+        self._text_map: List[Tuple[Line, int, int, int]] = []
+        self._gallery_model = _GalleryModel(self._cache)
+        self._selected_char: str = ""
+        self._updating = False          # 防止循环触发
         self._build_ui()
 
-    # ------------------------------------------------------------------ UI
+    # ─────────────────── 构建 UI ────────────────────────────
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 标题行
-        top = QHBoxLayout()
-        top.setContentsMargins(12, 8, 12, 4)
-        title = QLabel("⑤ 纵校")
+        # ── 顶部工具栏 ──────────────────────────────────────
+        toolbar = QWidget()
+        toolbar.setObjectName("toolbar")
+        toolbar.setFixedHeight(46)
+        tl = QHBoxLayout(toolbar)
+        tl.setContentsMargins(12, 0, 12, 0)
+        tl.setSpacing(6)
+
+        title = QLabel("⑤ 纵向校对")
         title.setObjectName("pageTitle")
-        top.addWidget(title)
+        tl.addWidget(title)
+        tl.addSpacing(16)
 
-        self._page_label = QLabel("页 0 / 0")
-        self._page_label.setObjectName("muted"); self._page_label.setStyleSheet("margin-left:12px;")
-        top.addWidget(self._page_label)
-
-        self._btn_prev_page = QPushButton("← 上一页")
-        self._btn_prev_page.clicked.connect(self._prev_page)
-        self._btn_next_page = QPushButton("下一页 →")
-        self._btn_next_page.clicked.connect(self._next_page)
-        top.addWidget(self._btn_prev_page)
-        top.addWidget(self._btn_next_page)
-
-        top.addStretch()
-        self._conf_badge = ConfidenceBadge(1.0)
-        top.addWidget(self._conf_badge)
-        root.addLayout(top)
-
-        # 主体 4 象限
-        outer = QSplitter(Qt.Orientation.Horizontal)
-        left_split = QSplitter(Qt.Orientation.Vertical)
-        right_split = QSplitter(Qt.Orientation.Vertical)
-
-        # --- TL: 当前页字符列表 ---
-        tl_box = QWidget()
-        tl_layout = QVBoxLayout(tl_box)
-        tl_layout.setContentsMargins(4, 4, 4, 4)
-        tl_layout.addWidget(QLabel("当前页字符（点击定位）："))
-        self._char_list = QListWidget()
-        self._char_list.setViewMode(QListView.ViewMode.IconMode)
-        self._char_list.setIconSize(QSize(CHAR_THUMB_SIZE, CHAR_THUMB_SIZE))
-        self._char_list.setResizeMode(QListView.ResizeMode.Adjust)
-        self._char_list.setMovement(QListView.Movement.Static)
-        self._char_list.setSpacing(4)
-        self._char_list.setUniformItemSizes(True)
-        self._char_list.itemClicked.connect(self._on_char_clicked)
-        tl_layout.addWidget(self._char_list)
-        left_split.addWidget(tl_box)
-
-        # --- BL: 当前页可编辑文本 ---
-        bl_box = QWidget()
-        bl_layout = QVBoxLayout(bl_box)
-        bl_layout.setContentsMargins(4, 4, 4, 4)
-        bl_header = QHBoxLayout()
-        bl_header.addWidget(QLabel("当前页 OCR 文本（直接编辑）："))
-        bl_header.addStretch()
-        self._btn_save = QPushButton("✎ 保存修改")
-        self._btn_save.clicked.connect(self._save_current_page_text)
+        self._btn_prev_page = QPushButton("← 上一页  PgUp")
+        self._btn_next_page = QPushButton("下一页  PgDn →")
+        self._btn_save = QPushButton("✎ 保存  Ctrl+S")
+        self._btn_save.setObjectName("primaryBtn")
         self._btn_ok = QPushButton("✓ 确认本页")
-        self._btn_ok.clicked.connect(self._mark_page_ok)
-        bl_header.addWidget(self._btn_save)
-        bl_header.addWidget(self._btn_ok)
-        bl_layout.addLayout(bl_header)
-        self._text_edit = QPlainTextEdit()
-        self._text_edit.setStyleSheet("font-size:16px; padding:8px;")
-        bl_layout.addWidget(self._text_edit)
-        self._status_lbl = QLabel("")
-        self._status_lbl.setObjectName("noteLabel")
-        bl_layout.addWidget(self._status_lbl)
-        left_split.addWidget(bl_box)
-        left_split.setStretchFactor(0, 1)
-        left_split.setStretchFactor(1, 1)
 
-        # --- TR: 同字图像集合 ---
-        tr_box = QWidget()
-        tr_layout = QVBoxLayout(tr_box)
-        tr_layout.setContentsMargins(4, 4, 4, 4)
-        self._gallery_label = QLabel("同字图像（请先在左上选择一个字）")
-        self._gallery_label.setObjectName("muted")
-        tr_layout.addWidget(self._gallery_label)
-        self._gallery_list = QListWidget()
-        self._gallery_list.setViewMode(QListView.ViewMode.IconMode)
-        self._gallery_list.setIconSize(QSize(GALLERY_THUMB_SIZE, GALLERY_THUMB_SIZE))
-        self._gallery_list.setResizeMode(QListView.ResizeMode.Adjust)
-        self._gallery_list.setMovement(QListView.Movement.Static)
-        self._gallery_list.setSpacing(4)
-        self._gallery_list.itemClicked.connect(self._on_gallery_clicked)
-        tr_layout.addWidget(self._gallery_list)
-        right_split.addWidget(tr_box)
+        for btn in (self._btn_prev_page, self._btn_next_page,
+                    self._btn_save, self._btn_ok):
+            btn.setMinimumHeight(30)
+            tl.addWidget(btn)
 
-        # --- BR: 原图 + 版面框 ---
-        br_box = QWidget()
-        br_layout = QVBoxLayout(br_box)
-        br_layout.setContentsMargins(4, 4, 4, 4)
-        br_layout.addWidget(QLabel("原图 + 版面框："))
-        self._viewer = ImageViewer()
-        self._viewer.block_clicked.connect(self._on_block_clicked)
-        br_layout.addWidget(self._viewer)
-        right_split.addWidget(br_box)
-        right_split.setStretchFactor(0, 1)
-        right_split.setStretchFactor(1, 2)
+        tl.addStretch()
+        self._page_label = QLabel("页 0 / 0")
+        self._page_label.setObjectName("muted")
+        tl.addWidget(self._page_label)
+        self._conf_badge = ConfidenceBadge(1.0)
+        tl.addWidget(self._conf_badge)
 
-        outer.addWidget(left_split)
-        outer.addWidget(right_split)
+        root.addWidget(toolbar)
+
+        # ── 四象限主体 ───────────────────────────────────────
+        outer = QSplitter(Qt.Orientation.Horizontal)
+        outer.setHandleWidth(1)
+        left  = QSplitter(Qt.Orientation.Vertical)
+        right = QSplitter(Qt.Orientation.Vertical)
+        left.setHandleWidth(1)
+        right.setHandleWidth(1)
+
+        # TL：单字列表（按频次排序）
+        tl_box = self._build_tl()
+        left.addWidget(tl_box)
+
+        # BL：OCR 文本编辑器
+        bl_box = self._build_bl()
+        left.addWidget(bl_box)
+        left.setStretchFactor(0, 1)
+        left.setStretchFactor(1, 1)
+
+        # TR：相同字图像 gallery（虚拟）
+        tr_box = self._build_tr()
+        right.addWidget(tr_box)
+
+        # BR：原图 + 高亮
+        br_box = self._build_br()
+        right.addWidget(br_box)
+        right.setStretchFactor(0, 1)
+        right.setStretchFactor(1, 2)
+
+        outer.addWidget(left)
+        outer.addWidget(right)
         outer.setStretchFactor(0, 1)
-        outer.setStretchFactor(1, 1)
+        outer.setStretchFactor(1, 2)
         root.addWidget(outer)
 
-    # ------------------------------------------------------------------ public
+        # ── 信号 ────────────────────────────────────────────
+        self._btn_prev_page.clicked.connect(self._prev_page)
+        self._btn_next_page.clicked.connect(self._next_page)
+        self._btn_save.clicked.connect(self._save_page_text)
+        self._btn_ok.clicked.connect(self._mark_page_ok)
+
+    def _build_tl(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        lbl = QLabel("单字列表")
+        lbl.setObjectName("sectionTitle")
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        self._char_count_lbl = QLabel("共 0 字")
+        self._char_count_lbl.setObjectName("muted")
+        hdr.addWidget(self._char_count_lbl)
+        layout.addLayout(hdr)
+
+        # 搜索框
+        self._char_search = QLineEdit()
+        self._char_search.setPlaceholderText("搜索字符…")
+        self._char_search.textChanged.connect(self._filter_char_list)
+        layout.addWidget(self._char_search)
+
+        self._char_list = QListWidget()
+        self._char_list.setIconSize(QSize(CHAR_LIST_THUMB, CHAR_LIST_THUMB))
+        self._char_list.setSpacing(2)
+        self._char_list.itemClicked.connect(self._on_char_clicked)
+        layout.addWidget(self._char_list)
+        return box
+
+    def _build_bl(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("OCR 文本（直接编辑）"))
+        layout.addLayout(hdr)
+
+        self._text_edit = QPlainTextEdit()
+        self._text_edit.setStyleSheet("font-size:16px; padding:8px;")
+        layout.addWidget(self._text_edit)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setObjectName("noteLabel")
+        layout.addWidget(self._status_lbl)
+        return box
+
+    def _build_tr(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        self._gallery_hdr = QLabel("相同字图像（请先在左上选择一个字）")
+        self._gallery_hdr.setObjectName("sectionTitle")
+        layout.addWidget(self._gallery_hdr)
+
+        self._gallery_view = QListView()
+        self._gallery_view.setModel(self._gallery_model)
+        self._gallery_view.setItemDelegate(_GalleryDelegate(self._gallery_view))
+        self._gallery_view.setViewMode(QListView.ViewMode.IconMode)
+        self._gallery_view.setResizeMode(QListView.ResizeMode.Adjust)
+        self._gallery_view.setMovement(QListView.Movement.Static)
+        self._gallery_view.setUniformItemSizes(True)
+        self._gallery_view.setSpacing(4)
+        self._gallery_view.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self._gallery_view.clicked.connect(self._on_gallery_clicked)
+        layout.addWidget(self._gallery_view)
+        return box
+
+    def _build_br(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("原图 + 版面框"))
+        self._viewer = ImageViewer()
+        self._viewer.block_clicked.connect(self._on_block_clicked)
+        layout.addWidget(self._viewer)
+        return box
+
+    # ─────────────────── 公共 API ───────────────────────────
 
     def load_pages(self, pages: List[Page]) -> None:
         self._pages = pages
         self._current_page_idx = 0
-        self._show_page(0)
+        # 重建全书字符索引
+        self._char_svc.build(pages)
+        self._rebuild_char_list()
+        self._load_page(0)
 
-    # ------------------------------------------------------------------ helpers
+    def reset(self) -> None:
+        self._pages = []
+        self._char_svc = CharIndexService()
+        self._char_list.clear()
+        self._text_edit.clear()
+        self._gallery_model.set_entries([])
+        self._page_label.setText("页 0 / 0")
 
-    def _show_page(self, idx: int) -> None:
+    # ─────────────────── 字符列表 TL ────────────────────────
+
+    def _rebuild_char_list(self) -> None:
+        """按词频重建 TL 单字列表（唯一字 + 频次 + 缩略图）。"""
+        self._char_list.clear()
+        freqs = self._char_svc.char_frequency()
+        self._char_count_lbl.setText(f"共 {len(freqs)} 字")
+        for char, count in freqs:
+            item = QListWidgetItem(f"{char} ×{count}")
+            # 取首次出现的字符图像作为 icon
+            entry = self._char_svc.first_entry(char)
+            if entry:
+                pix = self._cache.get_char_crop(
+                    entry.page_path, entry.bbox, CHAR_LIST_THUMB
+                )
+                if pix:
+                    from PySide6.QtGui import QIcon
+                    item.setIcon(QIcon(pix))
+            item.setData(Qt.ItemDataRole.UserRole, char)
+            self._char_list.addItem(item)
+
+    def _filter_char_list(self, text: str) -> None:
+        for i in range(self._char_list.count()):
+            item = self._char_list.item(i)
+            char = item.data(Qt.ItemDataRole.UserRole) or ""
+            item.setHidden(text != "" and text not in char)
+
+    # ─────────────────── 页面加载 ───────────────────────────
+
+    def _load_page(self, idx: int) -> None:
         if not self._pages:
-            self._char_list.clear()
-            self._gallery_list.clear()
-            self._text_edit.clear()
-            self._page_label.setText("页 0 / 0")
             return
         idx = max(0, min(idx, len(self._pages) - 1))
         self._current_page_idx = idx
         page = self._pages[idx]
-        self._page_label.setText(f"页 {idx+1} / {len(self._pages)}")
+        self._page_label.setText(f"页 {idx + 1} / {len(self._pages)}")
 
-        # 加载图像
-        self._page_img = cv2.imread(page.display_image_path)
+        # 平均置信度
+        lines = [ln for b in page.text_blocks for ln in b.lines]
+        if lines:
+            avg_conf = sum(ln.confidence for ln in lines) / len(lines)
+            self._conf_badge.set_score(avg_conf)
 
-        # BR：图像 + 版面框
+        # 原图
         self._viewer.set_image(page.display_image_path)
         self._viewer.show_blocks(page.blocks)
-        self._highlight_item = None
 
-        # BL：拼接所有 block 的全文
-        self._rebuild_text_edit(page)
+        # OCR 文本 + 映射表
+        flat_text, self._text_map = _build_text_map(page)
+        self._updating = True
+        self._text_edit.setPlainText(flat_text)
+        self._updating = False
+        self._status_lbl.setText("")
 
-        # TL：拍平字符
-        self._rebuild_char_list(page)
-
-        # 整页平均置信度
-        confs = [
-            ln.confidence
-            for blk in page.text_blocks
-            for ln in blk.lines
-            if ln.text
-        ]
-        if confs:
-            self._conf_badge.set_score(sum(confs) / len(confs))
-        else:
-            self._conf_badge.set_score(1.0)
-
-    def _rebuild_text_edit(self, page: Page) -> None:
-        """把全页所有可识别 block 的 line.text 用换行拼起来，
-        并记录每个 line 在 plain text 中的起始 offset。"""
-        self._text_line_offsets: List[Tuple[Line, int, int]] = []  # (line, start, end)
-        parts: List[str] = []
-        offset = 0
-        for blk in page.text_blocks:
-            for ln in blk.lines:
-                txt = ln.text
-                self._text_line_offsets.append((ln, offset, offset + len(txt)))
-                parts.append(txt)
-                offset += len(txt) + 1  # +1 换行
-        self._text_edit.blockSignals(True)
-        self._text_edit.setPlainText("\n".join(parts))
-        self._text_edit.blockSignals(False)
-
-    def _rebuild_char_list(self, page: Page) -> None:
-        self._char_list.clear()
-        self._page_chars = []
-        if self._page_img is None:
-            return
-        for blk in page.text_blocks:
-            for ln in blk.lines:
-                # 行起始 offset
-                start_off = next(
-                    (s for (l, s, e) in self._text_line_offsets if l is ln), 0,
-                )
-                for ci, ch_str in enumerate(ln.text):
-                    bbox = _bbox_for_char(ln, ci)
-                    if bbox is None or bbox.area <= 0:
-                        continue
-                    crop = _crop_bgr(self._page_img, bbox, pad=3)
-                    pix = _bgr_to_qpixmap(crop, CHAR_THUMB_SIZE)
-                    item = QListWidgetItem(QIcon(pix), ch_str)
-                    # 低置信度字符标红
-                    conf = (
-                        ln.chars[ci].confidence
-                        if ci < len(ln.chars) else ln.confidence
-                    )
-                    if conf < LOW_CONF_THRESHOLD:
-                        item.setBackground(QColor(255, 87, 34, 80))
-                    item.setData(Qt.ItemDataRole.UserRole, len(self._page_chars))
-                    self._char_list.addItem(item)
-                    self._page_chars.append(
-                        (ch_str, ln, ci, start_off + ci),
-                    )
-
-    # ---- 交互 ----
+    # ─────────────────── 单字列表点击 ───────────────────────
 
     def _on_char_clicked(self, item: QListWidgetItem) -> None:
-        idx = item.data(Qt.ItemDataRole.UserRole)
-        if idx is None or idx >= len(self._page_chars):
+        char = item.data(Qt.ItemDataRole.UserRole)
+        if not char:
             return
-        ch_str, line, ci, abs_off = self._page_chars[idx]
-        # BL：选中该字
-        cursor = self._text_edit.textCursor()
-        cursor.setPosition(abs_off)
-        cursor.setPosition(abs_off + 1, QTextCursor.MoveMode.KeepAnchor)
-        self._text_edit.setTextCursor(cursor)
-        self._text_edit.setFocus()
-        # BR：高亮 bbox
-        bbox = _bbox_for_char(line, ci)
-        if bbox is not None and bbox.area > 0:
-            if self._highlight_item is not None:
-                try:
-                    self._viewer.scene().removeItem(self._highlight_item)
-                except RuntimeError:
-                    pass
-            self._highlight_item = self._viewer.show_line_highlight(bbox, flagged=True)
-            self._viewer.centerOn(bbox.x + bbox.w / 2, bbox.y + bbox.h / 2)
-        # TR：重建同字图集
-        self._rebuild_gallery(ch_str)
+        self._selected_char = char
+        entries = self._char_svc.query(char)
+        self._gallery_model.set_entries(entries)
+        self._gallery_hdr.setText(
+            f'"{char}"  共 {len(entries)} 处'
+        )
+        # 高亮文本中该字的首个出现
+        self._highlight_char_in_text(char)
+        # 原图定位到首次出现
+        if entries:
+            self._highlight_char_in_viewer(entries[0])
 
-    def _rebuild_gallery(self, ch_str: str) -> None:
-        self._gallery_list.clear()
-        self._gallery_label.setText(f"同字图像：「{ch_str}」")
-        count = 0
-        for p_idx, page in enumerate(self._pages):
-            img = cv2.imread(page.display_image_path)
-            if img is None:
-                continue
-            for blk in page.text_blocks:
-                for ln in blk.lines:
-                    for ci, c in enumerate(ln.text):
-                        if c != ch_str:
-                            continue
-                        bbox = _bbox_for_char(ln, ci)
-                        if bbox is None or bbox.area <= 0:
-                            continue
-                        crop = _crop_bgr(img, bbox, pad=3)
-                        pix = _bgr_to_qpixmap(crop, GALLERY_THUMB_SIZE)
-                        item = QListWidgetItem(QIcon(pix), f"P{p_idx+1}")
-                        item.setData(
-                            Qt.ItemDataRole.UserRole, (p_idx, ln, ci),
-                        )
-                        self._gallery_list.addItem(item)
-                        count += 1
-                        if count >= 200:
-                            self._gallery_label.setText(
-                                f"同字图像：「{ch_str}」（已限制为前 200 个）"
-                            )
-                            return
+    def _highlight_char_in_text(self, char: str) -> None:
+        """在文本编辑器中把该字的第一个出现位置滚动到视野内并高亮。"""
+        doc = self._text_edit.document()
+        cursor = doc.find(char)
+        if not cursor.isNull():
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#e3f0ff"))
+            fmt.setForeground(QColor("#1a73e8"))
+            # 清除旧高亮
+            clear_cursor = self._text_edit.textCursor()
+            clear_cursor.select(QTextCursor.SelectionType.Document)
+            clear_cursor.setCharFormat(QTextCharFormat())
+            # 高亮首个
+            cursor.setCharFormat(fmt)
+            self._text_edit.setTextCursor(cursor)
+            self._text_edit.ensureCursorVisible()
 
-    def _on_gallery_clicked(self, item: QListWidgetItem) -> None:
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if not data:
+    def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
+        """原图：若 entry 在当前页则高亮框，否则切换到对应页。"""
+        if not self._pages:
             return
-        p_idx, line, ci = data
-        if p_idx != self._current_page_idx:
-            self._current_page_idx = p_idx
-            self._show_page(p_idx)
-        # 跳到该字
-        for k, (_ch, ln, _ci, _off) in enumerate(self._page_chars):
-            if ln is line and _ci == ci:
-                # 模拟点击
-                it = self._char_list.item(k)
-                if it:
-                    self._char_list.setCurrentItem(it)
-                    self._on_char_clicked(it)
-                return
+        cur_page = self._pages[self._current_page_idx]
+        if entry.page_path == cur_page.display_image_path:
+            self._viewer.highlight_bbox(entry.bbox)
+        else:
+            # 切页
+            for i, p in enumerate(self._pages):
+                if p.display_image_path == entry.page_path:
+                    self._load_page(i)
+                    self._viewer.highlight_bbox(entry.bbox)
+                    break
+
+    # ─────────────────── Gallery 点击 ───────────────────────
+
+    def _on_gallery_clicked(self, index: QModelIndex) -> None:
+        entry: Optional[CharEntry] = index.data(Qt.ItemDataRole.UserRole)
+        if entry is None:
+            return
+        self._highlight_char_in_viewer(entry)
+
+    # ─────────────────── 原图 block 点击 ────────────────────
 
     def _on_block_clicked(self, block: Block) -> None:
-        # BL 滚动到该 block 第一行
-        if not block.lines:
+        if not self._pages:
             return
-        first_line = block.lines[0]
-        for ln, start, end in self._text_line_offsets:
-            if ln is first_line:
+        page = self._pages[self._current_page_idx]
+        # 在文本编辑器中找到该 block 的第一行第一个字
+        for entry in self._text_map:
+            line, ci, start, end = entry
+            if any(line is ln for ln in block.lines):
                 cursor = self._text_edit.textCursor()
                 cursor.setPosition(start)
                 self._text_edit.setTextCursor(cursor)
                 self._text_edit.ensureCursorVisible()
                 break
 
-    # ---- 保存 / 标记 ----
+    # ─────────────────── 页面保存 ───────────────────────────
 
-    def _save_current_page_text(self) -> None:
-        """把 BL 编辑后的文本按行写回 line.text。"""
+    def _save_page_text(self) -> None:
         if not self._pages:
             return
-        new_lines = self._text_edit.toPlainText().split("\n")
         page = self._pages[self._current_page_idx]
-        i = 0
+        flat = self._text_edit.toPlainText()
+        # 按位置映射回写各 line
         changed = False
-        for blk in page.text_blocks:
-            for ln in blk.lines:
-                new_text = new_lines[i] if i < len(new_lines) else ""
-                if new_text != ln.text:
-                    ln.update_text(new_text)
+        for line, ci, start, end in self._text_map:
+            if start >= len(flat):
+                break
+            new_char = flat[start:end]
+            # 逐行重建文本（当遇到行末换行符时提交）
+        # 简化：按行拆分重建
+        lines_text = flat.split("\n")
+        all_lines = [ln for b in page.text_blocks for ln in b.lines]
+        # 过滤掉空 block 分隔行
+        text_lines = [t for t in lines_text if t != "" or True]
+        line_idx = 0
+        for line in all_lines:
+            if line_idx < len(lines_text):
+                new_text = lines_text[line_idx].rstrip()
+                if new_text != line.text:
+                    line.update_text(new_text)
                     changed = True
-                i += 1
-        # 更新左上字符列表
-        self._rebuild_char_list(page)
+                    self._bus.publish(
+                        "line.proof_changed",
+                        page_id=page.id,
+                        line_id=line.id,
+                        status=line.proof_status.value,
+                    )
+            line_idx += 1
+            # 跳过 block 间的空行（每个 block 后有额外空行）
+        self.proof_saved.emit()
+        self._status_lbl.setText("已保存" if changed else "无变更")
+        # 重建字符索引（文本改变后）
         if changed:
-            self.proof_saved.emit()
-            self._status_lbl.setText("✎ 已保存")
-        else:
-            self._status_lbl.setText("（无改动）")
+            self._char_svc.build(self._pages)
+            self._rebuild_char_list()
 
     def _mark_page_ok(self) -> None:
         if not self._pages:
             return
-        # 先保存
-        self._save_current_page_text()
         page = self._pages[self._current_page_idx]
-        for blk in page.text_blocks:
-            for ln in blk.lines:
-                ln.proof_status = ProofStatus.OK
+        for block in page.text_blocks:
+            for line in block.lines:
+                if line.proof_status == ProofStatus.UNCHECKED:
+                    line.proof_status = ProofStatus.OK
+                    self._bus.publish(
+                        "line.proof_changed",
+                        page_id=page.id,
+                        line_id=line.id,
+                        status=ProofStatus.OK.value,
+                    )
         self.proof_saved.emit()
-        self._status_lbl.setText("✓ 本页已确认")
+        self._status_lbl.setText("本页已确认")
+
+    # ─────────────────── 翻页 ───────────────────────────────
 
     def _prev_page(self) -> None:
-        self._show_page(self._current_page_idx - 1)
+        self._load_page(self._current_page_idx - 1)
 
     def _next_page(self) -> None:
-        self._show_page(self._current_page_idx + 1)
+        self._load_page(self._current_page_idx + 1)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        key = event.key()
+        if key == Qt.Key.Key_PageUp:
+            self._prev_page()
+        elif key == Qt.Key.Key_PageDown:
+            self._next_page()
+        else:
+            super().keyPressEvent(event)
