@@ -1627,6 +1627,121 @@ def test_layout_analyzer_builds_api_payload():
 
 
 # =====================================================================
+# CharIndexService — 整条字索引链路：纵/横 bbox、去重、排序、稳定查询
+# =====================================================================
+
+def test_char_index_vertical_split():
+    """纵排行 (h ≫ w) 的字符 bbox 应按高度等分，而非宽度。"""
+    from app.services.char_index_service import _estimate_char_bbox
+    from app.models import Line, BBox
+    line = Line(text="永和九年", confidence=0.9, bbox=BBox(100, 100, 40, 160))
+    boxes = [_estimate_char_bbox(line, i, 4) for i in range(4)]
+    # 期望：x 不变，y 递增 40，w=bb.w，h=40
+    assert boxes[0].x == 100 and boxes[0].y == 100
+    assert boxes[1].y == 140
+    assert boxes[2].y == 180
+    assert boxes[3].y == 220
+    for b in boxes:
+        assert b.w == 40 and b.h == 40
+    print("test_char_index_vertical_split PASSED")
+
+
+def test_char_index_horizontal_split():
+    """横排行 (w ≫ h) 的字符 bbox 应按宽度等分。"""
+    from app.services.char_index_service import _estimate_char_bbox
+    from app.models import Line, BBox
+    line = Line(text="测试横排", confidence=0.9, bbox=BBox(100, 100, 200, 30))
+    boxes = [_estimate_char_bbox(line, i, 4) for i in range(4)]
+    assert boxes[0].x == 100 and boxes[1].x == 150
+    assert boxes[2].x == 200 and boxes[3].x == 250
+    for b in boxes:
+        assert b.y == 100 and b.h == 30
+    print("test_char_index_horizontal_split PASSED")
+
+
+def test_char_index_dedup_on_rebuild():
+    """二次 build 不应使 entries 累积。"""
+    from app.services.char_index_service import CharIndexService
+    from app.models import Line, BBox, Block, BlockType, Page
+    page = Page(image_path="/tmp/p1.png", width=400, height=600, page_number=1)
+    blk = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
+    blk.lines = [
+        Line(text="永和九年", confidence=0.9, bbox=BBox(50, 50, 40, 160)),
+        Line(text="永字八法", confidence=0.9, bbox=BBox(100, 50, 40, 160)),
+    ]
+    page.blocks = [blk]
+    svc = CharIndexService()
+    svc.build([page])
+    n1 = len(svc.query("永"))
+    svc.build([page])
+    n2 = len(svc.query("永"))
+    assert n1 == n2 == 2, f"expected 2 entries each build, got {n1}/{n2}"
+    print("test_char_index_dedup_on_rebuild PASSED")
+
+
+def test_char_index_sort_categories():
+    """sorted_chars 排序：拼音/字母 → 数字 → 标点 → 符号。"""
+    from app.services.char_index_service import CharIndexService, _sort_key
+    # 直接验证 _sort_key 的种类排序，与外部依赖 pypinyin 是否可用解耦
+    samples = ["永", "A", "z", "1", "3", ",", "。", "=", "π"]
+    sorted_samples = sorted(samples, key=_sort_key)
+    # 字母/CJK 优先（kind=0），数字（kind=1），标点（kind=2），符号（kind=3）
+    kinds = []
+    for c in sorted_samples:
+        kinds.append(_sort_key(c)[0])
+    # 必须严格非递减
+    assert kinds == sorted(kinds), f"kinds not sorted: {kinds}"
+    # 数字必在标点之前
+    assert sorted_samples.index("1") < sorted_samples.index(",")
+    assert sorted_samples.index("3") < sorted_samples.index("。")
+    # 标点必在符号之前
+    assert sorted_samples.index(",") < sorted_samples.index("=")
+    print("test_char_index_sort_categories PASSED")
+
+
+def test_char_index_query_stable_order():
+    """query 返回的 entries 按 (page_number, line.y, line.x, char_idx) 稳定排序。"""
+    from app.services.char_index_service import CharIndexService
+    from app.models import Line, BBox, Block, BlockType, Page
+    p1 = Page(image_path="/tmp/p1.png", width=400, height=600, page_number=2)
+    b1 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
+    b1.lines = [
+        Line(text="永明", confidence=0.9, bbox=BBox(100, 200, 40, 80)),
+        Line(text="永和", confidence=0.9, bbox=BBox(100, 50, 40, 80)),  # y 更小
+    ]
+    p1.blocks = [b1]
+    p0 = Page(image_path="/tmp/p0.png", width=400, height=600, page_number=1)
+    b0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
+    b0.lines = [Line(text="永远", confidence=0.9, bbox=BBox(50, 100, 40, 80))]
+    p0.blocks = [b0]
+    svc = CharIndexService()
+    svc.build([p1, p0])
+    entries = svc.query("永")
+    assert len(entries) == 3
+    # 排序键：(page_number, line.y, line.x, char_idx)
+    # 期望顺序：page1(永远) → page2/y=50(永和) → page2/y=200(永明)
+    assert entries[0].page_number == 1
+    assert entries[1].page_number == 2 and entries[1].line.bbox.y == 50
+    assert entries[2].page_number == 2 and entries[2].line.bbox.y == 200
+    print("test_char_index_query_stable_order PASSED")
+
+
+def test_char_index_skips_whitespace():
+    """空白与空字符不进入索引。"""
+    from app.services.char_index_service import CharIndexService
+    from app.models import Line, BBox, Block, BlockType, Page
+    page = Page(image_path="/tmp/p1.png", width=400, height=600, page_number=1)
+    blk = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
+    blk.lines = [Line(text="永 和\t九", confidence=0.9, bbox=BBox(50, 50, 40, 200))]
+    page.blocks = [blk]
+    svc = CharIndexService()
+    svc.build([page])
+    assert " " not in svc._index and "\t" not in svc._index
+    assert svc.unique_chars() == 3  # 永和九
+    print("test_char_index_skips_whitespace PASSED")
+
+
+# =====================================================================
 # 入口
 # =====================================================================
 
@@ -1665,4 +1780,10 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_builds_api_payload()
+    test_char_index_vertical_split()
+    test_char_index_horizontal_split()
+    test_char_index_dedup_on_rebuild()
+    test_char_index_sort_categories()
+    test_char_index_query_stable_order()
+    test_char_index_skips_whitespace()
     print("\n✓ 所有测试通过")

@@ -311,16 +311,19 @@ class _LinePair(QFrame):
             self._img_lbl.setText("（无图像）")
             return
         h, w = crop.shape[:2]
-        if h <= 0:
-            self._img_lbl.setText("—")
+        # 极小 bbox（OCR 出错时高/宽 < 5px）放大后会产生伪影/碎裂，
+        # 而非真实行图。直接显示占位避免误导用户。
+        if h < 5 or w < 5:
+            self._img_lbl.setText("（行框异常）")
             return
-        # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）
+        # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）。
+        # 严格保持宽高比：先按高度缩放；若超宽再按宽度缩放重算高度。
         scale = IMAGE_ROW_H / h
-        new_w = max(1, int(w * scale))
+        new_w = max(1, int(round(w * scale)))
         MAX_LINE_W = 1200
         if new_w > MAX_LINE_W:
             scale = MAX_LINE_W / w
-            new_h = max(1, int(h * scale))
+            new_h = max(1, int(round(h * scale)))
             crop = cv2.resize(crop, (MAX_LINE_W, new_h), interpolation=cv2.INTER_AREA)
         else:
             crop = cv2.resize(crop, (new_w, IMAGE_ROW_H), interpolation=cv2.INTER_AREA)
@@ -515,21 +518,23 @@ class HProofPanel(QWidget):
         self._items.clear()
         self._pairs.clear()
 
-        # 清空旧控件
-        # takeAt() 只把 widget 从 layout 中摘除，widget 仍是 _list_widget 的子控件。
-        # setParent(None) 立即断开父子关系，widget 不再出现在 _list_widget.children()
-        # 中，Qt 不会为它分配几何空间或发起绘制事件，彻底防止重复显示。
-        while self._list_layout.count() > 1:  # keep the stretch at end
-            item = self._list_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.setParent(None)  # 立即从 _list_widget 子控件树中移除
-                w.deleteLater()    # 延迟销毁内存
+        # 清空旧 _LinePair。从后往前递删；skip _empty_lbl 和布局末尾的 stretch。
+        # 为什么要 skip ：之前代码会 delete _empty_lbl ，导致二次 load 时
+        # `self._empty_lbl.setVisible(...)` 变成访问已销毁的 C++ 对象 →
+        # RuntimeError 中断后续清理 → 旧 _LinePair 仍贴在 _list_widget 上 →
+        # 产生“重复页面”现象。
+        for i in range(self._list_layout.count() - 1, -1, -1):
+            item = self._list_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is None or w is self._empty_lbl:
+                continue
+            self._list_layout.takeAt(i)
+            w.setParent(None)
+            w.deleteLater()
 
         # 无数据时显示空状态
-        self._empty_lbl.setVisible(
-            not any(block.lines for page in pages for block in page.text_blocks)
-        )
+        has_data = any(block.lines for page in pages for block in page.text_blocks)
+        self._empty_lbl.setVisible(not has_data)
 
         line_num = 1  # 全局行号
         for page in pages:

@@ -61,13 +61,19 @@ def _verified_char_crop(
     page_path: str,
     bbox: BBox,
     size: int = GALLERY_THUMB,
-    pad: int = 2,
+    pad: Optional[int] = None,
 ) -> Optional[QPixmap]:
-    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并尝试修正。"""
+    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并尝试修正。
+
+    pad 为 None 时根据 bbox 尺寸自适应：~10% 且不超 6 像素，
+    避免纵排字中高度 ~40px 的字被固定 12px 填充拽进邻字。
+    """
     img = cache.get_image(page_path)
     if img is None:
         return None
     H, W = img.shape[:2]
+    if pad is None:
+        pad = max(1, min(int(min(bbox.w, bbox.h) * 0.10), 6))
     # 检查坐标合理性
     if bbox.x < 0 or bbox.y < 0 or bbox.x + bbox.w > W or bbox.y + bbox.h > H:
         logger.warning(
@@ -108,7 +114,7 @@ class _GalleryModel(QAbstractListModel):
             return None
         entry = self._entries[index.row()]
         if role == Qt.ItemDataRole.DecorationRole:
-            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB, pad=12)
+            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB)
         if role == Qt.ItemDataRole.DisplayRole:
             return f"{index.row() + 1:03d}\nP{entry.page_number}-{entry.char_idx + 1}"
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -416,7 +422,8 @@ class VProofPanel(QWidget):
 
     def _rebuild_char_list(self) -> None:
         self._char_list.clear()
-        freqs = self._char_svc.char_frequency()
+        # 按拼音 / 字母 a-z 优先，后续为数字 → 标点 → 符号 → 其他
+        freqs = self._char_svc.sorted_chars()
         self._char_count_lbl.setText(f"共 {len(freqs)} 字")
         for char, count in freqs:
             item = QListWidgetItem(f"{char} ×{count}")
@@ -482,11 +489,21 @@ class VProofPanel(QWidget):
         self._gallery_hdr.setText(f'"{char}"  共 {len(entries)} 处')
 
         # 先定位原图（可能触发翻页 → setPlainText 重置文本），再高亮文本
-        if entries:
-            self._highlight_char_in_viewer(entries[0])
-        self._highlight_char_in_text(char)
+        target = entries[0] if entries else None
+        if target:
+            self._highlight_char_in_viewer(target)
+        self._highlight_char_in_text(char, focus_entry=target)
 
-    def _highlight_char_in_text(self, char: str) -> None:
+    def _entry_text_pos(self, entry: CharEntry) -> Optional[int]:
+        """查找某个 CharEntry 在当前 _text_map 中的起始 start 光标位置。"""
+        for line, ci, start, _end in self._text_map:
+            if line is entry.line and ci == entry.char_idx:
+                return start
+        return None
+
+    def _highlight_char_in_text(
+        self, char: str, focus_entry: Optional[CharEntry] = None,
+    ) -> None:
         doc = self._text_edit.document()
         # 先清除全文格式
         clear_cur = QTextCursor(doc)
@@ -496,15 +513,26 @@ class VProofPanel(QWidget):
         fmt = QTextCharFormat()
         fmt.setBackground(QColor("#e3f0ff"))
         fmt.setForeground(QColor("#1a73e8"))
-        first_cursor: Optional[QTextCursor] = None
         cursor = doc.find(char)
         while not cursor.isNull():
             cursor.setCharFormat(fmt)
-            if first_cursor is None:
-                first_cursor = QTextCursor(cursor)
             cursor = doc.find(char, cursor)
-        if first_cursor is not None:
-            self._text_edit.setTextCursor(first_cursor)
+        # 定位到具体 entry。若未提供则定位到首出现。
+        target_pos: Optional[int] = None
+        if focus_entry is not None:
+            target_pos = self._entry_text_pos(focus_entry)
+        if target_pos is None:
+            first = doc.find(char)
+            if not first.isNull():
+                target_pos = first.selectionStart()
+        if target_pos is not None:
+            place = QTextCursor(doc)
+            place.setPosition(target_pos)
+            place.movePosition(
+                QTextCursor.MoveOperation.NextCharacter,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self._text_edit.setTextCursor(place)
             self._text_edit.ensureCursorVisible()
 
     def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
@@ -528,7 +556,8 @@ class VProofPanel(QWidget):
             return
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
         if self._selected_char:
-            self._highlight_char_in_text(self._selected_char)
+            # 传入 entry 以精准定位到该出现，而非首次出现
+            self._highlight_char_in_text(self._selected_char, focus_entry=entry)
 
     # ─────────────────── 原图 block 点击 ────────────────────
 
