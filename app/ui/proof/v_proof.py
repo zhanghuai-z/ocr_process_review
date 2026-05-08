@@ -47,7 +47,7 @@ from app.ui.widgets.image_viewer import ImageViewer
 logger = logging.getLogger(__name__)
 
 CHAR_LIST_THUMB = 44
-GALLERY_THUMB   = 60   # gallery 水平条高度
+GALLERY_THUMB   = 72   # gallery 水平条高度（较大缩略图）
 LOW_CONF        = 0.80
 
 
@@ -218,11 +218,6 @@ class VProofPanel(QWidget):
         tl = QHBoxLayout(toolbar)
         tl.setContentsMargins(12, 0, 12, 0)
         tl.setSpacing(6)
-
-        title = QLabel("纵向校对")
-        title.setObjectName("pageTitle")
-        tl.addWidget(title)
-        tl.addSpacing(16)
 
         self._btn_prev_page = QPushButton("← 上一页")
         self._btn_next_page = QPushButton("下一页 →")

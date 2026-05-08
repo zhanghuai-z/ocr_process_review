@@ -248,7 +248,7 @@ class ImageViewer(QGraphicsView):
         self._draw_start: Optional[QPointF] = None   # scene 坐标
         self._draw_item: Optional[QGraphicsRectItem] = None
 
-        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)

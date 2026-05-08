@@ -204,13 +204,32 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
 QProgressBar {
     background: #e9eef5;
     border: none;
-    border-radius: 4px;
+    border-radius: 3px;
     text-align: center;
     color: #1a73e8;
     font-size: 12px;
-    height: 12px;
+    height: 6px;
+    max-height: 6px;
 }
-QProgressBar::chunk { background: #1a73e8; border-radius: 4px; }
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #1a73e8, stop:0.5 #4da3ff, stop:1 #1a73e8);
+    border-radius: 3px;
+}
+
+/* ---------- 校对面板行 ---------- */
+QWidget#linePairWidget {
+    background: #ffffff;
+    border: 1px solid #e3e8ef;
+    border-radius: 6px;
+}
+QWidget#linePairWidget:hover {
+    border: 1px solid #b8d4ff;
+    background: #f8fbff;
+}
+
+/* ---------- 标签辅助 ---------- */
+QLabel#stepInfo { color: #1a73e8; font-size: 12px; font-weight: 500; }
 
 /* ---------- Splitter ---------- */
 QSplitter::handle { background: #e3e8ef; }
@@ -235,54 +254,6 @@ QToolTip {
 
 /* ---------- GraphicsView 背景 ---------- */
 QGraphicsView { background: #fafbfc; border: 1px solid #e3e8ef; border-radius: 6px; }
-
-/* ---------- 补充缺失控件 ---------- */
-QGroupBox {
-    border: 1px solid #e3e8ef;
-    border-radius: 6px;
-    margin-top: 12px;
-    background: #ffffff;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 8px;
-    padding: 0 4px;
-    color: #555;
-    font-weight: bold;
-}
-
-QSlider::groove:horizontal {
-    border: none;
-    height: 4px;
-    background: #e9eef5;
-    border-radius: 2px;
-}
-QSlider::handle:horizontal {
-    background: #1a73e8;
-    border-radius: 7px;
-    width: 14px;
-    margin: -5px 0;
-}
-QSlider::sub-page:horizontal {
-    background: #1a73e8;
-    border-radius: 2px;
-}
-
-QSpinBox::up-button, QSpinBox::down-button {
-    background: #f5f7fb;
-    border-left: 1px solid #d6dde6;
-    width: 20px;
-}
-QSpinBox::up-button {
-    border-bottom: 1px solid #d6dde6;
-    border-top-right-radius: 6px;
-}
-QSpinBox::down-button {
-    border-bottom-right-radius: 6px;
-}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: #e3f0ff; }
-
 """
 
 
