@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence
 
+from app.core.coordinate_seam import (
+    BBOX_SPACE_AUTO, BBoxSpace, CropCoordinateSeam,
+)
 from app.models import BBox
 
 
@@ -52,6 +55,7 @@ def project_line_bbox(
     crop_h: int,
     page_w: int,
     page_h: int,
+    source_space: BBoxSpace = BBOX_SPACE_AUTO,
 ) -> BBox:
     """把 OCR 行框统一回写到整页坐标。
 
@@ -59,10 +63,12 @@ def project_line_bbox(
     - page-relative: 保持原样
     最终都 clamp 到当前工作图范围内
     """
-    normalized = line_bbox.normalize()
-    if is_crop_relative_bbox(normalized, crop_w, crop_h):
-        normalized = normalized.translated(crop_origin_x, crop_origin_y)
-    return normalized.clamp(page_w, page_h)
+    seam = CropCoordinateSeam.from_page_bbox(
+        BBox(crop_origin_x, crop_origin_y, crop_w, crop_h),
+        page_w=page_w,
+        page_h=page_h,
+    )
+    return seam.to_page_bbox(line_bbox, source_space=source_space)
 
 
 def scale_bbox(bbox: BBox, scale_x: float, scale_y: float) -> BBox:

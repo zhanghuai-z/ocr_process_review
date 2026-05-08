@@ -134,6 +134,9 @@ def test_bbox_tools():
     from app.core.bbox_utils import (
         bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
     )
+    from app.core.coordinate_seam import (
+        BBOX_SPACE_CROP, BBOX_SPACE_PAGE, CropCoordinateSeam,
+    )
     from app.models import BBox
 
     # from_dict / to_dict round-trip
@@ -166,8 +169,14 @@ def test_bbox_tools():
         crop_h=40,
         page_w=400,
         page_h=300,
+        source_space=BBOX_SPACE_CROP,
     )
     assert page_bbox == BBox(110, 55, 40, 10)
+
+    seam = CropCoordinateSeam.from_page_bbox(BBox(100, 50, 120, 80), page_w=400, page_h=300)
+    assert seam.to_page_bbox(BBox(12, 8, 40, 12), source_space=BBOX_SPACE_CROP) == BBox(112, 58, 40, 12)
+    assert seam.to_page_bbox(BBox(120, 70, 40, 12), source_space=BBOX_SPACE_PAGE) == BBox(120, 70, 40, 12)
+    assert seam.to_crop_bbox(BBox(120, 70, 40, 12)) == BBox(20, 20, 40, 12)
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
@@ -582,6 +591,8 @@ def test_ocr_pipeline_keeps_page_relative_boxes():
     from app.services.ocr_pipeline import OcrPipeline
 
     class PageCoordEngine:
+        bbox_space = "page"
+
         def recognize(self, image_bgr, context):
             return [Line(text="整页坐标", confidence=0.92, bbox=BBox(120, 70, 80, 18))]
 
@@ -611,6 +622,8 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
     from app.services.ocr_pipeline import OcrPipeline
 
     class CropCoordEngine:
+        bbox_space = "crop"
+
         def recognize(self, image_bgr, context):
             return [Line(text="局部坐标", confidence=0.92, bbox=BBox(20, 10, 80, 18))]
 
@@ -625,6 +638,37 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         project = OcrProject(name="CropCoords", pages=[page])
 
         result = OcrPipeline(engine=CropCoordEngine()).process_project(project)
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert line.bbox == BBox(120, 70, 80, 18)
+    finally:
+        os.unlink(img_path)
+
+
+def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class LargeCropPageCoordEngine:
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="整页坐标", confidence=0.95, bbox=BBox(120, 70, 80, 18))]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((320, 480, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 300, 200))
+        page = Page(image_path=img_path, width=480, height=320, blocks=[block])
+        project = OcrProject(name="NoDoubleShift", pages=[page])
+
+        result = OcrPipeline(engine=LargeCropPageCoordEngine()).process_project(project)
         line = result.pages[0].blocks[0].lines[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
@@ -793,6 +837,7 @@ def test_page_image_cache():
     import cv2
     import numpy as np
 
+    from app.core.coordinate_seam import BBOX_SPACE_CROP, CropCoordinateSeam
     from app.core.page_image_cache import PageImageCache
     from app.models import BBox
 
@@ -809,10 +854,18 @@ def test_page_image_cache():
         img1 = cache.get_page_image(first)
         img1_again = cache.get_page_image(first)
         crop = cache.get_char_crop(first, BBox(5, 6, 10, 8))
+        seam = CropCoordinateSeam.from_page_bbox(BBox(10, 4, 15, 10), page_w=30, page_h=20)
+        seam_crop = cache.get_char_crop(
+            first,
+            BBox(3, 2, 4, 5),
+            source_space=BBOX_SPACE_CROP,
+            seam=seam,
+        )
 
         assert img1.shape == (20, 30, 3)
         assert img1_again is img1
         assert crop.shape == (8, 10, 3)
+        assert seam_crop.shape == (5, 4, 3)
 
         cache.get_page_image(second)
         cache.get_page_image(third)
@@ -1017,6 +1070,7 @@ if __name__ == "__main__":
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
+    test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()

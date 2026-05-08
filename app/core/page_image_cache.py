@@ -5,6 +5,9 @@ from collections import OrderedDict
 import cv2
 import numpy as np
 
+from app.core.coordinate_seam import (
+    BBOX_SPACE_PAGE, BBoxSpace, CropCoordinateSeam,
+)
 from app.models import BBox
 
 
@@ -33,12 +36,37 @@ class PageImageCache:
             self._cache.popitem(last=False)
         return image
 
-    def get_char_crop(self, page_path: str, bbox: BBox) -> np.ndarray:
+    def get_bbox_crop(
+        self,
+        page_path: str,
+        bbox: BBox,
+        *,
+        source_space: BBoxSpace = BBOX_SPACE_PAGE,
+        seam: CropCoordinateSeam | None = None,
+    ) -> np.ndarray:
         image = self.get_page_image(page_path)
-        clamped = bbox.normalize().clamp(image.shape[1], image.shape[0])
+        if seam is not None:
+            clamped = seam.to_page_bbox(bbox, source_space=source_space)
+        else:
+            clamped = bbox.normalize().clamp(image.shape[1], image.shape[0])
         if clamped.w <= 0 or clamped.h <= 0:
             raise ValueError("bbox produces an empty crop")
         return image[clamped.y:clamped.y2, clamped.x:clamped.x2].copy()
+
+    def get_char_crop(
+        self,
+        page_path: str,
+        bbox: BBox,
+        *,
+        source_space: BBoxSpace = BBOX_SPACE_PAGE,
+        seam: CropCoordinateSeam | None = None,
+    ) -> np.ndarray:
+        return self.get_bbox_crop(
+            page_path,
+            bbox,
+            source_space=source_space,
+            seam=seam,
+        )
 
     def cached_paths(self) -> list[str]:
         return list(self._cache.keys())
