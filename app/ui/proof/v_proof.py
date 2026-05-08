@@ -384,9 +384,8 @@ class VProofPanel(QWidget):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
-        layout.addWidget(QLabel("原图 + 版面框"))
+        layout.addWidget(QLabel("原图"))
         self._viewer = ImageViewer()
-        self._viewer.block_clicked.connect(self._on_block_clicked)
         layout.addWidget(self._viewer)
         return box
 
@@ -448,7 +447,8 @@ class VProofPanel(QWidget):
             self._conf_badge.set_score(avg_conf)
 
         self._viewer.set_image(page.display_image_path)
-        self._viewer.show_blocks(page.blocks)
+        # 纵校视图仅供参考，不显示版面标注框（show_blocks 不调用）
+        # 字符高亮由 highlight_bbox 单独绘制，避免与块框混淆
 
         flat_text, self._text_map = _build_text_map(page)
         self._updating = True
