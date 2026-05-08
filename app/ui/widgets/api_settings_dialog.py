@@ -12,8 +12,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox,
+    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
@@ -374,15 +374,45 @@ class ApiSettingsDialog(QDialog):
         self.setWindowTitle("OCR 引擎设置")
         self.setMinimumWidth(820)
         self.setStyleSheet(_STYLE)
+        # 根据屏幕可用区域限制最大高度，确保小屏上也能完整操作
+        _avail = QApplication.primaryScreen().availableGeometry()
+        self.setMaximumHeight(int(_avail.height() * 0.90))
         self._build_ui()
         self._load_config()
 
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
+        # 外层布局：滚动区 + 固定底部按钮栏
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # 滚动容器
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        scroll_content = QWidget()
+        root = QVBoxLayout(scroll_content)
+        root.setContentsMargins(20, 20, 20, 12)
         root.setSpacing(14)
+        scroll.setWidget(scroll_content)
+        outer.addWidget(scroll, 1)
+
+        # 底部固定栏（分隔线 + 按钮）
+        bottom_bar = QFrame()
+        bottom_bar.setObjectName("bottomBar")
+        bottom_bar.setStyleSheet(
+            "QFrame#bottomBar { background:#f5f7fb;"
+            " border-top: 1px solid #e3e8ef; padding: 0; }"
+        )
+        bottom_bar.setFixedHeight(56)
+        bottom_bar_layout = QHBoxLayout(bottom_bar)
+        bottom_bar_layout.setContentsMargins(20, 0, 20, 0)
+        bottom_bar_layout.setSpacing(8)
+        outer.addWidget(bottom_bar)
 
         hero = QFrame()
         hero.setObjectName("heroCard")
@@ -583,16 +613,15 @@ class ApiSettingsDialog(QDialog):
         self._footer_note.setWordWrap(True)
         root.addWidget(self._footer_note)
 
-        bottom = QHBoxLayout()
-        bottom.addStretch()
+        # 按钮放入底部固定栏（已在上方构建好 bottom_bar_layout）
+        bottom_bar_layout.addStretch()
         self._btn_cancel = QPushButton("取消")
         self._btn_cancel.clicked.connect(self.reject)
         self._btn_ok = QPushButton("保存")
         self._btn_ok.setObjectName("primaryBtn")
         self._btn_ok.clicked.connect(self._save_and_accept)
-        bottom.addWidget(self._btn_cancel)
-        bottom.addWidget(self._btn_ok)
-        root.addLayout(bottom)
+        bottom_bar_layout.addWidget(self._btn_cancel)
+        bottom_bar_layout.addWidget(self._btn_ok)
 
         self._radio_local.toggled.connect(self._on_mode_changed)
         self._radio_api.toggled.connect(self._on_mode_changed)
