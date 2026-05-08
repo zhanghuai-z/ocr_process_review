@@ -8,6 +8,7 @@ import numpy as np
 from app.core.coordinate_seam import (
     BBOX_SPACE_PAGE, BBoxSpace, CropCoordinateSeam,
 )
+from app.core.char_bbox_utils import refine_line_bbox
 from app.models import BBox
 
 
@@ -67,6 +68,23 @@ class PageImageCache:
             source_space=source_space,
             seam=seam,
         )
+
+    def get_line_crop(
+        self,
+        page_path: str,
+        bbox: BBox,
+        pad_y: int = 6,
+    ) -> np.ndarray:
+        image = self.get_page_image(page_path)
+        refined = refine_line_bbox(bbox, image)
+        h, w = image.shape[:2]
+        x1 = max(0, refined.x)
+        y1 = max(0, refined.y - pad_y)
+        x2 = min(w, refined.x2)
+        y2 = min(h, refined.y2 + pad_y)
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError("line bbox produces an empty crop")
+        return image[y1:y2, x1:x2].copy()
 
     def cached_paths(self) -> list[str]:
         return list(self._cache.keys())
