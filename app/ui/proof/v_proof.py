@@ -471,9 +471,10 @@ class VProofPanel(QWidget):
             )
         self._gallery_hdr.setText(f'"{char}"  共 {len(entries)} 处')
 
-        self._highlight_char_in_text(char)
+        # 先定位原图（可能触发翻页 → setPlainText 重置文本），再高亮文本
         if entries:
             self._highlight_char_in_viewer(entries[0])
+        self._highlight_char_in_text(char)
 
     def _highlight_char_in_text(self, char: str) -> None:
         doc = self._text_edit.document()
@@ -508,7 +509,9 @@ class VProofPanel(QWidget):
         entry: Optional[CharEntry] = index.data(Qt.ItemDataRole.UserRole)
         if entry is None:
             return
-        self._highlight_char_in_viewer(entry)
+        self._highlight_char_in_viewer(entry)  # 可能触发翻页
+        if self._selected_char:
+            self._highlight_char_in_text(self._selected_char)
 
     # ─────────────────── 原图 block 点击 ────────────────────
 
