@@ -969,9 +969,10 @@ def test_proof_state_bus():
 
 def test_char_index_service():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
-    from app.services.char_index_service import CharIndexService
+    from app.services.char_index_service import CharEntry, CharIndexEntry, CharIndexService
 
     page = Page(image_path="/tmp/page.png", width=400, height=300)
+    page.page_number = 7
     page.blocks = [
         Block(
             block_type=BlockType.TEXT,
@@ -997,11 +998,19 @@ def test_char_index_service():
     yi_entries = service.query("乙")
 
     assert len(yi_entries) == 2
+    assert CharIndexEntry is CharEntry
+    assert isinstance(yi_entries[0], CharEntry)
     assert yi_entries[0].page_idx == 0
+    assert yi_entries[0].page_path == page.display_image_path
+    assert yi_entries[0].page_number == 7
+    assert yi_entries[0].line is page.blocks[0].lines[0]
     assert yi_entries[0].block_order == 3
     assert yi_entries[0].bbox == BBox(30, 20, 18, 18)
     assert yi_entries[1].char_idx == 0
     assert yi_entries[1].bbox == BBox(10, 50, 50, 18)
+    assert service.first_entry("乙") == yi_entries[0]
+    assert service.unique_chars() == 3
+    assert service.total_chars() == 4
     assert service.char_frequency() == [("乙", 2), ("丙", 1), ("甲", 1)]
 
     print("test_char_index_service PASSED")
@@ -1026,6 +1035,46 @@ def test_char_index_service_synthesizes_vertical_char_boxes():
     assert entries[0].bbox == BBox(40, 90, 24, 40)
 
     print("test_char_index_service_synthesizes_vertical_char_boxes PASSED")
+
+
+def test_char_index_service_legacy_build_contract():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(text="甲乙", confidence=0.9, bbox=BBox(12, 30, 24, 80))
+    page = Page(
+        image_path="/tmp/legacy-page.png",
+        width=200,
+        height=240,
+        page_number=3,
+        blocks=[Block(block_type=BlockType.TEXT, order=1, bbox=BBox(10, 20, 40, 100), lines=[line])],
+    )
+
+    service = CharIndexService().build([page])
+    entry = service.first_entry("甲")
+
+    assert entry is not None
+    assert entry.page_path == page.display_image_path
+    assert entry.page_number == 3
+    assert entry.line is line
+    assert entry.bbox == BBox(12, 30, 24, 40)
+
+    print("test_char_index_service_legacy_build_contract PASSED")
+
+
+def test_ui_import_smoke():
+    import importlib
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    v_proof = importlib.import_module("app.ui.proof.v_proof")
+    main_window = importlib.import_module("app.ui.main_window")
+
+    assert hasattr(v_proof, "VProofPanel")
+    assert hasattr(main_window, "MainWindow")
+
+    print("test_ui_import_smoke PASSED")
 
 
 def test_page_image_cache():
