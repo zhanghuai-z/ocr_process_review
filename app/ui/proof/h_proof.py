@@ -28,7 +28,6 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import cv2
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QImage, QKeySequence, QPixmap, QShortcut,
@@ -300,24 +299,30 @@ class _LinePair(QFrame):
         if self._image_loaded:
             return
         self._image_loaded = True
-        img = self._cache.get_image(self._page.display_image_path)
-        if img is None:
-            self._img_lbl.setText("（无图像）")
-            return
-        H, W = img.shape[:2]
         bb = self._line.bbox
-        y1 = max(0, bb.y - ROW_PAD_Y)
-        y2 = min(H, bb.y + bb.h + ROW_PAD_Y)
-        x1 = max(0, bb.x)
-        x2 = min(W, bb.x + bb.w)
-        if x2 <= x1 or y2 <= y1:
+        if bb.w <= 0 or bb.h <= 0:
             self._img_lbl.setText("—")
             return
-        crop = np.ascontiguousarray(img[y1:y2, x1:x2])
+        # 使用 PageImageCache.get_line_crop 获取行切图（已处理越界情况）
+        crop = self._cache.get_line_crop(
+            self._page.display_image_path, bb, pad_y=ROW_PAD_Y
+        )
+        if crop is None:
+            self._img_lbl.setText("（无图像）")
+            return
         h, w = crop.shape[:2]
-        if h > 0 and h != IMAGE_ROW_H:
-            scale = IMAGE_ROW_H / h
-            new_w = max(1, int(w * scale))
+        if h <= 0:
+            self._img_lbl.setText("—")
+            return
+        # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）
+        scale = IMAGE_ROW_H / h
+        new_w = max(1, int(w * scale))
+        MAX_LINE_W = 1200
+        if new_w > MAX_LINE_W:
+            scale = MAX_LINE_W / w
+            new_h = max(1, int(h * scale))
+            crop = cv2.resize(crop, (MAX_LINE_W, new_h), interpolation=cv2.INTER_AREA)
+        else:
             crop = cv2.resize(crop, (new_w, IMAGE_ROW_H), interpolation=cv2.INTER_AREA)
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         rh, rw = rgb.shape[:2]

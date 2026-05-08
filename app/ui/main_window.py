@@ -437,6 +437,9 @@ class MainWindow(QMainWindow):
         from app.core.ocr_config import get_config
         from app.engines.real_ocr_adapter import get_engine_description
         dlg = ApiSettingsDialog(self)
+        # 防止对话框超出屏幕高度
+        _avail = QApplication.primaryScreen().availableGeometry()
+        dlg.setMaximumHeight(int(_avail.height() * 0.88))
         if dlg.exec():
             cfg = get_config()
             self._status_bar.showMessage(f"OCR 引擎：{get_engine_description(cfg['mode'])}")
