@@ -20,6 +20,7 @@ from app.models import (
     Block, BlockSource, OcrProject, Page, PageStatus, ProofStatus,
 )
 from app.services.ocr_pipeline import OcrPipeline, OcrProgress
+from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
 
@@ -49,6 +50,7 @@ class WorkflowController(QObject):
         self._project: Optional[OcrProject] = None
         self._store: Optional[ProjectStore] = None
         self._proof_engine = ProofEngine()
+        self._proof_crop_service = ProofCropService()
         self._max_step: int = STEP_IMPORT
         self._layout_worker = None
         self._ocr_worker = None
@@ -123,6 +125,7 @@ class WorkflowController(QObject):
             if not self._project:
                 self.worker_error.emit("项目文件无效或为空")
                 return False
+            self._proof_crop_service.normalize_project(self._project)
 
             self._max_step = self._compute_max_step()
             self.project_changed.emit(self._project)
@@ -254,6 +257,8 @@ class WorkflowController(QObject):
 
         for page in pages:
             page.status = PageStatus.OCR_DONE
+
+        self._proof_crop_service.normalize_pages(pages)
 
         # 自动标记低置信行
         flagged = self._proof_engine.auto_flag(pages)
