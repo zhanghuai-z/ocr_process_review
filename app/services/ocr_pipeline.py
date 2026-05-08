@@ -41,6 +41,7 @@ class OcrProgress:
     total_pages: int = 0
     current_block: int = 0
     total_blocks: int = 0
+    completed_pages: int = 0
     message: str = ""
 
 
@@ -86,6 +87,15 @@ class OcrPipeline:
                             result.failed_blocks.append(
                                 (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
                             )
+                    if progress_callback:
+                        progress_callback(OcrProgress(
+                            current_page=page_idx + 1,
+                            total_pages=total_pages,
+                            current_block=0,
+                            total_blocks=0,
+                            completed_pages=page_idx + 1,
+                            message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页图像读取失败",
+                        ))
                     continue
 
                 total_blocks = len([b for b in page.blocks if b.recognizable])
@@ -94,15 +104,6 @@ class OcrPipeline:
                 for block in page.blocks:
                     if not block.recognizable:
                         continue
-
-                    if progress_callback:
-                        progress_callback(OcrProgress(
-                            current_page=page_idx + 1,
-                            total_pages=total_pages,
-                            current_block=block_idx + 1,
-                            total_blocks=total_blocks,
-                            message=f"第 {page_idx + 1}/{total_pages} 页，块 {block_idx + 1}/{total_blocks}",
-                        ))
 
                     try:
                         lines = self._process_block(img, block, page, page_idx)
@@ -117,6 +118,25 @@ class OcrPipeline:
                         )
 
                     block_idx += 1
+                    if progress_callback:
+                        progress_callback(OcrProgress(
+                            current_page=page_idx + 1,
+                            total_pages=total_pages,
+                            current_block=block_idx,
+                            total_blocks=total_blocks,
+                            completed_pages=(page_idx + 1) if block_idx == total_blocks else page_idx,
+                            message=f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，块 {block_idx}/{total_blocks}",
+                        ))
+
+                if total_blocks == 0 and progress_callback:
+                    progress_callback(OcrProgress(
+                        current_page=page_idx + 1,
+                        total_pages=total_pages,
+                        current_block=0,
+                        total_blocks=0,
+                        completed_pages=page_idx + 1,
+                        message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
+                    ))
 
                 result.pages.append(page)
         finally:
