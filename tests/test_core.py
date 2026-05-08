@@ -726,6 +726,135 @@ def test_import_service_sequential_page_numbers():
     print("test_import_service_sequential_page_numbers PASSED")
 
 
+def test_proof_state_bus():
+    from app.core.proof_state_bus import (
+        TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus,
+    )
+
+    bus = get_proof_state_bus()
+    bus.clear()
+    events = []
+
+    unsubscribe = bus.subscribe(TOPIC_LINE_PROOF_CHANGED, events.append)
+    bus.publish(TOPIC_LINE_PROOF_CHANGED, {"line_id": 7, "status": "ok"})
+
+    assert events == [{"line_id": 7, "status": "ok"}]
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == 1
+
+    unsubscribe()
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == 0
+
+    bus.clear()
+    print("test_proof_state_bus PASSED")
+
+
+def test_char_index_service():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    page = Page(image_path="/tmp/page.png", width=400, height=300)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            order=3,
+            bbox=BBox(0, 0, 100, 20),
+            lines=[
+                Line(
+                    text="甲乙",
+                    confidence=0.9,
+                    bbox=BBox(10, 20, 100, 18),
+                    chars=[
+                        Char(char="甲", confidence=0.98, bbox=BBox(10, 20, 20, 18)),
+                        Char(char="乙", confidence=0.97, bbox=BBox(30, 20, 18, 18)),
+                    ],
+                ),
+                Line(text="乙丙", confidence=0.75, bbox=BBox(10, 50, 100, 18)),
+            ],
+        )
+    ]
+    project = OcrProject(name="char-index", pages=[page])
+
+    service = CharIndexService().build_index(project)
+    yi_entries = service.query("乙")
+
+    assert len(yi_entries) == 2
+    assert yi_entries[0].page_idx == 0
+    assert yi_entries[0].block_order == 3
+    assert yi_entries[0].bbox == BBox(30, 20, 18, 18)
+    assert yi_entries[1].char_idx == 0
+    assert yi_entries[1].bbox == BBox(10, 50, 100, 18)
+    assert service.char_frequency() == [("乙", 2), ("丙", 1), ("甲", 1)]
+
+    print("test_char_index_service PASSED")
+
+
+def test_page_image_cache():
+    import tempfile
+    import cv2
+    import numpy as np
+
+    from app.core.page_image_cache import PageImageCache
+    from app.models import BBox
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = os.path.join(tmpdir, "p1.png")
+        second = os.path.join(tmpdir, "p2.png")
+        third = os.path.join(tmpdir, "p3.png")
+
+        cv2.imwrite(first, np.full((20, 30, 3), 40, dtype=np.uint8))
+        cv2.imwrite(second, np.full((20, 30, 3), 80, dtype=np.uint8))
+        cv2.imwrite(third, np.full((20, 30, 3), 120, dtype=np.uint8))
+
+        cache = PageImageCache(max_pages=2)
+        img1 = cache.get_page_image(first)
+        img1_again = cache.get_page_image(first)
+        crop = cache.get_char_crop(first, BBox(5, 6, 10, 8))
+
+        assert img1.shape == (20, 30, 3)
+        assert img1_again is img1
+        assert crop.shape == (8, 10, 3)
+
+        cache.get_page_image(second)
+        cache.get_page_image(third)
+        assert cache.cached_paths() == [second, third]
+
+    print("test_page_image_cache PASSED")
+
+
+def test_proof_stats_service():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.services.proof_stats_service import ProofStatsService
+
+    bb = BBox(0, 0, 100, 20)
+    page = Page(image_path="/tmp/proof.png", width=400, height=300)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=bb,
+            lines=[
+                Line(text="确认", confidence=0.9, bbox=bb, proof_status=ProofStatus.OK),
+                Line(text="修改", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED),
+                Line(
+                    text="疑点", confidence=0.6, bbox=bb,
+                    proof_status=ProofStatus.UNCHECKED, review_flags=["low_confidence"],
+                ),
+                Line(text="待处理", confidence=0.9, bbox=bb, proof_status=ProofStatus.UNCHECKED),
+            ],
+        )
+    ]
+
+    stats = ProofStatsService().summarize(OcrProject(name="proof-stats", pages=[page]))
+
+    assert stats.total_lines == 4
+    assert stats.confirmed_lines == 1
+    assert stats.modified_lines == 1
+    assert stats.flagged_lines == 1
+    assert stats.pending_lines == 1
+    assert stats.to_dict()["flagged_lines"] == 1
+
+    print("test_proof_stats_service PASSED")
+
+
 def test_api_model_profile_helpers():
     from app.ui.widgets.api_settings_dialog import (
         get_api_model_profile_options,
@@ -891,6 +1020,10 @@ if __name__ == "__main__":
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()
+    test_proof_state_bus()
+    test_char_index_service()
+    test_page_image_cache()
+    test_proof_stats_service()
     test_api_model_profile_helpers()
     test_app_config_tracks_api_model_profile()
     test_api_settings_dialog_syncs_model_and_url()

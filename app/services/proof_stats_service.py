@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+from app.models import OcrProject, ProofStatus
+
+
+@dataclass(frozen=True)
+class ProofStats:
+    total_lines: int = 0
+    confirmed_lines: int = 0
+    modified_lines: int = 0
+    flagged_lines: int = 0
+    pending_lines: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+
+class ProofStatsService:
+    """项目级校对统计。"""
+
+    def summarize(self, project: OcrProject) -> ProofStats:
+        total = confirmed = modified = flagged = pending = 0
+
+        for page in project.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    total += 1
+                    if line.proof_status == ProofStatus.OK:
+                        confirmed += 1
+                    elif line.proof_status == ProofStatus.MODIFIED:
+                        modified += 1
+                    elif line.proof_status == ProofStatus.AUTO_FLAGGED or line.review_flags:
+                        flagged += 1
+                    else:
+                        pending += 1
+
+        return ProofStats(
+            total_lines=total,
+            confirmed_lines=confirmed,
+            modified_lines=modified,
+            flagged_lines=flagged,
+            pending_lines=pending,
+        )
