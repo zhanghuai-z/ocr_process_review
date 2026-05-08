@@ -726,6 +726,95 @@ def test_import_service_sequential_page_numbers():
     print("test_import_service_sequential_page_numbers PASSED")
 
 
+def _get_qapp():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    return app
+
+
+def _reset_app_config_for_test(tmpdir: str) -> None:
+    from PySide6.QtCore import QSettings
+    from app.core.app_config import AppConfig
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, tmpdir)
+    AppConfig._instance = None
+    AppConfig.instance().reset_to_defaults()
+
+
+def test_api_settings_dialog_keeps_model_preset_sync():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import (
+        ApiSettingsDialog,
+        get_api_model_profile_url,
+    )
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+
+        idx = dialog._api_model_combo.findData("paddleocr-vl")
+        dialog._api_model_combo.setCurrentIndex(idx)
+
+        assert dialog._url_edit.text() == get_api_model_profile_url("paddleocr-vl")
+        assert "PaddleOCR-VL" in dialog._summary_model.text()
+        assert "官方预设" in dialog._model_note.text()
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_keeps_model_preset_sync PASSED")
+
+
+def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import (
+        ApiSettingsDialog,
+        get_api_model_profile_url,
+    )
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._radio_api.setChecked(True)
+        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
+        dialog._sync_model_from_url()
+
+        assert dialog._api_model_combo.currentData() == "pp-ocrv5"
+        assert "/ocr" in dialog._summary_endpoint_kind.text()
+
+        dialog._url_edit.setText("https://example.com/custom")
+        dialog._sync_model_from_url()
+        assert dialog._api_model_combo.currentIndex() == -1
+        assert "自定义" in dialog._summary_model.text()
+
+        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
+        dialog._sync_model_from_url()
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["mode"] == "api"
+        assert cfg["api_model_profile"] == "pp-ocrv5"
+        assert cfg["api_url"] == get_api_model_profile_url("pp-ocrv5")
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_reverse_matches_url_and_persists_profile PASSED")
+
+
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -804,6 +893,8 @@ if __name__ == "__main__":
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()
+    test_api_settings_dialog_keeps_model_preset_sync()
+    test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_builds_api_payload()
