@@ -649,6 +649,45 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_reports_real_page_progress():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class ProgressEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="进度", confidence=0.96, bbox=BBox(5, 5, 30, 12))]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pages = []
+        for idx in range(2):
+            img_path = os.path.join(tmpdir, f"p{idx}.png")
+            img = np.ones((200, 300, 3), dtype=np.uint8) * 255
+            cv2.imwrite(img_path, img)
+            page = Page(image_path=img_path, width=300, height=200)
+            page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(20, 30, 120, 60))]
+            pages.append(page)
+
+        progress_events = []
+        result = OcrPipeline(engine=ProgressEngine()).process_project(
+            OcrProject(name="ProgressProject", pages=pages),
+            progress_callback=progress_events.append,
+        )
+
+        assert len(result.pages) == 2
+        assert len(progress_events) == 2
+        assert progress_events[0].completed_pages == 1
+        assert progress_events[0].current_page == 1
+        assert progress_events[1].completed_pages == 2
+        assert "第 2/2 页" in progress_events[1].message
+
+    print("test_ocr_pipeline_reports_real_page_progress PASSED")
+
+
 def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
     import tempfile
     import cv2
@@ -678,6 +717,105 @@ def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
         assert line.bbox == BBox(120, 70, 80, 18)
     finally:
         os.unlink(img_path)
+
+
+def test_workflow_controller_auto_chains_ocr_after_layout():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    controller = WorkflowController()
+    page = Page(image_path="/tmp/auto-chain.png", width=300, height=200)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(20, 30, 100, 40))]
+    controller._project = OcrProject(name="AutoChain", pages=[page])
+    controller._auto_start_ocr_after_layout = True
+
+    chained = []
+    controller.start_ocr = lambda pages, notify_page_callback=None: chained.append((pages, notify_page_callback)) or True
+
+    controller.on_layout_done([page])
+
+    assert len(chained) == 1
+    assert chained[0][0] == [page]
+
+    print("test_workflow_controller_auto_chains_ocr_after_layout PASSED")
+
+
+def test_workflow_controller_emits_ocr_progress_and_navigation():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.services.ocr_pipeline import OcrProgress
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeWorker:
+        def __init__(self, pipeline, pages, parent=None):
+            self.progress_update = DummySignal()
+            self.progress_state = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            total = len(self._pages)
+            self.progress_state.emit(OcrProgress(
+                current_page=1,
+                total_pages=total,
+                current_block=1,
+                total_blocks=1,
+                completed_pages=1,
+                message="OCR 识别中… 第 1/1 页，块 1/1",
+            ))
+            self.progress_update.emit(0, total)
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    original_worker = workflow_module.OcrPipelineWorker
+    original_create_engine = workflow_module.create_engine
+    workflow_module.OcrPipelineWorker = FakeWorker
+    workflow_module.create_engine = lambda: object()
+
+    try:
+        controller = workflow_module.WorkflowController()
+        page = Page(image_path="/tmp/controller-ocr.png", width=300, height=200)
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(20, 30, 100, 40))]
+        controller._project = OcrProject(name="ControllerOCR", pages=[page])
+
+        steps = []
+        progress_payloads = []
+        finished = []
+        page_progress = []
+
+        controller.step_requested.connect(steps.append)
+        controller.ocr_progress.connect(progress_payloads.append)
+        controller.ocr_finished.connect(finished.append)
+
+        ok = controller.start_ocr([page], notify_page_callback=lambda idx, total: page_progress.append((idx, total)))
+
+        assert ok is True
+        assert steps[-1] == workflow_module.STEP_OCR
+        assert len(progress_payloads) == 1
+        assert progress_payloads[0].completed_pages == 1
+        assert page_progress == [(0, 1)]
+        assert finished and finished[0] == [page]
+    finally:
+        workflow_module.OcrPipelineWorker = original_worker
+        workflow_module.create_engine = original_create_engine
+
+    print("test_workflow_controller_emits_ocr_progress_and_navigation PASSED")
 
 
 # =====================================================================
@@ -1172,7 +1310,10 @@ if __name__ == "__main__":
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
+    test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
+    test_workflow_controller_auto_chains_ocr_after_layout()
+    test_workflow_controller_emits_ocr_progress_and_navigation()
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()

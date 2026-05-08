@@ -40,6 +40,7 @@ class WorkflowController(QObject):
     step_requested = Signal(int)           # 请求跳转步骤
     layout_finished = Signal(object)       # List[Page]
     ocr_finished = Signal(object)          # List[Page]
+    ocr_progress = Signal(object)          # OcrProgress
     worker_error = Signal(str)             # 错误消息
     status_message = Signal(str)           # 状态栏消息
 
@@ -49,6 +50,10 @@ class WorkflowController(QObject):
         self._store: Optional[ProjectStore] = None
         self._proof_engine = ProofEngine()
         self._max_step: int = STEP_IMPORT
+        self._layout_worker = None
+        self._ocr_worker = None
+        self._auto_start_ocr_after_layout = True
+        self._queued_ocr_progress_callback: Optional[Callable] = None
 
     # ------------------------------------------------------------------ project management
 
@@ -216,6 +221,7 @@ class WorkflowController(QObject):
 
     def on_layout_done(self, pages: List[Page]) -> None:
         """版面分析完成后的处理。"""
+        self._layout_worker = None
         self._project.pages = pages
 
         for page in pages:
@@ -223,10 +229,19 @@ class WorkflowController(QObject):
 
         self._update_max_step()
         self.layout_finished.emit(pages)
-        self.status_message.emit(f"版面分析完成：{len(pages)} 页")
+        if self._auto_start_ocr_after_layout:
+            self.status_message.emit(f"版面分析完成：{len(pages)} 页，正在启动 OCR…")
+        else:
+            self.status_message.emit(f"版面分析完成：{len(pages)} 页")
 
         if self._store:
             self.save_project()
+
+        if self._auto_start_ocr_after_layout:
+            queued_callback = self._queued_ocr_progress_callback
+            self._auto_start_ocr_after_layout = False
+            self._queued_ocr_progress_callback = None
+            self.start_ocr(pages, notify_page_callback=queued_callback)
 
     def on_ocr_done(self, pages: List[Page]) -> None:
         """OCR 识别完成后的处理。
@@ -234,6 +249,7 @@ class WorkflowController(QObject):
         这是业务完成事件，由 Worker 触发。
         与用户点击"进入校对"按钮的导航意图严格分离。
         """
+        self._ocr_worker = None
         self._project.pages = pages
 
         for page in pages:
@@ -257,7 +273,15 @@ class WorkflowController(QObject):
         if not pages:
             self.status_message.emit("当前没有可分析的页面")
             return False
+        if self._layout_worker and self._layout_worker.isRunning():
+            self.status_message.emit("版面分析仍在进行中…")
+            return False
+        if self._ocr_worker and self._ocr_worker.isRunning():
+            self.status_message.emit("OCR 识别仍在进行中…")
+            return False
         from app.core.layout_analyzer import LayoutWorker
+        self._auto_start_ocr_after_layout = True
+        self._queued_ocr_progress_callback = None
         self._layout_worker = LayoutWorker(pages)
         self._layout_worker.page_done.connect(self._on_layout_progress)
         self._layout_worker.all_done.connect(self.on_layout_done)
@@ -272,6 +296,10 @@ class WorkflowController(QObject):
 
     def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> bool:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""
+        if self._ocr_worker and self._ocr_worker.isRunning():
+            self.status_message.emit("OCR 识别仍在进行中…")
+            return False
+
         recognizable_blocks = sum(len(page.recognizable_blocks) for page in pages)
         if recognizable_blocks == 0:
             self.worker_error.emit("当前没有可识别的文字块，请先完成版面分析或补充文字区域。")
@@ -283,15 +311,24 @@ class WorkflowController(QObject):
         pipeline = OcrPipeline(engine=engine)
 
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
+        self._ocr_worker.progress_state.connect(self._on_ocr_progress)
         if notify_page_callback:
             self._ocr_worker.progress_update.connect(notify_page_callback)
         self._ocr_worker.all_done.connect(self.on_ocr_done)
         self._ocr_worker.error.connect(self._on_worker_error)
         self._ocr_worker.start()
+        self.step_requested.emit(STEP_OCR)
         self.status_message.emit("OCR 识别中…")
         return True
 
+    def _on_ocr_progress(self, progress: OcrProgress) -> None:
+        self.ocr_progress.emit(progress)
+        if progress.message:
+            self.status_message.emit(progress.message)
+
     def _on_worker_error(self, msg: str) -> None:
+        self._layout_worker = None
+        self._ocr_worker = None
         logger.error("Worker error: %s", msg)
         self.worker_error.emit(msg)
         self.status_message.emit("处理失败")
@@ -303,6 +340,7 @@ class OcrPipelineWorker(QThread):
     page_done = Signal(int, int)     # (page_idx, total_pages)
     all_done  = Signal(list)         # List[Page]
     progress_update = Signal(int, int)
+    progress_state = Signal(object)  # OcrProgress
     error     = Signal(str)
 
     def __init__(self, pipeline: OcrPipeline, pages: List[Page], parent=None):
@@ -314,10 +352,15 @@ class OcrPipelineWorker(QThread):
         try:
             total = len(self._pages)
             project = OcrProject(name="_ocr_worker_", pages=self._pages)
+            completed_pages = 0
 
             def on_progress(progress: OcrProgress):
-                self.progress_update.emit(progress.current_page - 1, total)
-                self.page_done.emit(progress.current_page - 1, total)
+                nonlocal completed_pages
+                self.progress_state.emit(progress)
+                while completed_pages < progress.completed_pages:
+                    self.progress_update.emit(completed_pages, total)
+                    self.page_done.emit(completed_pages, total)
+                    completed_pages += 1
 
             result = self._pipeline.process_project(project, progress_callback=on_progress)
 
