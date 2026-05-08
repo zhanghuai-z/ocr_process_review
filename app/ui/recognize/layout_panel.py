@@ -1,59 +1,18 @@
-"""版面分析面板：图像 + BBox 叠加可视化，属性侧边栏。"""
+"""版面分析面板：图像 + BBox 叠加可视化，块信息内嵌底部栏。"""
 from __future__ import annotations
 from typing import List, Optional
+import uuid
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QSplitter, QTextEdit, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
-from app.models import Block, Page
+from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.ui.widgets.image_viewer import ImageViewer
+from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
-
-
-class BlockPropertyPanel(QWidget):
-    """侧边属性面板：显示选中 Block 的信息。"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        hdr = QLabel("块属性")
-        hdr.setObjectName("sectionTitle")
-        layout.addWidget(hdr)
-
-        self._type_lbl = QLabel("类型：—")
-        self._conf_lbl = ConfidenceBadge(1.0)
-        self._bbox_lbl = QLabel("位置：—")
-        self._text_edit = QTextEdit()
-        self._text_edit.setReadOnly(True)
-        self._text_edit.setPlaceholderText("（点击版面块查看文字内容）")
-        self._text_edit.setMaximumHeight(200)
-
-        for w in (self._type_lbl, self._conf_lbl, self._bbox_lbl):
-            layout.addWidget(w)
-        layout.addWidget(QLabel("内容预览："))
-        layout.addWidget(self._text_edit)
-        layout.addStretch()
-
-    def show_block(self, block: Block) -> None:
-        bb = block.bbox
-        self._type_lbl.setText(f"类型：{block.block_type.value}")
-        if block.lines:
-            self._conf_lbl.set_score(block.avg_confidence)
-        else:
-            self._conf_lbl.set_unavailable()
-        self._bbox_lbl.setText(f"位置：x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
-        self._text_edit.setPlainText(block.full_text or block.note)
-
-    def clear(self) -> None:
-        self._type_lbl.setText("类型：—")
-        self._bbox_lbl.setText("位置：—")
-        self._text_edit.clear()
 
 
 class LayoutPanel(QWidget):
@@ -87,7 +46,7 @@ class LayoutPanel(QWidget):
         title_row.addWidget(self._status_lbl)
         main_layout.addLayout(title_row)
 
-        # 主区域（三栏）
+        # 主区域（两栏：页面列表 + 图像查看器）
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # 左：页面列表（缩窄）
@@ -101,26 +60,23 @@ class LayoutPanel(QWidget):
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
         self._viewer.block_moved.connect(self._on_block_moved)
+        self._viewer.block_created.connect(self._on_block_created)
         splitter.addWidget(self._viewer)
 
-        # 右：属性面板（可折叠，默认宽度缩小）
-        self._prop_panel = BlockPropertyPanel()
-        self._prop_panel.setMinimumWidth(0)
-        self._prop_panel.setMaximumWidth(240)
-        splitter.addWidget(self._prop_panel)
-
-        # 左:中:右 = 1:7:2，中间画布获得最多空间
+        # 左:中 = 1:9
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 7)
-        splitter.setStretchFactor(2, 2)
-        # 设置初始尺寸（像素），用户可拖拽调整
-        splitter.setSizes([90, 9999, 200])
+        splitter.setStretchFactor(1, 9)
+        splitter.setSizes([90, 9999])
         main_layout.addWidget(splitter)
 
-        # 底部按钮
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(12, 6, 12, 8)
-        btn_row.setSpacing(8)
+        # 底部工具栏（按钮 + 属性信息内嵌）
+        bottom = QFrame()
+        bottom.setObjectName("toolbar")
+        bottom.setFixedHeight(46)
+        bottom_layout = QHBoxLayout(bottom)
+        bottom_layout.setContentsMargins(12, 0, 12, 0)
+        bottom_layout.setSpacing(8)
+
         self._btn_run = QPushButton("▶ 分析")
         self._btn_run.setToolTip("运行版面分析")
         self._btn_run.setEnabled(False)
@@ -128,7 +84,7 @@ class LayoutPanel(QWidget):
         self._btn_run.clicked.connect(self._request_analysis)
 
         self._btn_edit = QPushButton("✎ 编辑框")
-        self._btn_edit.setToolTip("切换编辑模式：开启后可拖动/选中 BBox")
+        self._btn_edit.setToolTip("开启后可拖动/缩放 BBox，右键拖拽新建框")
         self._btn_edit.setCheckable(True)
         self._btn_edit.setObjectName("ghostBtn")
         self._btn_edit.toggled.connect(self._viewer.set_edit_mode)
@@ -136,13 +92,33 @@ class LayoutPanel(QWidget):
         self._btn_next = QPushButton("→ 开始 OCR")
         self._btn_next.setEnabled(False)
         self._btn_next.clicked.connect(self.analysis_confirmed)
-        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(34)
+        self._btn_next.setObjectName("primaryBtn")
+        self._btn_next.setMinimumHeight(34)
 
-        btn_row.addWidget(self._btn_run)
-        btn_row.addWidget(self._btn_edit)
-        btn_row.addStretch()
-        btn_row.addWidget(self._btn_next)
-        main_layout.addLayout(btn_row)
+        bottom_layout.addWidget(self._btn_run)
+        bottom_layout.addWidget(self._btn_edit)
+
+        # 分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("color:#e3e8ef; margin:8px 4px;")
+        bottom_layout.addWidget(sep)
+
+        # 块属性内嵌标签
+        self._prop_type = QLabel("—")
+        self._prop_type.setObjectName("fieldLabel")
+        self._prop_bbox = QLabel("")
+        self._prop_bbox.setObjectName("muted")
+        self._prop_conf = ConfidenceBadge(1.0)
+        self._prop_conf.hide()
+        bottom_layout.addWidget(self._prop_type)
+        bottom_layout.addWidget(self._prop_bbox)
+        bottom_layout.addWidget(self._prop_conf)
+
+        bottom_layout.addStretch()
+        bottom_layout.addWidget(self._btn_next)
+        main_layout.addWidget(bottom)
 
     # ------------------------------------------------------------------ public
 
@@ -188,14 +164,34 @@ class LayoutPanel(QWidget):
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._viewer.show_blocks(page.blocks)
-        self._prop_panel.clear()
+        # 清空底部属性栏
+        self._prop_type.setText("—")
+        self._prop_bbox.setText("")
+        self._prop_conf.hide()
 
     def _on_block_clicked(self, block: Block) -> None:
-        self._prop_panel.show_block(block)
+        bb = block.bbox
+        self._prop_type.setText(f"[{block.block_type.value}]")
+        self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
+        self._prop_conf.set_score(block.avg_confidence)
+        self._prop_conf.show()
 
     def _on_block_moved(self, block: Block) -> None:
-        # 拖动调整后实时刷新属性面板坐标显示
-        self._prop_panel.show_block(block)
+        bb = block.bbox
+        self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
+
+    def _on_block_created(self, bbox: BBox) -> None:
+        """右键拖拽创建新 Block，添加到当前页并刷新画布。"""
+        if not self._pages:
+            return
+        page = self._pages[self._current_page_idx]
+        new_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=bbox,
+            source=BlockSource.MANUAL_DRAW,
+        )
+        page.blocks.append(new_block)
+        self._viewer.show_blocks(page.blocks)
 
     @property
     def run_button(self) -> QPushButton:
