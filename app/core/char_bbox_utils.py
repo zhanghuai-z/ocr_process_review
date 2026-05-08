@@ -22,6 +22,13 @@ def infer_line_direction(line_bbox: BBox, text_length: int) -> str:
     return LINE_DIRECTION_HORIZONTAL
 
 
+def infer_bbox_direction(line_bbox: BBox) -> str:
+    bbox = line_bbox.normalize()
+    if bbox.h > bbox.w * 1.4:
+        return LINE_DIRECTION_VERTICAL
+    return LINE_DIRECTION_HORIZONTAL
+
+
 def split_line_bbox_into_char_bboxes(line_bbox: BBox, text: str) -> List[BBox]:
     """在缺少字符级 bbox 时，按行框方向切分出字符框。"""
     text_length = len(text)
@@ -76,6 +83,36 @@ def _nonzero_bounds(projection: np.ndarray) -> Optional[tuple[int, int]]:
     if nonzero.size == 0:
         return None
     return int(nonzero[0]), int(nonzero[-1]) + 1
+
+
+def _projection_runs(projection: np.ndarray) -> List[tuple[int, int]]:
+    active = projection > 0
+    if not np.any(active):
+        return []
+    padded = np.pad(active.astype(np.int8), (1, 1))
+    transitions = np.diff(padded)
+    starts = np.flatnonzero(transitions == 1)
+    ends = np.flatnonzero(transitions == -1)
+    return [(int(start), int(end)) for start, end in zip(starts, ends)]
+
+
+def _select_dominant_run(
+    projection: np.ndarray,
+    *,
+    target_center: float,
+) -> Optional[tuple[int, int]]:
+    runs = _projection_runs(projection)
+    if not runs:
+        return None
+
+    def score(run: tuple[int, int]) -> tuple[float, float, int]:
+        start, end = run
+        ink = float(projection[start:end].sum())
+        center = (start + end) / 2.0
+        distance = abs(center - target_center)
+        return (ink, -distance, end - start)
+
+    return max(runs, key=score)
 
 
 def _nearest_projection_valley(
@@ -209,6 +246,64 @@ def refine_line_char_bboxes(
     return refined_boxes
 
 
+def refine_line_bbox(
+    line_bbox: BBox,
+    page_image: np.ndarray,
+) -> BBox:
+    """根据真实墨迹收紧整行 bbox，并在松散框中选择主文本带。"""
+    bbox = line_bbox.normalize().clamp(page_image.shape[1], page_image.shape[0])
+    if bbox.w <= 0 or bbox.h <= 0:
+        return bbox
+
+    crop = page_image[bbox.y:bbox.y2, bbox.x:bbox.x2]
+    if crop.size == 0:
+        return bbox
+
+    mask = _foreground_mask(crop)
+    if not mask.any():
+        return bbox
+
+    direction = infer_bbox_direction(bbox)
+    if direction == LINE_DIRECTION_HORIZONTAL:
+        secondary_projection = mask.sum(axis=1)
+        dominant = _select_dominant_run(
+            secondary_projection,
+            target_center=(bbox.h / 2.0),
+        )
+        if dominant is None:
+            return bbox
+        y0, y1 = dominant
+        band_mask = mask[y0:y1, :]
+        primary_projection = band_mask.sum(axis=0)
+        primary_bounds = _nonzero_bounds(primary_projection)
+        if primary_bounds is None:
+            return bbox
+        x0, x1 = primary_bounds
+        return _tighten_segment_to_foreground(
+            band_mask[:, x0:x1],
+            BBox(bbox.x + x0, bbox.y + y0, max(1, x1 - x0), max(1, y1 - y0)),
+        )
+
+    secondary_projection = mask.sum(axis=0)
+    dominant = _select_dominant_run(
+        secondary_projection,
+        target_center=(bbox.w / 2.0),
+    )
+    if dominant is None:
+        return bbox
+    x0, x1 = dominant
+    band_mask = mask[:, x0:x1]
+    primary_projection = band_mask.sum(axis=1)
+    primary_bounds = _nonzero_bounds(primary_projection)
+    if primary_bounds is None:
+        return bbox
+    y0, y1 = primary_bounds
+    return _tighten_segment_to_foreground(
+        band_mask[y0:y1, :],
+        BBox(bbox.x + x0, bbox.y + y0, max(1, x1 - x0), max(1, y1 - y0)),
+    )
+
+
 def ensure_line_char_bboxes(
     line: Line,
     page_image: Optional[np.ndarray] = None,
@@ -218,10 +313,16 @@ def ensure_line_char_bboxes(
         line.chars = []
         return []
 
-    split_bboxes = (
-        refine_line_char_bboxes(line.bbox, line.text, page_image)
+    refined_line_bbox = (
+        refine_line_bbox(line.bbox, page_image)
         if page_image is not None
-        else split_line_bbox_into_char_bboxes(line.bbox, line.text)
+        else line.bbox.normalize()
+    )
+    line.bbox = refined_line_bbox
+    split_bboxes = (
+        refine_line_char_bboxes(refined_line_bbox, line.text, page_image)
+        if page_image is not None
+        else split_line_bbox_into_char_bboxes(refined_line_bbox, line.text)
     )
     chars: List[Char] = []
     for idx, glyph in enumerate(line.text):

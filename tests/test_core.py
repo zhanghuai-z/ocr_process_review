@@ -139,7 +139,8 @@ def test_bbox_tools():
     )
     from app.core.char_bbox_utils import (
         LINE_DIRECTION_HORIZONTAL, LINE_DIRECTION_VERTICAL,
-        ensure_line_char_bboxes, infer_line_direction, refine_line_char_bboxes,
+        ensure_line_char_bboxes, infer_bbox_direction, infer_line_direction,
+        refine_line_bbox, refine_line_char_bboxes,
         split_line_bbox_into_char_bboxes,
     )
     from app.core.coordinate_seam import (
@@ -188,6 +189,8 @@ def test_bbox_tools():
 
     assert infer_line_direction(BBox(10, 20, 160, 24), 4) == LINE_DIRECTION_HORIZONTAL
     assert infer_line_direction(BBox(10, 20, 24, 160), 4) == LINE_DIRECTION_VERTICAL
+    assert infer_bbox_direction(BBox(10, 20, 160, 24)) == LINE_DIRECTION_HORIZONTAL
+    assert infer_bbox_direction(BBox(10, 20, 24, 160)) == LINE_DIRECTION_VERTICAL
 
     horizontal_chars = split_line_bbox_into_char_bboxes(BBox(10, 20, 160, 24), "天地玄黄")
     assert horizontal_chars[0] == BBox(10, 20, 40, 24)
@@ -224,6 +227,14 @@ def test_bbox_tools():
     for got, expected in zip(line.chars, glyph_boxes):
         assert abs(got.bbox.x - expected.x) <= 3
         assert abs(got.bbox.w - expected.w) <= 4
+
+    line_img = np.full((120, 180, 3), 255, dtype=np.uint8)
+    cv2.rectangle(line_img, (18, 18), (158, 30), (0, 0, 0), -1)
+    cv2.rectangle(line_img, (22, 62), (150, 76), (0, 0, 0), -1)
+    refined_line = refine_line_bbox(BBox(10, 44, 160, 40), line_img)
+    assert abs(refined_line.y - 61) <= 3
+    assert refined_line.h <= 18
+    assert refined_line.w >= 120
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
@@ -1154,6 +1165,16 @@ def test_page_image_cache():
         assert img1_again is img1
         assert crop.shape == (8, 10, 3)
         assert seam_crop.shape == (5, 4, 3)
+
+        line_path = os.path.join(tmpdir, "line.png")
+        line_img = np.full((120, 220, 3), 255, dtype=np.uint8)
+        cv2.rectangle(line_img, (16, 18), (204, 30), (0, 0, 0), -1)
+        cv2.rectangle(line_img, (18, 68), (196, 82), (0, 0, 0), -1)
+        cv2.imwrite(line_path, line_img)
+        loose_crop = cache.get_bbox_crop(line_path, BBox(10, 44, 200, 46))
+        refined_crop = cache.get_line_crop(line_path, BBox(10, 44, 200, 46), pad_y=2)
+        assert refined_crop.shape[0] < loose_crop.shape[0]
+        assert refined_crop.shape[1] >= 170
 
         cache.get_page_image(second)
         cache.get_page_image(third)

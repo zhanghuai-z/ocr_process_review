@@ -17,7 +17,10 @@ from typing import Optional
 import cv2
 import numpy as np
 
-from app.core.coordinate_seam import BBOX_SPACE_PAGE, BBoxSpace, CropCoordinateSeam
+from app.core.coordinate_seam import (
+    BBOX_SPACE_PAGE, BBoxSpace, CropCoordinateSeam,
+)
+from app.core.char_bbox_utils import refine_line_bbox
 from app.models import BBox
 
 logger = logging.getLogger(__name__)
@@ -142,17 +145,18 @@ class PageImageCache:
         pad_y: int = 6,
     ) -> Optional[np.ndarray]:
         """裁剪整行 BGR ndarray（含上下额外像素）。"""
-        img = self.get_page_image(page_path)
-        if img is None:
+        image = self.get_page_image(page_path)
+        if image is None:
             return None
-        h, w = img.shape[:2]
-        x1 = max(0, bbox.x)
-        y1 = max(0, bbox.y - pad_y)
-        x2 = min(w, bbox.x + bbox.w)
-        y2 = min(h, bbox.y + bbox.h + pad_y)
+        refined = refine_line_bbox(bbox, image)
+        h, w = image.shape[:2]
+        x1 = max(0, refined.x)
+        y1 = max(0, refined.y - pad_y)
+        x2 = min(w, refined.x2)
+        y2 = min(h, refined.y2 + pad_y)
         if x2 <= x1 or y2 <= y1:
             return None
-        return img[y1:y2, x1:x2].copy()
+        return image[y1:y2, x1:x2].copy()
 
     def cached_paths(self) -> list[str]:
         return list(self._cache.keys())

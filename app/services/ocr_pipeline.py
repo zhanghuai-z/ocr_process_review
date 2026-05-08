@@ -17,7 +17,7 @@ from typing import Callable, List, Optional, Protocol
 import cv2
 import numpy as np
 
-from app.core.char_bbox_utils import ensure_line_char_bboxes
+from app.core.char_bbox_utils import ensure_line_char_bboxes, refine_line_bbox
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
@@ -211,6 +211,7 @@ class OcrPipeline:
                 line.bbox,
                 source_space=bbox_space,
             )
+            line.bbox = refine_line_bbox(line.bbox, img)
             for char in line.chars:
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
