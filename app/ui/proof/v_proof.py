@@ -1,25 +1,24 @@
-"""纵校面板（PRD 3.3）：四象限协同，虚拟 gallery，全书字频。
+"""纵校面板（PRD 3.3）：参照 ui.jpg 布局重构。
 
 布局：
-  ┌──────────────┬──────────────────┐
-  │ TL: 单字列表  │ TR: 相同字图像集 │
-  │  (freq 排序)  │  (虚拟滚动)      │
-  ├──────────────┼──────────────────┤
-  │ BL: OCR 文本  │ BR: 原图 + 高亮  │
-  │   (可编辑)    │                  │
-  └──────────────┴──────────────────┘
+  ┌─────────────┬──────────────────────────────────────────────┐
+  │ 单字列表    │  相同字索引 gallery（水平条，可左右滚动）    │
+  │（频次排序） │──────────────────────────────────────────────│
+  │             │  OCR 文本（可编辑）  │ 原图 + 高亮框         │
+  └─────────────┴──────────────────────┴─────────────────────── ┘
 
-联动逻辑：
-  - 点单字列表 → gallery 刷新 + 文本定位高亮 + 原图红框
-  - 点 gallery 某个字 → 原图跳到对应页
-  - 文本保存 → 重建字符索引
+联动：
+  - 点单字列表 → gallery 刷新 + 文本高亮 + 原图定位
+  - 点 gallery 缩略图 → 原图跳到对应页并高亮
+  - 原图 block 点击 → 文本滚动到对应行
 
-性能：
-  - gallery 使用 QAbstractListModel + QListView + QStyledItemDelegate（虚拟渲染）
-  - 页面图像通过 PageImageCache（LRU）缓存，不重复读盘
+裁图坐标验证：
+  - get_char_crop 传入的 bbox 必须在 page 原图像素空间内
+  - 若坐标超出图像尺寸则记录 WARNING 日志
 """
 from __future__ import annotations
 
+import logging
 from typing import List, Optional, Tuple
 
 import cv2
@@ -28,7 +27,7 @@ from PySide6.QtCore import (
     QAbstractListModel, QModelIndex, QSize, Qt, Signal,
 )
 from PySide6.QtGui import (
-    QColor, QFont, QImage, QPainter, QPen, QPixmap,
+    QColor, QImage, QIcon, QPainter, QPen, QPixmap,
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -45,18 +44,50 @@ from app.services.char_index_service import CharEntry, CharIndexService
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.image_viewer import ImageViewer
 
-CHAR_LIST_THUMB = 52
-GALLERY_THUMB = 56
-LOW_CONF = 0.80
+logger = logging.getLogger(__name__)
+
+CHAR_LIST_THUMB = 44
+GALLERY_THUMB   = 60   # gallery 水平条高度
+LOW_CONF        = 0.80
 
 
 # ─────────────────────────────────────────────────────────────
-# 虚拟缩略图 Model / Delegate（gallery TR）
+# 裁图坐标验证辅助
+# ─────────────────────────────────────────────────────────────
+
+def _verified_char_crop(
+    cache: PageImageCache,
+    page_path: str,
+    bbox: BBox,
+    size: int = GALLERY_THUMB,
+) -> Optional[QPixmap]:
+    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并尝试修正。"""
+    img = cache.get_image(page_path)
+    if img is None:
+        return None
+    H, W = img.shape[:2]
+    # 检查坐标合理性
+    if bbox.x < 0 or bbox.y < 0 or bbox.x + bbox.w > W or bbox.y + bbox.h > H:
+        logger.warning(
+            "char bbox out of bounds: bbox=(%d,%d,%d,%d) img=(%d×%d) path=%s",
+            bbox.x, bbox.y, bbox.w, bbox.h, W, H, page_path,
+        )
+        # 修正到图像边界内
+        from app.models import BBox as BBox2
+        bbox = BBox2(
+            max(0, min(bbox.x, W - 1)),
+            max(0, min(bbox.y, H - 1)),
+            max(1, min(bbox.w, W - bbox.x)),
+            max(1, min(bbox.h, H - bbox.y)),
+        )
+    return cache.get_char_crop(page_path, bbox, size)
+
+
+# ─────────────────────────────────────────────────────────────
+# 虚拟 Gallery Model / Delegate（水平条）
 # ─────────────────────────────────────────────────────────────
 
 class _GalleryModel(QAbstractListModel):
-    """存储 CharEntry 列表；data() 按需从 PageImageCache 取 QPixmap。"""
-
     def __init__(self, cache: PageImageCache, parent=None) -> None:
         super().__init__(parent)
         self._entries: List[CharEntry] = []
@@ -75,85 +106,88 @@ class _GalleryModel(QAbstractListModel):
             return None
         entry = self._entries[index.row()]
         if role == Qt.ItemDataRole.DecorationRole:
-            return self._cache.get_char_crop(entry.page_path, entry.bbox, GALLERY_THUMB)
+            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB)
+        if role == Qt.ItemDataRole.DisplayRole:
+            return f"{index.row() + 1:03d}\nP{entry.page_number}-{entry.char_idx + 1}"
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"第 {entry.page_number} 页"
+            return f"第 {entry.page_number} 页，字#{entry.char_idx + 1}"
         if role == Qt.ItemDataRole.UserRole:
             return entry
         return None
 
 
 class _GalleryDelegate(QStyledItemDelegate):
-    """绘制缩略图；选中时蓝色边框。"""
-
-    SIZE = GALLERY_THUMB + 8
+    SIZE = GALLERY_THUMB + 28  # 图 + 标签
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
-        r = option.rect.adjusted(2, 2, -2, -2)
+        r = option.rect
         pix: Optional[QPixmap] = index.data(Qt.ItemDataRole.DecorationRole)
+        img_r = r.adjusted(2, 2, -2, -(28))
         if pix and not pix.isNull():
             scaled = pix.scaled(
-                r.size(),
+                img_r.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            # 居中绘制
-            dx = (r.width()  - scaled.width())  // 2
-            dy = (r.height() - scaled.height()) // 2
-            painter.drawPixmap(r.x() + dx, r.y() + dy, scaled)
+            dx = (img_r.width() - scaled.width()) // 2
+            painter.drawPixmap(img_r.x() + dx, img_r.y(), scaled)
         else:
-            painter.fillRect(r, QColor("#f0f6ff"))
+            painter.fillRect(img_r, QColor("#f0f6ff"))
 
+        # 标签
+        lbl = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        painter.setPen(QColor("#888"))
+        lbl_r = r.adjusted(0, GALLERY_THUMB + 2, 0, 0)
+        painter.drawText(
+            lbl_r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            lbl,
+        )
+
+        # 选中边框
         if option.state & QStyle.StateFlag.State_Selected:
             pen = QPen(QColor("#1a73e8"), 2)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(option.rect.adjusted(1, 1, -1, -1))
+            painter.drawRect(r.adjusted(1, 1, -1, -1))
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
         return QSize(self.SIZE, self.SIZE)
 
 
 # ─────────────────────────────────────────────────────────────
-# 文本位置映射：(line, char_idx, text_pos_start, text_pos_end)
+# 文本映射辅助
 # ─────────────────────────────────────────────────────────────
 
 def _build_text_map(
     page: Page,
 ) -> Tuple[str, List[Tuple[Line, int, int, int]]]:
-    """把当前页所有文本拼为一个大字符串，并建立 (line, char_idx, start, end) 映射。
-
-    返回 (flat_text, mapping)。
-    """
     parts: List[str] = []
     mapping: List[Tuple[Line, int, int, int]] = []
     pos = 0
     for block in page.text_blocks:
         for line in block.lines:
-            text = line.text
+            text = line.text or ""
             for ci, c in enumerate(text):
                 mapping.append((line, ci, pos, pos + 1))
                 pos += 1
-            # 行末换行
             if text:
                 parts.append(text)
                 parts.append("\n")
-                pos += 1  # 换行符占位
+                pos += 1
             else:
                 parts.append("\n")
                 pos += 1
-        # block 间额外空行
         parts.append("\n")
         pos += 1
     return "".join(parts), mapping
 
 
 # ─────────────────────────────────────────────────────────────
-# 纵校面板主体
+# 纵校面板
 # ─────────────────────────────────────────────────────────────
 
 class VProofPanel(QWidget):
-    """纵校面板：四象限协同。"""
+    """纵校面板：参照 ui.jpg 三区域布局（左单字列表 + 顶gallery + 底OCR/图）。"""
 
     proof_saved = Signal()
 
@@ -167,10 +201,10 @@ class VProofPanel(QWidget):
         self._text_map: List[Tuple[Line, int, int, int]] = []
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
-        self._updating = False          # 防止循环触发
+        self._updating = False
         self._build_ui()
 
-    # ─────────────────── 构建 UI ────────────────────────────
+    # ─────────────────── UI ───────────────────────────────────
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -185,13 +219,13 @@ class VProofPanel(QWidget):
         tl.setContentsMargins(12, 0, 12, 0)
         tl.setSpacing(6)
 
-        title = QLabel("⑤ 纵向校对")
+        title = QLabel("纵向校对")
         title.setObjectName("pageTitle")
         tl.addWidget(title)
         tl.addSpacing(16)
 
-        self._btn_prev_page = QPushButton("← 上一页  PgUp")
-        self._btn_next_page = QPushButton("下一页  PgDn →")
+        self._btn_prev_page = QPushButton("← 上一页")
+        self._btn_next_page = QPushButton("下一页 →")
         self._btn_save = QPushButton("✎ 保存  Ctrl+S")
         self._btn_save.setObjectName("primaryBtn")
         self._btn_ok = QPushButton("✓ 确认本页")
@@ -210,39 +244,23 @@ class VProofPanel(QWidget):
 
         root.addWidget(toolbar)
 
-        # ── 四象限主体 ───────────────────────────────────────
-        outer = QSplitter(Qt.Orientation.Horizontal)
-        outer.setHandleWidth(1)
-        left  = QSplitter(Qt.Orientation.Vertical)
-        right = QSplitter(Qt.Orientation.Vertical)
-        left.setHandleWidth(1)
-        right.setHandleWidth(1)
+        # ── 主体：水平分割（左单字列表 | 右主区域）─────────────
+        h_split = QSplitter(Qt.Orientation.Horizontal)
+        h_split.setHandleWidth(1)
 
-        # TL：单字列表（按频次排序）
-        tl_box = self._build_tl()
-        left.addWidget(tl_box)
+        # 左：单字列表 + 搜索
+        left_box = self._build_char_list()
+        left_box.setMinimumWidth(160)
+        left_box.setMaximumWidth(240)
+        h_split.addWidget(left_box)
 
-        # BL：OCR 文本编辑器
-        bl_box = self._build_bl()
-        left.addWidget(bl_box)
-        left.setStretchFactor(0, 1)
-        left.setStretchFactor(1, 1)
+        # 右：垂直分割（上gallery | 下文本/图）
+        right_box = self._build_right_area()
+        h_split.addWidget(right_box)
+        h_split.setStretchFactor(0, 1)
+        h_split.setStretchFactor(1, 4)
 
-        # TR：相同字图像 gallery（虚拟）
-        tr_box = self._build_tr()
-        right.addWidget(tr_box)
-
-        # BR：原图 + 高亮
-        br_box = self._build_br()
-        right.addWidget(br_box)
-        right.setStretchFactor(0, 1)
-        right.setStretchFactor(1, 2)
-
-        outer.addWidget(left)
-        outer.addWidget(right)
-        outer.setStretchFactor(0, 1)
-        outer.setStretchFactor(1, 2)
-        root.addWidget(outer)
+        root.addWidget(h_split, 1)
 
         # ── 信号 ────────────────────────────────────────────
         self._btn_prev_page.clicked.connect(self._prev_page)
@@ -250,7 +268,7 @@ class VProofPanel(QWidget):
         self._btn_save.clicked.connect(self._save_page_text)
         self._btn_ok.clicked.connect(self._mark_page_ok)
 
-    def _build_tl(self) -> QWidget:
+    def _build_char_list(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -266,7 +284,6 @@ class VProofPanel(QWidget):
         hdr.addWidget(self._char_count_lbl)
         layout.addLayout(hdr)
 
-        # 搜索框
         self._char_search = QLineEdit()
         self._char_search.setPlaceholderText("搜索字符…")
         self._char_search.textChanged.connect(self._filter_char_list)
@@ -279,15 +296,79 @@ class VProofPanel(QWidget):
         layout.addWidget(self._char_list)
         return box
 
-    def _build_bl(self) -> QWidget:
+    def _build_right_area(self) -> QWidget:
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # 上：gallery 水平条（固定高度）
+        gallery_box = self._build_gallery_strip()
+        gallery_box.setFixedHeight(GALLERY_THUMB + 50)
+        v.addWidget(gallery_box)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#e3e8ef;")
+        v.addWidget(sep)
+
+        # 下：OCR 文本 | 原图（QSplitter）
+        bottom_split = QSplitter(Qt.Orientation.Horizontal)
+        bottom_split.setHandleWidth(1)
+
+        bl_box = self._build_ocr_text()
+        br_box = self._build_viewer()
+
+        bottom_split.addWidget(bl_box)
+        bottom_split.addWidget(br_box)
+        bottom_split.setStretchFactor(0, 1)
+        bottom_split.setStretchFactor(1, 2)
+
+        v.addWidget(bottom_split, 1)
+        return box
+
+    def _build_gallery_strip(self) -> QWidget:
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(4)
+
+        hdr = QHBoxLayout()
+        self._gallery_hdr = QLabel("相同字索引（请先在左侧选择一个字）")
+        self._gallery_hdr.setObjectName("sectionTitle")
+        hdr.addWidget(self._gallery_hdr)
+        hdr.addStretch()
+        layout.addLayout(hdr)
+
+        self._gallery_view = QListView()
+        self._gallery_view.setModel(self._gallery_model)
+        self._gallery_view.setItemDelegate(_GalleryDelegate(self._gallery_view))
+        self._gallery_view.setViewMode(QListView.ViewMode.IconMode)
+        self._gallery_view.setFlow(QListView.Flow.LeftToRight)  # 水平排列
+        self._gallery_view.setWrapping(False)                   # 不换行
+        self._gallery_view.setResizeMode(QListView.ResizeMode.Fixed)
+        self._gallery_view.setMovement(QListView.Movement.Static)
+        self._gallery_view.setUniformItemSizes(True)
+        self._gallery_view.setSpacing(4)
+        self._gallery_view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._gallery_view.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._gallery_view.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._gallery_view.clicked.connect(self._on_gallery_clicked)
+        layout.addWidget(self._gallery_view)
+        return box
+
+    def _build_ocr_text(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
-
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("OCR 文本（直接编辑）"))
-        layout.addLayout(hdr)
+        layout.addWidget(QLabel("OCR 文本（直接编辑）"))
 
         self._text_edit = QPlainTextEdit()
         self._text_edit.setStyleSheet("font-size:16px; padding:8px;")
@@ -298,31 +379,7 @@ class VProofPanel(QWidget):
         layout.addWidget(self._status_lbl)
         return box
 
-    def _build_tr(self) -> QWidget:
-        box = QWidget()
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(4)
-
-        self._gallery_hdr = QLabel("相同字图像（请先在左上选择一个字）")
-        self._gallery_hdr.setObjectName("sectionTitle")
-        layout.addWidget(self._gallery_hdr)
-
-        self._gallery_view = QListView()
-        self._gallery_view.setModel(self._gallery_model)
-        self._gallery_view.setItemDelegate(_GalleryDelegate(self._gallery_view))
-        self._gallery_view.setViewMode(QListView.ViewMode.IconMode)
-        self._gallery_view.setResizeMode(QListView.ResizeMode.Adjust)
-        self._gallery_view.setMovement(QListView.Movement.Static)
-        self._gallery_view.setUniformItemSizes(True)
-        self._gallery_view.setSpacing(4)
-        self._gallery_view.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
-        self._gallery_view.clicked.connect(self._on_gallery_clicked)
-        layout.addWidget(self._gallery_view)
-        return box
-
-    def _build_br(self) -> QWidget:
+    def _build_viewer(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -338,10 +395,10 @@ class VProofPanel(QWidget):
     def load_pages(self, pages: List[Page]) -> None:
         self._pages = pages
         self._current_page_idx = 0
-        # 重建全书字符索引
         self._char_svc.build(pages)
         self._rebuild_char_list()
-        self._load_page(0)
+        if pages:
+            self._load_page(0)
 
     def reset(self) -> None:
         self._pages = []
@@ -351,23 +408,20 @@ class VProofPanel(QWidget):
         self._gallery_model.set_entries([])
         self._page_label.setText("页 0 / 0")
 
-    # ─────────────────── 字符列表 TL ────────────────────────
+    # ─────────────────── 单字列表 ────────────────────────────
 
     def _rebuild_char_list(self) -> None:
-        """按词频重建 TL 单字列表（唯一字 + 频次 + 缩略图）。"""
         self._char_list.clear()
         freqs = self._char_svc.char_frequency()
         self._char_count_lbl.setText(f"共 {len(freqs)} 字")
         for char, count in freqs:
             item = QListWidgetItem(f"{char} ×{count}")
-            # 取首次出现的字符图像作为 icon
             entry = self._char_svc.first_entry(char)
             if entry:
-                pix = self._cache.get_char_crop(
-                    entry.page_path, entry.bbox, CHAR_LIST_THUMB
+                pix = _verified_char_crop(
+                    self._cache, entry.page_path, entry.bbox, CHAR_LIST_THUMB
                 )
                 if pix:
-                    from PySide6.QtGui import QIcon
                     item.setIcon(QIcon(pix))
             item.setData(Qt.ItemDataRole.UserRole, char)
             self._char_list.addItem(item)
@@ -378,7 +432,7 @@ class VProofPanel(QWidget):
             char = item.data(Qt.ItemDataRole.UserRole) or ""
             item.setHidden(text != "" and text not in char)
 
-    # ─────────────────── 页面加载 ───────────────────────────
+    # ─────────────────── 页面加载 ────────────────────────────
 
     def _load_page(self, idx: int) -> None:
         if not self._pages:
@@ -388,17 +442,14 @@ class VProofPanel(QWidget):
         page = self._pages[idx]
         self._page_label.setText(f"页 {idx + 1} / {len(self._pages)}")
 
-        # 平均置信度
         lines = [ln for b in page.text_blocks for ln in b.lines]
         if lines:
             avg_conf = sum(ln.confidence for ln in lines) / len(lines)
             self._conf_badge.set_score(avg_conf)
 
-        # 原图
         self._viewer.set_image(page.display_image_path)
         self._viewer.show_blocks(page.blocks)
 
-        # OCR 文本 + 映射表
         flat_text, self._text_map = _build_text_map(page)
         self._updating = True
         self._text_edit.setPlainText(flat_text)
@@ -413,49 +464,42 @@ class VProofPanel(QWidget):
             return
         self._selected_char = char
         entries = self._char_svc.query(char)
+
+        # 重置 gallery：清选中、滚回顶部
         self._gallery_model.set_entries(entries)
-        # gallery 切字时强制滚回顶部并清空选中
         self._gallery_view.clearSelection()
         if entries:
             self._gallery_view.scrollTo(
                 self._gallery_model.index(0, 0),
                 QAbstractItemView.ScrollHint.PositionAtTop,
             )
-        self._gallery_hdr.setText(
-            f'"{char}"  共 {len(entries)} 处'
-        )
-        # 高亮文本中该字的首个出现
+        self._gallery_hdr.setText(f'"{char}"  共 {len(entries)} 处')
+
         self._highlight_char_in_text(char)
-        # 原图定位到首次出现
         if entries:
             self._highlight_char_in_viewer(entries[0])
 
     def _highlight_char_in_text(self, char: str) -> None:
-        """在文本编辑器中把该字的第一个出现位置滚动到视野内并高亮。"""
         doc = self._text_edit.document()
         cursor = doc.find(char)
         if not cursor.isNull():
             fmt = QTextCharFormat()
             fmt.setBackground(QColor("#e3f0ff"))
             fmt.setForeground(QColor("#1a73e8"))
-            # 清除旧高亮
-            clear_cursor = self._text_edit.textCursor()
-            clear_cursor.select(QTextCursor.SelectionType.Document)
-            clear_cursor.setCharFormat(QTextCharFormat())
-            # 高亮首个
+            clear = self._text_edit.textCursor()
+            clear.select(QTextCursor.SelectionType.Document)
+            clear.setCharFormat(QTextCharFormat())
             cursor.setCharFormat(fmt)
             self._text_edit.setTextCursor(cursor)
             self._text_edit.ensureCursorVisible()
 
     def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
-        """原图：若 entry 在当前页则高亮框，否则切换到对应页。"""
         if not self._pages:
             return
         cur_page = self._pages[self._current_page_idx]
         if entry.page_path == cur_page.display_image_path:
             self._viewer.highlight_bbox(entry.bbox)
         else:
-            # 切页
             for i, p in enumerate(self._pages):
                 if p.display_image_path == entry.page_path:
                     self._load_page(i)
@@ -473,10 +517,6 @@ class VProofPanel(QWidget):
     # ─────────────────── 原图 block 点击 ────────────────────
 
     def _on_block_clicked(self, block: Block) -> None:
-        if not self._pages:
-            return
-        page = self._pages[self._current_page_idx]
-        # 在文本编辑器中找到该 block 的第一行第一个字
         for entry in self._text_map:
             line, ci, start, end = entry
             if any(line is ln for ln in block.lines):
@@ -486,7 +526,7 @@ class VProofPanel(QWidget):
                 self._text_edit.ensureCursorVisible()
                 break
 
-    # ─────────────────── 页面保存 ───────────────────────────
+    # ─────────────────── 保存 ───────────────────────────────
 
     def _save_page_text(self) -> None:
         if not self._pages:
@@ -494,14 +534,13 @@ class VProofPanel(QWidget):
         page = self._pages[self._current_page_idx]
         flat = self._text_edit.toPlainText()
         lines_text = flat.split("\n")
-        # 按 _build_text_map 的结构遍历：每行占一个 slot，每个 block 末尾占一个 slot
         changed = False
         idx = 0
         for block in page.text_blocks:
             for line in block.lines:
                 if idx < len(lines_text):
                     new_text = lines_text[idx].rstrip()
-                    if new_text != line.text:
+                    if new_text != (line.text or ""):
                         line.update_text(new_text)
                         changed = True
                         self._bus.publish(
@@ -511,10 +550,9 @@ class VProofPanel(QWidget):
                             status=line.proof_status.value,
                         )
                 idx += 1
-            idx += 1  # 跳过 block 末尾的空行分隔符
+            idx += 1  # 跳过 block 末尾空行
         self.proof_saved.emit()
         self._status_lbl.setText("已保存" if changed else "无变更")
-        # 重建字符索引（文本改变后）
         if changed:
             self._char_svc.build(self._pages)
             self._rebuild_char_list()

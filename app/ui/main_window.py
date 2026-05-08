@@ -13,7 +13,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
     QStatusBar, QVBoxLayout, QWidget, QFrame,
 )
@@ -22,13 +22,11 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_LAYOUT, STEP_OCR,
     STEP_HPROOF, STEP_VPROOF,
 )
-from app.core.build_info import BUILD_MARKER
 from app.core.logging import get_logger
 from app.models import OcrProject, Page
 from app.services import ImportService
 from app.ui.recognize.import_panel import ImportPanel
 from app.ui.recognize.layout_panel import LayoutPanel
-from app.ui.recognize.ocr_panel import OcrPanel
 from app.ui.proof.h_proof import HProofPanel
 from app.ui.proof.v_proof import VProofPanel
 from app.ui.export.export_dialog import ExportDialog
@@ -46,12 +44,11 @@ class StepButton(QPushButton):
         self.setMinimumHeight(32)
 
 
-# (label, target_step, active_on_steps)  — 布局+OCR 共用一个按钮
+# (label, target_step, active_on_steps)  — 导入页不在导航栏内
 _NAV_ITEMS = [
-    ("①  导入",      STEP_IMPORT, frozenset({STEP_IMPORT})),
-    ("②  版面+OCR",  STEP_LAYOUT, frozenset({STEP_LAYOUT, STEP_OCR})),
-    ("③  横向校对",  STEP_HPROOF, frozenset({STEP_HPROOF})),
-    ("④  纵向校对",  STEP_VPROOF, frozenset({STEP_VPROOF})),
+    ("①  版面分析",  STEP_LAYOUT, frozenset({STEP_LAYOUT, STEP_OCR})),
+    ("②  横向校对",  STEP_HPROOF, frozenset({STEP_HPROOF})),
+    ("③  纵向校对",  STEP_VPROOF, frozenset({STEP_VPROOF})),
 ]
 
 
@@ -140,8 +137,9 @@ class MainWindow(QMainWindow):
         self._controller = WorkflowController()
         self._current_step: int = STEP_IMPORT
 
-        self.setWindowTitle(f"OCR 后处理 - {BUILD_MARKER}")
-        self.resize(1280, 800)
+        self.setWindowTitle("OCR 后处理")
+        _screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(int(_screen.width() * 0.85), int(_screen.height() * 0.85))
         self._build_ui()
         self._build_menu()
         self._connect_signals()
@@ -170,12 +168,14 @@ class MainWindow(QMainWindow):
 
         self._import_panel  = ImportPanel()
         self._layout_panel  = LayoutPanel()
-        self._ocr_panel     = OcrPanel()
+        self._ocr_placeholder = QLabel("正在 OCR 识别，请稍候…")
+        self._ocr_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._ocr_placeholder.setStyleSheet("font-size:18px; color:#888;")
         self._hproof_panel  = HProofPanel()
         self._vproof_panel  = VProofPanel()
 
         for w in (
-            self._import_panel, self._layout_panel, self._ocr_panel,
+            self._import_panel, self._layout_panel, self._ocr_placeholder,
             self._hproof_panel, self._vproof_panel,
         ):
             self._stack.addWidget(w)
@@ -185,7 +185,7 @@ class MainWindow(QMainWindow):
         # 状态栏
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage(f"就绪 | {BUILD_MARKER}")
+        self._status_bar.showMessage("就绪")
 
     def _connect_signals(self) -> None:
         """连接所有信号，包括 controller 和面板之间的信号。"""
@@ -197,12 +197,6 @@ class MainWindow(QMainWindow):
 
         # 版面面板：运行分析按钮 -> 启动分析
         self._layout_panel.run_button.clicked.connect(self._start_layout_analysis)
-
-        # 版面面板：用户确认分析结果 -> 启动 OCR（如果尚未识别则自动启动识别）
-        self._layout_panel.analysis_confirmed.connect(self._start_ocr)
-
-        # OCR 面板："进入校对"按钮 -> 只发导航请求（不触发完成逻辑）
-        self._ocr_panel.go_to_proof_requested.connect(self._on_go_to_proof)
 
         # 校对面板：保存修改
         self._hproof_panel.proof_saved.connect(self._auto_save)
@@ -266,7 +260,7 @@ class MainWindow(QMainWindow):
         self._controller.request_step(step)
 
     def _prev_step(self) -> None:
-        if self._current_step > STEP_IMPORT:
+        if self._current_step > STEP_LAYOUT:
             self._controller.request_step(self._current_step - 1)
 
     def _next_step(self) -> None:
@@ -278,16 +272,17 @@ class MainWindow(QMainWindow):
         self._top_nav.set_project_name(f"项目：{project.name}")
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
-        """版面分析完成，更新 UI 并恢复按钮。"""
+        """版面分析完成，更新 UI 并自动启动 OCR。"""
         self._layout_panel.show_analysis_result(pages)
         self._layout_panel.run_button.setEnabled(True)
         self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
+        self._start_ocr()
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。"""
-        self._ocr_panel.on_recognition_complete(pages)
         self._hproof_panel.load_pages(pages)
         self._vproof_panel.load_pages(pages)
+        self._go_to_step(STEP_HPROOF)
 
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
@@ -324,11 +319,8 @@ class MainWindow(QMainWindow):
                 if all(p.is_analyzed for p in project.pages):
                     self._layout_panel.show_analysis_result(project.pages)
                 if project.ocr_completed:
-                    self._ocr_panel.on_recognition_complete(project.pages)
                     self._hproof_panel.load_pages(project.pages)
                     self._vproof_panel.load_pages(project.pages)
-                else:
-                    self._ocr_panel.set_pages(project.pages)
             self._go_to_step(self._controller.get_open_step())
 
     def _save_project(self) -> None:
@@ -393,21 +385,14 @@ class MainWindow(QMainWindow):
             self._layout_panel.run_button.setEnabled(True)
 
     def _start_ocr(self) -> None:
-        """OCR 启动（由用户确认版面后触发）。"""
+        """OCR 启动（版面分析完成后自动触发，后台运行，不跳转页面）。"""
         if not self._controller.project or not self._controller.project.pages:
             return
         pages = self._controller.project.pages
         if self._controller.get_recognizable_block_count() == 0:
-            QMessageBox.information(self, "提示", "当前没有可识别的文字块，请先完成版面分析或补充文字区域。")
-            return
-        self._ocr_panel.set_pages(pages)
-        self._go_to_step(STEP_OCR)
-        if not self._controller.start_ocr(pages, notify_page_callback=self._ocr_panel.on_progress):
-            return
-
-    def _on_go_to_proof(self) -> None:
-        """用户点击"进入校对" → 只做导航，不触发 OCR 完成逻辑。"""
-        self._controller.request_step(STEP_HPROOF)
+            return  # 无可识别块，静默跳过
+        self._status_bar.showMessage("正在 OCR 识别…")
+        self._controller.start_ocr(pages)
 
     # ── 导出 ────────────────────────────────────────────────────
 

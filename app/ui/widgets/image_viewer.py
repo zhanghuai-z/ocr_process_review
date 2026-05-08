@@ -7,8 +7,6 @@
   - 右键长按拖拽 → 画出新矩形 → 发出 block_created(BBox)
 """
 from __future__ import annotations
-import json
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
@@ -18,11 +16,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
 )
 
-from app.core.build_info import BUILD_MARKER
-from app.core.logging import get_logger
 from app.models import BBox, Block, BlockType
-
-logger = get_logger(__name__)
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
@@ -36,7 +30,6 @@ def _pixmap_from_path(image_path: str) -> QPixmap:
     qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
-# 各块类型对应的边框颜色
 
 BLOCK_COLORS: dict[BlockType, QColor] = {
     BlockType.TEXT:           QColor(0x4C, 0xAF, 0x50),
@@ -240,6 +233,7 @@ class ImageViewer(QGraphicsView):
     block_clicked  = Signal(object)  # Block
     block_moved    = Signal(object)  # Block
     block_created  = Signal(object)  # BBox — 右键拖拽画出新矩形
+    block_deleted  = Signal(object)  # Block — Delete 键删除选中框
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -248,15 +242,14 @@ class ImageViewer(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
-        self._image_path: str = ""
-        self._edit_mode: bool = False
         self._highlight_item = None  # highlight_bbox 使用
 
         # 右键拖拽画框状态
         self._draw_start: Optional[QPointF] = None   # scene 坐标
         self._draw_item: Optional[QGraphicsRectItem] = None
 
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -270,11 +263,8 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         pixmap = _pixmap_from_path(image_path)
-        pixmap.setDevicePixelRatio(1.0)
-        self._image_path = image_path
         self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._pixmap_item.setPos(0, 0)
-        self._scene.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -282,11 +272,8 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         pixmap = QPixmap.fromImage(qimage)
-        pixmap.setDevicePixelRatio(1.0)
-        self._image_path = ""
         self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._pixmap_item.setPos(0, 0)
-        self._scene.setSceneRect(QRectF(0, 0, pixmap.width(), pixmap.height()))
+        self._scene.setSceneRect(self._pixmap_item.boundingRect())
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
@@ -300,12 +287,22 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)
-            item.set_editable(self._edit_mode)
+            item.set_editable(True)  # 始终可编辑
             item.setData(0, block)
             item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
-        self._write_viewer_debug(blocks)
+
+    def delete_selected(self) -> None:
+        """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
+        to_remove = [
+            (item, block) for item, block in self._block_items
+            if item.isSelected()
+        ]
+        for item, block in to_remove:
+            self._scene.removeItem(item)
+            self._block_items.remove((item, block))
+            self.block_deleted.emit(block)
 
     def highlight_bbox(self, bbox: BBox) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
@@ -343,14 +340,8 @@ class ImageViewer(QGraphicsView):
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_edit_mode(self, on: bool) -> None:
-        """切换编辑模式：开启后 BBox 可拖动，关闭后只能浏览/平移。"""
-        self._edit_mode = bool(on)
-        if self._edit_mode:
-            self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
-        else:
-            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        for item, _ in self._block_items:
-            item.set_editable(self._edit_mode)
+        """兼容旧调用，始终保持可编辑状态。"""
+        pass  # 始终 editable，无需切换
 
     # ------------------------------------------------------------------ events
 
@@ -365,8 +356,15 @@ class ImageViewer(QGraphicsView):
             factor = 1.15 if dy > 0 else 1 / 1.15
             self.scale(factor, factor)
 
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Delete:
+            self.delete_selected()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton and self._edit_mode:
+        if event.button() == Qt.MouseButton.RightButton:
             # 右键开始画新框
             self._draw_start = self.mapToScene(event.pos())
             pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
@@ -423,58 +421,3 @@ class ImageViewer(QGraphicsView):
         for item, _ in self._block_items:
             self._scene.removeItem(item)
         self._block_items.clear()
-
-    def _rect_to_dict(self, rect: QRectF) -> dict[str, float]:
-        return {
-            "x": rect.x(),
-            "y": rect.y(),
-            "w": rect.width(),
-            "h": rect.height(),
-        }
-
-    def _write_viewer_debug(self, blocks: List[Block]) -> None:
-        if not self._image_path or not self._pixmap_item:
-            return
-
-        pixmap = self._pixmap_item.pixmap()
-        transform = self.transform()
-        payload = {
-            "build": BUILD_MARKER,
-            "image_path": self._image_path,
-            "pixmap": {
-                "width": pixmap.width(),
-                "height": pixmap.height(),
-                "device_pixel_ratio": pixmap.devicePixelRatio(),
-                "item_bounding_rect": self._rect_to_dict(self._pixmap_item.boundingRect()),
-            },
-            "scene_rect": self._rect_to_dict(self._scene.sceneRect()),
-            "viewport": {
-                "width": self.viewport().width(),
-                "height": self.viewport().height(),
-                "transform_m11": transform.m11(),
-                "transform_m22": transform.m22(),
-                "horizontal_scroll": self.horizontalScrollBar().value(),
-                "vertical_scroll": self.verticalScrollBar().value(),
-            },
-            "blocks": [
-                {
-                    "order": block.order,
-                    "type": block.block_type.value,
-                    "bbox": {
-                        "x": block.bbox.x,
-                        "y": block.bbox.y,
-                        "w": block.bbox.w,
-                        "h": block.bbox.h,
-                        "xyxy": list(block.bbox.to_xyxy()),
-                    },
-                }
-                for block in blocks
-            ],
-        }
-        try:
-            Path(self._image_path).with_suffix(".viewer-debug.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            logger.warning("Failed to write viewer debug file: %s", exc)
