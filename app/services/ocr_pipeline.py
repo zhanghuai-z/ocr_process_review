@@ -17,6 +17,7 @@ from typing import Callable, List, Optional, Protocol
 import cv2
 import numpy as np
 
+from app.core.char_bbox_utils import ensure_line_char_bboxes
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
@@ -210,6 +211,13 @@ class OcrPipeline:
                 line.bbox,
                 source_space=bbox_space,
             )
+            for char in line.chars:
+                if char.bbox is None or char.bbox.area <= 0:
+                    continue
+                char.bbox = seam.to_page_bbox(
+                    char.bbox,
+                    source_space=bbox_space,
+                )
             # 设置 proof status
             if line.confidence < AUTO_FLAG_THRESHOLD:
                 if line.proof_status == ProofStatus.UNCHECKED:
@@ -219,5 +227,6 @@ class OcrPipeline:
                 line.ocr_text = line.text
             if not line.original_text:
                 line.original_text = line.text
+            ensure_line_char_bboxes(line)
 
         return lines

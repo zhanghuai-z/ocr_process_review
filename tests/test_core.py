@@ -134,10 +134,14 @@ def test_bbox_tools():
     from app.core.bbox_utils import (
         bbox_from_xyxy, is_crop_relative_bbox, project_line_bbox, sanitize_xyxy_bbox, scale_bbox,
     )
+    from app.core.char_bbox_utils import (
+        LINE_DIRECTION_HORIZONTAL, LINE_DIRECTION_VERTICAL,
+        ensure_line_char_bboxes, infer_line_direction, split_line_bbox_into_char_bboxes,
+    )
     from app.core.coordinate_seam import (
         BBOX_SPACE_CROP, BBOX_SPACE_PAGE, CropCoordinateSeam,
     )
-    from app.models import BBox
+    from app.models import BBox, Line
 
     # from_dict / to_dict round-trip
     d = {"x": 10, "y": 20, "w": 100, "h": 50}
@@ -177,6 +181,22 @@ def test_bbox_tools():
     assert seam.to_page_bbox(BBox(12, 8, 40, 12), source_space=BBOX_SPACE_CROP) == BBox(112, 58, 40, 12)
     assert seam.to_page_bbox(BBox(120, 70, 40, 12), source_space=BBOX_SPACE_PAGE) == BBox(120, 70, 40, 12)
     assert seam.to_crop_bbox(BBox(120, 70, 40, 12)) == BBox(20, 20, 40, 12)
+
+    assert infer_line_direction(BBox(10, 20, 160, 24), 4) == LINE_DIRECTION_HORIZONTAL
+    assert infer_line_direction(BBox(10, 20, 24, 160), 4) == LINE_DIRECTION_VERTICAL
+
+    horizontal_chars = split_line_bbox_into_char_bboxes(BBox(10, 20, 160, 24), "天地玄黄")
+    assert horizontal_chars[0] == BBox(10, 20, 40, 24)
+    assert horizontal_chars[-1] == BBox(130, 20, 40, 24)
+
+    vertical_chars = split_line_bbox_into_char_bboxes(BBox(10, 20, 24, 160), "天地玄黄")
+    assert vertical_chars[0] == BBox(10, 20, 24, 40)
+    assert vertical_chars[-1] == BBox(10, 140, 24, 40)
+
+    line = Line(text="天地玄黄", confidence=0.9, bbox=BBox(10, 20, 24, 160))
+    ensure_line_char_bboxes(line)
+    assert len(line.chars) == 4
+    assert line.chars[1].bbox == BBox(10, 60, 24, 40)
 
     scaled = scale_bbox(BBox(10, 20, 30, 40), 2.0, 1.5)
     assert scaled == BBox(20, 30, 60, 60)
@@ -622,14 +642,22 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
     import tempfile
     import cv2
     import numpy as np
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
     class CropCoordEngine:
         bbox_space = "crop"
 
         def recognize(self, image_bgr, context):
-            return [Line(text="局部坐标", confidence=0.92, bbox=BBox(20, 10, 80, 18))]
+            return [Line(
+                text="局部坐标",
+                confidence=0.92,
+                bbox=BBox(20, 10, 80, 18),
+                chars=[
+                    Char(char="局", confidence=0.95, bbox=BBox(20, 10, 20, 18)),
+                    Char(char="部", confidence=0.94, bbox=BBox(40, 10, 20, 18)),
+                ],
+            )]
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -645,6 +673,11 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         line = result.pages[0].blocks[0].lines[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
+        assert len(line.chars) == len(line.text)
+        assert line.chars[0].bbox == BBox(120, 70, 20, 18)
+        assert line.chars[1].bbox == BBox(140, 70, 20, 18)
+        assert line.chars[2].bbox == BBox(160, 70, 20, 18)
+        assert line.chars[3].bbox == BBox(180, 70, 20, 18)
     finally:
         os.unlink(img_path)
 
@@ -968,10 +1001,31 @@ def test_char_index_service():
     assert yi_entries[0].block_order == 3
     assert yi_entries[0].bbox == BBox(30, 20, 18, 18)
     assert yi_entries[1].char_idx == 0
-    assert yi_entries[1].bbox == BBox(10, 50, 100, 18)
+    assert yi_entries[1].bbox == BBox(10, 50, 50, 18)
     assert service.char_frequency() == [("乙", 2), ("丙", 1), ("甲", 1)]
 
     print("test_char_index_service PASSED")
+
+
+def test_char_index_service_synthesizes_vertical_char_boxes():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(text="天地玄黄", confidence=0.92, bbox=BBox(40, 10, 24, 160))
+    page = Page(
+        image_path="/tmp/page.png",
+        width=200,
+        height=240,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(30, 0, 60, 180), lines=[line])],
+    )
+
+    service = CharIndexService().build_index(OcrProject(name="vertical-index", pages=[page]))
+    entries = service.query("玄")
+
+    assert len(entries) == 1
+    assert entries[0].bbox == BBox(40, 90, 24, 40)
+
+    print("test_char_index_service_synthesizes_vertical_char_boxes PASSED")
 
 
 def test_page_image_cache():

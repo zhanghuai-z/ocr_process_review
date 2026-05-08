@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import DefaultDict
 
+from app.core.char_bbox_utils import ensure_line_char_bboxes
 from app.models import BBox, Line, OcrProject
 
 
@@ -48,6 +49,7 @@ class CharIndexService:
     def _iter_line_entries(
         self, page_idx: int, block_order: int, line_idx: int, line: Line,
     ) -> list[CharIndexEntry]:
+        ensure_line_char_bboxes(line)
         if line.chars:
             entries = []
             for char_idx, char in enumerate(line.chars):
