@@ -231,15 +231,21 @@ QProgressBar::chunk {
     border-radius: 3px;
 }
 
-/* ---------- 校对面板行 ---------- */
-QWidget#linePairWidget {
+/* ---------- 横校行对 ---------- */
+QFrame#linePair {
     background: #ffffff;
-    border: 1px solid #e3e8ef;
-    border-radius: 6px;
+    border-bottom: 1px solid #edf0f5;
 }
-QWidget#linePairWidget:hover {
-    border: 1px solid #b8d4ff;
-    background: #f8fbff;
+QFrame#linePair[active="true"] {
+    background: #f0f6ff;
+    border-left: 3px solid #1a73e8;
+}
+
+/* ---------- Proof 空状态 ---------- */
+QLabel#proofEmpty {
+    color: #bbbec4;
+    font-size: 15px;
+    qproperty-alignment: 'AlignCenter';
 }
 
 /* ---------- 标签辅助 ---------- */
