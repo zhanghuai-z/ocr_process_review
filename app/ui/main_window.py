@@ -10,11 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QPushButton, QSizePolicy, QStackedWidget,
+    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget,
     QStatusBar, QVBoxLayout, QWidget, QFrame,
 )
 
@@ -42,6 +42,48 @@ class StepButton(QPushButton):
         self.setObjectName("stepBtn")
         self.setCheckable(True)
         self.setMinimumHeight(32)
+
+
+# ── OCR 进度占位面板 ────────────────────────────────────────────
+class _OcrProgressWidget(QWidget):
+    """OCR 进行中占位面板：显示进度条和页面计数。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(12)
+
+        self._title = QLabel("正在 OCR 识别，请稍候…")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title.setStyleSheet("font-size:18px; color:#555;")
+
+        self._bar = QProgressBar()
+        self._bar.setFixedWidth(320)
+        self._bar.setFixedHeight(8)
+        self._bar.setTextVisible(False)
+        self._bar.setRange(0, 0)  # 默认不确定模式
+
+        self._count = QLabel("")
+        self._count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._count.setStyleSheet("font-size:13px; color:#888;")
+
+        layout.addStretch()
+        layout.addWidget(self._title)
+        layout.addWidget(self._bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._count)
+        layout.addStretch()
+
+    def reset(self) -> None:
+        self._bar.setRange(0, 0)
+        self._count.setText("")
+
+    @Slot(int, int)
+    def update_progress(self, current: int, total: int) -> None:
+        if total > 0:
+            self._bar.setRange(0, total)
+            self._bar.setValue(current + 1)
+            self._count.setText(f"{current + 1} / {total} 页")
 
 
 # (label, target_step, active_on_steps)  — 导入页不在导航栏内
@@ -168,9 +210,7 @@ class MainWindow(QMainWindow):
 
         self._import_panel  = ImportPanel()
         self._layout_panel  = LayoutPanel()
-        self._ocr_placeholder = QLabel("正在 OCR 识别，请稍候…")
-        self._ocr_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._ocr_placeholder.setStyleSheet("font-size:18px; color:#888;")
+        self._ocr_placeholder = _OcrProgressWidget()
         self._hproof_panel  = HProofPanel()
         self._vproof_panel  = VProofPanel()
 
@@ -385,14 +425,16 @@ class MainWindow(QMainWindow):
             self._layout_panel.run_button.setEnabled(True)
 
     def _start_ocr(self) -> None:
-        """OCR 启动（版面分析完成后自动触发，后台运行，不跳转页面）。"""
+        """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""
         if not self._controller.project or not self._controller.project.pages:
             return
         pages = self._controller.project.pages
         if self._controller.get_recognizable_block_count() == 0:
             return  # 无可识别块，静默跳过
+        self._ocr_placeholder.reset()
+        self._go_to_step(STEP_OCR)
         self._status_bar.showMessage("正在 OCR 识别…")
-        self._controller.start_ocr(pages)
+        self._controller.start_ocr(pages, notify_page_callback=self._ocr_placeholder.update_progress)
 
     # ── 导出 ────────────────────────────────────────────────────
 

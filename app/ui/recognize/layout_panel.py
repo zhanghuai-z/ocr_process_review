@@ -37,11 +37,11 @@ class LayoutPanel(QWidget):
         title_row = QHBoxLayout()
         title_row.setContentsMargins(12, 6, 12, 0)
 
-        self._btn_run = QPushButton("▶ 版面分析")
+        self._btn_run = QPushButton("▶")
         self._btn_run.setToolTip("运行版面分析")
         self._btn_run.setEnabled(False)
-        self._btn_run.setObjectName("ghostBtn")
-        self._btn_run.setMinimumHeight(30)
+        self._btn_run.setObjectName("runBtn")
+        self._btn_run.setFixedSize(36, 36)
         self._btn_run.clicked.connect(self._request_analysis)
         title_row.addWidget(self._btn_run)
 

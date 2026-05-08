@@ -60,6 +60,7 @@ def _verified_char_crop(
     page_path: str,
     bbox: BBox,
     size: int = GALLERY_THUMB,
+    pad: int = 2,
 ) -> Optional[QPixmap]:
     """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并尝试修正。"""
     img = cache.get_image(page_path)
@@ -80,7 +81,7 @@ def _verified_char_crop(
             max(1, min(bbox.w, W - bbox.x)),
             max(1, min(bbox.h, H - bbox.y)),
         )
-    return cache.get_char_crop(page_path, bbox, size)
+    return cache.get_char_crop(page_path, bbox, size, pad=pad)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ class _GalleryModel(QAbstractListModel):
             return None
         entry = self._entries[index.row()]
         if role == Qt.ItemDataRole.DecorationRole:
-            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB)
+            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB, pad=12)
         if role == Qt.ItemDataRole.DisplayRole:
             return f"{index.row() + 1:03d}\nP{entry.page_number}-{entry.char_idx + 1}"
         if role == Qt.ItemDataRole.ToolTipRole:
