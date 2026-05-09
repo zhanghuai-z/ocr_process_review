@@ -259,6 +259,27 @@ class ApiOcrEngine:
             ))
         return rows
 
+    def _compact_text(self, text: str) -> str:
+        return "".join(ch for ch in str(text) if not ch.isspace())
+
+    def _token_row_matches_line(self, row: TokenRow, line_text: str) -> bool:
+        return self._compact_text("".join(row.tokens)) == self._compact_text(line_text)
+
+    def _fallback_token_row_for_missing_line_bbox(
+        self,
+        token_rows: list[TokenRow],
+        row_idx: int,
+        line_text: str,
+    ) -> Optional[TokenRow]:
+        if row_idx >= len(token_rows):
+            return None
+        row = token_rows[row_idx]
+        if row.bbox is None or row.bbox.area <= 0:
+            return None
+        if not self._token_row_matches_line(row, line_text):
+            return None
+        return row
+
     def _select_token_row_for_line(self, token_rows: list[TokenRow], line_bbox: BBox) -> Optional[TokenRow]:
         scored: list[tuple[float, float, int, int, TokenRow]] = []
         line_center_y = line_bbox.y + line_bbox.h / 2.0
@@ -410,8 +431,12 @@ class ApiOcrEngine:
                 score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
                 bbox = self._bbox_from_region(boxes[idx]) if idx < len(boxes) else None
                 if bbox is None or bbox.area <= 0:
-                    continue
-                token_row = self._select_token_row_for_line(token_rows, bbox)
+                    token_row = self._fallback_token_row_for_missing_line_bbox(token_rows, idx, line_text)
+                    if token_row is None:
+                        continue
+                    bbox = token_row.bbox
+                else:
+                    token_row = self._select_token_row_for_line(token_rows, bbox)
                 chars = self._build_line_chars(
                     page_image=image_bgr,
                     line_text=line_text,

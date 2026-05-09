@@ -960,6 +960,73 @@ def test_api_ocr_engine_aligns_token_rows_by_bbox_not_index():
     print("test_api_ocr_engine_aligns_token_rows_by_bbox_not_index PASSED")
 
 
+def test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["因为", "错配"],
+                                    "rec_scores": [0.96, 0.94],
+                                    "rec_boxes": [],
+                                },
+                                "text_word": [
+                                    ["因", "为"],
+                                    ["不", "同"],
+                                ],
+                                "text_word_region": [
+                                    [
+                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
+                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
+                                    ],
+                                    [
+                                        [[10, 60], [30, 60], [30, 92], [10, 92]],
+                                        [[34, 60], [54, 60], [54, 92], [34, 92]],
+                                    ],
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        image[10:42, 10:30] = 0
+        image[10:42, 34:54] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "因为"
+        assert lines[0].bbox == BBox(10, 10, 44, 32)
+        assert lines[0].chars[0].token_text == "因"
+        assert lines[0].chars[1].token_text == "为"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing PASSED")
+
+
 def test_fake_layout_engine():
     from app.engines.fake_layout_engine import FakeLayoutEngine
 
@@ -2417,6 +2484,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_does_not_promote_block_content_to_line()
     test_api_ocr_engine_ignores_block_content_without_rec_rows()
     test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
+    test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
