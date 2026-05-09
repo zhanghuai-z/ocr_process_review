@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
+from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.services.char_index_service import CharEntry, CharIndexService
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -190,19 +191,17 @@ def _build_text_map(
     parts: List[str] = []
     mapping: List[Tuple[Line, int, int, int]] = []
     pos = 0
-    for block in page.text_blocks:
-        for line in block.lines:
-            text = line.text or ""
-            for ci, c in enumerate(text):
-                mapping.append((line, ci, pos, pos + 1))
-                pos += 1
-            if text:
-                parts.append(text)
-                parts.append("\n")
-                pos += 1
-            else:
-                parts.append("\n")
-                pos += 1
+    last_block: Optional[Block] = None
+    for block, line, _line_idx in iter_unique_page_text_lines(page):
+        if last_block is not None and block is not last_block:
+            parts.append("\n")
+            pos += 1
+        last_block = block
+        text = line.text or ""
+        for ci, _char in enumerate(text):
+            mapping.append((line, ci, pos, pos + 1))
+            pos += 1
+        parts.append(text)
         parts.append("\n")
         pos += 1
     return "".join(parts), mapping
@@ -534,15 +533,10 @@ class VProofPanel(QWidget):
         clear_cur = QTextCursor(doc)
         clear_cur.select(QTextCursor.SelectionType.Document)
         clear_cur.setCharFormat(QTextCharFormat())
-        # 高亮全部出现位置
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#e3f0ff"))
-        fmt.setForeground(QColor("#1a73e8"))
-        cursor = doc.find(char)
-        while not cursor.isNull():
-            cursor.setCharFormat(fmt)
-            cursor = doc.find(char, cursor)
-        # 定位到具体 entry。若未提供则定位到首出现。
+        fmt.setBackground(QColor("#ffe8a3"))
+        fmt.setForeground(QColor("#0b57d0"))
+        # 只高亮当前 occurrence。gallery 已展示同类集合，正文区负责一一对应定位。
         target_pos: Optional[int] = None
         if focus_entry is not None:
             target_pos = self._entry_text_pos(focus_entry)
@@ -559,6 +553,7 @@ class VProofPanel(QWidget):
                     QTextCursor.MoveOperation.NextCharacter,
                     QTextCursor.MoveMode.KeepAnchor,
                 )
+            place.setCharFormat(fmt)
             self._text_edit.setTextCursor(place)
             self._text_edit.ensureCursorVisible()
 
@@ -618,21 +613,23 @@ class VProofPanel(QWidget):
         lines_text = flat.split("\n")
         changed = False
         idx = 0
-        for block in page.text_blocks:
-            for line in block.lines:
-                if idx < len(lines_text):
-                    new_text = lines_text[idx].rstrip()
-                    if new_text != (line.text or ""):
-                        line.update_text(new_text)
-                        changed = True
-                        self._bus.publish(
-                            "line.proof_changed",
-                            page_id=page.id,
-                            line_id=line.id,
-                            status=line.proof_status.value,
-                        )
-                idx += 1
-            idx += 1  # 跳过 block 末尾空行
+        last_block: Optional[Block] = None
+        for block, line, _line_idx in iter_unique_page_text_lines(page):
+            if last_block is not None and block is not last_block:
+                idx += 1  # 跳过 block 间空行
+            last_block = block
+            if idx < len(lines_text):
+                new_text = lines_text[idx].rstrip()
+                if new_text != (line.text or ""):
+                    line.update_text(new_text)
+                    changed = True
+                    self._bus.publish(
+                        "line.proof_changed",
+                        page_id=page.id,
+                        line_id=line.id,
+                        status=line.proof_status.value,
+                    )
+            idx += 1
         self.proof_saved.emit()
         self._status_lbl.setText("✓ 已保存" if changed else "无变更")
         self._status_lbl.setStyleSheet(
@@ -646,16 +643,15 @@ class VProofPanel(QWidget):
         if not self._pages:
             return
         page = self._pages[self._current_page_idx]
-        for block in page.text_blocks:
-            for line in block.lines:
-                if line.proof_status == ProofStatus.UNCHECKED:
-                    line.proof_status = ProofStatus.OK
-                    self._bus.publish(
-                        "line.proof_changed",
-                        page_id=page.id,
-                        line_id=line.id,
-                        status=ProofStatus.OK.value,
-                    )
+        for _block, line, _line_idx in iter_unique_page_text_lines(page):
+            if line.proof_status == ProofStatus.UNCHECKED:
+                line.proof_status = ProofStatus.OK
+                self._bus.publish(
+                    "line.proof_changed",
+                    page_id=page.id,
+                    line_id=line.id,
+                    status=ProofStatus.OK.value,
+                )
         self.proof_saved.emit()
         self._status_lbl.setText("本页已确认")
 

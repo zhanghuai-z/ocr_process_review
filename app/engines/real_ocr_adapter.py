@@ -26,6 +26,7 @@ CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
 PADDLE_OCR_TUNING = {
     "textDetLimitSideLen": 1536,
     "textDetBoxThresh": 0.6,
+    "textDetUnclipRatio": 1.3,
 }
 
 
