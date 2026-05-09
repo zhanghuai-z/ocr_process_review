@@ -146,7 +146,7 @@ def test_bbox_tools():
     from app.core.coordinate_seam import (
         BBOX_SPACE_CROP, BBOX_SPACE_PAGE, CropCoordinateSeam,
     )
-    from app.models import BBox, Line
+    from app.models import BBox, Char, Line
 
     # from_dict / to_dict round-trip
     d = {"x": 10, "y": 20, "w": 100, "h": 50}
@@ -204,6 +204,31 @@ def test_bbox_tools():
     ensure_line_char_bboxes(line)
     assert len(line.chars) == 4
     assert line.chars[1].bbox == BBox(10, 60, 24, 40)
+
+    shifted = Line(
+        text="甲乙丙",
+        confidence=0.9,
+        bbox=BBox(10, 20, 90, 30),
+        chars=[
+            Char(
+                char="甲", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="ocr", bbox_granularity="char", token_text="甲",
+            ),
+            Char(
+                char="乙", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="ocr", bbox_granularity="char", token_text="乙",
+            ),
+            Char(
+                char="丙", confidence=0.9, bbox=BBox(70, 20, 30, 30),
+                bbox_source="ocr", bbox_granularity="char", token_text="丙",
+            ),
+        ],
+    )
+    ensure_line_char_bboxes(shifted)
+    assert shifted.chars[0].bbox == BBox(10, 20, 30, 30)
+    assert shifted.chars[0].bbox_source == "fallback"
+    assert shifted.chars[1].bbox == BBox(40, 20, 30, 30)
+    assert shifted.chars[1].bbox_source == "ocr"
 
     img = np.full((100, 180, 3), 255, dtype=np.uint8)
     glyph_boxes = [
