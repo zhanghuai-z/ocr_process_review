@@ -10,6 +10,14 @@ import numpy as np
 
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
 from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
+from app.core.ocr_ir import (
+    OCR_IR_SOURCE_REC_TEXT,
+    OCR_IR_SOURCE_TOKEN_TEXT,
+    OCR_IR_TOKEN_TEXT_FALLBACK_FLAG,
+    OcrIrLine,
+    OcrIrToken,
+    classify_ir_text,
+)
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Char, Line, ProofStatus
@@ -35,6 +43,7 @@ class TokenRow:
     tokens: list[str]
     regions: list
     bbox: Optional[BBox]
+    ir_tokens: list[OcrIrToken]
 
 
 def normalize_confidence(score) -> float:
@@ -244,19 +253,34 @@ class ApiOcrEngine:
             paired_tokens: list[str] = []
             paired_regions: list = []
             boxes: list[BBox] = []
-            for token_text, raw_region in zip(tokens, region_row):
+            ir_tokens: list[OcrIrToken] = []
+            for token_idx, (token_text, raw_region) in enumerate(zip(tokens, region_row)):
                 bbox = self._bbox_from_region(raw_region)
                 if bbox is None or bbox.area <= 0:
                     continue
                 paired_tokens.append(token_text)
                 paired_regions.append(raw_region)
                 boxes.append(bbox)
+                ir_tokens.append(OcrIrToken(
+                    text=token_text,
+                    bbox=bbox,
+                    row_index=len(rows),
+                    token_index=token_idx,
+                    raw_region=raw_region,
+                    kind=classify_ir_text(token_text),
+                    bbox_granularity=(
+                        CHAR_BBOX_GRANULARITY_CHAR
+                        if len(token_text) == 1
+                        else CHAR_BBOX_GRANULARITY_WORD
+                    ),
+                ))
             if not paired_tokens:
                 continue
             rows.append(TokenRow(
                 tokens=paired_tokens,
                 regions=paired_regions,
                 bbox=self._merge_bboxes(boxes),
+                ir_tokens=ir_tokens,
             ))
         return rows
 
@@ -299,6 +323,17 @@ class ApiOcrEngine:
             return None
         scored.sort()
         return scored[0][4]
+
+    def _looks_like_existing_ir_line(self, ir_lines: list[OcrIrLine], row: TokenRow) -> bool:
+        row_text = self._compact_text("".join(row.tokens))
+        if not row_text or row.bbox is None:
+            return True
+        for ir_line in ir_lines:
+            if self._compact_text(ir_line.text) != row_text:
+                continue
+            if self._bbox_overlap_ratio(ir_line.bbox, row.bbox) >= 0.80:
+                return True
+        return False
 
     def _find_token_span(
         self,
@@ -416,7 +451,7 @@ class ApiOcrEngine:
         resp.raise_for_status()
         data = resp.json()
 
-        lines: List[Line] = []
+        ir_lines: list[OcrIrLine] = []
         for item in self._iter_result_items(data):
             ocr_res = self._extract_overall_ocr_res(item)
             texts = ocr_res.get("rec_texts", [])
@@ -429,6 +464,7 @@ class ApiOcrEngine:
                 or []
             )
             token_rows = self._build_token_rows(item)
+            used_token_rows: set[int] = set()
             for idx, text in enumerate(texts):
                 line_text = str(text)
                 if not line_text:
@@ -443,28 +479,57 @@ class ApiOcrEngine:
                         review_flags.append(MISSING_LINE_BBOX_FLAG)
                     else:
                         bbox = token_row.bbox
+                        used_token_rows.add(id(token_row))
                 else:
                     token_row = self._select_token_row_for_line(token_rows, bbox)
-                chars = self._build_line_chars(
-                    page_image=image_bgr,
-                    line_text=line_text,
-                    line_confidence=score,
-                    token_row=token_row.tokens if token_row else [],
-                    region_row=token_row.regions if token_row else [],
-                )
-                lines.append(Line(
+                    if token_row is not None:
+                        used_token_rows.add(id(token_row))
+                ir_lines.append(OcrIrLine(
                     text=line_text,
                     confidence=score,
                     bbox=bbox,
-                    chars=chars,
-                    ocr_text=line_text,
+                    source_text=OCR_IR_SOURCE_REC_TEXT,
+                    tokens=token_row.ir_tokens if token_row else [],
                     review_flags=review_flags,
-                    proof_status=(
-                        ProofStatus.AUTO_FLAGGED
-                        if review_flags or score < AUTO_FLAG_THRESHOLD
-                        else ProofStatus.UNCHECKED
-                    ),
                 ))
+
+            if not texts:
+                for token_row in token_rows:
+                    if id(token_row) in used_token_rows or self._looks_like_existing_ir_line(ir_lines, token_row):
+                        continue
+                    if token_row.bbox is None or token_row.bbox.area <= 0:
+                        continue
+                    ir_lines.append(OcrIrLine(
+                        text="".join(token_row.tokens),
+                        confidence=0.0,
+                        bbox=token_row.bbox,
+                        source_text=OCR_IR_SOURCE_TOKEN_TEXT,
+                        tokens=token_row.ir_tokens,
+                        review_flags=[OCR_IR_TOKEN_TEXT_FALLBACK_FLAG],
+                    ))
+
+        lines: List[Line] = []
+        for ir_line in ir_lines:
+            chars = self._build_line_chars(
+                page_image=image_bgr,
+                line_text=ir_line.text,
+                line_confidence=ir_line.confidence,
+                token_row=[token.text for token in ir_line.tokens],
+                region_row=[token.raw_region for token in ir_line.tokens],
+            )
+            lines.append(Line(
+                text=ir_line.text,
+                confidence=ir_line.confidence,
+                bbox=ir_line.bbox,
+                chars=chars,
+                ocr_text=ir_line.text,
+                review_flags=ir_line.review_flags,
+                proof_status=(
+                    ProofStatus.AUTO_FLAGGED
+                    if ir_line.review_flags or ir_line.confidence < AUTO_FLAG_THRESHOLD
+                    else ProofStatus.UNCHECKED
+                ),
+            ))
         return lines
 
 

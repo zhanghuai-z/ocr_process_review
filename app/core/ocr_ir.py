@@ -1,0 +1,95 @@
+"""OCR intermediate representation helpers.
+
+OCR_IR separates raw engine fields from the proof-facing objects so adapters can
+preserve source semantics before converting into project models.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import unicodedata
+from typing import Any, Literal, Optional
+
+from app.models import BBox
+
+OCR_IR_SOURCE_REC_TEXT = "overall_ocr_res.rec_texts"
+OCR_IR_SOURCE_TOKEN_TEXT = "text_word"
+OCR_IR_TOKEN_TEXT_FALLBACK_FLAG = "ir_token_text_fallback"
+
+OcrIrKind = Literal["text", "digit", "formula", "punct", "symbol", "other"]
+
+_FORMULA_SYMBOLS = set("=+-−*/×÷^_()[]{}<>≤≥±√∑∫∞≈≠πΠαβγδθλμσΩω|")
+
+
+def is_cjk_char(char: str) -> bool:
+    if not char:
+        return False
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+    )
+
+
+def is_formula_char(char: str) -> bool:
+    if not char or char.isspace() or is_cjk_char(char):
+        return False
+    if char in _FORMULA_SYMBOLS:
+        return True
+    category = unicodedata.category(char)
+    return (
+        char.isascii() and (char.isalpha() or char.isdigit())
+    ) or category.startswith("S")
+
+
+def is_formula_token(text: str) -> bool:
+    compact = "".join(ch for ch in str(text) if not ch.isspace())
+    if not compact or compact.isdigit():
+        return False
+    if any(is_cjk_char(ch) for ch in compact):
+        return False
+    return any(ch.isalpha() for ch in compact) and all(
+        is_formula_char(ch) or unicodedata.category(ch).startswith("P")
+        for ch in compact
+    )
+
+
+def classify_ir_text(text: str) -> OcrIrKind:
+    compact = "".join(ch for ch in str(text) if not ch.isspace())
+    if not compact:
+        return "other"
+    if compact.isdigit():
+        return "digit"
+    if is_formula_token(compact):
+        return "formula"
+    categories = [unicodedata.category(ch) for ch in compact]
+    if all(category.startswith("P") for category in categories):
+        return "punct"
+    if all(category.startswith("S") for category in categories):
+        return "symbol"
+    if any(category.startswith("L") for category in categories):
+        return "text"
+    return "other"
+
+
+@dataclass(frozen=True)
+class OcrIrToken:
+    text: str
+    bbox: Optional[BBox]
+    row_index: int
+    token_index: int
+    raw_region: Any = None
+    kind: OcrIrKind = "other"
+    bbox_source: str = "ocr"
+    bbox_granularity: str = "char"
+
+
+@dataclass
+class OcrIrLine:
+    text: str
+    confidence: float
+    bbox: BBox
+    source_text: str
+    tokens: list[OcrIrToken] = field(default_factory=list)
+    review_flags: list[str] = field(default_factory=list)
+

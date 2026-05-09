@@ -13,6 +13,7 @@ from app.core.char_bbox_utils import (
     ensure_line_char_bboxes,
     is_meaningful_text_bbox,
 )
+from app.core.ocr_ir import is_formula_char, is_formula_token
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 
@@ -26,9 +27,10 @@ except ImportError:  # pragma: no cover
 
 _KIND_LETTER = 0
 _KIND_DIGIT = 1
-_KIND_PUNCT = 2
-_KIND_SYMBOL = 3
-_KIND_OTHER = 4
+_KIND_FORMULA = 2
+_KIND_PUNCT = 3
+_KIND_SYMBOL = 4
+_KIND_OTHER = 5
 
 
 def _char_kind(char: str) -> int:
@@ -52,6 +54,8 @@ def _token_kind(text: str) -> int:
         return _KIND_OTHER
     if normalized.isdigit():
         return _KIND_DIGIT
+    if is_formula_token(normalized):
+        return _KIND_FORMULA
     if all(_char_kind(ch) == _KIND_PUNCT for ch in normalized):
         return _KIND_PUNCT
     if all(_char_kind(ch) == _KIND_SYMBOL for ch in normalized):
@@ -67,6 +71,8 @@ def _sort_key(char: str) -> Tuple[int, str, str]:
     kind = _token_kind(char)
     if kind == _KIND_DIGIT and char.strip().isdigit():
         return kind, f"{len(char.strip()):04d}:{char.strip()}", char
+    if kind == _KIND_FORMULA:
+        return kind, char.strip().lower(), char
     if kind == _KIND_LETTER:
         if _HAS_PYPINYIN and ord(char) > 0x2E80:
             py = lazy_pinyin(char, style=Style.NORMAL)
@@ -242,6 +248,18 @@ class CharIndexService:
                 idx = end
                 continue
 
+            if is_formula_char(glyph):
+                end = idx + 1
+                while (
+                    end < len(chars)
+                    and is_formula_char(chars[end].char or "")
+                    and chars[end].bbox_granularity != "word"
+                ):
+                    end += 1
+                units.append(self._build_formula_unit(chars[idx:end], idx, line))
+                idx = end
+                continue
+
             bbox = char_obj.bbox or _estimate_char_bbox(line, idx, len(chars)) or line.bbox
             units.append({
                 "key": glyph,
@@ -297,8 +315,32 @@ class CharIndexService:
             "collection_kind": "token" if len(token) > 1 else "char",
         }
 
+    def _build_formula_unit(self, chars: List[Char], start_idx: int, line: Line) -> dict:
+        token = "".join(char.char for char in chars if char.char and not char.char.isspace())
+        bbox = self._merge_bboxes(chars, line.bbox)
+        confidence = sum(float(char.confidence) for char in chars) / max(1, len(chars))
+        return {
+            "key": token,
+            "char_idx": start_idx,
+            "bbox": bbox,
+            "confidence": confidence,
+            "bbox_source": chars[0].bbox_source or "fallback",
+            "bbox_granularity": chars[0].bbox_granularity or "fallback",
+            "token_text": token,
+            "collection_kind": "token",
+        }
+
     def _build_word_units(self, chars: List[Char], start_idx: int, line: Line) -> List[dict]:
         bbox = self._merge_bboxes(chars, line.bbox)
+        raw_content = [
+            (offset, char)
+            for offset, char in enumerate(chars)
+            if char.char and not char.char.isspace()
+        ]
+        raw_text = "".join(char.char for _, char in raw_content)
+        if is_formula_token(raw_text):
+            return [self._build_formula_unit([char for _, char in raw_content], start_idx + raw_content[0][0], line)]
+
         content = [
             (offset, char)
             for offset, char in enumerate(chars)
