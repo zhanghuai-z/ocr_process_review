@@ -12,11 +12,12 @@ Element source colours:
   fallback / other                        — gray  #909090
 """
 from __future__ import annotations
+import threading
 from typing import Any, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, Qt, QRunnable, QThreadPool, Signal
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPen, QPixmap, QPolygonF,
+    QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF,
 )
 from PySide6.QtWidgets import (
     QGraphicsItem, QGraphicsPixmapItem, QGraphicsPolygonItem,
@@ -194,6 +195,7 @@ class OcrCanvas(QGraphicsView):
     """
     node_clicked = Signal(object)
     coord_changed = Signal(float, float, float, float)
+    _image_ready = Signal(object, object)  # (PageNode, QImage) — internal
 
     def __init__(self, state: AppState, parent=None):
         super().__init__(parent)
@@ -210,6 +212,8 @@ class OcrCanvas(QGraphicsView):
 
         self._bbox_items: list[_BBoxItem] = []
         self._selected_item: Optional[_BBoxItem] = None
+        self._pending_page: Optional[PageNode] = None
+        self._image_ready.connect(self._on_image_ready)
 
         state.on_page_changed(self._on_page_changed)
         state.on_selection_changed(self._on_selection_changed)
@@ -219,25 +223,48 @@ class OcrCanvas(QGraphicsView):
         self._scene.clear()
         self._bbox_items = []
         self._selected_item = None
+        self._pending_page = page
 
-        if page.image_path:
-            pix = QPixmap(page.image_path)
-            if not pix.isNull():
-                img_item = self._scene.addPixmap(pix)
-                img_item.setZValue(0)
-                self._scene.setSceneRect(QRectF(pix.rect()))
-
+        # Draw overlays immediately (fast); load image in background thread
         flags = self._state.overlay_flags
         visible_sources: set[str] = set()
-
         self._draw_layout_det(page, flags, visible_sources)
         self._draw_blocks(page, flags, visible_sources)
         self._draw_lines(page, flags, visible_sources)
         self._draw_chars(page, flags, visible_sources)
-
         if flags.get("legend", True):
             _build_legend(self._scene, visible_sources)
 
+        if page.image_path:
+            self._load_image_async(page.image_path, page)
+        else:
+            self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _load_image_async(self, image_path: str, page: PageNode) -> None:
+        """Load QImage in background thread; deliver to main thread via signal."""
+        canvas_ref = self
+
+        def _worker() -> None:
+            img = QImage(image_path)
+            # Emit signal — Qt delivers to main thread via QueuedConnection
+            canvas_ref._image_ready.emit(page, img)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_image_ready(self, page: PageNode, img: QImage) -> None:
+        """Slot — called on main thread when background image load completes."""
+        if getattr(self, "_pending_page", None) is not page:
+            return  # page changed while loading
+        if img.isNull():
+            return
+        pix = QPixmap.fromImage(img)
+        img_item = self._scene.addPixmap(pix)
+        img_item.setZValue(0)
+        # Ensure all overlay items sit above the image
+        for item in self._scene.items():
+            if item is not img_item and item.zValue() <= 0:
+                item.setZValue(1)
+        self._scene.setSceneRect(QRectF(pix.rect()))
         self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
 
     def clear(self) -> None:
