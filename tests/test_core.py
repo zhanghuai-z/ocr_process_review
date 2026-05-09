@@ -608,6 +608,7 @@ def test_api_ocr_engine_requests_return_word_box():
         assert captured["json"]["useTextlineOrientation"] is False
         assert captured["json"]["textDetLimitSideLen"] == 1536
         assert captured["json"]["textDetBoxThresh"] == 0.6
+        assert captured["json"]["textDetUnclipRatio"] == 1.3
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
@@ -2013,6 +2014,67 @@ def test_char_index_skips_lines_with_unverified_geometry():
     print("test_char_index_skips_lines_with_unverified_geometry PASSED")
 
 
+def test_char_index_deduplicates_overlapping_duplicate_lines():
+    import tempfile
+
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        image = np.full((100, 180, 3), 255, dtype=np.uint8)
+        image[20:45, 20:100] = 0
+        cv2.imwrite(img_path, image)
+
+    try:
+        line_a = Line(text="重复", confidence=0.9, bbox=BBox(20, 20, 80, 25))
+        line_b = Line(text="重复", confidence=0.9, bbox=BBox(21, 20, 80, 25))
+        page = Page(
+            image_path=img_path,
+            width=180,
+            height=100,
+            blocks=[
+                Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 50), lines=[line_a]),
+                Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 50), lines=[line_b]),
+            ],
+        )
+        svc = CharIndexService().build_index(OcrProject(name="dedupe", pages=[page]))
+        assert len(svc.query("重")) == 1
+        assert len(svc.query("复")) == 1
+    finally:
+        os.unlink(img_path)
+
+    print("test_char_index_deduplicates_overlapping_duplicate_lines PASSED")
+
+
+def test_vproof_text_map_deduplicates_overlapping_duplicate_lines():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.v_proof import _build_text_map
+
+    line_a = Line(text="重复行", confidence=0.9, bbox=BBox(10, 10, 90, 20))
+    line_b = Line(text="重复行", confidence=0.9, bbox=BBox(11, 10, 90, 20))
+    line_c = Line(text="重复行", confidence=0.9, bbox=BBox(10, 60, 90, 20))
+    page = Page(
+        image_path="/tmp/p.png",
+        width=200,
+        height=120,
+        blocks=[
+            Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 40), lines=[line_a, line_b]),
+            Block(block_type=BlockType.TEXT, bbox=BBox(0, 50, 120, 40), lines=[line_c]),
+        ],
+    )
+
+    text, mapping = _build_text_map(page)
+    assert text.count("重复行") == 2
+    assert sum(1 for line, *_ in mapping if line is line_b) == 0
+    assert sum(1 for line, *_ in mapping if line is line_c) == 3
+
+    print("test_vproof_text_map_deduplicates_overlapping_duplicate_lines PASSED")
+
+
 def test_ui_import_smoke():
     import importlib
     import os
@@ -2615,4 +2677,6 @@ if __name__ == "__main__":
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
     test_char_index_skips_lines_with_unverified_geometry()
+    test_char_index_deduplicates_overlapping_duplicate_lines()
+    test_vproof_text_map_deduplicates_overlapping_duplicate_lines()
     print("\n✓ 所有测试通过")

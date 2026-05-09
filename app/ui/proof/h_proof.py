@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
+from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -533,41 +534,40 @@ class HProofPanel(QWidget):
             w.deleteLater()
 
         # 无数据时显示空状态
-        has_data = any(block.lines for page in pages for block in page.text_blocks)
+        has_data = any(True for page in pages for _ in iter_unique_page_text_lines(page))
         self._empty_lbl.setVisible(not has_data)
 
         line_num = 1  # 全局行号
         prev_page_number: int = -1
         for page in pages:
-            for block in page.text_blocks:
-                for li, line in enumerate(block.lines):
-                    # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
-                    if page.page_number != prev_page_number:
-                        sep = QLabel(f"── 第 {page.page_number} 页 ──")
-                        sep.setObjectName("pageSep")
-                        sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                        sep.setMinimumHeight(26)
-                        self._list_layout.insertWidget(
-                            self._list_layout.count() - 1, sep
-                        )
-                        prev_page_number = page.page_number
-                    self._items.append((block, line, page, li))
-                    pair = _LinePair(
-                        len(self._pairs), block, line, page, line_num,
-                        self._cache,
-                    )
-                    pair.clicked.connect(self._on_pair_clicked)
-                    pair.text_saved.connect(self._on_text_saved)
-                    pair.confirmed.connect(self._on_confirmed)
-                    pair.prev_req.connect(self._prev)
-                    pair.next_req.connect(self._next)
-                    pair.flag_req.connect(self._toggle_flag)
-                    pair.skip_req.connect(self._next)
-                    self._pairs.append(pair)
+            for block, line, li in iter_unique_page_text_lines(page):
+                # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
+                if page.page_number != prev_page_number:
+                    sep = QLabel(f"── 第 {page.page_number} 页 ──")
+                    sep.setObjectName("pageSep")
+                    sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    sep.setMinimumHeight(26)
                     self._list_layout.insertWidget(
-                        self._list_layout.count() - 1, pair
+                        self._list_layout.count() - 1, sep
                     )
-                    line_num += 1
+                    prev_page_number = page.page_number
+                self._items.append((block, line, page, li))
+                pair = _LinePair(
+                    len(self._pairs), block, line, page, line_num,
+                    self._cache,
+                )
+                pair.clicked.connect(self._on_pair_clicked)
+                pair.text_saved.connect(self._on_text_saved)
+                pair.confirmed.connect(self._on_confirmed)
+                pair.prev_req.connect(self._prev)
+                pair.next_req.connect(self._next)
+                pair.flag_req.connect(self._toggle_flag)
+                pair.skip_req.connect(self._next)
+                self._pairs.append(pair)
+                self._list_layout.insertWidget(
+                    self._list_layout.count() - 1, pair
+                )
+                line_num += 1
 
         self._current_idx = 0
         self._update_stats()

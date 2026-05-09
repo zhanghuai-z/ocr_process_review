@@ -13,6 +13,7 @@ from app.core.char_bbox_utils import (
     ensure_line_char_bboxes,
     is_meaningful_text_bbox,
 )
+from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 
 try:
@@ -141,17 +142,16 @@ class CharIndexService:
 
         for page_idx, page in enumerate(pages):
             page_image = cv2.imread(page.display_image_path, cv2.IMREAD_COLOR)
-            for block in page.text_blocks:
-                for line_idx, line in enumerate(block.lines):
-                    self._index_line(
-                        page_idx=page_idx,
-                        page=page,
-                        page_image=page_image,
-                        block_order=block.order,
-                        line_idx=line_idx,
-                        line=line,
-                        seen=seen,
-                    )
+            for block, line, line_idx in iter_unique_page_text_lines(page):
+                self._index_line(
+                    page_idx=page_idx,
+                    page=page,
+                    page_image=page_image,
+                    block_order=block.order,
+                    line_idx=line_idx,
+                    line=line,
+                    seen=seen,
+                )
 
         for entries in self._index.values():
             entries.sort(key=lambda entry: entry._entry_sort_key)
