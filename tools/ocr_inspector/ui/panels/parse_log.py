@@ -68,8 +68,20 @@ class ParseLogPanel(QWidget):
         self._count_label.setText(f"{len(entries)} 条")
 
     def _add_entry(self, entry) -> None:
-        """Accept dict or dataclass with .level/.stage/.message fields."""
-        if isinstance(entry, dict):
+        """Accept dict, dataclass, or plain str entries from adapter."""
+        if isinstance(entry, str):
+            # Plain string: parse optional "LEVEL: message" prefix
+            for lvl in ("ERROR", "WARNING", "INFO", "DEBUG"):
+                if entry.upper().startswith(lvl + ":") or entry.upper().startswith(lvl + " "):
+                    level = lvl
+                    msg   = entry[len(lvl)+1:].lstrip(": ").strip()
+                    stage = ""
+                    break
+            else:
+                level = "INFO"
+                stage = ""
+                msg   = entry
+        elif isinstance(entry, dict):
             level = str(entry.get("level", "INFO")).upper()
             stage = str(entry.get("stage", ""))
             msg   = str(entry.get("message", ""))

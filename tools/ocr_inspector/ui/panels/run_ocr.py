@@ -130,14 +130,17 @@ class RunOcrPanel(QWidget):
         pre_form = QFormLayout(pre_group)
         self._use_orientation = QCheckBox()
         self._use_orientation.setChecked(False)
+        self._use_orientation.setToolTip("自动识别并旋转文档方向 (0°/90°/180°/270°)\n对竖放扫描件有用；关闭节省约 50ms")
         pre_form.addRow("文档方向校正:", self._use_orientation)
 
         self._use_unwarping = QCheckBox()
         self._use_unwarping.setChecked(False)
+        self._use_unwarping.setToolTip("对扫描件做 TPS 去扭曲\n⚠ 开启后坐标仍在处理后图像像素空间")
         pre_form.addRow("图像去扭曲:", self._use_unwarping)
 
         self._use_textline_orient = QCheckBox()
         self._use_textline_orient.setChecked(False)
+        self._use_textline_orient.setToolTip("识别并处理竖排文本行 (日文/中文竖排)\n关闭节省约 5ms/行")
         pre_form.addRow("文本行方向:", self._use_textline_orient)
         layout.addWidget(pre_group)
 
@@ -150,6 +153,7 @@ class RunOcrPanel(QWidget):
         self._det_thresh.setSingleStep(0.05)
         self._det_thresh.setDecimals(2)
         self._det_thresh.setValue(0.3)
+        self._det_thresh.setToolTip("像素二值化阈值 (0~1)\n值越小：更多像素判为文字边缘 → 召回↑ 噪声↑\n值越大：只保留高置信像素 → 精确度↑ 漏字↑\n默认 0.3")
         det_form.addRow("det_thresh:", self._det_thresh)
 
         self._det_box_thresh = QDoubleSpinBox()
@@ -157,6 +161,7 @@ class RunOcrPanel(QWidget):
         self._det_box_thresh.setSingleStep(0.05)
         self._det_box_thresh.setDecimals(2)
         self._det_box_thresh.setValue(0.6)
+        self._det_box_thresh.setToolTip("检测框得分过滤阈值 (0~1)\n值越大：去掉低置信检测框 → 精确度↑ 召回↓\n默认 0.6")
         det_form.addRow("det_box_thresh:", self._det_box_thresh)
 
         self._det_unclip_ratio = QDoubleSpinBox()
@@ -164,12 +169,14 @@ class RunOcrPanel(QWidget):
         self._det_unclip_ratio.setSingleStep(0.1)
         self._det_unclip_ratio.setDecimals(2)
         self._det_unclip_ratio.setValue(1.5)
+        self._det_unclip_ratio.setToolTip("检测框扩张比例 (Vatti clipping)\n值越大框越宽松，有助包住完整字符\n过大会合并相邻行\n默认 1.5")
         det_form.addRow("det_unclip_ratio:", self._det_unclip_ratio)
 
         self._det_limit_side_len = QSpinBox()
         self._det_limit_side_len.setRange(64, 4096)
         self._det_limit_side_len.setSingleStep(64)
         self._det_limit_side_len.setValue(736)
+        self._det_limit_side_len.setToolTip("检测前图像最长边缩放上限 (px)\n值越小：速度快，细小文字易丢失\n值越大：细节保留好，内存/速度代价高\n默认 736")
         det_form.addRow("det_limit_side_len:", self._det_limit_side_len)
 
         self._det_limit_type_combo = QComboBox()
@@ -187,10 +194,12 @@ class RunOcrPanel(QWidget):
         self._rec_score_thresh.setSingleStep(0.05)
         self._rec_score_thresh.setDecimals(2)
         self._rec_score_thresh.setValue(0.0)
+        self._rec_score_thresh.setToolTip("识别置信度过滤阈值 (0~1)\n调高可减少乱码行，但可能漏掉难字\n0.0 = 不过滤（默认）")
         rec_form.addRow("rec_score_thresh:", self._rec_score_thresh)
 
         self._return_word_box = QCheckBox()
         self._return_word_box.setChecked(False)
+        self._return_word_box.setToolTip("开启后返回字/词级 bounding box\n→ overall_ocr_res.text_word_region 有值\n→ canvas 中橙色字框才会出现\n默认 False（关闭省速度）")
         rec_form.addRow("return_word_box:", self._return_word_box)
         layout.addWidget(rec_group)
 
@@ -347,9 +356,11 @@ class RunOcrPanel(QWidget):
         self._log.append(
             f"OK — {len(doc.pages)} page(s), {n_blocks} block(s), {n_lines} line(s)"
         )
-        for msg in (doc.parse_log or [])[:5]:
-            self._log.append(f"  warn: {msg}")
+        for msg in (doc.parse_log or []):
+            if "WARNING" in str(msg) or "ERROR" in str(msg):
+                self._log.append(f"  ⚠ {msg}")
         self._state.set_document(doc)
+        # _on_doc_loaded in main window handles combo + set_active_page automatically
 
     def _on_ocr_error(self, msg: str) -> None:
         self._run_btn.setEnabled(True)

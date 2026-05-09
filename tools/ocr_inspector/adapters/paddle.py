@@ -82,6 +82,10 @@ class PaddleAdapter:
             )
             page.layout_det_blocks.append(det_block)
 
+        # Log structural summary
+        log.append(f"INFO: parsing_res_list → {len(page.blocks)} block(s)")
+        log.append(f"INFO: layout_det_res.boxes → {len(page.layout_det_blocks)} det-box(es)")
+
         # Lines
         ocr_res = data.get("overall_ocr_res") or data
         rec_texts  = ocr_res.get("rec_texts")  or []
@@ -123,6 +127,14 @@ class PaddleAdapter:
                 matched.lines.append(line)
             else:
                 page.orphan_lines.append(line)
+
+        total_lines = len(page.all_lines)
+        total_chars = len(page.all_chars)
+        total_orphan = len(page.orphan_lines)
+        log.append(f"INFO: overall_ocr_res → {total_lines} line(s), {total_chars} char(s)")
+        if total_orphan:
+            log.append(f"WARNING: {total_orphan} orphan line(s) not matched to any block")
+        log.append(f"INFO: parse complete — coord space: image pixel space ({page.width}×{page.height})")
 
         return doc
 

@@ -108,6 +108,7 @@ class OcrInspectorWindow(QMainWindow):
         self.setStatusBar(status)
 
         self._canvas.coord_changed.connect(self._on_coord_changed)
+        self._state.on_document_changed(self._on_doc_loaded)
 
     def _open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -115,6 +116,21 @@ class OcrInspectorWindow(QMainWindow):
         )
         if path:
             self.load_file(path)
+
+    def _on_doc_loaded(self, doc) -> None:
+        """Called whenever AppState.set_document() is called (file load OR Run OCR)."""
+        if doc is None:
+            self._page_combo.clear()
+            return
+        self._page_combo.blockSignals(True)
+        self._page_combo.clear()
+        for page in doc.pages:
+            self._page_combo.addItem(f"Page {page.page_number}", page)
+        self._page_combo.setCurrentIndex(0)
+        self._page_combo.blockSignals(False)
+        self._status_engine.setText(f"engine: {doc.engine}")
+        if doc.pages:
+            self._state.set_active_page(doc.pages[0])
 
     def load_file(self, path: str) -> None:
         try:
@@ -128,23 +144,12 @@ class OcrInspectorWindow(QMainWindow):
         image_path = self._guess_image_path(path)
         doc = adapter_cls().parse(raw, source_path=path, image_path=image_path or "")
 
-        if doc.parse_log:
-            self.statusBar().showMessage(
-                f"Loaded with {len(doc.parse_log)} warnings", 5000
-            )
-        self._status_engine.setText(f"engine: {doc.engine}")
-        self._state.set_document(doc)
-
-        self._page_combo.blockSignals(True)
-        self._page_combo.clear()
-        for page in doc.pages:
-            self._page_combo.addItem(f"Page {page.page_number}", page)
-        self._page_combo.setCurrentIndex(0)
-        self._page_combo.blockSignals(False)
-
-        # Explicitly notify canvas: blockSignals prevented the combo signal from firing
-        if doc.pages:
-            self._state.set_active_page(doc.pages[0])
+        n_warn = sum(1 for m in (doc.parse_log or []) if "WARNING" in str(m) or "ERROR" in str(m))
+        if n_warn:
+            self.statusBar().showMessage(f"Loaded · {n_warn} warnings/errors — see 解析日志 tab", 5000)
+        else:
+            self.statusBar().showMessage(f"Loaded: {Path(path).name}", 3000)
+        self._state.set_document(doc)   # _on_doc_loaded fires here
 
     def _set_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
