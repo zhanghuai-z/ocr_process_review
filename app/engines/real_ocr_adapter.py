@@ -9,7 +9,7 @@ from typing import List, Optional
 import numpy as np
 
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
-from app.core.char_bbox_utils import is_meaningful_text_bbox
+from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Char, Line, ProofStatus
@@ -280,6 +280,10 @@ class ApiOcrEngine:
             return None
         return row
 
+    def _unverified_full_crop_bbox(self, image_bgr: np.ndarray) -> BBox:
+        height, width = image_bgr.shape[:2]
+        return BBox(0, 0, max(1, int(width)), max(1, int(height)))
+
     def _select_token_row_for_line(self, token_rows: list[TokenRow], line_bbox: BBox) -> Optional[TokenRow]:
         scored: list[tuple[float, float, int, int, TokenRow]] = []
         line_center_y = line_bbox.y + line_bbox.h / 2.0
@@ -430,11 +434,14 @@ class ApiOcrEngine:
                     continue
                 score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
                 bbox = self._bbox_from_region(boxes[idx]) if idx < len(boxes) else None
+                review_flags: list[str] = []
                 if bbox is None or bbox.area <= 0:
                     token_row = self._fallback_token_row_for_missing_line_bbox(token_rows, idx, line_text)
                     if token_row is None:
-                        continue
-                    bbox = token_row.bbox
+                        bbox = self._unverified_full_crop_bbox(image_bgr)
+                        review_flags.append(MISSING_LINE_BBOX_FLAG)
+                    else:
+                        bbox = token_row.bbox
                 else:
                     token_row = self._select_token_row_for_line(token_rows, bbox)
                 chars = self._build_line_chars(
@@ -450,9 +457,10 @@ class ApiOcrEngine:
                     bbox=bbox,
                     chars=chars,
                     ocr_text=line_text,
+                    review_flags=review_flags,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
-                        if score < AUTO_FLAG_THRESHOLD
+                        if review_flags or score < AUTO_FLAG_THRESHOLD
                         else ProofStatus.UNCHECKED
                     ),
                 ))

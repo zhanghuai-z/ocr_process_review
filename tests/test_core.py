@@ -965,6 +965,7 @@ def test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing():
     import requests
 
     from app.core.app_config import AppConfig, update_config
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
     from app.engines import OcrContext
     from app.engines.real_ocr_adapter import ApiOcrEngine
     from app.models import BBox
@@ -1015,16 +1016,71 @@ def test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing():
         image[10:42, 10:30] = 0
         image[10:42, 34:54] = 0
         lines = engine.recognize(image, OcrContext())
-        assert len(lines) == 1
+        assert len(lines) == 2
         assert lines[0].text == "因为"
         assert lines[0].bbox == BBox(10, 10, 44, 32)
         assert lines[0].chars[0].token_text == "因"
         assert lines[0].chars[1].token_text == "为"
+        assert lines[1].text == "错配"
+        assert lines[1].bbox == BBox(0, 0, 120, 120)
+        assert MISSING_LINE_BBOX_FLAG in lines[1].review_flags
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing PASSED")
+
+
+def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox, ProofStatus
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["有效OCR文本"],
+                                    "rec_scores": [0.91],
+                                    "rec_boxes": [],
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((80, 120, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "有效OCR文本"
+        assert lines[0].ocr_text == "有效OCR文本"
+        assert lines[0].bbox == BBox(0, 0, 120, 80)
+        assert MISSING_LINE_BBOX_FLAG in lines[0].review_flags
+        assert lines[0].proof_status == ProofStatus.AUTO_FLAGGED
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_preserves_rec_text_without_any_geometry PASSED")
 
 
 def test_fake_layout_engine():
@@ -1919,6 +1975,44 @@ def test_char_index_skips_empty_narrow_ocr_bbox():
     print("test_char_index_skips_empty_narrow_ocr_bbox PASSED")
 
 
+def test_char_index_skips_lines_with_unverified_geometry():
+    import tempfile
+
+    import cv2
+    import numpy as np
+
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        image[10:70, 10:110] = 0
+        cv2.imwrite(img_path, image)
+
+    try:
+        line = Line(
+            text="有效OCR文本",
+            confidence=0.9,
+            bbox=BBox(0, 0, 120, 80),
+            review_flags=[MISSING_LINE_BBOX_FLAG],
+        )
+        page = Page(
+            image_path=img_path,
+            width=120,
+            height=80,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 80), lines=[line])],
+        )
+        svc = CharIndexService().build_index(OcrProject(name="unverified", pages=[page]))
+        assert svc.query("有") == []
+        assert line.text == "有效OCR文本"
+    finally:
+        os.unlink(img_path)
+
+    print("test_char_index_skips_lines_with_unverified_geometry PASSED")
+
+
 def test_ui_import_smoke():
     import importlib
     import os
@@ -2485,6 +2579,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_ignores_block_content_without_rec_rows()
     test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
     test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing()
+    test_api_ocr_engine_preserves_rec_text_without_any_geometry()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
@@ -2519,4 +2614,5 @@ if __name__ == "__main__":
     test_char_index_suppresses_punctuation_topic_for_shared_word_box()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
+    test_char_index_skips_lines_with_unverified_geometry()
     print("\n✓ 所有测试通过")

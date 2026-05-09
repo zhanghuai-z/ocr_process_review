@@ -10,6 +10,9 @@ from app.models import BBox, Char, Line
 
 LINE_DIRECTION_HORIZONTAL = "horizontal"
 LINE_DIRECTION_VERTICAL = "vertical"
+MISSING_LINE_BBOX_FLAG = "missing_line_bbox"
+BBOX_SOURCE_UNAVAILABLE = "unavailable"
+BBOX_GRANULARITY_UNAVAILABLE = "unavailable"
 
 
 def infer_line_direction(line_bbox: BBox, text_length: int) -> str:
@@ -392,6 +395,20 @@ def ensure_line_char_bboxes(
     if not line.text:
         line.chars = []
         return []
+
+    if MISSING_LINE_BBOX_FLAG in line.review_flags:
+        line.chars = [
+            Char(
+                char=glyph,
+                confidence=float(line.confidence),
+                bbox=None,
+                bbox_source=BBOX_SOURCE_UNAVAILABLE,
+                bbox_granularity=BBOX_GRANULARITY_UNAVAILABLE,
+                token_text=glyph,
+            )
+            for glyph in line.text
+        ]
+        return line.chars
 
     refined_line_bbox = (
         refine_line_bbox(line.bbox, page_image)
