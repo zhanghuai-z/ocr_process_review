@@ -1084,6 +1084,66 @@ def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
     print("test_api_ocr_engine_preserves_rec_text_without_any_geometry PASSED")
 
 
+def test_api_ocr_engine_preserves_token_text_when_rec_rows_missing():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.ocr_ir import OCR_IR_TOKEN_TEXT_FALLBACK_FLAG
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox, ProofStatus
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": [],
+                                    "rec_scores": [],
+                                    "rec_boxes": [],
+                                },
+                                "text_word": [["漏", "字"]],
+                                "text_word_region": [[
+                                    [[10, 20], [28, 20], [28, 44], [10, 44]],
+                                    [[32, 20], [50, 20], [50, 44], [32, 44]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((80, 100, 3), 255, dtype=np.uint8)
+        image[20:44, 10:28] = 0
+        image[20:44, 32:50] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "漏字"
+        assert lines[0].bbox == BBox(10, 20, 40, 24)
+        assert OCR_IR_TOKEN_TEXT_FALLBACK_FLAG in lines[0].review_flags
+        assert lines[0].proof_status == ProofStatus.AUTO_FLAGGED
+        assert [char.token_text for char in lines[0].chars] == ["漏", "字"]
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_preserves_token_text_when_rec_rows_missing PASSED")
+
+
 def test_fake_layout_engine():
     from app.engines.fake_layout_engine import FakeLayoutEngine
 
@@ -1876,6 +1936,47 @@ def test_char_index_sorts_digit_tokens_short_to_long():
     print("test_char_index_sorts_digit_tokens_short_to_long PASSED")
 
 
+def test_char_index_groups_formula_runs_below_digits():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="税2026A+B",
+        confidence=0.9,
+        bbox=BBox(10, 20, 160, 24),
+        chars=[
+            Char(char="税", confidence=0.9, bbox=BBox(10, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="税"),
+            Char(char="2", confidence=0.9, bbox=BBox(34, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="0", confidence=0.9, bbox=BBox(44, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="0"),
+            Char(char="2", confidence=0.9, bbox=BBox(54, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="6", confidence=0.9, bbox=BBox(64, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="6"),
+            Char(char="A", confidence=0.9, bbox=BBox(84, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="A"),
+            Char(char="+", confidence=0.9, bbox=BBox(96, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="+"),
+            Char(char="B", confidence=0.9, bbox=BBox(106, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="B"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=200,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 180, 40), lines=[line])],
+    )
+    svc = CharIndexService().build_index(OcrProject(name="formula-group", pages=[page]))
+
+    assert svc.query("A") == []
+    assert svc.query("+") == []
+    assert svc.query("B") == []
+    formula = svc.first_entry("A+B")
+    assert formula is not None
+    assert formula.collection_kind == "token"
+    assert formula.bbox == BBox(84, 20, 34, 24)
+
+    sorted_keys = [key for key, _count in svc.sorted_chars()]
+    assert sorted_keys.index("2026") < sorted_keys.index("A+B")
+
+    print("test_char_index_groups_formula_runs_below_digits PASSED")
+
+
 def test_char_index_suppresses_punctuation_topic_for_shared_word_box():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
@@ -2642,6 +2743,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
     test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing()
     test_api_ocr_engine_preserves_rec_text_without_any_geometry()
+    test_api_ocr_engine_preserves_token_text_when_rec_rows_missing()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
@@ -2673,6 +2775,7 @@ if __name__ == "__main__":
     test_char_index_skips_whitespace()
     test_char_index_groups_digit_runs_as_tokens()
     test_char_index_sorts_digit_tokens_short_to_long()
+    test_char_index_groups_formula_runs_below_digits()
     test_char_index_suppresses_punctuation_topic_for_shared_word_box()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
