@@ -139,7 +139,7 @@ flowchart TD
 
 ## 6. Label Studio 参考结论
 
-已参考 Label Studio 的官方导出说明和 OCR 标注格式思路。关键点：
+已参考 Label Studio 官方导出说明，以及 GitHub 仓库 `HumanSignal/label-studio` 中 `docs/source/includes/result_format.md` 对 annotation result 的定义。关键点：
 
 - Label Studio 把一个标注拆成 **region** 与 **result**，同一个 region ID 关联 bbox、label、textarea 等结果；这给当前项目的启发是：不要把“几何框”“文本”“标签/类型”“消费状态”混成一个临时字段，应先进入 OCR_IR，再投射到不同 proof 消费层。
 - Label Studio 图像导出的 bbox 使用相对百分比，并要求明确单位转换；当前项目不照搬百分比坐标，因为 Paddle API 在关闭 unwarping 时返回的是输入图像像素坐标，项目内部继续保持像素坐标更直接。
