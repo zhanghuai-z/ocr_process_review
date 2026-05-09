@@ -304,6 +304,86 @@ def refine_line_bbox(
     )
 
 
+def measure_bbox_foreground(
+    page_image: Optional[np.ndarray],
+    bbox: Optional[BBox],
+) -> dict:
+    if page_image is None or bbox is None:
+        return {
+            "ink_pixels": 0,
+            "fill_ratio": 0.0,
+            "tight_w": 0,
+            "tight_h": 0,
+        }
+    normalized = bbox.normalize().clamp(page_image.shape[1], page_image.shape[0])
+    if normalized.w <= 0 or normalized.h <= 0:
+        return {
+            "ink_pixels": 0,
+            "fill_ratio": 0.0,
+            "tight_w": 0,
+            "tight_h": 0,
+        }
+
+    crop = page_image[normalized.y:normalized.y2, normalized.x:normalized.x2]
+    if crop.size == 0:
+        return {
+            "ink_pixels": 0,
+            "fill_ratio": 0.0,
+            "tight_w": 0,
+            "tight_h": 0,
+        }
+
+    mask = _foreground_mask(crop)
+    ink_pixels = int(mask.sum())
+    if ink_pixels <= 0:
+        return {
+            "ink_pixels": 0,
+            "fill_ratio": 0.0,
+            "tight_w": 0,
+            "tight_h": 0,
+        }
+
+    rows = np.flatnonzero(mask.sum(axis=1) > 0)
+    cols = np.flatnonzero(mask.sum(axis=0) > 0)
+    tight_h = int(rows[-1] - rows[0] + 1) if rows.size else 0
+    tight_w = int(cols[-1] - cols[0] + 1) if cols.size else 0
+    return {
+        "ink_pixels": ink_pixels,
+        "fill_ratio": float(ink_pixels) / float(normalized.w * normalized.h),
+        "tight_w": tight_w,
+        "tight_h": tight_h,
+    }
+
+
+def is_meaningful_text_bbox(
+    page_image: Optional[np.ndarray],
+    bbox: Optional[BBox],
+    text: str = "",
+) -> bool:
+    if bbox is None or bbox.area <= 0:
+        return False
+    if page_image is None:
+        return True
+
+    metrics = measure_bbox_foreground(page_image, bbox)
+    ink_pixels = int(metrics["ink_pixels"])
+    if ink_pixels <= 0:
+        return False
+
+    core_text = "".join(ch for ch in text if not ch.isspace())
+    expected_len = max(1, len(core_text))
+    tight_primary = max(int(metrics["tight_w"]), int(metrics["tight_h"]))
+    tight_secondary = min(int(metrics["tight_w"]), int(metrics["tight_h"]))
+
+    if tight_primary < max(2, expected_len) and ink_pixels < expected_len * 3:
+        return False
+    if tight_secondary <= 1 and ink_pixels < max(3, expected_len * 2):
+        return False
+    if float(metrics["fill_ratio"]) < 0.01 and ink_pixels < max(4, expected_len * 2):
+        return False
+    return True
+
+
 def ensure_line_char_bboxes(
     line: Line,
     page_image: Optional[np.ndarray] = None,
