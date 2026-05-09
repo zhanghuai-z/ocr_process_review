@@ -108,7 +108,6 @@ class Line:
 
     # --- Phase 1 新增字段 ---
     ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
-    text_source: str = ""                 # 当前 text 的来源字段
     llm_suggestion: str = ""              # LLM 预审建议文本
     llm_reason: str = ""                  # LLM 修改原因
     llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
@@ -128,7 +127,6 @@ class Line:
             "proof_status": self.proof_status.value,
             "original_text": self.original_text,
             "ocr_text": self.ocr_text,
-            "text_source": self.text_source,
             "llm_suggestion": self.llm_suggestion,
             "llm_reason": self.llm_reason,
             "llm_review_status": self.llm_review_status.value,

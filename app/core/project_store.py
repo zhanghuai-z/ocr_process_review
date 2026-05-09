@@ -23,8 +23,8 @@ from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 
 logger = get_logger(__name__)
 
-# --------------------------------------------------------------------- schema v4
-DDL_V4 = """
+# --------------------------------------------------------------------- schema v3
+DDL_V3 = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -74,7 +74,6 @@ CREATE TABLE IF NOT EXISTS line (
     x INTEGER NOT NULL, y INTEGER NOT NULL,
     w INTEGER NOT NULL, h INTEGER NOT NULL,
     ocr_text          TEXT    NOT NULL DEFAULT '',
-    text_source       TEXT    NOT NULL DEFAULT '',
     llm_suggestion    TEXT    NOT NULL DEFAULT '',
     llm_reason        TEXT    NOT NULL DEFAULT '',
     llm_review_status TEXT    NOT NULL DEFAULT 'disabled',
@@ -154,9 +153,6 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE char_ ADD COLUMN bbox_granularity TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE char_ ADD COLUMN token_text TEXT NOT NULL DEFAULT '';",
     ],
-    4: [
-        "ALTER TABLE line ADD COLUMN text_source TEXT NOT NULL DEFAULT '';",
-    ],
 }
 
 
@@ -193,7 +189,7 @@ class ProjectStore:
     def open(self) -> None:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(DDL_V4)
+        self._conn.executescript(DDL_V3)
         self._conn.commit()
         self._ensure_meta()
         self._migrate()
@@ -374,14 +370,14 @@ class ProjectStore:
         bb = line.bbox
         cur.execute(
             "INSERT INTO line (block_id, text, original_text, confidence, proof_status, "
-            "x, y, w, h, ocr_text, text_source, llm_suggestion, llm_reason, "
-            "llm_review_status, review_flags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
+            "review_flags_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (block_id, line.text, line.original_text, line.confidence,
-              line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
-              line.ocr_text, line.text_source, line.llm_suggestion, line.llm_reason,
-              line.llm_review_status.value,
-              _review_flags_to_json(line.review_flags)),
+             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
+             line.ocr_text, line.llm_suggestion, line.llm_reason,
+             line.llm_review_status.value,
+             _review_flags_to_json(line.review_flags)),
         )
         line.id = cur.lastrowid
 
@@ -418,10 +414,10 @@ class ProjectStore:
         bb = line.bbox
         self.conn.execute(
             "UPDATE line SET text=?, original_text=?, proof_status=?, "
-            "ocr_text=?, text_source=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
+            "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
             "review_flags_json=? WHERE id=?",
             (line.text, line.original_text, line.proof_status.value,
-             line.ocr_text, line.text_source, line.llm_suggestion, line.llm_reason,
+             line.ocr_text, line.llm_suggestion, line.llm_reason,
              line.llm_review_status.value,
              _review_flags_to_json(line.review_flags), line.id),
         )
@@ -516,7 +512,6 @@ class ProjectStore:
                 proof_status=ProofStatus(r["proof_status"]),
                 id=r["id"],
                 ocr_text=r["ocr_text"],
-                text_source=r["text_source"],
                 llm_suggestion=r["llm_suggestion"],
                 llm_reason=r["llm_reason"],
                 llm_review_status=LlmReviewStatus(r["llm_review_status"]),
