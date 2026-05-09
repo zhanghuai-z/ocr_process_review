@@ -3,6 +3,7 @@
 确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
@@ -21,6 +22,18 @@ CHAR_BBOX_SOURCE_FALLBACK = "fallback"
 CHAR_BBOX_GRANULARITY_CHAR = "char"
 CHAR_BBOX_GRANULARITY_WORD = "word"
 CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
+
+PADDLE_OCR_TUNING = {
+    "textDetLimitSideLen": 1536,
+    "textDetBoxThresh": 0.6,
+}
+
+
+@dataclass
+class TokenRow:
+    tokens: list[str]
+    regions: list
+    bbox: Optional[BBox]
 
 
 def normalize_confidence(score) -> float:
@@ -124,6 +137,7 @@ class ApiOcrEngine:
     def _build_request_body(self, file_b64: str, file_type: int = 1) -> dict:
         body = {"file": file_b64, "fileType": file_type, "returnWordBox": True}
         body.update(self._PIPELINE_DISABLE_FLAGS)
+        body.update(PADDLE_OCR_TUNING)
         return body
 
     def _iter_result_items(self, data: dict) -> list[dict]:
@@ -206,6 +220,59 @@ class ApiOcrEngine:
         x2 = max(box.x2 for box in boxes)
         y2 = max(box.y2 for box in boxes)
         return BBox.from_xyxy(x1, y1, x2, y2).normalize()
+
+    def _bbox_overlap_ratio(self, first: Optional[BBox], second: Optional[BBox]) -> float:
+        if first is None or second is None or first.area <= 0 or second.area <= 0:
+            return 0.0
+        x1 = max(first.x, second.x)
+        y1 = max(first.y, second.y)
+        x2 = min(first.x2, second.x2)
+        y2 = min(first.y2, second.y2)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        if inter <= 0:
+            return 0.0
+        return inter / float(min(first.area, second.area))
+
+    def _build_token_rows(self, item: dict) -> list[TokenRow]:
+        token_rows, region_rows = self._extract_word_box_rows(item)
+        rows: list[TokenRow] = []
+        for token_row, region_row in zip(token_rows, region_rows):
+            tokens = [token.strip() for token in self._normalize_token_texts(token_row) if token.strip()]
+            if not tokens or not isinstance(region_row, (list, tuple)):
+                continue
+            paired_tokens: list[str] = []
+            paired_regions: list = []
+            boxes: list[BBox] = []
+            for token_text, raw_region in zip(tokens, region_row):
+                bbox = self._bbox_from_region(raw_region)
+                if bbox is None or bbox.area <= 0:
+                    continue
+                paired_tokens.append(token_text)
+                paired_regions.append(raw_region)
+                boxes.append(bbox)
+            if not paired_tokens:
+                continue
+            rows.append(TokenRow(
+                tokens=paired_tokens,
+                regions=paired_regions,
+                bbox=self._merge_bboxes(boxes),
+            ))
+        return rows
+
+    def _select_token_row_for_line(self, token_rows: list[TokenRow], line_bbox: BBox) -> Optional[TokenRow]:
+        scored: list[tuple[float, float, int, int, TokenRow]] = []
+        line_center_y = line_bbox.y + line_bbox.h / 2.0
+        for idx, row in enumerate(token_rows):
+            overlap = self._bbox_overlap_ratio(row.bbox, line_bbox)
+            if overlap <= 0:
+                continue
+            row_center_y = row.bbox.y + row.bbox.h / 2.0 if row.bbox else line_center_y
+            distance = abs(row_center_y - line_center_y)
+            scored.append((-overlap, distance, row.bbox.x if row.bbox else 0, idx, row))
+        if not scored:
+            return None
+        scored.sort()
+        return scored[0][4]
 
     def _find_token_span(
         self,
@@ -335,28 +402,29 @@ class ApiOcrEngine:
                 or ocr_res.get("dt_polys")
                 or []
             )
-            token_rows, region_rows = self._extract_word_box_rows(item)
+            token_rows = self._build_token_rows(item)
             for idx, text in enumerate(texts):
+                line_text = str(text)
+                if not line_text:
+                    continue
                 score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-                if idx < len(boxes):
-                    bbox = self._bbox_from_region(boxes[idx]) or BBox(0, 0, 0, 0)
-                else:
-                    bbox = BBox(0, 0, 0, 0)
+                bbox = self._bbox_from_region(boxes[idx]) if idx < len(boxes) else None
+                if bbox is None or bbox.area <= 0:
+                    continue
+                token_row = self._select_token_row_for_line(token_rows, bbox)
                 chars = self._build_line_chars(
                     page_image=image_bgr,
-                    line_text=text,
+                    line_text=line_text,
                     line_confidence=score,
-                    token_row=token_rows[idx] if idx < len(token_rows) else [],
-                    region_row=region_rows[idx] if idx < len(region_rows) else [],
+                    token_row=token_row.tokens if token_row else [],
+                    region_row=token_row.regions if token_row else [],
                 )
-                explicit_boxes = [char.bbox for char in chars if char.bbox is not None and char.bbox.area > 0]
-                if not is_meaningful_text_bbox(image_bgr, bbox, text):
-                    bbox = self._merge_bboxes(explicit_boxes) or bbox
                 lines.append(Line(
-                    text=text,
+                    text=line_text,
                     confidence=score,
                     bbox=bbox,
                     chars=chars,
+                    ocr_text=line_text,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
                         if score < AUTO_FLAG_THRESHOLD
