@@ -537,9 +537,20 @@ class HProofPanel(QWidget):
         self._empty_lbl.setVisible(not has_data)
 
         line_num = 1  # 全局行号
+        prev_page_number: int = -1
         for page in pages:
             for block in page.text_blocks:
                 for li, line in enumerate(block.lines):
+                    # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
+                    if page.page_number != prev_page_number:
+                        sep = QLabel(f"── 第 {page.page_number} 页 ──")
+                        sep.setObjectName("pageSep")
+                        sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                        sep.setMinimumHeight(26)
+                        self._list_layout.insertWidget(
+                            self._list_layout.count() - 1, sep
+                        )
+                        prev_page_number = page.page_number
                     self._items.append((block, line, page, li))
                     pair = _LinePair(
                         len(self._pairs), block, line, page, line_num,

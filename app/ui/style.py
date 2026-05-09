@@ -248,6 +248,16 @@ QLabel#proofEmpty {
     qproperty-alignment: 'AlignCenter';
 }
 
+/* ---------- 横校页面分隔条 ---------- */
+QLabel#pageSep {
+    color: #aab4c0;
+    font-size: 11px;
+    background: #f5f7fb;
+    border-top: 1px solid #e3e8ef;
+    border-bottom: 1px solid #e3e8ef;
+    padding: 2px 0;
+}
+
 /* ---------- 标签辅助 ---------- */
 QLabel#stepInfo { color: #1a73e8; font-size: 12px; font-weight: 500; }
 

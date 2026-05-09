@@ -63,7 +63,7 @@ def _verified_char_crop(
     size: int = GALLERY_THUMB,
     pad: Optional[int] = None,
 ) -> Optional[QPixmap]:
-    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并尝试修正。
+    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并自动修正。
 
     pad 为 None 时根据 bbox 尺寸自适应：~10% 且不超 6 像素，
     避免纵排字中高度 ~40px 的字被固定 12px 填充拽进邻字。
@@ -80,13 +80,14 @@ def _verified_char_crop(
             "char bbox out of bounds: bbox=(%d,%d,%d,%d) img=(%d×%d) path=%s",
             bbox.x, bbox.y, bbox.w, bbox.h, W, H, page_path,
         )
-        # 修正到图像边界内
-        from app.models import BBox as BBox2
-        bbox = BBox2(
-            max(0, min(bbox.x, W - 1)),
-            max(0, min(bbox.y, H - 1)),
-            max(1, min(bbox.w, W - bbox.x)),
-            max(1, min(bbox.h, H - bbox.y)),
+        # 修正到图像边界内：先修正左上角，再用修正后的 x/y 计算宽高（之前的错误是用原始 bbox.x/y）
+        clamped_x = max(0, min(bbox.x, W - 1))
+        clamped_y = max(0, min(bbox.y, H - 1))
+        bbox = BBox(
+            clamped_x,
+            clamped_y,
+            max(1, min(bbox.w, W - clamped_x)),
+            max(1, min(bbox.h, H - clamped_y)),
         )
     return cache.get_char_crop(page_path, bbox, size, pad=pad)
 
@@ -421,6 +422,8 @@ class VProofPanel(QWidget):
     # ─────────────────── 单字列表 ────────────────────────────
 
     def _rebuild_char_list(self) -> None:
+        # 封锁信号防止重建过程中 currentItemChanged 被触发 _on_char_clicked
+        self._char_list.blockSignals(True)
         self._char_list.clear()
         # 按拼音 / 字母 a-z 优先，后续为数字 → 标点 → 符号 → 其他
         freqs = self._char_svc.sorted_chars()
@@ -436,6 +439,7 @@ class VProofPanel(QWidget):
                     item.setIcon(QIcon(pix))
             item.setData(Qt.ItemDataRole.UserRole, char)
             self._char_list.addItem(item)
+        self._char_list.blockSignals(False)
 
     def _filter_char_list(self, text: str) -> None:
         for i in range(self._char_list.count()):
@@ -492,6 +496,9 @@ class VProofPanel(QWidget):
         target = entries[0] if entries else None
         if target:
             self._highlight_char_in_viewer(target)
+            # 选中首条 gallery 条目与当前定位保持一致
+            first_idx = self._gallery_model.index(0, 0)
+            self._gallery_view.setCurrentIndex(first_idx)
         self._highlight_char_in_text(char, focus_entry=target)
 
     def _entry_text_pos(self, entry: CharEntry) -> Optional[int]:
@@ -555,7 +562,12 @@ class VProofPanel(QWidget):
         if entry is None:
             return
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
+        # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
+            n = len(self._char_svc.query(self._selected_char))
+            self._gallery_hdr.setText(
+                f'"{self._selected_char}"  共 {n} 处  [第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 字]'
+            )
             # 传入 entry 以精准定位到该出现，而非首次出现
             self._highlight_char_in_text(self._selected_char, focus_entry=entry)
 
