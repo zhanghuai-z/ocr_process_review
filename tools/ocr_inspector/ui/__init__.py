@@ -8,8 +8,8 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QFileDialog, QLabel, QMainWindow, QSplitter,
-    QStatusBar, QToolBar, QComboBox,
+    QFileDialog, QLabel, QMainWindow, QScrollArea, QSplitter,
+    QStatusBar, QTabWidget, QToolBar, QComboBox,
 )
 
 from tools.ocr_inspector.adapters import registry as adapter_registry
@@ -18,6 +18,7 @@ from tools.ocr_inspector.state import AppState
 from tools.ocr_inspector.ui.canvas import OcrCanvas
 from tools.ocr_inspector.ui.panels import JsonTreePanel
 from tools.ocr_inspector.ui.panels.inspector import InspectorPanel
+from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel
 
 
 class OcrInspectorWindow(QMainWindow):
@@ -31,12 +32,22 @@ class OcrInspectorWindow(QMainWindow):
         self._tree   = JsonTreePanel(self._state)
         self._canvas = OcrCanvas(self._state)
         self._insp   = InspectorPanel(self._state)
+        self._run    = RunOcrPanel(self._state)
+
+        # Right-side tabs: Inspector + Run OCR
+        right_tabs = QTabWidget()
+        right_tabs.addTab(self._insp, "Inspector")
+        run_scroll = QScrollArea()
+        run_scroll.setWidget(self._run)
+        run_scroll.setWidgetResizable(True)
+        run_scroll.setMinimumWidth(280)
+        right_tabs.addTab(run_scroll, "Run OCR")
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._tree)
         splitter.addWidget(self._canvas)
-        splitter.addWidget(self._insp)
-        splitter.setSizes([280, 820, 300])
+        splitter.addWidget(right_tabs)
+        splitter.setSizes([280, 820, 320])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -46,12 +57,12 @@ class OcrInspectorWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        open_act = QAction("Open JSON…", self)
+        open_act = QAction("Open JSON\u2026", self)
         open_act.setShortcut(QKeySequence("Ctrl+O"))
         open_act.triggered.connect(self._open_file)
         toolbar.addAction(open_act)
 
-        open_img_act = QAction("Set Image…", self)
+        open_img_act = QAction("Set Image\u2026", self)
         open_img_act.triggered.connect(self._set_image)
         toolbar.addAction(open_img_act)
 
@@ -79,9 +90,9 @@ class OcrInspectorWindow(QMainWindow):
             act.toggled.connect(lambda checked, k=key: self._state.set_overlay(k, checked))
             toolbar.addAction(act)
 
-        self._status_image  = QLabel("image: —")
-        self._status_scene  = QLabel("scene: —")
-        self._status_engine = QLabel("engine: —")
+        self._status_image  = QLabel("image: \u2014")
+        self._status_scene  = QLabel("scene: \u2014")
+        self._status_engine = QLabel("engine: \u2014")
         status = QStatusBar()
         status.addPermanentWidget(self._status_image)
         status.addPermanentWidget(self._status_scene)
@@ -122,6 +133,10 @@ class OcrInspectorWindow(QMainWindow):
             self._page_combo.addItem(f"Page {page.page_number}", page)
         self._page_combo.setCurrentIndex(0)
         self._page_combo.blockSignals(False)
+
+        # Explicitly notify canvas: blockSignals prevented the combo signal from firing
+        if doc.pages:
+            self._state.set_active_page(doc.pages[0])
 
     def _set_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
