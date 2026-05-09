@@ -17,79 +17,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from app.core.api_profiles import (
+    API_MODEL_PROFILES,
+    KNOWN_API_ENDPOINT_SUFFIXES,
+    detect_api_result_kind,
+    get_api_model_profile_options,
+    get_api_model_profile_url,
+    match_api_model_profile_from_url,
+    resolve_api_endpoint,
+)
 from app.core.ocr_config import get_config, update_config
 
 
 # ------------------------------------------------------------------ profiles
 
-KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing")
-
-API_MODEL_PROFILES: dict[str, dict[str, str]] = {
-    "pp-ocrv5": {
-        "label": "PP-OCRv5",
-        "url": "https://n6z9feddjca4l7b5.aistudio-app.com/ocr",
-        "desc": "通用文字识别（/ocr）",
-    },
-    "pp-structurev3": {
-        "label": "PP-StructureV3",
-        "url": "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
-        "desc": "版面 + OCR（/layout-parsing）",
-    },
-    "paddleocr-vl": {
-        "label": "PaddleOCR-VL",
-        "url": "https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing",
-        "desc": "VL 大模型版面解析",
-    },
-    "paddleocr-vl-1.5": {
-        "label": "PaddleOCR-VL-1.5",
-        "url": "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
-        "desc": "VL 1.5 升级版",
-    },
-}
-
-
-def get_api_model_profile_options() -> list[tuple[str, str]]:
-    return [(key, spec["label"]) for key, spec in API_MODEL_PROFILES.items()]
-
-
-def get_api_model_profile_url(profile: str | None) -> str:
-    if isinstance(profile, str) and profile in API_MODEL_PROFILES:
-        return API_MODEL_PROFILES[profile]["url"]
-    return API_MODEL_PROFILES["pp-structurev3"]["url"]
-
-
-def match_api_model_profile_from_url(api_url: str | None) -> str | None:
-    normalized = (api_url or "").strip().rstrip("/")
-    for key, spec in API_MODEL_PROFILES.items():
-        if spec["url"].rstrip("/") == normalized:
-            return key
-    return None
-
-
-def resolve_api_endpoint(api_url: str | None, default_suffix: str = "/layout-parsing") -> str:
-    url = (api_url or "").strip().rstrip("/")
-    if not url:
-        return ""
-    if any(url.endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
-        return url
-    return f"{url}{default_suffix}"
-
 
 def build_api_payload(file_b64: str, file_type: int) -> dict[str, object]:
     return {"file": file_b64, "fileType": file_type}
-
-
-def detect_api_result_kind(data: dict) -> str:
-    if not isinstance(data, dict):
-        return "unknown"
-    result = data.get("result", {})
-    if not isinstance(result, dict):
-        return "unknown"
-    if isinstance(result.get("ocrResults"), list):
-        return "ocr"
-    if isinstance(result.get("layoutParsingResults"), list):
-        return "layout"
-    return "unknown"
 
 
 # ------------------------------------------------------------------ stylesheet
@@ -662,7 +606,11 @@ class ApiSettingsDialog(QDialog):
     def _refresh_api_preview(self) -> None:
         profile_key = self._api_model_combo.currentData()
         url = self._url_edit.text().strip()
-        resolved = resolve_api_endpoint(url, default_suffix="/layout-parsing") if url else ""
+        resolved = resolve_api_endpoint(
+            url,
+            default_suffix="/layout-parsing",
+            profile=profile_key,
+        ) if url else ""
 
         if profile_key and profile_key in API_MODEL_PROFILES:
             spec = API_MODEL_PROFILES[profile_key]
@@ -759,7 +707,9 @@ class ApiSettingsDialog(QDialog):
         import requests
 
         url = resolve_api_endpoint(
-            self._url_edit.text().strip(), default_suffix="/layout-parsing",
+            self._url_edit.text().strip(),
+            default_suffix="/layout-parsing",
+            profile=self._api_model_combo.currentData(),
         )
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 API 地址。")

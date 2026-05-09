@@ -632,13 +632,78 @@ def test_api_ocr_engine_requests_return_word_box():
         assert captured["json"]["useDocUnwarping"] is False
         assert captured["json"]["useTextlineOrientation"] is False
         assert captured["json"]["textDetLimitSideLen"] == 1536
+        assert captured["json"]["textDetLimitType"] == "max"
+        assert captured["json"]["textDetThresh"] == 0.3
         assert captured["json"]["textDetBoxThresh"] == 0.6
-        assert captured["json"]["textDetUnclipRatio"] == 1.3
+        assert captured["json"]["textDetUnclipRatio"] == 2.0
+        assert captured["json"]["textRecScoreThresh"] == 0.0
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_requests_return_word_box PASSED")
+
+
+def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"ocrResults": []}}
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        return DummyResponse()
+
+    original_post = requests.post
+    requests.post = fake_post
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-ocrv5",
+        api_url="https://example.com/root",
+        api_timeout=12,
+    )
+    try:
+        ApiOcrEngine().recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
+        assert captured["url"] == "https://example.com/root/ocr"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile PASSED")
+
+
+def test_api_ocr_engine_parses_paddle_coordinate_variants():
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    engine = ApiOcrEngine()
+    assert engine._bbox_from_region(
+        [10, 20, 60, 20, 60, 50, 10, 50],
+        (40, 50, 3),
+    ) == BBox(10, 20, 40, 20)
+    assert engine._bbox_from_region(
+        [[[5, 7], [15, 7], [15, 17], [5, 17]]],
+        (30, 30, 3),
+    ) == BBox(5, 7, 10, 10)
+    assert engine._bbox_from_region(
+        {"points": [[3, 4], [13, 4], [13, 24], [3, 24]]},
+        (20, 20, 3),
+    ) == BBox(3, 4, 10, 16)
+
+    print("test_api_ocr_engine_parses_paddle_coordinate_variants PASSED")
 
 
 def test_api_ocr_engine_parses_char_level_word_boxes():
@@ -2303,6 +2368,7 @@ def test_proof_stats_service():
 
 
 def test_api_model_profile_helpers():
+    from app.core.api_profiles import resolve_api_endpoint
     from app.ui.widgets.api_settings_dialog import (
         get_api_model_profile_options,
         get_api_model_profile_url,
@@ -2320,6 +2386,9 @@ def test_api_model_profile_helpers():
     assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
     assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
     assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
+    assert resolve_api_endpoint("https://example.com/root", profile="pp-ocrv5") == "https://example.com/root/ocr"
+    assert resolve_api_endpoint("https://example.com/root", profile="paddleocr-vl") == "https://example.com/root/layout-parsing"
+    assert resolve_api_endpoint("https://example.com/root/ocr", profile="paddleocr-vl") == "https://example.com/root/ocr"
 
     print("test_api_model_profile_helpers PASSED")
 
@@ -2612,6 +2681,106 @@ def test_layout_analyzer_falls_back_to_ocr_results():
     print("test_layout_analyzer_falls_back_to_ocr_results PASSED")
 
 
+def test_layout_analyzer_uses_datainfo_canvas_scale():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "dataInfo": {"width": 500, "height": 1000},
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [10, 20, 110, 70],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(20, 40, 200, 100)
+
+    print("test_layout_analyzer_uses_datainfo_canvas_scale PASSED")
+
+
+def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
+    import tempfile
+
+    import cv2
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["OCR行"],
+                                    "rec_scores": [0.91],
+                                    "rec_boxes": [[10, 20, 110, 50]],
+                                },
+                            },
+                        },
+                    ],
+                },
+            }
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        return DummyResponse()
+
+    original_post = requests.post
+    requests.post = fake_post
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-ocrv5",
+        api_url="https://example.com/root",
+        api_timeout=12,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
+        page = Page(image_path=page_path, width=200, height=120)
+        LayoutAnalyzer()._api_analyze(page)
+        assert captured["url"] == "https://example.com/root/ocr"
+        assert len(page.blocks) == 1
+        assert page.blocks[0].block_type == BlockType.TEXT
+        assert "OCR行" in page.blocks[0].note
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+        os.unlink(page_path)
+
+    print("test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout PASSED")
+
+
 def test_layout_analyzer_builds_api_payload():
     from app.core.layout_analyzer import LayoutAnalyzer
 
@@ -2760,6 +2929,8 @@ if __name__ == "__main__":
     test_fake_ocr_engine()
     test_confidence_normalization()
     test_api_ocr_engine_requests_return_word_box()
+    test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()
+    test_api_ocr_engine_parses_paddle_coordinate_variants()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
@@ -2791,6 +2962,8 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
+    test_layout_analyzer_uses_datainfo_canvas_scale()
+    test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
     test_layout_analyzer_builds_api_payload()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
