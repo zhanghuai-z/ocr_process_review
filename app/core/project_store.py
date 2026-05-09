@@ -23,8 +23,8 @@ from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 
 logger = get_logger(__name__)
 
-# --------------------------------------------------------------------- schema v2
-DDL_V2 = """
+# --------------------------------------------------------------------- schema v3
+DDL_V3 = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -85,7 +85,10 @@ CREATE TABLE IF NOT EXISTS char_ (
     line_id     INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,
     char        TEXT    NOT NULL,
     confidence  REAL    NOT NULL DEFAULT 0.0,
-    x INTEGER, y INTEGER, w INTEGER, h INTEGER
+    x INTEGER, y INTEGER, w INTEGER, h INTEGER,
+    bbox_source TEXT    NOT NULL DEFAULT '',
+    bbox_granularity TEXT NOT NULL DEFAULT '',
+    token_text  TEXT    NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -145,6 +148,11 @@ MIGRATIONS: dict[int, list[str]] = {
         "action TEXT NOT NULL, payload_json TEXT NOT NULL DEFAULT '{}', "
         "created_at REAL NOT NULL);",
     ],
+    3: [
+        "ALTER TABLE char_ ADD COLUMN bbox_source TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE char_ ADD COLUMN bbox_granularity TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE char_ ADD COLUMN token_text TEXT NOT NULL DEFAULT '';",
+    ],
 }
 
 
@@ -181,7 +189,7 @@ class ProjectStore:
     def open(self) -> None:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(DDL_V2)
+        self._conn.executescript(DDL_V3)
         self._conn.commit()
         self._ensure_meta()
         self._migrate()
@@ -381,9 +389,21 @@ class ProjectStore:
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
         cur.execute(
-            "INSERT INTO char_ (line_id, char, confidence, x, y, w, h) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (line_id, char.char, char.confidence, x, y, w, h),
+            "INSERT INTO char_ (line_id, char, confidence, x, y, w, h, "
+            "bbox_source, bbox_granularity, token_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                line_id,
+                char.char,
+                char.confidence,
+                x,
+                y,
+                w,
+                h,
+                char.bbox_source,
+                char.bbox_granularity,
+                char.token_text,
+            ),
         )
         char.id = cur.lastrowid
 
@@ -513,6 +533,9 @@ class ProjectStore:
                 confidence=r["confidence"],
                 bbox=bbox,
                 id=r["id"],
+                bbox_source=r["bbox_source"],
+                bbox_granularity=r["bbox_granularity"],
+                token_text=r["token_text"],
             ))
         return chars
 
