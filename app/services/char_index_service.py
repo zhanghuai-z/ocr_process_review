@@ -8,7 +8,11 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import cv2
 
-from app.core.char_bbox_utils import ensure_line_char_bboxes, is_meaningful_text_bbox
+from app.core.char_bbox_utils import (
+    MISSING_LINE_BBOX_FLAG,
+    ensure_line_char_bboxes,
+    is_meaningful_text_bbox,
+)
 from app.models import BBox, Char, Line, OcrProject, Page
 
 try:
@@ -168,6 +172,8 @@ class CharIndexService:
         seen: Set[Tuple[int, int, str]],
     ) -> None:
         ensure_line_char_bboxes(line, page_image=page_image)
+        if MISSING_LINE_BBOX_FLAG in line.review_flags:
+            return
 
         if not line.chars:
             text = line.text or ""

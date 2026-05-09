@@ -606,6 +606,8 @@ def test_api_ocr_engine_requests_return_word_box():
         assert captured["json"]["useDocOrientationClassify"] is False
         assert captured["json"]["useDocUnwarping"] is False
         assert captured["json"]["useTextlineOrientation"] is False
+        assert captured["json"]["textDetLimitSideLen"] == 1536
+        assert captured["json"]["textDetBoxThresh"] == 0.6
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
@@ -783,6 +785,302 @@ def test_api_ocr_engine_filters_empty_narrow_word_boxes():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_filters_empty_narrow_word_boxes PASSED")
+
+
+def test_api_ocr_engine_does_not_promote_block_content_to_line():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["行级OCR"],
+                                    "rec_scores": [0.92],
+                                    "rec_boxes": [[10, 20, 80, 44]],
+                                },
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_bbox": [8, 18, 160, 90],
+                                        "block_content": "块级结构化文本，不能直接抬成行级Line",
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((120, 200, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "行级OCR"
+        assert lines[0].ocr_text == "行级OCR"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_does_not_promote_block_content_to_line PASSED")
+
+
+def test_api_ocr_engine_ignores_block_content_without_rec_rows():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_bbox": [10, 10, 180, 80],
+                                        "block_content": "只有块级结构文本",
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((120, 220, 3), dtype=np.uint8), OcrContext())
+        assert lines == []
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_ignores_block_content_without_rec_rows PASSED")
+
+
+def test_api_ocr_engine_aligns_token_rows_by_bbox_not_index():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["因为", "2016"],
+                                    "rec_scores": [0.96, 0.94],
+                                    "rec_boxes": [
+                                        [10, 10, 60, 42],
+                                        [10, 60, 90, 92],
+                                    ],
+                                },
+                                "text_word": [
+                                    ["2", "0", "1", "6"],
+                                    ["因", "为"],
+                                ],
+                                "text_word_region": [
+                                    [
+                                        [[10, 60], [26, 60], [26, 92], [10, 92]],
+                                        [[28, 60], [44, 60], [44, 92], [28, 92]],
+                                        [[46, 60], [62, 60], [62, 92], [46, 92]],
+                                        [[64, 60], [80, 60], [80, 92], [64, 92]],
+                                    ],
+                                    [
+                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
+                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
+                                    ],
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        image[10:42, 10:30] = 0
+        image[10:42, 34:54] = 0
+        image[60:92, 10:80] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert [line.text for line in lines] == ["因为", "2016"]
+        assert lines[0].chars[0].token_text == "因"
+        assert lines[0].chars[1].token_text == "为"
+        assert lines[1].chars[0].token_text == "2"
+        assert lines[1].chars[-1].token_text == "6"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_aligns_token_rows_by_bbox_not_index PASSED")
+
+
+def test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["因为", "错配"],
+                                    "rec_scores": [0.96, 0.94],
+                                    "rec_boxes": [],
+                                },
+                                "text_word": [
+                                    ["因", "为"],
+                                    ["不", "同"],
+                                ],
+                                "text_word_region": [
+                                    [
+                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
+                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
+                                    ],
+                                    [
+                                        [[10, 60], [30, 60], [30, 92], [10, 92]],
+                                        [[34, 60], [54, 60], [54, 92], [34, 92]],
+                                    ],
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        image[10:42, 10:30] = 0
+        image[10:42, 34:54] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert len(lines) == 2
+        assert lines[0].text == "因为"
+        assert lines[0].bbox == BBox(10, 10, 44, 32)
+        assert lines[0].chars[0].token_text == "因"
+        assert lines[0].chars[1].token_text == "为"
+        assert lines[1].text == "错配"
+        assert lines[1].bbox == BBox(0, 0, 120, 120)
+        assert MISSING_LINE_BBOX_FLAG in lines[1].review_flags
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing PASSED")
+
+
+def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox, ProofStatus
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["有效OCR文本"],
+                                    "rec_scores": [0.91],
+                                    "rec_boxes": [],
+                                },
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((80, 120, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "有效OCR文本"
+        assert lines[0].ocr_text == "有效OCR文本"
+        assert lines[0].bbox == BBox(0, 0, 120, 80)
+        assert MISSING_LINE_BBOX_FLAG in lines[0].review_flags
+        assert lines[0].proof_status == ProofStatus.AUTO_FLAGGED
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_preserves_rec_text_without_any_geometry PASSED")
 
 
 def test_fake_layout_engine():
@@ -1677,6 +1975,44 @@ def test_char_index_skips_empty_narrow_ocr_bbox():
     print("test_char_index_skips_empty_narrow_ocr_bbox PASSED")
 
 
+def test_char_index_skips_lines_with_unverified_geometry():
+    import tempfile
+
+    import cv2
+    import numpy as np
+
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        image[10:70, 10:110] = 0
+        cv2.imwrite(img_path, image)
+
+    try:
+        line = Line(
+            text="有效OCR文本",
+            confidence=0.9,
+            bbox=BBox(0, 0, 120, 80),
+            review_flags=[MISSING_LINE_BBOX_FLAG],
+        )
+        page = Page(
+            image_path=img_path,
+            width=120,
+            height=80,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 80), lines=[line])],
+        )
+        svc = CharIndexService().build_index(OcrProject(name="unverified", pages=[page]))
+        assert svc.query("有") == []
+        assert line.text == "有效OCR文本"
+    finally:
+        os.unlink(img_path)
+
+    print("test_char_index_skips_lines_with_unverified_geometry PASSED")
+
+
 def test_ui_import_smoke():
     import importlib
     import os
@@ -2239,6 +2575,11 @@ if __name__ == "__main__":
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
+    test_api_ocr_engine_does_not_promote_block_content_to_line()
+    test_api_ocr_engine_ignores_block_content_without_rec_rows()
+    test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
+    test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing()
+    test_api_ocr_engine_preserves_rec_text_without_any_geometry()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
@@ -2273,4 +2614,5 @@ if __name__ == "__main__":
     test_char_index_suppresses_punctuation_topic_for_shared_word_box()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
+    test_char_index_skips_lines_with_unverified_geometry()
     print("\n✓ 所有测试通过")
