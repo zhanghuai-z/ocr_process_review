@@ -387,6 +387,59 @@ def is_meaningful_text_bbox(
     return True
 
 
+def _bbox_overlap_ratio(first: BBox, second: BBox) -> float:
+    first = first.normalize()
+    second = second.normalize()
+    x1 = max(first.x, second.x)
+    y1 = max(first.y, second.y)
+    x2 = min(first.x2, second.x2)
+    y2 = min(first.y2, second.y2)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    return inter / float(min(first.area, second.area))
+
+
+def _bbox_center_inside(bbox: BBox, target: BBox) -> bool:
+    cx = bbox.x + bbox.w / 2.0
+    cy = bbox.y + bbox.h / 2.0
+    return target.x <= cx <= target.x2 and target.y <= cy <= target.y2
+
+
+def explicit_char_bbox_points_to_neighbor(
+    explicit_bbox: BBox,
+    expected_bboxes: List[BBox],
+    idx: int,
+) -> bool:
+    """Return True when an OCR char bbox clearly lands on an adjacent slot."""
+    if len(expected_bboxes) <= 1 or idx < 0 or idx >= len(expected_bboxes):
+        return False
+    explicit = explicit_bbox.normalize()
+    expected = expected_bboxes[idx].normalize()
+    tolerance = max(2, int(max(expected.w, expected.h) * 0.20))
+    expected_zone = expected.expand(tolerance)
+    explicit_center_x = explicit.x + explicit.w / 2.0
+    explicit_center_y = explicit.y + explicit.h / 2.0
+    expected_center_x = expected.x + expected.w / 2.0
+    expected_center_y = expected.y + expected.h / 2.0
+    if expected.w >= expected.h:
+        if abs(explicit_center_x - expected_center_x) <= expected.w * 0.75:
+            return False
+    elif abs(explicit_center_y - expected_center_y) <= expected.h * 0.75:
+        return False
+    own_overlap = _bbox_overlap_ratio(explicit, expected)
+    neighbor_overlap = 0.0
+    for neighbor_idx in (idx - 1, idx + 1):
+        if 0 <= neighbor_idx < len(expected_bboxes):
+            neighbor_overlap = max(
+                neighbor_overlap,
+                _bbox_overlap_ratio(explicit, expected_bboxes[neighbor_idx]),
+            )
+    if _bbox_center_inside(explicit, expected_zone) and own_overlap >= neighbor_overlap:
+        return False
+    return neighbor_overlap > max(own_overlap * 1.25, 0.10)
+
+
 def ensure_line_char_bboxes(
     line: Line,
     page_image: Optional[np.ndarray] = None,
@@ -429,11 +482,18 @@ def ensure_line_char_bboxes(
             and existing.bbox is not None
             and existing.bbox.area > 0
         )
-        bbox = (
-            existing.bbox.normalize()
-            if has_explicit_bbox
-            else split_bboxes[idx]
-        )
+        repaired_neighbor_bbox = False
+        if has_explicit_bbox:
+            bbox = existing.bbox.normalize()
+            if (
+                existing is not None
+                and existing.bbox_granularity == "char"
+                and explicit_char_bbox_points_to_neighbor(bbox, split_bboxes, idx)
+            ):
+                bbox = split_bboxes[idx]
+                repaired_neighbor_bbox = True
+        else:
+            bbox = split_bboxes[idx]
         confidence = (
             float(existing.confidence)
             if existing is not None
@@ -442,12 +502,12 @@ def ensure_line_char_bboxes(
         char_id = existing.id if existing is not None else None
         bbox_source = (
             existing.bbox_source
-            if has_explicit_bbox and existing and existing.bbox_source
+            if has_explicit_bbox and not repaired_neighbor_bbox and existing and existing.bbox_source
             else "fallback"
         )
         bbox_granularity = (
             existing.bbox_granularity
-            if has_explicit_bbox and existing and existing.bbox_granularity
+            if has_explicit_bbox and not repaired_neighbor_bbox and existing and existing.bbox_granularity
             else "fallback"
         )
         token_text = (

@@ -137,7 +137,20 @@ flowchart TD
 - `CharIndexService._iter_index_units()` 把连续公式 run 合成一个 token。
 - `_sort_key()` 把公式 token 排到数字 token 之后，普通标点/符号之前。
 
-## 6. Label Studio 参考结论
+## 6. Residual 错切收口
+
+本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。
+
+新增守卫位于 `app/core/char_bbox_utils.py`：
+
+1. 先按当前 line bbox 和文本长度生成 expected char slots。
+2. 只对 `bbox_granularity="char"` 的显式 OCR 字框做轻量校验；word/token 框不拆，因为它们已经在集合层按 token 处理。
+3. 如果显式 bbox 的中心不在自身 expected slot 附近，且与相邻 slot 的重叠显著高于自身 slot，则认为它“指向邻字”。
+4. 仅在这个明确条件下，用 expected slot 替换该字框，并把 bbox 标为 fallback；其它正常 OCR char bbox 继续保留。
+
+这不是重新做全量切字，而是给 OCR 显式字框加一层邻字错位保险，避免少量已偏移字框继续污染纵校 crop。
+
+## 7. Label Studio 参考结论
 
 已参考 Label Studio 官方导出说明，以及 GitHub 仓库 `HumanSignal/label-studio` 中 `docs/source/includes/result_format.md` 对 annotation result 的定义。关键点：
 
@@ -146,7 +159,7 @@ flowchart TD
 - Label Studio 的 prediction/annotation 思路适合借鉴：机器预测先作为可追踪中间结果，人工结果再作为终审。当前 OCR_IR 也是“机器 raw → 中间表示 → proof 人工消费”的链路，不让 UI 直接消费 raw JSON。
 - 不适合照搬的点：Label Studio 是通用标注平台，region/result JSON 很灵活但较重；当前桌面 OCR 工具需要轻量、可构建、与现有 `Line/Char` 模型兼容，因此只借鉴“region/result 分离”和“ID/来源可追踪”的思想，不引入完整 Label Studio 标注格式。
 
-## 7. 适配现状
+## 8. 适配现状
 
 已经适配：
 
@@ -159,6 +172,7 @@ flowchart TD
 - bbox 空窄/无墨迹过滤
 - 连续数字 token 合组
 - 公式 token 合组，并在纵校集合中排在数字下面
+- 显式 OCR char bbox 若明显落到相邻 expected slot，会在 proof 几何正规化时降级为 fallback slot
 - 多字符 word bbox 不伪装成精确单字框
 - 无可靠行几何时保留 OCR 文本，但标记 `missing_line_bbox`，不进入纵校字符索引
 - proof 消费层对同页重叠重复行去重，避免横校/纵校重复展示和重复索引
@@ -172,7 +186,7 @@ flowchart TD
 - 无几何 OCR 文本的专门队列；当前只保留文本并标记疑点
 - 基于真实模型输出的自动参数寻优
 
-## 8. 本轮判断
+## 9. 本轮判断
 
 用户反馈的残留现象主要卡在三段：
 
@@ -180,6 +194,7 @@ flowchart TD
 2. **集合仍混相邻字**：一部分来自 Paddle token bbox 本身过松，一部分来自 fallback/重复行污染。本轮收紧 `textDetUnclipRatio=1.3`，并继续跳过无可靠几何行的纵校索引。
 3. **公式字母边角料**：公式片段此前被当成普通单字进入集合，单个字母/符号 crop 容易变成边角料。本轮把公式 run 当成 token，和数字一样整体裁图、整体排序。
 4. **OCR 文本缺失**：如果 `rec_texts` 没有行级文本，但 `text_word` 已经有文本与 bbox，旧链路不会产出 `Line`。本轮通过 OCR_IR token fallback 保住这类文本，并打疑点标记。
+5. **文本正确但裁图邻字**：如果 OCR char bbox 的文本索引正确、几何却明显落到前/后字符 slot，旧逻辑会照单全收。本轮改为仅对这类“指向邻字”的显式 char bbox 做 fallback 修正。
 
 仍需后续轮次处理的问题：
 
