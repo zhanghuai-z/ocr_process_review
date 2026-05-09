@@ -19,7 +19,9 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from collections import Counter
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -50,6 +52,57 @@ logger = logging.getLogger(__name__)
 CHAR_LIST_THUMB = 44
 GALLERY_THUMB   = 72   # gallery 水平条高度（较大缩略图）
 LOW_CONF        = 0.80
+
+
+# ─────────────────────────────────────────────────────────────
+# Token 排序键（支持多字符 token，汉字→字母→数字→标点→其他）
+# ─────────────────────────────────────────────────────────────
+
+try:
+    from pypinyin import lazy_pinyin as _lazy_pinyin
+
+    def _token_sort_key(tok: str) -> tuple:
+        if not tok:
+            return (5, "", 0, "")
+        fc = tok[0]
+        if "\u4e00" <= fc <= "\u9fff":
+            py = _lazy_pinyin(fc) or [fc]
+            return (0, py[0], len(tok), tok)
+        if fc.isalpha():
+            return (1, fc.lower(), len(tok), tok)
+        if fc.isdigit():
+            return (2, tok, len(tok), tok)
+        if fc in "。，！？、；：''\"\"【】《》〈〉「」『』…—～·":
+            return (3, tok, len(tok), tok)
+        return (4, tok, len(tok), tok)
+
+except ImportError:
+
+    def _token_sort_key(tok: str) -> tuple:  # type: ignore[misc]
+        return (0, tok, len(tok), tok)
+
+
+# ─────────────────────────────────────────────────────────────
+# Token 级索引条目（v_proof 内部用，不修改 CharIndexService）
+# ─────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _TokenEntry:
+    """一个 token（单字或多字符）在页面中的一处出现。"""
+
+    token_text: str         # 显示键，如 "的" 或 "2026"
+    page_path: str
+    page_number: int
+    line: Line
+    start_char_idx: int     # 在行中第一个字符的下标
+    bbox: BBox              # token 在页面原图的 bbox（多字共享时为整词框）
+    confidence: float
+
+    @property
+    def char_idx(self) -> int:
+        """兼容 _entry_text_pos 使用的 char_idx 接口。"""
+        return self.start_char_idx
 
 
 # ─────────────────────────────────────────────────────────────
@@ -99,10 +152,10 @@ def _verified_char_crop(
 class _GalleryModel(QAbstractListModel):
     def __init__(self, cache: PageImageCache, parent=None) -> None:
         super().__init__(parent)
-        self._entries: List[CharEntry] = []
+        self._entries: List[_TokenEntry] = []
         self._cache = cache
 
-    def set_entries(self, entries: List[CharEntry]) -> None:
+    def set_entries(self, entries: List[_TokenEntry]) -> None:
         self.beginResetModel()
         self._entries = entries
         self.endResetModel()
@@ -117,9 +170,9 @@ class _GalleryModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DecorationRole:
             return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB)
         if role == Qt.ItemDataRole.DisplayRole:
-            return f"{index.row() + 1:03d}\nP{entry.page_number}-{entry.char_idx + 1}"
+            return f"{index.row() + 1:03d}\nP{entry.page_number}-{entry.token_text}"
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"第 {entry.page_number} 页，字#{entry.char_idx + 1}"
+            return f"第 {entry.page_number} 页，位#{entry.char_idx + 1}  [{entry.token_text}]"
         if role == Qt.ItemDataRole.UserRole:
             return entry
         return None
@@ -207,6 +260,8 @@ class VProofPanel(QWidget):
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
         self._char_svc = CharIndexService()
+        self._token_index: Dict[str, List[_TokenEntry]] = {}
+        self._token_freq: Counter[str] = Counter()
         self._text_map: List[Tuple[Line, int, int, int]] = []
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
@@ -283,11 +338,11 @@ class VProofPanel(QWidget):
         layout.setSpacing(4)
 
         hdr = QHBoxLayout()
-        lbl = QLabel("单字列表")
+        lbl = QLabel("字符索引")
         lbl.setObjectName("sectionTitle")
         hdr.addWidget(lbl)
         hdr.addStretch()
-        self._char_count_lbl = QLabel("共 0 字")
+        self._char_count_lbl = QLabel("共 0 项")
         self._char_count_lbl.setObjectName("muted")
         hdr.addWidget(self._char_count_lbl)
         layout.addLayout(hdr)
@@ -407,6 +462,7 @@ class VProofPanel(QWidget):
         self._pages = pages
         self._current_page_idx = 0
         self._char_svc.build(pages)
+        self._build_token_index(pages)
         self._rebuild_char_list()
         if pages:
             self._load_page(0)
@@ -414,30 +470,117 @@ class VProofPanel(QWidget):
     def reset(self) -> None:
         self._pages = []
         self._char_svc = CharIndexService()
+        self._token_index = {}
+        self._token_freq = Counter()
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])
         self._page_label.setText("页 0 / 0")
 
-    # ─────────────────── 单字列表 ────────────────────────────
+    # ─────────────────── 字符索引（token 层）──────────────────
+
+    def _build_token_index(self, pages: List[Page]) -> None:
+        """构建 token 级索引：按 Char.token_text 分组，多字符 token 仅记录首字位置。
+
+        不修改 CharIndexService，在 v_proof 内部提供 token-aware 分组。
+        当 Char.token_text 为空时回退到 char 字段。
+        """
+        index: Dict[str, List[_TokenEntry]] = {}
+        freq: Counter[str] = Counter()
+        seen: set = set()
+
+        for page in pages:
+            for block in page.text_blocks:
+                for line in block.lines:
+                    if line.chars:
+                        ci = 0
+                        while ci < len(line.chars):
+                            ch = line.chars[ci]
+                            tok = (ch.token_text or ch.char).strip()
+                            if not tok:
+                                ci += 1
+                                continue
+                            key = (id(line), ci)
+                            if key in seen:
+                                ci += 1
+                                continue
+                            seen.add(key)
+                            bbox = ch.bbox or line.bbox
+                            if bbox is None:
+                                ci += 1
+                                continue
+                            # 多字符 token：跳过同一 token 的后续字符
+                            end_ci = ci + 1
+                            if len(tok) > 1:
+                                while end_ci < len(line.chars):
+                                    nch = line.chars[end_ci]
+                                    ntok = (nch.token_text or nch.char).strip()
+                                    if ntok == tok:
+                                        seen.add((id(line), end_ci))
+                                        end_ci += 1
+                                    else:
+                                        break
+                            entry = _TokenEntry(
+                                token_text=tok,
+                                page_path=page.display_image_path,
+                                page_number=page.page_number,
+                                line=line,
+                                start_char_idx=ci,
+                                bbox=bbox,
+                                confidence=float(ch.confidence),
+                            )
+                            index.setdefault(tok, []).append(entry)
+                            freq[tok] += 1
+                            ci = end_ci
+                    else:
+                        # line.chars 为空：回退到文本字符水平索引
+                        text = line.text or ""
+                        for ci, glyph in enumerate(text):
+                            if not glyph or glyph.isspace():
+                                continue
+                            key = (id(line), ci)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            if line.bbox is None:
+                                continue
+                            entry = _TokenEntry(
+                                token_text=glyph,
+                                page_path=page.display_image_path,
+                                page_number=page.page_number,
+                                line=line,
+                                start_char_idx=ci,
+                                bbox=line.bbox,
+                                confidence=float(line.confidence),
+                            )
+                            index.setdefault(glyph, []).append(entry)
+                            freq[glyph] += 1
+
+        for entries in index.values():
+            entries.sort(key=lambda e: (e.page_number, id(e.line), e.start_char_idx))
+
+        self._token_index = index
+        self._token_freq = freq
 
     def _rebuild_char_list(self) -> None:
         # 封锁信号防止重建过程中 currentItemChanged 被触发 _on_char_clicked
         self._char_list.blockSignals(True)
         self._char_list.clear()
-        # 按拼音 / 字母 a-z 优先，后续为数字 → 标点 → 符号 → 其他
-        freqs = self._char_svc.sorted_chars()
-        self._char_count_lbl.setText(f"共 {len(freqs)} 字")
-        for char, count in freqs:
-            item = QListWidgetItem(f"{char} ×{count}")
-            entry = self._char_svc.first_entry(char)
-            if entry:
+        # 按 token 排序：汉字拼音 → 字母 → 数字 → 标点 → 其他
+        sorted_tokens = sorted(
+            self._token_freq.items(), key=lambda kv: _token_sort_key(kv[0])
+        )
+        self._char_count_lbl.setText(f"共 {len(sorted_tokens)} 项")
+        for tok, count in sorted_tokens:
+            item = QListWidgetItem(f"{tok} ×{count}")
+            entries = self._token_index.get(tok, [])
+            if entries:
                 pix = _verified_char_crop(
-                    self._cache, entry.page_path, entry.bbox, CHAR_LIST_THUMB
+                    self._cache, entries[0].page_path, entries[0].bbox, CHAR_LIST_THUMB
                 )
                 if pix:
                     item.setIcon(QIcon(pix))
-            item.setData(Qt.ItemDataRole.UserRole, char)
+            item.setData(Qt.ItemDataRole.UserRole, tok)
             self._char_list.addItem(item)
         self._char_list.blockSignals(False)
 
@@ -476,11 +619,11 @@ class VProofPanel(QWidget):
     # ─────────────────── 单字列表点击 ───────────────────────
 
     def _on_char_clicked(self, item: QListWidgetItem) -> None:
-        char = item.data(Qt.ItemDataRole.UserRole)
-        if not char:
+        tok = item.data(Qt.ItemDataRole.UserRole)
+        if not tok:
             return
-        self._selected_char = char
-        entries = self._char_svc.query(char)
+        self._selected_char = tok
+        entries = self._token_index.get(tok, [])
 
         # 重置 gallery：清选中、滚回顶部
         self._gallery_model.set_entries(entries)
@@ -490,7 +633,7 @@ class VProofPanel(QWidget):
                 self._gallery_model.index(0, 0),
                 QAbstractItemView.ScrollHint.PositionAtTop,
             )
-        self._gallery_hdr.setText(f'"{char}"  共 {len(entries)} 处')
+        self._gallery_hdr.setText(f'"{tok}"  共 {len(entries)} 处')
 
         # 先定位原图（可能触发翻页 → setPlainText 重置文本），再高亮文本
         target = entries[0] if entries else None
@@ -499,17 +642,17 @@ class VProofPanel(QWidget):
             # 选中首条 gallery 条目与当前定位保持一致
             first_idx = self._gallery_model.index(0, 0)
             self._gallery_view.setCurrentIndex(first_idx)
-        self._highlight_char_in_text(char, focus_entry=target)
+        self._highlight_char_in_text(tok, focus_entry=target)
 
-    def _entry_text_pos(self, entry: CharEntry) -> Optional[int]:
-        """查找某个 CharEntry 在当前 _text_map 中的起始 start 光标位置。"""
+    def _entry_text_pos(self, entry) -> Optional[int]:
+        """查找 entry（CharEntry 或 _TokenEntry）在当前 _text_map 中的起始光标位置。"""
         for line, ci, start, _end in self._text_map:
             if line is entry.line and ci == entry.char_idx:
                 return start
         return None
 
     def _highlight_char_in_text(
-        self, char: str, focus_entry: Optional[CharEntry] = None,
+        self, char: str, focus_entry: Optional[_TokenEntry] = None,
     ) -> None:
         doc = self._text_edit.document()
         # 先清除全文格式
@@ -542,7 +685,7 @@ class VProofPanel(QWidget):
             self._text_edit.setTextCursor(place)
             self._text_edit.ensureCursorVisible()
 
-    def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
+    def _highlight_char_in_viewer(self, entry: _TokenEntry) -> None:
         if not self._pages:
             return
         cur_page = self._pages[self._current_page_idx]
@@ -558,15 +701,15 @@ class VProofPanel(QWidget):
     # ─────────────────── Gallery 点击 ───────────────────────
 
     def _on_gallery_clicked(self, index: QModelIndex) -> None:
-        entry: Optional[CharEntry] = index.data(Qt.ItemDataRole.UserRole)
+        entry: Optional[_TokenEntry] = index.data(Qt.ItemDataRole.UserRole)
         if entry is None:
             return
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
         # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
-            n = len(self._char_svc.query(self._selected_char))
+            n = len(self._token_index.get(self._selected_char, []))
             self._gallery_hdr.setText(
-                f'"{self._selected_char}"  共 {n} 处  [第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 字]'
+                f'"{self._selected_char}"  共 {n} 处  [第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位]'
             )
             # 传入 entry 以精准定位到该出现，而非首次出现
             self._highlight_char_in_text(self._selected_char, focus_entry=entry)
@@ -620,6 +763,7 @@ class VProofPanel(QWidget):
         )
         if changed:
             self._char_svc.build(self._pages)
+            self._build_token_index(self._pages)
             self._rebuild_char_list()
 
     def _mark_page_ok(self) -> None:
