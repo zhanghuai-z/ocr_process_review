@@ -924,6 +924,84 @@ def test_api_ocr_engine_aligns_token_rows_by_bbox_not_index():
     print("test_api_ocr_engine_aligns_token_rows_by_bbox_not_index PASSED")
 
 
+def test_api_ocr_engine_selects_token_rows_once_per_rec_row():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["", ""],
+                                    "rec_scores": [0.96, 0.94],
+                                    "rec_boxes": [
+                                        [10, 10, 60, 42],
+                                        [10, 60, 90, 92],
+                                    ],
+                                },
+                                "text_word": [
+                                    ["因", "为"],
+                                    ["2", "0", "1", "6"],
+                                ],
+                                "text_word_region": [
+                                    [
+                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
+                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
+                                    ],
+                                    [
+                                        [[10, 60], [26, 60], [26, 92], [10, 92]],
+                                        [[28, 60], [44, 60], [44, 92], [28, 92]],
+                                        [[46, 60], [62, 60], [62, 92], [46, 92]],
+                                        [[64, 60], [80, 60], [80, 92], [64, 92]],
+                                    ],
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    original_select = ApiOcrEngine._select_token_rows_for_bbox
+    calls = []
+
+    def counting_select(self, token_rows, bbox):
+        calls.append((bbox.x, bbox.y, bbox.w, bbox.h))
+        return original_select(self, token_rows, bbox)
+
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    ApiOcrEngine._select_token_rows_for_bbox = counting_select
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        image[10:42, 10:54] = 0
+        image[60:92, 10:80] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert [line.text for line in lines] == ["因为", "2016"]
+        assert [line.ocr_text for line in lines] == ["因为", "2016"]
+        assert len(calls) == 2
+    finally:
+        requests.post = original_post
+        ApiOcrEngine._select_token_rows_for_bbox = original_select
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_selects_token_rows_once_per_rec_row PASSED")
+
+
 def test_char_index_follows_block_content_reconstruction():
     import numpy as np
     import requests
@@ -2478,6 +2556,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
     test_api_ocr_engine_prefers_block_content_for_text_reconstruction()
     test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
+    test_api_ocr_engine_selects_token_rows_once_per_rec_row()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()

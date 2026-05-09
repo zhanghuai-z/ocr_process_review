@@ -521,8 +521,8 @@ class ApiOcrEngine:
                 continue
 
             for row in rec_rows:
-                line_text = row.text or "".join(token_row.text for token_row in self._select_token_rows_for_bbox(token_rows, row.bbox))
                 selected_token_rows = self._select_token_rows_for_bbox(token_rows, row.bbox)
+                line_text = row.text or "".join(token_row.text for token_row in selected_token_rows)
                 chars = self._build_line_chars(
                     page_image=image_bgr,
                     line_text=line_text,
@@ -538,7 +538,7 @@ class ApiOcrEngine:
                     confidence=row.confidence,
                     bbox=bbox,
                     chars=chars,
-                    ocr_text=row.text,
+                    ocr_text=row.text or line_text,
                     text_source=LINE_TEXT_SOURCE_REC if row.text else LINE_TEXT_SOURCE_TOKEN,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
