@@ -24,7 +24,7 @@ if /i "%1"=="/?" goto :help
 echo ============================================================
 echo  OCR Process - Build
 if %CLEAN_BUILD%==1 (
-    echo  Mode: FULL (--clean)
+    echo  Mode: FULL ^(--clean^)
 ) else (
     echo  Mode: INCREMENTAL
 )
@@ -93,8 +93,37 @@ if errorlevel 1 (
 REM -- [4/5] Clean old build if --clean ----------------------------
 if %CLEAN_BUILD%==1 (
     echo [4/5] Cleaning old build...
-    if exist "%PROJ_ROOT%dist\ocr_process" rmdir /s /q "%PROJ_ROOT%dist\ocr_process"
-    if exist "%PROJ_ROOT%build\ocr_process" rmdir /s /q "%PROJ_ROOT%build\ocr_process"
+
+    REM Kill any running instances that would lock the output directory
+    echo   Stopping any running instances...
+    taskkill /F /IM ocr_inspector.exe >nul 2>&1
+    taskkill /F /IM ocr_process.exe   >nul 2>&1
+    REM Brief wait for OS to release file handles
+    ping -n 2 127.0.0.1 >nul 2>&1
+
+    REM Remove dist output
+    if exist "%PROJ_ROOT%dist\ocr_process" (
+        rmdir /s /q "%PROJ_ROOT%dist\ocr_process" 2>nul
+        if exist "%PROJ_ROOT%dist\ocr_process" (
+            echo.
+            echo [FAIL] Cannot remove dist\ocr_process -- directory still locked.
+            echo.
+            echo  Possible causes:
+            echo    - ocr_inspector.exe or ocr_process.exe is still running
+            echo    - A file manager or antivirus is holding a file open
+            echo.
+            echo  Fix: close all OCR windows, wait a moment, then run build.bat --clean again
+            pause
+            exit /b 1
+        )
+    )
+
+    REM Remove build cache
+    if exist "%PROJ_ROOT%build\ocr_process" (
+        rmdir /s /q "%PROJ_ROOT%build\ocr_process" 2>nul
+    )
+
+    echo   Done.
 ) else (
     echo [4/5] Using cached build...
 )

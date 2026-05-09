@@ -74,12 +74,25 @@ def _flatten_structure_result(result_list: list) -> dict:
 
 
 def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
-    """Run structure-aware OCR, falling back to a compatible local path when needed."""
+    """Run structure-aware OCR, falling back to a compatible local path when needed.
+
+    PaddleOCR internally uses cv2.imread, which fails on Windows for non-ASCII
+    paths. When the path contains non-ASCII chars, pre-load the image as a numpy
+    array and pass that to predict() instead.
+    """
+    # PaddleOCR's predict() accepts numpy arrays (BGR), so we can bypass
+    # cv2.imread's non-ASCII path limitation by reading bytes ourselves.
+    try:
+        input_img = _imread_any_path(image_path)
+    except Exception:
+        # Fallback to string path if pre-loading fails (e.g. unsupported format)
+        input_img = image_path  # type: ignore[assignment]
+
     try:
         from paddleocr import PPStructureV3
 
         engine = PPStructureV3(**params["structure"])
-        result = list(engine.predict(image_path))
+        result = list(engine.predict(input_img))
         return _flatten_structure_result(result)
     except Exception as exc:
         if "pipeline (PP-StructureV3) does not exist" not in str(exc):
@@ -95,7 +108,7 @@ def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
             "show_log": False,
         })
         pred_p = {k: v for k, v in params["ocr_pred"].items() if v is not None}
-        result = list(PaddleOCR(**init_p).predict(image_path, **pred_p))
+        result = list(PaddleOCR(**init_p).predict(input_img, **pred_p))
         raw = _flatten_paddle_result(result)
         if isinstance(raw, dict):
             meta = raw.setdefault("_inspector_meta", {})
@@ -187,6 +200,27 @@ def _build_api_request_body(file_b64: str, params: dict[str, Any], cfg: dict[str
     return body
 
 
+def _imread_any_path(image_path: str):
+    """Read image via bytes->imdecode to support non-ASCII (e.g. Chinese) paths.
+
+    cv2.imread silently fails on Windows when the path contains non-ASCII chars.
+    Reading raw bytes first (OS-agnostic via pathlib) and decoding in memory
+    works for all paths and all formats that cv2 supports (JPEG, PNG, TIFF...).
+    """
+    import cv2
+    import numpy as np
+
+    try:
+        raw = Path(image_path).read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read image file: {image_path}") from exc
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError(f"Cannot decode image (unsupported format or corrupt): {image_path}")
+    return img
+
+
 def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     import base64
 
@@ -203,9 +237,7 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
 
     timeout = int(cfg.get("api_timeout", 30) or 30)
     token = str(cfg.get("api_token", "") or "").strip()
-    img = cv2.imread(image_path)
-    if img is None:
-        raise RuntimeError(f"Cannot read image: {image_path}")
+    img = _imread_any_path(image_path)
     ok, buf = cv2.imencode(".jpg", img)
     if not ok:
         raise RuntimeError(f"Cannot encode image: {image_path}")
@@ -512,7 +544,12 @@ class RunOcrPanel(QWidget):
                     init_p = {k: v for k, v in params["ocr_init"].items() if v is not None}
                     pred_p = {k: v for k, v in params["ocr_pred"].items() if v is not None}
                     engine = PaddleOCR(**init_p)
-                    result = list(engine.predict(image_path, **pred_p))
+                    # Pre-load image as numpy to bypass cv2.imread non-ASCII path issue
+                    try:
+                        input_img = _imread_any_path(image_path)
+                    except Exception:
+                        input_img = image_path  # type: ignore[assignment]
+                    result = list(engine.predict(input_img, **pred_p))
                     raw = _flatten_paddle_result(result)
                 signals.finished.emit(raw, image_path)
             except Exception as exc:
