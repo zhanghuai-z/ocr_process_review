@@ -1,99 +1,100 @@
 请在 **一次** gh copilot ask 中完成以下全部内容。
 
-你的分支：`claude/editable-canvas`
-工作目录：`D:\project\ocr_process\worktrees\claude`
+你的分支：`claude/ocr-inspector-logic`  
+工作目录：`D:\project\ocr_process\worktrees\claude`  
+基线：`coord/phase1-stabilization` @ `c0164e0`
 
-## 任务目标
+## 本轮目标
 
-做一轮 **横校 UI 根因排查**，重点解决“横校内容重复了一遍”的问题；不要打补丁式隐藏重复内容。
+你这轮不要再把重点放在“再接一层 Paddle”。  
+用户的明确要求是：**把 OCR Inspector 做成一个真正看得清参数、元素、逻辑关系的调试台。**
 
-用户最后确认的问题是：
+也就是说，这轮你负责的是：
 
-1. 横校内容 **重复显示了一遍**
-2. 用户明确不接受“补丁式”修法，不能只靠隐藏 / 跳过 / 去重显示来糊过去
-3. 如果重复来自上游数据而不是 UI 渲染，也要在 handoff 里明确指出根因和证据
+1. 把参数都贴出来
+2. 把整体逻辑规划清楚
+3. 保证程序调试各项功能正常
+4. 让用户看得见：
+   - 哪个参数起什么作用
+   - 能得到哪些元素
 
-## 当前依赖
+## 必读
 
-- `docs/coordinator-handoff.md`
-- `docs/coordinator-agent-prompt.md`
-- `plan.md`
-- 当前集成基线：`coord/phase1-stabilization` @ `4ff9346`
-- 先读：
-  - `app/ui/proof/h_proof.py`
-  - `app/ui/proof/v_proof.py`
-  - 如有必要，可读 `app/core/project_store.py`、`app/models/` 相关结构，但不要改
+- `D:\project\ocr_process\worktrees\coord\ocr_tool_prompt.md`
+- `/root/github/label-studio`
+- `D:\project\ocr_process\worktrees\coord\standard\ocr-paddle-standard.md`
+- `D:\project\ocr_process\docs\Paddle_api_details\README.md`
 
-## 边界
+## 用户当前反馈
 
-### ✅ 可以改
+1. 小工具目前 OCR 功能还只是占位
+2. 根据 JSON 文件在图像上预览坐标详情还不太明朗
+3. 我们不能再陷入另一个“重新接入 Paddle”的坑
+4. 工具的目的很明确：
+   - 我要看到哪个参数起什么作用
+   - 可以得到哪些元素
+   - 各项调试功能都能正常工作
 
-- `app/ui/proof/h_proof.py`
-- `app/ui/proof/v_proof.py`（只在确认与重复渲染有关时再动）
+## 你的交付
 
-### ❌ 不要改
+你自己决定怎么实现，但最终必须满足：
 
-- `app/core/`
-- `app/services/`
-- `app/engines/`
-- `app/models/`
-- `app/controllers/`
+1. 参数在工具里是可见的，不是藏在代码里
+2. 元素来源与层级在工具里是可见的
+3. JSON / OCR_IR / 图像三者的关系在工具里是可观察的
+4. 不是继续做 live-Paddle 接入，而是优先把现有 JSON / IR 调试能力做扎实
+
+handoff 里必须明确写出：
+
+- 现在工具里能看到哪些参数
+- 每类参数会影响什么
+- 现在工具里能看到哪些元素
+- 整体调试逻辑是怎么规划的
+
+## 文件边界
+
+这轮没有其他实现 agent 与你抢文件。  
+你可以按需要修改：
+
+- `tools/`
+- `build.bat`
+- `build.sh`
+- `ocr_process.spec`
+- `app/`（如果启动链确实需要）
 - `tests/test_core.py`
 
-## 协作限制
+不要修改：
 
-- 这是 **横校重复内容排查** 任务
-- 不要用“界面上去重一下”这种方式糊弄过去
-- 先判断重复来自：
-  - `load_pages()` / 行列表构建
-  - block/line 数据源本身重复
-  - 还是 UI 组件重复渲染
-- 如果根因不在 UI，停止越界修复，在 handoff 里明确交回
+- `D:\project\ocr_process\AGENT.md`
+- `worktrees/coord/standard/` 里的标准文件
 
-## 具体任务
+## 过程要求
 
-1. 复现“横校内容重复了一遍”的问题。
-2. 明确判断重复发生在哪一层：
-   - 数据层重复
-   - UI 列表构建重复
-   - 单行组件渲染重复
-3. 只在确定根因位于 UI 层时修改 `h_proof.py` / 相关 UI 代码。
-4. 如果重复其实是上游数据问题，在 handoff 里给出最小复现路径和证据，不要硬修 UI 表象。
+1. 你自己做审查，不要把“请 coord 给技术方向”当成默认下一步
+2. **你自己跑现有测试 / 启动 / 构建链，再 handoff**
+3. 不要再把重点放在“再接一个 live OCR 请求”
+4. handoff 里必须说明当前工具对参数、元素、逻辑关系分别看到了什么
 
-## 验收标准
+## 验收
 
-- 能明确说明横校重复内容的根因
-- 若根因在 UI 层，重复显示被真正修掉
-- 若根因不在 UI 层，handoff 能明确交回给 coordinator / GPT
+coord 只看这些：
 
-## 测试与验证
-
-- 自动化测试：`python tests/test_core.py`
-- 如需手工验证：
-  - 打开版面分析页，测试左拖 / 右画 / Delete 删除
-  - 打开横校、纵校页面，对比图像区域是否明显更自然
+1. 分支能否顺利合并
+2. 代码是否可构建
+3. 工具里是否真的能看到参数 / 元素 / 逻辑关系
+4. handoff 是否把整体调试规划写清楚
 
 ## 交付要求
 
 完成后：
 
-1. 提交到 `claude/editable-canvas`
-2. 保持 handoff 输出
-3. 明确说明哪些点已完成，哪些点因边界限制未动
-
-```text
-[Handoff]
-Task:
-Done:
-- ...
-Files:
-- ...
-Decisions:
-- ...
-Risks:
-- ...
-Validate:
-- ...
-Next:
-- ...
-```
+1. 提交到 `claude/ocr-inspector-logic`
+2. 输出 handoff
+3. 明确给出：
+   - 工具里现在能看到哪些参数
+   - 这些参数分别影响什么
+   - 工具里现在能看到哪些元素
+   - 整体调试逻辑怎么规划
+   - 你自己跑了哪些测试/启动/构建
+   - 剩余问题还有哪些
+4. **完成后必须 ask request 等待**

@@ -59,8 +59,28 @@ class PaddleAdapter:
             bbox = _bbox_from_box(block_raw.get("block_bbox"))
             content = str(block_raw.get("block_content") or "")
             block = BlockNode.make(label=label, bbox=bbox, content=content,
-                                   order=order, raw=block_raw)
+                                   order=order, source_field="parsing_res_list",
+                                   raw=block_raw)
             page.blocks.append(block)
+
+        # Blocks from layout detection (detection only, no text content)
+        layout_det = data.get("layout_det_res") or {}
+        for det_order, det_box in enumerate(layout_det.get("boxes") or []):
+            if not isinstance(det_box, dict):
+                continue
+            det_label = str(det_box.get("label", "unknown"))
+            det_coord = det_box.get("coordinate")
+            det_bbox = _bbox_from_box(det_coord)
+            det_score = float(det_box.get("score", 0.0))
+            det_block = BlockNode.make(
+                label=det_label,
+                bbox=det_bbox,
+                content=f"[layout_det score={det_score:.3f}]",
+                order=det_order,
+                source_field="layout_det_res",
+                raw=det_box,
+            )
+            page.layout_det_blocks.append(det_block)
 
         # Lines
         ocr_res = data.get("overall_ocr_res") or data

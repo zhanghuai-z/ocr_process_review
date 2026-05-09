@@ -19,6 +19,8 @@ from tools.ocr_inspector.ui.canvas import OcrCanvas
 from tools.ocr_inspector.ui.panels import JsonTreePanel
 from tools.ocr_inspector.ui.panels.inspector import InspectorPanel
 from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel
+from tools.ocr_inspector.ui.panels.params_ref import ParamsRefPanel
+from tools.ocr_inspector.ui.panels.parse_log import ParseLogPanel
 
 
 class OcrInspectorWindow(QMainWindow):
@@ -42,6 +44,10 @@ class OcrInspectorWindow(QMainWindow):
         run_scroll.setWidgetResizable(True)
         run_scroll.setMinimumWidth(280)
         right_tabs.addTab(run_scroll, "Run OCR")
+        self._parse_log = ParseLogPanel(self._state)
+        right_tabs.addTab(self._parse_log, "解析日志")
+        self._params_ref = ParamsRefPanel()
+        right_tabs.addTab(self._params_ref, "参数说明")
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._tree)
@@ -82,6 +88,8 @@ class OcrInspectorWindow(QMainWindow):
             ("chars",    "Chars",    "F3"),
             ("polygons", "Polygons", "F4"),
             ("labels",   "Labels",   "F5"),
+            ("layout_det", "LayoutDet", "F6"),
+            ("legend",   "Legend",   "F7"),
         ]:
             act = QAction(label, self)
             act.setCheckable(True)
