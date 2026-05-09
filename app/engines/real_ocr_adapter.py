@@ -3,6 +3,7 @@
 确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
@@ -11,7 +12,7 @@ from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bb
 from app.core.char_bbox_utils import is_meaningful_text_bbox
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.models import BBox, Char, Line, ProofStatus
+from app.models import BBox, BlockType, Char, Line, ProofStatus
 from app.core.app_config import get_config
 
 AUTO_FLAG_THRESHOLD = 0.80
@@ -21,6 +22,24 @@ CHAR_BBOX_SOURCE_FALLBACK = "fallback"
 CHAR_BBOX_GRANULARITY_CHAR = "char"
 CHAR_BBOX_GRANULARITY_WORD = "word"
 CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
+LINE_TEXT_SOURCE_REC = "overall_ocr_res.rec_texts"
+LINE_TEXT_SOURCE_BLOCK = "parsing_res_list.block_content"
+LINE_TEXT_SOURCE_TOKEN = "text_word"
+
+
+@dataclass
+class TokenRow:
+    text: str
+    tokens: list[str]
+    regions: list
+    bbox: Optional[BBox]
+
+
+@dataclass
+class RecRow:
+    text: str
+    confidence: float
+    bbox: BBox
 
 
 def normalize_confidence(score) -> float:
@@ -166,6 +185,41 @@ class ApiOcrEngine:
         )
         return token_rows, region_rows
 
+    def _extract_structured_text_blocks(self, item: dict) -> list[dict]:
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        if not isinstance(pruned, dict):
+            pruned = {}
+        blocks = pruned.get("parsing_res_list") or item.get("parsing_res_list") or []
+        if not isinstance(blocks, list):
+            return []
+
+        structured: list[dict] = []
+        for record in blocks:
+            if not isinstance(record, dict):
+                continue
+            label = str(record.get("block_label") or record.get("label") or "").strip()
+            content = record.get("block_content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            block_type = BlockType.from_paddle(label)
+            if block_type not in (BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE):
+                continue
+            bbox = self._bbox_from_region(
+                record.get("block_bbox")
+                or record.get("coordinate")
+                or record.get("bbox")
+                or record.get("points")
+            )
+            if bbox is None or bbox.area <= 0:
+                continue
+            structured.append({
+                "label": label or "text",
+                "content": content.strip(),
+                "bbox": bbox,
+                "source": LINE_TEXT_SOURCE_BLOCK,
+            })
+        return structured
+
     def _bbox_from_region(self, region) -> BBox | None:
         if isinstance(region, dict):
             if {"x", "y", "w", "h"} <= set(region.keys()):
@@ -198,6 +252,9 @@ class ApiOcrEngine:
             tokens.append(token_text)
         return tokens
 
+    def _normalize_line_text(self, text: str) -> str:
+        return (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
     def _merge_bboxes(self, boxes: list[BBox]) -> Optional[BBox]:
         if not boxes:
             return None
@@ -206,6 +263,85 @@ class ApiOcrEngine:
         x2 = max(box.x2 for box in boxes)
         y2 = max(box.y2 for box in boxes)
         return BBox.from_xyxy(x1, y1, x2, y2).normalize()
+
+    def _bbox_overlap_ratio(self, first: Optional[BBox], second: Optional[BBox]) -> float:
+        if first is None or second is None or first.area <= 0 or second.area <= 0:
+            return 0.0
+        x1 = max(first.x, second.x)
+        y1 = max(first.y, second.y)
+        x2 = min(first.x2, second.x2)
+        y2 = min(first.y2, second.y2)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        if inter <= 0:
+            return 0.0
+        return inter / float(min(first.area, second.area))
+
+    def _text_signature(self, text: str) -> str:
+        return "".join(ch for ch in text if not ch.isspace())
+
+    def _contains_signature(self, outer: str, inner: str) -> bool:
+        return bool(inner) and inner in outer
+
+    def _build_token_rows(self, item: dict) -> list[TokenRow]:
+        token_rows, region_rows = self._extract_word_box_rows(item)
+        rows: list[TokenRow] = []
+        for token_row, region_row in zip(token_rows, region_rows):
+            tokens = [token.strip() for token in self._normalize_token_texts(token_row) if token.strip()]
+            if not tokens or not isinstance(region_row, (list, tuple)):
+                continue
+            paired_tokens: list[str] = []
+            paired_regions: list = []
+            boxes: list[BBox] = []
+            for token_text, raw_region in zip(tokens, region_row):
+                bbox = self._bbox_from_region(raw_region)
+                if bbox is None or bbox.area <= 0:
+                    continue
+                paired_tokens.append(token_text)
+                paired_regions.append(raw_region)
+                boxes.append(bbox)
+            if not paired_tokens:
+                continue
+            rows.append(TokenRow(
+                text="".join(paired_tokens),
+                tokens=paired_tokens,
+                regions=paired_regions,
+                bbox=self._merge_bboxes(boxes),
+            ))
+        return rows
+
+    def _build_rec_rows(self, item: dict) -> list[RecRow]:
+        ocr_res = self._extract_overall_ocr_res(item)
+        texts = ocr_res.get("rec_texts", [])
+        scores = ocr_res.get("rec_scores", [])
+        boxes = (
+            ocr_res.get("rec_boxes")
+            or ocr_res.get("rec_polys")
+            or ocr_res.get("rec_polygons")
+            or ocr_res.get("dt_polys")
+            or []
+        )
+        rows: list[RecRow] = []
+        for idx, text in enumerate(texts):
+            bbox = self._bbox_from_region(boxes[idx]) if idx < len(boxes) else None
+            if bbox is None or bbox.area <= 0:
+                continue
+            rows.append(RecRow(
+                text=self._normalize_line_text(str(text)),
+                confidence=normalize_confidence(scores[idx]) if idx < len(scores) else 0.0,
+                bbox=bbox,
+            ))
+        return rows
+
+    def _select_token_rows_for_bbox(self, token_rows: list[TokenRow], bbox: BBox) -> list[TokenRow]:
+        scored: list[tuple[float, float, int, TokenRow]] = []
+        for row in token_rows:
+            overlap = self._bbox_overlap_ratio(row.bbox, bbox)
+            if overlap <= 0:
+                continue
+            distance = abs((row.bbox.y + row.bbox.h / 2.0) - (bbox.y + bbox.h / 2.0)) if row.bbox else 0.0
+            scored.append((-overlap, distance, row.bbox.x if row.bbox else 0, row))
+        scored.sort()
+        return [row for _overlap, _distance, _x, row in scored]
 
     def _find_token_span(
         self,
@@ -240,8 +376,7 @@ class ApiOcrEngine:
         page_image: np.ndarray,
         line_text: str,
         line_confidence: float,
-        token_row,
-        region_row,
+        token_rows: list[TokenRow],
     ) -> list[Char]:
         chars = [
             Char(
@@ -257,42 +392,88 @@ class ApiOcrEngine:
         if not line_text:
             return chars
 
-        tokens = self._normalize_token_texts(token_row)
-        if not isinstance(region_row, (list, tuple)):
-            return chars
-
         occupied = [False] * len(line_text)
         cursor = 0
-        for token, raw_region in zip(tokens, region_row):
-            token_text = token.strip()
-            if not token_text:
-                continue
-            bbox = self._bbox_from_region(raw_region)
-            if bbox is None or bbox.area <= 0:
-                continue
-            if not is_meaningful_text_bbox(page_image, bbox, token_text):
-                continue
-            span = self._find_token_span(line_text, token_text, cursor, occupied)
-            if span is None:
-                continue
-            start, end = span
-            granularity = (
-                CHAR_BBOX_GRANULARITY_CHAR
-                if len(token_text) == 1
-                else CHAR_BBOX_GRANULARITY_WORD
-            )
-            for idx in range(start, end):
-                chars[idx] = Char(
-                    char=line_text[idx],
-                    confidence=float(line_confidence),
-                    bbox=bbox,
-                    bbox_source=CHAR_BBOX_SOURCE_OCR,
-                    bbox_granularity=granularity,
-                    token_text=token_text,
+        for row in token_rows:
+            for token_text, raw_region in zip(row.tokens, row.regions):
+                bbox = self._bbox_from_region(raw_region)
+                if bbox is None or bbox.area <= 0:
+                    continue
+                if not is_meaningful_text_bbox(page_image, bbox, token_text):
+                    continue
+                span = self._find_token_span(line_text, token_text, cursor, occupied)
+                if span is None:
+                    continue
+                start, end = span
+                granularity = (
+                    CHAR_BBOX_GRANULARITY_CHAR
+                    if len(token_text) == 1
+                    else CHAR_BBOX_GRANULARITY_WORD
                 )
-                occupied[idx] = True
-            cursor = end
+                for idx in range(start, end):
+                    chars[idx] = Char(
+                        char=line_text[idx],
+                        confidence=float(line_confidence),
+                        bbox=bbox,
+                        bbox_source=CHAR_BBOX_SOURCE_OCR,
+                        bbox_granularity=granularity,
+                        token_text=token_text,
+                    )
+                    occupied[idx] = True
+                cursor = end
         return chars
+
+    def _build_structured_lines(
+        self,
+        *,
+        page_image: np.ndarray,
+        structured_blocks: list[dict],
+        rec_rows: list[RecRow],
+        token_rows: list[TokenRow],
+    ) -> list[Line]:
+        lines: list[Line] = []
+        for block in sorted(structured_blocks, key=lambda item: (item["bbox"].y, item["bbox"].x)):
+            block_text = self._normalize_line_text(block["content"])
+            if not block_text:
+                continue
+            selected_rec_rows = [
+                row for row in rec_rows
+                if self._bbox_overlap_ratio(row.bbox, block["bbox"]) > 0
+                and (
+                    not row.text
+                    or self._contains_signature(self._text_signature(block_text), self._text_signature(row.text))
+                )
+            ]
+            selected_token_rows = self._select_token_rows_for_bbox(token_rows, block["bbox"])
+            raw_ocr_text = "\n".join(row.text for row in selected_rec_rows if row.text)
+            confidence = (
+                sum(row.confidence for row in selected_rec_rows) / len(selected_rec_rows)
+                if selected_rec_rows else 0.0
+            )
+            line_bbox = self._merge_bboxes([row.bbox for row in selected_rec_rows]) or block["bbox"]
+            chars = self._build_line_chars(
+                page_image=page_image,
+                line_text=block_text,
+                line_confidence=confidence,
+                token_rows=selected_token_rows,
+            )
+            explicit_boxes = [char.bbox for char in chars if char.bbox is not None and char.bbox.area > 0]
+            if not is_meaningful_text_bbox(page_image, line_bbox, block_text):
+                line_bbox = self._merge_bboxes(explicit_boxes) or line_bbox
+            lines.append(Line(
+                text=block_text,
+                confidence=confidence,
+                bbox=line_bbox,
+                chars=chars,
+                ocr_text=raw_ocr_text,
+                text_source=block["source"],
+                proof_status=(
+                    ProofStatus.AUTO_FLAGGED
+                    if confidence < AUTO_FLAG_THRESHOLD
+                    else ProofStatus.UNCHECKED
+                ),
+            ))
+        return lines
 
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64
@@ -325,41 +506,43 @@ class ApiOcrEngine:
 
         lines: List[Line] = []
         for item in self._iter_result_items(data):
-            ocr_res = self._extract_overall_ocr_res(item)
-            texts = ocr_res.get("rec_texts", [])
-            scores = ocr_res.get("rec_scores", [])
-            boxes = (
-                ocr_res.get("rec_boxes")
-                or ocr_res.get("rec_polys")
-                or ocr_res.get("rec_polygons")
-                or ocr_res.get("dt_polys")
-                or []
+            token_rows = self._build_token_rows(item)
+            rec_rows = self._build_rec_rows(item)
+            structured_blocks = self._extract_structured_text_blocks(item)
+
+            structured_lines = self._build_structured_lines(
+                page_image=image_bgr,
+                structured_blocks=structured_blocks,
+                rec_rows=rec_rows,
+                token_rows=token_rows,
             )
-            token_rows, region_rows = self._extract_word_box_rows(item)
-            for idx, text in enumerate(texts):
-                score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-                if idx < len(boxes):
-                    bbox = self._bbox_from_region(boxes[idx]) or BBox(0, 0, 0, 0)
-                else:
-                    bbox = BBox(0, 0, 0, 0)
+            if structured_lines:
+                lines.extend(structured_lines)
+                continue
+
+            for row in rec_rows:
+                line_text = row.text or "".join(token_row.text for token_row in self._select_token_rows_for_bbox(token_rows, row.bbox))
+                selected_token_rows = self._select_token_rows_for_bbox(token_rows, row.bbox)
                 chars = self._build_line_chars(
                     page_image=image_bgr,
-                    line_text=text,
-                    line_confidence=score,
-                    token_row=token_rows[idx] if idx < len(token_rows) else [],
-                    region_row=region_rows[idx] if idx < len(region_rows) else [],
+                    line_text=line_text,
+                    line_confidence=row.confidence,
+                    token_rows=selected_token_rows,
                 )
                 explicit_boxes = [char.bbox for char in chars if char.bbox is not None and char.bbox.area > 0]
-                if not is_meaningful_text_bbox(image_bgr, bbox, text):
+                bbox = row.bbox
+                if not is_meaningful_text_bbox(image_bgr, bbox, line_text):
                     bbox = self._merge_bboxes(explicit_boxes) or bbox
                 lines.append(Line(
-                    text=text,
-                    confidence=score,
+                    text=line_text,
+                    confidence=row.confidence,
                     bbox=bbox,
                     chars=chars,
+                    ocr_text=row.text,
+                    text_source=LINE_TEXT_SOURCE_REC if row.text else LINE_TEXT_SOURCE_TOKEN,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
-                        if score < AUTO_FLAG_THRESHOLD
+                        if row.confidence < AUTO_FLAG_THRESHOLD
                         else ProofStatus.UNCHECKED
                     ),
                 ))

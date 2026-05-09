@@ -306,6 +306,7 @@ def test_project_store():
             loaded = store.load_project(project_id=1)
             assert loaded.name == "存储测试"
             assert loaded.pages[0].blocks[0].lines[0].text == "Hello OCR"
+            assert loaded.pages[0].blocks[0].lines[0].text_source == ""
             loaded_chars = loaded.pages[0].blocks[0].lines[0].chars
             assert loaded_chars[0].bbox_source == "ocr"
             assert loaded_chars[0].bbox_granularity == "char"
@@ -423,7 +424,7 @@ def test_project_store_schema_migration():
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         assert ver is not None
-        assert int(ver[0]) >= 3
+        assert int(ver[0]) >= 4
         conn2.close()
 
         print("test_project_store_schema_migration PASSED")
@@ -658,6 +659,7 @@ def test_api_ocr_engine_parses_char_level_word_boxes():
         lines = engine.recognize(np.zeros((120, 80, 3), dtype=np.uint8), OcrContext())
         assert len(lines) == 1
         assert lines[0].bbox == BBox(10, 20, 40, 60)
+        assert lines[0].text_source == "overall_ocr_res.rec_texts"
         assert len(lines[0].chars) == 2
         assert lines[0].chars[0].bbox == BBox(10, 20, 18, 60)
         assert lines[0].chars[0].bbox_source == "ocr"
@@ -783,6 +785,241 @@ def test_api_ocr_engine_filters_empty_narrow_word_boxes():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_filters_empty_narrow_word_boxes PASSED")
+
+
+def test_api_ocr_engine_prefers_block_content_for_text_reconstruction():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    block_text = "综合上述供需两侧分析，本文认为。"
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["综合上述供需两侧分析", "X_{ct}"],
+                                    "rec_scores": [0.96, 0.72],
+                                    "rec_boxes": [
+                                        [10, 10, 160, 40],
+                                        [12, 48, 80, 76],
+                                    ],
+                                },
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_bbox": [10, 10, 180, 42],
+                                        "block_content": block_text,
+                                    },
+                                    {
+                                        "block_label": "formula",
+                                        "block_bbox": [12, 48, 80, 76],
+                                        "block_content": "X_{ct}",
+                                    },
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((100, 220, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == block_text
+        assert lines[0].text_source == "parsing_res_list.block_content"
+        assert lines[0].ocr_text == "综合上述供需两侧分析"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_prefers_block_content_for_text_reconstruction PASSED")
+
+
+def test_api_ocr_engine_aligns_token_rows_by_bbox_not_index():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["因为", "2016"],
+                                    "rec_scores": [0.96, 0.94],
+                                    "rec_boxes": [
+                                        [10, 10, 60, 42],
+                                        [10, 60, 90, 92],
+                                    ],
+                                },
+                                "text_word": [
+                                    ["2", "0", "1", "6"],
+                                    ["因", "为"],
+                                ],
+                                "text_word_region": [
+                                    [
+                                        [[10, 60], [26, 60], [26, 92], [10, 92]],
+                                        [[28, 60], [44, 60], [44, 92], [28, 92]],
+                                        [[46, 60], [62, 60], [62, 92], [46, 92]],
+                                        [[64, 60], [80, 60], [80, 92], [64, 92]],
+                                    ],
+                                    [
+                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
+                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
+                                    ],
+                                ],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 120, 3), 255, dtype=np.uint8)
+        image[10:42, 10:30] = 0
+        image[10:42, 34:54] = 0
+        image[60:92, 10:80] = 0
+        lines = engine.recognize(image, OcrContext())
+        assert [line.text for line in lines] == ["因为", "2016"]
+        assert lines[0].chars[0].token_text == "因"
+        assert lines[0].chars[1].token_text == "为"
+        assert lines[1].chars[0].token_text == "2"
+        assert lines[1].chars[-1].token_text == "6"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_aligns_token_rows_by_bbox_not_index PASSED")
+
+
+def test_char_index_follows_block_content_reconstruction():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    block_text = "综合上述供需两侧分析，本文认为。"
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["综台上述供需两侧分析", "X_{ct}"],
+                                    "rec_scores": [0.96, 0.72],
+                                    "rec_boxes": [
+                                        [10, 10, 170, 42],
+                                        [12, 48, 80, 76],
+                                    ],
+                                },
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_bbox": [10, 10, 180, 42],
+                                        "block_content": block_text,
+                                    },
+                                    {
+                                        "block_label": "formula",
+                                        "block_bbox": [12, 48, 80, 76],
+                                        "block_content": "X_{ct}",
+                                    },
+                                ],
+                                "text_word": [[
+                                    "综", "合", "上", "述", "供", "需", "两", "侧", "分", "析", "，",
+                                    "本", "文", "认", "为", "。",
+                                ]],
+                                "text_word_region": [[
+                                    [[10, 10], [18, 10], [18, 42], [10, 42]],
+                                    [[20, 10], [28, 10], [28, 42], [20, 42]],
+                                    [[30, 10], [38, 10], [38, 42], [30, 42]],
+                                    [[40, 10], [48, 10], [48, 42], [40, 42]],
+                                    [[50, 10], [58, 10], [58, 42], [50, 42]],
+                                    [[60, 10], [68, 10], [68, 42], [60, 42]],
+                                    [[70, 10], [78, 10], [78, 42], [70, 42]],
+                                    [[80, 10], [88, 10], [88, 42], [80, 42]],
+                                    [[90, 10], [98, 10], [98, 42], [90, 42]],
+                                    [[100, 10], [108, 10], [108, 42], [100, 42]],
+                                    [[110, 10], [118, 10], [118, 42], [110, 42]],
+                                    [[120, 10], [128, 10], [128, 42], [120, 42]],
+                                    [[130, 10], [138, 10], [138, 42], [130, 42]],
+                                    [[140, 10], [148, 10], [148, 42], [140, 42]],
+                                    [[150, 10], [158, 10], [158, 42], [150, 42]],
+                                    [[160, 10], [168, 10], [168, 42], [160, 42]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((120, 220, 3), 255, dtype=np.uint8)
+        image[10:42, 10:168] = 0
+        lines = engine.recognize(image, OcrContext())
+        page = Page(
+            image_path="/tmp/reconstruct.png",
+            width=220,
+            height=120,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 200, 60), lines=lines)],
+        )
+        svc = CharIndexService().build_index(OcrProject(name="reconstruct", pages=[page]))
+        assert lines[0].text == block_text
+        assert lines[0].text_source == "parsing_res_list.block_content"
+        assert len(svc.query("两")) == 1
+        assert svc.query("X") == []
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_char_index_follows_block_content_reconstruction PASSED")
 
 
 def test_fake_layout_engine():
@@ -2239,6 +2476,8 @@ if __name__ == "__main__":
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
+    test_api_ocr_engine_prefers_block_content_for_text_reconstruction()
+    test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
@@ -2273,4 +2512,5 @@ if __name__ == "__main__":
     test_char_index_suppresses_punctuation_topic_for_shared_word_box()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
+    test_char_index_follows_block_content_reconstruction()
     print("\n✓ 所有测试通过")
