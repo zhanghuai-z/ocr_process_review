@@ -45,6 +45,10 @@ class BBox:
     def y2(self) -> float:
         return self.y + self.h
 
+    @property
+    def area(self) -> float:
+        return self.w * self.h
+
     @classmethod
     def from_xyxy(cls, x1: float, y1: float, x2: float, y2: float) -> "BBox":
         return cls(x1, y1, x2 - x1, y2 - y1)
@@ -135,6 +139,7 @@ class BlockNode:
     content: str = ""
     lines: List[LineNode] = field(default_factory=list)
     order: int = 0
+    source_field: str = ""
     raw: Any = None
 
     @classmethod
@@ -151,6 +156,7 @@ class PageNode:
     height: int = 0
     blocks: List[BlockNode] = field(default_factory=list)
     orphan_lines: List[LineNode] = field(default_factory=list)
+    layout_det_blocks: List["BlockNode"] = field(default_factory=list)
     raw: Any = None
 
     @classmethod

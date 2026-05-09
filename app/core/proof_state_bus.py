@@ -1,25 +1,44 @@
 """校对事件总线：轻量发布/订阅，用于跨面板通知状态变更。
 
-用法：
+用法（新式，推荐）：
+    from app.core.proof_state_bus import TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus
+
+    bus = get_proof_state_bus()
+    unsub = bus.subscribe(TOPIC_LINE_PROOF_CHANGED, my_handler)
+    bus.publish(TOPIC_LINE_PROOF_CHANGED, {"page_id": 1, "line_id": 5, "status": "OK"})
+    unsub()  # 取消订阅
+
+用法（旧式，仍兼容）：
     from app.core.proof_state_bus import ProofStateBus
 
-    # 订阅
     bus = ProofStateBus.instance()
     bus.subscribe("line.proof_changed", my_handler)
-
-    # 发布
     bus.publish("line.proof_changed", page_id=1, line_id=5, status="OK")
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Topic constants
+# ---------------------------------------------------------------------------
+TOPIC_LINE_PROOF_CHANGED = "line.proof_changed"
+
+
+# ---------------------------------------------------------------------------
+# Bus
+# ---------------------------------------------------------------------------
 
 class ProofStateBus:
-    """单例事件总线。"""
+    """单例事件总线。
+
+    publish 支持两种调用形式：
+      bus.publish(topic, payload_dict)   → handler(payload_dict)
+      bus.publish(topic, **kwargs)       → handler(**kwargs)
+    """
 
     _instance: "ProofStateBus | None" = None
 
@@ -41,9 +60,17 @@ class ProofStateBus:
 
     # ------------------------------------------------------------------ API
 
-    def subscribe(self, event: str, handler: Callable[..., Any]) -> None:
-        """注册事件处理函数。同一 handler 可重复订阅同一事件（会执行多次）。"""
+    def subscribe(self, event: str, handler: Callable[..., Any]) -> Callable[[], None]:
+        """注册事件处理函数。
+
+        返回一个无参 callable，调用后取消订阅。
+        """
         self._subscribers.setdefault(event, []).append(handler)
+
+        def _unsubscribe() -> None:
+            self.unsubscribe(event, handler)
+
+        return _unsubscribe
 
     def unsubscribe(self, event: str, handler: Callable[..., Any]) -> None:
         """取消注册。若 handler 未注册则忽略。"""
@@ -54,14 +81,38 @@ class ProofStateBus:
             except ValueError:
                 pass
 
-    def publish(self, event: str, **kwargs: Any) -> None:
-        """发布事件，同步调用所有订阅者。handler 异常不中止其他 handler。"""
-        for handler in list(self._subscribers.get(event, [])):
+    def publish(self, event: str, payload: Optional[Any] = None, **kwargs: Any) -> None:
+        """发布事件，同步调用所有订阅者。handler 异常不中止其他 handler。
+
+        支持两种形式：
+          publish(topic, {"key": "value"})  → handler({"key": "value"})
+          publish(topic, key="value")       → handler(key="value")
+        """
+        handlers = list(self._subscribers.get(event, []))
+        for handler in handlers:
             try:
-                handler(**kwargs)
+                if payload is not None:
+                    handler(payload)
+                elif kwargs:
+                    handler(**kwargs)
+                else:
+                    handler()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
+
+    def subscriber_count(self, event: str) -> int:
+        """返回指定事件的当前订阅者数量。"""
+        return len(self._subscribers.get(event, []))
 
     def clear(self) -> None:
         """清除所有订阅（测试用）。"""
         self._subscribers.clear()
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience
+# ---------------------------------------------------------------------------
+
+def get_proof_state_bus() -> ProofStateBus:
+    """返回全局单例 ProofStateBus。"""
+    return ProofStateBus.instance()

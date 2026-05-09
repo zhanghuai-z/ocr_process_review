@@ -2627,6 +2627,142 @@ def test_layout_analyzer_builds_api_payload():
     print("test_layout_analyzer_builds_api_payload PASSED")
 
 
+def test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing():
+    import sys
+    import types
+
+    from tools.ocr_inspector.ui.panels.run_ocr import _run_structure_ocr
+
+    class FakeResult:
+        def json(self):
+            return {
+                "overall_ocr_res": {
+                    "rec_texts": ["兼容回退"],
+                    "rec_boxes": [[10, 20, 80, 40]],
+                }
+            }
+
+    class FakePPStructureV3:
+        def __init__(self, **kwargs):
+            raise RuntimeError(
+                "The pipeline (PP-StructureV3) does not exist! Please use a pipeline name or a config file path!"
+            )
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def predict(self, image_path, **kwargs):
+            return [FakeResult()]
+
+    fake_module = types.SimpleNamespace(
+        PPStructureV3=FakePPStructureV3,
+        PaddleOCR=FakePaddleOCR,
+    )
+
+    original = sys.modules.get("paddleocr")
+    sys.modules["paddleocr"] = fake_module
+    try:
+        raw = _run_structure_ocr(
+            "/tmp/sample.png",
+            {
+                "structure": {"layout_threshold": 0.5},
+                "ocr_init": {"lang": "ch", "ocr_version": None},
+                "ocr_pred": {"return_word_box": True},
+            },
+        )
+    finally:
+        if original is None:
+            sys.modules.pop("paddleocr", None)
+        else:
+            sys.modules["paddleocr"] = original
+
+    assert raw["overall_ocr_res"]["rec_texts"] == ["兼容回退"]
+    assert raw["_inspector_meta"]["fallback"] == "paddleocr_layout_compat"
+    assert "PP-StructureV3" in raw["_inspector_meta"]["reason"]
+
+    print("test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing PASSED")
+
+
+def test_inspector_flattens_api_layout_parsing_result():
+    from tools.ocr_inspector.ui.panels.run_ocr import _flatten_api_result
+
+    raw = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "parsing_res_list": [
+                            {"block_label": "paragraph", "block_bbox": [1, 2, 30, 40]},
+                        ],
+                        "layout_det_res": {
+                            "boxes": [
+                                {"label": "paragraph", "coordinate": [1, 2, 30, 40], "score": 0.9},
+                            ],
+                        },
+                        "overall_ocr_res": {
+                            "rec_texts": ["第一行"],
+                            "rec_boxes": [[1, 2, 30, 20]],
+                            "text_word": [["第一行"]],
+                            "text_word_region": [[[1, 2, 30, 20]]],
+                        },
+                    }
+                }
+            ]
+        }
+    }
+
+    flattened = _flatten_api_result(raw)
+
+    assert flattened["parsing_res_list"][0]["block_label"] == "paragraph"
+    assert flattened["layout_det_res"]["boxes"][0]["label"] == "paragraph"
+    assert flattened["overall_ocr_res"]["rec_texts"] == ["第一行"]
+    assert flattened["overall_ocr_res"]["text_word"][0] == ["第一行"]
+
+    print("test_inspector_flattens_api_layout_parsing_result PASSED")
+
+
+def test_inspector_builds_api_request_body_from_shared_config():
+    from tools.ocr_inspector.ui.panels.run_ocr import _build_api_request_body
+
+    body = _build_api_request_body(
+        "abc123",
+        {
+            "ocr_init": {
+                "use_doc_orientation_classify": True,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": True,
+            },
+            "ocr_pred": {
+                "return_word_box": True,
+                "text_det_thresh": 0.25,
+                "text_det_box_thresh": 0.55,
+                "text_det_unclip_ratio": 1.4,
+                "text_det_limit_side_len": 960,
+                "text_det_limit_type": "max",
+                "text_rec_score_thresh": 0.2,
+            },
+        },
+        {"api_layout_model_name": "PP-StructureV3"},
+    )
+
+    assert body["file"] == "abc123"
+    assert body["fileType"] == 1
+    assert body["model_name"] == "PP-StructureV3"
+    assert body["returnWordBox"] is True
+    assert body["useDocOrientationClassify"] is True
+    assert body["useDocUnwarping"] is False
+    assert body["useTextlineOrientation"] is True
+    assert body["textDetThresh"] == 0.25
+    assert body["textDetBoxThresh"] == 0.55
+    assert body["textDetUnclipRatio"] == 1.4
+    assert body["textDetLimitSideLen"] == 960
+    assert body["textDetLimitType"] == "max"
+    assert body["textRecScoreThresh"] == 0.2
+
+    print("test_inspector_builds_api_request_body_from_shared_config PASSED")
+
+
 # =====================================================================
 # CharIndexService — 整条字索引链路：纵/横 bbox、去重、排序、稳定查询
 # =====================================================================
@@ -2792,6 +2928,9 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_builds_api_payload()
+    test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
+    test_inspector_flattens_api_layout_parsing_result()
+    test_inspector_builds_api_request_body_from_shared_config()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
     test_char_index_dedup_on_rebuild()
