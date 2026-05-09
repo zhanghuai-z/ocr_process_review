@@ -7,14 +7,19 @@ from typing import List
 
 import numpy as np
 
-from app.core.bbox_utils import bbox_from_xyxy, sanitize_xyxy_bbox
+from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.models import BBox, Line, ProofStatus
+from app.models import BBox, Char, Line, ProofStatus
 from app.core.app_config import get_config
 
 AUTO_FLAG_THRESHOLD = 0.80
 logger = get_logger(__name__)
+CHAR_BBOX_SOURCE_OCR = "ocr"
+CHAR_BBOX_SOURCE_FALLBACK = "fallback"
+CHAR_BBOX_GRANULARITY_CHAR = "char"
+CHAR_BBOX_GRANULARITY_WORD = "word"
+CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
 
 
 def normalize_confidence(score) -> float:
@@ -108,6 +113,147 @@ class LocalOcrEngine:
 class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
 
+    bbox_space = "crop"
+    _PIPELINE_DISABLE_FLAGS = {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useTextlineOrientation": False,
+    }
+
+    def _build_request_body(self, file_b64: str, file_type: int = 1) -> dict:
+        body = {"file": file_b64, "fileType": file_type, "returnWordBox": True}
+        body.update(self._PIPELINE_DISABLE_FLAGS)
+        return body
+
+    def _iter_result_items(self, data: dict) -> list[dict]:
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        items: list[dict] = []
+        for key in ("layoutParsingResults", "ocrResults"):
+            value = result.get(key)
+            if isinstance(value, list):
+                items.extend(item for item in value if isinstance(item, dict))
+        return items
+
+    def _extract_overall_ocr_res(self, item: dict) -> dict:
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        if not isinstance(pruned, dict):
+            pruned = {}
+        ocr_res = pruned.get("overall_ocr_res")
+        if isinstance(ocr_res, dict):
+            return ocr_res
+        direct = item.get("overall_ocr_res")
+        return direct if isinstance(direct, dict) else {}
+
+    def _extract_word_box_rows(self, item: dict) -> tuple[list, list]:
+        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        if not isinstance(pruned, dict):
+            pruned = {}
+        ocr_res = self._extract_overall_ocr_res(item)
+        token_rows = (
+            pruned.get("text_word")
+            or pruned.get("textWord")
+            or ocr_res.get("text_word")
+            or ocr_res.get("textWord")
+            or []
+        )
+        region_rows = (
+            pruned.get("text_word_region")
+            or pruned.get("textWordRegion")
+            or ocr_res.get("text_word_region")
+            or ocr_res.get("textWordRegion")
+            or []
+        )
+        return token_rows, region_rows
+
+    def _bbox_from_region(self, region) -> BBox | None:
+        if isinstance(region, dict):
+            if {"x", "y", "w", "h"} <= set(region.keys()):
+                return BBox.from_dict(region).normalize()
+            for key in ("coordinate", "bbox", "box"):
+                value = region.get(key)
+                if value is not None:
+                    return self._bbox_from_region(value)
+            return None
+        if not isinstance(region, (list, tuple)):
+            return None
+        if len(region) >= 4 and all(not isinstance(v, (list, tuple)) for v in region[:4]):
+            return bbox_from_xyxy(region[:4]).normalize()
+        if len(region) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in region[:4]):
+            return bbox_from_quad(region[:4]).normalize()
+        return None
+
+    def _normalize_token_texts(self, token_row) -> list[str]:
+        if isinstance(token_row, str):
+            return [token_row]
+        if not isinstance(token_row, (list, tuple)):
+            return []
+        tokens: list[str] = []
+        for token in token_row:
+            if token is None:
+                continue
+            token_text = str(token)
+            if token_text == "":
+                continue
+            tokens.append(token_text)
+        return tokens
+
+    def _build_line_chars(
+        self,
+        *,
+        line_text: str,
+        line_confidence: float,
+        token_row,
+        region_row,
+    ) -> list[Char]:
+        chars = [
+            Char(
+                char=glyph,
+                confidence=float(line_confidence),
+                bbox=None,
+                bbox_source=CHAR_BBOX_SOURCE_FALLBACK,
+                bbox_granularity=CHAR_BBOX_GRANULARITY_FALLBACK,
+                token_text=glyph,
+            )
+            for glyph in line_text
+        ]
+        if not line_text:
+            return chars
+
+        tokens = self._normalize_token_texts(token_row)
+        if not isinstance(region_row, (list, tuple)):
+            return chars
+
+        cursor = 0
+        for token, raw_region in zip(tokens, region_row):
+            token_text = token.strip()
+            if not token_text:
+                continue
+            bbox = self._bbox_from_region(raw_region)
+            if bbox is None or bbox.area <= 0:
+                continue
+            start = line_text.find(token_text, cursor)
+            if start < 0 and cursor < len(line_text):
+                start = line_text.find(token_text, max(0, cursor - 1))
+            if start < 0:
+                continue
+            end = min(len(line_text), start + len(token_text))
+            granularity = (
+                CHAR_BBOX_GRANULARITY_CHAR
+                if len(token_text) == 1
+                else CHAR_BBOX_GRANULARITY_WORD
+            )
+            for idx in range(start, end):
+                chars[idx] = Char(
+                    char=line_text[idx],
+                    confidence=float(line_confidence),
+                    bbox=bbox,
+                    bbox_source=CHAR_BBOX_SOURCE_OCR,
+                    bbox_granularity=granularity,
+                    token_text=token_text,
+                )
+            cursor = end
+        return chars
+
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64
         import cv2
@@ -130,40 +276,42 @@ class ApiOcrEngine:
 
         resp = requests.post(
             url,
-            json={
-                "file": file_b64,
-                "fileType": 1,
-                # 关闭服务侧预处理，避免坐标偏移（与 LayoutAnalyzer 保持一致）
-                "useDocOrientationClassify": False,
-                "useDocUnwarping": False,
-                "useTextlineOrientation": False,
-            },
+            json=self._build_request_body(file_b64, 1),
             headers=headers,
             timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
 
-        layout_results = data.get("result", {}).get("layoutParsingResults", [])
         lines: List[Line] = []
-        for item in layout_results:
-            ocr_res = (
-                item.get("prunedResult", {})
-                    .get("overall_ocr_res", {})
-            )
+        for item in self._iter_result_items(data):
+            ocr_res = self._extract_overall_ocr_res(item)
             texts = ocr_res.get("rec_texts", [])
             scores = ocr_res.get("rec_scores", [])
-            boxes = ocr_res.get("rec_boxes", [])
+            boxes = (
+                ocr_res.get("rec_boxes")
+                or ocr_res.get("rec_polys")
+                or ocr_res.get("rec_polygons")
+                or ocr_res.get("dt_polys")
+                or []
+            )
+            token_rows, region_rows = self._extract_word_box_rows(item)
             for idx, text in enumerate(texts):
                 score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
                 if idx < len(boxes):
-                    bbox = bbox_from_xyxy(boxes[idx])
+                    bbox = self._bbox_from_region(boxes[idx]) or BBox(0, 0, 0, 0)
                 else:
                     bbox = BBox(0, 0, 0, 0)
                 lines.append(Line(
                     text=text,
                     confidence=score,
                     bbox=bbox,
+                    chars=self._build_line_chars(
+                        line_text=text,
+                        line_confidence=score,
+                        token_row=token_rows[idx] if idx < len(token_rows) else [],
+                        region_row=region_rows[idx] if idx < len(region_rows) else [],
+                    ),
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
                         if score < AUTO_FLAG_THRESHOLD

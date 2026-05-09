@@ -90,6 +90,9 @@ class Char:
     confidence: float
     bbox: Optional[BBox] = None
     id: Optional[int] = None  # 数据库 rowid
+    bbox_source: str = ""
+    bbox_granularity: str = ""
+    token_text: str = ""
 
 
 @dataclass

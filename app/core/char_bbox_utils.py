@@ -327,9 +327,14 @@ def ensure_line_char_bboxes(
     chars: List[Char] = []
     for idx, glyph in enumerate(line.text):
         existing = line.chars[idx] if idx < len(line.chars) else None
+        has_explicit_bbox = (
+            existing is not None
+            and existing.bbox is not None
+            and existing.bbox.area > 0
+        )
         bbox = (
             existing.bbox.normalize()
-            if existing and existing.bbox is not None and existing.bbox.area > 0
+            if has_explicit_bbox
             else split_bboxes[idx]
         )
         confidence = (
@@ -338,6 +343,29 @@ def ensure_line_char_bboxes(
             else float(line.confidence)
         )
         char_id = existing.id if existing is not None else None
-        chars.append(Char(char=glyph, confidence=confidence, bbox=bbox, id=char_id))
+        bbox_source = (
+            existing.bbox_source
+            if has_explicit_bbox and existing and existing.bbox_source
+            else "fallback"
+        )
+        bbox_granularity = (
+            existing.bbox_granularity
+            if has_explicit_bbox and existing and existing.bbox_granularity
+            else "fallback"
+        )
+        token_text = (
+            existing.token_text
+            if existing is not None and existing.token_text
+            else glyph
+        )
+        chars.append(Char(
+            char=glyph,
+            confidence=confidence,
+            bbox=bbox,
+            id=char_id,
+            bbox_source=bbox_source,
+            bbox_granularity=bbox_granularity,
+            token_text=token_text,
+        ))
     line.chars = chars
     return chars

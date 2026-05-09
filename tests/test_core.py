@@ -263,7 +263,7 @@ def test_block_type_mapping():
 # =====================================================================
 
 def test_project_store():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -271,7 +271,29 @@ def test_project_store():
 
     try:
         bb = BBox(0, 0, 100, 20)
-        line = Line(text="Hello OCR", confidence=0.92, bbox=bb)
+        line = Line(
+            text="Hello OCR",
+            confidence=0.92,
+            bbox=bb,
+            chars=[
+                Char(
+                    char="H",
+                    confidence=0.92,
+                    bbox=BBox(0, 0, 12, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="char",
+                    token_text="H",
+                ),
+                Char(
+                    char="e",
+                    confidence=0.92,
+                    bbox=BBox(12, 0, 18, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="word",
+                    token_text="ello",
+                ),
+            ],
+        )
         block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
         page = Page(image_path="/tmp/img.jpg", width=800, height=600)
         page.blocks.append(block)
@@ -284,6 +306,10 @@ def test_project_store():
             loaded = store.load_project(project_id=1)
             assert loaded.name == "存储测试"
             assert loaded.pages[0].blocks[0].lines[0].text == "Hello OCR"
+            loaded_chars = loaded.pages[0].blocks[0].lines[0].chars
+            assert loaded_chars[0].bbox_source == "ocr"
+            assert loaded_chars[0].bbox_granularity == "char"
+            assert loaded_chars[1].token_text == "ello"
 
         print("test_project_store PASSED")
     finally:
@@ -330,7 +356,7 @@ def test_project_store_clean_on_resave():
 
 
 def test_project_store_schema_migration():
-    """从 v1 schema 迁移到 v2。"""
+    """从 v1 schema 迁移到当前版本。"""
     import sqlite3
     from app.core.project_store import ProjectStore
 
@@ -397,7 +423,7 @@ def test_project_store_schema_migration():
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         assert ver is not None
-        assert int(ver[0]) >= 2
+        assert int(ver[0]) >= 3
         conn2.close()
 
         print("test_project_store_schema_migration PASSED")
@@ -534,6 +560,173 @@ def test_confidence_normalization():
     assert normalize_badge_score("0.76") == 0.76
 
     print("test_confidence_normalization PASSED")
+
+
+def test_api_ocr_engine_requests_return_word_box():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"layoutParsingResults": []}}
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return DummyResponse()
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_url="https://example.com",
+        api_token="demo",
+        api_timeout=12,
+    )
+
+    original_post = requests.post
+    requests.post = fake_post
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
+        assert lines == []
+        assert captured["url"] == "https://example.com/layout-parsing"
+        assert captured["json"]["returnWordBox"] is True
+        assert captured["json"]["useDocOrientationClassify"] is False
+        assert captured["json"]["useDocUnwarping"] is False
+        assert captured["json"]["useTextlineOrientation"] is False
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_requests_return_word_box PASSED")
+
+
+def test_api_ocr_engine_parses_char_level_word_boxes():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["天地"],
+                                    "rec_scores": [0.93],
+                                    "rec_boxes": [[10, 20, 50, 80]],
+                                },
+                                "text_word": [["天", "地"]],
+                                "text_word_region": [[
+                                    [[10, 20], [28, 20], [28, 80], [10, 80]],
+                                    [[30, 20], [48, 20], [48, 80], [30, 80]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((120, 80, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].bbox == BBox(10, 20, 40, 60)
+        assert len(lines[0].chars) == 2
+        assert lines[0].chars[0].bbox == BBox(10, 20, 18, 60)
+        assert lines[0].chars[0].bbox_source == "ocr"
+        assert lines[0].chars[0].bbox_granularity == "char"
+        assert lines[0].chars[1].token_text == "地"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_parses_char_level_word_boxes PASSED")
+
+
+def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["南京市长江大桥"],
+                                    "rec_scores": [0.97],
+                                    "rec_polys": [[
+                                        [5, 10], [105, 10], [105, 40], [5, 40],
+                                    ]],
+                                },
+                                "text_word": [["南京市", "长江大桥"]],
+                                "text_word_region": [[
+                                    [[5, 10], [42, 10], [42, 40], [5, 40]],
+                                    [[48, 10], [105, 10], [105, 40], [48, 40]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        line = engine.recognize(np.zeros((80, 160, 3), dtype=np.uint8), OcrContext())[0]
+        assert len(line.chars) == len(line.text)
+        assert all(ch.bbox_source == "ocr" for ch in line.chars)
+        assert all(ch.bbox_granularity == "word" for ch in line.chars[:3])
+        assert all(ch.bbox_granularity == "word" for ch in line.chars[3:])
+        assert line.chars[0].bbox == line.chars[2].bbox
+        assert line.chars[3].bbox == line.chars[-1].bbox
+        assert line.chars[0].token_text == "南京市"
+        assert line.chars[-1].token_text == "长江大桥"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision PASSED")
 
 
 def test_fake_layout_engine():
@@ -716,6 +909,64 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         assert line.chars[1].bbox == BBox(140, 70, 20, 18)
         assert line.chars[2].bbox == BBox(160, 70, 20, 18)
         assert line.chars[3].bbox == BBox(180, 70, 20, 18)
+    finally:
+        os.unlink(img_path)
+
+
+def test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class PartialWordBoxEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            return [Line(
+                text="甲乙丙",
+                confidence=0.94,
+                bbox=BBox(10, 20, 90, 24),
+                chars=[
+                    Char(
+                        char="甲",
+                        confidence=0.94,
+                        bbox=BBox(12, 20, 14, 24),
+                        bbox_source="ocr",
+                        bbox_granularity="char",
+                        token_text="甲",
+                    ),
+                    Char(
+                        char="乙",
+                        confidence=0.94,
+                        bbox=BBox(34, 20, 18, 24),
+                        bbox_source="ocr",
+                        bbox_granularity="char",
+                        token_text="乙",
+                    ),
+                ],
+            )]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((120, 220, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 100, 40))
+        page = Page(image_path=img_path, width=220, height=120, blocks=[block])
+        result = OcrPipeline(engine=PartialWordBoxEngine()).process_project(
+            OcrProject(name="PartialWordBox", pages=[page])
+        )
+        line = result.pages[0].blocks[0].lines[0]
+
+        assert line.chars[0].bbox == BBox(112, 80, 14, 24)
+        assert line.chars[0].bbox_source == "ocr"
+        assert line.chars[1].bbox == BBox(134, 80, 18, 24)
+        assert line.chars[1].bbox_source == "ocr"
+        assert line.chars[2].bbox_source == "fallback"
+        assert line.chars[2].bbox_granularity == "fallback"
     finally:
         os.unlink(img_path)
 
@@ -1758,12 +2009,16 @@ if __name__ == "__main__":
     test_export_html()
     test_fake_ocr_engine()
     test_confidence_normalization()
+    test_api_ocr_engine_requests_return_word_box()
+    test_api_ocr_engine_parses_char_level_word_boxes()
+    test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
+    test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars()
     test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
