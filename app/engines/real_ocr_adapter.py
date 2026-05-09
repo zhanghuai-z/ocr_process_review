@@ -3,11 +3,12 @@
 确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
 """
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
+from app.core.char_bbox_utils import is_meaningful_text_bbox
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Char, Line, ProofStatus
@@ -197,9 +198,46 @@ class ApiOcrEngine:
             tokens.append(token_text)
         return tokens
 
+    def _merge_bboxes(self, boxes: list[BBox]) -> Optional[BBox]:
+        if not boxes:
+            return None
+        x1 = min(box.x for box in boxes)
+        y1 = min(box.y for box in boxes)
+        x2 = max(box.x2 for box in boxes)
+        y2 = max(box.y2 for box in boxes)
+        return BBox.from_xyxy(x1, y1, x2, y2).normalize()
+
+    def _find_token_span(
+        self,
+        line_text: str,
+        token_text: str,
+        cursor: int,
+        occupied: list[bool],
+    ) -> tuple[int, int] | None:
+        token_len = len(token_text)
+        if token_len <= 0 or token_len > len(line_text):
+            return None
+        search_start = max(0, min(cursor, len(line_text) - token_len))
+        for start in range(search_start, len(line_text) - token_len + 1):
+            end = start + token_len
+            if line_text[start:end] != token_text:
+                continue
+            if any(occupied[start:end]):
+                continue
+            return start, end
+        for start in range(0, search_start):
+            end = start + token_len
+            if line_text[start:end] != token_text:
+                continue
+            if any(occupied[start:end]):
+                continue
+            return start, end
+        return None
+
     def _build_line_chars(
         self,
         *,
+        page_image: np.ndarray,
         line_text: str,
         line_confidence: float,
         token_row,
@@ -223,6 +261,7 @@ class ApiOcrEngine:
         if not isinstance(region_row, (list, tuple)):
             return chars
 
+        occupied = [False] * len(line_text)
         cursor = 0
         for token, raw_region in zip(tokens, region_row):
             token_text = token.strip()
@@ -231,12 +270,12 @@ class ApiOcrEngine:
             bbox = self._bbox_from_region(raw_region)
             if bbox is None or bbox.area <= 0:
                 continue
-            start = line_text.find(token_text, cursor)
-            if start < 0 and cursor < len(line_text):
-                start = line_text.find(token_text, max(0, cursor - 1))
-            if start < 0:
+            if not is_meaningful_text_bbox(page_image, bbox, token_text):
                 continue
-            end = min(len(line_text), start + len(token_text))
+            span = self._find_token_span(line_text, token_text, cursor, occupied)
+            if span is None:
+                continue
+            start, end = span
             granularity = (
                 CHAR_BBOX_GRANULARITY_CHAR
                 if len(token_text) == 1
@@ -251,6 +290,7 @@ class ApiOcrEngine:
                     bbox_granularity=granularity,
                     token_text=token_text,
                 )
+                occupied[idx] = True
             cursor = end
         return chars
 
@@ -302,16 +342,21 @@ class ApiOcrEngine:
                     bbox = self._bbox_from_region(boxes[idx]) or BBox(0, 0, 0, 0)
                 else:
                     bbox = BBox(0, 0, 0, 0)
+                chars = self._build_line_chars(
+                    page_image=image_bgr,
+                    line_text=text,
+                    line_confidence=score,
+                    token_row=token_rows[idx] if idx < len(token_rows) else [],
+                    region_row=region_rows[idx] if idx < len(region_rows) else [],
+                )
+                explicit_boxes = [char.bbox for char in chars if char.bbox is not None and char.bbox.area > 0]
+                if not is_meaningful_text_bbox(image_bgr, bbox, text):
+                    bbox = self._merge_bboxes(explicit_boxes) or bbox
                 lines.append(Line(
                     text=text,
                     confidence=score,
                     bbox=bbox,
-                    chars=self._build_line_chars(
-                        line_text=text,
-                        line_confidence=score,
-                        token_row=token_rows[idx] if idx < len(token_rows) else [],
-                        region_row=region_rows[idx] if idx < len(region_rows) else [],
-                    ),
+                    chars=chars,
                     proof_status=(
                         ProofStatus.AUTO_FLAGGED
                         if score < AUTO_FLAG_THRESHOLD

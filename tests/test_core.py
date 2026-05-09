@@ -729,6 +729,62 @@ def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
     print("test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision PASSED")
 
 
+def test_api_ocr_engine_filters_empty_narrow_word_boxes():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["甲乙"],
+                                    "rec_scores": [0.95],
+                                    "rec_boxes": [[10, 10, 70, 40]],
+                                },
+                                "text_word": [["甲", "乙"]],
+                                "text_word_region": [[
+                                    [[10, 10], [28, 10], [28, 40], [10, 40]],
+                                    [[60, 12], [61, 12], [61, 13], [60, 13]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        image[10:40, 10:28] = 0
+        line = engine.recognize(image, OcrContext())[0]
+        assert line.chars[0].bbox_source == "ocr"
+        assert line.chars[0].bbox is not None
+        assert line.chars[1].bbox is None
+        assert line.chars[1].bbox_source == "fallback"
+        assert line.chars[1].bbox_granularity == "fallback"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_filters_empty_narrow_word_boxes PASSED")
+
+
 def test_fake_layout_engine():
     from app.engines.fake_layout_engine import FakeLayoutEngine
 
@@ -1451,6 +1507,176 @@ def test_char_index_service_legacy_build_contract():
     print("test_char_index_service_legacy_build_contract PASSED")
 
 
+def test_char_index_groups_digit_runs_as_tokens():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="2026年",
+        confidence=0.93,
+        bbox=BBox(10, 20, 100, 24),
+        chars=[
+            Char(char="2", confidence=0.93, bbox=BBox(10, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="0", confidence=0.93, bbox=BBox(22, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="0"),
+            Char(char="2", confidence=0.93, bbox=BBox(34, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="6", confidence=0.93, bbox=BBox(46, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="6"),
+            Char(char="年", confidence=0.93, bbox=BBox(66, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="年"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=200,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 120, 40), lines=[line])],
+    )
+
+    svc = CharIndexService().build_index(OcrProject(name="digit-group", pages=[page]))
+    digit_entries = svc.query("2026")
+    assert len(digit_entries) == 1
+    assert digit_entries[0].bbox == BBox(10, 20, 48, 24)
+    assert digit_entries[0].collection_kind == "token"
+    assert svc.query("2") == []
+    assert len(svc.query("年")) == 1
+
+    print("test_char_index_groups_digit_runs_as_tokens PASSED")
+
+
+def test_char_index_sorts_digit_tokens_short_to_long():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="9 11 2026 税",
+        confidence=0.9,
+        bbox=BBox(10, 20, 180, 24),
+        chars=[
+            Char(char="9", confidence=0.9, bbox=BBox(10, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="9"),
+            Char(char=" ", confidence=0.9, bbox=None),
+            Char(char="1", confidence=0.9, bbox=BBox(28, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="1"),
+            Char(char="1", confidence=0.9, bbox=BBox(38, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="1"),
+            Char(char=" ", confidence=0.9, bbox=None),
+            Char(char="2", confidence=0.9, bbox=BBox(56, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="0", confidence=0.9, bbox=BBox(66, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="0"),
+            Char(char="2", confidence=0.9, bbox=BBox(76, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="6", confidence=0.9, bbox=BBox(86, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="6"),
+            Char(char=" ", confidence=0.9, bbox=None),
+            Char(char="税", confidence=0.9, bbox=BBox(104, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="税"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=200,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 180, 40), lines=[line])],
+    )
+    svc = CharIndexService().build_index(OcrProject(name="digit-sort", pages=[page]))
+    sorted_keys = [key for key, _count in svc.sorted_chars()]
+    digit_keys = [key for key in sorted_keys if key.isdigit()]
+    assert digit_keys == ["9", "11", "2026"]
+
+    print("test_char_index_sorts_digit_tokens_short_to_long PASSED")
+
+
+def test_char_index_suppresses_punctuation_topic_for_shared_word_box():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    shared_bbox = BBox(10, 20, 28, 24)
+    line = Line(
+        text="税。",
+        confidence=0.91,
+        bbox=shared_bbox,
+        chars=[
+            Char(char="税", confidence=0.91, bbox=shared_bbox, bbox_source="ocr", bbox_granularity="word", token_text="税。"),
+            Char(char="。", confidence=0.91, bbox=shared_bbox, bbox_source="ocr", bbox_granularity="word", token_text="税。"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 40), lines=[line])],
+    )
+    svc = CharIndexService().build_index(OcrProject(name="punct-suppress", pages=[page]))
+
+    assert len(svc.query("税")) == 1
+    assert svc.query("。") == []
+    assert svc.first_entry("税").bbox_granularity == "word"
+
+    print("test_char_index_suppresses_punctuation_topic_for_shared_word_box PASSED")
+
+
+def test_char_index_uses_token_collection_for_word_level_han_bbox():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    shared_bbox = BBox(20, 20, 40, 24)
+    line = Line(
+        text="税业",
+        confidence=0.92,
+        bbox=shared_bbox,
+        chars=[
+            Char(char="税", confidence=0.92, bbox=shared_bbox, bbox_source="ocr", bbox_granularity="word", token_text="税业"),
+            Char(char="业", confidence=0.92, bbox=shared_bbox, bbox_source="ocr", bbox_granularity="word", token_text="税业"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 100, 40), lines=[line])],
+    )
+    svc = CharIndexService().build_index(OcrProject(name="word-level-token", pages=[page]))
+
+    assert len(svc.query("税业")) == 1
+    assert svc.query("税") == []
+    assert svc.query("业") == []
+    assert svc.first_entry("税业").collection_kind == "token"
+
+    print("test_char_index_uses_token_collection_for_word_level_han_bbox PASSED")
+
+
+def test_char_index_skips_empty_narrow_ocr_bbox():
+    import tempfile
+
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        image = np.full((80, 120, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (10, 20), (26, 48), (0, 0, 0), -1)
+        cv2.imwrite(page_path, image)
+
+        line = Line(
+            text="甲乙",
+            confidence=0.92,
+            bbox=BBox(10, 20, 60, 28),
+            chars=[
+                Char(char="甲", confidence=0.92, bbox=BBox(10, 20, 16, 28), bbox_source="ocr", bbox_granularity="char", token_text="甲"),
+                Char(char="乙", confidence=0.92, bbox=BBox(60, 22, 1, 1), bbox_source="ocr", bbox_granularity="char", token_text="乙"),
+            ],
+        )
+        page = Page(
+            image_path=page_path,
+            width=120,
+            height=80,
+            blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 40), lines=[line])],
+        )
+        svc = CharIndexService().build_index(OcrProject(name="bad-box-filter", pages=[page]))
+
+        assert len(svc.query("甲")) == 1
+        assert svc.query("乙") == []
+    finally:
+        os.unlink(page_path)
+
+    print("test_char_index_skips_empty_narrow_ocr_bbox PASSED")
+
+
 def test_ui_import_smoke():
     import importlib
     import os
@@ -2012,6 +2238,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
+    test_api_ocr_engine_filters_empty_narrow_word_boxes()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
@@ -2041,4 +2268,9 @@ if __name__ == "__main__":
     test_char_index_sort_categories()
     test_char_index_query_stable_order()
     test_char_index_skips_whitespace()
+    test_char_index_groups_digit_runs_as_tokens()
+    test_char_index_sorts_digit_tokens_short_to_long()
+    test_char_index_suppresses_punctuation_topic_for_shared_word_box()
+    test_char_index_uses_token_collection_for_word_level_han_bbox()
+    test_char_index_skips_empty_narrow_ocr_bbox()
     print("\n✓ 所有测试通过")
