@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for OCR Process
 #
+# Builds TWO executables into one dist/ocr_process/ folder:
+#   ocr_process.exe    — main OCR post-processing app  (main.py)
+#   ocr_inspector.exe  — standalone OCR debug inspector (inspect_ocr.py)
+#
 # Usage (Windows cmd/PowerShell):
 #   pyinstaller ocr_process.spec --noconfirm
 #
 # Notes:
 #   - onedir mode: dist/ocr_process/ is portable
-#   - PaddleOCR model downloads to %%USERPROFILE%%\.paddleocr\ on first run
+#   - Both EXEs share DLLs inside the same dist directory
 #   - UPX disabled by default; set upx=True after installing UPX
 
 import sys
@@ -79,11 +83,22 @@ hiddenimports = [
 # Collect all app.* submodules
 hiddenimports += collect_submodules("app")
 
-# PaddleOCR (uncomment if needed, ~+1 GB)
-# hiddenimports += collect_submodules("paddle")
-# hiddenimports += collect_submodules("paddleocr")
+# Collect all tools.ocr_inspector.* submodules (for ocr_inspector.exe)
+hiddenimports += collect_submodules("tools")
 
-# -- Analysis ---------------------------------------------------------
+excludes = [
+    "tkinter",
+    "matplotlib",
+    "scipy",
+    "IPython",
+    "notebook",
+    "pytest",
+    "unittest",
+]
+
+# =====================================================================
+# Analysis 1: main OCR post-processing app
+# =====================================================================
 a = Analysis(
     [str(PROJECT_ROOT / "main.py")],
     pathex=[str(PROJECT_ROOT)],
@@ -92,15 +107,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=[
-        "tkinter",
-        "matplotlib",
-        "scipy",
-        "IPython",
-        "notebook",
-        "pytest",
-        "unittest",
-    ],
+    excludes=excludes,
     noarchive=False,
     optimize=1,
 )
@@ -127,10 +134,53 @@ exe = EXE(
           if (PROJECT_ROOT / "resources" / "icon.ico").exists() else None,
 )
 
+# =====================================================================
+# Analysis 2: OCR Inspector debug tool
+# =====================================================================
+b = Analysis(
+    [str(PROJECT_ROOT / "inspect_ocr.py")],
+    pathex=[str(PROJECT_ROOT)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=excludes,
+    noarchive=False,
+    optimize=1,
+)
+
+pyz_b = PYZ(b.pure)
+
+exe_inspector = EXE(
+    pyz_b,
+    b.scripts,
+    [],
+    exclude_binaries=True,
+    name="ocr_inspector",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=str(PROJECT_ROOT / "resources" / "icon.ico")
+          if (PROJECT_ROOT / "resources" / "icon.ico").exists() else None,
+)
+
+# =====================================================================
+# Single COLLECT — both EXEs share DLLs in the same output folder
+# PyInstaller deduplicates binaries by destination path automatically
+# =====================================================================
 coll = COLLECT(
     exe,
-    a.binaries,
-    a.datas,
+    exe_inspector,
+    a.binaries + b.binaries,
+    a.datas + b.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

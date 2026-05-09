@@ -116,6 +116,13 @@ if errorlevel 1 (
 echo.
 echo ============================================================
 echo  DONE! Output: %PROJ_ROOT%dist\ocr_process\
+echo.
+echo  Executables:
+echo    ocr_process.exe    -- Main OCR post-processing app
+echo    ocr_inspector.exe  -- OCR debug inspector tool
+echo.
+echo  Launch inspector:
+echo    %PROJ_ROOT%dist\ocr_process\ocr_inspector.exe [json_path]
 echo ============================================================
 explorer "%PROJ_ROOT%dist\ocr_process"
 pause
