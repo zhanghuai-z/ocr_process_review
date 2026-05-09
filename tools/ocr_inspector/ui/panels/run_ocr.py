@@ -73,6 +73,173 @@ def _flatten_structure_result(result_list: list) -> dict:
     return out
 
 
+def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
+    """Run structure-aware OCR, falling back to a compatible local path when needed."""
+    try:
+        from paddleocr import PPStructureV3
+
+        engine = PPStructureV3(**params["structure"])
+        result = list(engine.predict(image_path))
+        return _flatten_structure_result(result)
+    except Exception as exc:
+        if "pipeline (PP-StructureV3) does not exist" not in str(exc):
+            raise
+
+        from paddleocr import PaddleOCR
+
+        init_p = {k: v for k, v in params["ocr_init"].items() if v is not None}
+        init_p.update({
+            "layout": True,
+            "table": False,
+            "ocr": True,
+            "show_log": False,
+        })
+        pred_p = {k: v for k, v in params["ocr_pred"].items() if v is not None}
+        result = list(PaddleOCR(**init_p).predict(image_path, **pred_p))
+        raw = _flatten_paddle_result(result)
+        if isinstance(raw, dict):
+            meta = raw.setdefault("_inspector_meta", {})
+            meta["fallback"] = "paddleocr_layout_compat"
+            meta["reason"] = str(exc)
+        return raw
+
+
+def _flatten_api_result(data: dict[str, Any]) -> dict[str, Any]:
+    """Flatten AiStudio /layout-parsing response into PaddleAdapter-friendly shape."""
+    result = data.get("result", data) if isinstance(data, dict) else data
+    if not isinstance(result, dict):
+        raise RuntimeError("API response is not a dict")
+
+    if any(key in result for key in ("overall_ocr_res", "parsing_res_list", "layout_det_res")):
+        return dict(result)
+
+    items: list[dict[str, Any]] = []
+    for key in ("layoutParsingResults", "ocrResults"):
+        value = result.get(key)
+        if isinstance(value, list):
+            items.extend(item for item in value if isinstance(item, dict))
+
+    merged: dict[str, Any] = {
+        "parsing_res_list": [],
+        "layout_det_res": {"boxes": []},
+        "overall_ocr_res": {},
+    }
+
+    for item in items:
+        source = item.get("prunedResult")
+        if not isinstance(source, dict):
+            source = item
+        if not isinstance(source, dict):
+            continue
+
+        parsing_res = source.get("parsing_res_list")
+        if isinstance(parsing_res, list):
+            merged["parsing_res_list"].extend(v for v in parsing_res if isinstance(v, dict))
+
+        layout_det = source.get("layout_det_res")
+        if isinstance(layout_det, dict):
+            boxes = layout_det.get("boxes")
+            if isinstance(boxes, list):
+                merged["layout_det_res"]["boxes"].extend(v for v in boxes if isinstance(v, dict))
+            for key, value in layout_det.items():
+                if key == "boxes":
+                    continue
+                merged["layout_det_res"][key] = value
+
+        overall = source.get("overall_ocr_res")
+        if isinstance(overall, dict):
+            for key, value in overall.items():
+                if isinstance(value, list):
+                    merged["overall_ocr_res"].setdefault(key, [])
+                    merged["overall_ocr_res"][key].extend(value)
+                else:
+                    merged["overall_ocr_res"][key] = value
+
+    if not merged["parsing_res_list"]:
+        merged.pop("parsing_res_list", None)
+    if not merged["layout_det_res"].get("boxes"):
+        merged.pop("layout_det_res", None)
+    if not merged["overall_ocr_res"]:
+        merged.pop("overall_ocr_res", None)
+    return merged
+
+
+def _build_api_request_body(file_b64: str, params: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    body = ApiOcrEngine()._build_request_body(file_b64, 1)
+    model_name = str(cfg.get("api_layout_model_name", "") or "").strip()
+    if model_name:
+        body["model_name"] = model_name
+
+    body.update({
+        "returnWordBox": params["ocr_pred"]["return_word_box"],
+        "useDocOrientationClassify": params["ocr_init"]["use_doc_orientation_classify"],
+        "useDocUnwarping": params["ocr_init"]["use_doc_unwarping"],
+        "useTextlineOrientation": params["ocr_init"]["use_textline_orientation"],
+        "textDetThresh": params["ocr_pred"]["text_det_thresh"],
+        "textDetBoxThresh": params["ocr_pred"]["text_det_box_thresh"],
+        "textDetUnclipRatio": params["ocr_pred"]["text_det_unclip_ratio"],
+        "textDetLimitSideLen": params["ocr_pred"]["text_det_limit_side_len"],
+        "textDetLimitType": params["ocr_pred"]["text_det_limit_type"],
+        "textRecScoreThresh": params["ocr_pred"]["text_rec_score_thresh"],
+    })
+    return body
+
+
+def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
+    import base64
+
+    import cv2
+    import requests
+
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import resolve_api_endpoint
+
+    cfg = get_config()
+    url = resolve_api_endpoint(cfg.get("api_url", ""), default_suffix="/layout-parsing")
+    if not url:
+        raise RuntimeError("API URL is not configured. Open OCR 引擎设置 first.")
+
+    timeout = int(cfg.get("api_timeout", 30) or 30)
+    token = str(cfg.get("api_token", "") or "").strip()
+    img = cv2.imread(image_path)
+    if img is None:
+        raise RuntimeError(f"Cannot read image: {image_path}")
+    ok, buf = cv2.imencode(".jpg", img)
+    if not ok:
+        raise RuntimeError(f"Cannot encode image: {image_path}")
+    file_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    body = _build_api_request_body(file_b64, params, cfg)
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    resp = requests.post(url, json=body, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+
+    raw = _flatten_api_result(resp.json())
+    meta = raw.setdefault("_inspector_meta", {})
+    meta["source"] = "api"
+    meta["api_url"] = url
+    meta["api_model_profile"] = cfg.get("api_model_profile", "")
+    meta["api_request_summary"] = {
+        "returnWordBox": body.get("returnWordBox"),
+        "useDocOrientationClassify": body.get("useDocOrientationClassify"),
+        "useDocUnwarping": body.get("useDocUnwarping"),
+        "useTextlineOrientation": body.get("useTextlineOrientation"),
+        "textDetThresh": body.get("textDetThresh"),
+        "textDetBoxThresh": body.get("textDetBoxThresh"),
+        "textDetUnclipRatio": body.get("textDetUnclipRatio"),
+        "textDetLimitSideLen": body.get("textDetLimitSideLen"),
+        "textDetLimitType": body.get("textDetLimitType"),
+        "textRecScoreThresh": body.get("textRecScoreThresh"),
+        "model_name": body.get("model_name", ""),
+    }
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Panel
 # ---------------------------------------------------------------------------
@@ -110,6 +277,7 @@ class RunOcrPanel(QWidget):
         self._model_combo = QComboBox()
         self._model_combo.addItem("PaddleOCR (文字检测+识别)", "paddleocr")
         self._model_combo.addItem("PPStructureV3 (版面分析)", "ppstructure")
+        self._model_combo.addItem("AiStudio API (/layout-parsing，共享主程序设置)", "api")
         self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         model_form.addRow("Pipeline:", self._model_combo)
 
@@ -123,6 +291,19 @@ class RunOcrPanel(QWidget):
         self._ocr_version_combo.addItem("PP-OCRv4", "PP-OCRv4")
         self._ocr_version_combo.addItem("PP-OCRv3", "PP-OCRv3")
         model_form.addRow("OCR version:", self._ocr_version_combo)
+
+        self._api_cfg_btn = QPushButton("OCR 引擎设置…")
+        self._api_cfg_btn.clicked.connect(self._show_api_settings)
+        self._api_cfg_summary = QLabel()
+        self._api_cfg_summary.setWordWrap(True)
+        self._api_cfg_summary.setStyleSheet("color:#6b7280;")
+        api_cfg_box = QWidget()
+        api_cfg_layout = QVBoxLayout(api_cfg_box)
+        api_cfg_layout.setContentsMargins(0, 0, 0, 0)
+        api_cfg_layout.setSpacing(4)
+        api_cfg_layout.addWidget(self._api_cfg_btn)
+        api_cfg_layout.addWidget(self._api_cfg_summary)
+        model_form.addRow("Shared API:", api_cfg_box)
         layout.addWidget(model_group)
 
         # ── preprocessing ────────────────────────────────────────────────────
@@ -251,21 +432,53 @@ class RunOcrPanel(QWidget):
         layout.addWidget(log_group)
 
         layout.addStretch()
+        self.refresh_api_summary()
+        self._on_model_changed(self._model_combo.currentIndex())
 
     # ── slots ──────────────────────────────────────────────────────────────
 
     def _browse_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select image", "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.tiff);;All files (*)"
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All files (*)"
         )
         if path:
             self._img_edit.setText(path)
 
     def _on_model_changed(self, _index: int) -> None:
         is_structure = self._model_combo.currentData() == "ppstructure"
+        is_api = self._model_combo.currentData() == "api"
         self._layout_group.setVisible(is_structure)
-        self._lang_combo.setEnabled(not is_structure)
+        self._lang_combo.setEnabled(not is_structure and not is_api)
+        self._ocr_version_combo.setEnabled(not is_structure and not is_api)
+        self._api_cfg_btn.setEnabled(True)
+
+    def refresh_api_summary(self) -> None:
+        try:
+            from app.core.ocr_config import get_config
+            from app.ui.widgets.api_settings_dialog import resolve_api_endpoint
+        except ImportError:
+            self._api_cfg_summary.setText("(API config module unavailable)")
+            return
+        cfg = get_config()
+        url = resolve_api_endpoint(cfg.get("api_url", ""), default_suffix="/layout-parsing")
+        if not url:
+            self._api_cfg_summary.setText("未配置。点击“OCR 引擎设置…”后即可复用主程序 API。")
+            return
+        profile = str(cfg.get("api_model_profile", "") or "").strip() or "custom"
+        timeout = int(cfg.get("api_timeout", 30) or 30)
+        self._api_cfg_summary.setText(f"profile={profile} · timeout={timeout}s\n{url}")
+
+    def _show_api_settings(self) -> None:
+        try:
+            from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+        except ImportError as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "API Settings", f"Not available:\n{exc}")
+            return
+        dlg = ApiSettingsDialog(self)
+        if dlg.exec():
+            self.refresh_api_summary()
 
     def _run_ocr(self) -> None:
         image_path = self._img_edit.text().strip()
@@ -291,10 +504,9 @@ class RunOcrPanel(QWidget):
         def worker() -> None:
             try:
                 if model_key == "ppstructure":
-                    from paddleocr import PPStructureV3
-                    engine = PPStructureV3(**params["structure"])
-                    result = list(engine.predict(image_path))
-                    raw = _flatten_structure_result(result)
+                    raw = _run_structure_ocr(image_path, params)
+                elif model_key == "api":
+                    raw = _run_api_ocr(image_path, params)
                 else:
                     from paddleocr import PaddleOCR
                     init_p = {k: v for k, v in params["ocr_init"].items() if v is not None}
@@ -346,11 +558,20 @@ class RunOcrPanel(QWidget):
         self._last_raw = raw
         self._save_btn.setEnabled(True)
         self._log.append("OCR finished — parsing result…")
+        meta = raw.get("_inspector_meta", {}) if isinstance(raw, dict) else {}
+        if meta.get("fallback") == "paddleocr_layout_compat":
+            self._log.append("INFO: PPStructureV3 unavailable locally; used PaddleOCR layout compatibility mode.")
+        if meta.get("source") == "api":
+            self._log.append(f"INFO: AiStudio API → {meta.get('api_url', '')}")
         try:
             doc = PaddleAdapter().parse(raw, source_path="<live>", image_path=image_path)
         except Exception as exc:
             self._log.append(f"[ERROR] Adapter parse failed: {exc}")
             return
+        if meta.get("source") == "api":
+            doc.engine = "paddle-api"
+        elif meta.get("fallback") == "paddleocr_layout_compat":
+            doc.engine = "paddle-local-compat"
         n_lines = sum(len(list(p.all_lines)) for p in doc.pages)
         n_blocks = sum(len(p.blocks) for p in doc.pages)
         self._log.append(

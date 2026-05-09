@@ -72,6 +72,16 @@ class OcrInspectorWindow(QMainWindow):
         open_img_act.triggered.connect(self._set_image)
         toolbar.addAction(open_img_act)
 
+        open_only_img_act = QAction("Open Image\u2026", self)
+        open_only_img_act.setShortcut(QKeySequence("Ctrl+I"))
+        open_only_img_act.setToolTip("\u76f4\u63a5\u6253\u5f00\u56fe\u7247\uff08\u4e0d\u9700\u8981 JSON\uff09\uff0c\u53ef\u5728 Run OCR \u9762\u677f\u8fd0\u884c\u8bc6\u522b")
+        open_only_img_act.triggered.connect(self._open_image_only)
+        toolbar.addAction(open_only_img_act)
+
+        ocr_cfg_act = QAction("OCR Settings…", self)
+        ocr_cfg_act.triggered.connect(self._show_ocr_settings)
+        toolbar.addAction(ocr_cfg_act)
+
         toolbar.addSeparator()
 
         self._page_combo = QComboBox()
@@ -151,10 +161,25 @@ class OcrInspectorWindow(QMainWindow):
             self.statusBar().showMessage(f"Loaded: {Path(path).name}", 3000)
         self._state.set_document(doc)   # _on_doc_loaded fires here
 
+    def _open_image_only(self) -> None:
+        """Open image without JSON — creates stub doc visible immediately."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All files (*)"
+        )
+        if not path:
+            return
+        doc = DocumentNode.make(source_path=path, engine="image-only")
+        page = PageNode.make(page_number=1, image_path=path)
+        doc.pages.append(page)
+        doc.parse_log.append(f"INFO: image-only mode \u2014 {Path(path).name}")
+        self._state.set_document(doc)
+        self.statusBar().showMessage(f"Opened image: {Path(path).name}", 3000)
+
     def _set_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Set image for current page", "",
-            "Images (*.png *.jpg *.jpeg *.bmp *.tiff);;All files (*)"
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All files (*)"
         )
         if not path:
             return
@@ -162,16 +187,35 @@ class OcrInspectorWindow(QMainWindow):
         if page is not None:
             page.image_path = path
             self._state.set_active_page(page)
+        else:
+            # No document loaded yet — create stub so image is visible
+            doc = DocumentNode.make(source_path=path, engine="image-only")
+            stub = PageNode.make(page_number=1, image_path=path)
+            doc.pages.append(stub)
+            doc.parse_log.append(f"INFO: image-only mode \u2014 {Path(path).name}")
+            self._state.set_document(doc)
+            self.statusBar().showMessage(f"Image set: {Path(path).name}", 3000)
 
     @staticmethod
     def _guess_image_path(json_path: str) -> Optional[str]:
         stem = Path(json_path).stem
         parent = Path(json_path).parent
-        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tiff"):
+        for ext in (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"):
             candidate = parent / (stem + ext)
             if candidate.exists():
                 return str(candidate)
         return None
+
+    def _show_ocr_settings(self) -> None:
+        try:
+            from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+        except ImportError as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "OCR Settings", f"API settings dialog not available:\n{exc}")
+            return
+        dlg = ApiSettingsDialog(self)
+        if dlg.exec():
+            self._run.refresh_api_summary()
 
     def _on_page_index_changed(self, index: int) -> None:
         page = self._page_combo.itemData(index)
