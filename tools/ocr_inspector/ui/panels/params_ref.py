@@ -11,10 +11,12 @@ Organised into categories matching paddle.py / run_ocr.py:
 Column: param name | type | default | description | 对输出的影响
 """
 from __future__ import annotations
+import json
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QHeaderView, QLabel, QSplitter, QTextEdit, QTreeWidget,
+    QComboBox, QHeaderView, QLabel, QSplitter, QTextEdit, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -103,6 +105,67 @@ _HEADER_COL_WIDTHS = [180, 60, 80, 240, 280]
 _HEADER_LABELS = ["参数名", "类型", "默认值", "说明", "对输出的影响"]
 
 
+@dataclass(frozen=True)
+class ParamMatrixRow:
+    name: str
+    current_value: object
+    default_value: object
+    models: str
+    endpoint: str
+    sent: bool
+    reason: str
+
+
+_MATRIX_SPECS: dict[str, tuple[object, str, str]] = {
+    "returnWordBox": (False, "PP-OCRv5, PP-StructureV3", "请求 text_word/text_word_region；VL family 不支持真实 word/char bbox。"),
+    "useDocOrientationClassify": (True, "全部官方 profile", "坐标稳定保护项；Inspector 默认关闭，避免服务端旋转后 bbox 与原图漂移。"),
+    "useDocUnwarping": (False, "全部官方 profile", "坐标稳定保护项；开启会改变处理后图坐标空间。"),
+    "useTextlineOrientation": (True, "全部官方 profile", "坐标稳定保护项；Inspector 默认关闭，避免行方向分类造成坐标语义变化。"),
+    "textDetThresh": (0.3, "PP-OCRv5, PP-StructureV3", "文本检测阈值，仅 OCR detector/recognizer family 接收。"),
+    "textDetBoxThresh": (0.6, "PP-OCRv5, PP-StructureV3", "检测框分数阈值，仅 OCR detector/recognizer family 接收。"),
+    "textDetUnclipRatio": (1.5, "PP-OCRv5, PP-StructureV3", "检测框扩张比例，仅 OCR detector/recognizer family 接收。"),
+    "textDetLimitSideLen": (960, "PP-OCRv5, PP-StructureV3", "检测前最长边限制，仅 OCR detector/recognizer family 接收。"),
+    "textDetLimitType": ("max", "PP-OCRv5, PP-StructureV3", "检测缩放策略，仅 OCR detector/recognizer family 接收。"),
+    "textRecScoreThresh": (0.0, "PP-OCRv5, PP-StructureV3", "识别分数过滤阈值，仅 OCR detector/recognizer family 接收。"),
+    "layoutThreshold": (0.5, "本地 PPStructureV3", "共享 AiStudio body 暂不发送；本地 Run OCR 的 PPStructureV3 控件使用。"),
+    "layoutNms": (True, "本地 PPStructureV3", "共享 AiStudio body 暂不发送；避免不同云端 profile 因未知字段拒绝请求。"),
+    "layoutUnclipRatio": (1.5, "本地 PPStructureV3", "共享 AiStudio body 暂不发送；本地 layout 调试使用。"),
+}
+
+
+def build_paddle_param_matrix(profile: str = "pp-structurev3", endpoint_url: str | None = None) -> tuple[list[ParamMatrixRow], dict]:
+    """Build the visible parameter matrix and final API payload preview."""
+    from app.core.api_profiles import API_MODEL_PROFILES, get_api_request_options
+
+    profile_spec = API_MODEL_PROFILES.get(profile) or API_MODEL_PROFILES["pp-structurev3"]
+    endpoint = endpoint_url or str(profile_spec.get("url") or "")
+    options = get_api_request_options(profile, endpoint)
+    payload = {"file": "<base64 omitted>", "fileType": 1}
+    payload.update(options)
+
+    family = profile_spec.get("request_family")
+    rows: list[ParamMatrixRow] = []
+    for name, (default, models, note) in _MATRIX_SPECS.items():
+        sent = name in options
+        current = options.get(name, default)
+        if sent:
+            reason = "已发送：当前 profile 支持该参数。" if family == "ocr-word-box" else "已发送：坐标稳定保护项。"
+        elif family == "vl-layout" and name in ("returnWordBox", "textDetThresh", "textDetBoxThresh", "textDetUnclipRatio", "textDetLimitSideLen", "textDetLimitType", "textRecScoreThresh"):
+            reason = "未发送：PaddleOCR-VL/VL-1.5 返回 line/block/markdown，不承诺真实 token/char bbox，可能拒绝 OCR detector 参数。"
+        else:
+            reason = f"未发送：{note}"
+        rows.append(ParamMatrixRow(
+            name=name,
+            current_value=current,
+            default_value=default,
+            models=models,
+            endpoint=str(profile_spec.get("endpoint_suffix") or ""),
+            sent=sent,
+            reason=reason,
+        ))
+    return rows, payload
+
+
 class ParamsRefPanel(QWidget):
     """Read-only parameter reference panel (no state subscription)."""
 
@@ -150,6 +213,58 @@ class ParamsRefPanel(QWidget):
             row.setToolTip(4, effect)
 
         layout.addWidget(tree)
+
+        matrix_title = QLabel("<b>当前请求矩阵</b> · 显示参数是否会进入最终 API payload；VL 不支持真实 char/token bbox 时必须诚实降级。")
+        matrix_title.setWordWrap(True)
+        layout.addWidget(matrix_title)
+
+        self._profile_combo = QComboBox()
+        try:
+            from app.core.api_profiles import API_MODEL_PROFILES
+            for key, spec in API_MODEL_PROFILES.items():
+                self._profile_combo.addItem(str(spec.get("label") or key), key)
+        except Exception:
+            self._profile_combo.addItem("PP-StructureV3", "pp-structurev3")
+        self._profile_combo.currentIndexChanged.connect(self._refresh_matrix)
+        layout.addWidget(self._profile_combo)
+
+        self._matrix = QTreeWidget()
+        self._matrix.setColumnCount(7)
+        self._matrix.setHeaderLabels(["参数", "当前值", "默认值", "适用模型", "端点", "发送", "原因"])
+        for i, w in enumerate([170, 90, 90, 170, 120, 60, 420]):
+            self._matrix.setColumnWidth(i, w)
+        self._matrix.setAlternatingRowColors(True)
+        self._matrix.setRootIsDecorated(False)
+        self._matrix.setUniformRowHeights(False)
+        self._matrix.setWordWrap(True)
+        layout.addWidget(self._matrix, 1)
+
+        self._payload = QTextEdit()
+        self._payload.setReadOnly(True)
+        self._payload.setMaximumHeight(140)
+        self._payload.setStyleSheet("font-size:11px; font-family:monospace;")
+        layout.addWidget(QLabel("<b>最终 payload 预览</b>"))
+        layout.addWidget(self._payload)
+        self._refresh_matrix()
+
+    def _refresh_matrix(self) -> None:
+        profile = self._profile_combo.currentData() or "pp-structurev3"
+        rows, payload = build_paddle_param_matrix(str(profile))
+        self._matrix.clear()
+        for row in rows:
+            item = QTreeWidgetItem(self._matrix, [
+                row.name,
+                str(row.current_value),
+                str(row.default_value),
+                row.models,
+                row.endpoint,
+                "是" if row.sent else "否",
+                row.reason,
+            ])
+            if not row.sent:
+                item.setForeground(5, Qt.darkGray)
+            item.setToolTip(6, row.reason)
+        self._payload.setPlainText(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _bold_font():

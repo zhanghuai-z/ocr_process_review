@@ -3120,6 +3120,31 @@ def test_find_text_matches_ocr_chars():
     print("test_find_text_matches_ocr_chars PASSED")
 
 
+def test_crop_panel_search_selects_canvas_node():
+    """Selecting a text-search result must update AppState so canvas/tree can highlight it."""
+    from tools.ocr_inspector.models.ir import BBox, DocumentNode, LineNode, PageNode
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.panels.crop_panel import CropPanel
+
+    _get_qapp()
+
+    doc = DocumentNode.make(source_path="test.json")
+    page = PageNode.make(page_number=1, image_path="")
+    doc.pages.append(page)
+    line = LineNode.make(text="测试文字", confidence=0.95, bbox=BBox(x=10, y=20, w=200, h=30))
+    page.orphan_lines.append(line)
+
+    state = AppState()
+    state.set_document(doc)
+    panel = CropPanel(state)
+    panel.set_query("测试")
+
+    assert state.active_document is doc
+    assert state.selected_node is line
+    panel.close()
+    print("test_crop_panel_search_selects_canvas_node PASSED")
+
+
 def test_paddle_adapter_char_bbox_source():
     """PaddleAdapter sets bbox_source=ocr for text_word_region chars."""
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
@@ -3265,6 +3290,93 @@ def test_canvas_char_fallback_source_colour():
     assert "char_fallback" in SOURCE_COLOURS, f"char_fallback missing from SOURCE_COLOURS: {list(SOURCE_COLOURS)}"
     assert "text_word_region" in SOURCE_COLOURS
     print("test_canvas_char_fallback_source_colour PASSED")
+
+
+def test_canvas_char_overlay_default_visible():
+    """OCR char/token bbox layer should be visible without requiring the user to discover F3 first."""
+    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.canvas import OcrCanvas
+
+    _get_qapp()
+
+    state = AppState()
+    assert state.overlay_flags["chars"] is True
+    page = PageNode.make(page_number=1, image_path="")
+    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
+    char = CharNode.make(
+        char="测",
+        bbox=BBox(10, 20, 20, 30),
+        confidence=0.95,
+        bbox_source="ocr",
+        bbox_granularity="char",
+        token_text="测",
+    )
+    line.chars = [char]
+    page.orphan_lines.append(line)
+
+    canvas = OcrCanvas(state)
+    canvas.load_page(page)
+    item = canvas._node_item_map.get(id(char))
+
+    assert item is not None
+    assert item.isVisible()
+    assert item._source_field == "text_word_region"
+    canvas.close()
+    print("test_canvas_char_overlay_default_visible PASSED")
+
+
+def test_inspector_tree_syncs_external_char_selection():
+    """Canvas-selected char nodes must already exist in the left tree and become current."""
+    from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.panels import JsonTreePanel
+
+    _get_qapp()
+
+    doc = DocumentNode.make(source_path="test.json")
+    page = PageNode.make(page_number=1, image_path="")
+    doc.pages.append(page)
+    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
+    char = CharNode.make(
+        char="测",
+        bbox=BBox(10, 20, 20, 30),
+        confidence=0.95,
+        bbox_source="ocr",
+        bbox_granularity="char",
+        token_text="测",
+    )
+    line.chars = [char]
+    page.orphan_lines.append(line)
+
+    state = AppState()
+    tree = JsonTreePanel(state)
+    state.set_document(doc)
+    state.set_selection(char)
+
+    assert tree.currentItem() is not None
+    assert tree.currentItem().data(0, 0x0100) is char  # Qt.UserRole
+    tree.close()
+    print("test_inspector_tree_syncs_external_char_selection PASSED")
+
+
+def test_params_ref_matrix_marks_vl_word_box_unsupported():
+    from tools.ocr_inspector.ui.panels.params_ref import build_paddle_param_matrix
+
+    ocr_rows, ocr_payload = build_paddle_param_matrix("pp-ocrv5")
+    ocr_map = {row.name: row for row in ocr_rows}
+    assert ocr_map["returnWordBox"].sent is True
+    assert ocr_payload["returnWordBox"] is True
+    assert ocr_payload["textDetLimitSideLen"] == 1536
+
+    vl_rows, vl_payload = build_paddle_param_matrix("paddleocr-vl")
+    vl_map = {row.name: row for row in vl_rows}
+    assert vl_map["returnWordBox"].sent is False
+    assert "VL" in vl_map["returnWordBox"].reason
+    assert "returnWordBox" not in vl_payload
+    assert vl_payload["useDocUnwarping"] is False
+
+    print("test_params_ref_matrix_marks_vl_word_box_unsupported PASSED")
 
 
 
@@ -3759,6 +3871,7 @@ if __name__ == "__main__":
     test_crop_bbox_chinese_path()
     test_find_text_matches_lines()
     test_find_text_matches_ocr_chars()
+    test_crop_panel_search_selects_canvas_node()
     test_paddle_adapter_char_bbox_source()
     test_paddle_adapter_reads_direct_and_camelcase_word_rows()
     test_paddle_adapter_char_fallback_when_no_word_region()
@@ -3767,4 +3880,7 @@ if __name__ == "__main__":
     test_canvas_node_item_map_char_fallback()
     test_canvas_node_item_map_char_ocr()
     test_canvas_char_fallback_source_colour()
+    test_canvas_char_overlay_default_visible()
+    test_inspector_tree_syncs_external_char_selection()
+    test_params_ref_matrix_marks_vl_word_box_unsupported()
     print("\n✓ 所有测试通过")

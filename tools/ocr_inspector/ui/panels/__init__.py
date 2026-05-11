@@ -68,9 +68,7 @@ class JsonTreePanel(QTreeWidget):
         conf_str = f"{line.confidence:.2f}" if line.confidence else ""
         item = self._make_item(parent, "line", "Line", line.text[:60], conf_str, line)
         if line.chars:
-            ph = QTreeWidgetItem(item)
-            ph.setText(0, f"  {len(line.chars)} chars (expand to load)")
-            ph.setData(0, Qt.UserRole, ("char_placeholder", line))
+            self._build_chars(item, line)
 
     def _build_chars(self, parent: QTreeWidgetItem, line: LineNode) -> None:
         parent.takeChildren()
