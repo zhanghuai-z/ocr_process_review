@@ -14,6 +14,7 @@ class AppState:
         self._overlay_flags: dict[str, bool] = {
             "blocks": True, "lines": True, "chars": False,
             "polygons": False, "labels": True,
+            "layout_det": False, "legend": True,
         }
         self._on_document_changed: list[Callable] = []
         self._on_page_changed: list[Callable] = []

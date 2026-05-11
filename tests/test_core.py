@@ -2917,6 +2917,22 @@ def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
             "layoutParsingResults": [
                 {
                     "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [8, 18, 72, 55],
+                                    "score": 0.87,
+                                }
+                            ]
+                        },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "paragraph",
+                                "block_bbox": [10, 20, 70, 50],
+                                "block_content": "天地",
+                            }
+                        ],
                         "overall_ocr_res": {
                             "rec_texts": ["天地"],
                             "rec_scores": [0.91],
@@ -2929,7 +2945,11 @@ def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
     }
 
     doc = PaddleAdapter().parse(raw)
-    line = doc.pages[0].orphan_lines[0]
+    page = doc.pages[0]
+    assert page.blocks[0].source_field == "parsing_res_list"
+    assert page.layout_det_blocks[0].source_field == "layout_det_res"
+    assert page.layout_det_blocks[0].bbox.area > 0
+    line = page.blocks[0].lines[0]
     assert line.bbox is not None
     assert line.chars[0].bbox is None
     assert line.chars[0].bbox_source == "unavailable"
