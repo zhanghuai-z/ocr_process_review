@@ -428,7 +428,7 @@ class CropPanel(QWidget):
         layout.addWidget(self._tabs)
 
         # When a bbox is selected on canvas, pre-fill manual tab
-        state.on_node_selected.connect(self._on_node_selected)
+        state.on_selection_changed(self._on_node_selected)
 
     def _on_node_selected(self, node):
         if node is None:
