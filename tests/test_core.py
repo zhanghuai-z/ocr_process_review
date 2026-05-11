@@ -2858,6 +2858,18 @@ def test_inspector_local_flatteners_preserve_word_box_rows():
             ]
         ],
     })])
+    boxes_flattened = _flatten_paddle_result([FakeResult({
+        "rec_texts": ["源码"],
+        "rec_boxes": [[3, 4, 50, 24]],
+        "text_word": [["源", "码"]],
+        "text_word_region": [],
+        "text_word_boxes": [
+            [
+                [3, 4, 25, 24],
+                [26, 4, 50, 24],
+            ]
+        ],
+    })])
 
     assert paddle_flattened["text_word"][0] == ["本", "地"]
     assert paddle_flattened["overall_ocr_res"]["rec_texts"] == ["本地"]
@@ -2865,6 +2877,7 @@ def test_inspector_local_flatteners_preserve_word_box_rows():
     assert structure_flattened["parsing_res_list"][0]["block_label"] == "text"
     assert direct_flattened["overall_ocr_res"]["rec_texts"] == ["直出"]
     assert direct_flattened["text_word"][0] == ["直", "出"]
+    assert boxes_flattened["text_word_region"][0] == [[3, 4, 25, 24], [26, 4, 50, 24]]
 
     print("test_inspector_local_flatteners_preserve_word_box_rows PASSED")
 
@@ -3178,6 +3191,38 @@ def test_planb_core_seam_preserves_word_region_and_search_identity():
     assert matches[0].bbox_granularity == "word"
 
     print("test_planb_core_seam_preserves_word_region_and_search_identity PASSED")
+
+
+def test_planb_core_seam_reads_paddle_json_text_word_boxes_alias():
+    from tools.ocr_inspector.core import build_paddle_document, query_text_search_index, raw_contains_word_regions
+
+    raw = {
+        "overall_ocr_res": {
+            "rec_texts": ["源码"],
+            "rec_boxes": [[10, 20, 80, 50]],
+            "rec_scores": [0.97],
+        },
+        "text_word": [["源", "码"]],
+        "text_word_region": [],
+        "text_word_boxes": [[[10, 20, 40, 50], [41, 20, 80, 50]]],
+    }
+
+    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
+    doc = result.document
+    line = doc.pages[0].all_lines[0]
+    matches = query_text_search_index(doc, "源", include_lines=False)
+    codes = {diag.code for diag in result.diagnostics}
+
+    assert raw_contains_word_regions(raw) is True
+    assert "word_regions_preserved" in codes
+    assert len(line.chars) == 2
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert all(ch.bbox_granularity == "char" for ch in line.chars)
+    assert line.chars[0].bbox is not None and line.chars[0].bbox.x == 10
+    assert len(matches) == 1
+    assert matches[0].identity.startswith("p0:l0:token0:")
+
+    print("test_planb_core_seam_reads_paddle_json_text_word_boxes_alias PASSED")
 
 
 def test_planb_core_seam_flags_invalid_word_region():
@@ -4017,6 +4062,7 @@ if __name__ == "__main__":
     test_find_text_matches_ocr_chars()
     test_planb_core_seam_diagnoses_missing_word_region()
     test_planb_core_seam_preserves_word_region_and_search_identity()
+    test_planb_core_seam_reads_paddle_json_text_word_boxes_alias()
     test_planb_core_seam_flags_invalid_word_region()
     test_crop_panel_search_selects_canvas_node()
     test_paddle_adapter_char_bbox_source()

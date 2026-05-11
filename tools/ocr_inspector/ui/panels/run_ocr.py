@@ -79,12 +79,19 @@ def _merge_pruned_like_result(merged: dict[str, Any], source: dict[str, Any]) ->
 
     for canonical, aliases in (
         ("text_word", ("text_word", "textWord")),
-        ("text_word_region", ("text_word_region", "textWordRegion")),
+        ("text_word_region", ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes")),
     ):
+        empty_value: list[Any] | None = None
         for alias in aliases:
-            if alias in source:
-                _append_list_field(merged, canonical, source[alias])
+            value = source.get(alias)
+            if isinstance(value, list) and value:
+                _append_list_field(merged, canonical, value)
                 break
+            if isinstance(value, list) and empty_value is None:
+                empty_value = value
+        else:
+            if empty_value is not None:
+                _append_list_field(merged, canonical, empty_value)
 
 
 def _drop_empty_result_fields(raw: dict[str, Any]) -> dict[str, Any]:
@@ -131,6 +138,8 @@ def _flatten_structure_result(result_list: list) -> dict:
                     "textWord",
                     "text_word_region",
                     "textWordRegion",
+                    "text_word_boxes",
+                    "textWordBoxes",
                 )):
                     _merge_pruned_like_result(out, d)
                 else:
