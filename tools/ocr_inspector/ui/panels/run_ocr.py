@@ -411,8 +411,8 @@ class RunOcrPanel(QWidget):
         rec_form.addRow("rec_score_thresh:", self._rec_score_thresh)
 
         self._return_word_box = QCheckBox()
-        self._return_word_box.setChecked(False)
-        self._return_word_box.setToolTip("开启后返回字/词级 bounding box\n→ overall_ocr_res.text_word_region 有值\n→ canvas 中橙色字框才会出现\n默认 False（关闭省速度）")
+        self._return_word_box.setChecked(True)
+        self._return_word_box.setToolTip("开启后返回字/词级 bounding box\n→ overall_ocr_res.text_word_region 有值\n→ canvas 中橙色字框才会出现\n默认 True（开启；字框可视化需要）")
         rec_form.addRow("return_word_box:", self._return_word_box)
         layout.addWidget(rec_group)
 

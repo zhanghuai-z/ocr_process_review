@@ -21,6 +21,7 @@ from tools.ocr_inspector.ui.panels.inspector import InspectorPanel
 from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel
 from tools.ocr_inspector.ui.panels.params_ref import ParamsRefPanel
 from tools.ocr_inspector.ui.panels.parse_log import ParseLogPanel
+from tools.ocr_inspector.ui.panels.crop_panel import CropPanel
 
 
 class OcrInspectorWindow(QMainWindow):
@@ -28,7 +29,7 @@ class OcrInspectorWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("OCR Inspector")
-        self.resize(1400, 900)
+        self.resize(1520, 960)
 
         self._state = AppState()
         self._tree   = JsonTreePanel(self._state)
@@ -48,12 +49,14 @@ class OcrInspectorWindow(QMainWindow):
         right_tabs.addTab(self._parse_log, "解析日志")
         self._params_ref = ParamsRefPanel()
         right_tabs.addTab(self._params_ref, "参数说明")
+        self._crop = CropPanel(self._state)
+        right_tabs.addTab(self._crop, "文本找图")
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._tree)
         splitter.addWidget(self._canvas)
         splitter.addWidget(right_tabs)
-        splitter.setSizes([280, 820, 320])
+        splitter.setSizes([260, 960, 360])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -89,6 +92,19 @@ class OcrInspectorWindow(QMainWindow):
         self._page_combo.currentIndexChanged.connect(self._on_page_index_changed)
         toolbar.addWidget(QLabel("  Page: "))
         toolbar.addWidget(self._page_combo)
+
+        toolbar.addSeparator()
+
+        crop_act = QAction("文本找图…", self)
+        crop_act.setToolTip("打开文本搜索 / bbox 切图面板 (Ctrl+F)")
+        crop_act.setShortcut(QKeySequence("Ctrl+F"))
+        crop_act.triggered.connect(self._show_crop_panel)
+        toolbar.addAction(crop_act)
+
+        export_act = QAction("导出切图…", self)
+        export_act.setToolTip("将当前选中节点的 bbox 导出为图片")
+        export_act.triggered.connect(self._export_selected_crop)
+        toolbar.addAction(export_act)
 
         toolbar.addSeparator()
 
@@ -205,6 +221,48 @@ class OcrInspectorWindow(QMainWindow):
             if candidate.exists():
                 return str(candidate)
         return None
+
+    def _show_crop_panel(self) -> None:
+        """Switch right tabs to '文本找图' panel."""
+        # Find the tab widget and switch to CropPanel tab
+        splitter = self.centralWidget()
+        if splitter:
+            right_tabs = splitter.widget(2)
+            if hasattr(right_tabs, 'setCurrentWidget'):
+                right_tabs.setCurrentWidget(self._crop)
+                # Pre-fill search with selected node text if any
+                node = self._state.selected_node
+                if node is not None:
+                    text = getattr(node, "text", None) or getattr(node, "char", None) or ""
+                    if text and hasattr(self._crop, "set_query"):
+                        self._crop.set_query(str(text))
+
+    def _export_selected_crop(self) -> None:
+        """Export the current selected node's bbox as a cropped image."""
+        from tools.ocr_inspector.crop import crop_bbox, save_crop
+        node = self._state.selected_node
+        page = self._state.active_page
+        if node is None or page is None:
+            self.statusBar().showMessage("请先在左侧树选中一个节点", 3000)
+            return
+        bbox = getattr(node, "bbox", None)
+        if bbox is None:
+            self.statusBar().showMessage("所选节点没有 bbox", 3000)
+            return
+        image_path = page.image_path
+        if not image_path:
+            self.statusBar().showMessage("当前页面没有关联图片", 3000)
+            return
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "保存切图", "", "PNG (*.png);;JPEG (*.jpg);;All files (*)"
+        )
+        if not save_path:
+            return
+        try:
+            save_crop(image_path, bbox, save_path)
+            self.statusBar().showMessage(f"已保存: {save_path}", 4000)
+        except Exception as exc:
+            self.statusBar().showMessage(f"切图失败: {exc}", 5000)
 
     def _show_ocr_settings(self) -> None:
         try:

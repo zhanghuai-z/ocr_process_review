@@ -39,6 +39,8 @@ SOURCE_COLOURS: dict[str, QColor] = {
     "parsing_res_list":        QColor(0,   200,  80, 180),   # green
     "layout_det_res":          QColor(160,  80, 255, 180),   # purple
     "text_word_region":        QColor(255, 160,   0, 200),   # orange
+    "char_fallback":           QColor(180, 180, 180, 120),   # light gray dashed
+        "char_fallback":           QColor(180, 180, 180, 130),   # light gray (estimated bbox)
     "fallback":                QColor(140, 140, 140, 160),   # gray
 }
 
@@ -52,7 +54,8 @@ _SOURCE_LABELS = {
     "overall_ocr_res.rec_texts": "行级 OCR (overall_ocr_res)",
     "parsing_res_list":          "结构块 (parsing_res_list)",
     "layout_det_res":            "版面检测 (layout_det_res)",
-    "text_word_region":          "字/词框 (text_word_region)",
+    "text_word_region":          "字/词框·真实 (text_word_region)",
+    "char_fallback":             "字框·回退(行bbox) [estimated]",
     "fallback":                  "其他/回退",
 }
 
@@ -154,7 +157,8 @@ def _build_legend(scene: QGraphicsScene, visible_sources: set[str]) -> None:
         ("overall_ocr_res", "行级 OCR"),
         ("parsing_res_list", "结构化块"),
         ("layout_det_res", "版面检测"),
-        ("text_word_region", "字/词框"),
+        ("text_word_region", "字/词框·真实"),
+        ("char_fallback", "字框·回退(行bbox)"),
         ("fallback", "其他/回退"),
     ]
     x0, y0 = 8, 8
@@ -211,6 +215,7 @@ class OcrCanvas(QGraphicsView):
         self.setMouseTracking(True)
 
         self._bbox_items: list[_BBoxItem] = []
+        self._node_item_map: dict[int, _BBoxItem] = {}  # id(ir_node) → canvas item
         self._selected_item: Optional[_BBoxItem] = None
         self._pending_page: Optional[PageNode] = None
         self._image_ready.connect(self._on_image_ready)
@@ -222,6 +227,7 @@ class OcrCanvas(QGraphicsView):
     def load_page(self, page: PageNode) -> None:
         self._scene.clear()
         self._bbox_items = []
+        self._node_item_map = {}
         self._selected_item = None
         self._pending_page = page
 
@@ -235,10 +241,22 @@ class OcrCanvas(QGraphicsView):
         if flags.get("legend", True):
             _build_legend(self._scene, visible_sources)
 
+        # Re-apply current selection (e.g. after overlay toggle)
+        selected = self._state.selected_node
+        if selected is not None:
+            self._reapply_selection(selected)
+
         if page.image_path:
             self._load_image_async(page.image_path, page)
         else:
             self.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
+
+    def _reapply_selection(self, node) -> None:
+        """Re-highlight canvas item for node (called after scene rebuild)."""
+        item = self._node_item_map.get(id(node))
+        if item is not None:
+            item.highlight(True)
+            self._selected_item = item
 
     def _load_image_async(self, image_path: str, page: PageNode) -> None:
         """Load QImage in background thread; deliver to main thread via signal."""
@@ -270,6 +288,7 @@ class OcrCanvas(QGraphicsView):
     def clear(self) -> None:
         self._scene.clear()
         self._bbox_items = []
+        self._node_item_map = {}
         self._selected_item = None
 
     # ── draw helpers ──────────────────────────────────────────────────────
@@ -291,6 +310,7 @@ class OcrCanvas(QGraphicsView):
                 item.setPen(pen)
                 self._scene.addItem(item)
                 self._bbox_items.append(item)
+                self._node_item_map[id(block)] = item
                 if flags.get("labels") and block.label:
                     self._add_label(block.bbox, f"[det]{block.label}", colour, True)
                 visible_sources.add("layout_det_res")
@@ -306,6 +326,7 @@ class OcrCanvas(QGraphicsView):
                 item.setVisible(visible)
                 self._scene.addItem(item)
                 self._bbox_items.append(item)
+                self._node_item_map[id(block)] = item
                 if flags.get("labels") and block.label and visible:
                     self._add_label(block.bbox, block.label, colour, True)
                 visible_sources.add(sf)
@@ -322,6 +343,7 @@ class OcrCanvas(QGraphicsView):
                 item.setVisible(visible)
                 self._scene.addItem(item)
                 self._bbox_items.append(item)
+                self._node_item_map[id(line)] = item
                 visible_sources.add(sf)
             if line.polygon and poly_vis:
                 pi = _PolygonItem(line.polygon, line, sf)
@@ -332,19 +354,53 @@ class OcrCanvas(QGraphicsView):
     def _draw_chars(self, page: PageNode, flags: dict, visible_sources: set) -> None:
         if not flags.get("chars", False):
             return
-        seen: set = set()
+        show_labels = flags.get("labels", True)
+        # Deduplicate by bbox key for DISPLAY (avoid N overlapping identical rects)
+        # but map EVERY char node to an item so any char can be highlighted.
+        # OCR-true: keyed by (bbox coords, token_text) — different tokens at same pos both show.
+        # Fallback: keyed by bbox coords only — all chars in a line share one display box.
+        seen_ocr: dict[tuple, _BBoxItem] = {}
+        seen_fallback: dict[tuple, _BBoxItem] = {}
         for char in page.all_chars:
-            if char.bbox:
-                key = (char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
-                if key not in seen:
-                    seen.add(key)
-                    bs = getattr(char, "bbox_source", "") or "fallback"
-                    sf = "text_word_region" if bs == "ocr" else "fallback"
+            if not char.bbox:
+                continue
+            bs = getattr(char, "bbox_source", "") or "fallback"
+            is_ocr = (bs == "ocr")
+            b = char.bbox
+            coord_key = (b.x, b.y, b.w, b.h)
+            if is_ocr:
+                tok = getattr(char, "token_text", char.char) or char.char
+                key = (coord_key, tok)
+                if key not in seen_ocr:
+                    sf = "text_word_region"
                     item = _BBoxItem(char.bbox, char, sf)
                     item.setZValue(4)
                     self._scene.addItem(item)
                     self._bbox_items.append(item)
+                    seen_ocr[key] = item
                     visible_sources.add(sf)
+                    if show_labels:
+                        label_text = tok[:8] + ("…" if len(tok) > 8 else "")
+                        self._add_label(char.bbox, label_text, _source_colour(sf), True)
+                self._node_item_map[id(char)] = seen_ocr[key]
+            else:
+                if coord_key not in seen_fallback:
+                    sf = "char_fallback"
+                    item = _BBoxItem(char.bbox, char, sf)
+                    item.setZValue(4)
+                    pen = QPen(_source_colour(sf))
+                    pen.setWidth(1)
+                    pen.setCosmetic(True)
+                    pen.setStyle(Qt.DashLine)
+                    item.setPen(pen)
+                    self._scene.addItem(item)
+                    self._bbox_items.append(item)
+                    seen_fallback[coord_key] = item
+                    visible_sources.add(sf)
+                    if show_labels:
+                        self._add_label(char.bbox, "⚠est", _source_colour(sf), True)
+                self._node_item_map[id(char)] = seen_fallback[coord_key]
+
 
     def _add_label(self, bbox: BBox, text: str, colour: QColor, visible: bool) -> None:
         lbl = QGraphicsSimpleTextItem(text[:32])
@@ -369,12 +425,16 @@ class OcrCanvas(QGraphicsView):
             self._selected_item = None
         if node is None:
             return
-        for item in self._bbox_items:
-            if item.ir_node is node:
-                item.highlight(True)
-                self._selected_item = item
-                self.ensureVisible(item)
-                break
+        # Auto-enable chars overlay when a char node is selected.
+        # load_page will rebuild items then _reapply_selection handles highlight.
+        if isinstance(node, CharNode) and not self._state.overlay_flags.get("chars", False):
+            self._state.set_overlay("chars", True)
+            return
+        item = self._node_item_map.get(id(node))
+        if item is not None:
+            item.highlight(True)
+            self._selected_item = item
+            self.ensureVisible(item)
 
     def _on_overlay_changed(self, key: str, value: bool) -> None:
         page = self._state.active_page
