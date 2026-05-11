@@ -18,7 +18,7 @@ from typing import Iterable, List
 
 from PySide6.QtCore import QThread, Signal
 
-from app.core.api_profiles import resolve_api_endpoint
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
@@ -349,20 +349,17 @@ class LayoutAnalyzer:
             payload["model_name"] = model_name
         return payload
 
-    # PaddleX 服务侧默认会做方向分类 / 去畸变 / 文本行方向判断，
-    # 这些都会让返回坐标落在「预处理后的图」而不是我们传入的原图，
-    # 也是导致 bbox 整体偏移的根本原因。统一关闭。
-    _PIPELINE_DISABLE_FLAGS = {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-    }
-
     def _build_api_request_body(
-        self, file_b64: str, file_type: int, model_name: str = ""
+        self,
+        file_b64: str,
+        file_type: int,
+        model_name: str = "",
+        *,
+        profile: str | None = None,
+        endpoint_url: str | None = None,
     ) -> dict:
         body = self._build_api_payload(file_b64, file_type, model_name)
-        body.update(self._PIPELINE_DISABLE_FLAGS)
+        body.update(get_api_request_options(profile, endpoint_url))
         return body
 
     def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:
@@ -663,7 +660,13 @@ class LayoutAnalyzer:
 
         resp = requests.post(
             url,
-            json=self._build_api_request_body(file_b64, 1, layout_model_name),
+            json=self._build_api_request_body(
+                file_b64,
+                1,
+                layout_model_name,
+                profile=cfg.get("api_model_profile", ""),
+                endpoint_url=url,
+            ),
             headers=headers,
             timeout=timeout,
         )

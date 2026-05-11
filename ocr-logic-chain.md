@@ -12,13 +12,22 @@
 - `Authorization: token <api_token>`
 - `Content-Type: application/json`
 
-当前实际调用的参数：
+当前请求参数已经按模型 family 分流，不再四个模型套同一份 payload：
+
+| profile | endpoint | request family | 会传的参数 | 不传/降级的参数 | 当前最大可信文本几何 |
+| --- | --- | --- | --- | --- | --- |
+| `pp-ocrv5` | `/ocr` | `ocr-word-box` | `returnWordBox`、坐标稳定开关、OCR 检测/识别阈值 | layout/VL/markdown 专用参数 | `word`；单字 token 才可信为 `char` |
+| `pp-structurev3` | `/layout-parsing` | `ocr-word-box` | `returnWordBox`、坐标稳定开关、OCR 检测/识别阈值 | VL 专用理解参数；表格/公式/印章开关暂未开启 | `word`；单字 token 才可信为 `char`，另有 layout/block |
+| `paddleocr-vl` | `/layout-parsing` | `vl-layout` | 仅 `file/fileType` 基础输入 | `returnWordBox`、OCR det/rec 阈值、unclip 等传统 OCR 参数 | `line`/block；不承诺 word/char |
+| `paddleocr-vl-1.5` | `/layout-parsing` | `vl-layout` | 仅 `file/fileType` 基础输入 | `returnWordBox`、OCR det/rec 阈值、unclip 等传统 OCR 参数 | `line`/block；不承诺 word/char |
+
+`ocr-word-box` family 当前实际调用的参数：
 
 | 参数 | 当前值 | 层级 | 目的 |
 | --- | --- | --- | --- |
 | `file` | base64 图片 | 输入 | OCR 输入图 |
 | `fileType` | `1` | 输入 | 图片类型 |
-| `returnWordBox` | `true` | token/char | 要求返回 `text_word/text_word_region` |
+| `returnWordBox` | `true` | token/word | 要求返回 `text_word/text_word_region`；返回的是 token/word，不天然等于真实 char |
 | `useDocOrientationClassify` | `false` | 预处理 | 避免服务端旋转导致坐标漂移 |
 | `useDocUnwarping` | `false` | 预处理 | 避免扭曲校正后坐标空间变化 |
 | `useTextlineOrientation` | `false` | 行级 | 当前按原图坐标处理，不额外做行方向变换 |
@@ -29,23 +38,22 @@
 | `textDetUnclipRatio` | `2.0` | 检测 | 恢复 Paddle 默认框扩张语义；上一轮过低的 1.3 可能制造“边角料”式紧框 |
 | `textRecScoreThresh` | `0.0` | 识别 | 不在服务端丢弃低分文本，低置信交给 proof/疑点队列处理 |
 
-文档里提到但当前没有调用的参数：
+文档里提到但当前没有调用或只在部分模型调用的参数：
 
-- `textDetLimitType`
-- `textDetThresh`
-- `textRecScoreThresh`
 - `visualize`
 - `logId`
 - PP-StructureV3 的 `useSealRecognition/useTableRecognition/useFormulaRecognition/useChartRecognition/useRegionDetection`
 - layout 相关的 `layoutThreshold/layoutNms/layoutUnclipRatio/layoutMergeBboxesMode`
 - markdown/export 相关参数，如 `outputFormats/prettifyMarkdown/markdownIgnoreLabels`
+- VL 模型不再发送 `returnWordBox/textDet*/textRec*`，因为这些传统 OCR detector/recognizer 参数对 VL layout endpoint 不一定生效，甚至可能被忽略或拒绝。
 
-当前没有调用这些参数的原因是：本轮只收口 OCR proof 主链，避免继续扩大模型/输出面；其中 layout、markdown、表格、公式识别属于块级结构或导出层，不应直接影响行级 `Line` 与纵校 token。
+当前没有调用这些参数的原因是：本轮只收口 OCR proof 主链和四模型能力分流，避免继续扩大模型/输出面；其中 layout、markdown、表格、公式识别属于块级结构或导出层，不应直接影响行级 `Line` 与纵校 token。
 
 本轮重新看 PaddleOCR/PaddleX 参数后，结论是：继续靠事后几何规则修偏不是主方向。坐标可靠性首先取决于两件事：
 
 1. 服务端不能改变输入图坐标空间，所以三个预处理开关继续关闭。
-2. 检测框不能被人为压得过紧，所以 `textDetUnclipRatio` 从 1.3 回到 Paddle 文档默认 2.0；过紧框会让 token/char bbox 只覆盖笔画边缘，后续 proof 再怎么裁都会像“邻字/边角料”。
+2. 对 OCR family，检测框不能被人为压得过紧，所以 `textDetUnclipRatio` 从 1.3 回到 Paddle 文档默认 2.0；过紧框会让 token/word bbox 只覆盖笔画边缘，后续 proof 再怎么裁都会像“邻字/边角料”。
+3. 对 VL family，不把传统 OCR 参数硬塞进去。VL 的价值在 layout/markdown/语义结构，若需要 word/char 几何，应和 PP-OCRv5/Structure 组成双模型链，而不是让 VL 假装能返回字框。
 
 ## 2. 响应链
 
@@ -67,7 +75,7 @@
 
 - 块级：`parsing_res_list.block_content`
 - 行级：`overall_ocr_res.rec_texts + rec_boxes/rec_polys`
-- token/char 级：`text_word + text_word_region`
+- token/word 级：`text_word + text_word_region`
 - proof 集合：基于 `Line.text + Line.chars`，但只索引有可靠几何的行
 
 ## 3. 坐标转换链
@@ -112,7 +120,7 @@ flowchart TD
     B --> C[版面分析 Block]
     C --> D[OcrPipeline 裁剪 block ROI]
     D --> E[resolve_api_endpoint: /ocr 或 /layout-parsing]
-    E --> F[请求参数: returnWordBox + 坐标预处理关闭 + 检测参数]
+    E --> F[按 profile 分流请求参数]
     F --> G[Paddle prunedResult]
 
     G --> H1[overall_ocr_res.rec_texts]
@@ -145,11 +153,12 @@ flowchart TD
 
 当前能稳定拿到的元素：
 
-| 模型/端点 | 当前能拿到 | 当前用途 |
-| --- | --- | --- |
-| PP-OCRv5 `/ocr` | `ocrResults[].overall_ocr_res.rec_texts/rec_boxes/rec_polys`，可选 `text_word/text_word_region` | 行级 OCR、版面阶段退化为文本块、proof 字/词框 |
-| PP-StructureV3 `/layout-parsing` | `layout_det_res.boxes`、`parsing_res_list.block_*`、`overall_ocr_res`、`markdown` | 主版面块、结构文本、OCR 主链 |
-| PaddleOCR-VL `/layout-parsing` | layout/markdown/结构化解析，schema 与 Structure 接近但更偏文档理解 | 版面/结构候选，后续可用于公式、图表、复杂版面 |
+| 模型/端点 | 当前能拿到 | 当前用途 | truthful granularity |
+| --- | --- | --- | --- |
+| PP-OCRv5 `/ocr` | `ocrResults[].overall_ocr_res.rec_texts/rec_boxes/rec_polys`，可选 `text_word/text_word_region` | 行级 OCR、版面阶段退化为文本块、proof token/word 框 | 无 `text_word_region` 时仅 line；多字 token 是 `word`，单字 token 才是 `char` |
+| PP-StructureV3 `/layout-parsing` | `layout_det_res.boxes`、`parsing_res_list.block_*`、`overall_ocr_res`、`markdown`，可选 `text_word/text_word_region` | 主版面块、结构文本、OCR 主链 | layout/block + line；有 word region 时最多 `word` |
+| PaddleOCR-VL `/layout-parsing` | layout/markdown/结构化解析，schema 与 Structure 接近但更偏文档理解 | 版面/结构候选，后续可用于公式、图表、复杂版面 | 当前按 line/block 消费，不伪造 word/char |
+| PaddleOCR-VL-1.5 `/layout-parsing` | 与 VL 类似，偏文档理解和结构输出 | 版面/结构候选 | 当前按 line/block 消费，不伪造 word/char |
 
 当前还拿不到或未正式消费的元素：
 
@@ -157,6 +166,7 @@ flowchart TD
 - markdown 文档级输出：能从响应里看到，但 proof 主链不消费，避免 markdown 与行级 OCR 混层。
 - 表格结构、印章、图表：版面可识别为 block，但没有专门校对/导出链。
 - 每个字符的“真实置信度”：Paddle word box 主要提供位置，当前字符置信度仍继承行级分数。
+- 真正逐字 bbox：只有当 `text_word` 中 token 本身长度为 1 且有对应 `text_word_region`，才标为 `bbox_granularity=char`；多字 token 共享框只标 `word`；没有 token region 时标 `fallback/unavailable`。
 
 这些限制分别卡在：
 
@@ -164,7 +174,20 @@ flowchart TD
 2. **OCR_IR 层**：已经能区分 raw/line/token，但尚未把 block type 上下文传进每个 token。
 3. **proof UI 层**：横校/纵校目前围绕 `Line/Char`，还没有表格/公式/markdown 专门视图。
 
-## 7. 公式 / 数字 / 普通文本策略
+## 7. truthful char/token 坐标链
+
+这轮的重点不是“把所有字符都补出一个 bbox”，而是让字段名和实际精度一致：
+
+| 原始条件 | Inspector IR | 主程序 `Line.chars` | proof 消费语义 |
+| --- | --- | --- | --- |
+| 有单字 `text_word_region` | `bbox_source=ocr`、`bbox_granularity=char` | 同样标 `ocr/char` | 可以当单字 crop 使用 |
+| 有多字 token/word region | 每个字符引用同一 bbox，但 `bbox_granularity=word`、`collection_kind=token` | 同样标 `ocr/word`、`token_text=整词` | 不再伪装成多个精确单字，优先走 token 集合 |
+| 只有 line bbox | Inspector 的 char bbox 保持 `None`，`bbox_source=unavailable` | 主程序可为 UI 可用性补 fallback bbox，但标 `fallback` | 只能当估算裁图，不参与“真实 char 精度”判断 |
+| 没有 line bbox 但有 token row | 只在 token 文本完整匹配时作为 fallback line | 标 `ir_token_text_fallback` | 明确是文本保底，不是模型 line 输出 |
+
+当前为什么以前会出现“chars 其实是 fallback”：Inspector 先按 `line_bbox` 给每个 glyph 填一个 bbox，再在有 word region 时覆盖局部字符；没有 word region 的字符看起来也有框，但那只是整行框。现在 Inspector 不再这样做：line-only 字符的 bbox 是 `None/unavailable`，word 级共享框也只标 `word/token`。主程序 proof 层为了 UI 裁图仍允许 fallback bbox，但字段上保留 `bbox_source=fallback` 和 `bbox_granularity=fallback`，不会冒充 `ocr/char`。
+
+## 8. 公式 / 数字 / 普通文本策略
 
 纵校集合不再把所有字符都等价处理：
 
@@ -183,7 +206,7 @@ flowchart TD
 - `CharIndexService._iter_index_units()` 把连续公式 run 合成一个 token。
 - `_sort_key()` 把公式 token 排到数字 token 之后，普通标点/符号之前。
 
-## 8. Residual 错切收口
+## 9. Residual 错切收口
 
 本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。
 
@@ -196,7 +219,7 @@ flowchart TD
 
 这不是重新做全量切字，而是给 OCR 显式字框加一层邻字错位保险，避免少量已偏移字框继续污染纵校 crop。
 
-## 9. Label Studio 参考结论
+## 10. Label Studio 参考结论
 
 已参考 Label Studio 官方导出说明，以及 GitHub 仓库 `HumanSignal/label-studio` 中 `docs/source/includes/result_format.md` 对 annotation result 的定义。关键点：
 
@@ -205,13 +228,15 @@ flowchart TD
 - Label Studio 的 prediction/annotation 思路适合借鉴：机器预测先作为可追踪中间结果，人工结果再作为终审。当前 OCR_IR 也是“机器 raw → 中间表示 → proof 人工消费”的链路，不让 UI 直接消费 raw JSON。
 - 不适合照搬的点：Label Studio 是通用标注平台，region/result JSON 很灵活但较重；当前桌面 OCR 工具需要轻量、可构建、与现有 `Line/Char` 模型兼容，因此只借鉴“region/result 分离”和“ID/来源可追踪”的思想，不引入完整 Label Studio 标注格式。
 
-## 10. 适配现状
+## 11. 适配现状
 
 已经适配：
 
 - API 请求 `returnWordBox=true`
 - API endpoint 不再盲目拼 `/layout-parsing`，支持 PP-OCRv5 `/ocr` 和 Structure/VL `/layout-parsing`
+- 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
+- Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
 - API 坐标优先使用 `result.dataInfo.width/height` 判断画布，再用 pruned metadata / bbox 启发式兜底
 - 行级文本、置信度、行框读取
 - token/word bbox 读取
@@ -235,7 +260,7 @@ flowchart TD
 - 无几何 OCR 文本的专门队列；当前只保留文本并标记疑点
 - 基于真实模型输出的自动参数寻优
 
-## 11. 本轮判断
+## 12. 本轮判断
 
 用户反馈的残留现象主要卡在三段：
 

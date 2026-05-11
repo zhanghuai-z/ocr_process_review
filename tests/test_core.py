@@ -2368,7 +2368,12 @@ def test_proof_stats_service():
 
 
 def test_api_model_profile_helpers():
-    from app.core.api_profiles import resolve_api_endpoint
+    from app.core.api_profiles import (
+        get_api_model_profile,
+        get_api_request_options,
+        infer_api_model_profile_from_endpoint,
+        resolve_api_endpoint,
+    )
     from app.ui.widgets.api_settings_dialog import (
         get_api_model_profile_options,
         get_api_model_profile_url,
@@ -2389,8 +2394,62 @@ def test_api_model_profile_helpers():
     assert resolve_api_endpoint("https://example.com/root", profile="pp-ocrv5") == "https://example.com/root/ocr"
     assert resolve_api_endpoint("https://example.com/root", profile="paddleocr-vl") == "https://example.com/root/layout-parsing"
     assert resolve_api_endpoint("https://example.com/root/ocr", profile="paddleocr-vl") == "https://example.com/root/ocr"
+    assert infer_api_model_profile_from_endpoint("https://example.com/root/ocr") == "pp-ocrv5"
+
+    pp_ocr_options = get_api_request_options("pp-ocrv5")
+    assert pp_ocr_options["returnWordBox"] is True
+    assert pp_ocr_options["textDetUnclipRatio"] == 2.0
+    assert pp_ocr_options["useDocUnwarping"] is False
+
+    structure_options = get_api_request_options("pp-structurev3")
+    assert structure_options["returnWordBox"] is True
+    assert get_api_model_profile("pp-structurev3")["max_text_bbox_granularity"] == "word"
+
+    vl_options = get_api_request_options("paddleocr-vl")
+    assert "returnWordBox" not in vl_options
+    assert "textDetUnclipRatio" not in vl_options
+    assert get_api_model_profile("paddleocr-vl")["max_text_bbox_granularity"] == "line"
 
     print("test_api_model_profile_helpers PASSED")
+
+
+def test_api_request_builders_split_profile_params():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    ocr_body = ApiOcrEngine()._build_request_body(
+        "abc",
+        profile="pp-ocrv5",
+        endpoint_url="https://example.com/ocr",
+    )
+    assert ocr_body["file"] == "abc"
+    assert ocr_body["returnWordBox"] is True
+    assert ocr_body["textDetLimitType"] == "max"
+
+    vl_body = ApiOcrEngine()._build_request_body(
+        "abc",
+        profile="paddleocr-vl",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert vl_body == {"file": "abc", "fileType": 1}
+
+    layout_body = LayoutAnalyzer()._build_api_request_body(
+        "abc",
+        1,
+        profile="pp-structurev3",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert layout_body["returnWordBox"] is True
+
+    vl_layout_body = LayoutAnalyzer()._build_api_request_body(
+        "abc",
+        1,
+        profile="paddleocr-vl-1.5",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert "returnWordBox" not in vl_layout_body
+
+    print("test_api_request_builders_split_profile_params PASSED")
 
 
 def test_app_config_tracks_api_model_profile():
@@ -2796,6 +2855,70 @@ def test_layout_analyzer_builds_api_payload():
     print("test_layout_analyzer_builds_api_payload PASSED")
 
 
+def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+
+    raw = {
+        "api_model_profile": "paddleocr-vl",
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["天地"],
+                            "rec_scores": [0.91],
+                            "rec_boxes": [[10, 20, 70, 50]],
+                        }
+                    }
+                }
+            ]
+        },
+    }
+
+    doc = PaddleAdapter().parse(raw)
+    line = doc.pages[0].orphan_lines[0]
+    assert line.bbox is not None
+    assert line.chars[0].bbox is None
+    assert line.chars[0].bbox_source == "unavailable"
+    assert line.chars[0].bbox_granularity == "unavailable"
+    assert any("max_text_bbox_granularity=line" in msg for msg in doc.parse_log)
+
+    print("test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable PASSED")
+
+
+def test_ocr_inspector_paddle_adapter_marks_word_not_fake_char():
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+
+    raw = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["南京市"],
+                            "rec_scores": [0.95],
+                            "rec_polys": [[10, 20, 90, 20, 90, 50, 10, 50]],
+                        },
+                        "text_word": [["南京市"]],
+                        "text_word_region": [[[10, 20, 90, 20, 90, 50, 10, 50]]],
+                    }
+                }
+            ]
+        }
+    }
+
+    doc = PaddleAdapter().parse(raw)
+    line = doc.pages[0].orphan_lines[0]
+    assert line.bbox.to_dict() == {"x": 10, "y": 20, "w": 80, "h": 30}
+    assert len(line.chars) == 3
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert all(ch.bbox_granularity == "word" for ch in line.chars)
+    assert all(ch.collection_kind == "token" for ch in line.chars)
+    assert line.chars[0].bbox == line.chars[-1].bbox
+
+    print("test_ocr_inspector_paddle_adapter_marks_word_not_fake_char PASSED")
+
+
 # =====================================================================
 # CharIndexService — 整条字索引链路：纵/横 bbox、去重、排序、稳定查询
 # =====================================================================
@@ -2958,6 +3081,8 @@ if __name__ == "__main__":
     test_import_service_sequential_page_numbers()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
+    test_api_model_profile_helpers()
+    test_api_request_builders_split_profile_params()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
@@ -2965,6 +3090,8 @@ if __name__ == "__main__":
     test_layout_analyzer_uses_datainfo_canvas_scale()
     test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
     test_layout_analyzer_builds_api_payload()
+    test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable()
+    test_ocr_inspector_paddle_adapter_marks_word_not_fake_char()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
     test_char_index_dedup_on_rebuild()

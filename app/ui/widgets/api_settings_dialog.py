@@ -21,6 +21,7 @@ from app.core.api_profiles import (
     API_MODEL_PROFILES,
     KNOWN_API_ENDPOINT_SUFFIXES,
     detect_api_result_kind,
+    get_api_request_options,
     get_api_model_profile_options,
     get_api_model_profile_url,
     match_api_model_profile_from_url,
@@ -32,8 +33,16 @@ from app.core.ocr_config import get_config, update_config
 # ------------------------------------------------------------------ profiles
 
 
-def build_api_payload(file_b64: str, file_type: int) -> dict[str, object]:
-    return {"file": file_b64, "fileType": file_type}
+def build_api_payload(
+    file_b64: str,
+    file_type: int,
+    *,
+    profile: str | None = None,
+    endpoint_url: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"file": file_b64, "fileType": file_type}
+    payload.update(get_api_request_options(profile, endpoint_url))
+    return payload
 
 
 # ------------------------------------------------------------------ stylesheet
@@ -739,7 +748,12 @@ class ApiSettingsDialog(QDialog):
         self._btn_test.setEnabled(False)
         self._btn_test.setText("测试中…")
         try:
-            payload = build_api_payload(file_b64, 1)
+            payload = build_api_payload(
+                file_b64,
+                1,
+                profile=self._api_model_combo.currentData(),
+                endpoint_url=url,
+            )
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
             code = resp.status_code
             try:

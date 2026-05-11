@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from app.core.api_profiles import resolve_api_endpoint
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
 from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
 from app.core.ocr_ir import (
@@ -31,16 +31,6 @@ CHAR_BBOX_SOURCE_FALLBACK = "fallback"
 CHAR_BBOX_GRANULARITY_CHAR = "char"
 CHAR_BBOX_GRANULARITY_WORD = "word"
 CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
-
-PADDLE_OCR_TUNING = {
-    "textDetLimitSideLen": 1536,
-    "textDetLimitType": "max",
-    "textDetThresh": 0.3,
-    "textDetBoxThresh": 0.6,
-    "textDetUnclipRatio": 2.0,
-    "textRecScoreThresh": 0.0,
-}
-
 
 @dataclass
 class TokenRow:
@@ -147,16 +137,17 @@ class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
 
     bbox_space = "crop"
-    _PIPELINE_DISABLE_FLAGS = {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-    }
 
-    def _build_request_body(self, file_b64: str, file_type: int = 1) -> dict:
-        body = {"file": file_b64, "fileType": file_type, "returnWordBox": True}
-        body.update(self._PIPELINE_DISABLE_FLAGS)
-        body.update(PADDLE_OCR_TUNING)
+    def _build_request_body(
+        self,
+        file_b64: str,
+        file_type: int = 1,
+        *,
+        profile: str | None = None,
+        endpoint_url: str | None = None,
+    ) -> dict:
+        body = {"file": file_b64, "fileType": file_type}
+        body.update(get_api_request_options(profile, endpoint_url))
         return body
 
     def _iter_result_items(self, data: dict) -> list[dict]:
@@ -471,7 +462,12 @@ class ApiOcrEngine:
 
         resp = requests.post(
             url,
-            json=self._build_request_body(file_b64, 1),
+            json=self._build_request_body(
+                file_b64,
+                1,
+                profile=cfg.get("api_model_profile", ""),
+                endpoint_url=url,
+            ),
             headers=headers,
             timeout=timeout,
         )
