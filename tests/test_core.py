@@ -3400,20 +3400,44 @@ def test_inspector_tree_syncs_external_char_selection():
 
 
 def test_params_ref_matrix_marks_vl_word_box_unsupported():
-    from tools.ocr_inspector.ui.panels.params_ref import build_paddle_param_matrix
+    from app.core.api_profiles import PADDLE_COORD_STABILITY_FLAGS, PADDLE_OCR_WORD_BOX_PARAMS
+    from tools.ocr_inspector.ui.panels.params_ref import _PARAMS, build_paddle_param_matrix
 
     ocr_rows, ocr_payload = build_paddle_param_matrix("pp-ocrv5")
     ocr_map = {row.name: row for row in ocr_rows}
     assert ocr_map["returnWordBox"].sent is True
+    assert ocr_map["returnWordBox"].current_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
+    assert ocr_map["returnWordBox"].default_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
     assert ocr_payload["returnWordBox"] is True
     assert ocr_payload["textDetLimitSideLen"] == 1536
+    assert ocr_map["textDetLimitSideLen"].current_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetLimitSideLen"]
+    assert ocr_map["textDetLimitSideLen"].default_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetLimitSideLen"]
+    assert ocr_payload["textDetUnclipRatio"] == 2.0
+    assert ocr_map["textDetUnclipRatio"].default_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetUnclipRatio"]
+    assert ocr_map["useDocOrientationClassify"].current_value is PADDLE_COORD_STABILITY_FLAGS["useDocOrientationClassify"]
+    assert ocr_map["useDocOrientationClassify"].default_value is PADDLE_COORD_STABILITY_FLAGS["useDocOrientationClassify"]
+    assert ocr_map["useTextlineOrientation"].current_value is PADDLE_COORD_STABILITY_FLAGS["useTextlineOrientation"]
+    assert ocr_map["useTextlineOrientation"].default_value is PADDLE_COORD_STABILITY_FLAGS["useTextlineOrientation"]
 
     vl_rows, vl_payload = build_paddle_param_matrix("paddleocr-vl")
     vl_map = {row.name: row for row in vl_rows}
     assert vl_map["returnWordBox"].sent is False
+    assert vl_map["returnWordBox"].current_value == "unsupported"
+    assert vl_map["returnWordBox"].default_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
     assert "VL" in vl_map["returnWordBox"].reason
     assert "returnWordBox" not in vl_payload
     assert vl_payload["useDocUnwarping"] is False
+
+    static_defaults = {
+        entry[0]: entry[2]
+        for entry in _PARAMS
+        if entry[0] != "__cat__"
+    }
+    assert static_defaults["returnWordBox"] == "True"
+    assert static_defaults["useDocOrientationClassify"] == "False"
+    assert static_defaults["useTextlineOrientation"] == "False"
+    assert static_defaults["textDetUnclipRatio"] == "2.0"
+    assert static_defaults["textDetLimitSideLen"] == "1536"
 
     print("test_params_ref_matrix_marks_vl_word_box_unsupported PASSED")
 
