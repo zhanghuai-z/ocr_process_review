@@ -3326,6 +3326,45 @@ def test_canvas_char_overlay_default_visible():
     print("test_canvas_char_overlay_default_visible PASSED")
 
 
+def test_canvas_shows_unavailable_note_without_word_region():
+    """When no text_word_region exists, canvas must show a visible unavailable note instead of faking char boxes."""
+    from PySide6.QtWidgets import QGraphicsTextItem
+
+    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.canvas import OcrCanvas
+
+    _get_qapp()
+
+    state = AppState()
+    page = PageNode.make(page_number=1, image_path="")
+    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
+    line.chars = [
+        CharNode.make(
+            char="测",
+            bbox=None,
+            confidence=0.95,
+            bbox_source="unavailable",
+            bbox_granularity="unavailable",
+            token_text="测",
+        )
+    ]
+    page.orphan_lines.append(line)
+
+    canvas = OcrCanvas(state)
+    canvas.load_page(page)
+    notes = [
+        item.toPlainText()
+        for item in canvas._scene.items()
+        if isinstance(item, QGraphicsTextItem)
+    ]
+
+    assert any("text_word_region" in note and "unavailable" in note for note in notes), notes
+    assert id(line.chars[0]) not in canvas._node_item_map
+    canvas.close()
+    print("test_canvas_shows_unavailable_note_without_word_region PASSED")
+
+
 def test_inspector_tree_syncs_external_char_selection():
     """Canvas-selected char nodes must already exist in the left tree and become current."""
     from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
@@ -3881,6 +3920,7 @@ if __name__ == "__main__":
     test_canvas_node_item_map_char_ocr()
     test_canvas_char_fallback_source_colour()
     test_canvas_char_overlay_default_visible()
+    test_canvas_shows_unavailable_note_without_word_region()
     test_inspector_tree_syncs_external_char_selection()
     test_params_ref_matrix_marks_vl_word_box_unsupported()
     print("\n✓ 所有测试通过")
