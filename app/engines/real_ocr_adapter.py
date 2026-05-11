@@ -167,27 +167,29 @@ class ApiOcrEngine:
         if isinstance(ocr_res, dict):
             return ocr_res
         direct = item.get("overall_ocr_res")
-        return direct if isinstance(direct, dict) else {}
+        if isinstance(direct, dict):
+            return direct
+        if isinstance(item, dict) and any(key in item for key in ("rec_texts", "rec_boxes", "rec_polys", "dt_polys")):
+            return item
+        return {}
+
+    def _first_list_from_sources(self, sources: list[dict], keys: tuple[str, ...]) -> list:
+        for source in sources:
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
 
     def _extract_word_box_rows(self, item: dict) -> tuple[list, list]:
         pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
         if not isinstance(pruned, dict):
             pruned = {}
         ocr_res = self._extract_overall_ocr_res(item)
-        token_rows = (
-            pruned.get("text_word")
-            or pruned.get("textWord")
-            or ocr_res.get("text_word")
-            or ocr_res.get("textWord")
-            or []
-        )
-        region_rows = (
-            pruned.get("text_word_region")
-            or pruned.get("textWordRegion")
-            or ocr_res.get("text_word_region")
-            or ocr_res.get("textWordRegion")
-            or []
-        )
+        direct = item if isinstance(item, dict) else {}
+        sources = [pruned, direct, ocr_res]
+        token_rows = self._first_list_from_sources(sources, ("text_word", "textWord"))
+        region_rows = self._first_list_from_sources(sources, ("text_word_region", "textWordRegion"))
         return token_rows, region_rows
 
     def _clamp_parsed_bbox(self, bbox: BBox, image_shape=None) -> BBox:

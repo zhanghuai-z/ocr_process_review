@@ -78,6 +78,8 @@
 - token/word 级：`text_word + text_word_region`
 - proof 集合：基于 `Line.text + Line.chars`，但只索引有可靠几何的行
 
+Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 Paddle / 本地 Structure flatten 现在会保留 `prunedResult.text_word/text_word_region` 顶层字段，不再只合并 `overall_ocr_res`。`PaddleAdapter` 同时读取 `prunedResult`、flatten 后顶层、`overall_ocr_res` 三个位置，并兼容 `textWord/textWordRegion` camelCase 别名。因此 `chars` 是否回显现在取决于响应里是否真的有 token/word region，而不是 flatten/parser 把字段丢掉。
+
 ## 3. 坐标转换链
 
 当前统一按“输入图像像素空间”理解 Paddle 坐标：
@@ -206,7 +208,21 @@ flowchart TD
 - `CharIndexService._iter_index_units()` 把连续公式 run 合成一个 token。
 - `_sort_key()` 把公式 token 排到数字 token 之后，普通标点/符号之前。
 
-## 9. Residual 错切收口
+## 9. Inspector flatten / parser 收口
+
+本轮补齐的是 `chars` 回显链的真实缺口，不是再造 fallback：
+
+1. `tools/ocr_inspector/ui/panels/run_ocr.py::_flatten_api_result()` 会从 `layoutParsingResults[]/ocrResults[]` 的 `prunedResult` 中合并 `parsing_res_list`、`layout_det_res`、`overall_ocr_res` 和顶层 `text_word/text_word_region`。
+2. 本地 `PaddleOCR.predict()` 与 `PPStructureV3.predict()` 的 flatten 也走同一合并逻辑，避免本地 Inspector 调试链只有 block/line、没有 token/word 框。
+3. `tools/ocr_inspector/adapters/paddle.py` 读取 word rows 时按 `prunedResult -> flatten 顶层 -> overall_ocr_res` 查找，并兼容 `textWord/textWordRegion`。
+4. 若只有 `rec_texts/rec_boxes` 而没有 word rows，`CharNode.bbox` 仍保持 `None/unavailable`；这表示模型/请求没有给真实细粒度框，不再用 line bbox 假装 char。
+
+因此，当前 `chars` 不回显的判断标准是：
+
+- PP-OCRv5 / PP-StructureV3：若请求含 `returnWordBox=true` 且响应含 `text_word_region`，Inspector 应显示 `ocr/char` 或 `ocr/word`；若没有返回该字段，则是模型/服务输出限制或请求未生效。
+- PaddleOCR-VL / VL-1.5：项目默认不请求传统 OCR word-box 参数，最多稳定到 line/block；如果服务偶然返回 `text_word_region`，parser 能读，但 UI/文档不能承诺 VL 已支持真实 char。
+
+## 10. Residual 错切收口
 
 本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。
 
@@ -219,7 +235,7 @@ flowchart TD
 
 这不是重新做全量切字，而是给 OCR 显式字框加一层邻字错位保险，避免少量已偏移字框继续污染纵校 crop。
 
-## 10. Label Studio 参考结论
+## 11. Label Studio 参考结论
 
 已参考 Label Studio 官方导出说明，以及 GitHub 仓库 `HumanSignal/label-studio` 中 `docs/source/includes/result_format.md` 对 annotation result 的定义。关键点：
 
@@ -228,7 +244,7 @@ flowchart TD
 - Label Studio 的 prediction/annotation 思路适合借鉴：机器预测先作为可追踪中间结果，人工结果再作为终审。当前 OCR_IR 也是“机器 raw → 中间表示 → proof 人工消费”的链路，不让 UI 直接消费 raw JSON。
 - 不适合照搬的点：Label Studio 是通用标注平台，region/result JSON 很灵活但较重；当前桌面 OCR 工具需要轻量、可构建、与现有 `Line/Char` 模型兼容，因此只借鉴“region/result 分离”和“ID/来源可追踪”的思想，不引入完整 Label Studio 标注格式。
 
-## 11. 适配现状
+## 12. 适配现状
 
 已经适配：
 
@@ -237,6 +253,7 @@ flowchart TD
 - 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
+- Inspector flatten / PaddleAdapter 已补齐 `prunedResult.text_word/text_word_region` 顶层字段、flatten 后顶层字段和 camelCase alias，避免真实 token/word 框在调试链路中丢失
 - API 坐标优先使用 `result.dataInfo.width/height` 判断画布；若 dataInfo / pruned shape 与 raw bbox 明显冲突且 bbox 已是 page-space，则不二次缩放，再用 bbox 启发式兜底
 - 行级文本、置信度、行框读取
 - token/word bbox 读取
@@ -260,7 +277,7 @@ flowchart TD
 - 无几何 OCR 文本的专门队列；当前只保留文本并标记疑点
 - 基于真实模型输出的自动参数寻优
 
-## 12. 本轮判断
+## 13. 本轮判断
 
 用户反馈的残留现象主要卡在三段：
 

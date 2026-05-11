@@ -38,39 +38,105 @@ class _Signals(QObject):
 # Result flatteners
 # ---------------------------------------------------------------------------
 
+def _append_list_field(target: dict[str, Any], key: str, value: Any) -> None:
+    if isinstance(value, list):
+        target.setdefault(key, [])
+        target[key].extend(value)
+
+
+def _merge_pruned_like_result(merged: dict[str, Any], source: dict[str, Any]) -> None:
+    parsing_res = source.get("parsing_res_list")
+    if isinstance(parsing_res, list):
+        merged.setdefault("parsing_res_list", [])
+        merged["parsing_res_list"].extend(v for v in parsing_res if isinstance(v, dict))
+
+    layout_det = source.get("layout_det_res")
+    if isinstance(layout_det, dict):
+        merged.setdefault("layout_det_res", {"boxes": []})
+        boxes = layout_det.get("boxes")
+        if isinstance(boxes, list):
+            merged["layout_det_res"].setdefault("boxes", [])
+            merged["layout_det_res"]["boxes"].extend(v for v in boxes if isinstance(v, dict))
+        for key, value in layout_det.items():
+            if key != "boxes":
+                merged["layout_det_res"][key] = value
+
+    overall = source.get("overall_ocr_res")
+    if not isinstance(overall, dict) and any(key in source for key in ("rec_texts", "rec_boxes", "rec_polys", "dt_polys")):
+        overall = {
+            key: source[key]
+            for key in ("rec_texts", "rec_scores", "rec_boxes", "rec_polys", "rec_polygons", "dt_polys")
+            if key in source
+        }
+    if isinstance(overall, dict):
+        merged.setdefault("overall_ocr_res", {})
+        for key, value in overall.items():
+            if isinstance(value, list):
+                merged["overall_ocr_res"].setdefault(key, [])
+                merged["overall_ocr_res"][key].extend(value)
+            else:
+                merged["overall_ocr_res"][key] = value
+
+    for canonical, aliases in (
+        ("text_word", ("text_word", "textWord")),
+        ("text_word_region", ("text_word_region", "textWordRegion")),
+    ):
+        for alias in aliases:
+            if alias in source:
+                _append_list_field(merged, canonical, source[alias])
+                break
+
+
+def _drop_empty_result_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(raw)
+    if not cleaned.get("parsing_res_list"):
+        cleaned.pop("parsing_res_list", None)
+    layout_det = cleaned.get("layout_det_res")
+    if isinstance(layout_det, dict) and not layout_det.get("boxes"):
+        cleaned.pop("layout_det_res", None)
+    if not cleaned.get("overall_ocr_res"):
+        cleaned.pop("overall_ocr_res", None)
+    if not cleaned.get("text_word"):
+        cleaned.pop("text_word", None)
+    if not cleaned.get("text_word_region"):
+        cleaned.pop("text_word_region", None)
+    return cleaned
+
+
 def _flatten_paddle_result(result_list: list) -> dict:
     """Convert PaddleOCR 3.x predict() list to the dict shape PaddleAdapter expects."""
     merged: dict[str, Any] = {}
     for item in result_list:
         if hasattr(item, "json"):
             d = item.json()
-            if "overall_ocr_res" in d:
-                merged.setdefault("overall_ocr_res", {})
-                for k, v in d["overall_ocr_res"].items():
-                    if isinstance(v, list):
-                        merged["overall_ocr_res"].setdefault(k, [])
-                        merged["overall_ocr_res"][k].extend(v)
-                    else:
-                        merged["overall_ocr_res"][k] = v
-            if "parsing_res_list" in d:
-                merged.setdefault("parsing_res_list", [])
-                merged["parsing_res_list"].extend(d["parsing_res_list"])
+            if isinstance(d, dict):
+                _merge_pruned_like_result(merged, d)
     if not merged and result_list and hasattr(result_list[0], "json"):
         return result_list[0].json()
-    return merged
+    return _drop_empty_result_fields(merged)
 
 
 def _flatten_structure_result(result_list: list) -> dict:
     """Convert PPStructureV3 predict() output to raw dict for PaddleAdapter."""
-    out: dict[str, Any] = {"parsing_res_list": []}
+    out: dict[str, Any] = {}
     for item in result_list:
         if hasattr(item, "json"):
             d = item.json()
-            if "parsing_res_list" in d:
-                out["parsing_res_list"].extend(d["parsing_res_list"])
-            elif isinstance(d, dict):
-                out["parsing_res_list"].append(d)
-    return out
+            if isinstance(d, dict):
+                if any(key in d for key in (
+                    "overall_ocr_res",
+                    "parsing_res_list",
+                    "layout_det_res",
+                    "text_word",
+                    "textWord",
+                    "text_word_region",
+                    "textWordRegion",
+                )):
+                    _merge_pruned_like_result(out, d)
+                else:
+                    out.setdefault("parsing_res_list", [])
+                    out["parsing_res_list"].append(d)
+    return _drop_empty_result_fields(out)
 
 
 def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
@@ -132,11 +198,7 @@ def _flatten_api_result(data: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, list):
             items.extend(item for item in value if isinstance(item, dict))
 
-    merged: dict[str, Any] = {
-        "parsing_res_list": [],
-        "layout_det_res": {"boxes": []},
-        "overall_ocr_res": {},
-    }
+    merged: dict[str, Any] = {}
 
     for item in items:
         source = item.get("prunedResult")
@@ -145,36 +207,9 @@ def _flatten_api_result(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(source, dict):
             continue
 
-        parsing_res = source.get("parsing_res_list")
-        if isinstance(parsing_res, list):
-            merged["parsing_res_list"].extend(v for v in parsing_res if isinstance(v, dict))
+        _merge_pruned_like_result(merged, source)
 
-        layout_det = source.get("layout_det_res")
-        if isinstance(layout_det, dict):
-            boxes = layout_det.get("boxes")
-            if isinstance(boxes, list):
-                merged["layout_det_res"]["boxes"].extend(v for v in boxes if isinstance(v, dict))
-            for key, value in layout_det.items():
-                if key == "boxes":
-                    continue
-                merged["layout_det_res"][key] = value
-
-        overall = source.get("overall_ocr_res")
-        if isinstance(overall, dict):
-            for key, value in overall.items():
-                if isinstance(value, list):
-                    merged["overall_ocr_res"].setdefault(key, [])
-                    merged["overall_ocr_res"][key].extend(value)
-                else:
-                    merged["overall_ocr_res"][key] = value
-
-    if not merged["parsing_res_list"]:
-        merged.pop("parsing_res_list", None)
-    if not merged["layout_det_res"].get("boxes"):
-        merged.pop("layout_det_res", None)
-    if not merged["overall_ocr_res"]:
-        merged.pop("overall_ocr_res", None)
-    return merged
+    return _drop_empty_result_fields(merged)
 
 
 def _build_api_request_body(file_b64: str, params: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:

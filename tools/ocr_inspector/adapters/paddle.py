@@ -55,7 +55,30 @@ def _overall_ocr_res(item: dict) -> dict:
     if isinstance(ocr_res, dict):
         return ocr_res
     direct = item.get("overall_ocr_res") if isinstance(item, dict) else None
-    return direct if isinstance(direct, dict) else {}
+    if isinstance(direct, dict):
+        return direct
+    if isinstance(item, dict) and any(key in item for key in ("rec_texts", "rec_boxes", "rec_polys", "dt_polys")):
+        return item
+    return {}
+
+
+def _first_list_from_sources(sources: list[dict], keys: tuple[str, ...]) -> list:
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _word_box_rows(item: dict) -> tuple[list, list]:
+    pruned = _pruned_result(item)
+    ocr_res = _overall_ocr_res(item)
+    direct = item if isinstance(item, dict) else {}
+    sources = [pruned, direct, ocr_res]
+    text_words = _first_list_from_sources(sources, ("text_word", "textWord"))
+    word_regions = _first_list_from_sources(sources, ("text_word_region", "textWordRegion"))
+    return text_words, word_regions
 
 
 def _iter_result_items(data: dict) -> list[dict]:
@@ -189,8 +212,7 @@ class PaddleAdapter:
             rec_boxes  = ocr_res.get("rec_boxes")  or []
             rec_polys  = ocr_res.get("rec_polys") or ocr_res.get("rec_polygons") or ocr_res.get("dt_polys") or []
             rec_scores = ocr_res.get("rec_scores") or []
-            text_words = pruned.get("text_word") or ocr_res.get("text_word") or []
-            word_regions = pruned.get("text_word_region") or ocr_res.get("text_word_region") or []
+            text_words, word_regions = _word_box_rows(item)
 
             if not rec_texts:
                 log.append("WARNING: overall_ocr_res.rec_texts is empty or missing")
