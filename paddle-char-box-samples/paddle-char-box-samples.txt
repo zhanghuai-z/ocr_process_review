@@ -14,3 +14,10 @@ Sample crops:
 - s14 text=年 quality=usable_char_crop raw={'x': 1076, 'y': 256, 'w': 61, 'h': 72} bound={'x': 1076, 'y': 256, 'w': 61, 'h': 72} pair=paddle-char-box-samples/crops/s14_pair.png
 - s15 text=第 quality=usable_char_crop raw={'x': 1122, 'y': 256, 'w': 61, 'h': 72} bound={'x': 1122, 'y': 256, 'w': 61, 'h': 72} pair=paddle-char-box-samples/crops/s15_pair.png
 - token_2026 text=2026 quality=usable_token_crop_not_char_crop raw={'x': 985, 'y': 256, 'w': 92, 'h': 72} bound={'x': 985, 'y': 256, 'w': 92, 'h': 72} pair=paddle-char-box-samples/crops/token_2026_pair.png
+
+Direct Paddle JSON field audit:
+- Audit file: paddle-char-box-samples/paddle-return-field-audit.json
+- PP-OCRv5 raw JSON has return_word_box=true, model_settings, text_det_params, rec_texts/rec_boxes/rec_polys/dt_polys, text_word, and text_word_boxes.
+- PP-StructureV3 raw JSON has return_word_box=true inside overall_ocr_res and line-level rec fields, but no text_word/text_word_region/text_word_boxes in this real response.
+- No additional public char-box return field such as char_box/char_boxes was found in real JSON or Paddle/PaddleX source.
+- rec_boxes/rec_polys/dt_polys are line/detection geometry, not char geometry; textline_orientation_angles is metadata.

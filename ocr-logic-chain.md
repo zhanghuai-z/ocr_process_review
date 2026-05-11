@@ -265,6 +265,8 @@ PP-OCRv5 的实测字段计数：
 - raw field counts：`ocrResults=1`、`rec_texts=37`、`rec_boxes=37`、`rec_polys=37`、`text_word=37`、`text_word_boxes=37`。
 - parser/canvas：`line_count=37`、`char_count=1082`、`ocr_char_count=1082`、`canvas_items_for_chars=1082`。
 
+用户追问“是否还有其他 char 相关 return 字段”后，本轮补了直接字段审计，输出到 `paddle-char-box-samples/paddle-return-field-audit.json`。结论是：当前真实 JSON 与已安装 Paddle/PaddleX 源码里没有额外公开的 `char_box/char_boxes` 字段；稳定可用的 token/char 几何字段仍是 `text_word + text_word_boxes`，服务内/部分响应形态可能出现 `text_word_region`，项目继续作为 alias 兼容。`rec_boxes/rec_polys/dt_polys` 是行级/检测级几何，`textline_orientation_angles` 是行方向元数据，`return_word_box` 是开关，不是几何字段本身。源码证据对应 `pipeline.py`、`result.py::_to_json()`、`cal_ocr_word_box.py`、`processors.py` 和 `text_recognition/predictor.py`。
+
 PP-OCRv5 右偏/松框的量化结论来自 `ppocr_raw_parser_vs_mainapp_final.json` 与 `ppocr_raw_margin_metrics.json`：
 
 - sampled first line text：`数量经济技术经济研究2026年第4期`。
