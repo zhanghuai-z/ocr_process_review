@@ -633,7 +633,7 @@ def test_api_ocr_engine_requests_return_word_box():
         assert captured["json"]["useTextlineOrientation"] is False
         assert captured["json"]["textDetLimitSideLen"] == 1536
         assert captured["json"]["textDetBoxThresh"] == 0.6
-        assert captured["json"]["textDetUnclipRatio"] == 1.3
+        assert captured["json"]["textDetUnclipRatio"] == 2.0
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
@@ -2993,7 +2993,7 @@ def test_paddle_adapter_char_bbox_source():
 
 
 def test_paddle_adapter_char_fallback_when_no_word_region():
-    """PaddleAdapter sets bbox_source=fallback when text_word_region absent."""
+    """PaddleAdapter keeps char bbox unavailable when text_word_region is absent."""
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
     raw = {"overall_ocr_res": {
         "rec_texts": ["测试"], "rec_boxes": [[10, 20, 210, 50]], "rec_scores": [0.95],
@@ -3002,7 +3002,9 @@ def test_paddle_adapter_char_fallback_when_no_word_region():
     line = doc.pages[0].all_lines[0]
     assert len(line.chars) == 2
     for ch in line.chars:
-        assert ch.bbox_source == "fallback" and ch.bbox == line.bbox
+        assert ch.bbox_source == "unavailable"
+        assert ch.bbox_granularity == "unavailable"
+        assert ch.bbox is None
     print("test_paddle_adapter_char_fallback_when_no_word_region PASSED")
 
 
@@ -3091,6 +3093,339 @@ def test_canvas_char_fallback_source_colour():
 
 
 
+def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"ocrResults": []}}
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        return DummyResponse()
+
+    original_post = requests.post
+    requests.post = fake_post
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-ocrv5",
+        api_url="https://example.com/root",
+        api_timeout=12,
+    )
+    try:
+        ApiOcrEngine().recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
+        assert captured["url"] == "https://example.com/root/ocr"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile PASSED")
+
+
+def test_api_ocr_engine_parses_paddle_coordinate_variants():
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    engine = ApiOcrEngine()
+    dict_bbox = engine._bbox_from_region({"coordinate": [10, 20, 50, 60]})
+    assert dict_bbox.to_dict() == {"x": 10, "y": 20, "w": 40, "h": 40}
+
+    poly_bbox = engine._bbox_from_region([10, 20, 50, 20, 50, 60, 10, 60])
+    assert poly_bbox.to_dict() == {"x": 10, "y": 20, "w": 40, "h": 40}
+
+    nested_poly_bbox = engine._bbox_from_region([[10, 20], [50, 20], [50, 60], [10, 60]])
+    assert nested_poly_bbox.to_dict() == {"x": 10, "y": 20, "w": 40, "h": 40}
+
+    print("test_api_ocr_engine_parses_paddle_coordinate_variants PASSED")
+
+
+def test_api_request_builders_split_profile_params():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    ocr_body = ApiOcrEngine()._build_request_body(
+        "abc",
+        profile="pp-ocrv5",
+        endpoint_url="https://example.com/ocr",
+    )
+    assert ocr_body["file"] == "abc"
+    assert ocr_body["returnWordBox"] is True
+    assert ocr_body["textDetLimitType"] == "max"
+
+    vl_body = ApiOcrEngine()._build_request_body(
+        "abc",
+        profile="paddleocr-vl",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert vl_body == {"file": "abc", "fileType": 1}
+
+    layout_body = LayoutAnalyzer()._build_api_request_body(
+        "abc",
+        1,
+        profile="pp-structurev3",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert layout_body["returnWordBox"] is True
+
+    vl_layout_body = LayoutAnalyzer()._build_api_request_body(
+        "abc",
+        1,
+        profile="paddleocr-vl-1.5",
+        endpoint_url="https://example.com/layout-parsing",
+    )
+    assert "returnWordBox" not in vl_layout_body
+
+    print("test_api_request_builders_split_profile_params PASSED")
+
+
+def test_ocr_inspector_run_panel_profile_request_params():
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel, _build_api_request_body
+
+    _get_qapp()
+
+    panel = RunOcrPanel(AppState())
+    assert panel._return_word_box.isChecked() is True
+    assert panel._det_unclip_ratio.value() == 2.0
+    assert panel._det_limit_side_len.value() == 1536
+    panel.close()
+
+    params = {
+        "ocr_init": {
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        "ocr_pred": {
+            "return_word_box": True,
+            "text_det_thresh": 0.3,
+            "text_det_box_thresh": 0.6,
+            "text_det_unclip_ratio": 2.0,
+            "text_det_limit_side_len": 1536,
+            "text_det_limit_type": "max",
+            "text_rec_score_thresh": 0.0,
+        },
+    }
+
+    ocr_body = _build_api_request_body(
+        "abc",
+        params,
+        {
+            "api_model_profile": "pp-ocrv5",
+            "_resolved_api_url": "https://example.com/ocr",
+        },
+    )
+    assert ocr_body["returnWordBox"] is True
+    assert ocr_body["textDetLimitSideLen"] == 1536
+
+    vl_body = _build_api_request_body(
+        "abc",
+        params,
+        {
+            "api_model_profile": "paddleocr-vl",
+            "_resolved_api_url": "https://example.com/layout-parsing",
+        },
+    )
+    assert vl_body == {"file": "abc", "fileType": 1}
+
+    print("test_ocr_inspector_run_panel_profile_request_params PASSED")
+
+
+def test_layout_analyzer_uses_datainfo_canvas_scale():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "dataInfo": {"width": 500, "height": 1000},
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [10, 20, 110, 70],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(20, 40, 200, 100)
+
+    print("test_layout_analyzer_uses_datainfo_canvas_scale PASSED")
+
+
+def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
+    import tempfile
+
+    import cv2
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["OCR行"],
+                                    "rec_scores": [0.91],
+                                    "rec_boxes": [[10, 20, 110, 50]],
+                                },
+                            },
+                        },
+                    ],
+                },
+            }
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        return DummyResponse()
+
+    original_post = requests.post
+    requests.post = fake_post
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-ocrv5",
+        api_url="https://example.com/root",
+        api_timeout=12,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
+        page = Page(image_path=page_path, width=200, height=120)
+        LayoutAnalyzer()._api_analyze(page)
+        assert captured["url"] == "https://example.com/root/ocr"
+        assert len(page.blocks) == 1
+        assert page.blocks[0].block_type == BlockType.TEXT
+        assert "OCR行" in page.blocks[0].note
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+        os.unlink(page_path)
+
+    print("test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout PASSED")
+
+
+def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+
+    raw = {
+        "api_model_profile": "paddleocr-vl",
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [8, 18, 72, 55],
+                                    "score": 0.87,
+                                }
+                            ]
+                        },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "paragraph",
+                                "block_bbox": [10, 20, 70, 50],
+                                "block_content": "天地",
+                            }
+                        ],
+                        "overall_ocr_res": {
+                            "rec_texts": ["天地"],
+                            "rec_scores": [0.91],
+                            "rec_boxes": [[10, 20, 70, 50]],
+                        }
+                    }
+                }
+            ]
+        },
+    }
+
+    doc = PaddleAdapter().parse(raw)
+    page = doc.pages[0]
+    assert page.blocks[0].source_field == "parsing_res_list"
+    assert page.layout_det_blocks[0].source_field == "layout_det_res"
+    assert page.layout_det_blocks[0].bbox.area > 0
+    line = page.blocks[0].lines[0]
+    assert line.bbox is not None
+    assert line.chars[0].bbox is None
+    assert line.chars[0].bbox_source == "unavailable"
+    assert line.chars[0].bbox_granularity == "unavailable"
+    assert any("max_text_bbox_granularity=line" in msg for msg in doc.parse_log)
+
+    print("test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable PASSED")
+
+
+def test_ocr_inspector_paddle_adapter_marks_word_not_fake_char():
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+
+    raw = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["南京市"],
+                            "rec_scores": [0.95],
+                            "rec_polys": [[10, 20, 90, 20, 90, 50, 10, 50]],
+                        },
+                        "text_word": [["南京市"]],
+                        "text_word_region": [[[10, 20, 90, 20, 90, 50, 10, 50]]],
+                    }
+                }
+            ]
+        }
+    }
+
+    doc = PaddleAdapter().parse(raw)
+    line = doc.pages[0].orphan_lines[0]
+    assert line.bbox.to_dict() == {"x": 10, "y": 20, "w": 80, "h": 30}
+    assert len(line.chars) == 3
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert all(ch.bbox_granularity == "word" for ch in line.chars)
+    assert all(ch.collection_kind == "token" for ch in line.chars)
+    assert line.chars[0].bbox == line.chars[-1].bbox
+
+    print("test_ocr_inspector_paddle_adapter_marks_word_not_fake_char PASSED")
+
+
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
@@ -3132,14 +3467,21 @@ if __name__ == "__main__":
     test_import_service_sequential_page_numbers()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
+    test_api_model_profile_helpers()
+    test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()
+    test_api_ocr_engine_parses_paddle_coordinate_variants()
+    test_api_request_builders_split_profile_params()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
+    test_layout_analyzer_uses_datainfo_canvas_scale()
+    test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()
     test_inspector_builds_api_request_body_from_shared_config()
+    test_ocr_inspector_run_panel_profile_request_params()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
     test_char_index_dedup_on_rebuild()
@@ -3161,6 +3503,8 @@ if __name__ == "__main__":
     test_find_text_matches_ocr_chars()
     test_paddle_adapter_char_bbox_source()
     test_paddle_adapter_char_fallback_when_no_word_region()
+    test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable()
+    test_ocr_inspector_paddle_adapter_marks_word_not_fake_char()
     test_canvas_node_item_map_char_fallback()
     test_canvas_node_item_map_char_ocr()
     test_canvas_char_fallback_source_colour()

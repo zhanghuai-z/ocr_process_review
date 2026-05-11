@@ -180,23 +180,31 @@ def _flatten_api_result(data: dict[str, Any]) -> dict[str, Any]:
 def _build_api_request_body(file_b64: str, params: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
     from app.engines.real_ocr_adapter import ApiOcrEngine
 
-    body = ApiOcrEngine()._build_request_body(file_b64, 1)
+    profile = str(cfg.get("api_model_profile", "") or "").strip()
+    endpoint_url = str(cfg.get("_resolved_api_url", "") or "").strip()
+    body = ApiOcrEngine()._build_request_body(
+        file_b64,
+        1,
+        profile=profile,
+        endpoint_url=endpoint_url,
+    )
     model_name = str(cfg.get("api_layout_model_name", "") or "").strip()
     if model_name:
         body["model_name"] = model_name
 
-    body.update({
-        "returnWordBox": params["ocr_pred"]["return_word_box"],
-        "useDocOrientationClassify": params["ocr_init"]["use_doc_orientation_classify"],
-        "useDocUnwarping": params["ocr_init"]["use_doc_unwarping"],
-        "useTextlineOrientation": params["ocr_init"]["use_textline_orientation"],
-        "textDetThresh": params["ocr_pred"]["text_det_thresh"],
-        "textDetBoxThresh": params["ocr_pred"]["text_det_box_thresh"],
-        "textDetUnclipRatio": params["ocr_pred"]["text_det_unclip_ratio"],
-        "textDetLimitSideLen": params["ocr_pred"]["text_det_limit_side_len"],
-        "textDetLimitType": params["ocr_pred"]["text_det_limit_type"],
-        "textRecScoreThresh": params["ocr_pred"]["text_rec_score_thresh"],
-    })
+    if "returnWordBox" in body:
+        body.update({
+            "returnWordBox": params["ocr_pred"]["return_word_box"],
+            "useDocOrientationClassify": params["ocr_init"]["use_doc_orientation_classify"],
+            "useDocUnwarping": params["ocr_init"]["use_doc_unwarping"],
+            "useTextlineOrientation": params["ocr_init"]["use_textline_orientation"],
+            "textDetThresh": params["ocr_pred"]["text_det_thresh"],
+            "textDetBoxThresh": params["ocr_pred"]["text_det_box_thresh"],
+            "textDetUnclipRatio": params["ocr_pred"]["text_det_unclip_ratio"],
+            "textDetLimitSideLen": params["ocr_pred"]["text_det_limit_side_len"],
+            "textDetLimitType": params["ocr_pred"]["text_det_limit_type"],
+            "textRecScoreThresh": params["ocr_pred"]["text_rec_score_thresh"],
+        })
     return body
 
 
@@ -227,11 +235,16 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     import cv2
     import requests
 
+    from app.core.api_profiles import get_api_model_profile, resolve_api_endpoint
     from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import resolve_api_endpoint
 
     cfg = get_config()
-    url = resolve_api_endpoint(cfg.get("api_url", ""), default_suffix="/layout-parsing")
+    profile = str(cfg.get("api_model_profile", "") or "").strip()
+    url = resolve_api_endpoint(
+        cfg.get("api_url", ""),
+        default_suffix="/layout-parsing",
+        profile=profile,
+    )
     if not url:
         raise RuntimeError("API URL is not configured. Open OCR 引擎设置 first.")
 
@@ -242,6 +255,8 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     if not ok:
         raise RuntimeError(f"Cannot encode image: {image_path}")
     file_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+    cfg = dict(cfg)
+    cfg["_resolved_api_url"] = url
     body = _build_api_request_body(file_b64, params, cfg)
 
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -255,7 +270,9 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     meta = raw.setdefault("_inspector_meta", {})
     meta["source"] = "api"
     meta["api_url"] = url
-    meta["api_model_profile"] = cfg.get("api_model_profile", "")
+    meta["api_model_profile"] = profile
+    if profile:
+        meta["api_model_capability"] = dict(get_api_model_profile(profile))
     meta["api_request_summary"] = {
         "returnWordBox": body.get("returnWordBox"),
         "useDocOrientationClassify": body.get("useDocOrientationClassify"),
@@ -269,6 +286,7 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
         "textRecScoreThresh": body.get("textRecScoreThresh"),
         "model_name": body.get("model_name", ""),
     }
+    raw["api_model_profile"] = profile
     return raw
 
 
@@ -381,15 +399,15 @@ class RunOcrPanel(QWidget):
         self._det_unclip_ratio.setRange(0.5, 5.0)
         self._det_unclip_ratio.setSingleStep(0.1)
         self._det_unclip_ratio.setDecimals(2)
-        self._det_unclip_ratio.setValue(1.5)
-        self._det_unclip_ratio.setToolTip("检测框扩张比例 (Vatti clipping)\n值越大框越宽松，有助包住完整字符\n过大会合并相邻行\n默认 1.5")
+        self._det_unclip_ratio.setValue(2.0)
+        self._det_unclip_ratio.setToolTip("检测框扩张比例 (Vatti clipping)\n值越大框越宽松，有助包住完整字符\n过大会合并相邻行\n默认 2.0")
         det_form.addRow("det_unclip_ratio:", self._det_unclip_ratio)
 
         self._det_limit_side_len = QSpinBox()
         self._det_limit_side_len.setRange(64, 4096)
         self._det_limit_side_len.setSingleStep(64)
-        self._det_limit_side_len.setValue(736)
-        self._det_limit_side_len.setToolTip("检测前图像最长边缩放上限 (px)\n值越小：速度快，细小文字易丢失\n值越大：细节保留好，内存/速度代价高\n默认 736")
+        self._det_limit_side_len.setValue(1536)
+        self._det_limit_side_len.setToolTip("检测前图像最长边缩放上限 (px)\n值越小：速度快，细小文字易丢失\n值越大：细节保留好，内存/速度代价高\n默认 1536")
         det_form.addRow("det_limit_side_len:", self._det_limit_side_len)
 
         self._det_limit_type_combo = QComboBox()
@@ -412,7 +430,7 @@ class RunOcrPanel(QWidget):
 
         self._return_word_box = QCheckBox()
         self._return_word_box.setChecked(True)
-        self._return_word_box.setToolTip("开启后返回字/词级 bounding box\n→ overall_ocr_res.text_word_region 有值\n→ canvas 中橙色字框才会出现\n默认 True（开启；字框可视化需要）")
+        self._return_word_box.setToolTip("开启后返回字/词级 bounding box\n→ overall_ocr_res.text_word_region 有值\n→ canvas 中橙色字框才会出现\n默认 True，避免 Inspector 只能看到 line/fallback 级 bbox")
         rec_form.addRow("return_word_box:", self._return_word_box)
         layout.addWidget(rec_group)
 

@@ -40,7 +40,6 @@ SOURCE_COLOURS: dict[str, QColor] = {
     "layout_det_res":          QColor(160,  80, 255, 180),   # purple
     "text_word_region":        QColor(255, 160,   0, 200),   # orange
     "char_fallback":           QColor(180, 180, 180, 120),   # light gray dashed
-        "char_fallback":           QColor(180, 180, 180, 130),   # light gray (estimated bbox)
     "fallback":                QColor(140, 140, 140, 160),   # gray
 }
 

@@ -8,6 +8,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
 from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
 from app.core.ocr_ir import (
@@ -30,13 +31,6 @@ CHAR_BBOX_SOURCE_FALLBACK = "fallback"
 CHAR_BBOX_GRANULARITY_CHAR = "char"
 CHAR_BBOX_GRANULARITY_WORD = "word"
 CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
-
-PADDLE_OCR_TUNING = {
-    "textDetLimitSideLen": 1536,
-    "textDetBoxThresh": 0.6,
-    "textDetUnclipRatio": 1.3,
-}
-
 
 @dataclass
 class TokenRow:
@@ -69,7 +63,12 @@ def get_engine_description(mode: str = "") -> str:
     if mode == "api":
         cfg = get_config()
         api_url = cfg.get("api_url", "")
-        return f"API OCR（/layout-parsing, {api_url or '未配置 URL'}）"
+        endpoint = resolve_api_endpoint(
+            api_url,
+            default_suffix="/layout-parsing",
+            profile=cfg.get("api_model_profile", ""),
+        )
+        return f"API OCR（{endpoint or '未配置 URL'}）"
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
     return (
@@ -138,16 +137,17 @@ class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
 
     bbox_space = "crop"
-    _PIPELINE_DISABLE_FLAGS = {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-    }
 
-    def _build_request_body(self, file_b64: str, file_type: int = 1) -> dict:
-        body = {"file": file_b64, "fileType": file_type, "returnWordBox": True}
-        body.update(self._PIPELINE_DISABLE_FLAGS)
-        body.update(PADDLE_OCR_TUNING)
+    def _build_request_body(
+        self,
+        file_b64: str,
+        file_type: int = 1,
+        *,
+        profile: str | None = None,
+        endpoint_url: str | None = None,
+    ) -> dict:
+        body = {"file": file_b64, "fileType": file_type}
+        body.update(get_api_request_options(profile, endpoint_url))
         return body
 
     def _iter_result_items(self, data: dict) -> list[dict]:
@@ -190,21 +190,35 @@ class ApiOcrEngine:
         )
         return token_rows, region_rows
 
-    def _bbox_from_region(self, region) -> BBox | None:
+    def _clamp_parsed_bbox(self, bbox: BBox, image_shape=None) -> BBox:
+        normalized = bbox.normalize()
+        if image_shape is None:
+            return normalized
+        height, width = image_shape[:2]
+        return normalized.clamp(int(width), int(height))
+
+    def _bbox_from_region(self, region, image_shape=None) -> BBox | None:
         if isinstance(region, dict):
             if {"x", "y", "w", "h"} <= set(region.keys()):
-                return BBox.from_dict(region).normalize()
-            for key in ("coordinate", "bbox", "box"):
+                return self._clamp_parsed_bbox(BBox.from_dict(region), image_shape)
+            for key in ("coordinate", "bbox", "box", "points", "polygon", "poly"):
                 value = region.get(key)
                 if value is not None:
-                    return self._bbox_from_region(value)
+                    return self._bbox_from_region(value, image_shape)
             return None
         if not isinstance(region, (list, tuple)):
             return None
+        if len(region) == 1 and isinstance(region[0], (list, tuple)):
+            return self._bbox_from_region(region[0], image_shape)
+        if len(region) >= 8 and all(not isinstance(v, (list, tuple)) for v in region[:8]):
+            pairs = list(zip(region[0::2], region[1::2]))
+            return self._clamp_parsed_bbox(bbox_from_quad(pairs[:4]), image_shape)
         if len(region) >= 4 and all(not isinstance(v, (list, tuple)) for v in region[:4]):
-            return bbox_from_xyxy(region[:4]).normalize()
+            return self._clamp_parsed_bbox(bbox_from_xyxy(region[:4]), image_shape)
         if len(region) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in region[:4]):
-            return bbox_from_quad(region[:4]).normalize()
+            return self._clamp_parsed_bbox(bbox_from_quad(region[:4]), image_shape)
+        if len(region) >= 2 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in region[:2]):
+            return self._clamp_parsed_bbox(bbox_from_quad(region[:2]), image_shape)
         return None
 
     def _normalize_token_texts(self, token_row) -> list[str]:
@@ -243,7 +257,7 @@ class ApiOcrEngine:
             return 0.0
         return inter / float(min(first.area, second.area))
 
-    def _build_token_rows(self, item: dict) -> list[TokenRow]:
+    def _build_token_rows(self, item: dict, image_shape=None) -> list[TokenRow]:
         token_rows, region_rows = self._extract_word_box_rows(item)
         rows: list[TokenRow] = []
         for token_row, region_row in zip(token_rows, region_rows):
@@ -255,7 +269,7 @@ class ApiOcrEngine:
             boxes: list[BBox] = []
             ir_tokens: list[OcrIrToken] = []
             for token_idx, (token_text, raw_region) in enumerate(zip(tokens, region_row)):
-                bbox = self._bbox_from_region(raw_region)
+                bbox = self._bbox_from_region(raw_region, image_shape)
                 if bbox is None or bbox.area <= 0:
                     continue
                 paired_tokens.append(token_text)
@@ -395,7 +409,7 @@ class ApiOcrEngine:
             token_text = token.strip()
             if not token_text:
                 continue
-            bbox = self._bbox_from_region(raw_region)
+            bbox = self._bbox_from_region(raw_region, page_image.shape[:2])
             if bbox is None or bbox.area <= 0:
                 continue
             if not is_meaningful_text_bbox(page_image, bbox, token_text):
@@ -429,7 +443,11 @@ class ApiOcrEngine:
         from app.core.app_config import get_config
 
         cfg = get_config()
-        url = cfg["api_url"].rstrip("/") + "/layout-parsing"
+        url = resolve_api_endpoint(
+            cfg["api_url"],
+            default_suffix="/layout-parsing",
+            profile=cfg.get("api_model_profile", ""),
+        )
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
 
@@ -444,7 +462,12 @@ class ApiOcrEngine:
 
         resp = requests.post(
             url,
-            json=self._build_request_body(file_b64, 1),
+            json=self._build_request_body(
+                file_b64,
+                1,
+                profile=cfg.get("api_model_profile", ""),
+                endpoint_url=url,
+            ),
             headers=headers,
             timeout=timeout,
         )
@@ -463,14 +486,14 @@ class ApiOcrEngine:
                 or ocr_res.get("dt_polys")
                 or []
             )
-            token_rows = self._build_token_rows(item)
+            token_rows = self._build_token_rows(item, image_bgr.shape[:2])
             used_token_rows: set[int] = set()
             for idx, text in enumerate(texts):
                 line_text = str(text)
                 if not line_text:
                     continue
                 score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-                bbox = self._bbox_from_region(boxes[idx]) if idx < len(boxes) else None
+                bbox = self._bbox_from_region(boxes[idx], image_bgr.shape[:2]) if idx < len(boxes) else None
                 review_flags: list[str] = []
                 if bbox is None or bbox.area <= 0:
                     token_row = self._fallback_token_row_for_missing_line_bbox(token_rows, idx, line_text)

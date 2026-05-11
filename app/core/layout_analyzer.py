@@ -1,7 +1,7 @@
 """PP-StructureV3 layout analysis wrapper. Supports local / api modes.
 
 AiStudio Serving API (confirmed):
-  POST {api_url}/layout-parsing
+  POST resolve_api_endpoint(api_url, api_model_profile)
   Authorization: token <api_token>
   Body: {"file": "<base64_JPEG>", "fileType": 1}
   Response:
@@ -18,6 +18,7 @@ from typing import Iterable, List
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
@@ -295,13 +296,14 @@ class LayoutAnalyzer:
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = data.get("result", {}) if isinstance(data, dict) else {}
         layout_results = result.get("layoutParsingResults", [])
+        data_info = result.get("dataInfo") if isinstance(result, dict) else None
         page_blocks: List[Block] = []
         raw_overlay_items: List[tuple[str, object]] = []
         seen: set[tuple] = set()
         order = 0
 
         for item in layout_results if isinstance(layout_results, list) else []:
-            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
+            scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
                     "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
@@ -325,7 +327,7 @@ class LayoutAnalyzer:
 
         ocr_results = result.get("ocrResults", [])
         for item in ocr_results if isinstance(ocr_results, list) else []:
-            scale_x, scale_y = self._detect_api_canvas_scale(page, item)
+            scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             for record in self._iter_ocr_records_from_item(item):
                 order = self._append_api_block(
                     page=page,
@@ -347,36 +349,51 @@ class LayoutAnalyzer:
             payload["model_name"] = model_name
         return payload
 
-    # PaddleX 服务侧默认会做方向分类 / 去畸变 / 文本行方向判断，
-    # 这些都会让返回坐标落在「预处理后的图」而不是我们传入的原图，
-    # 也是导致 bbox 整体偏移的根本原因。统一关闭。
-    _PIPELINE_DISABLE_FLAGS = {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-    }
-
     def _build_api_request_body(
-        self, file_b64: str, file_type: int, model_name: str = ""
+        self,
+        file_b64: str,
+        file_type: int,
+        model_name: str = "",
+        *,
+        profile: str | None = None,
+        endpoint_url: str | None = None,
     ) -> dict:
         body = self._build_api_payload(file_b64, file_type, model_name)
-        body.update(self._PIPELINE_DISABLE_FLAGS)
+        body.update(get_api_request_options(profile, endpoint_url))
         return body
 
+    def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:
+        if not isinstance(data_info, dict):
+            return None
+        try:
+            width = float(data_info.get("width"))
+            height = float(data_info.get("height"))
+        except (TypeError, ValueError):
+            return None
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+
     def _detect_api_canvas_scale(
-        self, page: Page, item: dict
+        self, page: Page, item: dict, data_info: dict | None = None
     ) -> tuple[float, float]:
         """根据 API 返回内容反推坐标空间，返回 (scale_x, scale_y)。
 
         优先级：
-          1) prunedResult.input_img_shape / doc_preprocessor_res 实际尺寸（若有）
-          2) overall_ocr_res.rec_boxes 的最大坐标外推
-          3) layout_det_res.boxes 的最大坐标外推
-          4) (1.0, 1.0)
+          1) result.dataInfo.width/height（AIStudio 上传图像尺寸）
+          2) prunedResult.input_img_shape / doc_preprocessor_res 实际尺寸（若有）
+          3) overall_ocr_res.rec_boxes 的最大坐标外推
+          4) layout_det_res.boxes 的最大坐标外推
+          5) (1.0, 1.0)
         """
         pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
 
-        # (1) 显式的预处理输出尺寸
+        data_shape = self._shape_from_data_info(data_info)
+        if data_shape is not None and page.width > 0 and page.height > 0:
+            api_w, api_h = data_shape
+            return page.width / api_w, page.height / api_h
+
+        # (2) 显式的预处理输出尺寸
         for key in ("input_img_shape", "img_shape", "image_shape"):
             shape = pruned.get(key)
             if (
@@ -613,13 +630,17 @@ class LayoutAnalyzer:
     # ── api mode ───────────────────────────────────────────────
 
     def _api_analyze(self, page: Page) -> Page:
-        """Call AiStudio /layout-parsing; raises on network/auth errors."""
+        """Call the configured AiStudio model endpoint; raises on network/auth errors."""
         import cv2
         import requests
         from app.core.ocr_config import get_config
 
         cfg = get_config()
-        url = cfg["api_url"].rstrip("/") + "/layout-parsing"
+        url = resolve_api_endpoint(
+            cfg["api_url"],
+            default_suffix="/layout-parsing",
+            profile=cfg.get("api_model_profile", ""),
+        )
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
         layout_model_name = cfg.get("api_layout_model_name", "").strip()
@@ -639,7 +660,13 @@ class LayoutAnalyzer:
 
         resp = requests.post(
             url,
-            json=self._build_api_request_body(file_b64, 1, layout_model_name),
+            json=self._build_api_request_body(
+                file_b64,
+                1,
+                layout_model_name,
+                profile=cfg.get("api_model_profile", ""),
+                endpoint_url=url,
+            ),
             headers=headers,
             timeout=timeout,
         )
