@@ -3120,6 +3120,87 @@ def test_find_text_matches_ocr_chars():
     print("test_find_text_matches_ocr_chars PASSED")
 
 
+def test_planb_core_seam_diagnoses_missing_word_region():
+    from tools.ocr_inspector.core import build_paddle_document, raw_contains_word_regions
+
+    raw = {"overall_ocr_res": {
+        "rec_texts": ["测试"],
+        "rec_boxes": [[10, 20, 80, 50]],
+        "rec_scores": [0.95],
+    }}
+
+    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
+    doc = result.document
+    line = doc.pages[0].all_lines[0]
+    codes = {diag.code for diag in result.diagnostics}
+
+    assert raw_contains_word_regions(raw) is False
+    assert "server_missing_text_word_region" in codes
+    assert all(ch.bbox_source == "unavailable" and ch.bbox is None for ch in line.chars)
+
+    print("test_planb_core_seam_diagnoses_missing_word_region PASSED")
+
+
+def test_planb_core_seam_preserves_word_region_and_search_identity():
+    from tools.ocr_inspector.core import build_paddle_document, query_text_search_index, raw_contains_word_regions
+
+    raw = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["南京市"],
+                            "rec_boxes": [[10, 20, 100, 50]],
+                            "rec_scores": [0.96],
+                        },
+                        "text_word": [["南京市"]],
+                        "text_word_region": [[[10, 20, 100, 20, 100, 50, 10, 50]]],
+                    }
+                }
+            ]
+        }
+    }
+
+    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
+    doc = result.document
+    line = doc.pages[0].all_lines[0]
+    matches = query_text_search_index(doc, "南京", include_lines=False)
+    codes = {diag.code for diag in result.diagnostics}
+
+    assert raw_contains_word_regions(raw) is True
+    assert "word_regions_preserved" in codes
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert all(ch.bbox_granularity == "word" for ch in line.chars)
+    assert len(matches) == 1
+    assert matches[0].identity.startswith("p0:l0:token0:")
+    assert matches[0].bbox_source == "ocr"
+    assert matches[0].bbox_granularity == "word"
+
+    print("test_planb_core_seam_preserves_word_region_and_search_identity PASSED")
+
+
+def test_planb_core_seam_flags_invalid_word_region():
+    from tools.ocr_inspector.core import build_paddle_document, raw_contains_word_regions
+
+    raw = {"overall_ocr_res": {
+        "rec_texts": ["测"],
+        "rec_boxes": [[10, 20, 80, 50]],
+        "rec_scores": [0.95],
+    }, "text_word": [["测"]], "text_word_region": [[["bad-region"]]]}
+
+    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
+    codes = {diag.code for diag in result.diagnostics}
+    char = result.document.pages[0].all_lines[0].chars[0]
+
+    assert raw_contains_word_regions(raw) is True
+    assert "invalid_region_format" in codes
+    assert "word_regions_not_consumed" in codes
+    assert char.bbox_source == "unavailable"
+
+    print("test_planb_core_seam_flags_invalid_word_region PASSED")
+
+
 def test_crop_panel_search_selects_canvas_node():
     """Selecting a text-search result must update AppState so canvas/tree can highlight it."""
     from tools.ocr_inspector.models.ir import BBox, DocumentNode, LineNode, PageNode
@@ -3934,6 +4015,9 @@ if __name__ == "__main__":
     test_crop_bbox_chinese_path()
     test_find_text_matches_lines()
     test_find_text_matches_ocr_chars()
+    test_planb_core_seam_diagnoses_missing_word_region()
+    test_planb_core_seam_preserves_word_region_and_search_identity()
+    test_planb_core_seam_flags_invalid_word_region()
     test_crop_panel_search_selects_canvas_node()
     test_paddle_adapter_char_bbox_source()
     test_paddle_adapter_reads_direct_and_camelcase_word_rows()
