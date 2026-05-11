@@ -244,6 +244,35 @@ flowchart TD
 
 本轮按用户要求做了真实图片渲染验收：构造 `text_word_boxes` 响应后走 `PaddleAdapter -> OCR_IR -> AppState -> OcrCanvas`，输出 `/tmp/ocr_inspector_validation/text_word_boxes_canvas_render.png`。图片中 `源`、`码` 两个字符均出现橙色真实 char box，且两个 `CharNode` 都能映射到 canvas `_node_item_map`，说明不是只停在 parser/test，而是实际 canvas item 已产生。
 
+## 9.1 当前实测 JSON 证据：Structure 无字框，PP-OCRv5 有原始字框
+
+本轮按同一张样图 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif` 真实调用了两个 AiStudio 端点，证据文件保存在 `/tmp/ocr_inspector_validation/real_api/`：
+
+| 端点 | 证据文件 | 关键结论 |
+| --- | --- | --- |
+| PP-StructureV3 `/layout-parsing` | `structure_raw_response.json`、`structure_flattened.json`、`structure_evidence_summary.json` | 请求里已经有 `returnWordBox=true`，但 raw response 中 `text_word_region/text_word_boxes` 计数都是 0；flatten 后也都是 0；parser 生成 90 行、2480 个 unavailable char，OCR char/token box 为 0，canvas item 为 0。断点在 Paddle/服务端 Structure 返回层，不是 flatten/parser/canvas。 |
+| PP-OCRv5 `/ocr` | `ppocr_raw_response.json`、`ppocr_flattened.json`、`ppocr_evidence_summary.json` | 请求里有 `returnWordBox=true`，raw response 有 37 行 `text_word` 和 37 行 `text_word_boxes`；flatten 后归一成 37 行 `text_word_region`；parser 生成 37 行、1082 个 OCR char/token node；canvas item 为 1082。 |
+
+PP-StructureV3 的实测字段计数：
+
+- request summary：`returnWordBox=true`、`textDetUnclipRatio=2.0`、`textDetLimitSideLen=1536`、orientation/unwarping/textline orientation 全部为 `false`。
+- raw field counts：`layoutParsingResults=1`、`ocrResults=1`、`overall_ocr_res=2`、`rec_texts=90`、`rec_boxes=90`、`rec_polys=90`、`parsing_res_list=14`、`layout_det_res=2`、`text_word=0`、`text_word_region=0`、`text_word_boxes=0`。
+- parser/canvas：`line_count=90`、`char_count=2480`、`ocr_char_count=0`、`canvas_items_for_chars=0`。
+
+PP-OCRv5 的实测字段计数：
+
+- request summary：`returnWordBox=true`、`textDetUnclipRatio=2.0`、`textDetLimitSideLen=1536`、orientation/unwarping/textline orientation 全部为 `false`。
+- raw field counts：`ocrResults=1`、`rec_texts=37`、`rec_boxes=37`、`rec_polys=37`、`text_word=37`、`text_word_boxes=37`。
+- parser/canvas：`line_count=37`、`char_count=1082`、`ocr_char_count=1082`、`canvas_items_for_chars=1082`。
+
+PP-OCRv5 右偏/松框的量化结论来自 `ppocr_raw_parser_vs_mainapp_final.json` 与 `ppocr_raw_margin_metrics.json`：
+
+- sampled first line text：`数量经济技术经济研究2026年第4期`。
+- `raw_region == parser_bbox`：采样字符均为 `true`，说明 Inspector parser/IR 没有把 Paddle 原始 char box 改坏；canvas 画的就是 raw/parser box。
+- 示例：`数` 的 raw/parser bbox 是 `[304,256,365,328] -> x=304,y=256,w=61,h=72`，墨迹紧框宽高约 `55x57`，右侧空白约 `6px`、上方空白约 `9px`；parser 后 bbox 完全一致。
+- 主程序真实入口 `ensure_line_char_bboxes()` 对显式 OCR char box 默认保留 `bbox_source=ocr,bbox_granularity=char`，只在 `explicit_char_bbox_points_to_neighbor()` 判断“明显指向邻字”时降级为 fallback。该采样行全行只有 1 个字符触发修正，其余显式 OCR char box 保持 raw/parser 坐标。
+- 因此，PP-OCRv5 目前的“右边多切一点/左边少切一点”主要来自 Paddle raw `text_word_boxes` 本身的边界松紧与相邻字符分配；不是 Inspector parser 或 canvas 二次偏移。主程序看起来更好时，通常来自行框裁图 `refine_line_bbox()`、无字框 fallback 的 `refine_line_char_bboxes()`、以及极少数邻字错位保护；这些都不是 Paddle raw char box 本身，不能在 Inspector 里伪装成 raw。
+
 ## 10. Residual 错切收口
 
 本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。

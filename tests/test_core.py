@@ -2925,7 +2925,7 @@ def test_inspector_builds_api_request_body_from_shared_config():
 
 def test_inspector_runtime_meta_records_actual_request_and_response_fields():
     from tools.ocr_inspector.core import build_paddle_document
-    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta
+    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta, _summarize_relevant_response_fields
 
     raw = {
         "overall_ocr_res": {
@@ -2951,6 +2951,7 @@ def test_inspector_runtime_meta_records_actual_request_and_response_fields():
     assert raw["_inspector_meta"]["request_summary"]["returnWordBox"] is True
     assert raw["_inspector_meta"]["response_field_summary"]["ocrResults"] == 1
     assert raw["_inspector_meta"]["flattened_field_summary"]["rec_texts"] == 1
+    assert "text_word_boxes" not in _summarize_relevant_response_fields(raw)
     assert "returnWordBox=True" in log_text
     assert "response-fields" in log_text
     assert "server_missing_text_word_region" in codes
