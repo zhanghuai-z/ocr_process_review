@@ -21,6 +21,7 @@ from tools.ocr_inspector.ui.panels.inspector import InspectorPanel
 from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel
 from tools.ocr_inspector.ui.panels.params_ref import ParamsRefPanel
 from tools.ocr_inspector.ui.panels.parse_log import ParseLogPanel
+from tools.ocr_inspector.ui.panels.crop_panel import CropPanel
 
 
 class OcrInspectorWindow(QMainWindow):
@@ -48,6 +49,8 @@ class OcrInspectorWindow(QMainWindow):
         right_tabs.addTab(self._parse_log, "解析日志")
         self._params_ref = ParamsRefPanel()
         right_tabs.addTab(self._params_ref, "参数说明")
+        self._crop = CropPanel(self._state)
+        right_tabs.addTab(self._crop, "文本找图")
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._tree)

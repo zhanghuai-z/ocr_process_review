@@ -39,6 +39,7 @@ SOURCE_COLOURS: dict[str, QColor] = {
     "parsing_res_list":        QColor(0,   200,  80, 180),   # green
     "layout_det_res":          QColor(160,  80, 255, 180),   # purple
     "text_word_region":        QColor(255, 160,   0, 200),   # orange
+    "char_fallback":           QColor(180, 180, 180, 120),   # light gray dashed
     "fallback":                QColor(140, 140, 140, 160),   # gray
 }
 
@@ -52,7 +53,8 @@ _SOURCE_LABELS = {
     "overall_ocr_res.rec_texts": "行级 OCR (overall_ocr_res)",
     "parsing_res_list":          "结构块 (parsing_res_list)",
     "layout_det_res":            "版面检测 (layout_det_res)",
-    "text_word_region":          "字/词框 (text_word_region)",
+    "text_word_region":          "字/词框·真实 (text_word_region)",
+    "char_fallback":             "字框·回退(行bbox) (fallback)",
     "fallback":                  "其他/回退",
 }
 
@@ -154,7 +156,8 @@ def _build_legend(scene: QGraphicsScene, visible_sources: set[str]) -> None:
         ("overall_ocr_res", "行级 OCR"),
         ("parsing_res_list", "结构化块"),
         ("layout_det_res", "版面检测"),
-        ("text_word_region", "字/词框"),
+        ("text_word_region", "字/词框·真实"),
+        ("char_fallback", "字框·回退(行bbox)"),
         ("fallback", "其他/回退"),
     ]
     x0, y0 = 8, 8
@@ -332,19 +335,52 @@ class OcrCanvas(QGraphicsView):
     def _draw_chars(self, page: PageNode, flags: dict, visible_sources: set) -> None:
         if not flags.get("chars", False):
             return
-        seen: set = set()
+        show_labels = flags.get("labels", True)
+        # Track unique token bboxes separately for OCR-true vs fallback
+        # OCR-true: keyed by (bbox coords, token_text) so each unique word box appears once
+        # Fallback: keyed by bbox coords only (all chars in a line share same bbox)
+        seen_ocr: set = set()
+        seen_fallback: set = set()
         for char in page.all_chars:
-            if char.bbox:
-                key = (char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
-                if key not in seen:
-                    seen.add(key)
-                    bs = getattr(char, "bbox_source", "") or "fallback"
-                    sf = "text_word_region" if bs == "ocr" else "fallback"
-                    item = _BBoxItem(char.bbox, char, sf)
-                    item.setZValue(4)
-                    self._scene.addItem(item)
-                    self._bbox_items.append(item)
-                    visible_sources.add(sf)
+            if not char.bbox:
+                continue
+            bs = getattr(char, "bbox_source", "") or "fallback"
+            is_ocr = (bs == "ocr")
+            b = char.bbox
+            coord_key = (b.x, b.y, b.w, b.h)
+            if is_ocr:
+                # Key by coords + token_text so different tokens at same pos both show
+                tok = getattr(char, "token_text", char.char) or char.char
+                key = (coord_key, tok)
+                if key in seen_ocr:
+                    continue
+                seen_ocr.add(key)
+                sf = "text_word_region"
+                item = _BBoxItem(char.bbox, char, sf)
+                item.setZValue(4)
+                self._scene.addItem(item)
+                self._bbox_items.append(item)
+                visible_sources.add(sf)
+                if show_labels:
+                    gran = getattr(char, "bbox_granularity", "char")
+                    label_text = tok[:8] + ("…" if len(tok) > 8 else "")
+                    colour = _source_colour(sf)
+                    self._add_label(char.bbox, label_text, colour, True)
+            else:
+                # Fallback: one gray dashed box per unique line-level bbox
+                if coord_key in seen_fallback:
+                    continue
+                seen_fallback.add(coord_key)
+                sf = "char_fallback"
+                item = _BBoxItem(char.bbox, char, sf)
+                item.setZValue(4)
+                self._scene.addItem(item)
+                self._bbox_items.append(item)
+                visible_sources.add(sf)
+                # Small "F" label indicates fallback
+                if show_labels:
+                    colour = _source_colour(sf)
+                    self._add_label(char.bbox, "⚠fallback", colour, True)
 
     def _add_label(self, bbox: BBox, text: str, colour: QColor, visible: bool) -> None:
         lbl = QGraphicsSimpleTextItem(text[:32])

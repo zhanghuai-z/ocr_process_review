@@ -1,47 +1,36 @@
 请在 **一次** gh copilot ask 中完成以下全部内容。
 
-你的分支：`claude/ocr-inspector-logic`  
-工作目录：`D:\project\ocr_process\worktrees\claude`
+你的分支：`claude/ocr-inspector-char-crops`  
+工作目录：`D:\project\ocr_process\worktrees\claude`  
+当前基线：`coord/phase1-stabilization` @ `d51255e`
 
-## 当前状态
+## 本轮目标
 
-你这条线最近已经连续提交了：
+继续开发 OCR Inspector，但这轮重点不是 build 了，而是把**字级可视化与切图能力**做实。
 
-- `741e18d` `fix(inspector): image open + *.tif support + coord follow-up changes`
-- `6459648` `fix: close all remaining loose ends — 73/73 tests pass`
+用户当前明确要的东西：
 
-说明你已经连续在做收口。  
-**但当前这条 Claude 线仍然没有达到可交付水准。**
+1. 画布上现在没有真正精确到字的框，`chars` 看起来还是 `fallback`
+2. 需要一个**根据 bbox 输出切图**的模块
+3. 需要一个能力：**根据我输入的文本，输出对应 bbox 的图像**
 
-## coord 已复现到的现象
+## 你要解决的问题
 
-1. `build.bat --clean` 没有顺利完成
-2. 实际卡点出现在清理旧构建目录时：
-   - `dist\ocr_process\ocr_inspector.exe - Access is denied`
-3. coord 复现时，Windows 下确实还能看到旧进程在运行：
-   - `ocr_inspector.exe`
-   - `ocr_process.exe`
-4. `build.bat` 的 clean 模式标题还存在一个批处理语法问题：
-   - `echo  Mode: FULL (--clean)` 会把 `)` 吞进 `if (...)` 语法，导致输出异常
-5. 增量构建能进入 PyInstaller 主过程，说明当前不是“代码一启动就炸”的类型，而是**构建链收口不完整**
-6. 用户刚刚又在真实运行中打到新的直接报错：
-   - `Running OCR on: D:/project/ocr_process/worktrees/claude/file/244771纵校/120167.tif`
-   - `[ERROR] Cannot read image: D:/project/ocr_process/worktrees/claude/file/244771纵校/120167.tif`
-7. 这说明当前工具对 **`.tif` + 中文路径/真实用户路径** 的处理仍然没有收完，不能按“已交付”对待
+你自己决定具体方案，但最终必须满足：
 
-## 你的本轮目标
+1. 画布里字符层不能只停留在“fallback 状态看起来像有 chars”
+2. 用户能清楚分辨：
+   - 哪些 char/token bbox 是 OCR 真实给的
+   - 哪些是 fallback / 推导出来的
+3. 工具里要能基于 bbox 直接产出对应切图
+4. 工具里要能基于用户输入的文本，找到对应 bbox，并输出对应图像
+5. 这轮仍然要保持 OCR Inspector 的调试台属性：参数 / 元素 / 图像 / JSON / IR 关系不能被做坏
 
-你自己决定怎么实现，但最终必须满足：
+## 当前用户痛点
 
-1. 这条 Claude 分支的 **build + runtime** 都要达到可交付水准
-2. `build.bat --clean` 至少不能再以现在这种方式卡死/假死/报不清楚
-3. 如果旧 exe 正在运行，构建脚本要么能稳妥处理，要么**明确、可理解地失败并给出可执行提示**
-4. OCR Inspector 对真实用户路径下的图像读取必须可靠，至少这类：
-   - `.tif`
-   - 中文/非 ASCII 路径
-   - 真实工作目录下的用户文件路径
-5. 不能把你前面刚做好的图像打开 / `.tif` / inspector 其他收口改坏
-6. 不要再交一个“自评完成但用户一跑就报错”的版本；这轮目标是**完全收口**
+1. chars 的状态现在看起来还是 `fallback`
+2. 用户没法直接拿 bbox 切图
+3. 用户没法输入一段文本后，直接看到对应 bbox 的图像结果
 
 ## 必读
 
@@ -50,16 +39,16 @@
 - `D:\project\ocr_process\worktrees\coord\standard\ocr-paddle-standard.md`
 - `D:\project\ocr_process\docs\Paddle_api_details\README.md`
 
-## 范围
+## 文件边界
 
 你可以按需要修改：
 
+- `tools/`
+- `app/`（仅当确实影响 inspector 所需的共享能力）
+- `tests/test_core.py`
 - `build.bat`
 - `build.sh`
 - `ocr_process.spec`
-- `tools/`
-- `app/`（仅当确实影响打包或启动链）
-- `tests/test_core.py`
 
 不要修改：
 
@@ -68,27 +57,29 @@
 
 ## 过程要求
 
-1. 你自己判断并自审，不要把“请 coord 再分析一轮”当默认下一步
+1. 你自己判断并自审，不要把“请 coord 给技术方案”当默认下一步
 2. **你自己跑现有测试 / 启动 / 构建链，再 handoff**
-3. 这轮重点不是再做新功能，而是把当前分支的交付阻塞项收干净
-4. 如果你顺手发现和这次 build / 图像读取错误直接相关的小坑，可以一并处理
-5. 不要把问题留给 coord 或用户二次验证后再暴露；你自己把真实运行路径走通
+3. 不要只做一个“能演示”的半成品；要按用户真实调试场景收口
+4. 如果 `char` 层精度受限于源数据，你也必须把“真实 bbox / fallback bbox”的区别在工具里做清楚
 
 ## handoff 必须写清楚
 
-1. 构建失败的根因是什么
-2. 你如何处理“旧 exe 占用导致 clean 失败/卡住”这个问题
-3. `Cannot read image: ...120167.tif` 这类真实运行错误的根因是什么，你怎么收的
-4. `build.bat` / 打包链 / 图像读取链具体改了什么
-5. 图像打开 / `.tif` / 中文路径 / inspector 本轮已有修复是否全部保持正常
-6. 你自己跑了哪些测试 / 启动 / 构建 / 真实路径验证
-7. 还剩哪些问题没收；如果你认为没有，就明确写“当前已无已知用户可见阻塞”
+1. 现在字级 bbox 是怎么呈现的
+2. 哪些是 OCR 真实 bbox，哪些是 fallback
+3. bbox 切图模块怎么用
+4. 文本输入 -> bbox 图像输出怎么用
+5. 你自己跑了哪些测试 / 启动 / 构建
+6. 还剩哪些问题没收
 
 ## 交付要求
 
 完成后：
 
-1. 提交到 `claude/ocr-inspector-logic`
+1. 提交到 `claude/ocr-inspector-char-crops`
 2. 输出 handoff
-3. 明确说明“构建失败 + `.tif`/中文路径图像读取报错”这两件事是否彻底收口
+3. 明确说明：
+   - 字级框现在怎么展示
+   - bbox 切图怎么做
+   - 文本找图怎么做
+   - 真实 bbox / fallback bbox 如何区分
 4. **完成后必须 ask request 等待**

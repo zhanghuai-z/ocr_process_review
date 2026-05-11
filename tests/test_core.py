@@ -2882,6 +2882,131 @@ def test_char_index_skips_whitespace():
 # 入口
 # =====================================================================
 
+# =====================================================================
+# OCR Inspector — crop module + char bbox source tests
+# =====================================================================
+
+def test_crop_bbox_ascii_path():
+    """crop_bbox should work on ASCII paths and return a PIL Image."""
+    import tempfile, os, shutil
+    import numpy as np
+    try:
+        import cv2
+    except ImportError:
+        print("test_crop_bbox_ascii_path SKIPPED (cv2 not installed)")
+        return
+    from tools.ocr_inspector.crop import crop_bbox
+    from tools.ocr_inspector.models.ir import BBox
+    tmpdir = tempfile.mkdtemp()
+    img_path = os.path.join(tmpdir, "test.png")
+    arr = np.zeros((100, 200, 3), dtype=np.uint8)
+    arr[20:60, 50:150] = [0, 128, 255]
+    cv2.imwrite(img_path, arr)
+    bbox = BBox(x=50, y=20, w=100, h=40)
+    crop = crop_bbox(img_path, bbox)
+    assert crop.size == (100, 40), crop.size
+    crop_pad = crop_bbox(img_path, bbox, padding=5)
+    assert crop_pad.size == (110, 50), crop_pad.size
+    shutil.rmtree(tmpdir)
+    print("test_crop_bbox_ascii_path PASSED")
+
+
+def test_crop_bbox_chinese_path():
+    """crop_bbox must handle Chinese directory names."""
+    import tempfile, os, shutil
+    import numpy as np
+    try:
+        import cv2
+    except ImportError:
+        print("test_crop_bbox_chinese_path SKIPPED (cv2 not installed)")
+        return
+    from tools.ocr_inspector.crop import crop_bbox
+    from tools.ocr_inspector.models.ir import BBox
+    tmpdir = tempfile.mkdtemp()
+    cn_dir = os.path.join(tmpdir, "纵校测试")
+    os.makedirs(cn_dir, exist_ok=True)
+    img_path = os.path.join(cn_dir, "120167.png")
+    arr = np.zeros((100, 200, 3), dtype=np.uint8)
+    cv2.imwrite(img_path, arr)
+    bbox = BBox(x=10, y=10, w=80, h=40)
+    crop = crop_bbox(img_path, bbox)
+    assert crop.size == (80, 40), crop.size
+    shutil.rmtree(tmpdir)
+    print("test_crop_bbox_chinese_path PASSED")
+
+
+def test_find_text_matches_lines():
+    """find_text_matches finds line-level matches."""
+    from tools.ocr_inspector.crop import find_text_matches
+    from tools.ocr_inspector.models.ir import BBox, DocumentNode, LineNode, PageNode
+    doc = DocumentNode.make(source_path="test.json")
+    page = PageNode.make(page_number=1, image_path="/tmp/test.jpg")
+    doc.pages.append(page)
+    bbox = BBox(x=10, y=20, w=200, h=30)
+    line = LineNode.make(text="测试文字", confidence=0.95, bbox=bbox)
+    page.orphan_lines.append(line)
+    matches = find_text_matches(doc, "测试", search_chars=False, search_lines=True)
+    assert len(matches) == 1 and matches[0].kind == "line" and matches[0].bbox == bbox
+    assert len(find_text_matches(doc, "", search_lines=True)) == 0
+    print("test_find_text_matches_lines PASSED")
+
+
+def test_find_text_matches_ocr_chars():
+    """find_text_matches finds OCR-true chars, skips fallback chars."""
+    from tools.ocr_inspector.crop import find_text_matches
+    from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
+    doc = DocumentNode.make(source_path="test.json")
+    page = PageNode.make(page_number=1, image_path="/tmp/test.jpg")
+    doc.pages.append(page)
+    line_bbox = BBox(x=10, y=20, w=200, h=30)
+    line = LineNode.make(text="测试", confidence=0.95, bbox=line_bbox)
+    c_real = CharNode.make(char="测", bbox=BBox(10, 20, 20, 30),
+        confidence=0.95, bbox_source="ocr", bbox_granularity="char", token_text="测")
+    c_fb = CharNode.make(char="试", bbox=line_bbox,
+        confidence=0.95, bbox_source="fallback", bbox_granularity="line", token_text="试")
+    line.chars = [c_real, c_fb]
+    page.orphan_lines.append(line)
+    m = find_text_matches(doc, "测", search_chars=True, search_lines=False)
+    assert len(m) == 1 and m[0].kind == "char"
+    m2 = find_text_matches(doc, "试", search_chars=True, search_lines=False)
+    assert len(m2) == 0, f"fallback char should not match, got {len(m2)}"
+    print("test_find_text_matches_ocr_chars PASSED")
+
+
+def test_paddle_adapter_char_bbox_source():
+    """PaddleAdapter sets bbox_source=ocr for text_word_region chars."""
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+    raw = {"overall_ocr_res": {
+        "rec_texts": ["测试"], "rec_boxes": [[10, 20, 210, 50]], "rec_scores": [0.95],
+        "rec_polys": [],
+        "text_word": [["测", "试"]],
+        "text_word_region": [
+            [[[10,20],[30,20],[30,50],[10,50]], [[31,20],[60,20],[60,50],[31,50]]]
+        ],
+    }}
+    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
+    line = doc.pages[0].all_lines[0]
+    assert len(line.chars) == 2
+    assert all(c.bbox_source == "ocr" for c in line.chars)
+    assert line.chars[0].bbox != line.chars[1].bbox
+    print("test_paddle_adapter_char_bbox_source PASSED")
+
+
+def test_paddle_adapter_char_fallback_when_no_word_region():
+    """PaddleAdapter sets bbox_source=fallback when text_word_region absent."""
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+    raw = {"overall_ocr_res": {
+        "rec_texts": ["测试"], "rec_boxes": [[10, 20, 210, 50]], "rec_scores": [0.95],
+    }}
+    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
+    line = doc.pages[0].all_lines[0]
+    assert len(line.chars) == 2
+    for ch in line.chars:
+        assert ch.bbox_source == "fallback" and ch.bbox == line.bbox
+    print("test_paddle_adapter_char_fallback_when_no_word_region PASSED")
+
+
+
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
@@ -2946,4 +3071,10 @@ if __name__ == "__main__":
     test_char_index_skips_lines_with_unverified_geometry()
     test_char_index_deduplicates_overlapping_duplicate_lines()
     test_vproof_text_map_deduplicates_overlapping_duplicate_lines()
+    test_crop_bbox_ascii_path()
+    test_crop_bbox_chinese_path()
+    test_find_text_matches_lines()
+    test_find_text_matches_ocr_chars()
+    test_paddle_adapter_char_bbox_source()
+    test_paddle_adapter_char_fallback_when_no_word_region()
     print("\n✓ 所有测试通过")
