@@ -132,7 +132,8 @@ def get_api_request_options(profile: str | None, endpoint_url: str | None = None
 
     OCR detector/recognizer tuning is meaningful for PP-OCRv5 and the
     Structure OCR path.  VL layout endpoints may ignore or reject these fields,
-    so they intentionally receive only the base file payload.
+    so they intentionally do not receive them.  The orientation/unwarping flags
+    are coordinate-space guards and are sent for every known family.
     """
     profile_key = profile if isinstance(profile, str) and profile in API_MODEL_PROFILES else None
     if profile_key is None:
@@ -140,12 +141,12 @@ def get_api_request_options(profile: str | None, endpoint_url: str | None = None
     if profile_key is None:
         profile_key = "pp-structurev3"
     family = API_MODEL_PROFILES[profile_key].get("request_family")
+    options: dict[str, object] = {}
+    options.update(PADDLE_COORD_STABILITY_FLAGS)
     if family == "ocr-word-box":
-        options: dict[str, object] = {}
-        options.update(PADDLE_COORD_STABILITY_FLAGS)
         options.update(PADDLE_OCR_WORD_BOX_PARAMS)
         return options
-    return {}
+    return options
 
 
 def detect_api_result_kind(data: dict) -> str:

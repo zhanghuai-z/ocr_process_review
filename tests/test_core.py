@@ -698,6 +698,59 @@ def test_api_ocr_engine_parses_char_level_word_boxes():
     print("test_api_ocr_engine_parses_char_level_word_boxes PASSED")
 
 
+def test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "rec_texts": ["天地"],
+                                "rec_scores": [0.93],
+                                "rec_boxes": [[10, 20, 70, 50]],
+                                "textWord": [["天", "地"]],
+                                "textWordRegion": [[
+                                    [[10, 20], [40, 20], [40, 50], [10, 50]],
+                                    [[41, 20], [70, 20], [70, 50], [41, 50]],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        line = engine.recognize(np.zeros((80, 100, 3), dtype=np.uint8), OcrContext())[0]
+        assert line.bbox == BBox(10, 20, 60, 30)
+        assert len(line.chars) == 2
+        assert all(ch.bbox_source == "ocr" for ch in line.chars)
+        assert line.chars[0].bbox == BBox(10, 20, 30, 30)
+        assert line.chars[1].token_text == "地"
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes PASSED")
+
+
 def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
     import numpy as np
     import requests
@@ -2722,6 +2775,100 @@ def test_inspector_flattens_api_layout_parsing_result():
     print("test_inspector_flattens_api_layout_parsing_result PASSED")
 
 
+def test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars():
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+    from tools.ocr_inspector.ui.panels.run_ocr import _flatten_api_result
+
+    raw = {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": {
+                        "overall_ocr_res": {
+                            "rec_texts": ["测试"],
+                            "rec_scores": [0.96],
+                            "rec_boxes": [[10, 20, 70, 50]],
+                        },
+                        "text_word": [["测", "试"]],
+                        "text_word_region": [
+                            [
+                                [[10, 20], [35, 20], [35, 50], [10, 50]],
+                                [[36, 20], [70, 20], [70, 50], [36, 50]],
+                            ]
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    flattened = _flatten_api_result(raw)
+    doc = PaddleAdapter().parse(flattened)
+    line = doc.pages[0].all_lines[0]
+
+    assert flattened["text_word"][0] == ["测", "试"]
+    assert len(line.chars) == 2
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert all(ch.bbox_granularity == "char" for ch in line.chars)
+
+    print("test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars PASSED")
+
+
+def test_inspector_local_flatteners_preserve_word_box_rows():
+    from tools.ocr_inspector.ui.panels.run_ocr import (
+        _flatten_paddle_result,
+        _flatten_structure_result,
+    )
+
+    class FakeResult:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    payload = {
+        "parsing_res_list": [
+            {"block_label": "text", "block_bbox": [1, 2, 80, 40], "block_content": "本地"},
+        ],
+        "overall_ocr_res": {
+            "rec_texts": ["本地"],
+            "rec_scores": [0.92],
+            "rec_boxes": [[1, 2, 80, 40]],
+        },
+        "text_word": [["本", "地"]],
+        "text_word_region": [
+            [
+                [[1, 2], [30, 2], [30, 40], [1, 40]],
+                [[31, 2], [80, 2], [80, 40], [31, 40]],
+            ]
+        ],
+    }
+
+    paddle_flattened = _flatten_paddle_result([FakeResult(payload)])
+    structure_flattened = _flatten_structure_result([FakeResult(payload)])
+    direct_flattened = _flatten_paddle_result([FakeResult({
+        "rec_texts": ["直出"],
+        "rec_boxes": [[2, 3, 40, 20]],
+        "textWord": [["直", "出"]],
+        "textWordRegion": [
+            [
+                [[2, 3], [20, 3], [20, 20], [2, 20]],
+                [[21, 3], [40, 3], [40, 20], [21, 20]],
+            ]
+        ],
+    })])
+
+    assert paddle_flattened["text_word"][0] == ["本", "地"]
+    assert paddle_flattened["overall_ocr_res"]["rec_texts"] == ["本地"]
+    assert structure_flattened["text_word_region"][0][0][0] == [1, 2]
+    assert structure_flattened["parsing_res_list"][0]["block_label"] == "text"
+    assert direct_flattened["overall_ocr_res"]["rec_texts"] == ["直出"]
+    assert direct_flattened["text_word"][0] == ["直", "出"]
+
+    print("test_inspector_local_flatteners_preserve_word_box_rows PASSED")
+
+
 def test_inspector_builds_api_request_body_from_shared_config():
     from tools.ocr_inspector.ui.panels.run_ocr import _build_api_request_body
 
@@ -2992,6 +3139,34 @@ def test_paddle_adapter_char_bbox_source():
     print("test_paddle_adapter_char_bbox_source PASSED")
 
 
+def test_paddle_adapter_reads_direct_and_camelcase_word_rows():
+    """PaddleAdapter accepts flattened top-level and camelCase word-box fields."""
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+
+    raw = {
+        "rec_texts": ["天地"],
+        "rec_boxes": [[10, 20, 70, 50]],
+        "rec_scores": [0.95],
+        "textWord": [["天", "地"]],
+        "textWordRegion": [
+            [
+                [[10, 20], [40, 20], [40, 50], [10, 50]],
+                [[41, 20], [70, 20], [70, 50], [41, 50]],
+            ]
+        ],
+    }
+
+    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
+    line = doc.pages[0].all_lines[0]
+
+    assert line.text == "天地"
+    assert len(line.chars) == 2
+    assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    assert line.chars[0].bbox != line.chars[1].bbox
+
+    print("test_paddle_adapter_reads_direct_and_camelcase_word_rows PASSED")
+
+
 def test_paddle_adapter_char_fallback_when_no_word_region():
     """PaddleAdapter keeps char bbox unavailable when text_word_region is absent."""
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
@@ -3162,13 +3337,19 @@ def test_api_request_builders_split_profile_params():
     assert ocr_body["file"] == "abc"
     assert ocr_body["returnWordBox"] is True
     assert ocr_body["textDetLimitType"] == "max"
+    assert ocr_body["useDocUnwarping"] is False
 
     vl_body = ApiOcrEngine()._build_request_body(
         "abc",
         profile="paddleocr-vl",
         endpoint_url="https://example.com/layout-parsing",
     )
-    assert vl_body == {"file": "abc", "fileType": 1}
+    assert vl_body["file"] == "abc"
+    assert vl_body["fileType"] == 1
+    assert vl_body["useDocUnwarping"] is False
+    assert vl_body["useDocOrientationClassify"] is False
+    assert "returnWordBox" not in vl_body
+    assert "textDetLimitType" not in vl_body
 
     layout_body = LayoutAnalyzer()._build_api_request_body(
         "abc",
@@ -3185,6 +3366,7 @@ def test_api_request_builders_split_profile_params():
         endpoint_url="https://example.com/layout-parsing",
     )
     assert "returnWordBox" not in vl_layout_body
+    assert vl_layout_body["useDocUnwarping"] is False
 
     print("test_api_request_builders_split_profile_params PASSED")
 
@@ -3237,7 +3419,10 @@ def test_ocr_inspector_run_panel_profile_request_params():
             "_resolved_api_url": "https://example.com/layout-parsing",
         },
     )
-    assert vl_body == {"file": "abc", "fileType": 1}
+    assert vl_body["file"] == "abc"
+    assert vl_body["fileType"] == 1
+    assert vl_body["useDocUnwarping"] is False
+    assert "returnWordBox" not in vl_body
 
     print("test_ocr_inspector_run_panel_profile_request_params PASSED")
 
@@ -3274,6 +3459,74 @@ def test_layout_analyzer_uses_datainfo_canvas_scale():
     assert blocks[0].bbox == BBox(20, 40, 200, 100)
 
     print("test_layout_analyzer_uses_datainfo_canvas_scale PASSED")
+
+
+def test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "dataInfo": {"width": 500, "height": 1000},
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [800, 1500, 900, 1600],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(800, 1500, 100, 100)
+
+    print("test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space PASSED")
+
+
+def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "input_img_shape": [1000, 500],
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [800, 1500, 900, 1600],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(800, 1500, 100, 100)
+
+    print("test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space PASSED")
 
 
 def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
@@ -3441,6 +3694,7 @@ if __name__ == "__main__":
     test_confidence_normalization()
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
+    test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
     test_api_ocr_engine_does_not_promote_block_content_to_line()
@@ -3476,10 +3730,14 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_uses_datainfo_canvas_scale()
+    test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
+    test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()
+    test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars()
+    test_inspector_local_flatteners_preserve_word_box_rows()
     test_inspector_builds_api_request_body_from_shared_config()
     test_ocr_inspector_run_panel_profile_request_params()
     test_char_index_vertical_split()
@@ -3502,6 +3760,7 @@ if __name__ == "__main__":
     test_find_text_matches_lines()
     test_find_text_matches_ocr_chars()
     test_paddle_adapter_char_bbox_source()
+    test_paddle_adapter_reads_direct_and_camelcase_word_rows()
     test_paddle_adapter_char_fallback_when_no_word_region()
     test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable()
     test_ocr_inspector_paddle_adapter_marks_word_not_fake_char()
