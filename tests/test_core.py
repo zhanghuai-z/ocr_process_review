@@ -2452,6 +2452,59 @@ def test_api_request_builders_split_profile_params():
     print("test_api_request_builders_split_profile_params PASSED")
 
 
+def test_ocr_inspector_run_panel_profile_request_params():
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel, _build_api_request_body
+
+    _get_qapp()
+
+    panel = RunOcrPanel(AppState())
+    assert panel._return_word_box.isChecked() is True
+    assert panel._det_unclip_ratio.value() == 2.0
+    assert panel._det_limit_side_len.value() == 1536
+    panel.close()
+
+    params = {
+        "ocr_init": {
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+        "ocr_pred": {
+            "return_word_box": True,
+            "text_det_thresh": 0.3,
+            "text_det_box_thresh": 0.6,
+            "text_det_unclip_ratio": 2.0,
+            "text_det_limit_side_len": 1536,
+            "text_det_limit_type": "max",
+            "text_rec_score_thresh": 0.0,
+        },
+    }
+
+    ocr_body = _build_api_request_body(
+        "abc",
+        params,
+        {
+            "api_model_profile": "pp-ocrv5",
+            "_resolved_api_url": "https://example.com/ocr",
+        },
+    )
+    assert ocr_body["returnWordBox"] is True
+    assert ocr_body["textDetLimitSideLen"] == 1536
+
+    vl_body = _build_api_request_body(
+        "abc",
+        params,
+        {
+            "api_model_profile": "paddleocr-vl",
+            "_resolved_api_url": "https://example.com/layout-parsing",
+        },
+    )
+    assert vl_body == {"file": "abc", "fileType": 1}
+
+    print("test_ocr_inspector_run_panel_profile_request_params PASSED")
+
+
 def test_app_config_tracks_api_model_profile():
     from app.core.app_config import AppConfig, get_config, update_config
 
@@ -3083,6 +3136,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_model_profile_helpers()
     test_api_request_builders_split_profile_params()
+    test_ocr_inspector_run_panel_profile_request_params()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
