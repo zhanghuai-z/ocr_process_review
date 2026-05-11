@@ -66,7 +66,7 @@
 | `overall_ocr_res.rec_boxes` | 行级 bbox | `Line.bbox` | 已适配 |
 | `overall_ocr_res.rec_polys/rec_polygons/dt_polys` | 行级 polygon/bbox | `Line.bbox` | 已兼容 |
 | `text_word` | token/字文本 | `Line.chars[*].token_text` | 已适配 |
-| `text_word_region` | token/字坐标 | `Line.chars[*].bbox` | 已适配 |
+| `text_word_region` / `text_word_boxes` | token/字坐标；Paddle 内部先生成 region，JSON 常导出 boxes | `Line.chars[*].bbox` | 已适配，二者等价进入 Inspector token bbox 链 |
 | `parsing_res_list.block_content` | 块级结构文本 | 仅作为块级辅助语义 | 不升成 `Line` |
 | `parsing_res_list.block_bbox/block_label` | 块级结构框/标签 | 版面结构层 | 不作为行级 bbox |
 | `markdown.text` | 文档级/块级输出 | 当前 proof 主链不消费 | 未接入 proof |
@@ -75,10 +75,21 @@
 
 - 块级：`parsing_res_list.block_content`
 - 行级：`overall_ocr_res.rec_texts + rec_boxes/rec_polys`
-- token/word 级：`text_word + text_word_region`
+- token/word 级：`text_word + text_word_region/text_word_boxes`
 - proof 集合：基于 `Line.text + Line.chars`，但只索引有可靠几何的行
 
-Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 Paddle / 本地 Structure flatten 现在会保留 `prunedResult.text_word/text_word_region` 顶层字段，不再只合并 `overall_ocr_res`。`PaddleAdapter` 同时读取 `prunedResult`、flatten 后顶层、`overall_ocr_res` 三个位置，并兼容 `textWord/textWordRegion` camelCase 别名。因此 `chars` 是否回显现在取决于响应里是否真的有 token/word region，而不是 flatten/parser 把字段丢掉。
+Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 Paddle / 本地 Structure flatten 现在会保留 `prunedResult.text_word` 与 `text_word_region/text_word_boxes` 顶层字段，不再只合并 `overall_ocr_res`。`PaddleAdapter` 同时读取 `prunedResult`、flatten 后顶层、`overall_ocr_res` 三个位置，并兼容 `textWord/textWordRegion/textWordBoxes` camelCase 别名。因此 `chars` 是否回显现在取决于响应里是否真的有 token/word region/boxes，而不是 flatten/parser 把字段丢掉。
+
+本轮源码审计确认了一个易错点：PaddleX OCR pipeline 内部变量名是 `text_word_region`，但 `paddlex/inference/pipelines/ocr/result.py::OCRResult._to_json()` 对外 JSON 常写成 `text_word_boxes`。如果只盯 `text_word_region`，本地 Paddle 已经算出的 token 框会在 Inspector flatten/parser 层被误判为缺失。
+
+已读取并用于判断的 PaddleOCR/PaddleX 源码点：
+
+- `paddleocr/_pipelines/ocr.py::PaddleOCR.__init__` 与参数映射：`return_word_box` 会下发到 `SubModules.TextRecognition.return_word_box`，CLI 参数名为 `--return_word_box`。
+- `paddlex/inference/serving/basic_serving/_pipeline_apps/ocr.py`：服务 API 将请求里的 `returnWordBox` 传给 `pipeline.infer(... return_word_box=...)`。
+- `paddlex/inference/pipelines/ocr/pipeline.py`：`return_word_box=True` 时初始化 `text_word/text_word_region`，识别后调用 `cal_ocr_word_box()` 生成 token box，并再生成 `text_word_boxes`。
+- `paddlex/inference/models/text_recognition/predictor.py` 与 `processors.py`：识别后处理返回 `word_list/word_col_list/state_list`；transformers engine 路径提示不支持 `return_word_box`。
+- `paddlex/inference/pipelines/components/common/cal_ocr_word_box.py`：中文 `state == "cn"` 时按字符生成 char-ish box，多字符 token 仍可能是共享 word box。
+- `paddlex/inference/pipelines/ocr/result.py::_to_json()`：对外 JSON 包含 `text_word_boxes/text_word`，这就是 Inspector 需要兼容 boxes alias 的直接原因。
 
 ## 3. 坐标转换链
 
@@ -127,7 +138,7 @@ flowchart TD
 
     G --> H1[overall_ocr_res.rec_texts]
     G --> H2[overall_ocr_res.rec_boxes/rec_polys]
-    G --> H3[text_word/text_word_region]
+    G --> H3[text_word/text_word_region/text_word_boxes]
     G --> H4[parsing_res_list.block_content]
 
     H1 --> IR[OCR_IR: OcrIrLine/OcrIrToken]
@@ -212,15 +223,15 @@ flowchart TD
 
 本轮补齐的是 `chars` 回显链的真实缺口，不是再造 fallback：
 
-1. `tools/ocr_inspector/ui/panels/run_ocr.py::_flatten_api_result()` 会从 `layoutParsingResults[]/ocrResults[]` 的 `prunedResult` 中合并 `parsing_res_list`、`layout_det_res`、`overall_ocr_res` 和顶层 `text_word/text_word_region`。
+1. `tools/ocr_inspector/ui/panels/run_ocr.py::_flatten_api_result()` 会从 `layoutParsingResults[]/ocrResults[]` 的 `prunedResult` 中合并 `parsing_res_list`、`layout_det_res`、`overall_ocr_res` 和顶层 `text_word/text_word_region/text_word_boxes`。
 2. 本地 `PaddleOCR.predict()` 与 `PPStructureV3.predict()` 的 flatten 也走同一合并逻辑，避免本地 Inspector 调试链只有 block/line、没有 token/word 框。
-3. `tools/ocr_inspector/adapters/paddle.py` 读取 word rows 时按 `prunedResult -> flatten 顶层 -> overall_ocr_res` 查找，并兼容 `textWord/textWordRegion`。
+3. `tools/ocr_inspector/adapters/paddle.py` 读取 word rows 时按 `prunedResult -> flatten 顶层 -> overall_ocr_res` 查找，并兼容 `textWord/textWordRegion/textWordBoxes`。
 4. 若只有 `rec_texts/rec_boxes` 而没有 word rows，`CharNode.bbox` 仍保持 `None/unavailable`；这表示模型/请求没有给真实细粒度框，不再用 line bbox 假装 char。
 
 因此，当前 `chars` 不回显的判断标准是：
 
-- PP-OCRv5 / PP-StructureV3：若请求含 `returnWordBox=true` 且响应含 `text_word_region`，Inspector 应显示 `ocr/char` 或 `ocr/word`；若没有返回该字段，则是模型/服务输出限制或请求未生效。
-- PaddleOCR-VL / VL-1.5：项目默认不请求传统 OCR word-box 参数，最多稳定到 line/block；如果服务偶然返回 `text_word_region`，parser 能读，但 UI/文档不能承诺 VL 已支持真实 char。
+- PP-OCRv5 / PP-StructureV3：若请求含 `returnWordBox=true` 且响应含 `text_word_region` 或 Paddle JSON 的 `text_word_boxes`，Inspector 应显示 `ocr/char` 或 `ocr/word`；若没有返回这些字段，则是模型/服务输出限制或请求未生效。
+- PaddleOCR-VL / VL-1.5：项目默认不请求传统 OCR word-box 参数，最多稳定到 line/block；如果服务偶然返回 `text_word_region/text_word_boxes`，parser 能读，但 UI/文档不能承诺 VL 已支持真实 char。
 
 ## 10. Residual 错切收口
 
@@ -237,11 +248,13 @@ flowchart TD
 
 ## 11. Label Studio 参考结论
 
-已参考 Label Studio 官方导出说明，以及 GitHub 仓库 `HumanSignal/label-studio` 中 `docs/source/includes/result_format.md` 对 annotation result 的定义。关键点：
+已参考 Label Studio 官方导出说明，以及本地源码 `/root/github/label-studio/web/libs/editor/src/` 中的 region/selection 链。关键点：
 
 - Label Studio 把一个标注拆成 **region** 与 **result**，同一个 region ID 关联 bbox、label、textarea 等结果；这给当前项目的启发是：不要把“几何框”“文本”“标签/类型”“消费状态”混成一个临时字段，应先进入 OCR_IR，再投射到不同 proof 消费层。
 - Label Studio 图像导出的 bbox 使用相对百分比，并要求明确单位转换；当前项目不照搬百分比坐标，因为 Paddle API 在关闭 unwarping 时返回的是输入图像像素坐标，项目内部继续保持像素坐标更直接。
 - Label Studio 的 prediction/annotation 思路适合借鉴：机器预测先作为可追踪中间结果，人工结果再作为终审。当前 OCR_IR 也是“机器 raw → 中间表示 → proof 人工消费”的链路，不让 UI 直接消费 raw JSON。
+- `stores/RegionStore.js` 用 `region.id` 维护 `selection`、`regionIndexMap` 与 tree click 高亮，不依赖视图对象临时地址；Inspector 的等价原则是 search/tree/canvas 都必须指向同一个 `CharNode` 身份或稳定 identity。
+- `mixins/Regions.js`、`mixins/KonvaRegion.js`、`regions/RectRegion.jsx`、`components/SidePanels/DetailsPanel/RegionItem.tsx` 表明：画布点击、侧栏详情、树节点应只通过同一个 annotation/region store 更新选择态。Inspector 现在由 core search index 输出稳定 text-to-node identity，再让 crop/search/canvas 共享同一节点，避免每个面板各自重建 region。
 - 不适合照搬的点：Label Studio 是通用标注平台，region/result JSON 很灵活但较重；当前桌面 OCR 工具需要轻量、可构建、与现有 `Line/Char` 模型兼容，因此只借鉴“region/result 分离”和“ID/来源可追踪”的思想，不引入完整 Label Studio 标注格式。
 
 ## 12. 适配现状
@@ -253,7 +266,7 @@ flowchart TD
 - 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
-- Inspector flatten / PaddleAdapter 已补齐 `prunedResult.text_word/text_word_region` 顶层字段、flatten 后顶层字段和 camelCase alias，避免真实 token/word 框在调试链路中丢失
+- Inspector flatten / PaddleAdapter 已补齐 `prunedResult.text_word/text_word_region/text_word_boxes` 顶层字段、flatten 后顶层字段和 camelCase alias，避免真实 token/word 框在调试链路中丢失
 - API 坐标优先使用 `result.dataInfo.width/height` 判断画布；若 dataInfo / pruned shape 与 raw bbox 明显冲突且 bbox 已是 page-space，则不二次缩放，再用 bbox 启发式兜底
 - 行级文本、置信度、行框读取
 - token/word bbox 读取

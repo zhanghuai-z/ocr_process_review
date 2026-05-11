@@ -53,7 +53,7 @@ _SOURCE_LABELS = {
     "overall_ocr_res.rec_texts": "行级 OCR (overall_ocr_res)",
     "parsing_res_list":          "结构块 (parsing_res_list)",
     "layout_det_res":            "版面检测 (layout_det_res)",
-    "text_word_region":          "字/词框·真实 (text_word_region)",
+    "text_word_region":          "字/词框·真实 (text_word_region/text_word_boxes)",
     "char_fallback":             "字框·回退(行bbox) [estimated]",
     "fallback":                  "其他/回退",
 }
@@ -408,18 +408,18 @@ class OcrCanvas(QGraphicsView):
         if total_chars and not seen_ocr:
             if unavailable_chars:
                 self._add_canvas_note(
-                    "char/token bbox unavailable: 当前响应没有 text_word_region；"
+                    "char/token bbox unavailable: 当前响应没有 text_word_region/text_word_boxes；"
                     "请使用 PP-OCRv5/PP-StructureV3 并确认 returnWordBox=true。"
                 )
             elif seen_fallback:
                 self._add_canvas_note(
-                    "char/token bbox estimated: 当前没有真实 text_word_region，"
+                    "char/token bbox estimated: 当前没有真实 text_word_region/text_word_boxes，"
                     "灰色虚线仅为 fallback，不代表真实字/词框。"
                 )
         elif not total_chars and page.all_lines:
             self._add_canvas_note(
                 "char/token bbox unavailable: 当前 IR 没有 char/token 节点；"
-                "请检查响应是否包含 overall_ocr_res.rec_texts 与 text_word_region。"
+                "请检查响应是否包含 overall_ocr_res.rec_texts 与 text_word_region/text_word_boxes。"
             )
 
 

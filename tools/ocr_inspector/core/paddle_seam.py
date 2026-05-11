@@ -86,7 +86,7 @@ def canonical_polygon(raw: Any) -> Optional[Polygon]:
 
 def raw_contains_word_regions(value: Any) -> bool:
     if isinstance(value, dict):
-        for key in ("text_word_region", "textWordRegion"):
+        for key in ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"):
             if isinstance(value.get(key), list) and value.get(key):
                 return True
         return any(raw_contains_word_regions(v) for v in value.values())
@@ -118,12 +118,16 @@ def _overall_ocr_res(item: dict) -> dict:
 
 
 def _first_list_from_sources(sources: list[dict], keys: tuple[str, ...]) -> list:
+    first_empty: list | None = None
     for source in sources:
         for key in keys:
             value = source.get(key)
             if isinstance(value, list):
-                return value
-    return []
+                if value:
+                    return value
+                if first_empty is None:
+                    first_empty = value
+    return first_empty or []
 
 
 def _word_box_rows(item: dict) -> tuple[list, list]:
@@ -132,7 +136,7 @@ def _word_box_rows(item: dict) -> tuple[list, list]:
     direct = item if isinstance(item, dict) else {}
     sources = [pruned, direct, ocr_res]
     text_words = _first_list_from_sources(sources, ("text_word", "textWord"))
-    word_regions = _first_list_from_sources(sources, ("text_word_region", "textWordRegion"))
+    word_regions = _first_list_from_sources(sources, ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"))
     return text_words, word_regions
 
 
@@ -374,11 +378,11 @@ def _summarize_availability(raw: Any, doc: DocumentNode, diagnostics: list[CoreD
     ocr_chars = sum(1 for page in doc.pages for char in page.all_chars if char.bbox_source == "ocr" and char.bbox is not None)
     unavailable = sum(1 for page in doc.pages for char in page.all_chars if char.bbox_source == "unavailable")
     if raw_has_regions and ocr_chars:
-        _diag(diagnostics, "word_regions_preserved", "INFO", "availability", f"text_word_region preserved into {ocr_chars} OCR char/token node(s)")
+        _diag(diagnostics, "word_regions_preserved", "INFO", "availability", f"text_word_region/text_word_boxes preserved into {ocr_chars} OCR char/token node(s)")
     elif raw_has_regions and not ocr_chars:
-        _diag(diagnostics, "word_regions_not_consumed", "ERROR", "availability", "raw response has text_word_region but no OCR char/token nodes were produced")
+        _diag(diagnostics, "word_regions_not_consumed", "ERROR", "availability", "raw response has text_word_region/text_word_boxes but no OCR char/token nodes were produced")
     elif unavailable:
-        _diag(diagnostics, "server_missing_text_word_region", "INFO", "availability", "response has no text_word_region; char/token boxes are unavailable")
+        _diag(diagnostics, "server_missing_text_word_region", "INFO", "availability", "response has no text_word_region/text_word_boxes; char/token boxes are unavailable")
 
 
 def _attach_diagnostics(doc: DocumentNode, diagnostics: list[CoreDiagnostic]) -> None:
