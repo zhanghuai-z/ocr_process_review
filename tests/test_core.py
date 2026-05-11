@@ -3162,13 +3162,19 @@ def test_api_request_builders_split_profile_params():
     assert ocr_body["file"] == "abc"
     assert ocr_body["returnWordBox"] is True
     assert ocr_body["textDetLimitType"] == "max"
+    assert ocr_body["useDocUnwarping"] is False
 
     vl_body = ApiOcrEngine()._build_request_body(
         "abc",
         profile="paddleocr-vl",
         endpoint_url="https://example.com/layout-parsing",
     )
-    assert vl_body == {"file": "abc", "fileType": 1}
+    assert vl_body["file"] == "abc"
+    assert vl_body["fileType"] == 1
+    assert vl_body["useDocUnwarping"] is False
+    assert vl_body["useDocOrientationClassify"] is False
+    assert "returnWordBox" not in vl_body
+    assert "textDetLimitType" not in vl_body
 
     layout_body = LayoutAnalyzer()._build_api_request_body(
         "abc",
@@ -3185,6 +3191,7 @@ def test_api_request_builders_split_profile_params():
         endpoint_url="https://example.com/layout-parsing",
     )
     assert "returnWordBox" not in vl_layout_body
+    assert vl_layout_body["useDocUnwarping"] is False
 
     print("test_api_request_builders_split_profile_params PASSED")
 
@@ -3237,7 +3244,10 @@ def test_ocr_inspector_run_panel_profile_request_params():
             "_resolved_api_url": "https://example.com/layout-parsing",
         },
     )
-    assert vl_body == {"file": "abc", "fileType": 1}
+    assert vl_body["file"] == "abc"
+    assert vl_body["fileType"] == 1
+    assert vl_body["useDocUnwarping"] is False
+    assert "returnWordBox" not in vl_body
 
     print("test_ocr_inspector_run_panel_profile_request_params PASSED")
 
@@ -3274,6 +3284,74 @@ def test_layout_analyzer_uses_datainfo_canvas_scale():
     assert blocks[0].bbox == BBox(20, 40, 200, 100)
 
     print("test_layout_analyzer_uses_datainfo_canvas_scale PASSED")
+
+
+def test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "dataInfo": {"width": 500, "height": 1000},
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [800, 1500, 900, 1600],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(800, 1500, 100, 100)
+
+    print("test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space PASSED")
+
+
+def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "input_img_shape": [1000, 500],
+                        "layout_det_res": {
+                            "boxes": [
+                                {
+                                    "label": "text",
+                                    "coordinate": [800, 1500, 900, 1600],
+                                },
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert blocks[0].bbox == BBox(800, 1500, 100, 100)
+
+    print("test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space PASSED")
 
 
 def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
@@ -3476,6 +3554,8 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_uses_datainfo_canvas_scale()
+    test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
+    test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()

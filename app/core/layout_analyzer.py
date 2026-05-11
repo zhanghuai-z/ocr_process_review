@@ -182,6 +182,80 @@ class LayoutAnalyzer:
                     return bbox
         return None
 
+    def _raw_bbox_max_from_record(self, record: dict) -> tuple[float, float] | None:
+        for key in (
+            "coordinate", "bbox", "box", "block_bbox", "block_box",
+            "polygon", "poly", "points", "block_polygon_points",
+            "rec_box", "rec_bbox", "rec_poly", "rec_polys",
+        ):
+            if key not in record:
+                continue
+            max_xy = self._raw_bbox_max_from_coordinate(record.get(key))
+            if max_xy is not None:
+                return max_xy
+        return None
+
+    def _raw_bbox_max_from_coordinate(self, coord: object) -> tuple[float, float] | None:
+        """Extract raw max x/y before scaling or clamping."""
+        if coord is None:
+            return None
+        if isinstance(coord, dict):
+            if {"x", "y", "w", "h"}.issubset(coord.keys()):
+                try:
+                    return (
+                        float(coord["x"]) + float(coord["w"]),
+                        float(coord["y"]) + float(coord["h"]),
+                    )
+                except (TypeError, ValueError):
+                    return None
+            xs: list[float] = []
+            ys: list[float] = []
+            for x_key, y_key in (("x1", "y1"), ("x2", "y2"), ("x3", "y3"), ("x4", "y4")):
+                if x_key not in coord or y_key not in coord:
+                    continue
+                try:
+                    xs.append(float(coord[x_key]))
+                    ys.append(float(coord[y_key]))
+                except (TypeError, ValueError):
+                    return None
+            return (max(xs), max(ys)) if xs and ys else None
+
+        if isinstance(coord, (list, tuple)):
+            if coord and all(isinstance(point, (list, tuple)) for point in coord):
+                xs: list[float] = []
+                ys: list[float] = []
+                for point in coord:
+                    if len(point) < 2:
+                        continue
+                    try:
+                        xs.append(float(point[0]))
+                        ys.append(float(point[1]))
+                    except (TypeError, ValueError):
+                        return None
+                return (max(xs), max(ys)) if xs and ys else None
+            try:
+                values = [float(value) for value in coord]
+            except (TypeError, ValueError):
+                return None
+            if len(values) >= 8 and len(values) % 2 == 0:
+                return max(values[0::2]), max(values[1::2])
+            if len(values) >= 4:
+                return max(values[0], values[2]), max(values[1], values[3])
+        return None
+
+    def _raw_bbox_max_from_item(self, item: dict) -> tuple[float, float] | None:
+        max_x = 0.0
+        max_y = 0.0
+        found = False
+        for record in self._iter_layout_records_from_item(item) + self._iter_ocr_records_from_item(item):
+            max_xy = self._raw_bbox_max_from_record(record)
+            if max_xy is None:
+                continue
+            max_x = max(max_x, max_xy[0])
+            max_y = max(max_y, max_xy[1])
+            found = True
+        return (max_x, max_y) if found else None
+
     def _iter_layout_records_from_item(self, item: dict) -> List[dict]:
         pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
         candidates: List[dict] = []
@@ -374,6 +448,21 @@ class LayoutAnalyzer:
             return None
         return width, height
 
+    def _scale_from_api_shape(
+        self,
+        page: Page,
+        api_w: float,
+        api_h: float,
+        raw_max: tuple[float, float] | None,
+    ) -> tuple[float, float]:
+        if raw_max is not None:
+            max_x, max_y = raw_max
+            metadata_contradicted = max_x > api_w * 1.05 or max_y > api_h * 1.05
+            looks_like_page_space = max_x <= page.width * 1.05 and max_y <= page.height * 1.05
+            if metadata_contradicted and looks_like_page_space:
+                return 1.0, 1.0
+        return page.width / api_w, page.height / api_h
+
     def _detect_api_canvas_scale(
         self, page: Page, item: dict, data_info: dict | None = None
     ) -> tuple[float, float]:
@@ -387,11 +476,12 @@ class LayoutAnalyzer:
           5) (1.0, 1.0)
         """
         pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        raw_max = self._raw_bbox_max_from_item(item)
 
         data_shape = self._shape_from_data_info(data_info)
         if data_shape is not None and page.width > 0 and page.height > 0:
             api_w, api_h = data_shape
-            return page.width / api_w, page.height / api_h
+            return self._scale_from_api_shape(page, api_w, api_h, raw_max)
 
         # (2) 显式的预处理输出尺寸
         for key in ("input_img_shape", "img_shape", "image_shape"):
@@ -406,7 +496,7 @@ class LayoutAnalyzer:
             ):
                 api_h, api_w = float(shape[0]), float(shape[1])
                 if api_w > 0 and api_h > 0:
-                    return page.width / api_w, page.height / api_h
+                    return self._scale_from_api_shape(page, api_w, api_h, raw_max)
 
         doc_pre = pruned.get("doc_preprocessor_res") or {}
         if isinstance(doc_pre, dict):
@@ -420,41 +510,13 @@ class LayoutAnalyzer:
                 ):
                     api_h, api_w = float(shape[0]), float(shape[1])
                     if api_w > 0 and api_h > 0:
-                        return page.width / api_w, page.height / api_h
+                        return self._scale_from_api_shape(page, api_w, api_h, raw_max)
 
         # (2)/(3) 用最大坐标外推
-        ocr_res = pruned.get("overall_ocr_res") or {}
-        layout_res = pruned.get("layout_det_res") or {}
-
-        max_x_candidates: List[float] = []
-        max_y_candidates: List[float] = []
-
-        for box in ocr_res.get("rec_boxes", []) or []:
-            if isinstance(box, (list, tuple)) and len(box) >= 4:
-                max_x_candidates.append(float(box[2]))
-                max_y_candidates.append(float(box[3]))
-
-        for box in layout_res.get("boxes", []) or []:
-            if not isinstance(box, dict):
-                continue
-            coord = box.get("coordinate")
-            if not isinstance(coord, (list, tuple)):
-                continue
-            if (
-                len(coord) >= 4
-                and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in coord[:4])
-            ):
-                max_x_candidates.append(max(float(p[0]) for p in coord[:4]))
-                max_y_candidates.append(max(float(p[1]) for p in coord[:4]))
-            elif len(coord) >= 4:
-                max_x_candidates.append(float(coord[2]))
-                max_y_candidates.append(float(coord[3]))
-
-        if not max_x_candidates or not max_y_candidates or page.width <= 0 or page.height <= 0:
+        if raw_max is None or page.width <= 0 or page.height <= 0:
             return 1.0, 1.0
 
-        api_max_x = max(max_x_candidates)
-        api_max_y = max(max_y_candidates)
+        api_max_x, api_max_y = raw_max
         if api_max_x <= 0 or api_max_y <= 0:
             return 1.0, 1.0
 
