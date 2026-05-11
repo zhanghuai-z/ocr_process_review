@@ -233,6 +233,17 @@ flowchart TD
 - PP-OCRv5 / PP-StructureV3：若请求含 `returnWordBox=true` 且响应含 `text_word_region` 或 Paddle JSON 的 `text_word_boxes`，Inspector 应显示 `ocr/char` 或 `ocr/word`；若没有返回这些字段，则是模型/服务输出限制或请求未生效。
 - PaddleOCR-VL / VL-1.5：项目默认不请求传统 OCR word-box 参数，最多稳定到 line/block；如果服务偶然返回 `text_word_region/text_word_boxes`，parser 能读，但 UI/文档不能承诺 VL 已支持真实 char。
 
+本轮继续把“实际运行状态”接入 Inspector，而不是只显示静态理论矩阵：
+
+1. `RunOcrPanel` 会把本次 `source/pipeline/profile/endpoint` 写入 `_inspector_meta`，并在 Log 中显示。
+2. 对本地 Paddle / Structure，会显示本次实际参数摘要，包括 `returnWordBox`、orientation/unwarping 开关、det/rec 阈值、unclip 和 limit side。
+3. 对 API，会显示最终 resolved endpoint、profile、实际发送的 `returnWordBox` 与关键 payload 参数。
+4. flatten 前的响应字段和 flatten 后字段都会统计到 `response_field_summary` / `flattened_field_summary`，用户可直接看到有没有 `text_word_region/text_word_boxes`、`overall_ocr_res.rec_texts`、`rec_boxes`。
+5. `PaddleCoreResult` / `doc.parse_log` 会记录 runtime、request、response-fields、flattened-fields、IR 中 lines/chars/OCR char-token nodes 数量。
+6. Canvas warning 不再笼统说“请使用 PP-OCRv5/PP-StructureV3”：如果检测到本次已经发送 `returnWordBox=true`，但响应没有 word boxes，会明确显示断点在 Paddle/服务端返回层；如果 `returnWordBox=false`，则明确是请求未开启；如果响应有 boxes 但没有节点，则指向 parser/IR/canvas 消费层。
+
+本轮按用户要求做了真实图片渲染验收：构造 `text_word_boxes` 响应后走 `PaddleAdapter -> OCR_IR -> AppState -> OcrCanvas`，输出 `/tmp/ocr_inspector_validation/text_word_boxes_canvas_render.png`。图片中 `源`、`码` 两个字符均出现橙色真实 char box，且两个 `CharNode` 都能映射到 canvas `_node_item_map`，说明不是只停在 parser/test，而是实际 canvas item 已产生。
+
 ## 10. Residual 错切收口
 
 本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。
@@ -267,6 +278,8 @@ flowchart TD
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
 - Inspector flatten / PaddleAdapter 已补齐 `prunedResult.text_word/text_word_region/text_word_boxes` 顶层字段、flatten 后顶层字段和 camelCase alias，避免真实 token/word 框在调试链路中丢失
+- Inspector Run OCR Log / Parse Log 已显示本次实际 `source/pipeline/profile/endpoint`、payload 关键参数、响应字段摘要、flatten 字段摘要、IR 消费数量
+- Canvas unavailable warning 会根据真实 `returnWordBox` 请求状态和响应字段判断断点层，不再用“请使用 PP-OCRv5/PP-StructureV3”覆盖所有失败场景
 - API 坐标优先使用 `result.dataInfo.width/height` 判断画布；若 dataInfo / pruned shape 与 raw bbox 明显冲突且 bbox 已是 page-space，则不二次缩放，再用 bbox 启发式兜底
 - 行级文本、置信度、行框读取
 - token/word bbox 读取
