@@ -12,7 +12,7 @@ class AppState:
         self._active_page: Optional[PageNode] = None
         self._selected_node: Optional[IrNode] = None
         self._overlay_flags: dict[str, bool] = {
-            "blocks": True, "lines": True, "chars": False,
+            "blocks": True, "lines": True, "chars": True,
             "polygons": False, "labels": True,
             "layout_det": False, "legend": True,
         }
@@ -23,6 +23,10 @@ class AppState:
 
     @property
     def document(self) -> Optional[DocumentNode]:
+        return self._document
+
+    @property
+    def active_document(self) -> Optional[DocumentNode]:
         return self._document
 
     def set_document(self, doc: Optional[DocumentNode]) -> None:

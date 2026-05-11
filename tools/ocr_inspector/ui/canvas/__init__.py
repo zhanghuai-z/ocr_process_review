@@ -360,8 +360,13 @@ class OcrCanvas(QGraphicsView):
         # Fallback: keyed by bbox coords only — all chars in a line share one display box.
         seen_ocr: dict[tuple, _BBoxItem] = {}
         seen_fallback: dict[tuple, _BBoxItem] = {}
+        total_chars = 0
+        unavailable_chars = 0
         for char in page.all_chars:
+            total_chars += 1
             if not char.bbox:
+                if getattr(char, "bbox_source", "") == "unavailable":
+                    unavailable_chars += 1
                 continue
             bs = getattr(char, "bbox_source", "") or "fallback"
             is_ocr = (bs == "ocr")
@@ -400,6 +405,23 @@ class OcrCanvas(QGraphicsView):
                         self._add_label(char.bbox, "⚠est", _source_colour(sf), True)
                 self._node_item_map[id(char)] = seen_fallback[coord_key]
 
+        if total_chars and not seen_ocr:
+            if unavailable_chars:
+                self._add_canvas_note(
+                    "char/token bbox unavailable: 当前响应没有 text_word_region；"
+                    "请使用 PP-OCRv5/PP-StructureV3 并确认 returnWordBox=true。"
+                )
+            elif seen_fallback:
+                self._add_canvas_note(
+                    "char/token bbox estimated: 当前没有真实 text_word_region，"
+                    "灰色虚线仅为 fallback，不代表真实字/词框。"
+                )
+        elif not total_chars and page.all_lines:
+            self._add_canvas_note(
+                "char/token bbox unavailable: 当前 IR 没有 char/token 节点；"
+                "请检查响应是否包含 overall_ocr_res.rec_texts 与 text_word_region。"
+            )
+
 
     def _add_label(self, bbox: BBox, text: str, colour: QColor, visible: bool) -> None:
         lbl = QGraphicsSimpleTextItem(text[:32])
@@ -409,6 +431,15 @@ class OcrCanvas(QGraphicsView):
         lbl.setZValue(10)
         lbl.setVisible(visible)
         self._scene.addItem(lbl)
+
+    def _add_canvas_note(self, text: str) -> None:
+        note = QGraphicsTextItem(text)
+        note.setDefaultTextColor(QColor(255, 235, 170))
+        note.setTextWidth(560)
+        note.setPos(8, 72)
+        note.setZValue(30)
+        note.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self._scene.addItem(note)
 
     # ── state callbacks ──────────────────────────────────────────────────
 

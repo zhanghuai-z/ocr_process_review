@@ -225,13 +225,18 @@ class _TextSearchTab(QWidget):
                 src = f"  {src}/{gran}"
             label = f"[{m.kind}] {m.match_text[:40]}{bbox_str}{src}"
             item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, len(self._list) + len(self._matches) * 0)  # index
+            item.setData(Qt.UserRole, self._list.count())
             # Show char/line differently
             if m.kind == "char":
                 item.setForeground(Qt.darkGray)
             self._list.addItem(item)
 
         self._list.setCurrentRow(0)
+
+    def set_query(self, query: str, *, run: bool = True) -> None:
+        self._query.setText(query)
+        if run and query.strip():
+            self._do_search()
 
     def _on_selection(self, current: QListWidgetItem, _prev):
         if current is None:
@@ -244,6 +249,10 @@ class _TextSearchTab(QWidget):
             return
 
         match = self._matches[idx]
+        if self._state.active_page is not match.page:
+            self._state.set_active_page(match.page)
+        self._state.set_selection(match.node)
+
         if not match.image_path or not match.bbox:
             self._preview.show_error("没有图像路径或 bbox")
             self._btn_save.setEnabled(False)
@@ -441,5 +450,8 @@ class CropPanel(QWidget):
         """Switch to text-search tab and optionally pre-fill query."""
         self._tabs.setCurrentIndex(0)
         if query:
-            self._search_tab._query.setText(query)
-            self._search_tab._do_search()
+            self._search_tab.set_query(query)
+
+    def set_query(self, query: str):
+        """Compatibility hook used by the main window toolbar."""
+        self.focus_search(query)

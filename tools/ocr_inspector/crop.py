@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from tools.ocr_inspector.models.ir import (
     BBox, CharNode, DocumentNode, LineNode, PageNode, Polygon,
 )
+from tools.ocr_inspector.core import query_text_search_index
 
 if TYPE_CHECKING:
     pass
@@ -134,6 +135,7 @@ class TextMatch:
     match_text: str                    # the text of the node
     query: str                         # the search query
     kind: str                          # "char" or "line"
+    identity: str                      # stable search-index identity
 
     def crop(self, *, padding: int = 4) -> Optional["PIL.Image.Image"]:  # type: ignore[name-defined]
         """Convenience: crop this match's bbox from the page image."""
@@ -169,49 +171,25 @@ def find_text_matches(
     if not query:
         return []
 
-    cmp_query = query if case_sensitive else query.lower()
-    results: List[TextMatch] = []
-
-    for page in doc.pages:
-        img_path = page.image_path or ""
-
-        for line in page.all_lines:
-            # -- char-level search (only for OCR-true chars) --
-            if search_chars:
-                # Group chars by token_text to avoid duplicate matches
-                seen_tokens: set = set()
-                for char in line.chars:
-                    if getattr(char, "bbox_source", "") != "ocr":
-                        continue  # skip fallback chars; they have no real bbox
-                    token = char.token_text or char.char
-                    cmp_token = token if case_sensitive else token.lower()
-                    if cmp_query in cmp_token and token not in seen_tokens:
-                        seen_tokens.add(token)
-                        results.append(TextMatch(
-                            node=char,
-                            page=page,
-                            image_path=img_path,
-                            bbox=char.bbox,
-                            match_text=token,
-                            query=query,
-                            kind="char",
-                        ))
-
-            # -- line-level search --
-            if search_lines:
-                cmp_text = line.text if case_sensitive else line.text.lower()
-                if cmp_query in cmp_text:
-                    results.append(TextMatch(
-                        node=line,
-                        page=page,
-                        image_path=img_path,
-                        bbox=line.bbox,
-                        match_text=line.text,
-                        query=query,
-                        kind="line",
-                    ))
-
-    return results
+    return [
+        TextMatch(
+            node=entry.node,
+            page=entry.page,
+            image_path=entry.page.image_path or "",
+            bbox=entry.bbox,
+            match_text=entry.text,
+            query=query,
+            kind=entry.kind,
+            identity=entry.identity,
+        )
+        for entry in query_text_search_index(
+            doc,
+            query,
+            case_sensitive=case_sensitive,
+            include_chars=search_chars,
+            include_lines=search_lines,
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
