@@ -488,6 +488,7 @@ def ensure_line_char_bboxes(
             if (
                 existing is not None
                 and existing.bbox_granularity == "char"
+                and existing.bbox_source != "ocr"
                 and explicit_char_bbox_points_to_neighbor(bbox, split_bboxes, idx)
             ):
                 bbox = split_bboxes[idx]

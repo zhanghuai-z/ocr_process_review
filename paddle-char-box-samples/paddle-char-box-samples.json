@@ -1,0 +1,423 @@
+{
+  "source_files": [
+    "/mnt/d/project/ocr_process/file/244771纵校/120166.tif"
+  ],
+  "output_dir": "/mnt/d/project/ocr_process/worktrees/gpt/paddle-char-box-samples",
+  "model_profiles": {
+    "ppocrv5": {
+      "endpoint": "/ocr",
+      "request_summary": {
+        "fileType": 1,
+        "useDocOrientationClassify": false,
+        "useDocUnwarping": false,
+        "useTextlineOrientation": false,
+        "returnWordBox": true,
+        "textDetLimitSideLen": 1536,
+        "textDetLimitType": "max",
+        "textDetThresh": 0.3,
+        "textDetBoxThresh": 0.6,
+        "textDetUnclipRatio": 2.0,
+        "textRecScoreThresh": 0.0
+      },
+      "raw_field_counts": {
+        "layoutParsingResults": 0,
+        "ocrResults": 1,
+        "overall_ocr_res": 0,
+        "rec_texts": 37,
+        "rec_boxes": 37,
+        "rec_polys": 37,
+        "text_word": 37,
+        "textWord": 0,
+        "text_word_region": 0,
+        "textWordRegion": 0,
+        "text_word_boxes": 37,
+        "textWordBoxes": 0,
+        "parsing_res_list": 0,
+        "layout_det_res": 0
+      },
+      "parser_canvas_summary": {
+        "line_count": 37,
+        "char_count": 1082,
+        "ocr_char_count": 1082,
+        "canvas_items_for_chars": 1082
+      }
+    },
+    "ppstructurev3": {
+      "endpoint": "/layout-parsing",
+      "request_summary": {
+        "fileType": 1,
+        "useDocOrientationClassify": false,
+        "useDocUnwarping": false,
+        "useTextlineOrientation": false,
+        "returnWordBox": true,
+        "textDetLimitSideLen": 1536,
+        "textDetLimitType": "max",
+        "textDetThresh": 0.3,
+        "textDetBoxThresh": 0.6,
+        "textDetUnclipRatio": 2.0,
+        "textRecScoreThresh": 0.0
+      },
+      "raw_field_counts": {
+        "layoutParsingResults": 1,
+        "ocrResults": 1,
+        "overall_ocr_res": 2,
+        "rec_texts": 90,
+        "rec_boxes": 90,
+        "rec_polys": 90,
+        "text_word": 0,
+        "textWord": 0,
+        "text_word_region": 0,
+        "textWordRegion": 0,
+        "text_word_boxes": 0,
+        "textWordBoxes": 0,
+        "parsing_res_list": 14,
+        "layout_det_res": 2
+      },
+      "parser_canvas_summary": {
+        "line_count": 90,
+        "char_count": 2480,
+        "ocr_char_count": 0,
+        "canvas_items_for_chars": 0
+      }
+    }
+  },
+  "overlays": [
+    "paddle-char-box-samples/overlays/120166_ppocr_line_raw_vs_bound.png"
+  ],
+  "samples": [
+    {
+      "id": "s00",
+      "text": "数",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 304,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 304,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "数",
+      "raw_crop": "paddle-char-box-samples/crops/s00_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s00_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s00_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 2152,
+        "fill_ratio": 0.4899817850637523,
+        "tight_w": 55,
+        "tight_h": 57
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s01",
+      "text": "量",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 373,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 373,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "量",
+      "raw_crop": "paddle-char-box-samples/crops/s01_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s01_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s01_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 2451,
+        "fill_ratio": 0.5580601092896175,
+        "tight_w": 61,
+        "tight_h": 54
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s02",
+      "text": "经",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 431,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 431,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "经",
+      "raw_crop": "paddle-char-box-samples/crops/s02_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s02_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s02_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 1913,
+        "fill_ratio": 0.4355646630236794,
+        "tight_w": 53,
+        "tight_h": 55
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s03",
+      "text": "济",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 500,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 500,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "济",
+      "raw_crop": "paddle-char-box-samples/crops/s03_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s03_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s03_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 1681,
+        "fill_ratio": 0.38274134790528236,
+        "tight_w": 61,
+        "tight_h": 57
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s08",
+      "text": "研",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 799,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 799,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "研",
+      "raw_crop": "paddle-char-box-samples/crops/s08_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s08_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s08_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 1982,
+        "fill_ratio": 0.4512750455373406,
+        "tight_w": 55,
+        "tight_h": 54
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s09",
+      "text": "究",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 869,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 869,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "究",
+      "raw_crop": "paddle-char-box-samples/crops/s09_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s09_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s09_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 1789,
+        "fill_ratio": 0.41412037037037036,
+        "tight_w": 50,
+        "tight_h": 56
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s14",
+      "text": "年",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 1076,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 1076,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "年",
+      "raw_crop": "paddle-char-box-samples/crops/s14_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s14_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s14_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 731,
+        "fill_ratio": 0.16643897996357013,
+        "tight_w": 59,
+        "tight_h": 48
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "s15",
+      "text": "第",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 1122,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 1122,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "char",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "第",
+      "raw_crop": "paddle-char-box-samples/crops/s15_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/s15_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/s15_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 858,
+        "fill_ratio": 0.1953551912568306,
+        "tight_w": 56,
+        "tight_h": 48
+      },
+      "quality_label": "usable_char_crop",
+      "notes": "raw bbox and project binding are identical; crop contains target glyph with some Paddle raw margin"
+    },
+    {
+      "id": "token_2026",
+      "text": "2026",
+      "line_text": "数量经济技术经济研究2026年第4期",
+      "profile": "PP-OCRv5 /ocr",
+      "source_file": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+      "raw_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "project_bound_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "raw_equals_project_bound": true,
+      "bbox_source_after_binding": "ocr",
+      "bbox_granularity_after_binding": "word",
+      "from_raw_char_or_token_bbox": true,
+      "token_text": "2026",
+      "shared_by_char_indices": [
+        10,
+        11,
+        12,
+        13
+      ],
+      "raw_crop": "paddle-char-box-samples/crops/token_2026_raw.png",
+      "project_bound_crop": "paddle-char-box-samples/crops/token_2026_bound.png",
+      "pair_crop": "paddle-char-box-samples/crops/token_2026_pair.png",
+      "ink_metrics_in_raw": {
+        "ink_pixels": 1184,
+        "fill_ratio": 0.178743961352657,
+        "tight_w": 83,
+        "tight_h": 35
+      },
+      "quality_label": "usable_token_crop_not_char_crop",
+      "notes": "Paddle returns 2026 as shared token/word bbox; usable for token binding, not individual digit strong binding."
+    }
+  ],
+  "binding_summary": {
+    "ppocrv5_char_count_on_first_line": 18,
+    "changed_by_project_binding_count_on_first_line": 0,
+    "policy": "bbox_source=ocr boxes are preserved as Paddle raw truth; fallback/refined boxes are not presented as raw."
+  },
+  "conclusions": {
+    "ppocrv5_strong_binding": "usable_with_caveat",
+    "ppocrv5_reason": "Real samples show PP-OCRv5 returns char/token boxes and the crops generally contain the target glyph, but raw boxes often include extra margin and numeric runs can be token-level shared boxes rather than per-digit boxes.",
+    "ppstructurev3_word_boxes": "not_available_in_this_real_response",
+    "ppstructurev3_reason": "The real Structure response sent returnWordBox=true but returned no text_word_region/text_word_boxes, so it is not a stable char-box source in this sample.",
+    "postprocess_binding": "preserve_raw_ocr_boxes_after_fix",
+    "postprocess_reason": "For explicit PP-OCRv5 OCR boxes, project binding now preserves raw coordinates instead of replacing them with estimated split/refined boxes; postprocess remains useful for fallback/no-box paths and line crops, not as a magic repair for raw OCR char box quality."
+  }
+}

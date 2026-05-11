@@ -1,0 +1,414 @@
+{
+  "line_text": "数量经济技术经济研究2026年第4期",
+  "line_bbox_after_main_app": {
+    "x": 304,
+    "y": 265,
+    "w": 955,
+    "h": 57
+  },
+  "sample_count": 16,
+  "changed_count_all_line": 1,
+  "rows": [
+    {
+      "idx": 0,
+      "char": "数",
+      "raw_parser_bbox": {
+        "x": 304,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 304,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 2152,
+        "fill_ratio": 0.4899817850637523,
+        "tight_w": 55,
+        "tight_h": 57
+      }
+    },
+    {
+      "idx": 1,
+      "char": "量",
+      "raw_parser_bbox": {
+        "x": 373,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 373,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 2451,
+        "fill_ratio": 0.5580601092896175,
+        "tight_w": 61,
+        "tight_h": 54
+      }
+    },
+    {
+      "idx": 2,
+      "char": "经",
+      "raw_parser_bbox": {
+        "x": 431,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 431,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1913,
+        "fill_ratio": 0.4355646630236794,
+        "tight_w": 53,
+        "tight_h": 55
+      }
+    },
+    {
+      "idx": 3,
+      "char": "济",
+      "raw_parser_bbox": {
+        "x": 500,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 500,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1681,
+        "fill_ratio": 0.38274134790528236,
+        "tight_w": 61,
+        "tight_h": 57
+      }
+    },
+    {
+      "idx": 4,
+      "char": "技",
+      "raw_parser_bbox": {
+        "x": 558,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 558,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1889,
+        "fill_ratio": 0.4372685185185185,
+        "tight_w": 51,
+        "tight_h": 57
+      }
+    },
+    {
+      "idx": 5,
+      "char": "术",
+      "raw_parser_bbox": {
+        "x": 627,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 627,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1577,
+        "fill_ratio": 0.3590619307832423,
+        "tight_w": 61,
+        "tight_h": 57
+      }
+    },
+    {
+      "idx": 6,
+      "char": "经",
+      "raw_parser_bbox": {
+        "x": 684,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 684,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1875,
+        "fill_ratio": 0.42691256830601093,
+        "tight_w": 61,
+        "tight_h": 55
+      }
+    },
+    {
+      "idx": 7,
+      "char": "济",
+      "raw_parser_bbox": {
+        "x": 753,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 679,
+        "y": 265,
+        "w": 57,
+        "h": 56
+      },
+      "changed_by_main_app": true,
+      "source_after": "fallback",
+      "granularity_after": "fallback",
+      "raw_ink_metrics": {
+        "ink_pixels": 1869,
+        "fill_ratio": 0.4255464480874317,
+        "tight_w": 61,
+        "tight_h": 57
+      }
+    },
+    {
+      "idx": 8,
+      "char": "研",
+      "raw_parser_bbox": {
+        "x": 799,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 799,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1982,
+        "fill_ratio": 0.4512750455373406,
+        "tight_w": 55,
+        "tight_h": 54
+      }
+    },
+    {
+      "idx": 9,
+      "char": "究",
+      "raw_parser_bbox": {
+        "x": 869,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 869,
+        "y": 256,
+        "w": 60,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 1789,
+        "fill_ratio": 0.41412037037037036,
+        "tight_w": 50,
+        "tight_h": 56
+      }
+    },
+    {
+      "idx": 10,
+      "char": "2",
+      "raw_parser_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "word",
+      "raw_ink_metrics": {
+        "ink_pixels": 1184,
+        "fill_ratio": 0.178743961352657,
+        "tight_w": 83,
+        "tight_h": 35
+      }
+    },
+    {
+      "idx": 11,
+      "char": "0",
+      "raw_parser_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "word",
+      "raw_ink_metrics": {
+        "ink_pixels": 1184,
+        "fill_ratio": 0.178743961352657,
+        "tight_w": 83,
+        "tight_h": 35
+      }
+    },
+    {
+      "idx": 12,
+      "char": "2",
+      "raw_parser_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "word",
+      "raw_ink_metrics": {
+        "ink_pixels": 1184,
+        "fill_ratio": 0.178743961352657,
+        "tight_w": 83,
+        "tight_h": 35
+      }
+    },
+    {
+      "idx": 13,
+      "char": "6",
+      "raw_parser_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 985,
+        "y": 256,
+        "w": 92,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "word",
+      "raw_ink_metrics": {
+        "ink_pixels": 1184,
+        "fill_ratio": 0.178743961352657,
+        "tight_w": 83,
+        "tight_h": 35
+      }
+    },
+    {
+      "idx": 14,
+      "char": "年",
+      "raw_parser_bbox": {
+        "x": 1076,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 1076,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 731,
+        "fill_ratio": 0.16643897996357013,
+        "tight_w": 59,
+        "tight_h": 48
+      }
+    },
+    {
+      "idx": 15,
+      "char": "第",
+      "raw_parser_bbox": {
+        "x": 1122,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "main_app_after_ensure_bbox": {
+        "x": 1122,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "changed_by_main_app": false,
+      "source_after": "ocr",
+      "granularity_after": "char",
+      "raw_ink_metrics": {
+        "ink_pixels": 858,
+        "fill_ratio": 0.1953551912568306,
+        "tight_w": 56,
+        "tight_h": 48
+      }
+    }
+  ],
+  "conclusion": "For explicit OCR char boxes, ensure_line_char_bboxes preserves raw/parser bbox unless neighbor-repair triggers; on this line changed_count_all_line is the measured final behavior."
+}

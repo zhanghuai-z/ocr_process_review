@@ -225,10 +225,33 @@ def test_bbox_tools():
         ],
     )
     ensure_line_char_bboxes(shifted)
-    assert shifted.chars[0].bbox == BBox(10, 20, 30, 30)
-    assert shifted.chars[0].bbox_source == "fallback"
+    assert shifted.chars[0].bbox == BBox(40, 20, 30, 30)
+    assert shifted.chars[0].bbox_source == "ocr"
     assert shifted.chars[1].bbox == BBox(40, 20, 30, 30)
     assert shifted.chars[1].bbox_source == "ocr"
+
+    fallback_shifted = Line(
+        text="甲乙丙",
+        confidence=0.9,
+        bbox=BBox(10, 20, 90, 30),
+        chars=[
+            Char(
+                char="甲", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="甲",
+            ),
+            Char(
+                char="乙", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="乙",
+            ),
+            Char(
+                char="丙", confidence=0.9, bbox=BBox(70, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="丙",
+            ),
+        ],
+    )
+    ensure_line_char_bboxes(fallback_shifted)
+    assert fallback_shifted.chars[0].bbox == BBox(10, 20, 30, 30)
+    assert fallback_shifted.chars[0].bbox_source == "fallback"
 
     img = np.full((100, 180, 3), 255, dtype=np.uint8)
     glyph_boxes = [
