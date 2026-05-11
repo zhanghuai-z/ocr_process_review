@@ -165,9 +165,57 @@ def _detect_profile(raw: Any, data: dict) -> str | None:
     return None
 
 
+def _runtime_meta(raw: Any) -> dict:
+    if isinstance(raw, dict):
+        meta = raw.get("_inspector_meta")
+        if isinstance(meta, dict):
+            return meta
+    return {}
+
+
+def _request_return_word_box(meta: dict) -> bool | None:
+    for key in ("request_summary", "api_request_summary"):
+        summary = meta.get(key)
+        if isinstance(summary, dict) and "returnWordBox" in summary:
+            value = summary.get("returnWordBox")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.lower()
+                if lowered in ("true", "1", "yes"):
+                    return True
+                if lowered in ("false", "0", "no"):
+                    return False
+    return None
+
+
+def _append_runtime_metadata(raw: Any, doc: DocumentNode) -> None:
+    meta = _runtime_meta(raw)
+    if not meta:
+        return
+    source = meta.get("source", "-")
+    pipeline = meta.get("pipeline", "-")
+    profile = meta.get("api_model_profile", "-")
+    endpoint = meta.get("api_url", "")
+    doc.parse_log.append(f"INFO: [runtime] source={source} pipeline={pipeline} profile={profile} endpoint={endpoint or '-'}")
+
+    request = meta.get("request_summary") or meta.get("api_request_summary") or {}
+    if isinstance(request, dict) and request:
+        parts = ", ".join(f"{key}={request.get(key)!r}" for key in sorted(request) if key != "file")
+        doc.parse_log.append(f"INFO: [request] {parts}")
+
+    response_fields = meta.get("response_field_summary") or {}
+    flattened_fields = meta.get("flattened_field_summary") or {}
+    if isinstance(response_fields, dict):
+        doc.parse_log.append(f"INFO: [response-fields] {response_fields}")
+    if isinstance(flattened_fields, dict):
+        doc.parse_log.append(f"INFO: [flattened-fields] {flattened_fields}")
+
+
 def build_paddle_document(raw: Any, *, source_path: str = "", image_path: str = "") -> PaddleCoreResult:
     diagnostics: list[CoreDiagnostic] = []
     doc = DocumentNode.make(source_path=source_path, engine="paddle", raw=raw)
+    _append_runtime_metadata(raw, doc)
 
     data = raw.get("result", raw) if isinstance(raw, dict) else raw
     if not isinstance(data, dict):
@@ -375,6 +423,8 @@ def _build_chars(*, text: str, confidence: float, token_row: Any, region_row: An
 
 def _summarize_availability(raw: Any, doc: DocumentNode, diagnostics: list[CoreDiagnostic]) -> None:
     raw_has_regions = raw_contains_word_regions(raw)
+    meta = _runtime_meta(raw)
+    return_word_box = _request_return_word_box(meta)
     ocr_chars = sum(1 for page in doc.pages for char in page.all_chars if char.bbox_source == "ocr" and char.bbox is not None)
     unavailable = sum(1 for page in doc.pages for char in page.all_chars if char.bbox_source == "unavailable")
     if raw_has_regions and ocr_chars:
@@ -382,7 +432,24 @@ def _summarize_availability(raw: Any, doc: DocumentNode, diagnostics: list[CoreD
     elif raw_has_regions and not ocr_chars:
         _diag(diagnostics, "word_regions_not_consumed", "ERROR", "availability", "raw response has text_word_region/text_word_boxes but no OCR char/token nodes were produced")
     elif unavailable:
-        _diag(diagnostics, "server_missing_text_word_region", "INFO", "availability", "response has no text_word_region/text_word_boxes; char/token boxes are unavailable")
+        if return_word_box is True:
+            _diag(
+                diagnostics,
+                "server_missing_text_word_region",
+                "WARNING",
+                "availability",
+                "returnWordBox=true was sent, but response has no text_word_region/text_word_boxes; failure is at Paddle/server response layer",
+            )
+        elif return_word_box is False:
+            _diag(
+                diagnostics,
+                "request_word_box_disabled",
+                "INFO",
+                "availability",
+                "returnWordBox=false for this run; char/token boxes are unavailable because the request did not ask for them",
+            )
+        else:
+            _diag(diagnostics, "server_missing_text_word_region", "INFO", "availability", "response has no text_word_region/text_word_boxes; char/token boxes are unavailable")
 
 
 def _attach_diagnostics(doc: DocumentNode, diagnostics: list[CoreDiagnostic]) -> None:

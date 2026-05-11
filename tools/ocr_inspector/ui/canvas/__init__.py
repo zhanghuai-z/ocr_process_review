@@ -59,6 +59,34 @@ _SOURCE_LABELS = {
 }
 
 
+def _raw_contains_word_boxes(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key in ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"):
+            found = value.get(key)
+            if isinstance(found, list) and found:
+                return True
+        return any(_raw_contains_word_boxes(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_raw_contains_word_boxes(child) for child in value)
+    return False
+
+
+def _request_return_word_box(meta: dict[str, Any]) -> bool | None:
+    for key in ("request_summary", "api_request_summary"):
+        summary = meta.get(key)
+        if isinstance(summary, dict) and "returnWordBox" in summary:
+            value = summary.get("returnWordBox")
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.lower()
+                if lowered in ("true", "1", "yes"):
+                    return True
+                if lowered in ("false", "0", "no"):
+                    return False
+    return None
+
+
 def _source_colour(source_field: str) -> QColor:
     return SOURCE_COLOURS.get(source_field, SOURCE_COLOURS["fallback"])
 
@@ -407,10 +435,7 @@ class OcrCanvas(QGraphicsView):
 
         if total_chars and not seen_ocr:
             if unavailable_chars:
-                self._add_canvas_note(
-                    "char/token bbox unavailable: 当前响应没有 text_word_region/text_word_boxes；"
-                    "请使用 PP-OCRv5/PP-StructureV3 并确认 returnWordBox=true。"
-                )
+                self._add_canvas_note(self._unavailable_word_box_note())
             elif seen_fallback:
                 self._add_canvas_note(
                     "char/token bbox estimated: 当前没有真实 text_word_region/text_word_boxes，"
@@ -421,6 +446,36 @@ class OcrCanvas(QGraphicsView):
                 "char/token bbox unavailable: 当前 IR 没有 char/token 节点；"
                 "请检查响应是否包含 overall_ocr_res.rec_texts 与 text_word_region/text_word_boxes。"
             )
+
+    def _unavailable_word_box_note(self) -> str:
+        doc = self._state.active_document
+        raw = getattr(doc, "raw", {}) if doc is not None else {}
+        meta = raw.get("_inspector_meta", {}) if isinstance(raw, dict) else {}
+        sent = _request_return_word_box(meta if isinstance(meta, dict) else {})
+        profile = meta.get("api_model_profile") or meta.get("pipeline") or "-"
+        endpoint = meta.get("api_url") or "-"
+        has_word_boxes = _raw_contains_word_boxes(raw)
+
+        if has_word_boxes:
+            return (
+                "char/token bbox unavailable: 响应含 text_word_region/text_word_boxes，"
+                "但 parser/IR/canvas 没有消费成可画节点；请查看 Parse Log 的 word_regions_not_consumed。"
+            )
+        if sent is True:
+            return (
+                "char/token bbox unavailable: 本次已发送 returnWordBox=true，"
+                f"profile/pipeline={profile}，endpoint={endpoint}；"
+                "但响应没有 text_word_region/text_word_boxes，断点在 Paddle/服务端返回层。"
+            )
+        if sent is False:
+            return (
+                "char/token bbox unavailable: 本次 returnWordBox=false，"
+                "请求未开启字/词框；开启后 PP-OCRv5/PP-StructureV3 才可能返回真实框。"
+            )
+        return (
+            "char/token bbox unavailable: 当前响应没有 text_word_region/text_word_boxes；"
+            "也未检测到本次实际请求是否发送 returnWordBox，请查看 Run OCR Log / Parse Log。"
+        )
 
 
     def _add_label(self, bbox: BBox, text: str, colour: QColor, visible: bool) -> None:

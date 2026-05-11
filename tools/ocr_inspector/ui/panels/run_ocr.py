@@ -44,6 +44,111 @@ def _append_list_field(target: dict[str, Any], key: str, value: Any) -> None:
         target[key].extend(value)
 
 
+_RELEVANT_RESPONSE_FIELDS = (
+    "layoutParsingResults",
+    "ocrResults",
+    "prunedResult",
+    "overall_ocr_res",
+    "rec_texts",
+    "rec_boxes",
+    "rec_polys",
+    "rec_polygons",
+    "dt_polys",
+    "text_word",
+    "textWord",
+    "text_word_region",
+    "textWordRegion",
+    "text_word_boxes",
+    "textWordBoxes",
+    "parsing_res_list",
+    "layout_det_res",
+    "markdown",
+)
+
+
+def _field_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, dict):
+        return 1
+    if value in (None, ""):
+        return 0
+    return 1
+
+
+def _summarize_relevant_response_fields(value: Any) -> dict[str, int]:
+    summary: dict[str, int] = {}
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if key in _RELEVANT_RESPONSE_FIELDS:
+                    summary[key] = summary.get(key, 0) + _field_count(child)
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return {key: summary[key] for key in sorted(summary)}
+
+
+def _word_box_field_count(summary: dict[str, int]) -> int:
+    return sum(summary.get(key, 0) for key in ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"))
+
+
+def _summarize_runtime_params(params: dict[str, Any]) -> dict[str, Any]:
+    pred = params.get("ocr_pred", {}) if isinstance(params, dict) else {}
+    init = params.get("ocr_init", {}) if isinstance(params, dict) else {}
+    structure = params.get("structure", {}) if isinstance(params, dict) else {}
+    summary: dict[str, Any] = {
+        "returnWordBox": pred.get("return_word_box"),
+        "useDocOrientationClassify": init.get("use_doc_orientation_classify"),
+        "useDocUnwarping": init.get("use_doc_unwarping"),
+        "useTextlineOrientation": init.get("use_textline_orientation"),
+        "textDetThresh": pred.get("text_det_thresh", structure.get("text_det_thresh")),
+        "textDetBoxThresh": pred.get("text_det_box_thresh", structure.get("text_det_box_thresh")),
+        "textDetUnclipRatio": pred.get("text_det_unclip_ratio", structure.get("text_det_unclip_ratio")),
+        "textDetLimitSideLen": pred.get("text_det_limit_side_len", structure.get("text_det_limit_side_len")),
+        "textDetLimitType": pred.get("text_det_limit_type", structure.get("text_det_limit_type")),
+        "textRecScoreThresh": pred.get("text_rec_score_thresh", structure.get("text_rec_score_thresh")),
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _attach_inspector_runtime_meta(
+    raw: dict[str, Any],
+    *,
+    source: str,
+    pipeline: str,
+    image_path: str,
+    params: dict[str, Any] | None = None,
+    request_summary: dict[str, Any] | None = None,
+    response_raw: Any | None = None,
+    api_url: str = "",
+    api_model_profile: str = "",
+) -> dict[str, Any]:
+    meta = raw.setdefault("_inspector_meta", {})
+    meta["source"] = source
+    meta["pipeline"] = pipeline
+    meta["image_path"] = image_path
+    if api_url:
+        meta["api_url"] = api_url
+    if api_model_profile:
+        meta["api_model_profile"] = api_model_profile
+    if request_summary is None and params is not None:
+        request_summary = _summarize_runtime_params(params)
+    if request_summary is not None:
+        meta["request_summary"] = dict(request_summary)
+    response_summary = _summarize_relevant_response_fields(response_raw if response_raw is not None else raw)
+    flattened_summary = _summarize_relevant_response_fields(raw)
+    meta["response_field_summary"] = response_summary
+    meta["flattened_field_summary"] = flattened_summary
+    meta["response_word_box_field_count"] = _word_box_field_count(response_summary)
+    meta["flattened_word_box_field_count"] = _word_box_field_count(flattened_summary)
+    return raw
+
+
 def _merge_pruned_like_result(merged: dict[str, Any], source: dict[str, Any]) -> None:
     parsing_res = source.get("parsing_res_list")
     if isinstance(parsing_res, list):
@@ -168,7 +273,15 @@ def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
 
         engine = PPStructureV3(**params["structure"])
         result = list(engine.predict(input_img))
-        return _flatten_structure_result(result)
+        raw = _flatten_structure_result(result)
+        return _attach_inspector_runtime_meta(
+            raw,
+            source="local",
+            pipeline="ppstructure",
+            image_path=image_path,
+            params=params,
+            response_raw=[item.json() for item in result if hasattr(item, "json")],
+        )
     except Exception as exc:
         if "pipeline (PP-StructureV3) does not exist" not in str(exc):
             raise
@@ -189,6 +302,14 @@ def _run_structure_ocr(image_path: str, params: dict[str, Any]) -> dict:
             meta = raw.setdefault("_inspector_meta", {})
             meta["fallback"] = "paddleocr_layout_compat"
             meta["reason"] = str(exc)
+            _attach_inspector_runtime_meta(
+                raw,
+                source="local",
+                pipeline="paddleocr_layout_compat",
+                image_path=image_path,
+                params=params,
+                response_raw=[item.json() for item in result if hasattr(item, "json")],
+            )
         return raw
 
 
@@ -310,14 +431,12 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     resp = requests.post(url, json=body, headers=headers, timeout=timeout)
     resp.raise_for_status()
 
-    raw = _flatten_api_result(resp.json())
-    meta = raw.setdefault("_inspector_meta", {})
-    meta["source"] = "api"
-    meta["api_url"] = url
-    meta["api_model_profile"] = profile
+    response_json = resp.json()
+    raw = _flatten_api_result(response_json)
     if profile:
+        meta = raw.setdefault("_inspector_meta", {})
         meta["api_model_capability"] = dict(get_api_model_profile(profile))
-    meta["api_request_summary"] = {
+    request_summary = {
         "returnWordBox": body.get("returnWordBox"),
         "useDocOrientationClassify": body.get("useDocOrientationClassify"),
         "useDocUnwarping": body.get("useDocUnwarping"),
@@ -330,6 +449,18 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
         "textRecScoreThresh": body.get("textRecScoreThresh"),
         "model_name": body.get("model_name", ""),
     }
+    _attach_inspector_runtime_meta(
+        raw,
+        source="api",
+        pipeline="aistudio",
+        image_path=image_path,
+        request_summary=request_summary,
+        response_raw=response_json,
+        api_url=url,
+        api_model_profile=profile,
+    )
+    meta = raw.setdefault("_inspector_meta", {})
+    meta["api_request_summary"] = request_summary
     raw["api_model_profile"] = profile
     return raw
 
@@ -613,6 +744,15 @@ class RunOcrPanel(QWidget):
                         input_img = image_path  # type: ignore[assignment]
                     result = list(engine.predict(input_img, **pred_p))
                     raw = _flatten_paddle_result(result)
+                    if isinstance(raw, dict):
+                        _attach_inspector_runtime_meta(
+                            raw,
+                            source="local",
+                            pipeline="paddleocr",
+                            image_path=image_path,
+                            params=params,
+                            response_raw=[item.json() for item in result if hasattr(item, "json")],
+                        )
                 signals.finished.emit(raw, image_path)
             except Exception as exc:
                 signals.error.emit(str(exc))
@@ -662,6 +802,7 @@ class RunOcrPanel(QWidget):
             self._log.append("INFO: PPStructureV3 unavailable locally; used PaddleOCR layout compatibility mode.")
         if meta.get("source") == "api":
             self._log.append(f"INFO: AiStudio API → {meta.get('api_url', '')}")
+        self._append_runtime_meta(meta)
         try:
             doc = PaddleAdapter().parse(raw, source_path="<live>", image_path=image_path)
         except Exception as exc:
@@ -673,14 +814,40 @@ class RunOcrPanel(QWidget):
             doc.engine = "paddle-local-compat"
         n_lines = sum(len(list(p.all_lines)) for p in doc.pages)
         n_blocks = sum(len(p.blocks) for p in doc.pages)
+        n_chars = sum(len(list(p.all_chars)) for p in doc.pages)
+        n_ocr_chars = sum(1 for p in doc.pages for ch in p.all_chars if ch.bbox_source == "ocr" and ch.bbox is not None)
+        doc.parse_log.append(f"INFO: [IR] parsed lines={n_lines} chars={n_chars} ocr_char_token_nodes={n_ocr_chars}")
         self._log.append(
-            f"OK — {len(doc.pages)} page(s), {n_blocks} block(s), {n_lines} line(s)"
+            f"OK — {len(doc.pages)} page(s), {n_blocks} block(s), {n_lines} line(s), {n_ocr_chars}/{n_chars} OCR char/token box(es)"
         )
         for msg in (doc.parse_log or []):
             if "WARNING" in str(msg) or "ERROR" in str(msg):
                 self._log.append(f"  ⚠ {msg}")
         self._state.set_document(doc)
         # _on_doc_loaded in main window handles combo + set_active_page automatically
+
+    def _append_runtime_meta(self, meta: dict[str, Any]) -> None:
+        if not meta:
+            return
+        source = meta.get("source", "")
+        pipeline = meta.get("pipeline", "")
+        profile = meta.get("api_model_profile", "")
+        endpoint = meta.get("api_url", "")
+        self._log.append(f"Runtime: source={source or '-'} pipeline={pipeline or '-'} profile={profile or '-'}")
+        if endpoint:
+            self._log.append(f"Endpoint: {endpoint}")
+
+        request_summary = meta.get("request_summary") or meta.get("api_request_summary") or {}
+        if isinstance(request_summary, dict) and request_summary:
+            visible = {k: v for k, v in request_summary.items() if k != "file"}
+            self._log.append("Request params: " + json.dumps(visible, ensure_ascii=False, sort_keys=True))
+
+        response_fields = meta.get("response_field_summary") or {}
+        flattened_fields = meta.get("flattened_field_summary") or {}
+        if isinstance(response_fields, dict):
+            self._log.append("Response fields: " + json.dumps(response_fields, ensure_ascii=False, sort_keys=True))
+        if isinstance(flattened_fields, dict):
+            self._log.append("Flattened fields: " + json.dumps(flattened_fields, ensure_ascii=False, sort_keys=True))
 
     def _on_ocr_error(self, msg: str) -> None:
         self._run_btn.setEnabled(True)

@@ -2923,6 +2923,41 @@ def test_inspector_builds_api_request_body_from_shared_config():
     print("test_inspector_builds_api_request_body_from_shared_config PASSED")
 
 
+def test_inspector_runtime_meta_records_actual_request_and_response_fields():
+    from tools.ocr_inspector.core import build_paddle_document
+    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta
+
+    raw = {
+        "overall_ocr_res": {
+            "rec_texts": ["测"],
+            "rec_boxes": [[10, 20, 40, 50]],
+        }
+    }
+
+    _attach_inspector_runtime_meta(
+        raw,
+        source="api",
+        pipeline="aistudio",
+        image_path="/tmp/test.jpg",
+        request_summary={"returnWordBox": True, "textDetUnclipRatio": 2.0},
+        response_raw={"result": {"ocrResults": [{"prunedResult": raw}]}},
+        api_url="https://example.test/ocr",
+        api_model_profile="pp-ocrv5",
+    )
+    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
+    log_text = "\n".join(str(entry) for entry in result.document.parse_log)
+    codes = {diag.code for diag in result.diagnostics}
+
+    assert raw["_inspector_meta"]["request_summary"]["returnWordBox"] is True
+    assert raw["_inspector_meta"]["response_field_summary"]["ocrResults"] == 1
+    assert raw["_inspector_meta"]["flattened_field_summary"]["rec_texts"] == 1
+    assert "returnWordBox=True" in log_text
+    assert "response-fields" in log_text
+    assert "server_missing_text_word_region" in codes
+
+    print("test_inspector_runtime_meta_records_actual_request_and_response_fields PASSED")
+
+
 # =====================================================================
 # CharIndexService — 整条字索引链路：纵/横 bbox、去重、排序、稳定查询
 # =====================================================================
@@ -3491,6 +3526,49 @@ def test_canvas_shows_unavailable_note_without_word_region():
     print("test_canvas_shows_unavailable_note_without_word_region PASSED")
 
 
+def test_canvas_warning_reports_server_missing_after_return_word_box_sent():
+    from PySide6.QtWidgets import QGraphicsTextItem
+
+    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
+    from tools.ocr_inspector.state import AppState
+    from tools.ocr_inspector.ui.canvas import OcrCanvas
+    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta
+
+    _get_qapp()
+
+    raw = {
+        "overall_ocr_res": {
+            "rec_texts": ["测"],
+            "rec_boxes": [[10, 20, 40, 50]],
+        }
+    }
+    _attach_inspector_runtime_meta(
+        raw,
+        source="api",
+        pipeline="aistudio",
+        image_path="/tmp/test.jpg",
+        request_summary={"returnWordBox": True},
+        response_raw={"result": {"ocrResults": [{"prunedResult": raw}]}},
+        api_url="https://example.test/ocr",
+        api_model_profile="pp-ocrv5",
+    )
+    doc = PaddleAdapter().parse(raw, image_path="")
+    state = AppState()
+    state.set_document(doc)
+
+    canvas = OcrCanvas(state)
+    canvas.load_page(doc.pages[0])
+    notes = [
+        item.toPlainText()
+        for item in canvas._scene.items()
+        if isinstance(item, QGraphicsTextItem)
+    ]
+
+    assert any("returnWordBox=true" in note and "响应没有 text_word_region/text_word_boxes" in note for note in notes), notes
+    canvas.close()
+    print("test_canvas_warning_reports_server_missing_after_return_word_box_sent PASSED")
+
+
 def test_inspector_tree_syncs_external_char_selection():
     """Canvas-selected char nodes must already exist in the left tree and become current."""
     from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
@@ -4040,6 +4118,7 @@ if __name__ == "__main__":
     test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars()
     test_inspector_local_flatteners_preserve_word_box_rows()
     test_inspector_builds_api_request_body_from_shared_config()
+    test_inspector_runtime_meta_records_actual_request_and_response_fields()
     test_ocr_inspector_run_panel_profile_request_params()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
@@ -4075,6 +4154,7 @@ if __name__ == "__main__":
     test_canvas_char_fallback_source_colour()
     test_canvas_char_overlay_default_visible()
     test_canvas_shows_unavailable_note_without_word_region()
+    test_canvas_warning_reports_server_missing_after_return_word_box_sent()
     test_inspector_tree_syncs_external_char_selection()
     test_params_ref_matrix_marks_vl_word_box_unsupported()
     print("\n✓ 所有测试通过")
