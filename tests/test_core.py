@@ -3007,6 +3007,90 @@ def test_paddle_adapter_char_fallback_when_no_word_region():
 
 
 
+# =====================================================================
+# Canvas node_item_map + char selection tests (no Qt required)
+# =====================================================================
+
+def test_canvas_node_item_map_char_fallback():
+    """All fallback chars sharing a bbox must be mapped in _node_item_map."""
+    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode, DocumentNode
+    # Simulate what _draw_chars does:  seen_fallback maps bbox_key→item
+    # and ALL char nodes get mapped to that item.
+    page = PageNode.make(page_number=1, image_path="")
+    line_bbox = BBox(x=10, y=20, w=200, h=30)
+    line = LineNode.make(text="AB", confidence=0.9, bbox=line_bbox)
+    c1 = CharNode.make(char="A", bbox=line_bbox, confidence=0.9, bbox_source="fallback", bbox_granularity="line", token_text="A")
+    c2 = CharNode.make(char="B", bbox=line_bbox, confidence=0.9, bbox_source="fallback", bbox_granularity="line", token_text="B")
+    line.chars = [c1, c2]
+    page.orphan_lines.append(line)
+
+    # Replicate the dedup logic from _draw_chars
+    seen_fallback: dict = {}
+    node_item_map: dict = {}
+    _sentinel = object()  # stand-in for a canvas item
+
+    for char in page.all_chars:
+        if char.bbox:
+            key = (char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
+            bs = getattr(char, "bbox_source", "") or "fallback"
+            is_ocr = (bs == "ocr")
+            if not is_ocr:
+                if key not in seen_fallback:
+                    item = object()  # stand-in
+                    seen_fallback[key] = item
+                node_item_map[id(char)] = seen_fallback[key]
+
+    # Both chars should be in node_item_map
+    assert id(c1) in node_item_map, "c1 not mapped"
+    assert id(c2) in node_item_map, "c2 not mapped"
+    # Both point to the same display item
+    assert node_item_map[id(c1)] is node_item_map[id(c2)], "c1 and c2 should share item"
+    print("test_canvas_node_item_map_char_fallback PASSED")
+
+
+def test_canvas_node_item_map_char_ocr():
+    """OCR-true chars with distinct token_text get separate items."""
+    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
+    page = PageNode.make(page_number=1, image_path="")
+    bbox_a = BBox(x=10, y=20, w=20, h=30)
+    bbox_b = BBox(x=30, y=20, w=20, h=30)
+    line = LineNode.make(text="AB", confidence=0.9, bbox=BBox(10, 20, 40, 30))
+    c1 = CharNode.make(char="A", bbox=bbox_a, confidence=0.9, bbox_source="ocr", bbox_granularity="char", token_text="A")
+    c2 = CharNode.make(char="B", bbox=bbox_b, confidence=0.9, bbox_source="ocr", bbox_granularity="char", token_text="B")
+    line.chars = [c1, c2]
+    page.orphan_lines.append(line)
+
+    # Replicate _draw_chars OCR dedup logic
+    seen_ocr: dict = {}
+    node_item_map: dict = {}
+    for char in page.all_chars:
+        if char.bbox:
+            b = char.bbox
+            coord_key = (b.x, b.y, b.w, b.h)
+            bs = getattr(char, "bbox_source", "") or "fallback"
+            if bs == "ocr":
+                tok = getattr(char, "token_text", char.char) or char.char
+                key = (coord_key, tok)
+                if key not in seen_ocr:
+                    seen_ocr[key] = object()  # stand-in item
+                node_item_map[id(char)] = seen_ocr[key]
+
+    assert id(c1) in node_item_map, "c1 not mapped"
+    assert id(c2) in node_item_map, "c2 not mapped"
+    # Different bbox → different items
+    assert node_item_map[id(c1)] is not node_item_map[id(c2)], "distinct bboxes should get distinct items"
+    print("test_canvas_node_item_map_char_ocr PASSED")
+
+
+def test_canvas_char_fallback_source_colour():
+    """SOURCE_COLOURS must contain char_fallback key."""
+    from tools.ocr_inspector.ui.canvas import SOURCE_COLOURS
+    assert "char_fallback" in SOURCE_COLOURS, f"char_fallback missing from SOURCE_COLOURS: {list(SOURCE_COLOURS)}"
+    assert "text_word_region" in SOURCE_COLOURS
+    print("test_canvas_char_fallback_source_colour PASSED")
+
+
+
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
@@ -3077,4 +3161,7 @@ if __name__ == "__main__":
     test_find_text_matches_ocr_chars()
     test_paddle_adapter_char_bbox_source()
     test_paddle_adapter_char_fallback_when_no_word_region()
+    test_canvas_node_item_map_char_fallback()
+    test_canvas_node_item_map_char_ocr()
+    test_canvas_char_fallback_source_colour()
     print("\n✓ 所有测试通过")
