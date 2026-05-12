@@ -212,10 +212,12 @@ flowchart TD
 | --- | --- | --- | --- |
 | 有单字 `text_word_region` | `bbox_source=ocr`、`bbox_granularity=char` | 同样标 `ocr/char` | 可以当单字 crop 使用 |
 | 有多字 token/word region | 每个字符引用同一 bbox，但 `bbox_granularity=word`、`collection_kind=token` | 同样标 `ocr/word`、`token_text=整词` | 不再伪装成多个精确单字，优先走 token 集合 |
-| 只有 line bbox | Inspector 的 char bbox 保持 `None`，`bbox_source=unavailable` | 主程序可为 UI 可用性补 fallback bbox，但标 `fallback` | 只能当估算裁图，不参与“真实 char 精度”判断 |
+| 只有 line bbox | Inspector 的 char bbox 保持 `None`，`bbox_source=unavailable` | 主程序可为内部可用性补 fallback bbox，但标 `fallback` | 默认不进入纵校单字 gallery；只能在显式兼容/诊断模式下查看 |
 | 没有 line bbox 但有 token row | 只在 token 文本完整匹配时作为 fallback line | 标 `ir_token_text_fallback` | 明确是文本保底，不是模型 line 输出 |
 
 当前为什么以前会出现“chars 其实是 fallback”：Inspector 先按 `line_bbox` 给每个 glyph 填一个 bbox，再在有 word region 时覆盖局部字符；没有 word region 的字符看起来也有框，但那只是整行框。现在 Inspector 不再这样做：line-only 字符的 bbox 是 `None/unavailable`，word 级共享框也只标 `word/token`。主程序 proof 层为了 UI 裁图仍允许 fallback bbox，但字段上保留 `bbox_source=fallback` 和 `bbox_granularity=fallback`，不会冒充 `ocr/char`。
+
+主程序纵校默认只索引真实 OCR 几何：`CharIndexService()` 会过滤 `bbox_source!=ocr` 或 `bbox_granularity=fallback/unavailable/line` 的单位。旧项目/旧测试若确实需要查看估算结果，必须显式使用 `CharIndexService(include_fallback=True)`，这让 fallback 从默认主展示中降级为兼容/诊断入口。VProof 左侧列表也会标出 `[char]` / `[token]`，tooltip 显示 `bbox_source/bbox_granularity`，避免用户把 token 图或 fallback 图误认为精确单字图。
 
 ## 8. 公式 / 数字 / 普通文本策略
 
@@ -327,6 +329,8 @@ PP-OCRv5 右偏/松框的量化结论来自 `ppocr_raw_parser_vs_mainapp_final.j
 - 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
+- 主程序 `CharIndexService` 默认隐藏 fallback/unavailable/line 推断单字，只显示 `ocr/char` 和 `ocr/word` 组织出的 char/token；`include_fallback=True` 仅作为旧链路兼容/诊断开关
+- VProof 字符列表和 gallery tooltip 显示 `[char]` / `[token]` 与 `bbox_source/bbox_granularity`，让真实单字、token 图、fallback 语义可区分
 - Inspector flatten / PaddleAdapter 已补齐 `prunedResult.text_word/text_word_region/text_word_boxes` 顶层字段、flatten 后顶层字段和 camelCase alias，避免真实 token/word 框在调试链路中丢失
 - Inspector Run OCR Log / Parse Log 已显示本次实际 `source/pipeline/profile/endpoint`、payload 关键参数、响应字段摘要、flatten 字段摘要、IR 消费数量
 - Canvas unavailable warning 会根据真实 `returnWordBox` 请求状态和响应字段判断断点层，不再用“请使用 PP-OCRv5/PP-StructureV3”覆盖所有失败场景
