@@ -4,11 +4,13 @@
 
 ## 1. 请求链
 
-当前 API OCR 请求由 `app/engines/real_ocr_adapter.py::ApiOcrEngine._build_request_body()` 组装，端点由 `app/core/api_profiles.py::resolve_api_endpoint()` 统一解析：
+当前主程序 API 请求按“角色”解析端点，而不是让同一个模型同时承担版面和 proof。端点由 `app/core/api_profiles.py::resolve_api_endpoint_for_role()` 统一解析：
 
-- 如果用户保存的是完整端点 `/ocr` 或 `/layout-parsing`，直接使用该端点；
-- 如果用户保存的是服务根地址，则按模型 profile 补端点：`pp-ocrv5 -> /ocr`，PP-StructureV3 / PaddleOCR-VL / VL-1.5 -> `/layout-parsing`；
-- 这样版面分析可以用 PP-OCRv5 `/ocr` 的 `ocrResults` 合成文本块，也可以用 Structure/VL `/layout-parsing` 的结构块。
+- **layout role**：使用 `PP-StructureV3` / VL 的 `/layout-parsing`，只产生 layout/block/region 容器；
+- **proof OCR role**：使用 `PP-OCRv5` 的 `/ocr`，统一产生 HProof line text/geometry 与 VProof char/token geometry；
+- 官方 AiStudio 预设的 Structure/VL URL 在 OCR 阶段会切到 PP-OCRv5 官方 `/ocr`；PP-OCRv5 URL 在版面阶段会切到 PP-StructureV3 官方 `/layout-parsing`；
+- `profile` 不是死参数：当用户保存的是官方 profile 的 root URL（去掉 `/ocr` 或 `/layout-parsing` 后的地址）时，resolver 会结合 profile 找到对应的官方成对端点；自定义 root 不会被误切到官方 host。
+- 自部署服务若保存的是根地址，则 layout 补 `/layout-parsing`、OCR 补 `/ocr`；若保存的是完整 `/layout-parsing`，OCR 阶段会在同一 root 下替换为 `/ocr`。
 - `Authorization: token <api_token>`
 - `Content-Type: application/json`
 
@@ -67,15 +69,15 @@
 | `overall_ocr_res.rec_polys/rec_polygons/dt_polys` | 行级 polygon/bbox | `Line.bbox` | 已兼容 |
 | `text_word` | token/字文本 | `Line.chars[*].token_text` | 已适配 |
 | `text_word_region` / `text_word_boxes` | token/字坐标；Paddle 内部先生成 region，JSON 常导出 boxes | `Line.chars[*].bbox` | 已适配，二者等价进入 Inspector token bbox 链 |
-| `parsing_res_list.block_content` | 块级结构文本 | 仅作为块级辅助语义 | 不升成 `Line` |
-| `parsing_res_list.block_bbox/block_label` | 块级结构框/标签 | 版面结构层 | 不作为行级 bbox |
+| `parsing_res_list.block_content` | 块级结构文本 | 仅作为 block note / 版面辅助语义 | 不升成 `Line`，不进入 HProof/VProof 主链 |
+| `parsing_res_list.block_bbox/block_label` | 块级结构框/标签 | Structure layout 容器 | 只作为 PP-OCRv5 line 的空间归属容器，不作为行级 bbox |
 | `markdown.text` | 文档级/块级输出 | 当前 proof 主链不消费 | 未接入 proof |
 
 核心标准：
 
-- 块级：`parsing_res_list.block_content`
-- 行级：`overall_ocr_res.rec_texts + rec_boxes/rec_polys`
-- token/word 级：`text_word + text_word_region/text_word_boxes`
+- 块级：`PP-StructureV3 parsing_res_list/layout_det_res`
+- 行级：`PP-OCRv5 overall_ocr_res.rec_texts + rec_boxes/rec_polys`
+- token/word 级：`PP-OCRv5 text_word + text_word_region/text_word_boxes`
 - proof 集合：基于 `Line.text + Line.chars`，但只索引有可靠几何的行
 
 Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 Paddle / 本地 Structure flatten 现在会保留 `prunedResult.text_word` 与 `text_word_region/text_word_boxes` 顶层字段，不再只合并 `overall_ocr_res`。`PaddleAdapter` 同时读取 `prunedResult`、flatten 后顶层、`overall_ocr_res` 三个位置，并兼容 `textWord/textWordRegion/textWordBoxes` camelCase 别名。因此 `chars` 是否回显现在取决于响应里是否真的有 token/word region/boxes，而不是 flatten/parser 把字段丢掉。
@@ -125,29 +127,44 @@ Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 P
 4. 如果已有 `rec_texts`，未匹配的 token row 不再额外升成新行，避免把错配/噪声 token 变成重复 OCR 文本。
 5. OCR_IR 转 `Line` 后，横校只看 `Line.text + Line.bbox`，纵校只看 `Line.chars[*]`，集合/排序/高亮只看 `CharIndexService` 输出。
 
+## 4.1 主程序双模型 Proof 归属链
+
+本轮主程序已经把职责边界落到代码：
+
+1. `LayoutAnalyzer` 解析 layout role endpoint，只把 `PP-StructureV3` 的 `layout_det_res/parsing_res_list` 变成 `Block`；`block_content` 只进入 `Block.note` 预览，不会生成 `Line`。
+2. `ApiOcrEngine.prefer_page_ocr=True`，因此 `OcrPipeline` 在 API proof 阶段不再逐个 Structure block 调 `/layout-parsing`；它改为对整页调用 proof OCR role，也就是 `PP-OCRv5 /ocr`。
+3. `PP-OCRv5` 返回的 `Line` 先保留自己的行框、文本、token/char bbox，再由 `OcrPipeline._assign_page_ocr_lines_to_blocks()` 按空间关系归属到 Structure block。
+4. 可承接 PP-OCRv5 行的容器包括 `TEXT/TITLE/REFERENCE/EQUATION/FIGURE_CAPTION/TABLE_CAPTION`；`FIGURE/TABLE/UNKNOWN` 仍不吃 proof line。这样页级 OCR 路径不会先清空 caption/equation 的旧行又无法回填。
+5. 归属裁决以“line bbox 被 block 覆盖的比例”为主；若比例不足但 line 中心落入 block，也允许作为弱匹配；多个 block 同时匹配时选择覆盖更好、面积更小、阅读顺序更靠前的容器。
+6. 每条 PP-OCRv5 line 只分配一次，所以不会因为多个 Structure block 重叠而在横校重复；没有命中任何可承接容器的 line 会放入一个 synthetic `TEXT` block，`note=PP-OCRv5 unmatched proof lines`，保证 proof 不丢行但也不冒充 Structure 输出。
+6. `ProofCropService` 仍可对 PP-OCRv5 line/char 做图像内容驱动的收紧与缺项 fallback，但 `bbox_source=ocr`、`bbox_granularity=char/word` 的显式 OCR box 不会被覆盖成估算框。
+
+这样 HProof 的 `Line.text/Line.bbox` 与 VProof 的 `Line.chars[*].bbox/token_text` 均来自 PP-OCRv5；Structure 只决定这些 line 挂在哪个版面容器下。
+
 ## 5. 处理链图
 
 ```mermaid
 flowchart TD
     A[用户导入图片/PDF] --> B[Page.display_image_path 工作图]
-    B --> C[版面分析 Block]
-    C --> D[OcrPipeline 裁剪 block ROI]
-    D --> E[resolve_api_endpoint: /ocr 或 /layout-parsing]
-    E --> F[按 profile 分流请求参数]
-    F --> G[Paddle prunedResult]
+    B --> C[PP-StructureV3 layout role: Block/region 容器]
+    B --> D[PP-OCRv5 proof OCR role: 整页 OCR]
+    C --> A1[Structure block_content 只进 Block.note]
+    D --> E[ocrResults prunedResult]
+    E --> F[OCR_IR: PP-OCRv5 line/token]
 
-    G --> H1[overall_ocr_res.rec_texts]
-    G --> H2[overall_ocr_res.rec_boxes/rec_polys]
-    G --> H3[text_word/text_word_region/text_word_boxes]
-    G --> H4[parsing_res_list.block_content]
+    F --> H1[overall_ocr_res.rec_texts]
+    F --> H2[overall_ocr_res.rec_boxes/rec_polys]
+    F --> H3[text_word/text_word_region/text_word_boxes]
 
-    H1 --> IR[OCR_IR: OcrIrLine/OcrIrToken]
+    H1 --> IR[OcrIrLine/OcrIrToken]
     H2 --> IR
     H3 --> IR
-    IR --> I[Line.text / Line.ocr_text]
-    IR --> J[Line.bbox 行图几何]
-    IR --> K[Line.chars token/char bbox]
-    H4 --> L[块级辅助语义: 不生成 Line]
+    IR --> X[按 bbox overlap/center 分配到唯一 Structure Block]
+    C --> X
+    X --> I[Line.text / Line.ocr_text]
+    X --> J[Line.bbox 行图几何]
+    X --> K[Line.chars token/char bbox]
+    A1 --> L[块级辅助语义: 不生成 Line]
 
     I --> M[横校 HProof 文本]
     J --> N[横校 PageImageCache.get_line_crop]
@@ -168,8 +185,8 @@ flowchart TD
 
 | 模型/端点 | 当前能拿到 | 当前用途 | truthful granularity |
 | --- | --- | --- | --- |
-| PP-OCRv5 `/ocr` | `ocrResults[].overall_ocr_res.rec_texts/rec_boxes/rec_polys`，可选 `text_word/text_word_region` | 行级 OCR、版面阶段退化为文本块、proof token/word 框 | 无 `text_word_region` 时仅 line；多字 token 是 `word`，单字 token 才是 `char` |
-| PP-StructureV3 `/layout-parsing` | `layout_det_res.boxes`、`parsing_res_list.block_*`、`overall_ocr_res`、`markdown`，可选 `text_word/text_word_region` | 主版面块、结构文本、OCR 主链 | layout/block + line；有 word region 时最多 `word` |
+| PP-OCRv5 `/ocr` | `ocrResults[].overall_ocr_res.rec_texts/rec_boxes/rec_polys`，可选 `text_word/text_word_region/text_word_boxes` | HProof line 主链、VProof char/token 主链；未命中 layout 的行进入 synthetic text block | 无 word boxes 时仅 line；多字 token 是 `word`，单字 token 才是 `char` |
+| PP-StructureV3 `/layout-parsing` | `layout_det_res.boxes`、`parsing_res_list.block_*`、`markdown`、可能带 `overall_ocr_res` | layout/block/region/table/formula 容器，block text 仅作 note 预览 | 不作为 HProof line / VProof char 主来源 |
 | PaddleOCR-VL `/layout-parsing` | layout/markdown/结构化解析，schema 与 Structure 接近但更偏文档理解 | 版面/结构候选，后续可用于公式、图表、复杂版面 | 当前按 line/block 消费，不伪造 word/char |
 | PaddleOCR-VL-1.5 `/layout-parsing` | 与 VL 类似，偏文档理解和结构输出 | 版面/结构候选 | 当前按 line/block 消费，不伪造 word/char |
 
@@ -183,8 +200,8 @@ flowchart TD
 
 这些限制分别卡在：
 
-1. **模型/端点层**：PP-OCRv5 没有 layout block；Structure/VL 有结构但 text_word 支持和字段完整性依服务版本而定。
-2. **OCR_IR 层**：已经能区分 raw/line/token，但尚未把 block type 上下文传进每个 token。
+1. **模型/端点层**：PP-OCRv5 没有 layout block；Structure/VL 有结构但不再被当作 proof 文本/字框真值。
+2. **OCR_IR 层**：已经能区分 raw/line/token，并由 `OcrPipeline` 把 PP-OCRv5 line 显式归属到 layout block。
 3. **proof UI 层**：横校/纵校目前围绕 `Line/Char`，还没有表格/公式/markdown 专门视图。
 
 ## 7. truthful char/token 坐标链
@@ -244,6 +261,37 @@ flowchart TD
 
 本轮按用户要求做了真实图片渲染验收：构造 `text_word_boxes` 响应后走 `PaddleAdapter -> OCR_IR -> AppState -> OcrCanvas`，输出 `/tmp/ocr_inspector_validation/text_word_boxes_canvas_render.png`。图片中 `源`、`码` 两个字符均出现橙色真实 char box，且两个 `CharNode` 都能映射到 canvas `_node_item_map`，说明不是只停在 parser/test，而是实际 canvas item 已产生。
 
+## 9.1 当前实测 JSON 证据：Structure 无字框，PP-OCRv5 有原始字框
+
+本轮按同一张样图 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif` 真实调用了两个 AiStudio 端点，证据文件保存在 `/tmp/ocr_inspector_validation/real_api/`：
+
+| 端点 | 证据文件 | 关键结论 |
+| --- | --- | --- |
+| PP-StructureV3 `/layout-parsing` | `structure_raw_response.json`、`structure_flattened.json`、`structure_evidence_summary.json` | 请求里已经有 `returnWordBox=true`，但 raw response 中 `text_word_region/text_word_boxes` 计数都是 0；flatten 后也都是 0；parser 生成 90 行、2480 个 unavailable char，OCR char/token box 为 0，canvas item 为 0。断点在 Paddle/服务端 Structure 返回层，不是 flatten/parser/canvas。 |
+| PP-OCRv5 `/ocr` | `ppocr_raw_response.json`、`ppocr_flattened.json`、`ppocr_evidence_summary.json` | 请求里有 `returnWordBox=true`，raw response 有 37 行 `text_word` 和 37 行 `text_word_boxes`；flatten 后归一成 37 行 `text_word_region`；parser 生成 37 行、1082 个 OCR char/token node；canvas item 为 1082。 |
+
+PP-StructureV3 的实测字段计数：
+
+- request summary：`returnWordBox=true`、`textDetUnclipRatio=2.0`、`textDetLimitSideLen=1536`、orientation/unwarping/textline orientation 全部为 `false`。
+- raw field counts：`layoutParsingResults=1`、`ocrResults=1`、`overall_ocr_res=2`、`rec_texts=90`、`rec_boxes=90`、`rec_polys=90`、`parsing_res_list=14`、`layout_det_res=2`、`text_word=0`、`text_word_region=0`、`text_word_boxes=0`。
+- parser/canvas：`line_count=90`、`char_count=2480`、`ocr_char_count=0`、`canvas_items_for_chars=0`。
+
+PP-OCRv5 的实测字段计数：
+
+- request summary：`returnWordBox=true`、`textDetUnclipRatio=2.0`、`textDetLimitSideLen=1536`、orientation/unwarping/textline orientation 全部为 `false`。
+- raw field counts：`ocrResults=1`、`rec_texts=37`、`rec_boxes=37`、`rec_polys=37`、`text_word=37`、`text_word_boxes=37`。
+- parser/canvas：`line_count=37`、`char_count=1082`、`ocr_char_count=1082`、`canvas_items_for_chars=1082`。
+
+用户追问“是否还有其他 char 相关 return 字段”后，本轮补了直接字段审计，输出到 `paddle-char-box-samples/paddle-return-field-audit.json`。结论是：当前真实 JSON 与已安装 Paddle/PaddleX 源码里没有额外公开的 `char_box/char_boxes` 字段；稳定可用的 token/char 几何字段仍是 `text_word + text_word_boxes`，服务内/部分响应形态可能出现 `text_word_region`，项目继续作为 alias 兼容。`rec_boxes/rec_polys/dt_polys` 是行级/检测级几何，`textline_orientation_angles` 是行方向元数据，`return_word_box` 是开关，不是几何字段本身。源码证据对应 `pipeline.py`、`result.py::_to_json()`、`cal_ocr_word_box.py`、`processors.py` 和 `text_recognition/predictor.py`。
+
+PP-OCRv5 右偏/松框的量化结论来自 `ppocr_raw_parser_vs_mainapp_final.json` 与 `ppocr_raw_margin_metrics.json`：
+
+- sampled first line text：`数量经济技术经济研究2026年第4期`。
+- `raw_region == parser_bbox`：采样字符均为 `true`，说明 Inspector parser/IR 没有把 Paddle 原始 char box 改坏；canvas 画的就是 raw/parser box。
+- 示例：`数` 的 raw/parser bbox 是 `[304,256,365,328] -> x=304,y=256,w=61,h=72`，墨迹紧框宽高约 `55x57`，右侧空白约 `6px`、上方空白约 `9px`；parser 后 bbox 完全一致。
+- 主程序真实入口 `ensure_line_char_bboxes()` 对显式 OCR char box 默认保留 `bbox_source=ocr,bbox_granularity=char`，只在 `explicit_char_bbox_points_to_neighbor()` 判断“明显指向邻字”时降级为 fallback。该采样行全行只有 1 个字符触发修正，其余显式 OCR char box 保持 raw/parser 坐标。
+- 因此，PP-OCRv5 目前的“右边多切一点/左边少切一点”主要来自 Paddle raw `text_word_boxes` 本身的边界松紧与相邻字符分配；不是 Inspector parser 或 canvas 二次偏移。主程序看起来更好时，通常来自行框裁图 `refine_line_bbox()`、无字框 fallback 的 `refine_line_char_bboxes()`、以及极少数邻字错位保护；这些都不是 Paddle raw char box 本身，不能在 Inspector 里伪装成 raw。
+
 ## 10. Residual 错切收口
 
 本轮继续压低“文本正确，但少量裁图落到相邻字”的 residual case。新的判断是：OCR_IR 已经把文本/token/行级来源拆清楚，但进入 proof 前的 `ensure_line_char_bboxes()` 仍有一个边角风险：只要 OCR 返回了显式 char bbox，旧逻辑就会无条件保留它。若某个 char bbox 本身已经偏到前后相邻字，纵校集合看到的文本仍然正确，但裁图会显示邻字。
@@ -273,7 +321,9 @@ flowchart TD
 已经适配：
 
 - OCR family API 请求 `returnWordBox=true`；VL family 不请求 word box，但仍发送坐标稳定开关
-- API endpoint 不再盲目拼 `/layout-parsing`，支持 PP-OCRv5 `/ocr` 和 Structure/VL `/layout-parsing`
+- API endpoint 不再盲目拼 `/layout-parsing`，主程序按 role 拆为 layout endpoint 与 proof OCR endpoint
+- `LayoutAnalyzer` 使用 Structure/VL layout role；`ApiOcrEngine` 使用 PP-OCRv5 proof OCR role，并在 API pipeline 中声明 `prefer_page_ocr`
+- `OcrPipeline` 对 API proof 改为整页调用 PP-OCRv5，再把每条 line 按空间 overlap/center 分配到唯一 Structure line container；`EQUATION/FIGURE_CAPTION/TABLE_CAPTION` 会被回填，未匹配行进入 synthetic text block，避免重复消费和 caption/equation 丢行
 - 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`
@@ -284,6 +334,7 @@ flowchart TD
 - 行级文本、置信度、行框读取
 - token/word bbox 读取
 - OCR_IR：`OcrIrLine/OcrIrToken` 中间层
+- 主程序 `ApiOcrEngine` 也兼容 `text_word_boxes/textWordBoxes`，并用已选中的 `OcrIrToken.bbox` 构建 `Line.chars`，不再重复解析/选择 token row
 - `rec_texts` 完全缺失时，可由可靠 `text_word` fallback 保住文本并标记 `ir_token_text_fallback`
 - token row 与行 bbox 按 overlap 对齐，不再默认按数组下标绑定
 - bbox 空窄/无墨迹过滤

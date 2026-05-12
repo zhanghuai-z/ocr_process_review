@@ -225,10 +225,33 @@ def test_bbox_tools():
         ],
     )
     ensure_line_char_bboxes(shifted)
-    assert shifted.chars[0].bbox == BBox(10, 20, 30, 30)
-    assert shifted.chars[0].bbox_source == "fallback"
+    assert shifted.chars[0].bbox == BBox(40, 20, 30, 30)
+    assert shifted.chars[0].bbox_source == "ocr"
     assert shifted.chars[1].bbox == BBox(40, 20, 30, 30)
     assert shifted.chars[1].bbox_source == "ocr"
+
+    fallback_shifted = Line(
+        text="甲乙丙",
+        confidence=0.9,
+        bbox=BBox(10, 20, 90, 30),
+        chars=[
+            Char(
+                char="甲", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="甲",
+            ),
+            Char(
+                char="乙", confidence=0.9, bbox=BBox(40, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="乙",
+            ),
+            Char(
+                char="丙", confidence=0.9, bbox=BBox(70, 20, 30, 30),
+                bbox_source="fallback", bbox_granularity="char", token_text="丙",
+            ),
+        ],
+    )
+    ensure_line_char_bboxes(fallback_shifted)
+    assert fallback_shifted.chars[0].bbox == BBox(10, 20, 30, 30)
+    assert fallback_shifted.chars[0].bbox_source == "fallback"
 
     img = np.full((100, 180, 3), 255, dtype=np.uint8)
     glyph_boxes = [
@@ -626,7 +649,7 @@ def test_api_ocr_engine_requests_return_word_box():
         engine = ApiOcrEngine()
         lines = engine.recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
         assert lines == []
-        assert captured["url"] == "https://example.com/layout-parsing"
+        assert captured["url"] == "https://example.com/ocr"
         assert captured["json"]["returnWordBox"] is True
         assert captured["json"]["useDocOrientationClassify"] is False
         assert captured["json"]["useDocUnwarping"] is False
@@ -749,6 +772,60 @@ def test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes PASSED")
+
+
+def test_api_ocr_engine_parses_text_word_boxes_alias():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["源码"],
+                                    "rec_scores": [0.94],
+                                    "rec_boxes": [[10, 20, 70, 50]],
+                                },
+                                "text_word": [["源", "码"]],
+                                "text_word_boxes": [[
+                                    [10, 20, 40, 50],
+                                    [41, 20, 70, 50],
+                                ]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        line = engine.recognize(np.zeros((80, 100, 3), dtype=np.uint8), OcrContext())[0]
+        assert line.text == "源码"
+        assert line.chars[0].bbox == BBox(10, 20, 30, 30)
+        assert line.chars[1].bbox == BBox(41, 20, 29, 30)
+        assert all(ch.bbox_source == "ocr" for ch in line.chars)
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_parses_text_word_boxes_alias PASSED")
 
 
 def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
@@ -1536,6 +1613,140 @@ def test_ocr_pipeline_reports_real_page_progress():
         assert "第 2/2 页" in progress_events[1].message
 
     print("test_ocr_pipeline_reports_real_page_progress PASSED")
+
+
+def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class PageOcrEngine:
+        bbox_space = "crop"
+        prefer_page_ocr = True
+
+        def recognize(self, image_bgr, context):
+            assert context.block_id is None
+            return [
+                Line(
+                    text="甲",
+                    confidence=0.95,
+                    bbox=BBox(20, 20, 20, 20),
+                    chars=[Char(char="甲", confidence=0.95, bbox=BBox(20, 20, 20, 20), bbox_source="ocr", bbox_granularity="char", token_text="甲")],
+                ),
+                Line(
+                    text="乙",
+                    confidence=0.96,
+                    bbox=BBox(140, 20, 20, 20),
+                    chars=[Char(char="乙", confidence=0.96, bbox=BBox(140, 20, 20, 20), bbox_source="ocr", bbox_granularity="char", token_text="乙")],
+                ),
+                Line(
+                    text="丙",
+                    confidence=0.97,
+                    bbox=BBox(260, 120, 20, 20),
+                    chars=[Char(char="丙", confidence=0.97, bbox=BBox(260, 120, 20, 20), bbox_source="ocr", bbox_granularity="char", token_text="丙")],
+                ),
+            ]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((200, 320, 3), 255, dtype=np.uint8)
+        cv2.rectangle(img, (20, 20), (40, 40), (0, 0, 0), -1)
+        cv2.rectangle(img, (140, 20), (160, 40), (0, 0, 0), -1)
+        cv2.rectangle(img, (260, 120), (280, 140), (0, 0, 0), -1)
+        cv2.imwrite(img_path, img)
+
+    try:
+        broad = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 220, 80), order=0)
+        precise = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 60, 50), order=1)
+        page = Page(image_path=img_path, width=320, height=200, blocks=[broad, precise])
+        result = OcrPipeline(engine=PageOcrEngine()).process_project(
+            OcrProject(name="PageOcrAssign", pages=[page])
+        )
+        blocks = result.pages[0].blocks
+        all_texts = [line.text for block in blocks for line in block.lines]
+
+        assert all_texts.count("甲") == 1
+        assert all_texts.count("乙") == 1
+        assert all_texts.count("丙") == 1
+        assert [line.text for line in precise.lines] == ["甲"]
+        assert [line.text for line in broad.lines] == ["乙"]
+        assert blocks[-1].note == "PP-OCRv5 unmatched proof lines"
+        assert [line.text for line in blocks[-1].lines] == ["丙"]
+        assert blocks[-1].block_type == BlockType.TEXT
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once PASSED")
+
+
+def test_page_ocr_refills_caption_and_equation_blocks():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    def make_line(text, x, y):
+        return Line(
+            text=text,
+            confidence=0.95,
+            bbox=BBox(x, y, 30, 20),
+            chars=[
+                Char(
+                    char=text,
+                    confidence=0.95,
+                    bbox=BBox(x, y, 30, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="char",
+                    token_text=text,
+                )
+            ],
+        )
+
+    class PageOcrEngine:
+        bbox_space = "crop"
+        prefer_page_ocr = True
+
+        def recognize(self, image_bgr, context):
+            return [
+                make_line("式", 20, 20),
+                make_line("图", 20, 80),
+                make_line("表", 20, 140),
+            ]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((220, 180, 3), 255, dtype=np.uint8)
+        for y in (20, 80, 140):
+            cv2.rectangle(img, (20, y), (50, y + 20), (0, 0, 0), -1)
+        cv2.imwrite(img_path, img)
+
+    try:
+        equation = Block(block_type=BlockType.EQUATION, bbox=BBox(0, 0, 120, 60), lines=[make_line("旧", 5, 5)], order=0)
+        figure_caption = Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 60, 120, 60), lines=[make_line("旧", 5, 65)], order=1)
+        table_caption = Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(0, 120, 120, 60), lines=[make_line("旧", 5, 125)], order=2)
+        page = Page(
+            image_path=img_path,
+            width=180,
+            height=220,
+            blocks=[equation, figure_caption, table_caption],
+        )
+
+        result = OcrPipeline(engine=PageOcrEngine()).process_project(
+            OcrProject(name="CaptionEquationRefill", pages=[page])
+        )
+        blocks = result.pages[0].blocks
+
+        assert [line.text for line in blocks[0].lines] == ["式"]
+        assert [line.text for line in blocks[1].lines] == ["图"]
+        assert [line.text for line in blocks[2].lines] == ["表"]
+        assert "旧" not in [line.text for block in blocks for line in block.lines]
+    finally:
+        os.unlink(img_path)
+
+    print("test_page_ocr_refills_caption_and_equation_blocks PASSED")
 
 
 def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
@@ -2377,6 +2588,56 @@ def test_api_model_profile_helpers():
     print("test_api_model_profile_helpers PASSED")
 
 
+def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
+    from app.core.api_profiles import (
+        get_api_model_profile_url,
+        resolve_api_endpoint_for_role,
+    )
+
+    structure_url = get_api_model_profile_url("pp-structurev3")
+    ocr_url = get_api_model_profile_url("pp-ocrv5")
+    structure_root = structure_url.removesuffix("/layout-parsing")
+    ocr_root = ocr_url.removesuffix("/ocr")
+
+    assert resolve_api_endpoint_for_role(
+        structure_url,
+        profile="pp-structurev3",
+        role="layout",
+    ) == structure_url
+    assert resolve_api_endpoint_for_role(
+        structure_url,
+        profile="pp-structurev3",
+        role="ocr",
+    ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        ocr_url,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == structure_url
+    assert resolve_api_endpoint_for_role(
+        structure_root,
+        profile="pp-structurev3",
+        role="ocr",
+    ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        ocr_root,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == structure_url
+    assert resolve_api_endpoint_for_role(
+        "https://self-hosted.example.com",
+        profile="",
+        role="layout",
+    ) == "https://self-hosted.example.com/layout-parsing"
+    assert resolve_api_endpoint_for_role(
+        "https://self-hosted.example.com/layout-parsing",
+        profile="",
+        role="ocr",
+    ) == "https://self-hosted.example.com/ocr"
+
+    print("test_api_endpoint_role_resolution_keeps_layout_and_proof_separate PASSED")
+
+
 def test_app_config_tracks_api_model_profile():
     from app.core.app_config import AppConfig, get_config, update_config
 
@@ -2925,7 +3186,7 @@ def test_inspector_builds_api_request_body_from_shared_config():
 
 def test_inspector_runtime_meta_records_actual_request_and_response_fields():
     from tools.ocr_inspector.core import build_paddle_document
-    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta
+    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta, _summarize_relevant_response_fields
 
     raw = {
         "overall_ocr_res": {
@@ -2951,6 +3212,7 @@ def test_inspector_runtime_meta_records_actual_request_and_response_fields():
     assert raw["_inspector_meta"]["request_summary"]["returnWordBox"] is True
     assert raw["_inspector_meta"]["response_field_summary"]["ocrResults"] == 1
     assert raw["_inspector_meta"]["flattened_field_summary"]["rec_texts"] == 1
+    assert "text_word_boxes" not in _summarize_relevant_response_fields(raw)
     assert "returnWordBox=True" in log_text
     assert "response-fields" in log_text
     assert "server_missing_text_word_region" in codes
@@ -3908,7 +4170,7 @@ def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_spac
     print("test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space PASSED")
 
 
-def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
+def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected():
     import tempfile
 
     import cv2
@@ -3962,7 +4224,7 @@ def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
         cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
         page = Page(image_path=page_path, width=200, height=120)
         LayoutAnalyzer()._api_analyze(page)
-        assert captured["url"] == "https://example.com/root/ocr"
+        assert captured["url"] == "https://example.com/root/layout-parsing"
         assert len(page.blocks) == 1
         assert page.blocks[0].block_type == BlockType.TEXT
         assert "OCR行" in page.blocks[0].note
@@ -3971,7 +4233,7 @@ def test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout():
         cfg.reset_to_defaults()
         os.unlink(page_path)
 
-    print("test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout PASSED")
+    print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
 def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
@@ -4074,6 +4336,7 @@ if __name__ == "__main__":
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
+    test_api_ocr_engine_parses_text_word_boxes_alias()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
     test_api_ocr_engine_does_not_promote_block_content_to_line()
@@ -4091,6 +4354,8 @@ if __name__ == "__main__":
     test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars()
     test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
+    test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
+    test_page_ocr_refills_caption_and_equation_blocks()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_emits_ocr_progress_and_navigation()
@@ -4101,6 +4366,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_model_profile_helpers()
+    test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
     test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()
     test_api_ocr_engine_parses_paddle_coordinate_variants()
     test_api_request_builders_split_profile_params()
@@ -4111,7 +4377,7 @@ if __name__ == "__main__":
     test_layout_analyzer_uses_datainfo_canvas_scale()
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
-    test_layout_analyzer_accepts_pp_ocrv5_ocr_endpoint_for_layout()
+    test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()

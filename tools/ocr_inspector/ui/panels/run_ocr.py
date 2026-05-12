@@ -82,6 +82,8 @@ def _summarize_relevant_response_fields(value: Any) -> dict[str, int]:
     def visit(node: Any) -> None:
         if isinstance(node, dict):
             for key, child in node.items():
+                if key == "_inspector_meta":
+                    continue
                 if key in _RELEVANT_RESPONSE_FIELDS:
                     summary[key] = summary.get(key, 0) + _field_count(child)
                 visit(child)
