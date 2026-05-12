@@ -1,0 +1,3479 @@
+{
+  "sample_image": "/mnt/d/project/ocr_process/file/244771纵校/120166.tif",
+  "image_shape": {
+    "height": 3424,
+    "width": 2356
+  },
+  "ocr_line_count": 37,
+  "token_rows": 37,
+  "token_total": 998,
+  "single_cjk_token_count": 874,
+  "multi_cjk_token_count": 0,
+  "non_cjk_or_mixed_token_count": 124,
+  "component_method": {
+    "threshold": "Otsu binary inverse after 3x3 Gaussian blur",
+    "kernels": [
+      "raw",
+      "3x2",
+      "5x3",
+      "7x3"
+    ],
+    "component_filter": {
+      "min_area": 20,
+      "min_width": 3,
+      "min_height": 8
+    }
+  },
+  "kernel_stats": {
+    "raw": {
+      "lines_equal_text_len": 3,
+      "line_total": 37,
+      "avg_delta_from_text_len": 13.1081,
+      "min_delta_from_text_len": 0,
+      "max_delta_from_text_len": 40
+    },
+    "3x2": {
+      "lines_equal_text_len": 3,
+      "line_total": 37,
+      "avg_delta_from_text_len": 6.8108,
+      "min_delta_from_text_len": -2,
+      "max_delta_from_text_len": 19
+    },
+    "5x3": {
+      "lines_equal_text_len": 2,
+      "line_total": 37,
+      "avg_delta_from_text_len": 1.2432,
+      "min_delta_from_text_len": -8,
+      "max_delta_from_text_len": 7
+    },
+    "7x3": {
+      "lines_equal_text_len": 12,
+      "line_total": 37,
+      "avg_delta_from_text_len": -0.3514,
+      "min_delta_from_text_len": -10,
+      "max_delta_from_text_len": 5
+    }
+  },
+  "lines": [
+    {
+      "line_index": 0,
+      "text": "数量经济技术经济研究2026年第4期",
+      "text_len": 18,
+      "cjk": 13,
+      "digit": 5,
+      "latin": 0,
+      "other": 0,
+      "bbox": {
+        "x": 294,
+        "y": 256,
+        "w": 973,
+        "h": 72
+      },
+      "component_counts": {
+        "raw": 18,
+        "3x2": 18,
+        "5x3": 15,
+        "7x3": 14
+      },
+      "delta_from_text_len": {
+        "raw": 0,
+        "3x2": 0,
+        "5x3": -3,
+        "7x3": -4
+      }
+    },
+    {
+      "line_index": 1,
+      "text": "时,2016年增值税分成改革导致的原营业税分成比例下降,进一步弱化了地方政府",
+      "text_len": 38,
+      "cjk": 32,
+      "digit": 4,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 301,
+        "y": 406,
+        "w": 1845,
+        "h": 53
+      },
+      "component_counts": {
+        "raw": 48,
+        "3x2": 44,
+        "5x3": 36,
+        "7x3": 36
+      },
+      "delta_from_text_len": {
+        "raw": 10,
+        "3x2": 6,
+        "5x3": -2,
+        "7x3": -2
+      }
+    },
+    {
+      "line_index": 2,
+      "text": "推动本地服务业发展、刺激本地服务消费的财政动机。这种财政资源向供给端的",
+      "text_len": 35,
+      "cjk": 33,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 301,
+        "y": 484,
+        "w": 1845,
+        "h": 53
+      },
+      "component_counts": {
+        "raw": 55,
+        "3x2": 41,
+        "5x3": 36,
+        "7x3": 35
+      },
+      "delta_from_text_len": {
+        "raw": 20,
+        "3x2": 6,
+        "5x3": 1,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 3,
+      "text": "相对倾斜,会导致商品消费需求增速滞后于商品供给增速,带来地区商品供需适配",
+      "text_len": 36,
+      "cjk": 34,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 301,
+        "y": 562,
+        "w": 1845,
+        "h": 53
+      },
+      "component_counts": {
+        "raw": 76,
+        "3x2": 55,
+        "5x3": 43,
+        "7x3": 41
+      },
+      "delta_from_text_len": {
+        "raw": 40,
+        "3x2": 19,
+        "5x3": 7,
+        "7x3": 5
+      }
+    },
+    {
+      "line_index": 4,
+      "text": "问题。",
+      "text_len": 3,
+      "cjk": 2,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 292,
+        "y": 629,
+        "w": 165,
+        "h": 73
+      },
+      "component_counts": {
+        "raw": 6,
+        "3x2": 4,
+        "5x3": 4,
+        "7x3": 3
+      },
+      "delta_from_text_len": {
+        "raw": 3,
+        "3x2": 1,
+        "5x3": 1,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 5,
+      "text": "综合上述供需两侧分析,本文认为,2016年增值税分成改革通过对地方政府的",
+      "text_len": 36,
+      "cjk": 30,
+      "digit": 4,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 402,
+        "y": 718,
+        "w": 1744,
+        "h": 53
+      },
+      "component_counts": {
+        "raw": 55,
+        "3x2": 47,
+        "5x3": 41,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 19,
+        "3x2": 11,
+        "5x3": 5,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 6,
+      "text": "结构性财政激励冲击,使其更倾向于将有限的财政资源集中于短期能直接产生税",
+      "text_len": 35,
+      "cjk": 34,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 301,
+        "y": 794,
+        "w": 1845,
+        "h": 53
+      },
+      "component_counts": {
+        "raw": 47,
+        "3x2": 38,
+        "5x3": 36,
+        "7x3": 35
+      },
+      "delta_from_text_len": {
+        "raw": 12,
+        "3x2": 3,
+        "5x3": 1,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 7,
+      "text": "收利益增长的供给端，而对消费需求的激励较为有限。这种政策选择，是影响地区",
+      "text_len": 36,
+      "cjk": 33,
+      "digit": 0,
+      "latin": 0,
+      "other": 3,
+      "bbox": {
+        "x": 299,
+        "y": 869,
+        "w": 1845,
+        "h": 58
+      },
+      "component_counts": {
+        "raw": 56,
+        "3x2": 43,
+        "5x3": 39,
+        "7x3": 36
+      },
+      "delta_from_text_len": {
+        "raw": 20,
+        "3x2": 7,
+        "5x3": 3,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 8,
+      "text": "商品供需关系的重要体制性动因，也是完善促消费的制度机制建设中所需考虑的",
+      "text_len": 35,
+      "cjk": 34,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 299,
+        "y": 947,
+        "w": 1847,
+        "h": 58
+      },
+      "component_counts": {
+        "raw": 56,
+        "3x2": 48,
+        "5x3": 39,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 21,
+        "3x2": 13,
+        "5x3": 4,
+        "7x3": 2
+      }
+    },
+    {
+      "line_index": 9,
+      "text": "重要因素。据此，本文提出如下假说。",
+      "text_len": 17,
+      "cjk": 14,
+      "digit": 0,
+      "latin": 0,
+      "other": 3,
+      "bbox": {
+        "x": 299,
+        "y": 1025,
+        "w": 852,
+        "h": 58
+      },
+      "component_counts": {
+        "raw": 21,
+        "3x2": 21,
+        "5x3": 18,
+        "7x3": 18
+      },
+      "delta_from_text_len": {
+        "raw": 4,
+        "3x2": 4,
+        "5x3": 1,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 10,
+      "text": "研究假说:2016年增值税分成改革对地方政府产生“重生产、轻消费”的结构性",
+      "text_len": 37,
+      "cjk": 29,
+      "digit": 4,
+      "latin": 0,
+      "other": 4,
+      "bbox": {
+        "x": 397,
+        "y": 1101,
+        "w": 1749,
+        "h": 58
+      },
+      "component_counts": {
+        "raw": 53,
+        "3x2": 47,
+        "5x3": 38,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 16,
+        "3x2": 10,
+        "5x3": 1,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 11,
+      "text": "财政激励，限制了地区商品供需适配程度的提升。",
+      "text_len": 22,
+      "cjk": 20,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 299,
+        "y": 1181,
+        "w": 1102,
+        "h": 54
+      },
+      "component_counts": {
+        "raw": 29,
+        "3x2": 27,
+        "5x3": 25,
+        "7x3": 23
+      },
+      "delta_from_text_len": {
+        "raw": 7,
+        "3x2": 5,
+        "5x3": 3,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 12,
+      "text": "三、研究设计",
+      "text_len": 6,
+      "cjk": 5,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 1035,
+        "y": 1288,
+        "w": 375,
+        "h": 74
+      },
+      "component_counts": {
+        "raw": 10,
+        "3x2": 8,
+        "5x3": 7,
+        "7x3": 7
+      },
+      "delta_from_text_len": {
+        "raw": 4,
+        "3x2": 2,
+        "5x3": 1,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 13,
+      "text": "（一)实证模型",
+      "text_len": 7,
+      "cjk": 5,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 397,
+        "y": 1416,
+        "w": 324,
+        "h": 62
+      },
+      "component_counts": {
+        "raw": 10,
+        "3x2": 10,
+        "5x3": 6,
+        "7x3": 6
+      },
+      "delta_from_text_len": {
+        "raw": 3,
+        "3x2": 3,
+        "5x3": -1,
+        "7x3": -1
+      }
+    },
+    {
+      "line_index": 14,
+      "text": "本文基于2016年增值税分成改革形成的结构性财政激励,试图揭示地区商品",
+      "text_len": 35,
+      "cjk": 30,
+      "digit": 4,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 397,
+        "y": 1491,
+        "w": 1747,
+        "h": 63
+      },
+      "component_counts": {
+        "raw": 44,
+        "3x2": 42,
+        "5x3": 37,
+        "7x3": 35
+      },
+      "delta_from_text_len": {
+        "raw": 9,
+        "3x2": 7,
+        "5x3": 2,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 15,
+      "text": "供需适配关系的体制性因素。为了检验核心研究假说，本文利用2016年增值税分",
+      "text_len": 37,
+      "cjk": 31,
+      "digit": 4,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 297,
+        "y": 1569,
+        "w": 1849,
+        "h": 63
+      },
+      "component_counts": {
+        "raw": 57,
+        "3x2": 48,
+        "5x3": 42,
+        "7x3": 38
+      },
+      "delta_from_text_len": {
+        "raw": 20,
+        "3x2": 11,
+        "5x3": 5,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 16,
+      "text": "成改革的相对外生性和省际差异，构造以下强度双重差分模型：",
+      "text_len": 28,
+      "cjk": 26,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 297,
+        "y": 1647,
+        "w": 1423,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 42,
+        "3x2": 35,
+        "5x3": 31,
+        "7x3": 29
+      },
+      "delta_from_text_len": {
+        "raw": 14,
+        "3x2": 7,
+        "5x3": 3,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 17,
+      "text": "(1)",
+      "text_len": 3,
+      "cjk": 0,
+      "digit": 1,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 2055,
+        "y": 1721,
+        "w": 102,
+        "h": 69
+      },
+      "component_counts": {
+        "raw": 3,
+        "3x2": 3,
+        "5x3": 3,
+        "7x3": 3
+      },
+      "delta_from_text_len": {
+        "raw": 0,
+        "3x2": 0,
+        "5x3": 0,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 18,
+      "text": "Y=α+βIncentive,×Post2+γXc+δ+φ{+εa",
+      "text_len": 33,
+      "cjk": 0,
+      "digit": 1,
+      "latin": 23,
+      "other": 9,
+      "bbox": {
+        "x": 705,
+        "y": 1732,
+        "w": 1046,
+        "h": 60
+      },
+      "component_counts": {
+        "raw": 36,
+        "3x2": 31,
+        "5x3": 25,
+        "7x3": 23
+      },
+      "delta_from_text_len": {
+        "raw": 3,
+        "3x2": -2,
+        "5x3": -8,
+        "7x3": -10
+      }
+    },
+    {
+      "line_index": 19,
+      "text": "其中，下标c代表地级市，t为年份。被解释变量Y为地级市商品供需适配程度",
+      "text_len": 35,
+      "cjk": 29,
+      "digit": 0,
+      "latin": 3,
+      "other": 3,
+      "bbox": {
+        "x": 397,
+        "y": 1808,
+        "w": 1754,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 51,
+        "3x2": 41,
+        "5x3": 38,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 16,
+        "3x2": 6,
+        "5x3": 3,
+        "7x3": 2
+      }
+    },
+    {
+      "line_index": 20,
+      "text": "变量。核心解释变量Incentive{×Post{为强度变量与政策时点变量的交乘项,其中",
+      "text_len": 44,
+      "cjk": 26,
+      "digit": 0,
+      "latin": 13,
+      "other": 5,
+      "bbox": {
+        "x": 297,
+        "y": 1886,
+        "w": 1852,
+        "h": 67
+      },
+      "component_counts": {
+        "raw": 64,
+        "3x2": 55,
+        "5x3": 40,
+        "7x3": 35
+      },
+      "delta_from_text_len": {
+        "raw": 20,
+        "3x2": 11,
+        "5x3": -4,
+        "7x3": -9
+      }
+    },
+    {
+      "line_index": 21,
+      "text": "Incentive。表示2016年增值税分成改革下各地级市结构性财政激励程度，具体构造",
+      "text_len": 43,
+      "cjk": 28,
+      "digit": 4,
+      "latin": 9,
+      "other": 2,
+      "bbox": {
+        "x": 294,
+        "y": 1962,
+        "w": 1857,
+        "h": 69
+      },
+      "component_counts": {
+        "raw": 48,
+        "3x2": 45,
+        "5x3": 36,
+        "7x3": 34
+      },
+      "delta_from_text_len": {
+        "raw": 5,
+        "3x2": 2,
+        "5x3": -7,
+        "7x3": -9
+      }
+    },
+    {
+      "line_index": 22,
+      "text": "见式(5);政策时点变量Post,为改革年份虚拟变量，当t小于2016年时取值为0，反",
+      "text_len": 43,
+      "cjk": 26,
+      "digit": 6,
+      "latin": 5,
+      "other": 6,
+      "bbox": {
+        "x": 297,
+        "y": 2042,
+        "w": 1854,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 62,
+        "3x2": 54,
+        "5x3": 44,
+        "7x3": 40
+      },
+      "delta_from_text_len": {
+        "raw": 19,
+        "3x2": 11,
+        "5x3": 1,
+        "7x3": -3
+      }
+    },
+    {
+      "line_index": 23,
+      "text": "之取值为1。X_为地区层面控制变量，包含各地级市的经济发展水平、财政自给",
+      "text_len": 36,
+      "cjk": 30,
+      "digit": 1,
+      "latin": 1,
+      "other": 4,
+      "bbox": {
+        "x": 297,
+        "y": 2120,
+        "w": 1854,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 52,
+        "3x2": 37,
+        "5x3": 36,
+        "7x3": 36
+      },
+      "delta_from_text_len": {
+        "raw": 16,
+        "3x2": 1,
+        "5x3": 0,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 24,
+      "text": "度、金融发展水平、人口规模、产业结构、对外开放水平、货运规模、房价水平和人口",
+      "text_len": 38,
+      "cjk": 32,
+      "digit": 0,
+      "latin": 0,
+      "other": 6,
+      "bbox": {
+        "x": 297,
+        "y": 2193,
+        "w": 1852,
+        "h": 70
+      },
+      "component_counts": {
+        "raw": 52,
+        "3x2": 44,
+        "5x3": 40,
+        "7x3": 39
+      },
+      "delta_from_text_len": {
+        "raw": 14,
+        "3x2": 6,
+        "5x3": 2,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 25,
+      "text": "年龄结构等。δ和$φ{分别表示城市固定效应和年份固定效应，{为随机扰动项。",
+      "text_len": 37,
+      "cjk": 29,
+      "digit": 0,
+      "latin": 2,
+      "other": 6,
+      "bbox": {
+        "x": 294,
+        "y": 2271,
+        "w": 1859,
+        "h": 72
+      },
+      "component_counts": {
+        "raw": 53,
+        "3x2": 48,
+        "5x3": 39,
+        "7x3": 38
+      },
+      "delta_from_text_len": {
+        "raw": 16,
+        "3x2": 11,
+        "5x3": 2,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 26,
+      "text": "由于中国省级以下市县级政府分成比例由省级政府确定，各地级市政府的行为激",
+      "text_len": 35,
+      "cjk": 34,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 297,
+        "y": 2354,
+        "w": 1856,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 52,
+        "3x2": 44,
+        "5x3": 37,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 17,
+        "3x2": 9,
+        "5x3": 2,
+        "7x3": 2
+      }
+    },
+    {
+      "line_index": 27,
+      "text": "励存在省份内相关性，本文将标准误聚类在“省份×年份”层面。",
+      "text_len": 29,
+      "cjk": 24,
+      "digit": 0,
+      "latin": 0,
+      "other": 5,
+      "bbox": {
+        "x": 297,
+        "y": 2432,
+        "w": 1412,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 42,
+        "3x2": 34,
+        "5x3": 30,
+        "7x3": 29
+      },
+      "delta_from_text_len": {
+        "raw": 13,
+        "3x2": 5,
+        "5x3": 1,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 28,
+      "text": "（二)核心指标",
+      "text_len": 7,
+      "cjk": 5,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 397,
+        "y": 2508,
+        "w": 324,
+        "h": 62
+      },
+      "component_counts": {
+        "raw": 13,
+        "3x2": 11,
+        "5x3": 9,
+        "7x3": 7
+      },
+      "delta_from_text_len": {
+        "raw": 6,
+        "3x2": 4,
+        "5x3": 2,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 29,
+      "text": "1.核心被解释变量:商品供需适配程度",
+      "text_len": 18,
+      "cjk": 15,
+      "digit": 1,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 402,
+        "y": 2588,
+        "w": 861,
+        "h": 58
+      },
+      "component_counts": {
+        "raw": 28,
+        "3x2": 24,
+        "5x3": 21,
+        "7x3": 18
+      },
+      "delta_from_text_len": {
+        "raw": 10,
+        "3x2": 6,
+        "5x3": 3,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 30,
+      "text": "本文的研究目标为探究地区商品供给能力与商品消费能力之间适配程度背后",
+      "text_len": 33,
+      "cjk": 33,
+      "digit": 0,
+      "latin": 0,
+      "other": 0,
+      "bbox": {
+        "x": 397,
+        "y": 2662,
+        "w": 1754,
+        "h": 64
+      },
+      "component_counts": {
+        "raw": 54,
+        "3x2": 45,
+        "5x3": 37,
+        "7x3": 34
+      },
+      "delta_from_text_len": {
+        "raw": 21,
+        "3x2": 12,
+        "5x3": 4,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 31,
+      "text": "的体制动因。各种商品本身的供求信息最能反映供需适配状况（吕冰洋和谢耀智，",
+      "text_len": 36,
+      "cjk": 33,
+      "digit": 0,
+      "latin": 0,
+      "other": 3,
+      "bbox": {
+        "x": 301,
+        "y": 2740,
+        "w": 1848,
+        "h": 62
+      },
+      "component_counts": {
+        "raw": 55,
+        "3x2": 47,
+        "5x3": 39,
+        "7x3": 36
+      },
+      "delta_from_text_len": {
+        "raw": 19,
+        "3x2": 11,
+        "5x3": 3,
+        "7x3": 0
+      }
+    },
+    {
+      "line_index": 32,
+      "text": "2012)，但其并不能体现一个地区的商品供给和商品需求的总体情况。因此,本文",
+      "text_len": 38,
+      "cjk": 30,
+      "digit": 4,
+      "latin": 0,
+      "other": 4,
+      "bbox": {
+        "x": 299,
+        "y": 2815,
+        "w": 1852,
+        "h": 65
+      },
+      "component_counts": {
+        "raw": 53,
+        "3x2": 46,
+        "5x3": 37,
+        "7x3": 37
+      },
+      "delta_from_text_len": {
+        "raw": 15,
+        "3x2": 8,
+        "5x3": -1,
+        "7x3": -1
+      }
+    },
+    {
+      "line_index": 33,
+      "text": "尝试通过统计数据构建地区商品供需适配程度指标，从而在广义上体现地区总体",
+      "text_len": 35,
+      "cjk": 34,
+      "digit": 0,
+      "latin": 0,
+      "other": 1,
+      "bbox": {
+        "x": 299,
+        "y": 2891,
+        "w": 1852,
+        "h": 67
+      },
+      "component_counts": {
+        "raw": 54,
+        "3x2": 49,
+        "5x3": 41,
+        "7x3": 38
+      },
+      "delta_from_text_len": {
+        "raw": 19,
+        "3x2": 14,
+        "5x3": 6,
+        "7x3": 3
+      }
+    },
+    {
+      "line_index": 34,
+      "text": "的商品生产与居民消费之间的耦合关系，具体构造见式(2)~式(4)。式(2)定义了",
+      "text_len": 40,
+      "cjk": 28,
+      "digit": 3,
+      "latin": 0,
+      "other": 9,
+      "bbox": {
+        "x": 301,
+        "y": 2967,
+        "w": 1848,
+        "h": 67
+      },
+      "component_counts": {
+        "raw": 54,
+        "3x2": 47,
+        "5x3": 42,
+        "7x3": 41
+      },
+      "delta_from_text_len": {
+        "raw": 14,
+        "3x2": 7,
+        "5x3": 2,
+        "7x3": 1
+      }
+    },
+    {
+      "line_index": 35,
+      "text": "地区商品供需适配程度的度量，即地级市总商品消费与地级市总商品生产之比。",
+      "text_len": 35,
+      "cjk": 33,
+      "digit": 0,
+      "latin": 0,
+      "other": 2,
+      "bbox": {
+        "x": 301,
+        "y": 3045,
+        "w": 1850,
+        "h": 67
+      },
+      "component_counts": {
+        "raw": 55,
+        "3x2": 50,
+        "5x3": 39,
+        "7x3": 38
+      },
+      "delta_from_text_len": {
+        "raw": 20,
+        "3x2": 15,
+        "5x3": 4,
+        "7x3": 3
+      }
+    },
+    {
+      "line_index": 36,
+      "text": "166",
+      "text_len": 3,
+      "cjk": 0,
+      "digit": 3,
+      "latin": 0,
+      "other": 0,
+      "bbox": {
+        "x": 335,
+        "y": 3169,
+        "w": 108,
+        "h": 76
+      },
+      "component_counts": {
+        "raw": 3,
+        "3x2": 3,
+        "5x3": 2,
+        "7x3": 2
+      },
+      "delta_from_text_len": {
+        "raw": 0,
+        "3x2": 0,
+        "5x3": -1,
+        "7x3": -1
+      }
+    }
+  ],
+  "visualized_tokens": [
+    {
+      "line_index": 0,
+      "token_index": 0,
+      "text": "数",
+      "bbox": {
+        "x": 304,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 304,
+          "y": 266,
+          "w": 55,
+          "h": 57
+        }
+      ]
+    },
+    {
+      "line_index": 0,
+      "token_index": 1,
+      "text": "量",
+      "bbox": {
+        "x": 373,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "component_count_3x2": 4,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 373,
+          "y": 267,
+          "w": 49,
+          "h": 54
+        },
+        {
+          "x": 429,
+          "y": 311,
+          "w": 5,
+          "h": 9
+        },
+        {
+          "x": 430,
+          "y": 279,
+          "w": 4,
+          "h": 12
+        },
+        {
+          "x": 431,
+          "y": 297,
+          "w": 3,
+          "h": 10
+        }
+      ]
+    },
+    {
+      "line_index": 0,
+      "token_index": 2,
+      "text": "经",
+      "bbox": {
+        "x": 431,
+        "y": 256,
+        "w": 61,
+        "h": 72
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 431,
+          "y": 266,
+          "w": 53,
+          "h": 55
+        }
+      ]
+    },
+    {
+      "line_index": 1,
+      "token_index": 0,
+      "text": "时",
+      "bbox": {
+        "x": 305,
+        "y": 406,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 308,
+          "y": 411,
+          "w": 44,
+          "h": 46
+        },
+        {
+          "x": 328,
+          "y": 431,
+          "w": 7,
+          "h": 11
+        }
+      ]
+    },
+    {
+      "line_index": 1,
+      "token_index": 3,
+      "text": "年",
+      "bbox": {
+        "x": 499,
+        "y": 406,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 499,
+          "y": 410,
+          "w": 42,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 1,
+      "token_index": 4,
+      "text": "增",
+      "bbox": {
+        "x": 552,
+        "y": 406,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 552,
+          "y": 411,
+          "w": 40,
+          "h": 37
+        },
+        {
+          "x": 567,
+          "y": 437,
+          "w": 22,
+          "h": 20
+        }
+      ]
+    },
+    {
+      "line_index": 2,
+      "token_index": 0,
+      "text": "推",
+      "bbox": {
+        "x": 304,
+        "y": 484,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 307,
+          "y": 488,
+          "w": 44,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 2,
+      "token_index": 1,
+      "text": "动",
+      "bbox": {
+        "x": 357,
+        "y": 484,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 361,
+          "y": 488,
+          "w": 43,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 2,
+      "token_index": 2,
+      "text": "本",
+      "bbox": {
+        "x": 411,
+        "y": 484,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 413,
+          "y": 488,
+          "w": 46,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 3,
+      "token_index": 0,
+      "text": "相",
+      "bbox": {
+        "x": 304,
+        "y": 562,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 567,
+          "w": 44,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 3,
+      "token_index": 1,
+      "text": "对",
+      "bbox": {
+        "x": 357,
+        "y": 562,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 357,
+          "y": 572,
+          "w": 23,
+          "h": 37
+        },
+        {
+          "x": 380,
+          "y": 567,
+          "w": 25,
+          "h": 45
+        },
+        {
+          "x": 381,
+          "y": 587,
+          "w": 7,
+          "h": 11
+        }
+      ]
+    },
+    {
+      "line_index": 3,
+      "token_index": 2,
+      "text": "倾",
+      "bbox": {
+        "x": 410,
+        "y": 562,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 410,
+          "y": 566,
+          "w": 14,
+          "h": 48
+        },
+        {
+          "x": 424,
+          "y": 569,
+          "w": 34,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 4,
+      "token_index": 0,
+      "text": "问",
+      "bbox": {
+        "x": 304,
+        "y": 629,
+        "w": 61,
+        "h": 73
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 309,
+          "y": 646,
+          "w": 40,
+          "h": 45
+        },
+        {
+          "x": 320,
+          "y": 660,
+          "w": 18,
+          "h": 20
+        },
+        {
+          "x": 358,
+          "y": 668,
+          "w": 7,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 4,
+      "token_index": 1,
+      "text": "题",
+      "bbox": {
+        "x": 352,
+        "y": 629,
+        "w": 61,
+        "h": 73
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 358,
+          "y": 645,
+          "w": 47,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 5,
+      "token_index": 0,
+      "text": "综",
+      "bbox": {
+        "x": 405,
+        "y": 718,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 405,
+          "y": 722,
+          "w": 46,
+          "h": 33
+        },
+        {
+          "x": 405,
+          "y": 751,
+          "w": 27,
+          "h": 15
+        },
+        {
+          "x": 423,
+          "y": 744,
+          "w": 29,
+          "h": 25
+        }
+      ]
+    },
+    {
+      "line_index": 5,
+      "token_index": 1,
+      "text": "合",
+      "bbox": {
+        "x": 459,
+        "y": 718,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 459,
+          "y": 722,
+          "w": 46,
+          "h": 26
+        },
+        {
+          "x": 469,
+          "y": 749,
+          "w": 27,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 5,
+      "token_index": 2,
+      "text": "上",
+      "bbox": {
+        "x": 512,
+        "y": 718,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 512,
+          "y": 725,
+          "w": 45,
+          "h": 42
+        }
+      ]
+    },
+    {
+      "line_index": 6,
+      "token_index": 0,
+      "text": "结",
+      "bbox": {
+        "x": 304,
+        "y": 794,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 800,
+          "w": 46,
+          "h": 32
+        },
+        {
+          "x": 307,
+          "y": 826,
+          "w": 42,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 6,
+      "token_index": 1,
+      "text": "构",
+      "bbox": {
+        "x": 357,
+        "y": 794,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 360,
+          "y": 800,
+          "w": 45,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 6,
+      "token_index": 2,
+      "text": "性",
+      "bbox": {
+        "x": 411,
+        "y": 794,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 413,
+          "y": 801,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 7,
+      "token_index": 0,
+      "text": "收",
+      "bbox": {
+        "x": 304,
+        "y": 872,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 308,
+          "y": 879,
+          "w": 44,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 7,
+      "token_index": 1,
+      "text": "利",
+      "bbox": {
+        "x": 359,
+        "y": 872,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 359,
+          "y": 879,
+          "w": 34,
+          "h": 46
+        },
+        {
+          "x": 391,
+          "y": 878,
+          "w": 12,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 7,
+      "token_index": 2,
+      "text": "益",
+      "bbox": {
+        "x": 414,
+        "y": 872,
+        "w": 53,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 414,
+          "y": 879,
+          "w": 43,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 8,
+      "token_index": 0,
+      "text": "商",
+      "bbox": {
+        "x": 302,
+        "y": 952,
+        "w": 55,
+        "h": 49
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 956,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 8,
+      "token_index": 1,
+      "text": "品",
+      "bbox": {
+        "x": 355,
+        "y": 952,
+        "w": 55,
+        "h": 49
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 361,
+          "y": 979,
+          "w": 18,
+          "h": 22
+        },
+        {
+          "x": 369,
+          "y": 957,
+          "w": 26,
+          "h": 21
+        },
+        {
+          "x": 383,
+          "y": 979,
+          "w": 19,
+          "h": 22
+        }
+      ]
+    },
+    {
+      "line_index": 8,
+      "token_index": 2,
+      "text": "供",
+      "bbox": {
+        "x": 408,
+        "y": 952,
+        "w": 55,
+        "h": 49
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 412,
+          "y": 956,
+          "w": 46,
+          "h": 45
+        },
+        {
+          "x": 444,
+          "y": 989,
+          "w": 12,
+          "h": 12
+        }
+      ]
+    },
+    {
+      "line_index": 9,
+      "token_index": 0,
+      "text": "重",
+      "bbox": {
+        "x": 303,
+        "y": 1028,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 305,
+          "y": 1036,
+          "w": 45,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 9,
+      "token_index": 1,
+      "text": "要",
+      "bbox": {
+        "x": 358,
+        "y": 1028,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 358,
+          "y": 1036,
+          "w": 44,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 9,
+      "token_index": 2,
+      "text": "因",
+      "bbox": {
+        "x": 414,
+        "y": 1028,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 414,
+          "y": 1035,
+          "w": 38,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 10,
+      "token_index": 0,
+      "text": "研",
+      "bbox": {
+        "x": 401,
+        "y": 1103,
+        "w": 56,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 404,
+          "y": 1113,
+          "w": 47,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 10,
+      "token_index": 1,
+      "text": "究",
+      "bbox": {
+        "x": 458,
+        "y": 1103,
+        "w": 55,
+        "h": 54
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 458,
+          "y": 1112,
+          "w": 44,
+          "h": 15
+        },
+        {
+          "x": 458,
+          "y": 1123,
+          "w": 44,
+          "h": 34
+        },
+        {
+          "x": 483,
+          "y": 1123,
+          "w": 14,
+          "h": 14
+        }
+      ]
+    },
+    {
+      "line_index": 10,
+      "token_index": 2,
+      "text": "假",
+      "bbox": {
+        "x": 514,
+        "y": 1103,
+        "w": 55,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 514,
+          "y": 1112,
+          "w": 41,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 11,
+      "token_index": 0,
+      "text": "财",
+      "bbox": {
+        "x": 303,
+        "y": 1181,
+        "w": 54,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 305,
+          "y": 1190,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 11,
+      "token_index": 1,
+      "text": "政",
+      "bbox": {
+        "x": 357,
+        "y": 1181,
+        "w": 54,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 357,
+          "y": 1190,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 11,
+      "token_index": 2,
+      "text": "激",
+      "bbox": {
+        "x": 411,
+        "y": 1181,
+        "w": 54,
+        "h": 54
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 411,
+          "y": 1189,
+          "w": 44,
+          "h": 46
+        },
+        {
+          "x": 461,
+          "y": 1223,
+          "w": 4,
+          "h": 11
+        }
+      ]
+    },
+    {
+      "line_index": 12,
+      "token_index": 0,
+      "text": "三",
+      "bbox": {
+        "x": 1042,
+        "y": 1293,
+        "w": 65,
+        "h": 64
+      },
+      "component_count_3x2": 0,
+      "status": "empty",
+      "component_bboxes": []
+    },
+    {
+      "line_index": 12,
+      "token_index": 2,
+      "text": "研",
+      "bbox": {
+        "x": 1169,
+        "y": 1293,
+        "w": 65,
+        "h": 64
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 1169,
+          "y": 1304,
+          "w": 53,
+          "h": 49
+        }
+      ]
+    },
+    {
+      "line_index": 12,
+      "token_index": 3,
+      "text": "究",
+      "bbox": {
+        "x": 1227,
+        "y": 1293,
+        "w": 65,
+        "h": 64
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 1231,
+          "y": 1300,
+          "w": 51,
+          "h": 52
+        }
+      ]
+    },
+    {
+      "line_index": 13,
+      "token_index": 1,
+      "text": "一",
+      "bbox": {
+        "x": 438,
+        "y": 1416,
+        "w": 52,
+        "h": 62
+      },
+      "component_count_3x2": 0,
+      "status": "empty",
+      "component_bboxes": []
+    },
+    {
+      "line_index": 13,
+      "token_index": 3,
+      "text": "实",
+      "bbox": {
+        "x": 521,
+        "y": 1416,
+        "w": 52,
+        "h": 62
+      },
+      "component_count_3x2": 6,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 521,
+          "y": 1426,
+          "w": 36,
+          "h": 14
+        },
+        {
+          "x": 521,
+          "y": 1437,
+          "w": 35,
+          "h": 35
+        },
+        {
+          "x": 521,
+          "y": 1446,
+          "w": 9,
+          "h": 8
+        },
+        {
+          "x": 525,
+          "y": 1438,
+          "w": 8,
+          "h": 8
+        },
+        {
+          "x": 564,
+          "y": 1441,
+          "w": 9,
+          "h": 29
+        },
+        {
+          "x": 568,
+          "y": 1428,
+          "w": 5,
+          "h": 8
+        }
+      ]
+    },
+    {
+      "line_index": 13,
+      "token_index": 4,
+      "text": "证",
+      "bbox": {
+        "x": 562,
+        "y": 1416,
+        "w": 52,
+        "h": 62
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 564,
+          "y": 1427,
+          "w": 47,
+          "h": 43
+        },
+        {
+          "x": 568,
+          "y": 1428,
+          "w": 8,
+          "h": 9
+        }
+      ]
+    },
+    {
+      "line_index": 14,
+      "token_index": 0,
+      "text": "本",
+      "bbox": {
+        "x": 402,
+        "y": 1496,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 405,
+          "y": 1504,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 14,
+      "token_index": 1,
+      "text": "文",
+      "bbox": {
+        "x": 459,
+        "y": 1496,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 459,
+          "y": 1505,
+          "w": 45,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 14,
+      "token_index": 2,
+      "text": "基",
+      "bbox": {
+        "x": 516,
+        "y": 1496,
+        "w": 55,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 516,
+          "y": 1505,
+          "w": 42,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 15,
+      "token_index": 0,
+      "text": "供",
+      "bbox": {
+        "x": 303,
+        "y": 1572,
+        "w": 56,
+        "h": 57
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 305,
+          "y": 1582,
+          "w": 46,
+          "h": 47
+        },
+        {
+          "x": 337,
+          "y": 1615,
+          "w": 12,
+          "h": 13
+        }
+      ]
+    },
+    {
+      "line_index": 15,
+      "token_index": 1,
+      "text": "需",
+      "bbox": {
+        "x": 353,
+        "y": 1572,
+        "w": 55,
+        "h": 57
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 358,
+          "y": 1582,
+          "w": 45,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 15,
+      "token_index": 2,
+      "text": "适",
+      "bbox": {
+        "x": 412,
+        "y": 1572,
+        "w": 55,
+        "h": 57
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 412,
+          "y": 1582,
+          "w": 44,
+          "h": 46
+        },
+        {
+          "x": 414,
+          "y": 1585,
+          "w": 9,
+          "h": 10
+        }
+      ]
+    },
+    {
+      "line_index": 16,
+      "token_index": 0,
+      "text": "成",
+      "bbox": {
+        "x": 304,
+        "y": 1652,
+        "w": 54,
+        "h": 55
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 304,
+          "y": 1660,
+          "w": 47,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 16,
+      "token_index": 1,
+      "text": "改",
+      "bbox": {
+        "x": 354,
+        "y": 1652,
+        "w": 53,
+        "h": 55
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 358,
+          "y": 1660,
+          "w": 45,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 16,
+      "token_index": 2,
+      "text": "革",
+      "bbox": {
+        "x": 413,
+        "y": 1652,
+        "w": 53,
+        "h": 55
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 413,
+          "y": 1659,
+          "w": 42,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 19,
+      "token_index": 0,
+      "text": "其",
+      "bbox": {
+        "x": 403,
+        "y": 1812,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 406,
+          "y": 1821,
+          "w": 46,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 19,
+      "token_index": 1,
+      "text": "中",
+      "bbox": {
+        "x": 453,
+        "y": 1812,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 462,
+          "y": 1821,
+          "w": 39,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 19,
+      "token_index": 3,
+      "text": "下",
+      "bbox": {
+        "x": 533,
+        "y": 1812,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 538,
+          "y": 1822,
+          "w": 45,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 20,
+      "token_index": 0,
+      "text": "变",
+      "bbox": {
+        "x": 302,
+        "y": 1893,
+        "w": 59,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 1900,
+          "w": 45,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 20,
+      "token_index": 1,
+      "text": "量",
+      "bbox": {
+        "x": 362,
+        "y": 1893,
+        "w": 59,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 362,
+          "y": 1900,
+          "w": 43,
+          "h": 45
+        },
+        {
+          "x": 417,
+          "y": 1932,
+          "w": 4,
+          "h": 11
+        }
+      ]
+    },
+    {
+      "line_index": 20,
+      "token_index": 3,
+      "text": "核",
+      "bbox": {
+        "x": 472,
+        "y": 1893,
+        "w": 60,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 472,
+          "y": 1899,
+          "w": 41,
+          "h": 46
+        },
+        {
+          "x": 522,
+          "y": 1920,
+          "w": 8,
+          "h": 14
+        }
+      ]
+    },
+    {
+      "line_index": 21,
+      "token_index": 2,
+      "text": "表",
+      "bbox": {
+        "x": 501,
+        "y": 1968,
+        "w": 58,
+        "h": 56
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 501,
+          "y": 1977,
+          "w": 45,
+          "h": 46
+        },
+        {
+          "x": 554,
+          "y": 2010,
+          "w": 5,
+          "h": 8
+        }
+      ]
+    },
+    {
+      "line_index": 21,
+      "token_index": 3,
+      "text": "示",
+      "bbox": {
+        "x": 554,
+        "y": 1968,
+        "w": 58,
+        "h": 56
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 554,
+          "y": 1989,
+          "w": 44,
+          "h": 32
+        },
+        {
+          "x": 554,
+          "y": 1997,
+          "w": 16,
+          "h": 21
+        },
+        {
+          "x": 582,
+          "y": 1999,
+          "w": 15,
+          "h": 18
+        }
+      ]
+    },
+    {
+      "line_index": 21,
+      "token_index": 5,
+      "text": "年",
+      "bbox": {
+        "x": 722,
+        "y": 1968,
+        "w": 58,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 724,
+          "y": 1975,
+          "w": 46,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 22,
+      "token_index": 0,
+      "text": "见",
+      "bbox": {
+        "x": 301,
+        "y": 2046,
+        "w": 61,
+        "h": 56
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 307,
+          "y": 2065,
+          "w": 44,
+          "h": 35
+        },
+        {
+          "x": 314,
+          "y": 2056,
+          "w": 28,
+          "h": 29
+        }
+      ]
+    },
+    {
+      "line_index": 22,
+      "token_index": 1,
+      "text": "式",
+      "bbox": {
+        "x": 361,
+        "y": 2046,
+        "w": 61,
+        "h": 56
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 361,
+          "y": 2055,
+          "w": 44,
+          "h": 46
+        },
+        {
+          "x": 416,
+          "y": 2062,
+          "w": 6,
+          "h": 32
+        }
+      ]
+    },
+    {
+      "line_index": 22,
+      "token_index": 5,
+      "text": "政",
+      "bbox": {
+        "x": 521,
+        "y": 2046,
+        "w": 61,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 524,
+          "y": 2054,
+          "w": 46,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 23,
+      "token_index": 0,
+      "text": "之",
+      "bbox": {
+        "x": 303,
+        "y": 2124,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 2133,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 23,
+      "token_index": 1,
+      "text": "取",
+      "bbox": {
+        "x": 353,
+        "y": 2124,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 360,
+          "y": 2133,
+          "w": 47,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 23,
+      "token_index": 2,
+      "text": "值",
+      "bbox": {
+        "x": 413,
+        "y": 2124,
+        "w": 57,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 415,
+          "y": 2131,
+          "w": 47,
+          "h": 49
+        }
+      ]
+    },
+    {
+      "line_index": 24,
+      "token_index": 0,
+      "text": "度",
+      "bbox": {
+        "x": 306,
+        "y": 2200,
+        "w": 55,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 2211,
+          "w": 44,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 24,
+      "token_index": 2,
+      "text": "金",
+      "bbox": {
+        "x": 390,
+        "y": 2200,
+        "w": 55,
+        "h": 56
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 390,
+          "y": 2211,
+          "w": 42,
+          "h": 45
+        },
+        {
+          "x": 440,
+          "y": 2219,
+          "w": 5,
+          "h": 37
+        }
+      ]
+    },
+    {
+      "line_index": 24,
+      "token_index": 3,
+      "text": "融",
+      "bbox": {
+        "x": 432,
+        "y": 2200,
+        "w": 55,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 439,
+          "y": 2210,
+          "w": 45,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 25,
+      "token_index": 0,
+      "text": "年",
+      "bbox": {
+        "x": 306,
+        "y": 2274,
+        "w": 57,
+        "h": 67
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 2288,
+          "w": 46,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 25,
+      "token_index": 1,
+      "text": "龄",
+      "bbox": {
+        "x": 353,
+        "y": 2274,
+        "w": 57,
+        "h": 67
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 360,
+          "y": 2288,
+          "w": 47,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 25,
+      "token_index": 2,
+      "text": "结",
+      "bbox": {
+        "x": 411,
+        "y": 2274,
+        "w": 57,
+        "h": 67
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 414,
+          "y": 2288,
+          "w": 47,
+          "h": 31
+        },
+        {
+          "x": 415,
+          "y": 2313,
+          "w": 43,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 26,
+      "token_index": 0,
+      "text": "由",
+      "bbox": {
+        "x": 304,
+        "y": 2358,
+        "w": 55,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 311,
+          "y": 2368,
+          "w": 36,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 26,
+      "token_index": 1,
+      "text": "于",
+      "bbox": {
+        "x": 365,
+        "y": 2358,
+        "w": 54,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 365,
+          "y": 2371,
+          "w": 40,
+          "h": 43
+        }
+      ]
+    },
+    {
+      "line_index": 26,
+      "token_index": 2,
+      "text": "中",
+      "bbox": {
+        "x": 415,
+        "y": 2358,
+        "w": 54,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 417,
+          "y": 2367,
+          "w": 39,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 27,
+      "token_index": 0,
+      "text": "励",
+      "bbox": {
+        "x": 304,
+        "y": 2434,
+        "w": 59,
+        "h": 60
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 306,
+          "y": 2445,
+          "w": 46,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 27,
+      "token_index": 1,
+      "text": "存",
+      "bbox": {
+        "x": 356,
+        "y": 2434,
+        "w": 60,
+        "h": 60
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 358,
+          "y": 2445,
+          "w": 47,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 27,
+      "token_index": 2,
+      "text": "在",
+      "bbox": {
+        "x": 409,
+        "y": 2434,
+        "w": 59,
+        "h": 60
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 411,
+          "y": 2445,
+          "w": 46,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 28,
+      "token_index": 1,
+      "text": "二",
+      "bbox": {
+        "x": 436,
+        "y": 2508,
+        "w": 55,
+        "h": 62
+      },
+      "component_count_3x2": 0,
+      "status": "empty",
+      "component_bboxes": []
+    },
+    {
+      "line_index": 28,
+      "token_index": 3,
+      "text": "核",
+      "bbox": {
+        "x": 519,
+        "y": 2508,
+        "w": 55,
+        "h": 62
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 519,
+          "y": 2521,
+          "w": 41,
+          "h": 46
+        },
+        {
+          "x": 530,
+          "y": 2544,
+          "w": 28,
+          "h": 22
+        },
+        {
+          "x": 567,
+          "y": 2542,
+          "w": 7,
+          "h": 14
+        }
+      ]
+    },
+    {
+      "line_index": 28,
+      "token_index": 4,
+      "text": "心",
+      "bbox": {
+        "x": 571,
+        "y": 2508,
+        "w": 55,
+        "h": 62
+      },
+      "component_count_3x2": 4,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 571,
+          "y": 2541,
+          "w": 4,
+          "h": 15
+        },
+        {
+          "x": 580,
+          "y": 2532,
+          "w": 23,
+          "h": 32
+        },
+        {
+          "x": 586,
+          "y": 2524,
+          "w": 8,
+          "h": 11
+        },
+        {
+          "x": 601,
+          "y": 2538,
+          "w": 10,
+          "h": 14
+        }
+      ]
+    },
+    {
+      "line_index": 29,
+      "token_index": 2,
+      "text": "核",
+      "bbox": {
+        "x": 452,
+        "y": 2590,
+        "w": 55,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 455,
+          "y": 2598,
+          "w": 45,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 29,
+      "token_index": 3,
+      "text": "心",
+      "bbox": {
+        "x": 507,
+        "y": 2590,
+        "w": 55,
+        "h": 54
+      },
+      "component_count_3x2": 4,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 507,
+          "y": 2619,
+          "w": 7,
+          "h": 14
+        },
+        {
+          "x": 519,
+          "y": 2609,
+          "w": 24,
+          "h": 33
+        },
+        {
+          "x": 525,
+          "y": 2601,
+          "w": 9,
+          "h": 11
+        },
+        {
+          "x": 540,
+          "y": 2616,
+          "w": 11,
+          "h": 13
+        }
+      ]
+    },
+    {
+      "line_index": 29,
+      "token_index": 4,
+      "text": "被",
+      "bbox": {
+        "x": 553,
+        "y": 2590,
+        "w": 55,
+        "h": 54
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 558,
+          "y": 2598,
+          "w": 46,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 30,
+      "token_index": 0,
+      "text": "本",
+      "bbox": {
+        "x": 404,
+        "y": 2666,
+        "w": 54,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 408,
+          "y": 2676,
+          "w": 46,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 30,
+      "token_index": 1,
+      "text": "文",
+      "bbox": {
+        "x": 463,
+        "y": 2666,
+        "w": 54,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 463,
+          "y": 2676,
+          "w": 44,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 30,
+      "token_index": 2,
+      "text": "的",
+      "bbox": {
+        "x": 513,
+        "y": 2666,
+        "w": 53,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 517,
+          "y": 2676,
+          "w": 42,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 31,
+      "token_index": 0,
+      "text": "的",
+      "bbox": {
+        "x": 309,
+        "y": 2742,
+        "w": 54,
+        "h": 58
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 312,
+          "y": 2754,
+          "w": 41,
+          "h": 45
+        }
+      ]
+    },
+    {
+      "line_index": 31,
+      "token_index": 1,
+      "text": "体",
+      "bbox": {
+        "x": 359,
+        "y": 2742,
+        "w": 54,
+        "h": 58
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 361,
+          "y": 2752,
+          "w": 47,
+          "h": 47
+        }
+      ]
+    },
+    {
+      "line_index": 31,
+      "token_index": 2,
+      "text": "制",
+      "bbox": {
+        "x": 409,
+        "y": 2742,
+        "w": 54,
+        "h": 58
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 414,
+          "y": 2752,
+          "w": 35,
+          "h": 47
+        },
+        {
+          "x": 446,
+          "y": 2753,
+          "w": 11,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 32,
+      "token_index": 2,
+      "text": "但",
+      "bbox": {
+        "x": 463,
+        "y": 2820,
+        "w": 61,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 467,
+          "y": 2828,
+          "w": 47,
+          "h": 48
+        }
+      ]
+    },
+    {
+      "line_index": 32,
+      "token_index": 3,
+      "text": "其",
+      "bbox": {
+        "x": 523,
+        "y": 2820,
+        "w": 62,
+        "h": 56
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 523,
+          "y": 2828,
+          "w": 45,
+          "h": 47
+        },
+        {
+          "x": 575,
+          "y": 2866,
+          "w": 10,
+          "h": 8
+        }
+      ]
+    },
+    {
+      "line_index": 32,
+      "token_index": 4,
+      "text": "并",
+      "bbox": {
+        "x": 573,
+        "y": 2820,
+        "w": 62,
+        "h": 56
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 575,
+          "y": 2828,
+          "w": 46,
+          "h": 46
+        }
+      ]
+    },
+    {
+      "line_index": 33,
+      "token_index": 0,
+      "text": "尝",
+      "bbox": {
+        "x": 306,
+        "y": 2898,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 310,
+          "y": 2907,
+          "w": 45,
+          "h": 23
+        },
+        {
+          "x": 310,
+          "y": 2933,
+          "w": 44,
+          "h": 18
+        }
+      ]
+    },
+    {
+      "line_index": 33,
+      "token_index": 1,
+      "text": "试",
+      "bbox": {
+        "x": 365,
+        "y": 2898,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 365,
+          "y": 2907,
+          "w": 44,
+          "h": 44
+        }
+      ]
+    },
+    {
+      "line_index": 33,
+      "token_index": 2,
+      "text": "通",
+      "bbox": {
+        "x": 424,
+        "y": 2898,
+        "w": 54,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 424,
+          "y": 2908,
+          "w": 37,
+          "h": 43
+        },
+        {
+          "x": 470,
+          "y": 2926,
+          "w": 8,
+          "h": 24
+        }
+      ]
+    },
+    {
+      "line_index": 34,
+      "token_index": 0,
+      "text": "的",
+      "bbox": {
+        "x": 307,
+        "y": 2974,
+        "w": 57,
+        "h": 53
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 313,
+          "y": 2985,
+          "w": 41,
+          "h": 42
+        }
+      ]
+    },
+    {
+      "line_index": 34,
+      "token_index": 1,
+      "text": "商",
+      "bbox": {
+        "x": 367,
+        "y": 2974,
+        "w": 57,
+        "h": 53
+      },
+      "component_count_3x2": 2,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 367,
+          "y": 2983,
+          "w": 42,
+          "h": 44
+        },
+        {
+          "x": 419,
+          "y": 3006,
+          "w": 5,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 34,
+      "token_index": 2,
+      "text": "品",
+      "bbox": {
+        "x": 417,
+        "y": 2974,
+        "w": 57,
+        "h": 53
+      },
+      "component_count_3x2": 3,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 419,
+          "y": 3006,
+          "w": 17,
+          "h": 21
+        },
+        {
+          "x": 426,
+          "y": 2984,
+          "w": 26,
+          "h": 20
+        },
+        {
+          "x": 440,
+          "y": 3006,
+          "w": 19,
+          "h": 21
+        }
+      ]
+    },
+    {
+      "line_index": 35,
+      "token_index": 0,
+      "text": "地",
+      "bbox": {
+        "x": 309,
+        "y": 3050,
+        "w": 55,
+        "h": 57
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 309,
+          "y": 3063,
+          "w": 47,
+          "h": 43
+        }
+      ]
+    },
+    {
+      "line_index": 35,
+      "token_index": 1,
+      "text": "区",
+      "bbox": {
+        "x": 360,
+        "y": 3050,
+        "w": 54,
+        "h": 57
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 368,
+          "y": 3063,
+          "w": 41,
+          "h": 41
+        }
+      ]
+    },
+    {
+      "line_index": 35,
+      "token_index": 2,
+      "text": "商",
+      "bbox": {
+        "x": 421,
+        "y": 3050,
+        "w": 55,
+        "h": 57
+      },
+      "component_count_3x2": 1,
+      "status": "single_cjk",
+      "component_bboxes": [
+        {
+          "x": 421,
+          "y": 3059,
+          "w": 44,
+          "h": 48
+        }
+      ]
+    }
+  ],
+  "conclusion": "Whole-line connected-component counts are unstable; PP-OCRv5 single-CJK token boxes are the stable binding source on this page. Components are useful only inside token boxes for diagnostics or constrained future word-token splitting."
+}

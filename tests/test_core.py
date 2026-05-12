@@ -290,6 +290,48 @@ def test_bbox_tools():
     print("test_bbox_tools PASSED")
 
 
+def test_component_matcher_extracts_and_classifies_cjk_tokens():
+    import cv2
+    import numpy as np
+
+    from app.core.component_matcher import (
+        analyze_token_components, count_cjk_tokens, extract_text_components,
+    )
+    from app.models import BBox
+
+    img = np.full((80, 160, 3), 255, dtype=np.uint8)
+    cv2.rectangle(img, (12, 22), (32, 54), (0, 0, 0), -1)
+    cv2.rectangle(img, (58, 22), (78, 54), (0, 0, 0), -1)
+    cv2.rectangle(img, (104, 22), (124, 54), (0, 0, 0), -1)
+
+    components = extract_text_components(
+        img,
+        BBox(0, 0, 150, 70),
+        kernel_size=None,
+        min_area=20,
+    )
+    assert [component.bbox for component in components] == [
+        BBox(12, 22, 21, 33),
+        BBox(58, 22, 21, 33),
+        BBox(104, 22, 21, 33),
+    ]
+
+    single = analyze_token_components(img, "汉", BBox(8, 18, 30, 42), kernel_size=None)
+    assert single.status == "single_cjk"
+    assert single.component_count == 1
+
+    multi = analyze_token_components(img, "天地", BBox(50, 18, 82, 42), kernel_size=None)
+    assert multi.status == "split_candidate"
+    assert multi.component_count == 2
+
+    latin = analyze_token_components(img, "A1", BBox(50, 18, 82, 42), kernel_size=None)
+    assert latin.status == "not_cjk"
+
+    assert count_cjk_tokens(["天", "地玄", "2026", "A1"]) == (1, 1, 2)
+
+    print("test_component_matcher_extracts_and_classifies_cjk_tokens PASSED")
+
+
 def test_block_type_mapping():
     from app.models import BlockType
 
