@@ -15,6 +15,59 @@ class TextComponent:
     bbox: BBox
     area: int
 
+    @property
+    def aspect_ratio(self) -> float:
+        if self.bbox.h <= 0:
+            return 0.0
+        return float(self.bbox.w) / float(self.bbox.h)
+
+
+@dataclass(frozen=True)
+class ComponentShapeFilter:
+    min_width: float
+    max_width: float
+    min_height: float
+    max_height: float
+    min_area: float
+    max_area: float
+    min_aspect_ratio: float
+    max_aspect_ratio: float
+
+    def accepts(self, component: TextComponent) -> bool:
+        aspect_ratio = component.aspect_ratio
+        return (
+            self.min_width <= component.bbox.w <= self.max_width
+            and self.min_height <= component.bbox.h <= self.max_height
+            and self.min_area <= component.area <= self.max_area
+            and self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio
+        )
+
+
+@dataclass(frozen=True)
+class RelativeComponentShapeFilter:
+    min_width_ratio: float
+    max_width_ratio: float
+    min_height_ratio: float
+    max_height_ratio: float
+    min_area_ratio: float
+    max_area_ratio: float
+    min_aspect_ratio: float
+    max_aspect_ratio: float
+
+    def accepts(self, component: TextComponent, reference_height: float) -> bool:
+        if reference_height <= 0:
+            return False
+        width_ratio = float(component.bbox.w) / float(reference_height)
+        height_ratio = float(component.bbox.h) / float(reference_height)
+        area_ratio = float(component.area) / float(reference_height * reference_height)
+        aspect_ratio = component.aspect_ratio
+        return (
+            self.min_width_ratio <= width_ratio <= self.max_width_ratio
+            and self.min_height_ratio <= height_ratio <= self.max_height_ratio
+            and self.min_area_ratio <= area_ratio <= self.max_area_ratio
+            and self.min_aspect_ratio <= aspect_ratio <= self.max_aspect_ratio
+        )
+
 
 @dataclass(frozen=True)
 class TokenComponentAnalysis:
@@ -123,6 +176,84 @@ def count_cjk_tokens(tokens: Iterable[str]) -> tuple[int, int, int]:
         else:
             other += 1
     return single, multi, other
+
+
+def build_component_shape_filter(
+    components: Sequence[TextComponent],
+    *,
+    lower_quantile: float = 0.05,
+    upper_quantile: float = 0.95,
+    padding_ratio: float = 0.15,
+) -> ComponentShapeFilter:
+    if not components:
+        return ComponentShapeFilter(0, 0, 0, 0, 0, 0, 0, 0)
+
+    def interval(values: Sequence[float]) -> tuple[float, float]:
+        arr = np.asarray(values, dtype=float)
+        low = float(np.quantile(arr, lower_quantile))
+        high = float(np.quantile(arr, upper_quantile))
+        pad = max((high - low) * padding_ratio, 1.0)
+        return max(0.0, low - pad), high + pad
+
+    min_width, max_width = interval([component.bbox.w for component in components])
+    min_height, max_height = interval([component.bbox.h for component in components])
+    min_area, max_area = interval([component.area for component in components])
+    min_aspect, max_aspect = interval([component.aspect_ratio for component in components])
+    return ComponentShapeFilter(
+        min_width=min_width,
+        max_width=max_width,
+        min_height=min_height,
+        max_height=max_height,
+        min_area=min_area,
+        max_area=max_area,
+        min_aspect_ratio=min_aspect,
+        max_aspect_ratio=max_aspect,
+    )
+
+
+def build_relative_component_shape_filter(
+    samples: Sequence[tuple[TextComponent, float]],
+    *,
+    lower_quantile: float = 0.05,
+    upper_quantile: float = 0.95,
+    padding_ratio: float = 0.15,
+) -> RelativeComponentShapeFilter:
+    valid_samples = [
+        (component, float(reference_height))
+        for component, reference_height in samples
+        if reference_height > 0
+    ]
+    if not valid_samples:
+        return RelativeComponentShapeFilter(0, 0, 0, 0, 0, 0, 0, 0)
+
+    def interval(values: Sequence[float]) -> tuple[float, float]:
+        arr = np.asarray(values, dtype=float)
+        low = float(np.quantile(arr, lower_quantile))
+        high = float(np.quantile(arr, upper_quantile))
+        pad = max((high - low) * padding_ratio, 0.01)
+        return max(0.0, low - pad), high + pad
+
+    width_ratios = [component.bbox.w / reference for component, reference in valid_samples]
+    height_ratios = [component.bbox.h / reference for component, reference in valid_samples]
+    area_ratios = [
+        component.area / (reference * reference)
+        for component, reference in valid_samples
+    ]
+    aspects = [component.aspect_ratio for component, _ in valid_samples]
+    min_width, max_width = interval(width_ratios)
+    min_height, max_height = interval(height_ratios)
+    min_area, max_area = interval(area_ratios)
+    min_aspect, max_aspect = interval(aspects)
+    return RelativeComponentShapeFilter(
+        min_width_ratio=min_width,
+        max_width_ratio=max_width,
+        min_height_ratio=min_height,
+        max_height_ratio=max_height,
+        min_area_ratio=min_area,
+        max_area_ratio=max_area,
+        min_aspect_ratio=min_aspect,
+        max_aspect_ratio=max_aspect,
+    )
 
 
 def bbox_from_xyxy(values: Sequence[int | float]) -> BBox:

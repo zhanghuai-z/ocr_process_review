@@ -3489,5 +3489,397 @@
     "char_token_bbox_input": "Use PP-OCRv5 text_word/text_word_boxes as the binding window. On this page there are 998 tokens: 874 single-CJK tokens, 0 multi-CJK tokens, and 124 non-CJK/mixed tokens. Visualized CJK token crops generally bind to the correct glyph body, but cc is diagnostic only.",
     "line_bbox_input": "Use PP-OCRv5 rec_boxes as the only window and sort connected components inside a whole line. With 3x2 kernel only 3/37 lines match full text length and 0/37 match CJK count, so line bbox is unsafe for direct CJK element binding without token/text-run constraints.",
     "recommendation": "Use line bbox for HProof crop and diagnostics; use token bbox plus OCR token text for VProof binding; only attempt connected-component refinement inside a token bbox."
+  },
+  "normal_component_filter_experiment": {
+    "source": "relative normal CJK component interval learned from single-CJK PP-OCRv5 token bboxes with exactly one 3x2 component; ratios are normalized by token/line bbox height",
+    "normal_sample_count": 562,
+    "shape_filter": {
+      "min_width_ratio": 0.6682,
+      "max_width_ratio": 0.8967,
+      "min_height_ratio": 0.7217,
+      "max_height_ratio": 0.9297,
+      "min_area_ratio": 0.1259,
+      "max_area_ratio": 0.3687,
+      "min_aspect_ratio": 0.84,
+      "max_aspect_ratio": 1.0723
+    },
+    "line_bbox_components_before_filter": 1334,
+    "line_bbox_components_after_filter": 376,
+    "line_bbox_components_rejected": 958,
+    "lines_accepted_count_equals_cjk_count": 3,
+    "line_total": 37,
+    "line_stats": [
+      {
+        "line_index": 0,
+        "text_len": 18,
+        "cjk_count": 13,
+        "reference_height": 72,
+        "component_count_3x2": 18,
+        "accepted_normal_shape_count": 4,
+        "rejected_shape_count": 14,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 1,
+        "text_len": 38,
+        "cjk_count": 32,
+        "reference_height": 53,
+        "component_count_3x2": 44,
+        "accepted_normal_shape_count": 28,
+        "rejected_shape_count": 16,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 2,
+        "text_len": 35,
+        "cjk_count": 33,
+        "reference_height": 53,
+        "component_count_3x2": 41,
+        "accepted_normal_shape_count": 29,
+        "rejected_shape_count": 12,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 3,
+        "text_len": 36,
+        "cjk_count": 34,
+        "reference_height": 53,
+        "component_count_3x2": 55,
+        "accepted_normal_shape_count": 25,
+        "rejected_shape_count": 30,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 4,
+        "text_len": 3,
+        "cjk_count": 2,
+        "reference_height": 73,
+        "component_count_3x2": 4,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 4,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 5,
+        "text_len": 36,
+        "cjk_count": 30,
+        "reference_height": 53,
+        "component_count_3x2": 47,
+        "accepted_normal_shape_count": 26,
+        "rejected_shape_count": 21,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 6,
+        "text_len": 35,
+        "cjk_count": 34,
+        "reference_height": 53,
+        "component_count_3x2": 38,
+        "accepted_normal_shape_count": 29,
+        "rejected_shape_count": 9,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 7,
+        "text_len": 36,
+        "cjk_count": 33,
+        "reference_height": 58,
+        "component_count_3x2": 43,
+        "accepted_normal_shape_count": 30,
+        "rejected_shape_count": 13,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 8,
+        "text_len": 35,
+        "cjk_count": 34,
+        "reference_height": 58,
+        "component_count_3x2": 48,
+        "accepted_normal_shape_count": 25,
+        "rejected_shape_count": 23,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 9,
+        "text_len": 17,
+        "cjk_count": 14,
+        "reference_height": 58,
+        "component_count_3x2": 21,
+        "accepted_normal_shape_count": 10,
+        "rejected_shape_count": 11,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 10,
+        "text_len": 37,
+        "cjk_count": 29,
+        "reference_height": 58,
+        "component_count_3x2": 47,
+        "accepted_normal_shape_count": 25,
+        "rejected_shape_count": 22,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 11,
+        "text_len": 22,
+        "cjk_count": 20,
+        "reference_height": 54,
+        "component_count_3x2": 27,
+        "accepted_normal_shape_count": 17,
+        "rejected_shape_count": 10,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 12,
+        "text_len": 6,
+        "cjk_count": 5,
+        "reference_height": 74,
+        "component_count_3x2": 8,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 8,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 13,
+        "text_len": 7,
+        "cjk_count": 5,
+        "reference_height": 62,
+        "component_count_3x2": 10,
+        "accepted_normal_shape_count": 1,
+        "rejected_shape_count": 9,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 14,
+        "text_len": 35,
+        "cjk_count": 30,
+        "reference_height": 63,
+        "component_count_3x2": 42,
+        "accepted_normal_shape_count": 19,
+        "rejected_shape_count": 23,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 15,
+        "text_len": 37,
+        "cjk_count": 31,
+        "reference_height": 63,
+        "component_count_3x2": 48,
+        "accepted_normal_shape_count": 19,
+        "rejected_shape_count": 29,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 16,
+        "text_len": 28,
+        "cjk_count": 26,
+        "reference_height": 65,
+        "component_count_3x2": 35,
+        "accepted_normal_shape_count": 4,
+        "rejected_shape_count": 31,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 17,
+        "text_len": 3,
+        "cjk_count": 0,
+        "reference_height": 69,
+        "component_count_3x2": 3,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 3,
+        "accepted_equals_cjk_count": true
+      },
+      {
+        "line_index": 18,
+        "text_len": 33,
+        "cjk_count": 0,
+        "reference_height": 60,
+        "component_count_3x2": 31,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 31,
+        "accepted_equals_cjk_count": true
+      },
+      {
+        "line_index": 19,
+        "text_len": 35,
+        "cjk_count": 29,
+        "reference_height": 65,
+        "component_count_3x2": 41,
+        "accepted_normal_shape_count": 9,
+        "rejected_shape_count": 32,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 20,
+        "text_len": 44,
+        "cjk_count": 26,
+        "reference_height": 67,
+        "component_count_3x2": 55,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 55,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 21,
+        "text_len": 43,
+        "cjk_count": 28,
+        "reference_height": 69,
+        "component_count_3x2": 45,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 45,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 22,
+        "text_len": 43,
+        "cjk_count": 26,
+        "reference_height": 65,
+        "component_count_3x2": 54,
+        "accepted_normal_shape_count": 4,
+        "rejected_shape_count": 50,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 23,
+        "text_len": 36,
+        "cjk_count": 30,
+        "reference_height": 65,
+        "component_count_3x2": 37,
+        "accepted_normal_shape_count": 10,
+        "rejected_shape_count": 27,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 24,
+        "text_len": 38,
+        "cjk_count": 32,
+        "reference_height": 70,
+        "component_count_3x2": 44,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 44,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 25,
+        "text_len": 37,
+        "cjk_count": 29,
+        "reference_height": 72,
+        "component_count_3x2": 48,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 48,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 26,
+        "text_len": 35,
+        "cjk_count": 34,
+        "reference_height": 65,
+        "component_count_3x2": 44,
+        "accepted_normal_shape_count": 11,
+        "rejected_shape_count": 33,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 27,
+        "text_len": 29,
+        "cjk_count": 24,
+        "reference_height": 65,
+        "component_count_3x2": 34,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 34,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 28,
+        "text_len": 7,
+        "cjk_count": 5,
+        "reference_height": 62,
+        "component_count_3x2": 11,
+        "accepted_normal_shape_count": 2,
+        "rejected_shape_count": 9,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 29,
+        "text_len": 18,
+        "cjk_count": 15,
+        "reference_height": 58,
+        "component_count_3x2": 24,
+        "accepted_normal_shape_count": 13,
+        "rejected_shape_count": 11,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 30,
+        "text_len": 33,
+        "cjk_count": 33,
+        "reference_height": 64,
+        "component_count_3x2": 45,
+        "accepted_normal_shape_count": 5,
+        "rejected_shape_count": 40,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 31,
+        "text_len": 36,
+        "cjk_count": 33,
+        "reference_height": 62,
+        "component_count_3x2": 47,
+        "accepted_normal_shape_count": 21,
+        "rejected_shape_count": 26,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 32,
+        "text_len": 38,
+        "cjk_count": 30,
+        "reference_height": 65,
+        "component_count_3x2": 46,
+        "accepted_normal_shape_count": 10,
+        "rejected_shape_count": 36,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 33,
+        "text_len": 35,
+        "cjk_count": 34,
+        "reference_height": 67,
+        "component_count_3x2": 49,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 49,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 34,
+        "text_len": 40,
+        "cjk_count": 28,
+        "reference_height": 67,
+        "component_count_3x2": 47,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 47,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 35,
+        "text_len": 35,
+        "cjk_count": 33,
+        "reference_height": 67,
+        "component_count_3x2": 50,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 50,
+        "accepted_equals_cjk_count": false
+      },
+      {
+        "line_index": 36,
+        "text_len": 3,
+        "cjk_count": 0,
+        "reference_height": 76,
+        "component_count_3x2": 3,
+        "accepted_normal_shape_count": 0,
+        "rejected_shape_count": 3,
+        "accepted_equals_cjk_count": true
+      }
+    ],
+    "conclusion": "Relative shape filtering removes punctuation fragments, isolated strokes and oversized blobs better than an absolute interval, but accepted counts still match CJK count on only a subset of lines; line bbox alone remains unsafe for VProof binding."
   }
 }

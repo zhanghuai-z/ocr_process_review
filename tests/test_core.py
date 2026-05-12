@@ -295,7 +295,8 @@ def test_component_matcher_extracts_and_classifies_cjk_tokens():
     import numpy as np
 
     from app.core.component_matcher import (
-        analyze_token_components, count_cjk_tokens, extract_text_components,
+        analyze_token_components, build_component_shape_filter,
+        build_relative_component_shape_filter, count_cjk_tokens, extract_text_components,
     )
     from app.models import BBox
 
@@ -328,6 +329,16 @@ def test_component_matcher_extracts_and_classifies_cjk_tokens():
     assert latin.status == "not_cjk"
 
     assert count_cjk_tokens(["天", "地玄", "2026", "A1"]) == (1, 1, 2)
+
+    shape_filter = build_component_shape_filter(components)
+    assert all(shape_filter.accepts(component) for component in components)
+    assert not shape_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30))
+
+    relative_filter = build_relative_component_shape_filter(
+        [(component, 40.0) for component in components]
+    )
+    assert all(relative_filter.accepts(component, 40.0) for component in components)
+    assert not relative_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30), 40.0)
 
     print("test_component_matcher_extracts_and_classifies_cjk_tokens PASSED")
 

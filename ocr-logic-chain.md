@@ -221,7 +221,7 @@ flowchart TD
 
 ## 7.1 连通域与 Paddle token 对应分析
 
-本轮只做主程序方向的真实样张实验，不把连通域结果伪装成最终功能。实验样张仍用整页 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，持久证据保存在 `paddle-char-box-samples/component-matching/`：`120166_component_matching_summary.json` 是可复核统计，`120166_hanzi_token_component_grid.png` 是 101 个汉字 token 切图拼图，`120166_hanzi_token_component_grid_preview.png` 是前 30 个快速预览，`120166_line_component_counts_overlay.png` 是整页 line 级 cc/text_len 叠图，`120166_line_bbox_component_grid.png` 是只用 line bbox 输入时的错误/不安全示例，`120166_source_comparison_card.png` 是两种输入源对比卡片。实验方法是在每条 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和整页 OCR 文本/token 顺序对照。
+本轮只做主程序方向的真实样张实验，不把连通域结果伪装成最终功能。实验样张仍用整页 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，持久证据保存在 `paddle-char-box-samples/component-matching/`：`120166_component_matching_summary.json` 是可复核统计，`120166_hanzi_token_component_grid.png` 是 101 个汉字 token 切图拼图，`120166_hanzi_token_component_grid_preview.png` 是前 30 个快速预览，`120166_line_component_counts_overlay.png` 是整页 line 级 cc/text_len 叠图，`120166_line_bbox_component_grid.png` 是只用 line bbox 输入时的错误/不安全示例，`120166_source_comparison_card.png` 是两种输入源对比卡片，`120166_normal_shape_filter_card.png` / `120166_normal_shape_filter_grid.png` 是“正常字区间”过滤前后对比。实验方法是在每条 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和整页 OCR 文本/token 顺序对照。
 
 关键实测结论：
 
@@ -232,6 +232,8 @@ flowchart TD
 - 公式/拉丁行更不适合拆：`Y=α+βIncentive,×Post2+γXc+δ+φ{+εa` 长 33，拉丁/符号占主体，连通域 raw `36`、`3x2=31`、`5x3=26`、`7x3=23`；任何核都不能给出稳定逐字符语义。
 - 可视化拼图显示：token 文本与字图主体大体能对上，但单字 token 内的连通域数不总是 1。例如 `量/增/综/合/品/心` 会因为框内旁边碎片或汉字内部断裂出现 `cc>1`；`一/二/三` 这类低高度横画在当前 `min_height=8` 过滤下可能出现 `cc=0`。所以 `cc` 是诊断信号，不是替代 PP-OCRv5 token 文本的真值。
 - 输入源对比结论：`char/token bbox` 输入能把裁剪窗口先限制在 PP-OCRv5 token 内，图文主体可直接核对；`line bbox` 输入只能拿整行连通域再按顺序猜字符，`3x2` 下只有 `3/37` 行等于全文长度、`0/37` 行等于 CJK 数，且会把数字、标点、公式符号、邻字碎片一起纳入排序。因此 line bbox 只适合 HProof 行图和诊断，不适合直接生成 VProof 单字绑定。
+- “正常字区间”不能用绝对宽高，因为标题/正文/脚注字号不同。当前实验从 562 个 `单字 CJK token 且 cc=1` 的样本学习相对区间：`component_width / reference_height = 0.6682~0.8967`、`component_height / reference_height = 0.7217~0.9297`、`component_area / reference_height^2 = 0.1259~0.3687`、`aspect = 0.84~1.0723`。把该区间套回 line bbox 连通域后，组件从 `1334` 个降到 `376` 个，过滤掉 `958` 个笔画碎片、标点、数字/公式片段和异常宽块；但 accepted 数等于 CJK 数的行仍只有 `3/37`，说明形状过滤只能做 guardrail，不能让 line bbox 单独成为字图绑定源。
+- line 连通域里“某些笔画被放大成一个元素”有两个原因：一是 line bbox 没有 token 边界，小标点、数字、公式符号、邻字碎片都会作为独立 component 进入排序；二是可视化拼图为了肉眼检查会把每个 component tile 自动放大，小笔画看起来像一个大元素。再叠加闭运算时相近笔画可能合并，所以 line 级 component 只能作为候选/异常提示，不能直接映射到 OCR 文本字符。
 
 因此，当前不能把“整行连通域数 == 整行字符数”作为硬前提；可用的工程假设应更窄：
 
