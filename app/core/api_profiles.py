@@ -115,6 +115,23 @@ def resolve_api_endpoint(
     return f"{url}{suffix}"
 
 
+def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> str | None:
+    matched = match_api_model_profile_from_url(api_url)
+    if matched:
+        return matched
+    if not isinstance(profile, str) or profile not in API_MODEL_PROFILES:
+        return None
+    profile_url = get_api_model_profile_url(profile).rstrip("/")
+    profile_root = profile_url
+    for suffix in KNOWN_API_ENDPOINT_SUFFIXES:
+        if profile_root.endswith(suffix):
+            profile_root = profile_root[: -len(suffix)]
+            break
+    if api_url == profile_root:
+        return profile
+    return None
+
+
 def resolve_api_endpoint_for_role(
     api_url: str | None,
     *,
@@ -135,10 +152,10 @@ def resolve_api_endpoint_for_role(
     if not normalized:
         return ""
 
-    matched = match_api_model_profile_from_url(normalized)
+    profile_key = _profile_from_explicit_or_profile_url(normalized, profile)
 
     if role == "ocr":
-        if matched and matched != "pp-ocrv5" and API_MODEL_PROFILES[matched].get("layout"):
+        if profile_key and profile_key != "pp-ocrv5" and API_MODEL_PROFILES[profile_key].get("layout"):
             return get_api_model_profile_url("pp-ocrv5")
         if normalized.endswith("/layout-parsing"):
             return f"{normalized[:-len('/layout-parsing')]}/ocr"
@@ -149,7 +166,7 @@ def resolve_api_endpoint_for_role(
         )
 
     if role == "layout":
-        if matched == "pp-ocrv5":
+        if profile_key == "pp-ocrv5":
             return get_api_model_profile_url("pp-structurev3")
         if normalized.endswith("/ocr"):
             return f"{normalized[:-len('/ocr')]}/layout-parsing"

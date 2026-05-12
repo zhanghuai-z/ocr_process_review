@@ -30,10 +30,13 @@ logger = get_logger(__name__)
 
 # 非文字块类型默认不送 OCR
 NON_OCR_BLOCK_TYPES = {BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN}
-PROOF_TEXT_BLOCK_TYPES = {
+OCR_LINE_CONTAINER_BLOCK_TYPES = {
     BlockType.TEXT,
     BlockType.TITLE,
+    BlockType.FIGURE_CAPTION,
+    BlockType.TABLE_CAPTION,
     BlockType.REFERENCE,
+    BlockType.EQUATION,
 }
 
 # 自动标记低置信行阈值
@@ -274,7 +277,7 @@ class OcrPipeline:
 
         containers = [
             block for block in page.blocks
-            if block.recognizable and block.block_type in PROOF_TEXT_BLOCK_TYPES
+            if block.recognizable and block.block_type in OCR_LINE_CONTAINER_BLOCK_TYPES
         ]
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):

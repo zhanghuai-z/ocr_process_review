@@ -9,6 +9,7 @@
 - **layout role**：使用 `PP-StructureV3` / VL 的 `/layout-parsing`，只产生 layout/block/region 容器；
 - **proof OCR role**：使用 `PP-OCRv5` 的 `/ocr`，统一产生 HProof line text/geometry 与 VProof char/token geometry；
 - 官方 AiStudio 预设的 Structure/VL URL 在 OCR 阶段会切到 PP-OCRv5 官方 `/ocr`；PP-OCRv5 URL 在版面阶段会切到 PP-StructureV3 官方 `/layout-parsing`；
+- `profile` 不是死参数：当用户保存的是官方 profile 的 root URL（去掉 `/ocr` 或 `/layout-parsing` 后的地址）时，resolver 会结合 profile 找到对应的官方成对端点；自定义 root 不会被误切到官方 host。
 - 自部署服务若保存的是根地址，则 layout 补 `/layout-parsing`、OCR 补 `/ocr`；若保存的是完整 `/layout-parsing`，OCR 阶段会在同一 root 下替换为 `/ocr`。
 - `Authorization: token <api_token>`
 - `Content-Type: application/json`
@@ -133,8 +134,9 @@ Inspector 侧也必须保持同一层级语义：`run_ocr.py` 的 API / 本地 P
 1. `LayoutAnalyzer` 解析 layout role endpoint，只把 `PP-StructureV3` 的 `layout_det_res/parsing_res_list` 变成 `Block`；`block_content` 只进入 `Block.note` 预览，不会生成 `Line`。
 2. `ApiOcrEngine.prefer_page_ocr=True`，因此 `OcrPipeline` 在 API proof 阶段不再逐个 Structure block 调 `/layout-parsing`；它改为对整页调用 proof OCR role，也就是 `PP-OCRv5 /ocr`。
 3. `PP-OCRv5` 返回的 `Line` 先保留自己的行框、文本、token/char bbox，再由 `OcrPipeline._assign_page_ocr_lines_to_blocks()` 按空间关系归属到 Structure block。
-4. 归属裁决以“line bbox 被 block 覆盖的比例”为主；若比例不足但 line 中心落入 block，也允许作为弱匹配；多个 block 同时匹配时选择覆盖更好、面积更小、阅读顺序更靠前的容器。
-5. 每条 PP-OCRv5 line 只分配一次，所以不会因为多个 Structure block 重叠而在横校重复；没有命中任何 Structure text 容器的 line 会放入一个 synthetic `TEXT` block，`note=PP-OCRv5 unmatched proof lines`，保证 proof 不丢行但也不冒充 Structure 输出。
+4. 可承接 PP-OCRv5 行的容器包括 `TEXT/TITLE/REFERENCE/EQUATION/FIGURE_CAPTION/TABLE_CAPTION`；`FIGURE/TABLE/UNKNOWN` 仍不吃 proof line。这样页级 OCR 路径不会先清空 caption/equation 的旧行又无法回填。
+5. 归属裁决以“line bbox 被 block 覆盖的比例”为主；若比例不足但 line 中心落入 block，也允许作为弱匹配；多个 block 同时匹配时选择覆盖更好、面积更小、阅读顺序更靠前的容器。
+6. 每条 PP-OCRv5 line 只分配一次，所以不会因为多个 Structure block 重叠而在横校重复；没有命中任何可承接容器的 line 会放入一个 synthetic `TEXT` block，`note=PP-OCRv5 unmatched proof lines`，保证 proof 不丢行但也不冒充 Structure 输出。
 6. `ProofCropService` 仍可对 PP-OCRv5 line/char 做图像内容驱动的收紧与缺项 fallback，但 `bbox_source=ocr`、`bbox_granularity=char/word` 的显式 OCR box 不会被覆盖成估算框。
 
 这样 HProof 的 `Line.text/Line.bbox` 与 VProof 的 `Line.chars[*].bbox/token_text` 均来自 PP-OCRv5；Structure 只决定这些 line 挂在哪个版面容器下。
@@ -321,7 +323,7 @@ PP-OCRv5 右偏/松框的量化结论来自 `ppocr_raw_parser_vs_mainapp_final.j
 - OCR family API 请求 `returnWordBox=true`；VL family 不请求 word box，但仍发送坐标稳定开关
 - API endpoint 不再盲目拼 `/layout-parsing`，主程序按 role 拆为 layout endpoint 与 proof OCR endpoint
 - `LayoutAnalyzer` 使用 Structure/VL layout role；`ApiOcrEngine` 使用 PP-OCRv5 proof OCR role，并在 API pipeline 中声明 `prefer_page_ocr`
-- `OcrPipeline` 对 API proof 改为整页调用 PP-OCRv5，再把每条 line 按空间 overlap/center 分配到唯一 Structure text block，未匹配行进入 synthetic text block，避免重复消费
+- `OcrPipeline` 对 API proof 改为整页调用 PP-OCRv5，再把每条 line 按空间 overlap/center 分配到唯一 Structure line container；`EQUATION/FIGURE_CAPTION/TABLE_CAPTION` 会被回填，未匹配行进入 synthetic text block，避免重复消费和 caption/equation 丢行
 - 四模型 profile 已有 request family/capability：PP-OCRv5 与 Structure 走 `ocr-word-box`，VL/VL-1.5 走 `vl-layout`
 - OCR 参数回到“坐标稳定 + 默认框扩张”的方向：关闭预处理，`textDetUnclipRatio=2.0`
 - Inspector 不再把 line bbox 填给每个 char；line-only 字符为 `unavailable`，word 级框为 `word/token`

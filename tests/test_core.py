@@ -1681,6 +1681,74 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
     print("test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once PASSED")
 
 
+def test_page_ocr_refills_caption_and_equation_blocks():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    def make_line(text, x, y):
+        return Line(
+            text=text,
+            confidence=0.95,
+            bbox=BBox(x, y, 30, 20),
+            chars=[
+                Char(
+                    char=text,
+                    confidence=0.95,
+                    bbox=BBox(x, y, 30, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="char",
+                    token_text=text,
+                )
+            ],
+        )
+
+    class PageOcrEngine:
+        bbox_space = "crop"
+        prefer_page_ocr = True
+
+        def recognize(self, image_bgr, context):
+            return [
+                make_line("式", 20, 20),
+                make_line("图", 20, 80),
+                make_line("表", 20, 140),
+            ]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((220, 180, 3), 255, dtype=np.uint8)
+        for y in (20, 80, 140):
+            cv2.rectangle(img, (20, y), (50, y + 20), (0, 0, 0), -1)
+        cv2.imwrite(img_path, img)
+
+    try:
+        equation = Block(block_type=BlockType.EQUATION, bbox=BBox(0, 0, 120, 60), lines=[make_line("旧", 5, 5)], order=0)
+        figure_caption = Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 60, 120, 60), lines=[make_line("旧", 5, 65)], order=1)
+        table_caption = Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(0, 120, 120, 60), lines=[make_line("旧", 5, 125)], order=2)
+        page = Page(
+            image_path=img_path,
+            width=180,
+            height=220,
+            blocks=[equation, figure_caption, table_caption],
+        )
+
+        result = OcrPipeline(engine=PageOcrEngine()).process_project(
+            OcrProject(name="CaptionEquationRefill", pages=[page])
+        )
+        blocks = result.pages[0].blocks
+
+        assert [line.text for line in blocks[0].lines] == ["式"]
+        assert [line.text for line in blocks[1].lines] == ["图"]
+        assert [line.text for line in blocks[2].lines] == ["表"]
+        assert "旧" not in [line.text for block in blocks for line in block.lines]
+    finally:
+        os.unlink(img_path)
+
+    print("test_page_ocr_refills_caption_and_equation_blocks PASSED")
+
+
 def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
     import tempfile
     import cv2
@@ -2528,6 +2596,8 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
 
     structure_url = get_api_model_profile_url("pp-structurev3")
     ocr_url = get_api_model_profile_url("pp-ocrv5")
+    structure_root = structure_url.removesuffix("/layout-parsing")
+    ocr_root = ocr_url.removesuffix("/ocr")
 
     assert resolve_api_endpoint_for_role(
         structure_url,
@@ -2541,6 +2611,16 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
         ocr_url,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == structure_url
+    assert resolve_api_endpoint_for_role(
+        structure_root,
+        profile="pp-structurev3",
+        role="ocr",
+    ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        ocr_root,
         profile="pp-ocrv5",
         role="layout",
     ) == structure_url
@@ -4275,6 +4355,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
+    test_page_ocr_refills_caption_and_equation_blocks()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_emits_ocr_progress_and_navigation()
