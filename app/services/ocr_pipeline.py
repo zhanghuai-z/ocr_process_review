@@ -30,6 +30,11 @@ logger = get_logger(__name__)
 
 # 非文字块类型默认不送 OCR
 NON_OCR_BLOCK_TYPES = {BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN}
+PROOF_TEXT_BLOCK_TYPES = {
+    BlockType.TEXT,
+    BlockType.TITLE,
+    BlockType.REFERENCE,
+}
 
 # 自动标记低置信行阈值
 AUTO_FLAG_THRESHOLD = 0.80
@@ -101,6 +106,29 @@ class OcrPipeline:
                     continue
 
                 total_blocks = len([b for b in page.blocks if b.recognizable])
+
+                if self._prefers_page_ocr():
+                    try:
+                        self._process_page_with_page_ocr(img, page, page_idx)
+                    except Exception as e:
+                        logger.error(
+                            "Page OCR failed: page=%d: %s",
+                            page_idx, e,
+                        )
+                        result.failed_blocks.append((page_idx, -1, str(e)))
+                    if progress_callback:
+                        progress_callback(OcrProgress(
+                            current_page=page_idx + 1,
+                            total_pages=total_pages,
+                            current_block=max(1, total_blocks),
+                            total_blocks=max(1, total_blocks),
+                            completed_pages=page_idx + 1,
+                            message=f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，PP-OCRv5 页级 proof line 已归属到版面块",
+                        ))
+                    self._proof_crop_service.normalize_pages([page])
+                    result.pages.append(page)
+                    continue
+
                 block_idx = 0
 
                 for block in page.blocks:
@@ -146,6 +174,139 @@ class OcrPipeline:
             self.close()
 
         return result
+
+    def _prefers_page_ocr(self) -> bool:
+        return bool(getattr(self._engine, "prefer_page_ocr", False))
+
+    def _process_page_with_page_ocr(
+        self,
+        img: np.ndarray,
+        page: Page,
+        page_idx: int,
+    ) -> None:
+        """Run PP-OCRv5 once on the page, then assign each line to one layout block.
+
+        Structure blocks stay as containers; proof-facing line text/geometry and
+        char/token boxes come only from the OCR engine result.  A line is consumed
+        at most once by choosing the best spatial container.
+        """
+        full_page = BBox(0, 0, img.shape[1], img.shape[0])
+        seam = CropCoordinateSeam.from_page_bbox(
+            full_page,
+            page_w=img.shape[1],
+            page_h=img.shape[0],
+        )
+        bbox_space = get_engine_bbox_space(self._engine)
+        context = OcrContext(
+            page_image_path=page.display_image_path,
+            page_number=page.page_number,
+            block_id=None,
+            block_type=BlockType.TEXT,
+            page_bbox=full_page,
+            crop_bbox=seam.crop_bbox,
+            expected_bbox_space=bbox_space,
+        )
+        lines = self._engine.recognize(img, context)
+        self._normalize_engine_lines(lines, seam, bbox_space)
+        self._assign_page_ocr_lines_to_blocks(page, lines)
+
+    def _normalize_engine_lines(
+        self,
+        lines: List[Line],
+        seam: CropCoordinateSeam,
+        bbox_space: str,
+    ) -> None:
+        for line in lines:
+            line.bbox = seam.to_page_bbox(
+                line.bbox,
+                source_space=bbox_space,
+            )
+            for char in line.chars:
+                if char.bbox is None or char.bbox.area <= 0:
+                    continue
+                char.bbox = seam.to_page_bbox(
+                    char.bbox,
+                    source_space=bbox_space,
+                )
+            if line.confidence < AUTO_FLAG_THRESHOLD:
+                if line.proof_status == ProofStatus.UNCHECKED:
+                    line.proof_status = ProofStatus.AUTO_FLAGGED
+            if not line.ocr_text:
+                line.ocr_text = line.text
+            if not line.original_text:
+                line.original_text = line.text
+
+    def _line_block_overlap_score(self, line: Line, block: Block) -> float:
+        line_box = line.bbox
+        block_box = block.bbox
+        if line_box.area <= 0 or block_box.area <= 0:
+            return 0.0
+        x1 = max(line_box.x, block_box.x)
+        y1 = max(line_box.y, block_box.y)
+        x2 = min(line_box.x2, block_box.x2)
+        y2 = min(line_box.y2, block_box.y2)
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        return inter / float(line_box.area) if inter > 0 else 0.0
+
+    def _select_container_block(self, line: Line, blocks: list[Block]) -> Block | None:
+        scored: list[tuple[float, int, int, int, Block]] = []
+        center_x = line.bbox.x + line.bbox.w / 2.0
+        center_y = line.bbox.y + line.bbox.h / 2.0
+        for idx, block in enumerate(blocks):
+            overlap = self._line_block_overlap_score(line, block)
+            contains_center = (
+                block.bbox.x <= center_x <= block.bbox.x2
+                and block.bbox.y <= center_y <= block.bbox.y2
+            )
+            if overlap < 0.10 and not contains_center:
+                continue
+            score = max(overlap, 0.10 if contains_center else 0.0)
+            scored.append((score, -block.bbox.area, -block.order, -idx, block))
+        if not scored:
+            return None
+        scored.sort(reverse=True)
+        return scored[0][4]
+
+    def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
+        for block in page.blocks:
+            if block.recognizable and block.block_type not in NON_OCR_BLOCK_TYPES:
+                block.lines = []
+
+        containers = [
+            block for block in page.blocks
+            if block.recognizable and block.block_type in PROOF_TEXT_BLOCK_TYPES
+        ]
+        unmatched: list[Line] = []
+        for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
+            block = self._select_container_block(line, containers)
+            if block is None:
+                unmatched.append(line)
+            else:
+                block.lines.append(line)
+
+        if not unmatched:
+            return
+        merged = self._merge_line_bboxes(unmatched)
+        if merged is None:
+            return
+        synthetic = Block(
+            block_type=BlockType.TEXT,
+            bbox=merged,
+            lines=unmatched,
+            order=(max((block.order for block in page.blocks), default=-1) + 1),
+            note="PP-OCRv5 unmatched proof lines",
+        )
+        page.blocks.append(synthetic)
+
+    def _merge_line_bboxes(self, lines: list[Line]) -> BBox | None:
+        valid = [line.bbox for line in lines if line.bbox.area > 0]
+        if not valid:
+            return None
+        x1 = min(bbox.x for bbox in valid)
+        y1 = min(bbox.y for bbox in valid)
+        x2 = max(bbox.x2 for bbox in valid)
+        y2 = max(bbox.y2 for bbox in valid)
+        return BBox.from_xyxy(x1, y1, x2, y2)
 
     def process_block(
         self,
@@ -209,26 +370,6 @@ class OcrPipeline:
         lines = self._engine.recognize(crop, context)
 
         # 转换 bbox 从 crop 坐标到 page 坐标
-        for line in lines:
-            line.bbox = seam.to_page_bbox(
-                line.bbox,
-                source_space=bbox_space,
-            )
-            for char in line.chars:
-                if char.bbox is None or char.bbox.area <= 0:
-                    continue
-                char.bbox = seam.to_page_bbox(
-                    char.bbox,
-                    source_space=bbox_space,
-                )
-            # 设置 proof status
-            if line.confidence < AUTO_FLAG_THRESHOLD:
-                if line.proof_status == ProofStatus.UNCHECKED:
-                    line.proof_status = ProofStatus.AUTO_FLAGGED
-            # 保存 OCR 原文
-            if not line.ocr_text:
-                line.ocr_text = line.text
-            if not line.original_text:
-                line.original_text = line.text
+        self._normalize_engine_lines(lines, seam, bbox_space)
 
         return lines

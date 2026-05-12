@@ -18,7 +18,7 @@ from typing import Iterable, List
 
 from PySide6.QtCore import QThread, Signal
 
-from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
@@ -698,10 +698,10 @@ class LayoutAnalyzer:
         from app.core.ocr_config import get_config
 
         cfg = get_config()
-        url = resolve_api_endpoint(
+        url = resolve_api_endpoint_for_role(
             cfg["api_url"],
-            default_suffix="/layout-parsing",
             profile=cfg.get("api_model_profile", ""),
+            role="layout",
         )
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")

@@ -115,6 +115,53 @@ def resolve_api_endpoint(
     return f"{url}{suffix}"
 
 
+def resolve_api_endpoint_for_role(
+    api_url: str | None,
+    *,
+    profile: str | None = None,
+    role: str,
+) -> str:
+    """Resolve the concrete endpoint for the model role used by the main app.
+
+    The proof workflow is intentionally dual-model:
+    - layout role -> Structure/VL `/layout-parsing`
+    - OCR proof role -> PP-OCRv5 `/ocr`
+
+    Official AiStudio presets use different hosts, so exact preset URLs are
+    switched to their paired role endpoint.  Custom self-hosted URLs keep the
+    same root and only swap `/layout-parsing` <-> `/ocr`.
+    """
+    normalized = (api_url or "").strip().rstrip("/")
+    if not normalized:
+        return ""
+
+    matched = match_api_model_profile_from_url(normalized)
+
+    if role == "ocr":
+        if matched and matched != "pp-ocrv5" and API_MODEL_PROFILES[matched].get("layout"):
+            return get_api_model_profile_url("pp-ocrv5")
+        if normalized.endswith("/layout-parsing"):
+            return f"{normalized[:-len('/layout-parsing')]}/ocr"
+        return resolve_api_endpoint(
+            normalized,
+            default_suffix="/ocr",
+            profile="pp-ocrv5",
+        )
+
+    if role == "layout":
+        if matched == "pp-ocrv5":
+            return get_api_model_profile_url("pp-structurev3")
+        if normalized.endswith("/ocr"):
+            return f"{normalized[:-len('/ocr')]}/layout-parsing"
+        return resolve_api_endpoint(
+            normalized,
+            default_suffix="/layout-parsing",
+            profile="pp-structurev3",
+        )
+
+    raise ValueError(f"Unknown API endpoint role: {role}")
+
+
 def infer_api_model_profile_from_endpoint(endpoint_url: str | None) -> str | None:
     normalized = (endpoint_url or "").strip().rstrip("/")
     matched = match_api_model_profile_from_url(normalized)

@@ -8,7 +8,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from app.core.api_profiles import get_api_request_options, resolve_api_endpoint
+from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
 from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
 from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
 from app.core.ocr_ir import (
@@ -63,12 +63,12 @@ def get_engine_description(mode: str = "") -> str:
     if mode == "api":
         cfg = get_config()
         api_url = cfg.get("api_url", "")
-        endpoint = resolve_api_endpoint(
+        endpoint = resolve_api_endpoint_for_role(
             api_url,
-            default_suffix="/layout-parsing",
             profile=cfg.get("api_model_profile", ""),
+            role="ocr",
         )
-        return f"API OCR（{endpoint or '未配置 URL'}）"
+        return f"API OCR / Proof（PP-OCRv5：{endpoint or '未配置 URL'}）"
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
     return (
@@ -137,6 +137,7 @@ class ApiOcrEngine:
     """AiStudio API OCR 引擎适配器。"""
 
     bbox_space = "crop"
+    prefer_page_ocr = True
 
     def _build_request_body(
         self,
@@ -152,12 +153,13 @@ class ApiOcrEngine:
 
     def _iter_result_items(self, data: dict) -> list[dict]:
         result = data.get("result", {}) if isinstance(data, dict) else {}
-        items: list[dict] = []
-        for key in ("layoutParsingResults", "ocrResults"):
-            value = result.get(key)
-            if isinstance(value, list):
-                items.extend(item for item in value if isinstance(item, dict))
-        return items
+        ocr_results = result.get("ocrResults")
+        if isinstance(ocr_results, list) and ocr_results:
+            return [item for item in ocr_results if isinstance(item, dict)]
+        layout_results = result.get("layoutParsingResults")
+        if isinstance(layout_results, list):
+            return [item for item in layout_results if isinstance(item, dict)]
+        return []
 
     def _extract_overall_ocr_res(self, item: dict) -> dict:
         pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
@@ -189,7 +191,10 @@ class ApiOcrEngine:
         direct = item if isinstance(item, dict) else {}
         sources = [pruned, direct, ocr_res]
         token_rows = self._first_list_from_sources(sources, ("text_word", "textWord"))
-        region_rows = self._first_list_from_sources(sources, ("text_word_region", "textWordRegion"))
+        region_rows = self._first_list_from_sources(
+            sources,
+            ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"),
+        )
         return token_rows, region_rows
 
     def _clamp_parsed_bbox(self, bbox: BBox, image_shape=None) -> BBox:
@@ -384,8 +389,7 @@ class ApiOcrEngine:
         page_image: np.ndarray,
         line_text: str,
         line_confidence: float,
-        token_row,
-        region_row,
+        tokens: list[OcrIrToken],
     ) -> list[Char]:
         chars = [
             Char(
@@ -401,17 +405,13 @@ class ApiOcrEngine:
         if not line_text:
             return chars
 
-        tokens = self._normalize_token_texts(token_row)
-        if not isinstance(region_row, (list, tuple)):
-            return chars
-
         occupied = [False] * len(line_text)
         cursor = 0
-        for token, raw_region in zip(tokens, region_row):
-            token_text = token.strip()
+        for token in tokens:
+            token_text = token.text.strip()
             if not token_text:
                 continue
-            bbox = self._bbox_from_region(raw_region, page_image.shape[:2])
+            bbox = token.bbox
             if bbox is None or bbox.area <= 0:
                 continue
             if not is_meaningful_text_bbox(page_image, bbox, token_text):
@@ -420,18 +420,13 @@ class ApiOcrEngine:
             if span is None:
                 continue
             start, end = span
-            granularity = (
-                CHAR_BBOX_GRANULARITY_CHAR
-                if len(token_text) == 1
-                else CHAR_BBOX_GRANULARITY_WORD
-            )
             for idx in range(start, end):
                 chars[idx] = Char(
                     char=line_text[idx],
                     confidence=float(line_confidence),
                     bbox=bbox,
-                    bbox_source=CHAR_BBOX_SOURCE_OCR,
-                    bbox_granularity=granularity,
+                    bbox_source=token.bbox_source,
+                    bbox_granularity=token.bbox_granularity,
                     token_text=token_text,
                 )
                 occupied[idx] = True
@@ -445,10 +440,10 @@ class ApiOcrEngine:
         from app.core.app_config import get_config
 
         cfg = get_config()
-        url = resolve_api_endpoint(
+        url = resolve_api_endpoint_for_role(
             cfg["api_url"],
-            default_suffix="/layout-parsing",
             profile=cfg.get("api_model_profile", ""),
+            role="ocr",
         )
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
@@ -539,8 +534,7 @@ class ApiOcrEngine:
                 page_image=image_bgr,
                 line_text=ir_line.text,
                 line_confidence=ir_line.confidence,
-                token_row=[token.text for token in ir_line.tokens],
-                region_row=[token.raw_region for token in ir_line.tokens],
+                tokens=ir_line.tokens,
             )
             lines.append(Line(
                 text=ir_line.text,
