@@ -219,6 +219,27 @@ flowchart TD
 
 主程序纵校默认只索引真实 OCR 几何：`CharIndexService()` 会过滤 `bbox_source!=ocr` 或 `bbox_granularity=fallback/unavailable/line` 的单位。旧项目/旧测试若确实需要查看估算结果，必须显式使用 `CharIndexService(include_fallback=True)`，这让 fallback 从默认主展示中降级为兼容/诊断入口。VProof 左侧列表也会标出 `[char]` / `[token]`，tooltip 显示 `bbox_source/bbox_granularity`，避免用户把 token 图或 fallback 图误认为精确单字图。
 
+## 7.1 连通域与 Paddle token 对应分析
+
+本轮只做主程序方向的真实样张分析，不落完整连通域实现。实验样张仍用 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，Paddle 证据来自 `paddle-char-box-samples/evidence/ppocr_raw_parser_vs_mainapp_final.json` 与 `paddle-char-box-samples/paddle-char-box-samples.json`。实验方法是在 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和 Paddle 文本/token 顺序对照。
+
+关键实测结论：
+
+- 首行 `数量经济技术经济研究2026年第4期` 的 line bbox 为 `x=304,y=265,w=955,h=57`；不做形态学或只做 `3x2` 闭运算时，过滤噪声后的连通域数都是 18，正好等于文本长度 18。前 10 个中文字符 `数量经济技术经济研究` 对应 10 个单调递增连通域，x 顺序与 Paddle 单字 token 顺序一致。
+- 同一行的数字 token `2026` 在无形态学/`3x2` 下是 4 个独立小连通域；到 `5x3`/`7x3` 后会合并成 1 个连通域。这说明数字/拉丁串不应按“一个字符一个连通域”硬拆，应继续按 token/run 处理。
+- `7x3` 以上会开始把相邻汉字粘连，例如首行中 `济研` 被合成一个宽约 114px 的连通域；`9x3` 会进一步把多组汉字合并。因此闭运算核不能全局加大，最多作为非常轻的断笔连接，不能作为主分割依据。
+- 第二行样例 `时,2016年增值税分成改革导致的原营业税分成比例下降,进一步弱化了地方政府` 更接近正文密集场景：文本长 38，其中 CJK 32、数字 4、标点 2。无形态学连通域为 48，`3x2` 后为 43，`5x3` 后为 36。它不再稳定等于字符数，原因包括标点/数字小块、个别汉字断成多个部件、局部闭运算又会把相邻字粘在一起。
+
+因此，当前不能把“整行连通域数 == 整行字符数”作为硬前提；可用的工程假设应更窄：
+
+1. **单字 Paddle token 已经是最可信入口**：如果 PP-OCRv5 给出长度为 1 的 CJK token bbox，主程序只需要在该 bbox 内做墨迹收紧或邻字错位保护，不要用整行连通域重切它。
+2. **多字中文 token 可做受限拆分候选**：只有当 token 文本全为 CJK、token bbox 内的轻量连通域/投影段数量与 CJK 字数一致、段的 x 顺序单调、每段宽高接近当前行高、且段间距不异常时，才允许把 `ocr/word` 提升成候选 `ocr/char_refined`。否则继续保持 token 集合。
+3. **数字、拉丁、公式和混合 token 不拆**：`2026` 这类 run 在不同核下会从 4 个域变成 1 个域，拆分稳定性低；公式/拉丁符号也有类似问题。它们继续走数字 token / 公式 token 集合，不进入普通单字集合。
+4. **整行级只能做校验，不做最终分配**：连通域行级计数可用于诊断“这一行适不适合细拆”，但最终对应关系必须落在 Paddle token bbox 内，用 token 局部范围约束，避免行内前后字符串位。
+5. **失败必须诚实降级**：如果局部连通域数、投影段、token 字符数三者不一致，或任一候选段越界/过窄/无墨迹，就保留 `bbox_granularity=word` 或 `fallback`，不要输出看似精确的 char crop。
+
+后续若实现，应放在 proof 几何正规化链中，作为 `ocr/word` token 的可选 refine 阶段：输入 `Line`、`Char` token 元数据和整页图，输出带来源标记的候选子框。该阶段不能覆盖原始 Paddle bbox，应保留 `raw_token_bbox`、`refined_bbox`、`refine_status` 和失败原因，UI 可把它作为“自动细拆建议”，人工仍可回退到 token 图。
+
 ## 8. 公式 / 数字 / 普通文本策略
 
 纵校集合不再把所有字符都等价处理：
