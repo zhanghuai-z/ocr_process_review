@@ -3475,5 +3475,19 @@
       ]
     }
   ],
-  "conclusion": "Whole-line connected-component counts are unstable; PP-OCRv5 single-CJK token boxes are the stable binding source on this page. Components are useful only inside token boxes for diagnostics or constrained future word-token splitting."
+  "conclusion": "Whole-line connected-component counts are unstable; PP-OCRv5 single-CJK token boxes are the stable binding source on this page. Components are useful only inside token boxes for diagnostics or constrained future word-token splitting.",
+  "line_bbox_input_experiment": {
+    "input_source": "PP-OCRv5 line bbox + line text only",
+    "kernel": "3x2",
+    "line_total": 37,
+    "lines_equal_text_len": 3,
+    "lines_equal_cjk_count": 0,
+    "unsafe_line_count": 37,
+    "sampled_components": []
+  },
+  "source_comparison": {
+    "char_token_bbox_input": "Use PP-OCRv5 text_word/text_word_boxes as the binding window. On this page there are 998 tokens: 874 single-CJK tokens, 0 multi-CJK tokens, and 124 non-CJK/mixed tokens. Visualized CJK token crops generally bind to the correct glyph body, but cc is diagnostic only.",
+    "line_bbox_input": "Use PP-OCRv5 rec_boxes as the only window and sort connected components inside a whole line. With 3x2 kernel only 3/37 lines match full text length and 0/37 match CJK count, so line bbox is unsafe for direct CJK element binding without token/text-run constraints.",
+    "recommendation": "Use line bbox for HProof crop and diagnostics; use token bbox plus OCR token text for VProof binding; only attempt connected-component refinement inside a token bbox."
+  }
 }

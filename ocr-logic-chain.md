@@ -221,7 +221,7 @@ flowchart TD
 
 ## 7.1 连通域与 Paddle token 对应分析
 
-本轮只做主程序方向的真实样张实验，不把连通域结果伪装成最终功能。实验样张仍用整页 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，持久证据保存在 `paddle-char-box-samples/component-matching/`：`120166_component_matching_summary.json` 是可复核统计，`120166_hanzi_token_component_grid.png` 是 101 个汉字 token 切图拼图，`120166_hanzi_token_component_grid_preview.png` 是前 30 个快速预览，`120166_line_component_counts_overlay.png` 是整页 line 级 cc/text_len 叠图。实验方法是在每条 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和整页 OCR 文本/token 顺序对照。
+本轮只做主程序方向的真实样张实验，不把连通域结果伪装成最终功能。实验样张仍用整页 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，持久证据保存在 `paddle-char-box-samples/component-matching/`：`120166_component_matching_summary.json` 是可复核统计，`120166_hanzi_token_component_grid.png` 是 101 个汉字 token 切图拼图，`120166_hanzi_token_component_grid_preview.png` 是前 30 个快速预览，`120166_line_component_counts_overlay.png` 是整页 line 级 cc/text_len 叠图，`120166_line_bbox_component_grid.png` 是只用 line bbox 输入时的错误/不安全示例，`120166_source_comparison_card.png` 是两种输入源对比卡片。实验方法是在每条 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和整页 OCR 文本/token 顺序对照。
 
 关键实测结论：
 
@@ -231,6 +231,7 @@ flowchart TD
 - 典型密集正文行仍显示风险：`时,2016年增值税分成改革导致的原营业税分成比例下降,进一步弱化了地方政府` 长 38，CJK 32、数字 4、标点 2；连通域为 raw `48`、`3x2=44`、`5x3=36`、`7x3=36`。它不再稳定等于字符数，原因包括标点/数字小块、个别汉字断成多个部件、局部闭运算又会把相邻字粘在一起。
 - 公式/拉丁行更不适合拆：`Y=α+βIncentive,×Post2+γXc+δ+φ{+εa` 长 33，拉丁/符号占主体，连通域 raw `36`、`3x2=31`、`5x3=26`、`7x3=23`；任何核都不能给出稳定逐字符语义。
 - 可视化拼图显示：token 文本与字图主体大体能对上，但单字 token 内的连通域数不总是 1。例如 `量/增/综/合/品/心` 会因为框内旁边碎片或汉字内部断裂出现 `cc>1`；`一/二/三` 这类低高度横画在当前 `min_height=8` 过滤下可能出现 `cc=0`。所以 `cc` 是诊断信号，不是替代 PP-OCRv5 token 文本的真值。
+- 输入源对比结论：`char/token bbox` 输入能把裁剪窗口先限制在 PP-OCRv5 token 内，图文主体可直接核对；`line bbox` 输入只能拿整行连通域再按顺序猜字符，`3x2` 下只有 `3/37` 行等于全文长度、`0/37` 行等于 CJK 数，且会把数字、标点、公式符号、邻字碎片一起纳入排序。因此 line bbox 只适合 HProof 行图和诊断，不适合直接生成 VProof 单字绑定。
 
 因此，当前不能把“整行连通域数 == 整行字符数”作为硬前提；可用的工程假设应更窄：
 
@@ -254,6 +255,13 @@ flowchart TD
 | 标点/符号 | 纯标点/纯符号 | 一般不抢主题 | 仅在独立可靠时进入 | 符号区 |
 
 公式按整体走的原因：用户反馈的“公式字母边角料小图”来自把 `A+B` 这类公式片段拆成单个字母/符号后再裁图，单个 bbox 很容易只剩边缘或和相邻符号互相串框。公式与数字一样，本质上更适合作为不可拆 token 校对：用户需要确认的是整个变量/表达式片段，而不是把每个公式字母混入正文单字集合。
+
+number / 公式是否应单独建属性框，要按层级区分：
+
+1. **正文行内数字**：不新建 Structure 属性框，也不按 line 单独切出去；必须先依赖 PP-OCRv5 的 OCR 文本/token 顺序识别出连续 digit run，再在 `CharIndexService` 中合并成数字 token。原因是数字混在正文里时，纯连通域无法知道 `2016` 是一个数值 token 还是四个普通元素，也无法稳定处理标点和邻字碎片。
+2. **行内公式/变量片段**：不拆成单字符属性框，按公式 token/run 处理。若它位于普通正文 line 内，仍归属该 PP-OCRv5 line，只在 VProof 集合层按公式 token 显示。
+3. **独立公式行或 Structure `EQUATION` block**：Structure 可以提供 `EQUATION` 容器，PP-OCRv5 仍提供 proof line/text/bbox。也就是说公式可以有单独 block/line 容器，但 proof 文本和裁图主链不回退到 Structure。
+4. **页码/编号/图表编号**：若 Structure 识别为装饰性 `number/page_number/formula_number`，版面阶段可以过滤或降级为辅助属性；若 PP-OCRv5 把它识别为 proof line，则应按业务规则决定是否进入导出/校对队列，而不是混入正文单字集合。
 
 当前实现位置：
 
