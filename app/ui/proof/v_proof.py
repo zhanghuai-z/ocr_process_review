@@ -123,8 +123,10 @@ class _GalleryModel(QAbstractListModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             display_key = entry.token_text or entry.char
             kind = entry.collection_kind
-            return f"第 {entry.page_number} 页，位#{entry.char_idx + 1}  [{display_key}]" + (
-                "  (token)" if kind == "token" else ""
+            kind_label = "token" if kind == "token" else "char"
+            return (
+                f"第 {entry.page_number} 页，位#{entry.char_idx + 1}  "
+                f"[{display_key}] ({kind_label}, {entry.bbox_source}/{entry.bbox_granularity})"
             )
         if role == Qt.ItemDataRole.UserRole:
             return entry
@@ -446,9 +448,13 @@ class VProofPanel(QWidget):
         freqs = self._char_svc.sorted_chars()
         self._char_count_lbl.setText(f"共 {len(freqs)} 项")
         for tok, count in freqs:
-            item = QListWidgetItem(f"{tok} ×{count}")
             entry = self._char_svc.first_entry(tok)
+            prefix = "token" if entry and entry.collection_kind == "token" else "char"
+            item = QListWidgetItem(f"{tok} ×{count}  [{prefix}]")
             if entry:
+                item.setToolTip(
+                    f"{entry.bbox_source}/{entry.bbox_granularity} · {entry.collection_kind}"
+                )
                 pix = _verified_char_crop(
                     self._cache, entry.page_path, entry.bbox, CHAR_LIST_THUMB
                 )

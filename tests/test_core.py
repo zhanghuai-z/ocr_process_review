@@ -2071,7 +2071,7 @@ def test_char_index_service():
     ]
     project = OcrProject(name="char-index", pages=[page])
 
-    service = CharIndexService().build_index(project)
+    service = CharIndexService(include_fallback=True).build_index(project)
     yi_entries = service.query("乙")
 
     assert len(yi_entries) == 2
@@ -2105,7 +2105,7 @@ def test_char_index_service_synthesizes_vertical_char_boxes():
         blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(30, 0, 60, 180), lines=[line])],
     )
 
-    service = CharIndexService().build_index(OcrProject(name="vertical-index", pages=[page]))
+    service = CharIndexService(include_fallback=True).build_index(OcrProject(name="vertical-index", pages=[page]))
     entries = service.query("玄")
 
     assert len(entries) == 1
@@ -2140,7 +2140,7 @@ def test_char_index_service_legacy_build_contract():
             blocks=[Block(block_type=BlockType.TEXT, order=1, bbox=BBox(10, 20, 90, 70), lines=[line])],
         )
 
-        service = CharIndexService().build([page])
+        service = CharIndexService(include_fallback=True).build([page])
         entry = service.first_entry("甲")
 
         assert entry is not None
@@ -2153,6 +2153,41 @@ def test_char_index_service_legacy_build_contract():
         os.unlink(page_path)
 
     print("test_char_index_service_legacy_build_contract PASSED")
+
+
+def test_char_index_hides_fallback_units_by_default():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    token_bbox = BBox(30, 20, 42, 24)
+    line = Line(
+        text="估真实",
+        confidence=0.93,
+        bbox=BBox(10, 20, 80, 24),
+        chars=[
+            Char(char="估", confidence=0.8, bbox=BBox(10, 20, 18, 24), bbox_source="fallback", bbox_granularity="fallback", token_text="估"),
+            Char(char="真", confidence=0.93, bbox=token_bbox, bbox_source="ocr", bbox_granularity="word", token_text="真实"),
+            Char(char="实", confidence=0.93, bbox=token_bbox, bbox_source="ocr", bbox_granularity="word", token_text="真实"),
+        ],
+    )
+    inferred_line = Line(text="推断", confidence=0.7, bbox=BBox(10, 60, 80, 24))
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=120,
+        height=100,
+        blocks=[
+            Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 100, 90), lines=[line, inferred_line]),
+        ],
+    )
+
+    svc = CharIndexService().build_index(OcrProject(name="hide-fallback", pages=[page]))
+
+    assert svc.query("估") == []
+    assert svc.query("推") == []
+    assert svc.query("真实")[0].collection_kind == "token"
+    assert svc.query("真") == []
+
+    print("test_char_index_hides_fallback_units_by_default PASSED")
 
 
 def test_char_index_groups_digit_runs_as_tokens():
@@ -2431,7 +2466,7 @@ def test_char_index_deduplicates_overlapping_duplicate_lines():
                 Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 50), lines=[line_b]),
             ],
         )
-        svc = CharIndexService().build_index(OcrProject(name="dedupe", pages=[page]))
+        svc = CharIndexService(include_fallback=True).build_index(OcrProject(name="dedupe", pages=[page]))
         assert len(svc.query("重")) == 1
         assert len(svc.query("复")) == 1
     finally:
@@ -3264,7 +3299,7 @@ def test_char_index_dedup_on_rebuild():
         Line(text="永字八法", confidence=0.9, bbox=BBox(100, 50, 40, 160)),
     ]
     page.blocks = [blk]
-    svc = CharIndexService()
+    svc = CharIndexService(include_fallback=True)
     svc.build([page])
     n1 = len(svc.query("永"))
     svc.build([page])
@@ -3308,7 +3343,7 @@ def test_char_index_query_stable_order():
     b0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
     b0.lines = [Line(text="永远", confidence=0.9, bbox=BBox(50, 100, 40, 80))]
     p0.blocks = [b0]
-    svc = CharIndexService()
+    svc = CharIndexService(include_fallback=True)
     svc.build([p1, p0])
     entries = svc.query("永")
     assert len(entries) == 3
@@ -3328,7 +3363,7 @@ def test_char_index_skips_whitespace():
     blk = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
     blk.lines = [Line(text="永 和\t九", confidence=0.9, bbox=BBox(50, 50, 40, 200))]
     page.blocks = [blk]
-    svc = CharIndexService()
+    svc = CharIndexService(include_fallback=True)
     svc.build([page])
     assert " " not in svc._index and "\t" not in svc._index
     assert svc.unique_chars() == 3  # 永和九
@@ -4388,6 +4423,7 @@ if __name__ == "__main__":
     test_ocr_inspector_run_panel_profile_request_params()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
+    test_char_index_hides_fallback_units_by_default()
     test_char_index_dedup_on_rebuild()
     test_char_index_sort_categories()
     test_char_index_query_stable_order()

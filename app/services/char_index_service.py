@@ -137,7 +137,8 @@ CharIndexEntry = CharEntry
 class CharIndexService:
     """全文字符索引。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_fallback: bool = False) -> None:
+        self._include_fallback = include_fallback
         self._index: Dict[str, List[CharEntry]] = {}
         self._freq: Counter[str] = Counter()
 
@@ -401,6 +402,8 @@ class CharIndexService:
     ) -> None:
         if not glyph or glyph.isspace():
             return
+        if not self._include_fallback and self._is_fallback_unit(bbox_source, bbox_granularity):
+            return
         key = (id(line), char_idx, glyph)
         if key in seen:
             return
@@ -428,6 +431,13 @@ class CharIndexService:
         )
         self._index.setdefault(glyph, []).append(entry)
         self._freq[glyph] += 1
+
+    def _is_fallback_unit(self, bbox_source: str, bbox_granularity: str) -> bool:
+        source = (bbox_source or "fallback").strip().lower()
+        granularity = (bbox_granularity or "fallback").strip().lower()
+        if source != "ocr":
+            return True
+        return granularity in {"", "fallback", "unavailable", "line"}
 
     def query(self, char: str) -> List[CharEntry]:
         if not char:
