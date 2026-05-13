@@ -505,7 +505,7 @@ def _make_scope_comparison(
     draw.text((label_w + scope_w + crop_w + 8, 62), "adjusted scope", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + scope_w * 2 + crop_w + 8, 62), "adjusted final crop", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + 8, 80), "cur: red L10/R20", fill=(80, 80, 80), font=latin_small)
-    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: red L7/R25", fill=(80, 80, 80), font=latin_small)
+    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: red L5/R25", fill=(80, 80, 80), font=latin_small)
     for row, token in enumerate(samples):
         y = header_h + row * row_h
         current = current_evals[token.id]
@@ -607,8 +607,9 @@ def _make_page_report(
         f"radiation zone comparison - page {page_id}",
         "=" * 72,
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
-        "adjusted: left strong extends 3% (left red anti shrinks 10%->7%), right strong shrinks 5% (right red anti grows 20%->25%)",
+        "adjusted: left strong extends 5% (left red anti shrinks 10%->5%), right strong shrinks 5% (right red anti grows 20%->25%)",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
+        "strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
         f"parameter-sensitive tokens by scope labels: {len(changed)}",
@@ -648,7 +649,7 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
     draw.text((24, 20), "Page-level radiation scope sensitivity overview", fill=(0, 0, 0), font=title_font)
     draw.text(
         (24, 54),
-        "red=anti/weak region; orange=rescue domain, not anti. Adjusted profile: left strong +3%, right strong -5%.",
+        "red=anti/weak region; orange=rescue domain, not anti. Adjusted profile: left strong +5%, right strong -5%. Strong-hit CC is kept whole.",
         fill=(80, 0, 0),
         font=text_font,
     )
@@ -691,7 +692,8 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "=" * 72,
         "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
-        "Adjusted profile: left strong extends 3% (left anti shrinks 10%->7%); right strong shrinks 5% (right anti grows 20%->25%).",
+        "Adjusted profile: left strong extends 5% (left anti shrinks 10%->5%); right strong shrinks 5% (right anti grows 20%->25%).",
+        "Strong preservation: a CC that intersects green strong is retained whole; red anti only filters fully-outside-strong CCs, then ownership may clip the final union.",
         "",
         f"pages evaluated: {len(page_summaries)}",
         f"cjk tokens evaluated: {total_cjk}",
@@ -734,7 +736,7 @@ def run_page_comparison(
     )
     adjusted_spec = ZoneSpec(
         name="adjusted scope",
-        left_inset_ratio=0.07,
+        left_inset_ratio=0.05,
         right_inset_ratio=0.25,
         rescue_left_guard_ratio=0.00,
         rescue_right_guard_ratio=0.10,

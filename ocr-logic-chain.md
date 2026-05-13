@@ -300,6 +300,8 @@ python app/experiments/run_radiation_zone_comparison.py
 - **青色**：ownership 区间。
 - **蓝色**：hard_bound 连通域提取范围。
 
+强辐射区的保留规则必须明确：**只要一个 component 与绿色强辐射区相交，就保留整个 component bbox**。红色反辐射区不会切断这个 component 的笔画；红区只过滤“完全没有碰到强区”的孤立 component。最终成品字仍会在横向按 ownership 裁边，这是防止跨入邻字主体的最后边界，不是反辐射裁笔画。
+
 当前 v11 参数语义：
 
 ```text
@@ -311,13 +313,13 @@ rescue_right_anti_guard = 5%
 本轮按要求绘制的调整 profile：
 
 ```text
-strong_left_inset = 7%    # 左强辐射区向左延长 3%，左反辐射区 10% -> 7%
+strong_left_inset = 5%    # 左强辐射区向左延长 5%，左反辐射区 10% -> 5%
 strong_right_inset = 25%  # 右强辐射区向左缩减 5%
 rescue_left_anti_guard = 0%
 rescue_right_anti_guard = 10%  # 右侧救回 guard 随右反辐射区延长 5%
 ```
 
-这组调整的作用是：左侧稍微更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 324 个 token 对该 scope/crop profile 变化敏感，194 个 token 的最终成品字 crop 实际变化；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 有明确的局部作用，但不应全局替换默认 profile。
+这组调整的作用是：左侧更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 376 个 token 对该 scope/crop profile 变化敏感，200 个 token 的最终成品字 crop 实际变化；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 有明确的局部作用，但不应全局替换默认 profile。
 
 建议把后续参数做成质量分级 profile：
 

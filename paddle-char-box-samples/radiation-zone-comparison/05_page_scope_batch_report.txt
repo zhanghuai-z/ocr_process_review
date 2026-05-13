@@ -2,31 +2,32 @@ radiation zone comparison - page batch
 ========================================================================
 Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.
 Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.
-Adjusted profile: left strong extends 3% (left anti shrinks 10%->7%); right strong shrinks 5% (right anti grows 20%->25%).
+Adjusted profile: left strong extends 5% (left anti shrinks 10%->5%); right strong shrinks 5% (right anti grows 20%->25%).
+Strong preservation: a CC that intersects green strong is retained whole; red anti only filters fully-outside-strong CCs, then ownership may clip the final union.
 
 pages evaluated: 20
 cjk tokens evaluated: 17026
-parameter-sensitive tokens: 324
-final crop changed tokens: 194
+parameter-sensitive tokens: 376
+final crop changed tokens: 200
 
 per-page summary:
-- 120166: cjk=874 sensitive=10 crop_changed=5 no_strong=0/0 examples=L08#011性, L28#004心, L22#028年, L24#027运, L20#003核, L08#020消, L07#024这, L30#027适
-- 120167: cjk=975 sensitive=21 crop_changed=15 no_strong=0/0 examples=L28#001份, L28#003均, L15#003总, L17#003总, L10#004情, L02#025文, L35#012均, L35#023量
-- 120168: cjk=796 sensitive=11 crop_changed=6 no_strong=0/0 examples=L00#011年, L04#003总, L12#026方, L43#014理, L43#000进, L27#004洋, L24#019业, L30#009流
-- 120169: cjk=615 sensitive=6 crop_changed=4 no_strong=0/0 examples=L07#013心, L04#001心, L59#026励, L60#022商, L09#027年, L10#006性, L37#000年, L37#001份
-- 120170: cjk=956 sensitive=8 crop_changed=3 no_strong=0/0 examples=L22#023均, L34#011结, L15#014增, L21#013慰, L00#007济, L03#002适, L11#002进, L00#011年
-- 120171: cjk=794 sensitive=31 crop_changed=22 no_strong=0/0 examples=L04#025这, L09#029进, L61#031业, L07#017一, L00#020政, L20#001均, L66#034以, L62#033了
-- 120172: cjk=700 sensitive=27 crop_changed=20 no_strong=0/0 examples=L00#003济, L63#033的, L73#008限, L73#030之, L44#001份, L63#032后, L73#031后, L55#023产
-- 120173: cjk=779 sensitive=19 crop_changed=15 no_strong=0/0 examples=L26#001均, L70#002固, L24#003支, L94#023还, L96#023信, L97#018信, L09#028商, L19#000变
-- 120174: cjk=775 sensitive=11 crop_changed=5 no_strong=0/0 examples=L00#011年, L19#000快, L10#003总, L00#007济, L78#001余, L13#001消, L09#002消, L16#002这
-- 120175: cjk=765 sensitive=29 crop_changed=17 no_strong=0/0 examples=L31#004总, L00#020政, L88#002同, L09#012总, L00#031配, L18#028潜, L05#029地, L16#030此
-- 120176: cjk=1028 sensitive=15 crop_changed=4 no_strong=0/0 examples=L23#023调, L20#003业, L24#024使, L15#027消, L02#027消, L04#020进, L12#026途, L03#033疗
+- 120166: cjk=874 sensitive=11 crop_changed=5 no_strong=0/0 examples=L08#011性, L28#004心, L22#028年, L20#003核, L08#020消, L24#027运, L07#024这, L30#027适
+- 120167: cjk=975 sensitive=26 crop_changed=15 no_strong=0/0 examples=L28#001份, L28#003均, L15#003总, L17#003总, L10#004情, L02#025文, L35#012均, L35#023量
+- 120168: cjk=796 sensitive=12 crop_changed=6 no_strong=0/0 examples=L00#011年, L04#003总, L12#026方, L43#014理, L43#000进, L32#010消, L27#004洋, L24#019业
+- 120169: cjk=615 sensitive=11 crop_changed=6 no_strong=0/0 examples=L07#013心, L04#001心, L59#016改, L59#026励, L10#032验, L60#022商, L09#027年, L10#006性
+- 120170: cjk=956 sensitive=11 crop_changed=4 no_strong=0/0 examples=L22#023均, L06#029快, L34#011结, L15#014增, L21#013慰, L00#007济, L03#002适, L11#002进
+- 120171: cjk=794 sensitive=33 crop_changed=22 no_strong=0/0 examples=L04#025这, L09#029进, L07#017一, L00#020政, L20#001均, L66#034以, L62#033了, L65#026活
+- 120172: cjk=700 sensitive=32 crop_changed=20 no_strong=0/0 examples=L63#033的, L73#008限, L73#030之, L44#001份, L63#032后, L73#031后, L55#023产, L63#018扣
+- 120173: cjk=779 sensitive=22 crop_changed=15 no_strong=0/0 examples=L26#001均, L70#002固, L24#003支, L94#023还, L96#023信, L97#018信, L09#028商, L19#000变
+- 120174: cjk=775 sensitive=18 crop_changed=6 no_strong=0/0 examples=L00#011年, L19#000快, L10#003总, L17#034改, L00#007济, L78#001余, L13#001消, L09#002消
+- 120175: cjk=765 sensitive=31 crop_changed=18 no_strong=0/0 examples=L31#004总, L89#016临, L00#020政, L88#002同, L09#012总, L00#031配, L18#028潜, L05#029地
+- 120176: cjk=1028 sensitive=20 crop_changed=4 no_strong=0/0 examples=L23#023调, L20#003业, L24#024使, L15#027消, L01#026消, L32#009源, L03#022将, L04#020进
 - 120177: cjk=1080 sensitive=11 crop_changed=1 no_strong=0/0 examples=L32#011性, L21#029这, L29#008将, L21#012间, L24#000这, L31#023溢, L02#015消, L32#024消
-- 120178: cjk=1152 sensitive=17 crop_changed=5 no_strong=0/0 examples=L09#002源, L28#026制, L03#007性, L12#029保, L26#001实, L29#004消, L34#020消, L33#033适
-- 120179: cjk=685 sensitive=4 crop_changed=1 no_strong=0/0 examples=L18#028来, L02#001源, L35#004冰, L00#006一, L02#021标, L01#033动, L00#002发, L00#020政
+- 120178: cjk=1152 sensitive=21 crop_changed=5 no_strong=0/0 examples=L09#002源, L03#007性, L12#029保, L26#001实, L29#004消, L33#014消, L28#026制, L33#033适
+- 120179: cjk=685 sensitive=5 crop_changed=1 no_strong=0/0 examples=L18#028来, L02#001源, L35#004冰, L00#006一, L02#021标, L34#005洋, L01#033动, L00#002发
 - 120180: cjk=488 sensitive=25 crop_changed=20 no_strong=0/0 examples=L06#037北, L26#034商, L02#014财, L24#027支, L15#021与, L20#032省, L05#013济, L12#030济
-- 120183: cjk=670 sensitive=17 crop_changed=13 no_strong=0/0 examples=L00#020业, L03#003恩, L00#014聚, L00#024生, L00#012业, L26#024基, L17#008基, L24#034京
-- 120184: cjk=957 sensitive=5 crop_changed=1 no_strong=0/0 examples=L00#011年, L25#013溢, L25#004洁, L33#002剔, L05#006只, L23#034效, L34#022势, L00#003济
+- 120183: cjk=670 sensitive=20 crop_changed=13 no_strong=0/0 examples=L00#020业, L03#003恩, L00#014聚, L00#024生, L00#012业, L26#024基, L17#008基, L24#034京
+- 120184: cjk=957 sensitive=6 crop_changed=2 no_strong=0/0 examples=L00#011年, L24#033资, L25#013溢, L25#004洁, L33#002剔, L05#006只, L23#034效, L34#022势
 - 120185: cjk=1073 sensitive=7 crop_changed=0 no_strong=0/0 examples=L19#009态, L08#032进, L16#015将, L01#035效, L23#031司, L27#013函, L00#022要, L09#028浩
-- 120186: cjk=909 sensitive=15 crop_changed=8 no_strong=0/0 examples=L00#011年, L06#022性, L22#029利, L23#011业, L00#007济, L07#027进, L25#028能, L03#025进
-- 120187: cjk=955 sensitive=35 crop_changed=29 no_strong=0/0 examples=L28#029心, L05#006基, L20#029终, L10#013和, L13#028妮, L04#030方, L13#012化, L13#020化
+- 120186: cjk=909 sensitive=16 crop_changed=8 no_strong=0/0 examples=L00#011年, L06#022性, L22#029利, L23#011业, L00#007济, L25#028能, L03#025进, L03#020焱
+- 120187: cjk=955 sensitive=38 crop_changed=29 no_strong=0/0 examples=L28#029心, L05#006基, L20#029终, L10#013和, L13#028妮, L04#030方, L13#012化, L13#020化
