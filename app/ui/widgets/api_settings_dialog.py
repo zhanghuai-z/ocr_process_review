@@ -1,12 +1,4 @@
-"""OCR 引擎设置对话框。
-
-特性：
-- 模式切换：本地 PaddleOCR ↔ 云端 API
-- 4 个官方模型预设（PP-OCRv5 / PP-StructureV3 / PaddleOCR-VL / PaddleOCR-VL-1.5）
-  下拉选中后自动填 URL；URL 修改后自动反向匹配
-- 测试连接：发送一张小测试图，根据 errorCode + result 类型判断
-- 视觉风格参考 ui.jpg：浅色卡片 + 天蓝主色 + 概览式信息面板
-"""
+"""OCR API connection settings dialog."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
@@ -377,13 +369,13 @@ class ApiSettingsDialog(QDialog):
         hero_eyebrow.setObjectName("heroEyebrow")
         hero_layout.addWidget(hero_eyebrow)
 
-        hero_title = QLabel("OCR 引擎与 API 连接")
+        hero_title = QLabel("OCR API 连接")
         hero_title.setObjectName("heroTitle")
         hero_layout.addWidget(hero_title)
 
         hero_desc = QLabel(
-            "保留 GPT 已接入的官方模型预设、自动填 URL 与反向匹配能力，"
-            "同时把配置阅读顺序整理成“模式选择 → 接口配置 → 摘要确认”。"
+            "当前主链固定使用 Structure 负责版面、PP-OCRv5 负责 proof OCR；"
+            "这里只维护服务地址和访问 Token，避免把模型选择暴露给普通操作流程。"
         )
         hero_desc.setObjectName("heroDesc")
         hero_desc.setWordWrap(True)
@@ -392,9 +384,9 @@ class ApiSettingsDialog(QDialog):
         hero_pills = QHBoxLayout()
         hero_pills.setContentsMargins(0, 0, 0, 0)
         hero_pills.setSpacing(8)
-        hero_pills.addWidget(_pill("4 个官方模型预设"))
-        hero_pills.addWidget(_pill("URL 自动识别"))
-        hero_pills.addWidget(_pill("内置测试连接"))
+        hero_pills.addWidget(_pill("双模型自动分工"))
+        hero_pills.addWidget(_pill("只填 API 地址"))
+        hero_pills.addWidget(_pill("Token 本机保存"))
         hero_pills.addStretch()
         hero_layout.addLayout(hero_pills)
         root.addWidget(hero)
@@ -403,10 +395,12 @@ class ApiSettingsDialog(QDialog):
             "工作模式",
             "优先先选运行方式，再决定是否填写 API 参数，避免操作顺序混乱。",
         )
+        mode_card.hide()
         mode_row = QHBoxLayout()
         mode_row.setSpacing(12)
         self._radio_local = QRadioButton("本地模型")
         self._radio_api = QRadioButton("云端 API")
+        self._radio_api.setChecked(True)
         self._local_mode_card = _ModeCard(
             self._radio_local,
             "本地 PaddleOCR",
@@ -426,7 +420,7 @@ class ApiSettingsDialog(QDialog):
 
         self._api_card, api_layout = _section_card(
             "API 连接",
-            "下拉框保留 4 个官方模型预设；切换预设时自动回填完整端点，手动改 URL 时会尝试反向识别。",
+            "填写服务根地址或完整端点即可。程序会按角色自动解析 layout 与 OCR 端点。",
         )
 
         self._api_mode_notice = QLabel()
@@ -447,15 +441,18 @@ class ApiSettingsDialog(QDialog):
             spec = API_MODEL_PROFILES[key]
             self._api_model_combo.addItem(f"{label}  —  {spec['desc']}", key)
         self._api_model_combo.setCurrentIndex(-1)
-        api_form.addLayout(_form_row("官方模型", self._api_model_combo))
+        self._api_model_row = QWidget()
+        self._api_model_row.setLayout(_form_row("官方模型", self._api_model_combo))
+        self._api_model_row.hide()
+        api_form.addWidget(self._api_model_row)
 
         self._model_note = QLabel()
         self._model_note.setObjectName("noteLabel")
         self._model_note.setWordWrap(True)
-        api_form.addLayout(_note_row(self._model_note))
+        self._model_note.hide()
 
         self._url_edit = QLineEdit()
-        self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com/layout-parsing")
+        self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com")
         self._url_edit.setClearButtonEnabled(True)
         api_form.addLayout(_form_row("API 地址", self._url_edit))
 
@@ -491,7 +488,9 @@ class ApiSettingsDialog(QDialog):
         self._timeout_spin.setFixedWidth(140)
         timeout_layout.addWidget(self._timeout_spin)
         timeout_layout.addStretch()
-        api_form.addLayout(_form_row("请求超时", timeout_row))
+        self._timeout_row = timeout_row
+        self._timeout_row.hide()
+        api_form.addWidget(self._timeout_row)
 
         test_row = QHBoxLayout()
         test_row.setContentsMargins(0, 4, 0, 0)
@@ -542,9 +541,9 @@ class ApiSettingsDialog(QDialog):
         side_layout.addWidget(hint_title)
 
         for text in (
-            "优先选择官方模型，可避免端点路径填错。",
-            "若粘贴的是服务根地址，测试连接会自动补全 /layout-parsing。",
-            "切回本地模式后，API 配置会保留，方便后续再次启用。",
+            "服务根地址会按角色自动补全 /layout-parsing 与 /ocr。",
+            "如果粘贴完整 /layout-parsing 或 /ocr，程序会在同一 root 下切换角色端点。",
+            "Token 只保存在本机配置中，项目文件不写入 Token。",
         ):
             hint = QLabel(f"• {text}")
             hint.setObjectName("summaryDesc")
@@ -559,8 +558,7 @@ class ApiSettingsDialog(QDialog):
         root.addStretch()
 
         self._footer_note = QLabel(
-            "保存时会继续写入 api_model_profile，并清空旧的 api_layout_model_name，"
-            "避免回退到旧版手填模型名逻辑。"
+            "保存后主程序固定走 API 双模型链：Structure 做版面，PP-OCRv5 做 proof OCR。"
         )
         self._footer_note.setObjectName("footerNote")
         self._footer_note.setWordWrap(True)
@@ -585,22 +583,12 @@ class ApiSettingsDialog(QDialog):
 
     def _load_config(self) -> None:
         cfg = get_config()
-        if cfg["mode"] == "api":
-            self._radio_api.setChecked(True)
-        else:
-            self._radio_local.setChecked(True)
-
-        profile_key = cfg.get("api_model_profile", "") or ""
-        if not profile_key:
-            profile_key = match_api_model_profile_from_url(cfg.get("api_url", ""))
-        index = self._api_model_combo.findData(profile_key) if profile_key else -1
+        self._radio_api.setChecked(True)
         self._api_model_combo.blockSignals(True)
-        self._api_model_combo.setCurrentIndex(index if index >= 0 else -1)
+        self._api_model_combo.setCurrentIndex(-1)
         self._api_model_combo.blockSignals(False)
 
         api_url = cfg.get("api_url", "")
-        if not api_url and index >= 0:
-            api_url = get_api_model_profile_url(profile_key)
         self._url_edit.setText(api_url)
 
         self._token_edit.setText(cfg.get("api_token", ""))
@@ -613,30 +601,19 @@ class ApiSettingsDialog(QDialog):
         _refresh_widget_style(card)
 
     def _refresh_api_preview(self) -> None:
-        profile_key = self._api_model_combo.currentData()
         url = self._url_edit.text().strip()
         resolved = resolve_api_endpoint(
             url,
             default_suffix="/layout-parsing",
-            profile=profile_key,
+            profile=None,
         ) if url else ""
 
-        if profile_key and profile_key in API_MODEL_PROFILES:
-            spec = API_MODEL_PROFILES[profile_key]
-            self._model_note.setText(
-                f"已选官方预设：{spec['label']}，会自动填入对应端点。"
-            )
-            self._summary_model.setText(spec["label"])
-            self._summary_desc.setText(spec["desc"])
-        else:
-            self._model_note.setText(
-                "当前未匹配官方预设。可直接填写自部署 Serving 地址，保存时会按 URL 原样使用。"
-            )
-            self._summary_model.setText("自定义 API 地址")
-            self._summary_desc.setText("未匹配到官方模型预设，将根据当前 URL 直接请求。")
+        self._model_note.setText("")
+        self._summary_model.setText("自动双模型：Structure + PP-OCRv5")
+        self._summary_desc.setText("版面分析使用 layout role；横校/纵校 proof 使用 OCR role。")
 
         if not url:
-            self._url_note.setText("可直接粘贴完整端点，也可只填服务根地址。")
+            self._url_note.setText("请填写服务根地址或完整端点。")
             self._summary_endpoint_kind.setText("端点待填写")
             self._summary_endpoint.setText("尚未填写 API 地址。")
         elif any(url.rstrip("/").endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
@@ -645,26 +622,16 @@ class ApiSettingsDialog(QDialog):
             self._summary_endpoint_kind.setText(f"当前端点：{endpoint_type}")
             self._summary_endpoint.setText(url.rstrip("/"))
         else:
-            self._url_note.setText(
-                "当前地址未包含端点后缀，测试连接时会自动补全 /layout-parsing。"
-            )
+            self._url_note.setText("当前地址未包含端点后缀，会按角色自动补全。")
             self._summary_endpoint_kind.setText("自动补全：/layout-parsing")
             self._summary_endpoint.setText(resolved)
 
-        if self._radio_api.isChecked():
-            self._summary_mode.setText("当前模式：云端 API")
-            self._api_mode_notice.setText(
-                "当前处于云端 API 模式，请确认地址、Token 与模型预设一致后再开始识别。"
-            )
-        else:
-            self._summary_mode.setText("当前模式：本地 PaddleOCR")
-            self._api_mode_notice.setText(
-                "当前处于本地模式，以下 API 配置会被保留，但本次识别不会调用远端服务。"
-            )
+        self._summary_mode.setText("当前模式：API 双模型链")
+        self._api_mode_notice.setText("只需维护 API 地址和 Token；模型分工由程序固定处理。")
 
     def _on_mode_changed(self) -> None:
-        api_enabled = self._radio_api.isChecked()
-        self._api_form_panel.setEnabled(api_enabled)
+        self._radio_api.setChecked(True)
+        self._api_form_panel.setEnabled(True)
         self._set_mode_card_selected(self._local_mode_card, self._radio_local.isChecked())
         self._set_mode_card_selected(self._api_mode_card, self._radio_api.isChecked())
         self._refresh_api_preview()
@@ -676,10 +643,8 @@ class ApiSettingsDialog(QDialog):
         self._refresh_api_preview()
 
     def _sync_model_from_url(self) -> None:
-        profile_key = match_api_model_profile_from_url(self._url_edit.text().strip())
-        index = self._api_model_combo.findData(profile_key) if profile_key else -1
         self._api_model_combo.blockSignals(True)
-        self._api_model_combo.setCurrentIndex(index if index >= 0 else -1)
+        self._api_model_combo.setCurrentIndex(-1)
         self._api_model_combo.blockSignals(False)
         self._refresh_api_preview()
 
@@ -692,16 +657,10 @@ class ApiSettingsDialog(QDialog):
             self._btn_show_token.setText("显示")
 
     def _save_and_accept(self) -> None:
-        mode = "api" if self._radio_api.isChecked() else "local"
         api_url = self._url_edit.text().strip().rstrip("/")
-        api_model_profile = (
-            self._api_model_combo.currentData()
-            or match_api_model_profile_from_url(api_url)
-            or ""
-        )
         update_config(
-            mode=mode,
-            api_model_profile=api_model_profile,
+            mode="api",
+            api_model_profile="",
             api_url=api_url,
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
@@ -718,7 +677,7 @@ class ApiSettingsDialog(QDialog):
         url = resolve_api_endpoint(
             self._url_edit.text().strip(),
             default_suffix="/layout-parsing",
-            profile=self._api_model_combo.currentData(),
+            profile=None,
         )
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 API 地址。")
@@ -751,7 +710,7 @@ class ApiSettingsDialog(QDialog):
             payload = build_api_payload(
                 file_b64,
                 1,
-                profile=self._api_model_combo.currentData(),
+                profile=None,
                 endpoint_url=url,
             )
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)

@@ -290,6 +290,59 @@ def test_bbox_tools():
     print("test_bbox_tools PASSED")
 
 
+def test_component_matcher_extracts_and_classifies_cjk_tokens():
+    import cv2
+    import numpy as np
+
+    from app.core.component_matcher import (
+        analyze_token_components, build_component_shape_filter,
+        build_relative_component_shape_filter, count_cjk_tokens, extract_text_components,
+    )
+    from app.models import BBox
+
+    img = np.full((80, 160, 3), 255, dtype=np.uint8)
+    cv2.rectangle(img, (12, 22), (32, 54), (0, 0, 0), -1)
+    cv2.rectangle(img, (58, 22), (78, 54), (0, 0, 0), -1)
+    cv2.rectangle(img, (104, 22), (124, 54), (0, 0, 0), -1)
+
+    components = extract_text_components(
+        img,
+        BBox(0, 0, 150, 70),
+        kernel_size=None,
+        min_area=20,
+    )
+    assert [component.bbox for component in components] == [
+        BBox(12, 22, 21, 33),
+        BBox(58, 22, 21, 33),
+        BBox(104, 22, 21, 33),
+    ]
+
+    single = analyze_token_components(img, "汉", BBox(8, 18, 30, 42), kernel_size=None)
+    assert single.status == "single_cjk"
+    assert single.component_count == 1
+
+    multi = analyze_token_components(img, "天地", BBox(50, 18, 82, 42), kernel_size=None)
+    assert multi.status == "split_candidate"
+    assert multi.component_count == 2
+
+    latin = analyze_token_components(img, "A1", BBox(50, 18, 82, 42), kernel_size=None)
+    assert latin.status == "not_cjk"
+
+    assert count_cjk_tokens(["天", "地玄", "2026", "A1"]) == (1, 1, 2)
+
+    shape_filter = build_component_shape_filter(components)
+    assert all(shape_filter.accepts(component) for component in components)
+    assert not shape_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30))
+
+    relative_filter = build_relative_component_shape_filter(
+        [(component, 40.0) for component in components]
+    )
+    assert all(relative_filter.accepts(component, 40.0) for component in components)
+    assert not relative_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30), 40.0)
+
+    print("test_component_matcher_extracts_and_classifies_cjk_tokens PASSED")
+
+
 def test_block_type_mapping():
     from app.models import BlockType
 
@@ -826,6 +879,84 @@ def test_api_ocr_engine_parses_text_word_boxes_alias():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_parses_text_word_boxes_alias PASSED")
+
+
+def test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion():
+    import numpy as np
+
+    from app.core.wordbox_anchor import refine_wordbox_anchors
+    from app.models import BBox
+
+    image = np.full((100, 140, 3), 255, dtype=np.uint8)
+    image[30:58, 26:45] = 0
+    source = BBox(30, 20, 50, 50)
+
+    anchors = refine_wordbox_anchors(
+        image,
+        BBox(20, 20, 90, 50),
+        [("税", source)],
+    )
+
+    assert len(anchors) == 1
+    assert anchors[0].kind == "cjk"
+    assert anchors[0].crop_bbox.x < source.x
+    assert anchors[0].crop_bbox.x2 <= source.x2
+    assert anchors[0].kept_cc_count >= 1
+
+    print("test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion PASSED")
+
+
+def test_api_ocr_engine_refines_cjk_word_box_with_anchor():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+    from app.models import BBox
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "overall_ocr_res": {
+                                    "rec_texts": ["税"],
+                                    "rec_scores": [0.96],
+                                    "rec_boxes": [[20, 20, 110, 70]],
+                                },
+                                "text_word": [["税"]],
+                                "text_word_boxes": [[[30, 20, 80, 70]]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        image = np.full((100, 140, 3), 255, dtype=np.uint8)
+        image[30:58, 26:45] = 0
+        line = ApiOcrEngine().recognize(image, OcrContext())[0]
+        assert line.chars[0].bbox.x < 30
+        assert line.chars[0].bbox.x2 <= 80
+        assert line.chars[0].bbox_source == "ocr"
+        assert line.chars[0].bbox_granularity == "char"
+        assert line.chars[0].bbox != BBox(30, 20, 50, 50)
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_refines_cjk_word_box_with_anchor PASSED")
 
 
 def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
@@ -1801,6 +1932,185 @@ def test_workflow_controller_auto_chains_ocr_after_layout():
     print("test_workflow_controller_auto_chains_ocr_after_layout PASSED")
 
 
+def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
+    import app.controllers.workflow_controller as workflow_module
+    import app.core.layout_analyzer as layout_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeLayoutWorker:
+        def __init__(self, pages):
+            self.page_done = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            for page in self._pages:
+                page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, page.width, page.height), order=0)]
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    class FakeProofWorker:
+        def __init__(self, pipeline, pages, parent=None):
+            self.progress_update = DummySignal()
+            self.progress_state = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            self._pages[0].blocks[0].lines = [
+                Line(text="税", confidence=0.96, bbox=BBox(20, 20, 20, 20))
+            ]
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    class FakePageOcrEngine:
+        prefer_page_ocr = True
+
+    original_layout_worker = layout_module.LayoutWorker
+    original_ocr_worker = workflow_module.OcrPipelineWorker
+    original_create_engine = workflow_module.create_engine
+    layout_module.LayoutWorker = FakeLayoutWorker
+    workflow_module.OcrPipelineWorker = FakeProofWorker
+    workflow_module.create_engine = lambda: FakePageOcrEngine()
+
+    try:
+        controller = workflow_module.WorkflowController()
+        page = Page(image_path="/tmp/parallel-proof.png", width=100, height=80)
+        controller._project = OcrProject(name="ParallelProof", pages=[page])
+        finished = []
+        controller.ocr_finished.connect(finished.append)
+
+        ok = controller.start_layout_analysis([page])
+
+        assert ok is True
+        assert finished
+        assert finished[0][0].blocks[0].lines[0].text == "税"
+        assert finished[0][0].status == workflow_module.PageStatus.OCR_DONE
+    finally:
+        layout_module.LayoutWorker = original_layout_worker
+        workflow_module.OcrPipelineWorker = original_ocr_worker
+        workflow_module.create_engine = original_create_engine
+
+    print("test_workflow_controller_starts_parallel_proof_ocr_with_layout PASSED")
+
+
+def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment():
+    import app.controllers.workflow_controller as workflow_module
+    import app.core.layout_analyzer as layout_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeLayoutWorker:
+        def __init__(self, pages):
+            self.page_done = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            for page in self._pages:
+                page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, page.width, page.height), order=0)]
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    class FakeProofWorker:
+        def __init__(self, pipeline, pages, parent=None):
+            self.progress_update = DummySignal()
+            self.progress_state = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            self._pages[0].blocks[0].lines = [
+                Line(text="第一页", confidence=0.96, bbox=BBox(10, 10, 20, 20))
+            ]
+            self._pages[2].blocks[0].lines = [
+                Line(text="第三页", confidence=0.97, bbox=BBox(30, 30, 20, 20))
+            ]
+            self.all_done.emit([self._pages[0], self._pages[2]])
+            self._running = False
+
+    class FakePageOcrEngine:
+        prefer_page_ocr = True
+
+    original_layout_worker = layout_module.LayoutWorker
+    original_ocr_worker = workflow_module.OcrPipelineWorker
+    original_create_engine = workflow_module.create_engine
+    layout_module.LayoutWorker = FakeLayoutWorker
+    workflow_module.OcrPipelineWorker = FakeProofWorker
+    workflow_module.create_engine = lambda: FakePageOcrEngine()
+
+    try:
+        controller = workflow_module.WorkflowController()
+        pages = [
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+        ]
+        controller._project = OcrProject(name="ParallelProofSkip", pages=pages)
+        finished = []
+        controller.ocr_finished.connect(finished.append)
+
+        ok = controller.start_layout_analysis(pages)
+
+        assert ok is True
+        assert finished
+        out_pages = finished[0]
+        assert out_pages[0].blocks[0].lines[0].text == "第一页"
+        assert out_pages[1].blocks[0].lines == []
+        assert out_pages[2].blocks[0].lines[0].text == "第三页"
+    finally:
+        layout_module.LayoutWorker = original_layout_worker
+        workflow_module.OcrPipelineWorker = original_ocr_worker
+        workflow_module.create_engine = original_create_engine
+
+    print("test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment PASSED")
+
+
 def test_workflow_controller_emits_ocr_progress_and_navigation():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, OcrProject, Page
@@ -2213,7 +2523,7 @@ def test_char_index_groups_digit_runs_as_tokens():
         blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 120, 40), lines=[line])],
     )
 
-    svc = CharIndexService().build_index(OcrProject(name="digit-group", pages=[page]))
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="digit-group", pages=[page]))
     digit_entries = svc.query("2026")
     assert len(digit_entries) == 1
     assert digit_entries[0].bbox == BBox(10, 20, 48, 24)
@@ -2222,6 +2532,45 @@ def test_char_index_groups_digit_runs_as_tokens():
     assert len(svc.query("年")) == 1
 
     print("test_char_index_groups_digit_runs_as_tokens PASSED")
+
+
+def test_char_index_filters_non_cjk_from_default_vproof():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="税2026A+B，业",
+        confidence=0.93,
+        bbox=BBox(10, 20, 180, 24),
+        chars=[
+            Char(char="税", confidence=0.93, bbox=BBox(10, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="税"),
+            Char(char="2", confidence=0.93, bbox=BBox(34, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="0", confidence=0.93, bbox=BBox(44, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="0"),
+            Char(char="2", confidence=0.93, bbox=BBox(54, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="2"),
+            Char(char="6", confidence=0.93, bbox=BBox(64, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="6"),
+            Char(char="A", confidence=0.93, bbox=BBox(84, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="A"),
+            Char(char="+", confidence=0.93, bbox=BBox(96, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="+"),
+            Char(char="B", confidence=0.93, bbox=BBox(106, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="B"),
+            Char(char="，", confidence=0.93, bbox=BBox(120, 20, 8, 24), bbox_source="ocr", bbox_granularity="char", token_text="，"),
+            Char(char="业", confidence=0.93, bbox=BBox(136, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="业"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=200,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 190, 40), lines=[line])],
+    )
+
+    svc = CharIndexService().build_index(OcrProject(name="default-cjk-only", pages=[page]))
+
+    assert len(svc.query("税")) == 1
+    assert len(svc.query("业")) == 1
+    assert svc.query("2026") == []
+    assert svc.query("A+B") == []
+    assert svc.query("，") == []
+
+    print("test_char_index_filters_non_cjk_from_default_vproof PASSED")
 
 
 def test_char_index_sorts_digit_tokens_short_to_long():
@@ -2252,7 +2601,7 @@ def test_char_index_sorts_digit_tokens_short_to_long():
         height=120,
         blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 180, 40), lines=[line])],
     )
-    svc = CharIndexService().build_index(OcrProject(name="digit-sort", pages=[page]))
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="digit-sort", pages=[page]))
     sorted_keys = [key for key, _count in svc.sorted_chars()]
     digit_keys = [key for key in sorted_keys if key.isdigit()]
     assert digit_keys == ["9", "11", "2026"]
@@ -2285,7 +2634,7 @@ def test_char_index_groups_formula_runs_below_digits():
         height=120,
         blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 180, 40), lines=[line])],
     )
-    svc = CharIndexService().build_index(OcrProject(name="formula-group", pages=[page]))
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="formula-group", pages=[page]))
 
     assert svc.query("A") == []
     assert svc.query("+") == []
@@ -2678,6 +3027,10 @@ def test_app_config_tracks_api_model_profile():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
+    defaults = get_config()
+    assert defaults["mode"] == "api"
+    assert defaults["api_model_profile"] == ""
+
     update_config(
         mode="api",
         api_model_profile="paddleocr-vl-1.5",
@@ -2708,30 +3061,14 @@ def test_api_settings_dialog_syncs_model_and_url():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
-    update_config(
-        mode="api",
-        api_model_profile="pp-structurev3",
-        api_url="https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
-        api_token="",
-        api_timeout=30,
-        api_layout_model_name="",
-    )
+    update_config(mode="local", api_model_profile="pp-structurev3", api_url="https://example.com/root", api_token="old")
 
     dialog = ApiSettingsDialog()
-    assert dialog._api_model_combo.currentData() == "pp-structurev3"
-    assert dialog._url_edit.text() == "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing"
-
-    index = dialog._api_model_combo.findData("pp-ocrv5")
-    dialog._api_model_combo.setCurrentIndex(index)
-    assert dialog._url_edit.text() == "https://n6z9feddjca4l7b5.aistudio-app.com/ocr"
-
-    dialog._url_edit.setText("https://example.com/custom-layout")
-    dialog._sync_model_from_url()
+    assert dialog._radio_api.isChecked()
+    assert dialog._api_model_row.isHidden()
     assert dialog._api_model_combo.currentIndex() == -1
-
-    dialog._url_edit.setText("https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing")
-    dialog._sync_model_from_url()
-    assert dialog._api_model_combo.currentData() == "paddleocr-vl"
+    assert dialog._url_edit.text() == "https://example.com/root"
+    assert "自动双模型" in dialog._summary_model.text()
 
     cfg.reset_to_defaults()
 
@@ -2759,11 +3096,7 @@ def _reset_app_config_for_test(tmpdir: str) -> None:
 
 def test_api_settings_dialog_keeps_model_preset_sync():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import (
-        ApiSettingsDialog,
-        get_api_model_profile_url,
-    )
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
 
@@ -2771,12 +3104,10 @@ def test_api_settings_dialog_keeps_model_preset_sync():
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
 
-        idx = dialog._api_model_combo.findData("paddleocr-vl")
-        dialog._api_model_combo.setCurrentIndex(idx)
-
-        assert dialog._url_edit.text() == get_api_model_profile_url("paddleocr-vl")
-        assert "PaddleOCR-VL" in dialog._summary_model.text()
-        assert "官方预设" in dialog._model_note.text()
+        assert dialog._api_model_row.isHidden()
+        assert dialog._model_note.isHidden()
+        assert dialog._api_form_panel.isEnabled()
+        assert "API 双模型链" in dialog._summary_mode.text()
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -2788,36 +3119,26 @@ def test_api_settings_dialog_keeps_model_preset_sync():
 def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     from app.core.app_config import AppConfig
     from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import (
-        ApiSettingsDialog,
-        get_api_model_profile_url,
-    )
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
-        dialog._radio_api.setChecked(True)
-        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
-        dialog._sync_model_from_url()
-
-        assert dialog._api_model_combo.currentData() == "pp-ocrv5"
-        assert "/ocr" in dialog._summary_endpoint_kind.text()
-
         dialog._url_edit.setText("https://example.com/custom")
+        dialog._token_edit.setText("secret")
         dialog._sync_model_from_url()
         assert dialog._api_model_combo.currentIndex() == -1
-        assert "自定义" in dialog._summary_model.text()
+        assert "自动双模型" in dialog._summary_model.text()
 
-        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
-        dialog._sync_model_from_url()
         dialog._save_and_accept()
 
         cfg = get_config()
         assert cfg["mode"] == "api"
-        assert cfg["api_model_profile"] == "pp-ocrv5"
-        assert cfg["api_url"] == get_api_model_profile_url("pp-ocrv5")
+        assert cfg["api_model_profile"] == ""
+        assert cfg["api_url"] == "https://example.com/custom"
+        assert cfg["api_token"] == "secret"
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -4271,6 +4592,73 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
+def test_layout_worker_continues_after_single_page_failure():
+    from unittest.mock import patch
+
+    from app.core.layout_analyzer import LayoutAnalyzer, LayoutWorker
+    from app.models import BBox, Block, BlockType, Page
+
+    pages = [
+        Page(image_path="/tmp/layout-ok-1.png", width=100, height=100, page_number=1),
+        Page(image_path="/tmp/layout-bad.png", width=100, height=100, page_number=2),
+        Page(image_path="/tmp/layout-ok-2.png", width=100, height=100, page_number=3),
+    ]
+    done = []
+    emitted_pages = []
+    errors = []
+
+    def fake_analyze(_self, page):
+        if page.page_number == 2:
+            raise RuntimeError("boom")
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+
+    with patch.object(LayoutAnalyzer, "analyze", fake_analyze):
+        worker = LayoutWorker(pages)
+        worker.page_done.connect(lambda idx, total: done.append((idx, total)))
+        worker.all_done.connect(lambda result: emitted_pages.append(result))
+        worker.error.connect(lambda message: errors.append(message))
+        worker.run()
+
+    assert done == [(0, 3), (1, 3), (2, 3)]
+    assert errors == []
+    assert emitted_pages == [pages]
+    assert len(pages[0].blocks) == 1
+    assert pages[1].blocks == []
+    assert pages[1].error_message.startswith("版面分析失败：boom")
+    assert len(pages[2].blocks) == 1
+
+    print("test_layout_worker_continues_after_single_page_failure PASSED")
+
+
+def test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
+
+    success_page = Page(image_path="/tmp/layout-success.png", width=100, height=100, page_number=1)
+    success_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+    failed_page = Page(image_path="/tmp/layout-failed.png", width=100, height=100, page_number=2)
+    failed_page.error_message = "版面分析失败：boom"
+    pages = [success_page, failed_page]
+
+    controller = WorkflowController()
+    controller._project = OcrProject(name="partial-layout", pages=[])
+    controller._auto_start_ocr_after_layout = True
+    started = []
+    messages = []
+    controller.start_ocr = lambda result_pages, notify_page_callback=None: started.append(result_pages)
+    controller.status_message.connect(messages.append)
+
+    controller.on_layout_done(pages)
+
+    assert success_page.status == PageStatus.LAYOUT_DONE
+    assert failed_page.status == PageStatus.ERROR
+    assert controller.project.pages == pages
+    assert started == [pages]
+    assert any("1/2 页成功" in message and "1 页失败" in message for message in messages)
+
+    print("test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages PASSED")
+
+
 def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
 
@@ -4372,6 +4760,8 @@ if __name__ == "__main__":
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
     test_api_ocr_engine_parses_text_word_boxes_alias()
+    test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion()
+    test_api_ocr_engine_refines_cjk_word_box_with_anchor()
     test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
     test_api_ocr_engine_filters_empty_narrow_word_boxes()
     test_api_ocr_engine_does_not_promote_block_content_to_line()
@@ -4393,6 +4783,8 @@ if __name__ == "__main__":
     test_page_ocr_refills_caption_and_equation_blocks()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_workflow_controller_auto_chains_ocr_after_layout()
+    test_workflow_controller_starts_parallel_proof_ocr_with_layout()
+    test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
     test_workflow_controller_emits_ocr_progress_and_navigation()
     test_workflow_controller_normalizes_loaded_project_geometry()
     test_export_service()
@@ -4413,6 +4805,8 @@ if __name__ == "__main__":
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
+    test_layout_worker_continues_after_single_page_failure()
+    test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()
@@ -4429,6 +4823,7 @@ if __name__ == "__main__":
     test_char_index_query_stable_order()
     test_char_index_skips_whitespace()
     test_char_index_groups_digit_runs_as_tokens()
+    test_char_index_filters_non_cjk_from_default_vproof()
     test_char_index_sorts_digit_tokens_short_to_long()
     test_char_index_groups_formula_runs_below_digits()
     test_char_index_suppresses_punctuation_topic_for_shared_word_box()

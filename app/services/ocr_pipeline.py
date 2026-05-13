@@ -301,6 +301,10 @@ class OcrPipeline:
         )
         page.blocks.append(synthetic)
 
+    def assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
+        """Public wrapper used when PP-OCRv5 proof lines finish before layout."""
+        self._assign_page_ocr_lines_to_blocks(page, lines)
+
     def _merge_line_bboxes(self, lines: list[Line]) -> BBox | None:
         valid = [line.bbox for line in lines if line.bbox.area > 0]
         if not valid:

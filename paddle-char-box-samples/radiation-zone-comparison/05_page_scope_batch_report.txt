@@ -1,0 +1,35 @@
+radiation zone comparison - page batch
+========================================================================
+Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.
+Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.
+Adjusted profile: dark-green keep seed keeps right anti stricter at 23%; light-green left extension reaches 0% but only rescues candidates, not direct crumbs.
+Strong preservation: a CC that touches/intersects the dark-green keep seed is retained whole; red anti only filters fully-outside-seed CCs.
+Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion; adjusted final crop is allowed to overflow ownership after seed/anti filtering.
+
+pages evaluated: 20
+cjk tokens evaluated: 17026
+parameter-sensitive tokens: 5145
+final crop changed tokens: 4771
+break-blue stroke tokens: 4729
+
+per-page summary:
+- 120166: cjk=874 sensitive=265 crop_changed=251 break_blue=215 no_strong=0/0 examples=L08#020消, L21#015地, L30#027适, L33#002通, L13#003实, L31#022需, L28#004心, L31#015信
+- 120167: cjk=975 sensitive=325 crop_changed=298 break_blue=315 no_strong=0/0 examples=L28#000省, L28#001份, L28#003均, L28#004可, L28#002人, L28#005支, L28#006配, L15#003总
+- 120168: cjk=796 sensitive=196 crop_changed=182 break_blue=159 no_strong=0/0 examples=L00#011年, L27#004洋, L24#019业, L30#009流, L31#024还, L40#032治, L11#002谢, L03#004三
+- 120169: cjk=615 sensitive=132 crop_changed=114 break_blue=93 no_strong=0/0 examples=L14#000变, L50#007检, L37#001份, L37#003定, L14#001量, L59#026励, L06#009核, L10#005构
+- 120170: cjk=956 sensitive=291 crop_changed=235 break_blue=378 no_strong=0/0 examples=L19#001点, L13#005供, L18#034息, L03#002适, L11#002进, L15#015值, L15#021的, L12#029行
+- 120171: cjk=794 sensitive=339 crop_changed=334 break_blue=317 no_strong=0/0 examples=L00#032关, L61#033业, L66#035年, L62#017结, L04#025这, L09#029进, L07#017一, L61#032企
+- 120172: cjk=700 sensitive=372 crop_changed=348 break_blue=414 no_strong=0/0 examples=L64#025检, L04#007但, L13#001业, L13#006造, L01#020带, L02#006业, L59#027详, L57#011途
+- 120173: cjk=779 sensitive=310 crop_changed=308 break_blue=299 no_strong=0/0 examples=L07#022些, L98#027润, L70#001份, L93#012还, L03#024得, L98#026利, L98#028总, L97#012业
+- 120174: cjk=775 sensitive=139 crop_changed=125 break_blue=98 no_strong=0/0 examples=L00#011年, L27#002消, L27#004总, L00#003济, L16#002这, L17#008通, L18#011进, L19#001速
+- 120175: cjk=765 sensitive=298 crop_changed=274 break_blue=259 no_strong=0/0 examples=L18#003消, L27#002总, L05#022检, L28#002总, L18#021供, L27#000就, L18#002与, L27#001业
+- 120176: cjk=1028 sensitive=263 crop_changed=247 break_blue=240 no_strong=0/0 examples=L15#027消, L23#023调, L05#030消, L19#006检, L12#023优, L12#026途, L03#033疗, L03#023科
+- 120177: cjk=1080 sensitive=243 crop_changed=219 break_blue=194 no_strong=0/0 examples=L21#029这, L29#008将, L15#026需, L31#022外, L31#023溢, L33#023地, L32#024消, L08#027供
+- 120178: cjk=1152 sensitive=238 crop_changed=197 break_blue=247 no_strong=0/0 examples=L29#004消, L32#004逐, L27#016促, L33#033适, L12#023供, L30#004消, L22#028信, L18#028预
+- 120179: cjk=685 sensitive=189 crop_changed=178 break_blue=179 no_strong=0/0 examples=L26#020费, L35#004冰, L00#008增, L27#001地, L27#011的, L26#007宁, L18#028来, L20#031提
+- 120180: cjk=488 sensitive=255 crop_changed=248 break_blue=245 no_strong=0/0 examples=L02#035思, L08#028均, L21#005革, L12#019与, L05#007量, L20#026业, L02#034再, L10#033和
+- 120183: cjk=670 sensitive=203 crop_changed=193 break_blue=189 no_strong=0/0 examples=L00#022要, L23#012济, L23#011经, L24#003构, L27#011感, L00#006引, L22#034通, L23#037授
+- 120184: cjk=957 sensitive=130 crop_changed=112 break_blue=71 no_strong=0/0 examples=L00#011年, L24#003于, L23#034效, L34#022势, L13#005从, L25#031鲜, L17#024让, L00#008研
+- 120185: cjk=1073 sensitive=231 crop_changed=211 break_blue=166 no_strong=0/0 examples=L08#032进, L10#004陈, L23#016证, L04#002期, L23#031司, L16#014而, L03#009供, L00#022要
+- 120186: cjk=909 sensitive=261 crop_changed=246 break_blue=219 no_strong=0/0 examples=L03#020焱, L00#011年, L04#017进, L13#009这, L20#004进, L33#013术, L26#017信, L18#012稳
+- 120187: cjk=955 sensitive=465 crop_changed=451 break_blue=432 no_strong=0/0 examples=L01#004条, L04#010术, L04#028产, L28#029心, L00#017造, L11#033经, L19#018信, L20#034行

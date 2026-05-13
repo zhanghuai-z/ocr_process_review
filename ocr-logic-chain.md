@@ -219,24 +219,182 @@ flowchart TD
 
 主程序纵校默认只索引真实 OCR 几何：`CharIndexService()` 会过滤 `bbox_source!=ocr` 或 `bbox_granularity=fallback/unavailable/line` 的单位。旧项目/旧测试若确实需要查看估算结果，必须显式使用 `CharIndexService(include_fallback=True)`，这让 fallback 从默认主展示中降级为兼容/诊断入口。VProof 左侧列表也会标出 `[char]` / `[token]`，tooltip 显示 `bbox_source/bbox_granularity`，避免用户把 token 图或 fallback 图误认为精确单字图。
 
+## 7.1 连通域与 Paddle token 对应分析
+
+本轮只做主程序方向的真实样张实验，不把连通域结果伪装成最终功能。实验样张仍用整页 `/mnt/d/project/ocr_process/file/244771纵校/120166.tif`，持久证据保存在 `paddle-char-box-samples/component-matching/`：`120166_component_matching_summary.json` 是可复核统计，`120166_hanzi_token_component_grid.png` 是 101 个汉字 token 切图拼图，`120166_hanzi_token_component_grid_preview.png` 是前 30 个快速预览，`120166_line_component_counts_overlay.png` 是整页 line 级 cc/text_len 叠图，`120166_line_bbox_component_grid.png` 是只用 line bbox 输入时的错误/不安全示例，`120166_source_comparison_card.png` 是两种输入源对比卡片，`120166_normal_shape_filter_card.png` / `120166_normal_shape_filter_grid.png` 是“正常字区间”过滤前后对比。实验方法是在每条 PP-OCRv5 行框内做 Otsu 反色二值化，再分别用无形态学、`3x2`、`5x3`、`7x3` 等小核闭运算跑 connected components，按 x 坐标排序后和整页 OCR 文本/token 顺序对照。
+
+关键实测结论：
+
+- 整页 37 行里，连通域数等于整行文本长度的行数很少：无形态学 `3/37`，`3x2` 为 `3/37`，`5x3` 为 `2/37`，`7x3` 为 `12/37`。`7x3` 看起来更接近行长，但它是通过粘连换来的，平均偏差只有 `-0.3514` 不代表逐字对应可靠。
+- 整页平均偏差说明“整行连通域 = 字符数”不稳定：无形态学平均比行长多 `13.1081` 个域，`3x2` 多 `6.8108`，`5x3` 多 `1.2432`，`7x3` 少 `0.3514`；单行偏差范围分别到 `0~40`、`-2~19`、`-8~7`、`-10~5`。
+- Paddle token 侧更关键：整页 `text_word/text_word_boxes` 共 37 行、998 个 token，其中 874 个是单字 CJK token，124 个是数字/拉丁/公式/标点/混合 token；本页没有多字纯 CJK token。这意味着当前样张的正文汉字主路径已经由 Paddle 给到单字 token，连通域不应该再整行重切，只适合做 bbox 内墨迹收紧/异常诊断。
+- 典型密集正文行仍显示风险：`时,2016年增值税分成改革导致的原营业税分成比例下降,进一步弱化了地方政府` 长 38，CJK 32、数字 4、标点 2；连通域为 raw `48`、`3x2=44`、`5x3=36`、`7x3=36`。它不再稳定等于字符数，原因包括标点/数字小块、个别汉字断成多个部件、局部闭运算又会把相邻字粘在一起。
+- 公式/拉丁行更不适合拆：`Y=α+βIncentive,×Post2+γXc+δ+φ{+εa` 长 33，拉丁/符号占主体，连通域 raw `36`、`3x2=31`、`5x3=26`、`7x3=23`；任何核都不能给出稳定逐字符语义。
+- 可视化拼图显示：token 文本与字图主体大体能对上，但单字 token 内的连通域数不总是 1。例如 `量/增/综/合/品/心` 会因为框内旁边碎片或汉字内部断裂出现 `cc>1`；`一/二/三` 这类低高度横画在当前 `min_height=8` 过滤下可能出现 `cc=0`。所以 `cc` 是诊断信号，不是替代 PP-OCRv5 token 文本的真值。
+- 输入源对比结论：`char/token bbox` 输入能把裁剪窗口先限制在 PP-OCRv5 token 内，图文主体可直接核对；`line bbox` 输入只能拿整行连通域再按顺序猜字符，`3x2` 下只有 `3/37` 行等于全文长度、`0/37` 行等于 CJK 数，且会把数字、标点、公式符号、邻字碎片一起纳入排序。因此 line bbox 只适合 HProof 行图和诊断，不适合直接生成 VProof 单字绑定。
+- “正常字区间”不能用绝对宽高，因为标题/正文/脚注字号不同。当前实验从 562 个 `单字 CJK token 且 cc=1` 的样本学习相对区间：`component_width / reference_height = 0.6682~0.8967`、`component_height / reference_height = 0.7217~0.9297`、`component_area / reference_height^2 = 0.1259~0.3687`、`aspect = 0.84~1.0723`。把该区间套回 line bbox 连通域后，组件从 `1334` 个降到 `376` 个，过滤掉 `958` 个笔画碎片、标点、数字/公式片段和异常宽块；但 accepted 数等于 CJK 数的行仍只有 `3/37`，说明形状过滤只能做 guardrail，不能让 line bbox 单独成为字图绑定源。
+- line 连通域里“某些笔画被放大成一个元素”有两个原因：一是 line bbox 没有 token 边界，小标点、数字、公式符号、邻字碎片都会作为独立 component 进入排序；二是可视化拼图为了肉眼检查会把每个 component tile 自动放大，小笔画看起来像一个大元素。再叠加闭运算时相近笔画可能合并，所以 line 级 component 只能作为候选/异常提示，不能直接映射到 OCR 文本字符。
+
+因此，当前不能把“整行连通域数 == 整行字符数”作为硬前提；可用的工程假设应更窄：
+
+1. **单字 Paddle token 已经是最可信入口**：如果 PP-OCRv5 给出长度为 1 的 CJK token bbox，主程序只需要在该 bbox 内做墨迹收紧或邻字错位保护，不要用整行连通域重切它。
+2. **多字中文 token 可做受限拆分候选，但本页未出现**：只有当后续真实响应出现纯 CJK 多字 token，且 token bbox 内的轻量连通域/投影段数量与 CJK 字数一致、段的 x 顺序单调、每段宽高接近当前行高、且段间距不异常时，才允许把 `ocr/word` 提升成候选 `ocr/char_refined`。否则继续保持 token 集合。
+3. **数字、拉丁、公式和混合 token 不拆**：`2026` 这类 run 在不同核下会从 4 个域变成 1 个域，拆分稳定性低；公式/拉丁符号也有类似问题。它们继续走数字 token / 公式 token 集合，不进入普通单字集合。
+4. **整行级只能做校验，不做最终分配**：连通域行级计数可用于诊断“这一行适不适合细拆”，但最终对应关系必须落在 Paddle token bbox 内，用 token 局部范围约束，避免行内前后串位。
+5. **失败必须诚实降级**：如果局部连通域数、投影段、token 字符数三者不一致，或任一候选段越界/过窄/无墨迹，就保留 `bbox_granularity=word` 或 `fallback`，不要输出看似精确的 char crop。
+
+后续若实现，应放在 proof 几何正规化链中，作为 `ocr/word` token 的可选 refine 阶段：输入 `Line`、`Char` token 元数据和整页图，输出带来源标记的候选子框。该阶段不能覆盖原始 Paddle bbox，应保留 `raw_token_bbox`、`refined_bbox`、`refine_status` 和失败原因，UI 可把它作为“自动细拆建议”，人工仍可回退到 token 图。
+
+## 7.2 wordbox_anchor 规则消融结论
+
+本轮继续沿 Claude/Codex 的 `wordbox_anchor` 路线做规则拆解，而不是另起一套算法。可复跑脚本为 `app/experiments/run_wordbox_anchor_ablation.py`，输入是持久化的 `paddle-char-box-samples/wordbox-anchor-ablation/120166_ppocrv5_return_word_box.json` 与 `file/244771纵校/120166.tif`。输出证据在 `paddle-char-box-samples/wordbox-anchor-ablation/`：
+
+- `01_rule_on_off_samples.png`：同一 token 在 full/no ownership/no edge crumb/largest/no clip 下的切图对比；
+- `02_success_failure_residual_samples.png`：full anchor 的成功与残留高风险样本；
+- `03_rule_contribution_ranking.png`：规则贡献排序卡片；
+- `04_ablation_report.txt`：统计报告；
+- `wordbox_anchor_ablation_summary.json`：可复核统计与样本 token id。
+
+当前真实材料的基础事实：`text_word` 能完整重建 `rec_texts`，token 类型为 `CJK=874`、`number=19`、`punct=86`、`latin=13`、`formula=6`。因此真实 `text_word_boxes` 主链应是：`zip(text_word, text_word_boxes)` 作为唯一顺序与几何锚点，Structure 继续只提供 layout 容器；line bbox 只作为 HProof 行图、ownership 上下文、行高参考和诊断，不再作为 VProof 单字真值。
+
+消融统计显示，full anchor 在 874 个 CJK token 上把原始 `cc1=427 / cc2+=447` 收到 `cc1=803 / cc2+=71`，CJK 可绑定率为 `100%`。规则贡献按本页实测排序：
+
+1. **edge crumb suppression**：贡献最大。关闭后 `cc2+` 从 full 的 `71` 升到 `228`，多出 `157` 个噪声多连通域；它压制的是 source bbox 边缘小而窄、贴边的邻字碎片。
+2. **ownership intervals**：关闭后 `cc2+` 从 `71` 升到 `130`，多出 `59` 个邻字归属错误；它压制的是质心已经属于相邻 token 的 component。
+3. **union multi-CC**：不能删。只取最大 component 会丢掉 `71` 个合法多笔画/分体汉字的部件，例如 `术/动/品/需/三/以` 这类 cc2+ 或 cc3 字。
+4. **non-CJK split**：应保留为分流规则。它把 124 个 number/latin/formula/punct token 挡在 CJK glyph lane 之外；不分流时会出现 `fallback_source_box=13`，公式/标点/数字也会被 CJK 规则错误消费。
+5. **source/ownership crop clamp**：本页贡献低，是 guardrail。`no_source_clip` 与 full 的 cc 和 outside 计数相同；在 120166 上不是决定性规则，但对更差 word box 仍可防止 crop 过界。
+6. **quick_simple / realloc / white-margin**：偏性能和视觉白边优化。Claude v11 action log 中 `realloc` 和 `wm` 次数很高，但它们主要影响裁图留白与观感，不替代 ownership、edge crumb、union 的正确性作用；`stop-on-ink` 已被 v11 文档弃用，不应重新引入。
+
+多笔画汉字最稳判据不是“只要 cc=1”，而是：先限定在 PP-OCRv5 source word box 内，再按 ownership/edge crumb 过滤，最后对同一 ownership 内保留的 components 做 union。`cc2+` 在中文里是正常形态，不应被当作错误；错误的是把邻字碎片或非 CJK token 混进来。
+
+边角料最稳压制规则是两层：第一层按相邻 token 中点划 ownership，component 质心不在当前 ownership 内就丢；第二层丢掉贴 source 左右边的小面积窄 component。正常字区间/line 级形状过滤只能做 guardrail，不应作为主绑定规则。
+
+数字 / 公式 / 混合数字行必须先靠 OCR 文本/token 分类分流：正文内 `2016` 之类数字 run 不单独建 Structure 框，也不从 line 连通域猜；在 VProof 集合层合并为 number token。公式/变量片段按 formula token/run 处理；独立公式可以由 Structure `EQUATION` 提供容器，但 proof text/bbox 仍由 PP-OCRv5 line/token 主链负责。
+
+## 7.3 PP-OCRv5 bbox 质量分级与辐射区参数 profile
+
+后续调参不能再使用“全局改一个参数”的方式。`wordbox_anchor` 的主要风险不是某个参数绝对好坏，而是不同质量的 PP-OCRv5 `text_word_boxes` 需要不同处理强度：紧框、松框、左偏旁被裁、右侧邻字蹭入、细横字、非 CJK token 的风险完全不同。如果把某个 Q2 风险样本调好后全局应用，很容易把原本 Q0 稳定字带坏。
+
+本轮新增辐射区作用域可视化脚本：
+
+```bash
+python app/experiments/run_radiation_zone_comparison.py
+```
+
+输出在 `paddle-char-box-samples/radiation-zone-comparison/`：
+
+- `01_radiation_scope_current_vs_adjusted.png`：首个页面的当前 v11 与调整后辐射区横向对比，列为“当前作用域 / 当前成品字 / 调整后作用域 / 调整后成品字”。
+- `02_bbox_quality_tier_matrix.png`：bbox 质量分级与允许调参范围。
+- `03_radiation_scope_report.txt`：首个页面的参数敏感 token 列表与解释。
+- `04_page_scope_overview.png`：按页统计的参数敏感概览。
+- `05_page_scope_batch_report.txt`：20 页批量统计报告。
+- `pages/*_radiation_scope_current_vs_adjusted.png`：每页独立的横向作用域与成品字样例图。
+- `radiation_zone_comparison_summary.json`：可复核的 bbox、zone、component label 与页级统计。
+
+颜色语义必须固定，避免误读：
+
+- **深绿色**：主题 keep seed，component 与该区相交或贴边才直接保留。
+- **浅绿色**：左侧 extension candidate，只能走弱救回条件，不能直接保留独立碎片。
+- **红色**：弱/反辐射边缘区，即 strong 之外的 source 边缘带。
+- **橙色**：弱区救回作用域，不是反辐射区；它表示落在弱区的 component 还允许被面积/y overlap/ownership 条件救回的范围。
+- **青色**：ownership 区间。
+- **蓝色**：原始 hard_bound / 诊断框，不再是最终笔画限制。
+- **紫色**：stroke-search 实际连通域提取范围，用于让强区命中的笔画能在蓝框外完整结束。
+
+强辐射区的保留规则必须明确：**只要一个 component 与深绿色 keep seed 相交或 1-2px 贴边，就保留该 component**。红色反辐射区不会切断这个 component 的笔画；红区只过滤“完全没有碰到 keep seed”的孤立 component。浅绿色左扩区不能直接吃字，只能作为候选救回区，仍需满足 y overlap、面积阈值和归属条件。最新修正把 ownership 从“最终硬刀”改回“诊断/归属 guardrail”：源框内的合法分离笔画可通过 `source-body rescue` 保留；跨字/横线等 oversized component 可以保留其 ownership 内部分，但不能借紫色搜索范围整段吞邻字；只有主题 component 触碰蓝框的方向，最终 crop 才允许突破 ownership。蓝色 hard_bound 因此不再截断主题笔画，紫色 stroke-search 负责找完整连通域，但 final crop 仍按 seed/anti/尺寸闸门防止邻字主体被带入。
+
+当前 v11 参数语义：
+
+```text
+strong_left_inset = 10%
+strong_right_inset = 20%
+rescue_right_anti_guard = 5%
+```
+
+本轮按要求绘制的调整 profile：
+
+```text
+direct_left_inset = 10%   # 深绿色 keep seed：仍用 v11 左边界，不直接吃左侧碎片
+extension_left_inset = 0% # 浅绿色候选区：左侧延长 10%，只允许弱救回
+strong_right_inset = 23%  # 右强辐射区向左缩减 3%
+adaptive_hard_bound = 5%  # 主题 CC 触碰蓝框时，同方向扩张蓝框；强区 10% : 蓝框 5% = 2:1
+stroke_search_extension = 25%  # 蓝框外继续追连通域完整结束
+seed_touch_tolerance = 2px
+source_body_rescue = on  # 源框内合法分离笔画不因右侧收紧被误杀
+crop_overflow = side-aware  # 只在蓝框触边方向突破 ownership
+rescue_left_anti_guard = 0%
+rescue_right_anti_guard = 8%  # 右侧救回 guard 随右反辐射区延长 3%
+```
+
+这组调整的作用是：左侧更宽容但不直接吃碎片，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，但不能因为 23% seed 收紧就切掉源框内合法分离笔画。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5145 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，4771 个 token 的最终成品字 crop 实际变化，4729 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。当前默认页级效果图每页展示 12 个样本，以便更容易观察蚊子碎片与切字回归。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
+
+建议把后续参数做成质量分级 profile：
+
+| 等级 | bbox 信号 | 参数策略 | UI / 导出语义 |
+|---|---|---|---|
+| Q0 stable | 单/少量 cc，source 边距正常，当前与调整 profile 结果一致 | 使用默认 v11，不做自适应扩张 | 可默认展示 refined crop |
+| Q1 edge-risk | 墨迹贴 source 边，疑似紧框或单侧偏移 | 只允许单侧小幅放宽，例如左偏旁保护 profile | 标记为边缘风险，保留 raw token bbox |
+| Q2 loose/noisy | 出现 `anti_dropped`、`weak_rescued`、multi-CC 或参数敏感 | 使用更严格 ownership、edge crumb、反区 guard，并保留 profile 对比结果 | UI 标黄，人工可看 raw/refined 对比 |
+| Q3 fallback | 无强区 cc、无墨迹、非 CJK/mixed token、细横特殊失败 | 不强行生成 glyph crop，保持 token/raw bbox 或人工处理 | 不能静默导出为精确单字真值 |
+
+工程落地时，profile 只能生成候选，不能覆盖原始 Paddle bbox。每个候选必须保留：
+
+- `raw_token_bbox`
+- `refined_bbox`
+- `quality_tier`
+- `profile_name`
+- `risk_flags`
+- `component_counts`
+- `refine_status`
+
+这样后续微调参数时，可以按 Q0/Q1/Q2/Q3 分层回归，确认“风险样本改善”没有破坏“稳定样本”。主程序默认展示可使用最高可信 refined crop，但导出和人工终审必须能回退到 raw token bbox。
+
+## 7.4 主程序集成点（当前分支）
+
+本轮已把实验链路接回主程序，而不是继续停留在外部脚本：
+
+- `app/core/wordbox_anchor.py`：新增主程序内的 PP-OCRv5 word-box anchor 模块。输入为整页/裁图图像、PP-OCRv5 `text_word/text_word_boxes` 解析出的 token bbox，以及行 bbox；输出 `TokenAnchor`，包含 `source_bbox`、`ownership_x`、`ink_bbox`、`crop_bbox`、`status`、`confidence` 和规则 notes。它继承 Claude v12 的核心规则：真实 word box 作主锚、邻 token 中点 ownership、CJK 辐射 seed、side crumb suppression、multi-CC union、右侧不扩张、左侧只在 seed-hit component 真实突破时允许 overflow。
+- `app/engines/real_ocr_adapter.py`：在 `ApiOcrEngine` 解析出 `OcrIrToken` 后、构造 `Line.chars` 前调用 wordbox anchor。只有单字 CJK token 会把 proof-facing bbox 替换为 refined `crop_bbox`，并保持 `bbox_source=ocr / bbox_granularity=char`；数字、英文、公式、标点、混合 token 不进 CJK 辐射主链，继续保留原始 OCR token bbox 语义。
+- `app/controllers/workflow_controller.py`：API proof engine 支持页级 OCR 时，`start_layout_analysis()` 会同时启动 Structure layout worker 与 PP-OCRv5 proof OCR worker。PP-OCRv5 在临时整页容器中先跑完整页 line/token；Structure 完成后，再把 proof lines 归属到 Structure blocks。若当前 engine 不支持页级 proof OCR（例如本地旧模式），仍回退到旧的 layout 完成后自动 OCR。
+- `app/services/ocr_pipeline.py`：开放 `assign_page_ocr_lines_to_blocks()`，用于“proof OCR 先完成、layout 后完成”的并发合并路径；归属逻辑仍复用原来的 overlap/center 规则，避免并发路径和串行路径分叉。
+- `app/services/char_index_service.py`：纵校默认只索引 CJK key。数字、标点、拉丁、公式默认不展示，避免当前未收稳的非 CJK 图继续污染纵校集合；诊断/历史测试可显式 `include_non_cjk=True` 恢复旧的数字 run / 公式 token 集合。
+
+当前主链因此变为：用户触发版面分析 → Structure 产生版面容器，同时 PP-OCRv5 产生 line/token/word-box → wordbox anchor 只收紧 CJK 单字 token → proof lines 归属到 Structure 容器 → VProof 默认只展示 CJK refined/word token 集合。`line bbox` 仍只做上下文、ownership 和 HProof 行图，不再作为 VProof 单字真值。
+
+残余边界必须继续诚实处理：
+
+1. 目前主程序数据模型还没有持久化 `raw_token_bbox/refined_bbox/quality_tier/profile_name/risk_flags/component_counts/refine_status`，所以本轮只把 refined crop 接入 proof-facing bbox；下一轮应扩展 `Char` 元数据，确保 UI 能在 raw/refined 之间切换。
+2. 纯 CJK 多字 token 仍保持 `ocr/word` token 集合，不拆成伪精确单字。只有后续补齐“token 内受限细拆 + 分级回归”后，才允许提升为候选 char。
+3. 非 CJK 并非完全废弃：OCR 文本、HProof、导出仍保留数字/公式/字母文本；只是 VProof 图像集合默认隐藏，避免当前阶段把未稳定的 token 图当成正文单字图。
+
 ## 8. 公式 / 数字 / 普通文本策略
 
-纵校集合不再把所有字符都等价处理：
+纵校集合不再把所有字符都等价处理。当前用户验收阶段默认只展示 CJK；非 CJK 集合保留为诊断/后续开关，不再默认进入 VProof 图像面板：
 
-| 类型 | 判定 | 集合 key | bbox 策略 | 排序 |
-| --- | --- | --- | --- | --- |
-| 普通中文/正文 | CJK 或普通文字 | 单字，或可靠 word token | 单字 bbox / word bbox | 普通文字区 |
-| 连续数字 | `isdigit()` 连续 run | 整体数字，如 `2026` | 合并整段 bbox | 数字区，短到长 |
-| 公式 token | 非 CJK，含拉丁/希腊/数学符号，如 `A+B`、`x1` | 整体公式 | 合并整段 bbox | 数字下面 |
-| 标点/符号 | 纯标点/纯符号 | 一般不抢主题 | 仅在独立可靠时进入 | 符号区 |
+| 类型 | 判定 | 默认 VProof | 诊断/可选语义 |
+| --- | --- | --- | --- |
+| CJK 单字 | 单字汉字 token | 展示 refined char crop | `wordbox_anchor` 可替换 proof-facing bbox |
+| 纯 CJK 多字 token | 多字中文共用 word bbox | 作为 CJK token 集合展示，不拆伪 char | 后续满足受限细拆条件时再提升 |
+| 连续数字 | `isdigit()` 连续 run | 默认隐藏 | `include_non_cjk=True` 时合并成整体数字，如 `2026` |
+| 公式 token | 非 CJK，含拉丁/希腊/数学符号，如 `A+B`、`x1` | 默认隐藏 | `include_non_cjk=True` 时整体公式 token |
+| 标点/符号/拉丁 | 纯标点、符号或英文 | 默认隐藏 | 仅作为 OCR 文本和诊断，不抢正文主题 |
 
 公式按整体走的原因：用户反馈的“公式字母边角料小图”来自把 `A+B` 这类公式片段拆成单个字母/符号后再裁图，单个 bbox 很容易只剩边缘或和相邻符号互相串框。公式与数字一样，本质上更适合作为不可拆 token 校对：用户需要确认的是整个变量/表达式片段，而不是把每个公式字母混入正文单字集合。
+
+number / 公式是否应单独建属性框，要按层级区分：
+
+1. **正文行内数字**：不新建 Structure 属性框，也不按 line 单独切出去；必须先依赖 PP-OCRv5 的 OCR 文本/token 顺序识别出连续 digit run，再在 `CharIndexService` 中合并成数字 token。原因是数字混在正文里时，纯连通域无法知道 `2016` 是一个数值 token 还是四个普通元素，也无法稳定处理标点和邻字碎片。
+2. **行内公式/变量片段**：不拆成单字符属性框，按公式 token/run 处理。若它位于普通正文 line 内，仍归属该 PP-OCRv5 line，只在 VProof 集合层按公式 token 显示。
+3. **独立公式行或 Structure `EQUATION` block**：Structure 可以提供 `EQUATION` 容器，PP-OCRv5 仍提供 proof line/text/bbox。也就是说公式可以有单独 block/line 容器，但 proof 文本和裁图主链不回退到 Structure。
+4. **页码/编号/图表编号**：若 Structure 识别为装饰性 `number/page_number/formula_number`，版面阶段可以过滤或降级为辅助属性；若 PP-OCRv5 把它识别为 proof line，则应按业务规则决定是否进入导出/校对队列，而不是混入正文单字集合。
 
 当前实现位置：
 
 - `app/core/ocr_ir.py::is_formula_token/is_formula_char` 定义公式 token 语义。
-- `CharIndexService._iter_index_units()` 把连续公式 run 合成一个 token。
-- `_sort_key()` 把公式 token 排到数字 token 之后，普通标点/符号之前。
+- `CharIndexService._maybe_add()` 默认过滤非 CJK key；`include_non_cjk=True` 时才恢复数字、公式、拉丁诊断集合。
+- `CharIndexService._iter_index_units()` 仍保留连续数字与公式 run 合并逻辑，供后续打开非 CJK 纵校开关时复用。
+- `_sort_key()` 仍保留数字/公式排序规则，避免诊断集合打开后排序退化。
 
 ## 9. Inspector flatten / parser 收口
 
