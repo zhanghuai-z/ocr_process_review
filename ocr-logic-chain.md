@@ -317,17 +317,17 @@ rescue_right_anti_guard = 5%
 ```text
 direct_left_inset = 10%   # 深绿色 keep seed：仍用 v11 左边界，不直接吃左侧碎片
 extension_left_inset = 0% # 浅绿色候选区：左侧延长 10%，只允许弱救回
-strong_right_inset = 25%  # 右强辐射区向左缩减 5%
+strong_right_inset = 23%  # 右强辐射区向左缩减 3%
 adaptive_hard_bound = 5%  # 主题 CC 触碰蓝框时，同方向扩张蓝框；强区 10% : 蓝框 5% = 2:1
 stroke_search_extension = 25%  # 蓝框外继续追连通域完整结束
 seed_touch_tolerance = 2px
 source_body_rescue = on  # 源框内合法分离笔画不因右侧收紧被误杀
 crop_overflow = side-aware  # 只在蓝框触边方向突破 ownership
 rescue_left_anti_guard = 0%
-rescue_right_anti_guard = 10%  # 右侧救回 guard 随右反辐射区延长 5%
+rescue_right_anti_guard = 8%  # 右侧救回 guard 随右反辐射区延长 3%
 ```
 
-这组调整的作用是：左侧更宽容但不直接吃碎片，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，但不能因为 25% seed 收紧就切掉源框内合法分离笔画。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5146 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，4768 个 token 的最终成品字 crop 实际变化，4721 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
+这组调整的作用是：左侧更宽容但不直接吃碎片，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，但不能因为 23% seed 收紧就切掉源框内合法分离笔画。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5145 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，4771 个 token 的最终成品字 crop 实际变化，4729 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。当前默认页级效果图每页展示 12 个样本，以便更容易观察蚊子碎片与切字回归。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
 
 建议把后续参数做成质量分级 profile：
 

@@ -789,7 +789,7 @@ def _make_page_report(
         f"radiation zone comparison - page {page_id}",
         "=" * 72,
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
-        "adjusted: dark-green keep seed keeps right anti stricter (25%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs",
+        "adjusted: dark-green keep seed keeps right anti stricter (23%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
         "strong preservation: any component touching/intersecting the dark-green keep seed is kept whole; red anti does not cut its stroke.",
         "blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion, and adjusted final crop is no longer re-clipped to ownership.",
@@ -881,7 +881,7 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "=" * 72,
         "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
-        "Adjusted profile: dark-green keep seed keeps right anti stricter at 25%; light-green left extension reaches 0% but only rescues candidates, not direct crumbs.",
+        "Adjusted profile: dark-green keep seed keeps right anti stricter at 23%; light-green left extension reaches 0% but only rescues candidates, not direct crumbs.",
         "Strong preservation: a CC that touches/intersects the dark-green keep seed is retained whole; red anti only filters fully-outside-seed CCs.",
         "Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion; adjusted final crop is allowed to overflow ownership after seed/anti filtering.",
         "",
@@ -928,9 +928,9 @@ def run_page_comparison(
     adjusted_spec = ZoneSpec(
         name="adjusted scope",
         left_inset_ratio=0.00,
-        right_inset_ratio=0.25,
+        right_inset_ratio=0.23,
         direct_left_inset_ratio=0.10,
-        direct_right_inset_ratio=0.25,
+        direct_right_inset_ratio=0.23,
         stroke_extension_ratio=0.25,
         adaptive_hard_bound_ratio=0.05,
         seed_touch_tolerance_ratio=0.00,
@@ -940,7 +940,7 @@ def run_page_comparison(
         allow_crop_overflow=True,
         keep_source_body_components=True,
         rescue_left_guard_ratio=0.00,
-        rescue_right_guard_ratio=0.10,
+        rescue_right_guard_ratio=0.08,
     )
     current_evals = {token.id: _evaluate_zone(image_bgr, token, current_spec) for token in tokens}
     adjusted_evals = {token.id: _evaluate_zone(image_bgr, token, adjusted_spec) for token in tokens}
@@ -1062,7 +1062,7 @@ def main() -> None:
         default="120166,120167,120168,120169,120170,120171,120172,120173,120174,120175,120176,120177,120178,120179,120180,120183,120184,120185,120186,120187",
         help="Comma-separated page ids to process.",
     )
-    parser.add_argument("--samples-per-page", type=int, default=8)
+    parser.add_argument("--samples-per-page", type=int, default=12)
     args = parser.parse_args()
     page_ids = [item.strip() for item in args.pages.split(",") if item.strip()]
     run_batch_comparison(args.image_dir, args.json_dir, args.output, page_ids=page_ids, samples_per_page=args.samples_per_page)

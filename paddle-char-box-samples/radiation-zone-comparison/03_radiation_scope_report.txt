@@ -1,7 +1,7 @@
 radiation zone comparison - page 120166
 ========================================================================
 current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%
-adjusted: dark-green keep seed keeps right anti stricter (25%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs
+adjusted: dark-green keep seed keeps right anti stricter (23%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs
 orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.
 strong preservation: any component touching/intersecting the dark-green keep seed is kept whole; red anti does not cut its stroke.
 blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion, and adjusted final crop is no longer re-clipped to ownership.
@@ -21,6 +21,10 @@ selected samples:
 - L31#022 需: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 4, 'anti_dropped': 2}, adjusted={'anti_dropped': 7, 'strong': 3}
 - L28#004 心: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'anti_dropped': 2, 'strong': 3}, adjusted={'anti_dropped': 7, 'strong': 4}
 - L31#015 信: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 5, 'anti_dropped': 1}, adjusted={'anti_dropped': 4, 'strong': 5, 'weak_rescued': 1}
+- L07#028 选: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 2}, adjusted={'anti_dropped': 6, 'strong': 2}
+- L09#014 假: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 2}, adjusted={'anti_dropped': 5, 'strong': 1, 'weak_rescued': 1}
+- L22#028 年: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'anti_dropped': 2, 'strong': 1}, adjusted={'anti_dropped': 1, 'strong': 1, 'weak_rescued': 1}
+- L27#011 文: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 2}, adjusted={'anti_dropped': 3, 'strong': 3}
 
 interpretation:
 - The requested adjustment uses left extension as a candidate rescue/search area, while direct keep still comes from the dark-green subject seed.
