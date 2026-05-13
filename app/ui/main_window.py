@@ -328,10 +328,15 @@ class MainWindow(QMainWindow):
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。"""
-        self._hproof_panel.load_pages(pages)
-        self._vproof_panel.load_pages(pages)
+        if self._proof_loaded_line_count > 0:
+            self._hproof_panel.merge_pages(pages)
+            self._vproof_panel.merge_pages(pages)
+        else:
+            self._hproof_panel.load_pages(pages)
+            self._vproof_panel.load_pages(pages)
         self._proof_loaded_line_count = sum(page.total_lines for page in pages)
-        self._go_to_step(STEP_HPROOF)
+        if self._current_step < STEP_HPROOF:
+            self._go_to_step(STEP_HPROOF)
 
     def _on_ocr_progress(self, progress) -> None:
         if progress.total_pages > 0:
@@ -346,8 +351,12 @@ class MainWindow(QMainWindow):
         line_count = sum(page.total_lines for page in project.pages)
         if line_count <= 0 or line_count == self._proof_loaded_line_count:
             return
-        self._hproof_panel.load_pages(project.pages)
-        self._vproof_panel.load_pages(project.pages)
+        if self._proof_loaded_line_count > 0:
+            self._hproof_panel.merge_pages(project.pages)
+            self._vproof_panel.merge_pages(project.pages)
+        else:
+            self._hproof_panel.load_pages(project.pages)
+            self._vproof_panel.load_pages(project.pages)
         self._proof_loaded_line_count = line_count
 
     def _on_worker_error(self, msg: str) -> None:

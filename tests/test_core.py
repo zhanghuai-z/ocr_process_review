@@ -4744,6 +4744,70 @@ def test_hproof_page_filter_keeps_pages_separate():
     print("test_hproof_page_filter_keeps_pages_separate PASSED")
 
 
+def test_hproof_merge_pages_preserves_active_editor_text():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    page1 = Page(image_path="/tmp/hproof-merge-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+        Line(text="第一页", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+    ])]
+    page2 = Page(image_path="/tmp/hproof-merge-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+        Line(text="第二页", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+    ])]
+
+    panel = HProofPanel()
+    panel.load_pages([page1])
+    panel._pairs[0]._editor.setPlainText("未保存横校文本")
+
+    panel.merge_pages([page1, page2])
+
+    assert len(panel._pairs) == 2
+    assert panel._current_idx == 0
+    assert panel._pairs[0]._editor.toPlainText() == "未保存横校文本"
+    panel.close()
+
+    print("test_hproof_merge_pages_preserves_active_editor_text PASSED")
+
+
+def test_vproof_merge_pages_preserves_current_page_text():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line1 = Line(
+        text="甲",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page1 = Page(image_path="/tmp/vproof-merge-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    line2 = Line(
+        text="乙",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="乙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page2 = Page(image_path="/tmp/vproof-merge-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+
+    panel = VProofPanel()
+    panel.load_pages([page1])
+    panel._text_edit.setPlainText("未保存纵校文本")
+
+    panel.merge_pages([page1, page2])
+
+    assert panel._current_page_idx == 0
+    assert panel._text_edit.toPlainText() == "未保存纵校文本"
+    assert panel._char_svc.query("乙")
+    panel.close()
+
+    print("test_vproof_merge_pages_preserves_current_page_text PASSED")
+
+
 def test_image_viewer_char_boxes_update_char_bbox():
     from PySide6.QtGui import QImage
 
@@ -4917,6 +4981,8 @@ if __name__ == "__main__":
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()
     test_proof_line_iterator_includes_caption_and_equation_lines()
     test_hproof_page_filter_keeps_pages_separate()
+    test_hproof_merge_pages_preserves_active_editor_text()
+    test_vproof_merge_pages_preserves_current_page_text()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()

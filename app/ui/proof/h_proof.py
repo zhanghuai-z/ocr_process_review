@@ -565,6 +565,39 @@ class HProofPanel(QWidget):
         self._refresh_page_filter()
         self._render_pages(self._filtered_pages())
 
+    def merge_pages(self, pages: List[Page]) -> None:
+        """Merge OCR background updates without rebuilding active editors."""
+        if not self._pairs:
+            self.load_pages(pages)
+            return
+        self._pages = pages
+        self._refresh_page_filter()
+        loaded_line_ids = {id(line) for _block, line, _page, _li in self._items}
+        prev_page_number = self._items[-1][2].page_number if self._items else -1
+        added = False
+        for page in self._filtered_pages():
+            page_line_num = 1
+            for block, line, li in iter_unique_page_text_lines(page):
+                if id(line) in loaded_line_ids:
+                    page_line_num += 1
+                    continue
+                if page.page_number != prev_page_number:
+                    sep = QLabel(f"── 第 {page.page_number} 页 ──")
+                    sep.setObjectName("pageSep")
+                    sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    sep.setMinimumHeight(26)
+                    self._list_layout.insertWidget(self._list_layout.count() - 1, sep)
+                    prev_page_number = page.page_number
+                self._append_pair(block, line, page, li, page_line_num)
+                loaded_line_ids.add(id(line))
+                page_line_num += 1
+                added = True
+        if added:
+            self._empty_lbl.setVisible(False)
+            self._update_stats()
+            self._progress_lbl.setText(f"{self._current_idx + 1} / {len(self._pairs)}")
+            QTimer.singleShot(100, self._load_visible_images)
+
     def _refresh_page_filter(self) -> None:
         current = self._page_combo.currentData()
         page_numbers = [
@@ -629,22 +662,7 @@ class HProofPanel(QWidget):
                         self._list_layout.count() - 1, sep
                     )
                     prev_page_number = page.page_number
-                self._items.append((block, line, page, li))
-                pair = _LinePair(
-                    len(self._pairs), block, line, page, page_line_num,
-                    self._cache,
-                )
-                pair.clicked.connect(self._on_pair_clicked)
-                pair.text_saved.connect(self._on_text_saved)
-                pair.confirmed.connect(self._on_confirmed)
-                pair.prev_req.connect(self._prev)
-                pair.next_req.connect(self._next)
-                pair.flag_req.connect(self._toggle_flag)
-                pair.skip_req.connect(self._next)
-                self._pairs.append(pair)
-                self._list_layout.insertWidget(
-                    self._list_layout.count() - 1, pair
-                )
+                self._append_pair(block, line, page, li, page_line_num)
                 page_line_num += 1
 
         self._current_idx = 0
@@ -653,6 +671,22 @@ class HProofPanel(QWidget):
             self._activate(0)
             # 懒加载前 30 行图像
             QTimer.singleShot(100, self._load_visible_images)
+
+    def _append_pair(self, block: Block, line: Line, page: Page, li: int, page_line_num: int) -> None:
+        self._items.append((block, line, page, li))
+        pair = _LinePair(
+            len(self._pairs), block, line, page, page_line_num,
+            self._cache,
+        )
+        pair.clicked.connect(self._on_pair_clicked)
+        pair.text_saved.connect(self._on_text_saved)
+        pair.confirmed.connect(self._on_confirmed)
+        pair.prev_req.connect(self._prev)
+        pair.next_req.connect(self._next)
+        pair.flag_req.connect(self._toggle_flag)
+        pair.skip_req.connect(self._next)
+        self._pairs.append(pair)
+        self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
 
     def reset(self) -> None:
         self.load_pages([])
