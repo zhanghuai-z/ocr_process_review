@@ -314,13 +314,15 @@ rescue_right_anti_guard = 5%
 本轮按要求绘制的调整 profile：
 
 ```text
-strong_left_inset = 5%    # 左强辐射区向左延长 5%，左反辐射区 10% -> 5%
+strong_left_inset = 0%    # 左强辐射区向左延长 10%，左反辐射区 10% -> 0%
 strong_right_inset = 25%  # 右强辐射区向左缩减 5%
+adaptive_hard_bound = 5%  # 主题 CC 触碰蓝框时，同方向扩张蓝框；强区 10% : 蓝框 5% = 2:1
+stroke_search_extension = 25%  # 蓝框外继续追连通域完整结束
 rescue_left_anti_guard = 0%
 rescue_right_anti_guard = 10%  # 右侧救回 guard 随右反辐射区延长 5%
 ```
 
-这组调整的作用是：左侧更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 342 个 token 对该 scope/crop profile 变化敏感，158 个 token 的最终成品字 crop 实际变化，2670 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 有明确的局部作用，但不应全局替换默认 profile。
+这组调整的作用是：左侧更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5345 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，1040 个 token 的最终成品字 crop 实际变化，1764 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
 
 建议把后续参数做成质量分级 profile：
 

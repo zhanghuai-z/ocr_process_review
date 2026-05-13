@@ -76,7 +76,8 @@ class ZoneSpec:
     tol_ratio: float = 0.08
     min_tol: int = 3
     y_pad_ratio: float = 0.15
-    stroke_extension_ratio: float = 0.25
+    stroke_extension_ratio: float = 0.0
+    adaptive_hard_bound_ratio: float = 0.0
     weak_y_overlap_ratio: float = 0.25
     weak_area_ratio: float = 0.05
     rescue_left_guard_ratio: float = 0.0
@@ -101,8 +102,10 @@ class TokenRef:
 class ZoneEval:
     token: TokenRef
     spec: ZoneSpec
+    initial_hard_bound: Box
     hard_bound: Box
     stroke_bound: Box
+    blue_expanded_sides: tuple[str, ...]
     strong: Box
     rescue_domain: tuple[float, float]
     components: tuple[Component, ...]
@@ -123,8 +126,10 @@ class ZoneEval:
             "spec": self.spec.name,
             "source_bbox": self.token.source.to_list(),
             "ownership": [round(self.token.ownership[0], 2), round(self.token.ownership[1], 2)],
+            "initial_hard_bound": self.initial_hard_bound.to_list(),
             "hard_bound": self.hard_bound.to_list(),
             "stroke_bound": self.stroke_bound.to_list(),
+            "blue_expanded_sides": list(self.blue_expanded_sides),
             "strong": self.strong.to_list(),
             "rescue_domain": [round(self.rescue_domain[0], 2), round(self.rescue_domain[1], 2)],
             "counts": dict(self.counts),
@@ -193,6 +198,29 @@ def _intersects(a: Box, b: Box) -> bool:
     return min(a.x2, b.x2) > max(a.x1, b.x1) and min(a.y2, b.y2) > max(a.y1, b.y1)
 
 
+def _touch_sides(box: Box, bound: Box, margin: int = 1) -> tuple[str, ...]:
+    sides: list[str] = []
+    if box.x1 <= bound.x1 + margin:
+        sides.append("L")
+    if box.x2 >= bound.x2 - margin:
+        sides.append("R")
+    if box.y1 <= bound.y1 + margin:
+        sides.append("U")
+    if box.y2 >= bound.y2 - margin:
+        sides.append("D")
+    return tuple(sides)
+
+
+def _expand_sides(bound: Box, sides: tuple[str, ...], pad_x: int, pad_y: int, width: int, height: int) -> Box:
+    side_set = set(sides)
+    return Box(
+        bound.x1 - (pad_x if "L" in side_set else 0),
+        bound.y1 - (pad_y if "U" in side_set else 0),
+        bound.x2 + (pad_x if "R" in side_set else 0),
+        bound.y2 + (pad_y if "D" in side_set else 0),
+    ).clip(width, height)
+
+
 def _ownership_intervals(line_box: Box, token_boxes: list[Box]) -> list[tuple[float, float]]:
     centers = [box.cx for box in token_boxes]
     intervals: list[tuple[float, float]] = []
@@ -227,31 +255,67 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
     tol = max(spec.min_tol, int(source_w * spec.tol_ratio))
     y_pad = max(2, int(source_h * spec.y_pad_ratio))
     own_lo, own_hi = token.ownership
-    hard_bound = Box(
+    initial_hard_bound = Box(
         max(0, int(own_lo) - tol),
         max(0, source.y1 - y_pad),
         min(width, int(own_hi) + tol + 1),
         min(height, source.y2 + y_pad),
     )
-    stroke_pad_x = max(tol * 2, int(source_w * spec.stroke_extension_ratio), 6)
-    stroke_pad_y = max(y_pad * 2, int(source_h * spec.stroke_extension_ratio), 6)
-    stroke_bound = Box(
-        hard_bound.x1 - stroke_pad_x,
-        hard_bound.y1 - stroke_pad_y,
-        hard_bound.x2 + stroke_pad_x,
-        hard_bound.y2 + stroke_pad_y,
-    ).clip(width, height)
+    hard_bound = initial_hard_bound
     strong = Box(
-        source.x1 + max(1, int(source_w * spec.left_inset_ratio)),
+        source.x1 + max(0, int(source_w * spec.left_inset_ratio)),
         source.y1 + max(1, int(source_h * spec.y_inset_ratio)),
-        source.x2 - max(1, int(source_w * spec.right_inset_ratio)),
+        source.x2 - max(0, int(source_w * spec.right_inset_ratio)),
         source.y2 - max(1, int(source_h * spec.y_inset_ratio)),
     )
     if strong.x1 >= strong.x2 or strong.y1 >= strong.y2:
-        return ZoneEval(token, spec, hard_bound, stroke_bound, strong, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
+        return ZoneEval(token, spec, initial_hard_bound, hard_bound, hard_bound, (), strong, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
 
-    components = _extract_components(image_bgr, stroke_bound)
-    strong_components = [component for component in components if _intersects(component.box, strong)]
+    def build_stroke_bound(bound: Box) -> Box:
+        if spec.stroke_extension_ratio <= 0:
+            return bound
+        stroke_pad_x = max(tol * 2, int(source_w * spec.stroke_extension_ratio), 6)
+        stroke_pad_y = max(y_pad * 2, int(source_h * spec.stroke_extension_ratio), 6)
+        return Box(
+            bound.x1 - stroke_pad_x,
+            bound.y1 - stroke_pad_y,
+            bound.x2 + stroke_pad_x,
+            bound.y2 + stroke_pad_y,
+        ).clip(width, height)
+
+    def extract_strong(bound: Box) -> tuple[Box, tuple[Component, ...], list[Component]]:
+        search_bound = build_stroke_bound(bound)
+        found_components = _extract_components(image_bgr, search_bound)
+        found_strong = [component for component in found_components if _intersects(component.box, strong)]
+        return search_bound, found_components, found_strong
+
+    stroke_bound, components, strong_components = extract_strong(hard_bound)
+    blue_sides: tuple[str, ...] = ()
+    if spec.adaptive_hard_bound_ratio > 0 and strong_components:
+        sides = sorted({side for component in strong_components for side in _touch_sides(component.box, hard_bound)})
+        blue_sides = tuple(sides)
+        if blue_sides:
+            pad_x = max(1, int(source_w * spec.adaptive_hard_bound_ratio))
+            pad_y = max(1, int(source_h * spec.adaptive_hard_bound_ratio))
+            hard_bound = _expand_sides(hard_bound, blue_sides, pad_x, pad_y, width, height)
+            stroke_bound, components, strong_components = extract_strong(hard_bound)
+
+    if spec.stroke_extension_ratio > 0:
+        for _ in range(3):
+            if not strong_components:
+                break
+            stroke_sides = tuple(sorted({side for component in strong_components for side in _touch_sides(component.box, stroke_bound)}))
+            if not stroke_sides:
+                break
+            extend_x = max(2, int(source_w * spec.stroke_extension_ratio))
+            extend_y = max(2, int(source_h * spec.stroke_extension_ratio))
+            new_stroke_bound = _expand_sides(stroke_bound, stroke_sides, extend_x, extend_y, width, height)
+            if new_stroke_bound == stroke_bound:
+                break
+            stroke_bound = new_stroke_bound
+            components = _extract_components(image_bgr, stroke_bound)
+            strong_components = [component for component in components if _intersects(component.box, strong)]
+
     main_area = max((component.area for component in strong_components), default=max((c.area for c in components), default=0))
     weak_area_threshold = max(8, int(main_area * spec.weak_area_ratio))
     rescue_lo = max(own_lo, source.x1 + source_w * spec.rescue_left_guard_ratio)
@@ -307,8 +371,10 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
     return ZoneEval(
         token=token,
         spec=spec,
+        initial_hard_bound=initial_hard_bound,
         hard_bound=hard_bound,
         stroke_bound=stroke_bound,
+        blue_expanded_sides=blue_sides,
         strong=strong,
         rescue_domain=(rescue_lo, rescue_hi),
         components=components,
@@ -332,7 +398,7 @@ def _quality_label(current: ZoneEval, adjusted: ZoneEval) -> str:
     )
     left_margin = (ink.x1 - source.x1) / max(1, source.w)
     right_margin = (source.x2 - ink.x2) / max(1, source.w)
-    delta = current.counts != adjusted.counts or current.crop != adjusted.crop or current.no_strong != adjusted.no_strong
+    delta = _effective_counts(current) != _effective_counts(adjusted) or current.crop != adjusted.crop or current.no_strong != adjusted.no_strong
     if delta:
         return "Q2 param-sensitive"
     if current.counts.get("anti_dropped", 0) or current.counts.get("weak_rescued", 0) or len(components_in_source) >= 3:
@@ -344,6 +410,11 @@ def _quality_label(current: ZoneEval, adjusted: ZoneEval) -> str:
 
 def _outside(outer: Box, inner: Box) -> bool:
     return inner.x1 < outer.x1 or inner.y1 < outer.y1 or inner.x2 > outer.x2 or inner.y2 > outer.y2
+
+
+def _effective_counts(zone: ZoneEval) -> tuple[int, int]:
+    counts = zone.counts
+    return counts.get("strong", 0), counts.get("weak_rescued", 0)
 
 
 def _breaks_hard_bound(zone: ZoneEval) -> bool:
@@ -484,7 +555,7 @@ def _select_samples(
             score += 220
         if current.crop != adjusted.crop:
             score += 180
-        if current.counts != adjusted.counts or current.no_strong != adjusted.no_strong:
+        if _effective_counts(current) != _effective_counts(adjusted) or current.no_strong != adjusted.no_strong:
             score += 120
         score += counts.get("anti_dropped", 0) * 25
         score += counts.get("weak_rescued", 0) * 20
@@ -541,7 +612,7 @@ def _make_scope_comparison(
     draw.text((label_w + scope_w + crop_w + 8, 62), "adjusted scope", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + scope_w * 2 + crop_w + 8, 62), "adjusted final crop", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + 8, 80), "cur: red L10/R20", fill=(80, 80, 80), font=latin_small)
-    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: red L5/R25", fill=(80, 80, 80), font=latin_small)
+    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: red L0/R25; blue +5% on touch", fill=(80, 80, 80), font=latin_small)
     for row, token in enumerate(samples):
         y = header_h + row * row_h
         current = current_evals[token.id]
@@ -633,9 +704,10 @@ def _make_page_report(
     changed = [
         token
         for token in current_evals
-        if current_evals[token].counts != adjusted_evals[token].counts
+        if _effective_counts(current_evals[token]) != _effective_counts(adjusted_evals[token])
         or current_evals[token].crop != adjusted_evals[token].crop
         or current_evals[token].no_strong != adjusted_evals[token].no_strong
+        or adjusted_evals[token].blue_expanded_sides
     ]
     crop_changed = [token for token in current_evals if current_evals[token].crop != adjusted_evals[token].crop]
     break_blue = [
@@ -649,13 +721,13 @@ def _make_page_report(
         f"radiation zone comparison - page {page_id}",
         "=" * 72,
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
-        "adjusted: left strong extends 5% (left red anti shrinks 10%->5%), right strong shrinks 5% (right red anti grows 20%->25%)",
+        "adjusted: left strong extends 10% (left red anti shrinks 10%->0%), right strong shrinks 5% (right red anti grows 20%->25%)",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
         "strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.",
-        "blue is now only the initial hard_bound/diagnostic box; stroke extraction uses a larger purple stroke-search box, so preserved strokes may break the blue box.",
+        "blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
-        f"parameter-sensitive tokens by scope labels: {len(changed)}",
+        f"effective parameter-sensitive tokens: {len(changed)}",
         f"final crop changed tokens: {len(crop_changed)}",
         f"break-blue stroke tokens: {len(break_blue)}",
         f"no strong cc current/adjusted: {current_no_strong}/{adjusted_no_strong}",
@@ -675,7 +747,7 @@ def _make_page_report(
         [
             "",
             "interpretation:",
-            "- The requested adjustment makes the left strong area moderately more permissive and the right strong area stricter.",
+            "- The requested adjustment removes the left anti band for the adjusted profile and keeps the right side stricter.",
             "- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.",
             "- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.",
             "- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.",
@@ -694,7 +766,7 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
     draw.text((24, 20), "Page-level radiation scope sensitivity overview", fill=(0, 0, 0), font=title_font)
     draw.text(
         (24, 54),
-        "red=anti/weak; orange=rescue; purple=stroke-search. Blue is initial hard_bound only; strong-hit strokes may break it.",
+        "red=anti/weak; orange=rescue; purple=stroke-search. Adjusted blue expands 5% when touched; strong-hit strokes complete beyond it.",
         fill=(80, 0, 0),
         font=text_font,
     )
@@ -740,9 +812,9 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "=" * 72,
         "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
-        "Adjusted profile: left strong extends 5% (left anti shrinks 10%->5%); right strong shrinks 5% (right anti grows 20%->25%).",
+        "Adjusted profile: left strong extends 10% (left anti shrinks 10%->0%); right strong shrinks 5% (right anti grows 20%->25%).",
         "Strong preservation: a CC that intersects green strong is retained whole; red anti only filters fully-outside-strong CCs, then ownership may clip the final union.",
-        "Blue is no longer a final stroke limit: it is the initial hard_bound/diagnostic box. Components are extracted from the larger purple stroke-search box so a preserved stroke can break blue.",
+        "Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion.",
         "",
         f"pages evaluated: {len(page_summaries)}",
         f"cjk tokens evaluated: {total_cjk}",
@@ -786,8 +858,10 @@ def run_page_comparison(
     )
     adjusted_spec = ZoneSpec(
         name="adjusted scope",
-        left_inset_ratio=0.05,
+        left_inset_ratio=0.00,
         right_inset_ratio=0.25,
+        stroke_extension_ratio=0.25,
+        adaptive_hard_bound_ratio=0.05,
         rescue_left_guard_ratio=0.00,
         rescue_right_guard_ratio=0.10,
     )
@@ -811,9 +885,10 @@ def run_page_comparison(
     changed = [
         token_id
         for token_id in current_evals
-        if current_evals[token_id].counts != adjusted_evals[token_id].counts
+        if _effective_counts(current_evals[token_id]) != _effective_counts(adjusted_evals[token_id])
         or current_evals[token_id].crop != adjusted_evals[token_id].crop
         or current_evals[token_id].no_strong != adjusted_evals[token_id].no_strong
+        or adjusted_evals[token_id].blue_expanded_sides
     ]
     crop_changed = [token_id for token_id in current_evals if current_evals[token_id].crop != adjusted_evals[token_id].crop]
     break_blue = [
