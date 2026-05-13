@@ -4740,6 +4740,33 @@ def test_hproof_line_iterator_excludes_non_text_elements():
     print("test_hproof_line_iterator_excludes_non_text_elements PASSED")
 
 
+def test_hproof_line_iterator_excludes_position_source_labels():
+    from app.core.proof_line_utils import iter_unique_page_hproof_lines
+    from app.models import BBox, Block, BlockType, Line, Page
+
+    page = Page(image_path="/tmp/hproof-position.png", width=100, height=100)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(1, 1, 20, 10),
+            lines=[Line(text="12", confidence=0.9, bbox=BBox(1, 1, 20, 10))],
+            note="score=0.99 | source_label=page_number",
+        ),
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(1, 20, 60, 12),
+            lines=[Line(text="正文", confidence=0.9, bbox=BBox(1, 20, 60, 12))],
+            note="source_label=text",
+        ),
+    ]
+
+    texts = [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)]
+
+    assert texts == ["正文"]
+
+    print("test_hproof_line_iterator_excludes_position_source_labels PASSED")
+
+
 def test_hproof_page_filter_keeps_pages_separate():
     from app.models import BBox, Block, BlockType, Line, Page
     from app.ui.proof.h_proof import HProofPanel
@@ -4903,9 +4930,10 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._gallery_view.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert "background:#ffffff" in panel._gallery_view.styleSheet()
     assert "background:#ffffff" in panel._char_list.styleSheet()
-    assert v_proof.GALLERY_THUMB <= 36
-    assert v_proof.CHAR_LIST_THUMB <= 28
-    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 44
+    assert v_proof.GALLERY_THUMB <= 18
+    assert v_proof.CHAR_LIST_THUMB <= 12
+    assert panel._left_box.maximumWidth() <= 150
+    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 30
     panel.close()
 
     print("test_vproof_gallery_uses_wrapping_white_grid PASSED")
@@ -4974,12 +5002,49 @@ def test_vproof_highlight_can_repeat_without_losing_state():
     print("test_vproof_highlight_can_repeat_without_losing_state PASSED")
 
 
+def test_vproof_highlight_survives_repeated_page_switches():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line1 = Line(
+        text="甲",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    line2 = Line(
+        text="乙",
+        confidence=0.9,
+        bbox=BBox(20, 20, 20, 10),
+        chars=[Char(char="乙", confidence=0.9, bbox=BBox(20, 20, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page1 = Page(image_path="/tmp/vproof-switch-1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    page2 = Page(image_path="/tmp/vproof-switch-2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+    panel = VProofPanel()
+    panel.load_pages([page1, page2])
+
+    for token in ("甲", "乙", "甲", "乙", "甲", "乙"):
+        entry = panel._char_svc.query(token)[0]
+        panel._highlight_char_in_viewer(entry)
+        panel._highlight_char_in_text(token, focus_entry=entry)
+        assert panel._viewer._highlight_item is not None
+        assert len(panel._text_edit.extraSelections()) == 1
+        assert panel._text_edit.textCursor().selectedText() == token
+
+    panel.close()
+
+    print("test_vproof_highlight_survives_repeated_page_switches PASSED")
+
+
 def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
-    pair_styles = open(h_proof.__file__, encoding="utf-8").read()
-    assert "font-size:30px" in pair_styles
+    assert h_proof.TEXT_FONT_PX == 18
+    assert h_proof.TEXT_EDITOR_MAX_H <= 42
 
     print("test_hproof_visual_size_is_compact PASSED")
 
@@ -5157,6 +5222,7 @@ if __name__ == "__main__":
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()
     test_proof_line_iterator_includes_caption_and_equation_lines()
     test_hproof_line_iterator_excludes_non_text_elements()
+    test_hproof_line_iterator_excludes_position_source_labels()
     test_hproof_page_filter_keeps_pages_separate()
     test_hproof_merge_pages_preserves_active_editor_text()
     test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans()
@@ -5165,6 +5231,7 @@ if __name__ == "__main__":
     test_vproof_gallery_uses_wrapping_white_grid()
     test_vproof_text_highlight_targets_single_entry()
     test_vproof_highlight_can_repeat_without_losing_state()
+    test_vproof_highlight_survives_repeated_page_switches()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()

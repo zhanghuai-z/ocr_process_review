@@ -268,6 +268,7 @@ class ImageViewer(QGraphicsView):
     # ------------------------------------------------------------------ public
 
     def set_image(self, image_path: str) -> None:
+        self._highlight_item = None
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
@@ -278,6 +279,7 @@ class ImageViewer(QGraphicsView):
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_image_from_qimage(self, qimage: QImage) -> None:
+        self._highlight_item = None
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
@@ -340,6 +342,7 @@ class ImageViewer(QGraphicsView):
         if hasattr(self, "_highlight_item") and self._highlight_item is not None:
             if self._highlight_item.scene() is self._scene:
                 self._scene.removeItem(self._highlight_item)
+            self._highlight_item = None
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QPen, QColor
         rect = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
@@ -457,6 +460,9 @@ class ImageViewer(QGraphicsView):
     # ------------------------------------------------------------------ private
 
     def _clear_overlays(self) -> None:
+        if self._highlight_item is not None and self._highlight_item.scene() is self._scene:
+            self._scene.removeItem(self._highlight_item)
+        self._highlight_item = None
         for item, _ in self._block_items:
             self._scene.removeItem(item)
         self._block_items.clear()

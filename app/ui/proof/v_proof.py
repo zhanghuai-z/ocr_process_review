@@ -48,8 +48,8 @@ from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
 
-CHAR_LIST_THUMB = 22
-GALLERY_THUMB   = 28
+CHAR_LIST_THUMB = 12
+GALLERY_THUMB   = 18
 LOW_CONF        = 0.80
 
 
@@ -217,6 +217,7 @@ class VProofPanel(QWidget):
         self._bus = ProofStateBus.instance()
         self._char_svc = CharIndexService()
         self._text_map: List[Tuple[Line, int, int, int]] = []
+        self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
         self._updating = False
@@ -262,16 +263,17 @@ class VProofPanel(QWidget):
         h_split.setHandleWidth(1)
 
         # 左：单字列表 + 搜索
-        left_box = self._build_char_list()
-        left_box.setMinimumWidth(130)
-        left_box.setMaximumWidth(190)
-        h_split.addWidget(left_box)
+        self._main_split = h_split
+        self._left_box = self._build_char_list()
+        self._left_box.setMinimumWidth(100)
+        self._left_box.setMaximumWidth(150)
+        h_split.addWidget(self._left_box)
 
         # 右：垂直分割（上gallery | 下文本/图）
         right_box = self._build_right_area()
         h_split.addWidget(right_box)
         h_split.setStretchFactor(0, 1)
-        h_split.setStretchFactor(1, 5)
+        h_split.setStretchFactor(1, 7)
 
         root.addWidget(h_split, 1)
 
@@ -324,9 +326,9 @@ class VProofPanel(QWidget):
         v.setSpacing(0)
 
         # 上：gallery 网格（固定高度）
-        gallery_box = self._build_gallery_strip()
-        gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
-        v.addWidget(gallery_box)
+        self._gallery_box = self._build_gallery_strip()
+        self._gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
+        v.addWidget(self._gallery_box)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -334,18 +336,18 @@ class VProofPanel(QWidget):
         v.addWidget(sep)
 
         # 下：OCR 文本 | 原图（QSplitter）
-        bottom_split = QSplitter(Qt.Orientation.Horizontal)
-        bottom_split.setHandleWidth(1)
+        self._bottom_split = QSplitter(Qt.Orientation.Horizontal)
+        self._bottom_split.setHandleWidth(1)
 
         bl_box = self._build_ocr_text()
         br_box = self._build_viewer()
 
-        bottom_split.addWidget(bl_box)
-        bottom_split.addWidget(br_box)
-        bottom_split.setStretchFactor(0, 1)
-        bottom_split.setStretchFactor(1, 3)
+        self._bottom_split.addWidget(bl_box)
+        self._bottom_split.addWidget(br_box)
+        self._bottom_split.setStretchFactor(0, 1)
+        self._bottom_split.setStretchFactor(1, 4)
 
-        v.addWidget(bottom_split, 1)
+        v.addWidget(self._bottom_split, 1)
         return box
 
     def _build_gallery_strip(self) -> QWidget:
@@ -430,6 +432,8 @@ class VProofPanel(QWidget):
         current_page = self._pages[self._current_page_idx]
         self._pages = pages
         self._current_page_idx = self._find_page_index(current_page)
+        if self._pages:
+            self._rebuild_text_lookup(self._pages[self._current_page_idx])
         self._char_svc.build(pages)
         selected = self._selected_char
         self._rebuild_char_list()
@@ -513,6 +517,7 @@ class VProofPanel(QWidget):
         # 字符高亮由 highlight_bbox 单独绘制，避免与块框混淆
 
         flat_text, self._text_map = _build_text_map(page)
+        self._rebuild_text_lookup(page)
         self._updating = True
         self._text_edit.setPlainText(flat_text)
         self._text_edit.setExtraSelections([])
@@ -548,20 +553,21 @@ class VProofPanel(QWidget):
             self._gallery_view.setCurrentIndex(first_idx)
         self._highlight_char_in_text(tok, focus_entry=target)
 
+    def _rebuild_text_lookup(self, page: Page) -> None:
+        _flat_text, self._text_map = _build_text_map(page)
+        self._entry_pos_by_key = {
+            (id(line), ci): start
+            for line, ci, start, _end in self._text_map
+        }
+
     def _entry_text_pos(self, entry: CharEntry) -> Optional[int]:
         """查找 CharEntry 在当前 _text_map 中的起始光标位置。"""
-        for line, ci, start, _end in self._text_map:
-            if line is entry.line and ci == entry.char_idx:
-                return start
-        return None
+        return self._entry_pos_by_key.get((id(entry.line), entry.char_idx))
 
     def _highlight_char_in_text(
         self, char: str, focus_entry: Optional[CharEntry] = None,
     ) -> None:
         doc = self._text_edit.document()
-        clear_cur = QTextCursor(doc)
-        clear_cur.select(QTextCursor.SelectionType.Document)
-        clear_cur.setCharFormat(QTextCharFormat())
         fmt = QTextCharFormat()
         fmt.setBackground(QColor("#ffe8a3"))
         fmt.setForeground(QColor("#0b57d0"))

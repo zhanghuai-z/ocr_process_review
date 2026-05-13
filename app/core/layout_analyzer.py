@@ -366,6 +366,17 @@ class LayoutAnalyzer:
             note_parts.append(preview[:120])
         if score is not None:
             note_parts.append(f"score={score:.3f}")
+        normalized_type = raw_type.strip().lower().replace("-", "_").replace(" ", "_") if raw_type else ""
+        if normalized_type in {
+            "page_number",
+            "number",
+            "formula_number",
+            "header",
+            "footer",
+            "footnote",
+            "sidebar_text",
+        }:
+            note_parts.append(f"source_label={raw_type}")
 
         raw_overlay_items.append((raw_type, bbox))
         page_blocks.append(Block(
