@@ -45,6 +45,7 @@ class LayoutPanel(QWidget):
         self._btn_run.setObjectName("runBtn")
         self._btn_run.setFixedSize(36, 36)
         self._btn_run.clicked.connect(self._request_analysis)
+        self._btn_run.hide()
         title_row.addWidget(self._btn_run)
 
         self._btn_char_boxes = QPushButton("字框")
@@ -169,6 +170,12 @@ class LayoutPanel(QWidget):
             )
         else:
             self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")
+
+    def set_current_page_number(self, page_number: int) -> None:
+        for idx, page in enumerate(self._pages):
+            if page.page_number == page_number:
+                self._page_list.setCurrentRow(idx)
+                return
 
     # ------------------------------------------------------------------ private
 

@@ -149,7 +149,7 @@ class _GalleryDelegate(QStyledItemDelegate):
             dx = (img_r.width() - scaled.width()) // 2
             painter.drawPixmap(img_r.x() + dx, img_r.y(), scaled)
         else:
-            painter.fillRect(img_r, QColor("#f0f6ff"))
+            painter.fillRect(img_r, QColor("#ffffff"))
             # 裁图失败时显示 token 内容作为占位，避免白块无信息
             entry = index.data(Qt.ItemDataRole.UserRole)
             fallback = (entry.token_text or entry.char) if entry else "?"
@@ -318,6 +318,7 @@ class VProofPanel(QWidget):
         self._char_list = QListWidget()
         self._char_list.setIconSize(QSize(CHAR_LIST_THUMB, CHAR_LIST_THUMB))
         self._char_list.setSpacing(2)
+        self._char_list.setStyleSheet("QListWidget { background:#ffffff; } QListWidget::item { background:#ffffff; }")
         self._char_list.itemClicked.connect(self._on_char_clicked)
         self._char_list.currentItemChanged.connect(
             lambda cur, _prev: self._on_char_clicked(cur) if cur else None
@@ -331,9 +332,9 @@ class VProofPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # 上：gallery 水平条（固定高度）
+        # 上：gallery 网格（固定高度）
         gallery_box = self._build_gallery_strip()
-        gallery_box.setFixedHeight(GALLERY_THUMB + 50)
+        gallery_box.setFixedHeight(GALLERY_THUMB * 3 + 54)
         v.addWidget(gallery_box)
 
         sep = QFrame()
@@ -374,16 +375,17 @@ class VProofPanel(QWidget):
         self._gallery_view.setItemDelegate(_GalleryDelegate(self._gallery_view))
         self._gallery_view.setViewMode(QListView.ViewMode.IconMode)
         self._gallery_view.setFlow(QListView.Flow.LeftToRight)  # 水平排列
-        self._gallery_view.setWrapping(False)                   # 不换行
-        self._gallery_view.setResizeMode(QListView.ResizeMode.Fixed)
+        self._gallery_view.setWrapping(True)
+        self._gallery_view.setResizeMode(QListView.ResizeMode.Adjust)
         self._gallery_view.setMovement(QListView.Movement.Static)
         self._gallery_view.setUniformItemSizes(True)
         self._gallery_view.setSpacing(4)
+        self._gallery_view.setStyleSheet("QListView { background:#ffffff; } QListView::item { background:#ffffff; }")
         self._gallery_view.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._gallery_view.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._gallery_view.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection

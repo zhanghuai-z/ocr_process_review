@@ -95,10 +95,9 @@ _NAV_ITEMS = [
 
 
 class TopNavBar(QWidget):
-    """顶部水平导航：← → + 步骤按钮 + 项目名 + 导出按钮。"""
+    """顶部水平导航：步骤按钮 + 版面分析启动 + 项目名 + 导出按钮。"""
     step_clicked   = Signal(int)
-    prev_clicked   = Signal()
-    next_clicked   = Signal()
+    layout_run_clicked = Signal()
     export_clicked = Signal()
 
     def __init__(self, parent=None):
@@ -117,26 +116,6 @@ class TopNavBar(QWidget):
         )
         layout.addWidget(brand)
 
-        # ← → 箭头
-        self._btn_prev = QPushButton("←")
-        self._btn_next = QPushButton("→")
-        for b in (self._btn_prev, self._btn_next):
-            b.setObjectName("ghostBtn")
-            b.setFixedSize(30, 30)
-        self._btn_prev.setToolTip("上一步")
-        self._btn_next.setToolTip("下一步")
-        self._btn_prev.clicked.connect(self.prev_clicked)
-        self._btn_next.clicked.connect(self.next_clicked)
-        layout.addWidget(self._btn_prev)
-        layout.addWidget(self._btn_next)
-
-        # 分隔线
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        sep.setStyleSheet("color:#e3e8ef; margin:8px 6px;")
-        layout.addWidget(sep)
-
         # 步骤按钮
         self._buttons: List[StepButton] = []
         for label, target_step, _active in _NAV_ITEMS:
@@ -145,6 +124,18 @@ class TopNavBar(QWidget):
             btn.clicked.connect(lambda _, s=target_step: self.step_clicked.emit(s))
             self._buttons.append(btn)
             layout.addWidget(btn)
+
+        self._btn_run_layout = QPushButton("▶")
+        self._btn_run_layout.setToolTip("运行版面分析")
+        self._btn_run_layout.setFixedSize(34, 30)
+        self._btn_run_layout.setEnabled(False)
+        self._btn_run_layout.setStyleSheet(
+            "QPushButton { background:#22c55e; color:white; border:0; border-radius:4px; "
+            "font-size:16px; font-weight:bold; }"
+            "QPushButton:disabled { background:#b8dec5; color:#f3fff6; }"
+        )
+        self._btn_run_layout.clicked.connect(self.layout_run_clicked)
+        layout.addWidget(self._btn_run_layout)
 
         layout.addStretch()
 
@@ -167,6 +158,9 @@ class TopNavBar(QWidget):
         for i, (_, target_step, _) in enumerate(_NAV_ITEMS):
             self._buttons[i].setEnabled(target_step <= max_step)
 
+    def set_layout_run_enabled(self, enabled: bool) -> None:
+        self._btn_run_layout.setEnabled(enabled)
+
     def set_project_name(self, name: str) -> None:
         self._project_lbl.setText(name)
 
@@ -179,6 +173,7 @@ class MainWindow(QMainWindow):
         self._controller = WorkflowController()
         self._current_step: int = STEP_IMPORT
         self._proof_loaded_line_count: int = 0
+        self._current_page_number: int = 1
 
         self.setWindowTitle("OCR 后处理")
         _screen = QApplication.primaryScreen().availableGeometry()
@@ -201,8 +196,7 @@ class MainWindow(QMainWindow):
         # 顶部导航栏
         self._top_nav = TopNavBar()
         self._top_nav.step_clicked.connect(self._on_step_clicked)
-        self._top_nav.prev_clicked.connect(self._prev_step)
-        self._top_nav.next_clicked.connect(self._next_step)
+        self._top_nav.layout_run_clicked.connect(self._start_layout_analysis)
         self._top_nav.export_clicked.connect(self._show_export_dialog)
         outer.addWidget(self._top_nav)
 
@@ -236,9 +230,6 @@ class MainWindow(QMainWindow):
         # 导入面板：图片/PDF 准备就绪
         self._import_panel.images_ready.connect(self._on_images_ready)
 
-        # 版面面板：运行分析按钮 -> 启动分析
-        self._layout_panel.run_button.clicked.connect(self._start_layout_analysis)
-
         # 校对面板：保存修改
         self._hproof_panel.proof_saved.connect(self._auto_save)
         self._vproof_panel.proof_saved.connect(self._auto_save)
@@ -254,6 +245,8 @@ class MainWindow(QMainWindow):
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._status_bar.showMessage)
         self._layout_panel.geometry_changed.connect(self._controller.save_project)
+        self._layout_panel.page_selected.connect(self._on_layout_page_selected)
+        self._hproof_panel.page_selected.connect(self._on_hproof_page_selected)
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -297,6 +290,10 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(step)
         self._top_nav.set_active(step)
         self._current_step = step
+        if step == STEP_HPROOF:
+            self._hproof_panel.set_current_page_number(self._current_page_number)
+        elif step == STEP_LAYOUT:
+            self._layout_panel.set_current_page_number(self._current_page_number)
 
     def _on_step_clicked(self, step: int) -> None:
         """用户点击步骤栏按钮 → 让 controller 判断是否允许跳转。"""
@@ -309,6 +306,16 @@ class MainWindow(QMainWindow):
     def _next_step(self) -> None:
         self._controller.request_step(self._current_step + 1)
 
+    def _on_layout_page_selected(self, idx: int) -> None:
+        project = self._controller.project
+        if project and 0 <= idx < len(project.pages):
+            self._current_page_number = project.pages[idx].page_number
+            self._hproof_panel.set_current_page_number(self._current_page_number)
+
+    def _on_hproof_page_selected(self, page_number: int) -> None:
+        self._current_page_number = page_number
+        self._layout_panel.set_current_page_number(page_number)
+
     # ── Controller 回调 ─────────────────────────────────────────
 
     def _on_project_changed(self, project: OcrProject) -> None:
@@ -318,6 +325,7 @@ class MainWindow(QMainWindow):
         """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
         self._layout_panel.show_analysis_result(pages)
         self._layout_panel.run_button.setEnabled(True)
+        self._top_nav.set_layout_run_enabled(True)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
             self._status_bar.showMessage(
@@ -362,6 +370,7 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
         self._layout_panel.run_button.setEnabled(True)
+        self._top_nav.set_layout_run_enabled(True)
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
         QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
@@ -392,6 +401,7 @@ class MainWindow(QMainWindow):
             project = self._controller.project
             if project and project.pages:
                 self._layout_panel.set_pages(project.pages)
+                self._top_nav.set_layout_run_enabled(True)
                 if all(p.is_analyzed for p in project.pages):
                     self._layout_panel.show_analysis_result(project.pages)
                 if project.ocr_completed:
@@ -435,6 +445,7 @@ class MainWindow(QMainWindow):
 
             self._controller.on_images_ready(result.pages)
             self._proof_loaded_line_count = 0
+            self._top_nav.set_layout_run_enabled(True)
 
             if result.failed:
                 fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
@@ -461,8 +472,10 @@ class MainWindow(QMainWindow):
         if not self._controller.project or not self._controller.project.pages:
             return
         self._layout_panel.run_button.setEnabled(False)
+        self._top_nav.set_layout_run_enabled(False)
         if not self._controller.start_layout_analysis(self._controller.project.pages):
             self._layout_panel.run_button.setEnabled(True)
+            self._top_nav.set_layout_run_enabled(True)
 
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""
