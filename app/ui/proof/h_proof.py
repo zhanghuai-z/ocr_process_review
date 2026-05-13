@@ -41,13 +41,13 @@ from PySide6.QtWidgets import (
 from app.models import Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.core.char_bbox_utils import refine_line_bbox
-from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
-IMAGE_ROW_H  = 52    # 行图像显示高度（px）
+IMAGE_ROW_H  = 44    # 行图像显示高度（px）
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -233,6 +233,7 @@ class _LinePair(QFrame):
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
+        self._editor.cursorPositionChanged.connect(self._render_line_image)
         tr.addWidget(self._editor, 1)
 
         # 状态标签
@@ -296,6 +297,7 @@ class _LinePair(QFrame):
             self._editor.hide()
             self._text_lbl.setText(self._line.text or "")
             self._text_lbl.show()
+            self._render_line_image()
 
         self._refresh_status()
 
@@ -339,7 +341,15 @@ class _LinePair(QFrame):
         cursor = self._editor.textCursor()
         start = min(cursor.selectionStart(), cursor.selectionEnd())
         end = max(cursor.selectionStart(), cursor.selectionEnd())
+        highlight_range: tuple[int, int] | None = None
         if not self._editor.isHidden() and end > start:
+            highlight_range = (start, end)
+        elif not self._editor.isHidden():
+            pos = max(0, cursor.position() - 1)
+            if pos < len(self._line.chars):
+                highlight_range = (pos, pos + 1)
+        if highlight_range is not None:
+            start, end = highlight_range
             ox, oy = self._line_crop_origin
             for idx in range(start, min(end, len(self._line.chars))):
                 char = self._line.chars[idx]
@@ -446,6 +456,7 @@ class HProofPanel(QWidget):
     """横校面板：滚动列表 + 工具栏，对照 ui-2.jpg 设计。"""
 
     proof_saved = Signal()
+    page_selected = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -594,7 +605,7 @@ class HProofPanel(QWidget):
         added = False
         for page in self._filtered_pages():
             page_line_num = 1
-            for block, line, li in iter_unique_page_text_lines(page):
+            for block, line, li in iter_unique_page_hproof_lines(page):
                 key = self._line_key(block, line, page, li)
                 existing_index = loaded_keys.get(key)
                 if existing_index is not None:
@@ -624,7 +635,7 @@ class HProofPanel(QWidget):
         page_numbers = [
             page.page_number
             for page in self._pages
-            if any(True for _ in iter_unique_page_text_lines(page))
+            if any(True for _ in iter_unique_page_hproof_lines(page))
         ]
         self._filter_updating = True
         self._page_combo.clear()
@@ -645,7 +656,15 @@ class HProofPanel(QWidget):
     def _on_page_filter_changed(self) -> None:
         if self._filter_updating:
             return
+        page_number = self._page_combo.currentData()
+        if page_number is not None:
+            self.page_selected.emit(int(page_number))
         self._render_pages(self._filtered_pages())
+
+    def set_current_page_number(self, page_number: int) -> None:
+        index = self._page_combo.findData(page_number)
+        if index >= 0 and self._page_combo.currentIndex() != index:
+            self._page_combo.setCurrentIndex(index)
 
     def _render_pages(self, pages: List[Page]) -> None:
         self._items.clear()
@@ -666,13 +685,13 @@ class HProofPanel(QWidget):
             w.deleteLater()
 
         # 无数据时显示空状态
-        has_data = any(True for page in pages for _ in iter_unique_page_text_lines(page))
+        has_data = any(True for page in pages for _ in iter_unique_page_hproof_lines(page))
         self._empty_lbl.setVisible(not has_data)
 
         prev_page_number: int = -1
         for page in pages:
             page_line_num = 1
-            for block, line, li in iter_unique_page_text_lines(page):
+            for block, line, li in iter_unique_page_hproof_lines(page):
                 # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
                 if page.page_number != prev_page_number:
                     sep = QLabel(f"── 第 {page.page_number} 页 ──")

@@ -14,6 +14,12 @@ PROOF_LINE_BLOCK_TYPES = {
     BlockType.EQUATION,
 }
 
+HPROOF_LINE_BLOCK_TYPES = {
+    BlockType.TEXT,
+    BlockType.TITLE,
+    BlockType.REFERENCE,
+}
+
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
     text = line.text or ""
@@ -35,6 +41,18 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
     seen: list[tuple[str, BBox]] = []
     for block in page.blocks:
         if block.block_type not in PROOF_LINE_BLOCK_TYPES:
+            continue
+        for line_idx, line in enumerate(block.lines):
+            if _is_duplicate_line(line, seen):
+                continue
+            yield block, line, line_idx
+
+
+def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int]]:
+    """Yield only text-like lines for HProof, excluding captions/equations."""
+    seen: list[tuple[str, BBox]] = []
+    for block in page.blocks:
+        if block.block_type not in HPROOF_LINE_BLOCK_TYPES:
             continue
         for line_idx, line in enumerate(block.lines):
             if _is_duplicate_line(line, seen):
