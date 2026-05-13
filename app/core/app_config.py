@@ -12,13 +12,12 @@ from PySide6.QtCore import QSettings
 # 默认配置
 _DEFAULT_CONFIG: dict[str, Any] = {
     # OCR 引擎
-    "ocr_mode": "local",           # "local" | "api" | "mock"
-    "api_model_profile": "pp-ocrv5",
+    "ocr_mode": "api",             # 当前主程序固定使用 API 双模型链
     "api_url": "",
     "api_timeout": 30,
     "api_token": "",
     "api_layout_model_name": "",
-    "api_model_profile": "",   # 选中的官方预设 key，空 = 未选/自定义
+    "api_model_profile": "",       # UI 不再暴露模型选择；保留字段仅兼容旧配置
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -94,8 +93,7 @@ def get_config() -> dict[str, Any]:
     """兼容旧 OCR 配置接口，返回 dict。"""
     cfg = AppConfig.instance()
     return {
-        "mode": cfg.get("ocr_mode", "local"),
-        "api_model_profile": cfg.get("api_model_profile", "pp-ocrv5"),
+        "mode": cfg.get("ocr_mode", "api"),
         "api_url": cfg.get("api_url", ""),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),
@@ -114,7 +112,6 @@ def update_config(**kwargs: Any) -> None:
         "api_timeout": "api_timeout",
         "api_token": "api_token",
         "api_layout_model_name": "api_layout_model_name",
-        "api_model_profile": "api_model_profile",
     }
     for k, v in kwargs.items():
         if k in mapping:

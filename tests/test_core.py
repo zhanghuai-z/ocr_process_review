@@ -3027,6 +3027,10 @@ def test_app_config_tracks_api_model_profile():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
+    defaults = get_config()
+    assert defaults["mode"] == "api"
+    assert defaults["api_model_profile"] == ""
+
     update_config(
         mode="api",
         api_model_profile="paddleocr-vl-1.5",
@@ -3057,30 +3061,14 @@ def test_api_settings_dialog_syncs_model_and_url():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
-    update_config(
-        mode="api",
-        api_model_profile="pp-structurev3",
-        api_url="https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
-        api_token="",
-        api_timeout=30,
-        api_layout_model_name="",
-    )
+    update_config(mode="local", api_model_profile="pp-structurev3", api_url="https://example.com/root", api_token="old")
 
     dialog = ApiSettingsDialog()
-    assert dialog._api_model_combo.currentData() == "pp-structurev3"
-    assert dialog._url_edit.text() == "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing"
-
-    index = dialog._api_model_combo.findData("pp-ocrv5")
-    dialog._api_model_combo.setCurrentIndex(index)
-    assert dialog._url_edit.text() == "https://n6z9feddjca4l7b5.aistudio-app.com/ocr"
-
-    dialog._url_edit.setText("https://example.com/custom-layout")
-    dialog._sync_model_from_url()
+    assert dialog._radio_api.isChecked()
+    assert dialog._api_model_row.isHidden()
     assert dialog._api_model_combo.currentIndex() == -1
-
-    dialog._url_edit.setText("https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing")
-    dialog._sync_model_from_url()
-    assert dialog._api_model_combo.currentData() == "paddleocr-vl"
+    assert dialog._url_edit.text() == "https://example.com/root"
+    assert "自动双模型" in dialog._summary_model.text()
 
     cfg.reset_to_defaults()
 
@@ -3108,11 +3096,7 @@ def _reset_app_config_for_test(tmpdir: str) -> None:
 
 def test_api_settings_dialog_keeps_model_preset_sync():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import (
-        ApiSettingsDialog,
-        get_api_model_profile_url,
-    )
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
 
@@ -3120,12 +3104,10 @@ def test_api_settings_dialog_keeps_model_preset_sync():
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
 
-        idx = dialog._api_model_combo.findData("paddleocr-vl")
-        dialog._api_model_combo.setCurrentIndex(idx)
-
-        assert dialog._url_edit.text() == get_api_model_profile_url("paddleocr-vl")
-        assert "PaddleOCR-VL" in dialog._summary_model.text()
-        assert "官方预设" in dialog._model_note.text()
+        assert dialog._api_model_row.isHidden()
+        assert dialog._model_note.isHidden()
+        assert dialog._api_form_panel.isEnabled()
+        assert "API 双模型链" in dialog._summary_mode.text()
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -3137,36 +3119,26 @@ def test_api_settings_dialog_keeps_model_preset_sync():
 def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     from app.core.app_config import AppConfig
     from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import (
-        ApiSettingsDialog,
-        get_api_model_profile_url,
-    )
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
-        dialog._radio_api.setChecked(True)
-        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
-        dialog._sync_model_from_url()
-
-        assert dialog._api_model_combo.currentData() == "pp-ocrv5"
-        assert "/ocr" in dialog._summary_endpoint_kind.text()
-
         dialog._url_edit.setText("https://example.com/custom")
+        dialog._token_edit.setText("secret")
         dialog._sync_model_from_url()
         assert dialog._api_model_combo.currentIndex() == -1
-        assert "自定义" in dialog._summary_model.text()
+        assert "自动双模型" in dialog._summary_model.text()
 
-        dialog._url_edit.setText(get_api_model_profile_url("pp-ocrv5"))
-        dialog._sync_model_from_url()
         dialog._save_and_accept()
 
         cfg = get_config()
         assert cfg["mode"] == "api"
-        assert cfg["api_model_profile"] == "pp-ocrv5"
-        assert cfg["api_url"] == get_api_model_profile_url("pp-ocrv5")
+        assert cfg["api_model_profile"] == ""
+        assert cfg["api_url"] == "https://example.com/custom"
+        assert cfg["api_token"] == "secret"
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -4620,6 +4592,73 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
+def test_layout_worker_continues_after_single_page_failure():
+    from unittest.mock import patch
+
+    from app.core.layout_analyzer import LayoutAnalyzer, LayoutWorker
+    from app.models import BBox, Block, BlockType, Page
+
+    pages = [
+        Page(image_path="/tmp/layout-ok-1.png", width=100, height=100, page_number=1),
+        Page(image_path="/tmp/layout-bad.png", width=100, height=100, page_number=2),
+        Page(image_path="/tmp/layout-ok-2.png", width=100, height=100, page_number=3),
+    ]
+    done = []
+    emitted_pages = []
+    errors = []
+
+    def fake_analyze(_self, page):
+        if page.page_number == 2:
+            raise RuntimeError("boom")
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+
+    with patch.object(LayoutAnalyzer, "analyze", fake_analyze):
+        worker = LayoutWorker(pages)
+        worker.page_done.connect(lambda idx, total: done.append((idx, total)))
+        worker.all_done.connect(lambda result: emitted_pages.append(result))
+        worker.error.connect(lambda message: errors.append(message))
+        worker.run()
+
+    assert done == [(0, 3), (1, 3), (2, 3)]
+    assert errors == []
+    assert emitted_pages == [pages]
+    assert len(pages[0].blocks) == 1
+    assert pages[1].blocks == []
+    assert pages[1].error_message.startswith("版面分析失败：boom")
+    assert len(pages[2].blocks) == 1
+
+    print("test_layout_worker_continues_after_single_page_failure PASSED")
+
+
+def test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
+
+    success_page = Page(image_path="/tmp/layout-success.png", width=100, height=100, page_number=1)
+    success_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+    failed_page = Page(image_path="/tmp/layout-failed.png", width=100, height=100, page_number=2)
+    failed_page.error_message = "版面分析失败：boom"
+    pages = [success_page, failed_page]
+
+    controller = WorkflowController()
+    controller._project = OcrProject(name="partial-layout", pages=[])
+    controller._auto_start_ocr_after_layout = True
+    started = []
+    messages = []
+    controller.start_ocr = lambda result_pages, notify_page_callback=None: started.append(result_pages)
+    controller.status_message.connect(messages.append)
+
+    controller.on_layout_done(pages)
+
+    assert success_page.status == PageStatus.LAYOUT_DONE
+    assert failed_page.status == PageStatus.ERROR
+    assert controller.project.pages == pages
+    assert started == [pages]
+    assert any("1/2 页成功" in message and "1 页失败" in message for message in messages)
+
+    print("test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages PASSED")
+
+
 def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
 
@@ -4766,6 +4805,8 @@ if __name__ == "__main__":
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
+    test_layout_worker_continues_after_single_page_failure()
+    test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()

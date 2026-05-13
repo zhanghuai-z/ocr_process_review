@@ -233,14 +233,23 @@ class WorkflowController(QObject):
         self._project.pages = pages
 
         for page in pages:
-            page.status = PageStatus.LAYOUT_DONE
+            page.status = PageStatus.ERROR if page.error_message else PageStatus.LAYOUT_DONE
 
         self._update_max_step()
         self.layout_finished.emit(pages)
+        failed_pages = [page for page in pages if page.error_message]
+        success_count = len(pages) - len(failed_pages)
         if self._auto_start_ocr_after_layout:
-            self.status_message.emit(f"版面分析完成：{len(pages)} 页，正在启动 OCR…")
+            self.status_message.emit(
+                f"版面分析完成：{success_count}/{len(pages)} 页成功"
+                + (f"，{len(failed_pages)} 页失败" if failed_pages else "")
+                + "，正在启动 OCR…"
+            )
         else:
-            self.status_message.emit(f"版面分析完成：{len(pages)} 页")
+            self.status_message.emit(
+                f"版面分析完成：{success_count}/{len(pages)} 页成功"
+                + (f"，{len(failed_pages)} 页失败" if failed_pages else "")
+            )
 
         if self._store:
             self.save_project()
@@ -257,6 +266,9 @@ class WorkflowController(QObject):
             queued_callback = self._queued_ocr_progress_callback
             self._auto_start_ocr_after_layout = False
             self._queued_ocr_progress_callback = None
+            if self.get_recognizable_block_count() == 0:
+                self.status_message.emit("版面分析未产生可识别文字块，已停止自动 OCR")
+                return
             self.start_ocr(pages, notify_page_callback=queued_callback)
 
     def on_ocr_done(self, pages: List[Page]) -> None:

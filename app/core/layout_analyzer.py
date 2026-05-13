@@ -39,15 +39,24 @@ class LayoutWorker(QThread):
         self._pages = pages
 
     def run(self) -> None:
-        try:
-            analyzer = LayoutAnalyzer()
-            total = len(self._pages)
-            for i, page in enumerate(self._pages):
+        analyzer = LayoutAnalyzer()
+        total = len(self._pages)
+        fatal_errors: list[str] = []
+        for i, page in enumerate(self._pages):
+            try:
                 analyzer.analyze(page)
+                page.error_message = ""
+            except Exception as e:
+                logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
+                page.blocks = []
+                page.error_message = f"版面分析失败：{e}"
+                fatal_errors.append(f"第 {page.page_number} 页：{e}")
+            finally:
                 self.page_done.emit(i, total)
-            self.all_done.emit(self._pages)
-        except Exception as e:
-            self.error.emit(str(e))
+        if len(fatal_errors) == total and total > 0:
+            self.error.emit("所有页面版面分析失败：\n" + "\n".join(fatal_errors[:5]))
+            return
+        self.all_done.emit(self._pages)
 
 
 class LayoutAnalyzer:

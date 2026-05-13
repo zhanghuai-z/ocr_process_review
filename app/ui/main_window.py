@@ -312,11 +312,16 @@ class MainWindow(QMainWindow):
         self._top_nav.set_project_name(f"项目：{project.name}")
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
-        """版面分析完成，更新 UI 并自动启动 OCR。"""
+        """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
         self._layout_panel.show_analysis_result(pages)
         self._layout_panel.run_button.setEnabled(True)
-        self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
-        self._start_ocr()
+        failed = sum(1 for page in pages if page.error_message)
+        if failed:
+            self._status_bar.showMessage(
+                f"版面分析完成：{len(pages) - failed}/{len(pages)} 页成功，{failed} 页失败"
+            )
+        else:
+            self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。"""

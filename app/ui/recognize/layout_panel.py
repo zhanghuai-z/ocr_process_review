@@ -153,7 +153,13 @@ class LayoutPanel(QWidget):
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
         total_blocks = sum(len(p.blocks) for p in pages)
-        self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")
+        failed = sum(1 for page in pages if page.error_message)
+        if failed:
+            self._status_lbl.setText(
+                f"共 {len(pages)} 页，{total_blocks} 个版面块，{failed} 页分析失败"
+            )
+        else:
+            self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")
 
     # ------------------------------------------------------------------ private
 
@@ -175,6 +181,8 @@ class LayoutPanel(QWidget):
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._viewer.show_blocks(page.blocks)
+        elif page.error_message:
+            self._status_lbl.setText(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
         self._type_combo.setEnabled(False)
         self._prop_bbox.setText("")
