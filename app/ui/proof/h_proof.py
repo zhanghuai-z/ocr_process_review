@@ -162,14 +162,14 @@ class _LinePair(QFrame):
         self._active_bar.setStyleSheet("background: transparent;")
         il.addWidget(self._active_bar)
 
-        lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
-        lbl_img_hdr.setFixedWidth(LABEL_W)
-        lbl_img_hdr.setObjectName("muted")
-        lbl_img_hdr.setAlignment(
+        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
+        self._lbl_img_hdr.setFixedWidth(LABEL_W)
+        self._lbl_img_hdr.setObjectName("muted")
+        self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        il.addWidget(lbl_img_hdr)
+        self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
+        il.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -196,14 +196,14 @@ class _LinePair(QFrame):
         self._active_bar2.setStyleSheet("background: transparent;")
         tr.addWidget(self._active_bar2)
 
-        lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
-        lbl_txt_hdr.setFixedWidth(LABEL_W)
-        lbl_txt_hdr.setObjectName("muted")
-        lbl_txt_hdr.setAlignment(
+        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
+        self._lbl_txt_hdr.setFixedWidth(LABEL_W)
+        self._lbl_txt_hdr.setObjectName("muted")
+        self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        tr.addWidget(lbl_txt_hdr)
+        self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
+        tr.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
@@ -269,7 +269,7 @@ class _LinePair(QFrame):
             bg = "#f0f6ff"
         else:
             # 保存编辑内容
-            if self._editor.isVisible():
+            if not self._editor.isHidden():
                 new_text = self._editor.toPlainText()
                 if new_text != self._line.text:
                     self.text_saved.emit(self._idx, new_text)
@@ -339,7 +339,7 @@ class _LinePair(QFrame):
         cursor = self._editor.textCursor()
         start = min(cursor.selectionStart(), cursor.selectionEnd())
         end = max(cursor.selectionStart(), cursor.selectionEnd())
-        if self._editor.isVisible() and end > start:
+        if not self._editor.isHidden() and end > start:
             ox, oy = self._line_crop_origin
             for idx in range(start, min(end, len(self._line.chars))):
                 char = self._line.chars[idx]
@@ -375,6 +375,20 @@ class _LinePair(QFrame):
         """外部更新 line.text 后刷新显示。"""
         if not self._active:
             self._text_lbl.setText(self._line.text or "")
+        self._refresh_status()
+
+    def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
+        """Point this UI row at the current project Line without rebuilding it."""
+        self._block = block
+        self._line = line
+        self._page = page
+        self._line_in_page = line_in_page
+        self._lbl_img_hdr.setText(f"图像行 {line_in_page}")
+        self._lbl_txt_hdr.setText(f"识别文本 {line_in_page}")
+        self._image_loaded = False
+        self._line_crop = None
+        if self._editor.isHidden():
+            self._text_lbl.setText(line.text or "")
         self._refresh_status()
 
     @property
@@ -572,13 +586,20 @@ class HProofPanel(QWidget):
             return
         self._pages = pages
         self._refresh_page_filter()
-        loaded_line_ids = {id(line) for _block, line, _page, _li in self._items}
+        loaded_keys = {
+            self._line_key(block, line, page, li): index
+            for index, (block, line, page, li) in enumerate(self._items)
+        }
         prev_page_number = self._items[-1][2].page_number if self._items else -1
         added = False
         for page in self._filtered_pages():
             page_line_num = 1
             for block, line, li in iter_unique_page_text_lines(page):
-                if id(line) in loaded_line_ids:
+                key = self._line_key(block, line, page, li)
+                existing_index = loaded_keys.get(key)
+                if existing_index is not None:
+                    self._items[existing_index] = (block, line, page, li)
+                    self._pairs[existing_index].rebind(block, line, page, page_line_num)
                     page_line_num += 1
                     continue
                 if page.page_number != prev_page_number:
@@ -589,7 +610,7 @@ class HProofPanel(QWidget):
                     self._list_layout.insertWidget(self._list_layout.count() - 1, sep)
                     prev_page_number = page.page_number
                 self._append_pair(block, line, page, li, page_line_num)
-                loaded_line_ids.add(id(line))
+                loaded_keys[key] = len(self._items) - 1
                 page_line_num += 1
                 added = True
         if added:
@@ -688,6 +709,22 @@ class HProofPanel(QWidget):
         self._pairs.append(pair)
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
 
+    def _line_key(self, block: Block, line: Line, page: Page, line_idx: int) -> tuple:
+        bbox = line.bbox.normalize()
+        return (
+            page.display_image_path,
+            page.source_path,
+            int(page.source_page_index),
+            int(page.page_number),
+            block.block_type.value,
+            int(block.order),
+            int(line_idx),
+            int(bbox.x),
+            int(bbox.y),
+            int(bbox.w),
+            int(bbox.h),
+        )
+
     def reset(self) -> None:
         self.load_pages([])
         self._progress_lbl.setText("0 / 0")
@@ -763,7 +800,7 @@ class HProofPanel(QWidget):
         if not self._pairs or self._current_idx >= len(self._pairs):
             return
         pair = self._pairs[self._current_idx]
-        if pair._editor.isVisible():
+        if not pair._editor.isHidden():
             new_text = pair._editor.toPlainText()
             _, line, page, _ = self._items[self._current_idx]
             if new_text != line.text:

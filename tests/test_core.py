@@ -4772,6 +4772,47 @@ def test_hproof_merge_pages_preserves_active_editor_text():
     print("test_hproof_merge_pages_preserves_active_editor_text PASSED")
 
 
+def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    old_line = Line(text="旧对象", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_page = Page(
+        image_path="/tmp/hproof-rebind.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    old_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[old_line])]
+    new_line = Line(text="新对象", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    new_page = Page(
+        image_path="/tmp/hproof-rebind.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    new_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[new_line])]
+
+    panel = HProofPanel()
+    panel.load_pages([old_page])
+    panel._pairs[0]._editor.setPlainText("用户未保存")
+
+    panel.merge_pages([new_page])
+    panel._save_current(silent=True)
+
+    assert len(panel._pairs) == 1
+    assert panel._items[0][1] is new_line
+    assert panel._pairs[0].line is new_line
+    assert new_line.text == "用户未保存"
+    assert old_line.text == "旧对象"
+    panel.close()
+
+    print("test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans PASSED")
+
+
 def test_vproof_merge_pages_preserves_current_page_text():
     from app.models import BBox, Block, BlockType, Char, Line, Page
     from app.ui.proof.v_proof import VProofPanel
@@ -4982,6 +5023,7 @@ if __name__ == "__main__":
     test_proof_line_iterator_includes_caption_and_equation_lines()
     test_hproof_page_filter_keeps_pages_separate()
     test_hproof_merge_pages_preserves_active_editor_text()
+    test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans()
     test_vproof_merge_pages_preserves_current_page_text()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
