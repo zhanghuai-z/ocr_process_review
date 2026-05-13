@@ -73,6 +73,8 @@ class ZoneSpec:
     left_inset_ratio: float
     right_inset_ratio: float
     y_inset_ratio: float = 0.15
+    direct_left_inset_ratio: float | None = None
+    direct_right_inset_ratio: float | None = None
     tol_ratio: float = 0.08
     min_tol: int = 3
     y_pad_ratio: float = 0.15
@@ -107,6 +109,7 @@ class ZoneEval:
     stroke_bound: Box
     blue_expanded_sides: tuple[str, ...]
     strong: Box
+    extension: Box
     rescue_domain: tuple[float, float]
     components: tuple[Component, ...]
     component_labels: tuple[str, ...]
@@ -131,6 +134,7 @@ class ZoneEval:
             "stroke_bound": self.stroke_bound.to_list(),
             "blue_expanded_sides": list(self.blue_expanded_sides),
             "strong": self.strong.to_list(),
+            "extension": self.extension.to_list(),
             "rescue_domain": [round(self.rescue_domain[0], 2), round(self.rescue_domain[1], 2)],
             "counts": dict(self.counts),
             "ink_bbox": self.ink.to_list() if self.ink else None,
@@ -262,14 +266,22 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
         min(height, source.y2 + y_pad),
     )
     hard_bound = initial_hard_bound
-    strong = Box(
+    extension = Box(
         source.x1 + max(0, int(source_w * spec.left_inset_ratio)),
         source.y1 + max(1, int(source_h * spec.y_inset_ratio)),
         source.x2 - max(0, int(source_w * spec.right_inset_ratio)),
         source.y2 - max(1, int(source_h * spec.y_inset_ratio)),
     )
+    direct_left = spec.direct_left_inset_ratio if spec.direct_left_inset_ratio is not None else spec.left_inset_ratio
+    direct_right = spec.direct_right_inset_ratio if spec.direct_right_inset_ratio is not None else spec.right_inset_ratio
+    strong = Box(
+        source.x1 + max(0, int(source_w * direct_left)),
+        source.y1 + max(1, int(source_h * spec.y_inset_ratio)),
+        source.x2 - max(0, int(source_w * direct_right)),
+        source.y2 - max(1, int(source_h * spec.y_inset_ratio)),
+    )
     if strong.x1 >= strong.x2 or strong.y1 >= strong.y2:
-        return ZoneEval(token, spec, initial_hard_bound, hard_bound, hard_bound, (), strong, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
+        return ZoneEval(token, spec, initial_hard_bound, hard_bound, hard_bound, (), strong, extension, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
 
     def build_stroke_bound(bound: Box) -> Box:
         if spec.stroke_extension_ratio <= 0:
@@ -328,7 +340,8 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
             continue
         y_overlap = max(0, min(component.box.y2, source.y2) - max(component.box.y1, source.y1))
         if (
-            rescue_lo <= component.cx <= rescue_hi
+            _intersects(component.box, extension)
+            and rescue_lo <= component.cx <= rescue_hi
             and y_overlap >= source_h * spec.weak_y_overlap_ratio
             and component.area >= weak_area_threshold
         ):
@@ -376,6 +389,7 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
         stroke_bound=stroke_bound,
         blue_expanded_sides=blue_sides,
         strong=strong,
+        extension=extension,
         rescue_domain=(rescue_lo, rescue_hi),
         components=components,
         component_labels=tuple(labels),
@@ -481,6 +495,8 @@ def _draw_zone_panel(
     right_anti = Box(zone.strong.x2, source.y1, source.x2, source.y2)
     _draw_translucent(panel, rect(left_anti), (255, 80, 80, 65))
     _draw_translucent(panel, rect(right_anti), (255, 80, 80, 65))
+    if zone.extension != zone.strong:
+        _draw_translucent(panel, rect(zone.extension), (120, 230, 120, 40))
     _draw_translucent(panel, rect(zone.strong), (0, 190, 80, 70))
 
     rescue_box = Box(int(round(zone.rescue_domain[0])), source.y1, int(round(zone.rescue_domain[1])), source.y2)
@@ -490,8 +506,11 @@ def _draw_zone_panel(
     draw.rectangle(rect(zone.stroke_bound), outline=(150, 70, 210), width=2)
     draw.rectangle(rect(zone.hard_bound), outline=(60, 120, 255), width=2)
     draw.rectangle(rect(source), outline=(0, 0, 0), width=2)
+    if zone.extension != zone.strong:
+        draw.rectangle(rect(zone.extension), outline=(80, 190, 80), width=1)
     draw.rectangle(rect(zone.strong), outline=(0, 150, 60), width=2)
     draw.rectangle(rect(rescue_box), outline=(230, 150, 0), width=2)
+    draw.rectangle(rect(zone.crop), outline=(245, 210, 0), width=2)
     own_box = Box(int(round(zone.token.ownership[0])), source.y1, int(round(zone.token.ownership[1])), source.y2)
     draw.rectangle(rect(own_box), outline=(0, 180, 210), width=1)
 
@@ -603,7 +622,7 @@ def _make_scope_comparison(
     draw.text((16, 12), f"Radiation scope comparison on real PP-OCRv5 word boxes - page {page_id}", fill=(0, 0, 0), font=latin)
     draw.text(
         (16, 38),
-        "green=strong, red=anti/weak, orange=rescue, purple=stroke-search, blue=initial hard_bound only",
+        "dark green=keep seed, light green=left extension candidate, red=anti, yellow=final crop",
         fill=(40, 40, 40),
         font=latin_small,
     )
@@ -721,9 +740,9 @@ def _make_page_report(
         f"radiation zone comparison - page {page_id}",
         "=" * 72,
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
-        "adjusted: left strong extends 10% (left red anti shrinks 10%->0%), right strong shrinks 5% (right red anti grows 20%->25%)",
+        "adjusted: dark-green keep seed keeps right anti stricter (25%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
-        "strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.",
+        "strong preservation: any component intersecting the dark-green keep seed is kept whole before ownership clipping; red anti does not cut its stroke.",
         "blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
@@ -747,7 +766,7 @@ def _make_page_report(
         [
             "",
             "interpretation:",
-            "- The requested adjustment removes the left anti band for the adjusted profile and keeps the right side stricter.",
+            "- The requested adjustment uses left extension as a candidate rescue/search area, while direct keep still comes from the dark-green subject seed.",
             "- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.",
             "- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.",
             "- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.",
@@ -766,7 +785,7 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
     draw.text((24, 20), "Page-level radiation scope sensitivity overview", fill=(0, 0, 0), font=title_font)
     draw.text(
         (24, 54),
-        "red=anti/weak; orange=rescue; purple=stroke-search. Adjusted blue expands 5% when touched; strong-hit strokes complete beyond it.",
+        "dark green=keep seed; light green=left candidate extension; red=anti; yellow=final crop.",
         fill=(80, 0, 0),
         font=text_font,
     )
@@ -812,8 +831,8 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "=" * 72,
         "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
-        "Adjusted profile: left strong extends 10% (left anti shrinks 10%->0%); right strong shrinks 5% (right anti grows 20%->25%).",
-        "Strong preservation: a CC that intersects green strong is retained whole; red anti only filters fully-outside-strong CCs, then ownership may clip the final union.",
+        "Adjusted profile: dark-green keep seed keeps right anti stricter at 25%; light-green left extension reaches 0% but only rescues candidates, not direct crumbs.",
+        "Strong preservation: a CC that intersects the dark-green keep seed is retained whole; red anti only filters fully-outside-seed CCs, then ownership may clip the final union.",
         "Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion.",
         "",
         f"pages evaluated: {len(page_summaries)}",
@@ -860,6 +879,8 @@ def run_page_comparison(
         name="adjusted scope",
         left_inset_ratio=0.00,
         right_inset_ratio=0.25,
+        direct_left_inset_ratio=0.10,
+        direct_right_inset_ratio=0.25,
         stroke_extension_ratio=0.25,
         adaptive_hard_bound_ratio=0.05,
         rescue_left_guard_ratio=0.00,
@@ -958,7 +979,8 @@ def run_batch_comparison(
     payload = {
         "pages": page_payloads,
         "legend": {
-            "green": "strong direct-keep radiation zone",
+            "dark_green": "subject keep seed; direct strong-hit components are retained whole",
+            "light_green": "left extension candidate area; not a direct keep zone",
             "red": "anti/weak edge zone",
             "orange": "weak-zone rescue domain, not anti-radiation",
             "cyan": "ownership interval",

@@ -294,14 +294,15 @@ python app/experiments/run_radiation_zone_comparison.py
 
 颜色语义必须固定，避免误读：
 
-- **绿色**：强辐射区，component 与该区相交就直接保留。
+- **深绿色**：主题 keep seed，component 与该区相交才直接保留。
+- **浅绿色**：左侧 extension candidate，只能走弱救回条件，不能直接保留独立碎片。
 - **红色**：弱/反辐射边缘区，即 strong 之外的 source 边缘带。
 - **橙色**：弱区救回作用域，不是反辐射区；它表示落在弱区的 component 还允许被面积/y overlap/ownership 条件救回的范围。
 - **青色**：ownership 区间。
 - **蓝色**：原始 hard_bound / 诊断框，不再是最终笔画限制。
 - **紫色**：stroke-search 实际连通域提取范围，用于让强区命中的笔画能在蓝框外完整结束。
 
-强辐射区的保留规则必须明确：**只要一个 component 与绿色强辐射区相交，就保留整个 component bbox**。红色反辐射区不会切断这个 component 的笔画；红区只过滤“完全没有碰到强区”的孤立 component。蓝色 hard_bound 也不能截断笔画，本轮改为在更大的紫色 stroke-search 范围内提取连通域，因此强区命中的笔画可以突破蓝框完整结束。最终成品字仍会在横向按 ownership 裁边，这是防止跨入邻字主体的最后边界，不是反辐射裁笔画。
+强辐射区的保留规则必须明确：**只要一个 component 与深绿色 keep seed 相交，就保留整个 component bbox**。红色反辐射区不会切断这个 component 的笔画；红区只过滤“完全没有碰到 keep seed”的孤立 component。浅绿色左扩区不能直接吃字，只能作为候选救回区，仍需满足 ownership、y overlap、面积阈值。蓝色 hard_bound 也不能截断主题笔画，本轮改为在更大的紫色 stroke-search 范围内提取连通域，因此强区命中的笔画可以突破蓝框完整结束。最终成品字仍会在横向按 ownership 裁边，这是防止跨入邻字主体的最后边界，不是反辐射裁笔画。
 
 当前 v11 参数语义：
 
@@ -314,7 +315,8 @@ rescue_right_anti_guard = 5%
 本轮按要求绘制的调整 profile：
 
 ```text
-strong_left_inset = 0%    # 左强辐射区向左延长 10%，左反辐射区 10% -> 0%
+direct_left_inset = 10%   # 深绿色 keep seed：仍用 v11 左边界，不直接吃左侧碎片
+extension_left_inset = 0% # 浅绿色候选区：左侧延长 10%，只允许弱救回
 strong_right_inset = 25%  # 右强辐射区向左缩减 5%
 adaptive_hard_bound = 5%  # 主题 CC 触碰蓝框时，同方向扩张蓝框；强区 10% : 蓝框 5% = 2:1
 stroke_search_extension = 25%  # 蓝框外继续追连通域完整结束
@@ -322,7 +324,7 @@ rescue_left_anti_guard = 0%
 rescue_right_anti_guard = 10%  # 右侧救回 guard 随右反辐射区延长 5%
 ```
 
-这组调整的作用是：左侧更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5345 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，1040 个 token 的最终成品字 crop 实际变化，1764 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
+这组调整的作用是：左侧更宽容但不直接吃碎片，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 5003 个 token 对有效 scope/crop/蓝框扩张 profile 敏感，947 个 token 的最终成品字 crop 实际变化，1485 个 token 出现笔画/成品字突破蓝色 hard_bound 的情况；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 作用明显，必须继续按 Q1/Q2 风险样本分级启用，不应全局替换默认 profile。
 
 建议把后续参数做成质量分级 profile：
 

@@ -1,29 +1,29 @@
 radiation zone comparison - page 120166
 ========================================================================
 current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%
-adjusted: left strong extends 10% (left red anti shrinks 10%->0%), right strong shrinks 5% (right red anti grows 20%->25%)
+adjusted: dark-green keep seed keeps right anti stricter (25%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs
 orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.
-strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.
+strong preservation: any component intersecting the dark-green keep seed is kept whole before ownership clipping; red anti does not cut its stroke.
 blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion.
 
 cjk tokens evaluated: 874
-effective parameter-sensitive tokens: 267
-final crop changed tokens: 55
-break-blue stroke tokens: 54
+effective parameter-sensitive tokens: 258
+final crop changed tokens: 51
+break-blue stroke tokens: 50
 no strong cc current/adjusted: 0/0
 
 selected samples:
-- L25#020 份: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 2, 'weak_rescued': 1}, adjusted={'anti_dropped': 6, 'strong': 2}
 - L07#031 是: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 4}, adjusted={'strong': 1, 'anti_dropped': 1}
 - L24#014 产: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 1, 'anti_dropped': 2}
 - L27#024 份: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 2, 'anti_dropped': 1}, adjusted={'anti_dropped': 4, 'strong': 2}
-- L08#011 性: Q2 param-sensitive, crop_changed=True, break_blue=False, current={'anti_dropped': 4, 'strong': 1}, adjusted={'anti_dropped': 5, 'strong': 2}
 - L21#028 具: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 1}, adjusted={'strong': 1, 'anti_dropped': 2}
 - L24#009 人: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 1}, adjusted={'strong': 1, 'anti_dropped': 1}
 - L34#035 定: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'strong': 1, 'anti_dropped': 1}, adjusted={'strong': 1, 'anti_dropped': 2}
+- L34#008 消: Q2 param-sensitive, crop_changed=True, break_blue=False, current={'strong': 3, 'anti_dropped': 3}, adjusted={'anti_dropped': 4, 'strong': 2}
+- L24#027 运: Q2 param-sensitive, crop_changed=True, break_blue=False, current={'strong': 4, 'anti_dropped': 1}, adjusted={'anti_dropped': 4, 'strong': 3}
 
 interpretation:
-- The requested adjustment removes the left anti band for the adjusted profile and keeps the right side stricter.
+- The requested adjustment uses left extension as a candidate rescue/search area, while direct keep still comes from the dark-green subject seed.
 - This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.
 - It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.
 - Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.
