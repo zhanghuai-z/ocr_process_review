@@ -24,6 +24,7 @@ from app.services.ocr_pipeline import OcrPipeline, OcrProgress
 from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
+PARALLEL_PROOF_PAGE_KEY_ATTR = "_parallel_proof_page_key"
 
 # 步骤索引（与 stacked widget 顺序一致）
 STEP_IMPORT = 0
@@ -365,6 +366,10 @@ class WorkflowController(QObject):
 
     def _clone_pages_for_parallel_proof(self, pages: List[Page]) -> List[Page]:
         proof_pages = copy.deepcopy(pages)
+        for index, (source_page, proof_page) in enumerate(zip(pages, proof_pages)):
+            page_key = self._make_parallel_page_key(source_page, index)
+            setattr(source_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
+            setattr(proof_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
         for page in proof_pages:
             page.blocks = [
                 Block(
@@ -389,13 +394,54 @@ class WorkflowController(QObject):
             for line in block.lines
         ]
 
+    def _make_parallel_page_key(self, page: Page, index: int) -> tuple[int, str, str, int, int]:
+        return (
+            int(index),
+            page.display_image_path,
+            page.source_path,
+            int(page.source_page_index),
+            int(page.page_number),
+        )
+
+    def _parallel_page_key(self, page: Page) -> tuple[int, str, str, int, int]:
+        key = getattr(page, PARALLEL_PROOF_PAGE_KEY_ATTR, None)
+        if key is not None:
+            return key
+        return self._make_parallel_page_key(page, -1)
+
     def _finish_parallel_proof_ocr(self) -> None:
         if self._pending_layout_pages is None or self._pending_proof_pages is None:
             return
         layout_pages = self._pending_layout_pages
         proof_pages = self._pending_proof_pages
         assigner = OcrPipeline(engine=object())
-        for layout_page, proof_page in zip(layout_pages, proof_pages):
+        proof_by_key: dict[tuple[int, str, str, int, int], Page] = {}
+        duplicate_keys: set[tuple[int, str, str, int, int]] = set()
+        for page in proof_pages:
+            key = self._parallel_page_key(page)
+            if key in proof_by_key:
+                duplicate_keys.add(key)
+                logger.warning(
+                    "Parallel proof OCR duplicate page identity; skipping ambiguous proof merge for page=%s",
+                    page.display_image_path,
+                )
+                continue
+            proof_by_key[key] = page
+        for layout_page in layout_pages:
+            layout_key = self._parallel_page_key(layout_page)
+            if layout_key in duplicate_keys:
+                logger.warning(
+                    "Parallel proof OCR ambiguous page identity; skipping proof merge for page=%s",
+                    layout_page.display_image_path,
+                )
+                continue
+            proof_page = proof_by_key.get(layout_key)
+            if proof_page is None:
+                logger.warning(
+                    "Parallel proof OCR missing page result; skipping proof merge for page=%s",
+                    layout_page.display_image_path,
+                )
+                continue
             assigner.assign_page_ocr_lines_to_blocks(
                 layout_page,
                 self._collect_proof_lines(proof_page),

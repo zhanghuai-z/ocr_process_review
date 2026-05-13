@@ -2017,6 +2017,100 @@ def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
     print("test_workflow_controller_starts_parallel_proof_ocr_with_layout PASSED")
 
 
+def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment():
+    import app.controllers.workflow_controller as workflow_module
+    import app.core.layout_analyzer as layout_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeLayoutWorker:
+        def __init__(self, pages):
+            self.page_done = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            for page in self._pages:
+                page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, page.width, page.height), order=0)]
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    class FakeProofWorker:
+        def __init__(self, pipeline, pages, parent=None):
+            self.progress_update = DummySignal()
+            self.progress_state = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            self._pages[0].blocks[0].lines = [
+                Line(text="第一页", confidence=0.96, bbox=BBox(10, 10, 20, 20))
+            ]
+            self._pages[2].blocks[0].lines = [
+                Line(text="第三页", confidence=0.97, bbox=BBox(30, 30, 20, 20))
+            ]
+            self.all_done.emit([self._pages[0], self._pages[2]])
+            self._running = False
+
+    class FakePageOcrEngine:
+        prefer_page_ocr = True
+
+    original_layout_worker = layout_module.LayoutWorker
+    original_ocr_worker = workflow_module.OcrPipelineWorker
+    original_create_engine = workflow_module.create_engine
+    layout_module.LayoutWorker = FakeLayoutWorker
+    workflow_module.OcrPipelineWorker = FakeProofWorker
+    workflow_module.create_engine = lambda: FakePageOcrEngine()
+
+    try:
+        controller = workflow_module.WorkflowController()
+        pages = [
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+            Page(image_path="/tmp/parallel-proof-same.png", width=120, height=80, page_number=1),
+        ]
+        controller._project = OcrProject(name="ParallelProofSkip", pages=pages)
+        finished = []
+        controller.ocr_finished.connect(finished.append)
+
+        ok = controller.start_layout_analysis(pages)
+
+        assert ok is True
+        assert finished
+        out_pages = finished[0]
+        assert out_pages[0].blocks[0].lines[0].text == "第一页"
+        assert out_pages[1].blocks[0].lines == []
+        assert out_pages[2].blocks[0].lines[0].text == "第三页"
+    finally:
+        layout_module.LayoutWorker = original_layout_worker
+        workflow_module.OcrPipelineWorker = original_ocr_worker
+        workflow_module.create_engine = original_create_engine
+
+    print("test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment PASSED")
+
+
 def test_workflow_controller_emits_ocr_progress_and_navigation():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, OcrProject, Page
@@ -4651,6 +4745,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()
+    test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
     test_workflow_controller_emits_ocr_progress_and_navigation()
     test_workflow_controller_normalizes_loaded_project_geometry()
     test_export_service()
