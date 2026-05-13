@@ -178,6 +178,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = WorkflowController()
         self._current_step: int = STEP_IMPORT
+        self._proof_loaded_line_count: int = 0
 
         self.setWindowTitle("OCR 后处理")
         _screen = QApplication.primaryScreen().availableGeometry()
@@ -249,8 +250,10 @@ class MainWindow(QMainWindow):
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
+        self._controller.ocr_progress.connect(self._on_ocr_progress)
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._status_bar.showMessage)
+        self._layout_panel.geometry_changed.connect(self._controller.save_project)
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
@@ -327,7 +330,25 @@ class MainWindow(QMainWindow):
         """OCR 完成（由 controller 发出，业务事件）。"""
         self._hproof_panel.load_pages(pages)
         self._vproof_panel.load_pages(pages)
+        self._proof_loaded_line_count = sum(page.total_lines for page in pages)
         self._go_to_step(STEP_HPROOF)
+
+    def _on_ocr_progress(self, progress) -> None:
+        if progress.total_pages > 0:
+            current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
+            self._ocr_placeholder.update_progress(current, progress.total_pages)
+        self._refresh_proof_panels_if_available()
+
+    def _refresh_proof_panels_if_available(self) -> None:
+        project = self._controller.project
+        if not project or not project.pages:
+            return
+        line_count = sum(page.total_lines for page in project.pages)
+        if line_count <= 0 or line_count == self._proof_loaded_line_count:
+            return
+        self._hproof_panel.load_pages(project.pages)
+        self._vproof_panel.load_pages(project.pages)
+        self._proof_loaded_line_count = line_count
 
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
@@ -348,6 +369,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if self._controller.new_project(name, path):
+            self._proof_loaded_line_count = 0
             self._go_to_step(STEP_IMPORT)
             self._import_panel.reset()
 
@@ -366,6 +388,9 @@ class MainWindow(QMainWindow):
                 if project.ocr_completed:
                     self._hproof_panel.load_pages(project.pages)
                     self._vproof_panel.load_pages(project.pages)
+                    self._proof_loaded_line_count = sum(page.total_lines for page in project.pages)
+                else:
+                    self._proof_loaded_line_count = 0
             self._go_to_step(self._controller.get_open_step())
 
     def _save_project(self) -> None:
@@ -400,6 +425,7 @@ class MainWindow(QMainWindow):
                 return
 
             self._controller.on_images_ready(result.pages)
+            self._proof_loaded_line_count = 0
 
             if result.failed:
                 fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])

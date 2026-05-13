@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
 )
 
-from app.models import BBox, Block, BlockType
+from app.models import BBox, Block, BlockType, Char
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
@@ -136,7 +136,7 @@ class _ResizeHandle(QGraphicsRectItem):
         for h in bi._handles:
             h.update_position()
         # 同步 block
-        if bi._block is not None:
+        if bi._block is not None and hasattr(bi._block, "bbox"):
             bi._block.bbox = BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
             bi.signals.moved.emit(bi._block)
         event.accept()
@@ -167,7 +167,7 @@ class BBoxItem(QGraphicsRectItem):
         self.setPen(pen)
         self._label = label
         self._color = color
-        self._block: Optional[Block] = None
+        self._block: Optional[object] = None
         self.signals = _BBoxSignals()
         self._handles: List[_ResizeHandle] = []
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -181,7 +181,7 @@ class BBoxItem(QGraphicsRectItem):
             h.update_position()
             self._handles.append(h)
 
-    def set_block(self, block: Block) -> None:
+    def set_block(self, block: object) -> None:
         self._block = block
 
     def set_editable(self, editable: bool) -> None:
@@ -206,10 +206,16 @@ class BBoxItem(QGraphicsRectItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._update_tooltip()
-            if self._block is not None:
-                r = self.sceneBoundingRect()
+            if self._block is not None and hasattr(self._block, "bbox"):
+                pos = self.scenePos()
+                r = self.rect()
                 bb = self._block.bbox
-                self._block.bbox = BBox(int(r.x()), int(r.y()), bb.w, bb.h)
+                self._block.bbox = BBox(
+                    int(pos.x() + r.x()),
+                    int(pos.y() + r.y()),
+                    bb.w,
+                    bb.h,
+                )
                 self.signals.moved.emit(self._block)
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # 选中时显示手柄，取消选中时隐藏
@@ -234,6 +240,7 @@ class ImageViewer(QGraphicsView):
     block_moved    = Signal(object)  # Block
     block_created  = Signal(object)  # BBox — 右键拖拽画出新矩形
     block_deleted  = Signal(object)  # Block — Delete 键删除选中框
+    char_bbox_moved = Signal(object)  # Char
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -242,6 +249,7 @@ class ImageViewer(QGraphicsView):
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
+        self._char_items: List[Tuple[BBoxItem, Char]] = []
         self._highlight_item = None  # highlight_bbox 使用
 
         # 右键拖拽画框状态
@@ -262,6 +270,7 @@ class ImageViewer(QGraphicsView):
     def set_image(self, image_path: str) -> None:
         self._scene.clear()
         self._block_items.clear()
+        self._char_items.clear()
         pixmap = _pixmap_from_path(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -271,6 +280,7 @@ class ImageViewer(QGraphicsView):
     def set_image_from_qimage(self, qimage: QImage) -> None:
         self._scene.clear()
         self._block_items.clear()
+        self._char_items.clear()
         pixmap = QPixmap.fromImage(qimage)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -292,6 +302,26 @@ class ImageViewer(QGraphicsView):
             item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
+
+    def show_char_boxes(self, chars: List[Char]) -> None:
+        """Overlay editable OCR char/token boxes on top of layout blocks."""
+        for item, _ in self._char_items:
+            if item.scene() is self._scene:
+                self._scene.removeItem(item)
+        self._char_items.clear()
+        color = QColor("#ff8c00")
+        for char in chars:
+            if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
+                continue
+            bb = char.bbox
+            item = BBoxItem(QRectF(0, 0, bb.w, bb.h), color, f"[char] {char.char or char.token_text}")
+            item.setPos(bb.x, bb.y)
+            item.set_block(char)
+            item.set_editable(True)
+            item.setZValue(8)
+            item.signals.moved.connect(self.char_bbox_moved.emit)
+            self._scene.addItem(item)
+            self._char_items.append((item, char))
 
     def delete_selected(self) -> None:
         """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
@@ -421,3 +451,6 @@ class ImageViewer(QGraphicsView):
         for item, _ in self._block_items:
             self._scene.removeItem(item)
         self._block_items.clear()
+        for item, _ in self._char_items:
+            self._scene.removeItem(item)
+        self._char_items.clear()

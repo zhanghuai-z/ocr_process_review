@@ -34,12 +34,13 @@ from PySide6.QtGui import (
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from app.models import Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
+from app.core.char_bbox_utils import refine_line_bbox
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -134,6 +135,8 @@ class _LinePair(QFrame):
         self._cache        = cache
         self._active       = False
         self._image_loaded = False
+        self._line_crop = None
+        self._line_crop_origin: tuple[int, int] = (0, 0)
 
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -229,6 +232,7 @@ class _LinePair(QFrame):
         self._editor.flag_requested.connect(self.flag_req)
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
+        self._editor.selectionChanged.connect(self._render_line_image)
         tr.addWidget(self._editor, 1)
 
         # 状态标签
@@ -304,19 +308,53 @@ class _LinePair(QFrame):
         if bb.w <= 0 or bb.h <= 0:
             self._img_lbl.setText("—")
             return
-        # 使用 PageImageCache.get_line_crop 获取行切图（已处理越界情况）
-        crop = self._cache.get_line_crop(
-            self._page.display_image_path, bb, pad_y=ROW_PAD_Y
-        )
-        if crop is None:
+        image = self._cache.get_page_image(self._page.display_image_path)
+        if image is None:
             self._img_lbl.setText("（无图像）")
             return
+        refined = refine_line_bbox(bb, image)
+        H, W = image.shape[:2]
+        x1 = max(0, refined.x)
+        y1 = max(0, refined.y - ROW_PAD_Y)
+        x2 = min(W, refined.x2)
+        y2 = min(H, refined.y2 + ROW_PAD_Y)
+        if x2 <= x1 or y2 <= y1:
+            self._img_lbl.setText("（行框异常）")
+            return
+        crop = image[y1:y2, x1:x2].copy()
+        self._line_crop = crop
+        self._line_crop_origin = (x1, y1)
         h, w = crop.shape[:2]
         # 极小 bbox（OCR 出错时高/宽 < 5px）放大后会产生伪影/碎裂，
         # 而非真实行图。直接显示占位避免误导用户。
         if h < 5 or w < 5:
             self._img_lbl.setText("（行框异常）")
             return
+        self._render_line_image()
+
+    def _render_line_image(self) -> None:
+        if self._line_crop is None:
+            return
+        crop = self._line_crop.copy()
+        cursor = self._editor.textCursor()
+        start = min(cursor.selectionStart(), cursor.selectionEnd())
+        end = max(cursor.selectionStart(), cursor.selectionEnd())
+        if self._editor.isVisible() and end > start:
+            ox, oy = self._line_crop_origin
+            for idx in range(start, min(end, len(self._line.chars))):
+                char = self._line.chars[idx]
+                if char.bbox is None:
+                    continue
+                x1 = max(0, char.bbox.x - ox)
+                y1 = max(0, char.bbox.y - oy)
+                x2 = min(crop.shape[1] - 1, char.bbox.x2 - ox)
+                y2 = min(crop.shape[0] - 1, char.bbox.y2 - oy)
+                if x2 > x1 and y2 > y1:
+                    cv2.rectangle(crop, (x1, y1), (x2, y2), (0, 128, 255), 2)
+                    overlay = crop.copy()
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 128, 255), -1)
+                    crop = cv2.addWeighted(overlay, 0.18, crop, 0.82, 0)
+        h, w = crop.shape[:2]
         # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）。
         # 严格保持宽高比：先按高度缩放；若超宽再按宽度缩放重算高度。
         scale = IMAGE_ROW_H / h
@@ -397,9 +435,11 @@ class HProofPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._pages: List[Page] = []
         self._items: List[Tuple[Block, Line, Page, int]] = []
         self._pairs: List[_LinePair] = []
         self._current_idx: int = 0
+        self._filter_updating = False
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
         self._build_ui()
@@ -432,6 +472,11 @@ class HProofPanel(QWidget):
             tl.addWidget(btn)
 
         tl.addStretch()
+
+        self._page_combo = QComboBox()
+        self._page_combo.setMinimumWidth(120)
+        self._page_combo.currentIndexChanged.connect(self._on_page_filter_changed)
+        tl.addWidget(self._page_combo)
 
         self._progress_lbl = QLabel("0 / 0")
         self._progress_lbl.setObjectName("muted")
@@ -516,6 +561,39 @@ class HProofPanel(QWidget):
     # ── 公共 API ───────────────────────────────────────────────
 
     def load_pages(self, pages: List[Page]) -> None:
+        self._pages = pages
+        self._refresh_page_filter()
+        self._render_pages(self._filtered_pages())
+
+    def _refresh_page_filter(self) -> None:
+        current = self._page_combo.currentData()
+        page_numbers = [
+            page.page_number
+            for page in self._pages
+            if any(True for _ in iter_unique_page_text_lines(page))
+        ]
+        self._filter_updating = True
+        self._page_combo.clear()
+        self._page_combo.addItem("全部页面", None)
+        for page_number in page_numbers:
+            self._page_combo.addItem(f"第 {page_number} 页", page_number)
+        if current in page_numbers:
+            index = self._page_combo.findData(current)
+            self._page_combo.setCurrentIndex(index)
+        self._filter_updating = False
+
+    def _filtered_pages(self) -> List[Page]:
+        page_number = self._page_combo.currentData()
+        if page_number is None:
+            return self._pages
+        return [page for page in self._pages if page.page_number == page_number]
+
+    def _on_page_filter_changed(self) -> None:
+        if self._filter_updating:
+            return
+        self._render_pages(self._filtered_pages())
+
+    def _render_pages(self, pages: List[Page]) -> None:
         self._items.clear()
         self._pairs.clear()
 
@@ -537,9 +615,9 @@ class HProofPanel(QWidget):
         has_data = any(True for page in pages for _ in iter_unique_page_text_lines(page))
         self._empty_lbl.setVisible(not has_data)
 
-        line_num = 1  # 全局行号
         prev_page_number: int = -1
         for page in pages:
+            page_line_num = 1
             for block, line, li in iter_unique_page_text_lines(page):
                 # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
                 if page.page_number != prev_page_number:
@@ -553,7 +631,7 @@ class HProofPanel(QWidget):
                     prev_page_number = page.page_number
                 self._items.append((block, line, page, li))
                 pair = _LinePair(
-                    len(self._pairs), block, line, page, line_num,
+                    len(self._pairs), block, line, page, page_line_num,
                     self._cache,
                 )
                 pair.clicked.connect(self._on_pair_clicked)
@@ -567,7 +645,7 @@ class HProofPanel(QWidget):
                 self._list_layout.insertWidget(
                     self._list_layout.count() - 1, pair
                 )
-                line_num += 1
+                page_line_num += 1
 
         self._current_idx = 0
         self._update_stats()

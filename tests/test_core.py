@@ -4659,6 +4659,113 @@ def test_workflow_controller_marks_partial_layout_failures_without_blocking_succ
     print("test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages PASSED")
 
 
+def test_workflow_controller_enables_proof_steps_after_first_ocr_page():
+    from app.controllers.workflow_controller import STEP_OCR, STEP_VPROOF, WorkflowController
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrProgress
+
+    page1 = Page(image_path="/tmp/ocr-page-1.png", width=100, height=100, page_number=1)
+    page1.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 0, 80, 30),
+            lines=[Line(text="第一页", confidence=0.9, bbox=BBox(1, 2, 60, 20))],
+        )
+    ]
+    page2 = Page(image_path="/tmp/ocr-page-2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 30))]
+
+    controller = WorkflowController()
+    controller._project = OcrProject(name="partial-ocr", pages=[page1, page2])
+    controller._max_step = STEP_OCR
+    enabled = []
+    controller.step_enabled_changed.connect(enabled.append)
+
+    controller._on_ocr_progress(OcrProgress(total_pages=2, completed_pages=1))
+
+    assert enabled[-1] == STEP_VPROOF
+    assert controller.can_enter_step(STEP_VPROOF)
+
+    print("test_workflow_controller_enables_proof_steps_after_first_ocr_page PASSED")
+
+
+def test_proof_line_iterator_includes_caption_and_equation_lines():
+    from app.core.proof_line_utils import iter_unique_page_text_lines
+    from app.models import BBox, Block, BlockType, Line, Page
+
+    page = Page(image_path="/tmp/proof-lines.png", width=100, height=100)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+            Line(text="正文", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+        ]),
+        Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 20, 80, 20), lines=[
+            Line(text="图注", confidence=0.9, bbox=BBox(1, 21, 20, 10)),
+        ]),
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 40, 80, 20), lines=[
+            Line(text="E=mc2", confidence=0.9, bbox=BBox(1, 41, 30, 10)),
+        ]),
+        Block(block_type=BlockType.FIGURE, bbox=BBox(0, 60, 80, 20), lines=[
+            Line(text="图片不校", confidence=0.9, bbox=BBox(1, 61, 30, 10)),
+        ]),
+    ]
+
+    texts = [line.text for _block, line, _idx in iter_unique_page_text_lines(page)]
+
+    assert texts == ["正文", "图注", "E=mc2"]
+
+    print("test_proof_line_iterator_includes_caption_and_equation_lines PASSED")
+
+
+def test_hproof_page_filter_keeps_pages_separate():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    page1 = Page(image_path="/tmp/hproof-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+        Line(text="第一页", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+    ])]
+    page2 = Page(image_path="/tmp/hproof-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+        Line(text="第二页", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+    ])]
+
+    panel = HProofPanel()
+    panel.load_pages([page1, page2])
+    assert len(panel._pairs) == 2
+
+    panel._page_combo.setCurrentIndex(panel._page_combo.findData(2))
+
+    assert len(panel._pairs) == 1
+    assert panel._items[0][2] is page2
+    assert panel._pairs[0]._line_in_page == 1
+    panel.close()
+
+    print("test_hproof_page_filter_keeps_pages_separate PASSED")
+
+
+def test_image_viewer_char_boxes_update_char_bbox():
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Char
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    app = _get_qapp()
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(80, 60, QImage.Format.Format_RGB888))
+    char = Char(char="字", confidence=0.9, bbox=BBox(10, 12, 20, 22))
+    viewer.show_char_boxes([char])
+    item, _ = viewer._char_items[0]
+
+    item.setPos(14, 16)
+    app.processEvents()
+
+    assert char.bbox == BBox(14, 16, 20, 22)
+    viewer.close()
+
+    print("test_image_viewer_char_boxes_update_char_bbox PASSED")
+
+
 def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
 
@@ -4807,6 +4914,10 @@ if __name__ == "__main__":
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
+    test_workflow_controller_enables_proof_steps_after_first_ocr_page()
+    test_proof_line_iterator_includes_caption_and_equation_lines()
+    test_hproof_page_filter_keeps_pages_separate()
+    test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()
