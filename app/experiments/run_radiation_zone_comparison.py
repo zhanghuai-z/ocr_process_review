@@ -76,6 +76,7 @@ class ZoneSpec:
     tol_ratio: float = 0.08
     min_tol: int = 3
     y_pad_ratio: float = 0.15
+    stroke_extension_ratio: float = 0.25
     weak_y_overlap_ratio: float = 0.25
     weak_area_ratio: float = 0.05
     rescue_left_guard_ratio: float = 0.0
@@ -101,6 +102,7 @@ class ZoneEval:
     token: TokenRef
     spec: ZoneSpec
     hard_bound: Box
+    stroke_bound: Box
     strong: Box
     rescue_domain: tuple[float, float]
     components: tuple[Component, ...]
@@ -122,6 +124,7 @@ class ZoneEval:
             "source_bbox": self.token.source.to_list(),
             "ownership": [round(self.token.ownership[0], 2), round(self.token.ownership[1], 2)],
             "hard_bound": self.hard_bound.to_list(),
+            "stroke_bound": self.stroke_bound.to_list(),
             "strong": self.strong.to_list(),
             "rescue_domain": [round(self.rescue_domain[0], 2), round(self.rescue_domain[1], 2)],
             "counts": dict(self.counts),
@@ -230,6 +233,14 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
         min(width, int(own_hi) + tol + 1),
         min(height, source.y2 + y_pad),
     )
+    stroke_pad_x = max(tol * 2, int(source_w * spec.stroke_extension_ratio), 6)
+    stroke_pad_y = max(y_pad * 2, int(source_h * spec.stroke_extension_ratio), 6)
+    stroke_bound = Box(
+        hard_bound.x1 - stroke_pad_x,
+        hard_bound.y1 - stroke_pad_y,
+        hard_bound.x2 + stroke_pad_x,
+        hard_bound.y2 + stroke_pad_y,
+    ).clip(width, height)
     strong = Box(
         source.x1 + max(1, int(source_w * spec.left_inset_ratio)),
         source.y1 + max(1, int(source_h * spec.y_inset_ratio)),
@@ -237,9 +248,9 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
         source.y2 - max(1, int(source_h * spec.y_inset_ratio)),
     )
     if strong.x1 >= strong.x2 or strong.y1 >= strong.y2:
-        return ZoneEval(token, spec, hard_bound, strong, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
+        return ZoneEval(token, spec, hard_bound, stroke_bound, strong, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
 
-    components = _extract_components(image_bgr, hard_bound)
+    components = _extract_components(image_bgr, stroke_bound)
     strong_components = [component for component in components if _intersects(component.box, strong)]
     main_area = max((component.area for component in strong_components), default=max((c.area for c in components), default=0))
     weak_area_threshold = max(8, int(main_area * spec.weak_area_ratio))
@@ -297,6 +308,7 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
         token=token,
         spec=spec,
         hard_bound=hard_bound,
+        stroke_bound=stroke_bound,
         strong=strong,
         rescue_domain=(rescue_lo, rescue_hi),
         components=components,
@@ -330,6 +342,19 @@ def _quality_label(current: ZoneEval, adjusted: ZoneEval) -> str:
     return "Q0 stable"
 
 
+def _outside(outer: Box, inner: Box) -> bool:
+    return inner.x1 < outer.x1 or inner.y1 < outer.y1 or inner.x2 > outer.x2 or inner.y2 > outer.y2
+
+
+def _breaks_hard_bound(zone: ZoneEval) -> bool:
+    if _outside(zone.hard_bound, zone.crop):
+        return True
+    return any(
+        label in {"strong", "weak_rescued"} and _outside(zone.hard_bound, component.box)
+        for component, label in zip(zone.components, zone.component_labels)
+    )
+
+
 def _draw_translucent(base: Image.Image, rect: tuple[int, int, int, int], fill: tuple[int, int, int, int]) -> None:
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     ImageDraw.Draw(overlay).rectangle(rect, fill=fill)
@@ -354,7 +379,15 @@ def _draw_zone_panel(
     latin: ImageFont.FreeTypeFont,
 ) -> Image.Image:
     height, width = image_bgr.shape[:2]
-    view = zone.hard_bound.expand(max(12, zone.token.source.w // 2)).clip(width, height)
+    view_boxes = [zone.hard_bound, zone.stroke_bound, zone.token.source, zone.crop]
+    if zone.ink:
+        view_boxes.append(zone.ink)
+    view = Box(
+        min(box.x1 for box in view_boxes),
+        min(box.y1 for box in view_boxes),
+        max(box.x2 for box in view_boxes),
+        max(box.y2 for box in view_boxes),
+    ).expand(max(12, zone.token.source.w // 2)).clip(width, height)
     crop = image_bgr[view.y1:view.y2, view.x1:view.x2]
     if crop.size == 0:
         return Image.new("RGB", (panel_w, panel_h), (30, 30, 30))
@@ -383,6 +416,7 @@ def _draw_zone_panel(
     _draw_translucent(panel, rect(rescue_box), (255, 190, 0, 42))
 
     draw = ImageDraw.Draw(panel)
+    draw.rectangle(rect(zone.stroke_bound), outline=(150, 70, 210), width=2)
     draw.rectangle(rect(zone.hard_bound), outline=(60, 120, 255), width=2)
     draw.rectangle(rect(source), outline=(0, 0, 0), width=2)
     draw.rectangle(rect(zone.strong), outline=(0, 150, 60), width=2)
@@ -446,6 +480,8 @@ def _select_samples(
         adjusted = adjusted_evals[token.id]
         counts = current.counts
         score = 0
+        if _breaks_hard_bound(current) or _breaks_hard_bound(adjusted):
+            score += 220
         if current.crop != adjusted.crop:
             score += 180
         if current.counts != adjusted.counts or current.no_strong != adjusted.no_strong:
@@ -496,7 +532,7 @@ def _make_scope_comparison(
     draw.text((16, 12), f"Radiation scope comparison on real PP-OCRv5 word boxes - page {page_id}", fill=(0, 0, 0), font=latin)
     draw.text(
         (16, 38),
-        "green=strong direct keep, red=anti/weak edge, orange=rescue domain (not anti), cyan=ownership, blue=hard_bound",
+        "green=strong, red=anti/weak, orange=rescue, purple=stroke-search, blue=initial hard_bound only",
         fill=(40, 40, 40),
         font=latin_small,
     )
@@ -515,21 +551,22 @@ def _make_scope_comparison(
         draw.text((10, y + 38), token.text, fill=(180, 0, 0), font=cjk)
         draw.text((54, y + 42), qlabel, fill=(40, 40, 40), font=latin_small)
         draw.text((10, y + 62), f"crop changed: {current.crop != adjusted.crop}", fill=(120, 0, 0), font=latin_small)
-        draw.text((10, y + 82), f"src={token.source.to_list()}", fill=(40, 40, 40), font=latin_small)
+        draw.text((10, y + 82), f"break blue: { _breaks_hard_bound(current) or _breaks_hard_bound(adjusted) }", fill=(120, 0, 0), font=latin_small)
+        draw.text((10, y + 104), f"src={token.source.to_list()}", fill=(40, 40, 40), font=latin_small)
         draw.text(
-            (10, y + 104),
+            (10, y + 126),
             f"cur {dict(current.counts)}",
             fill=(40, 40, 40),
             font=latin_small,
         )
         draw.text(
-            (10, y + 126),
+            (10, y + 148),
             f"adj {dict(adjusted.counts)}",
             fill=(40, 40, 40),
             font=latin_small,
         )
-        draw.text((10, y + 148), f"cur crop={current.crop.to_list()}", fill=(40, 40, 40), font=latin_small)
-        draw.text((10, y + 170), f"adj crop={adjusted.crop.to_list()}", fill=(40, 40, 40), font=latin_small)
+        draw.text((10, y + 170), f"cur crop={current.crop.to_list()}", fill=(40, 40, 40), font=latin_small)
+        draw.text((10, y + 192), f"adj crop={adjusted.crop.to_list()}", fill=(40, 40, 40), font=latin_small)
         x = label_w
         image.paste(_draw_zone_panel(image_bgr, current, panel_w=scope_w, panel_h=row_h, latin=latin_small), (x, y))
         x += scope_w
@@ -601,6 +638,11 @@ def _make_page_report(
         or current_evals[token].no_strong != adjusted_evals[token].no_strong
     ]
     crop_changed = [token for token in current_evals if current_evals[token].crop != adjusted_evals[token].crop]
+    break_blue = [
+        token
+        for token in current_evals
+        if _breaks_hard_bound(current_evals[token]) or _breaks_hard_bound(adjusted_evals[token])
+    ]
     current_no_strong = sum(1 for eval_item in current_evals.values() if eval_item.no_strong)
     adjusted_no_strong = sum(1 for eval_item in adjusted_evals.values() if eval_item.no_strong)
     lines = [
@@ -610,10 +652,12 @@ def _make_page_report(
         "adjusted: left strong extends 5% (left red anti shrinks 10%->5%), right strong shrinks 5% (right red anti grows 20%->25%)",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
         "strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.",
+        "blue is now only the initial hard_bound/diagnostic box; stroke extraction uses a larger purple stroke-search box, so preserved strokes may break the blue box.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
         f"parameter-sensitive tokens by scope labels: {len(changed)}",
         f"final crop changed tokens: {len(crop_changed)}",
+        f"break-blue stroke tokens: {len(break_blue)}",
         f"no strong cc current/adjusted: {current_no_strong}/{adjusted_no_strong}",
         "",
         "selected samples:",
@@ -624,6 +668,7 @@ def _make_page_report(
         lines.append(
             f"- L{token.line:02d}#{token.token:03d} {token.text}: "
             f"{_quality_label(current, adjusted)}, crop_changed={current.crop != adjusted.crop}, "
+            f"break_blue={_breaks_hard_bound(current) or _breaks_hard_bound(adjusted)}, "
             f"current={dict(current.counts)}, adjusted={dict(adjusted.counts)}"
         )
     lines.extend(
@@ -649,7 +694,7 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
     draw.text((24, 20), "Page-level radiation scope sensitivity overview", fill=(0, 0, 0), font=title_font)
     draw.text(
         (24, 54),
-        "red=anti/weak region; orange=rescue domain, not anti. Adjusted profile: left strong +5%, right strong -5%. Strong-hit CC is kept whole.",
+        "red=anti/weak; orange=rescue; purple=stroke-search. Blue is initial hard_bound only; strong-hit strokes may break it.",
         fill=(80, 0, 0),
         font=text_font,
     )
@@ -658,9 +703,10 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
         ("cjk", 130),
         ("sensitive", 220),
         ("crop changed", 350),
-        ("current no-strong", 500),
-        ("adjusted no-strong", 670),
-        ("selected examples", 870),
+        ("break blue", 500),
+        ("current no-strong", 640),
+        ("adjusted no-strong", 810),
+        ("selected examples", 1010),
     ]
     y = 92
     for label, x in columns:
@@ -673,6 +719,7 @@ def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> N
             str(summary["cjk_total"]),
             str(summary["parameter_sensitive_count"]),
             str(summary["crop_changed_count"]),
+            str(summary["break_blue_count"]),
             str(summary["current_no_strong_count"]),
             str(summary["adjusted_no_strong_count"]),
             examples,
@@ -687,6 +734,7 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
     total_cjk = sum(item["cjk_total"] for item in page_summaries)
     total_sensitive = sum(item["parameter_sensitive_count"] for item in page_summaries)
     total_crop_changed = sum(item["crop_changed_count"] for item in page_summaries)
+    total_break_blue = sum(item["break_blue_count"] for item in page_summaries)
     lines = [
         "radiation zone comparison - page batch",
         "=" * 72,
@@ -694,11 +742,13 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
         "Adjusted profile: left strong extends 5% (left anti shrinks 10%->5%); right strong shrinks 5% (right anti grows 20%->25%).",
         "Strong preservation: a CC that intersects green strong is retained whole; red anti only filters fully-outside-strong CCs, then ownership may clip the final union.",
+        "Blue is no longer a final stroke limit: it is the initial hard_bound/diagnostic box. Components are extracted from the larger purple stroke-search box so a preserved stroke can break blue.",
         "",
         f"pages evaluated: {len(page_summaries)}",
         f"cjk tokens evaluated: {total_cjk}",
         f"parameter-sensitive tokens: {total_sensitive}",
         f"final crop changed tokens: {total_crop_changed}",
+        f"break-blue stroke tokens: {total_break_blue}",
         "",
         "per-page summary:",
     ]
@@ -706,7 +756,7 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         examples = ", ".join(f"L{line:02d}#{token:03d}{text}" for line, token, text in summary["selected_examples"][:8])
         lines.append(
             f"- {summary['page_id']}: cjk={summary['cjk_total']} sensitive={summary['parameter_sensitive_count']} "
-            f"crop_changed={summary['crop_changed_count']} "
+            f"crop_changed={summary['crop_changed_count']} break_blue={summary['break_blue_count']} "
             f"no_strong={summary['current_no_strong_count']}/{summary['adjusted_no_strong_count']} examples={examples}"
         )
     output_path.write_text("\n".join(lines), encoding="utf-8")
@@ -766,6 +816,11 @@ def run_page_comparison(
         or current_evals[token_id].no_strong != adjusted_evals[token_id].no_strong
     ]
     crop_changed = [token_id for token_id in current_evals if current_evals[token_id].crop != adjusted_evals[token_id].crop]
+    break_blue = [
+        token_id
+        for token_id in current_evals
+        if _breaks_hard_bound(current_evals[token_id]) or _breaks_hard_bound(adjusted_evals[token_id])
+    ]
     payload: dict[str, Any] = {
         "page_id": page_id,
         "source_image": str(image_path),
@@ -776,6 +831,7 @@ def run_page_comparison(
         "cjk_total": len(tokens),
         "parameter_sensitive_count": len(changed),
         "crop_changed_count": len(crop_changed),
+        "break_blue_count": len(break_blue),
         "current_no_strong_count": sum(1 for eval_item in current_evals.values() if eval_item.no_strong),
         "adjusted_no_strong_count": sum(1 for eval_item in adjusted_evals.values() if eval_item.no_strong),
         "sample_token_ids": [list(token.id) for token in samples],
@@ -831,7 +887,8 @@ def run_batch_comparison(
             "red": "anti/weak edge zone",
             "orange": "weak-zone rescue domain, not anti-radiation",
             "cyan": "ownership interval",
-            "blue": "hard_bound extraction area",
+            "purple": "larger stroke-search area used for component extraction",
+            "blue": "initial hard_bound / diagnostic box, not the final stroke limit",
             "final_crop_columns": "current and adjusted crop boxes after keeping strong/rescued components and clipping to ownership",
         },
     }

@@ -4,21 +4,23 @@ current v11: left strong inset=10%, right strong inset=20%, rescue right anti gu
 adjusted: left strong extends 5% (left red anti shrinks 10%->5%), right strong shrinks 5% (right red anti grows 20%->25%)
 orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.
 strong preservation: any component intersecting the green strong zone is kept whole before ownership clipping; red anti does not cut its stroke.
+blue is now only the initial hard_bound/diagnostic box; stroke extraction uses a larger purple stroke-search box, so preserved strokes may break the blue box.
 
 cjk tokens evaluated: 874
-parameter-sensitive tokens by scope labels: 11
-final crop changed tokens: 5
+parameter-sensitive tokens by scope labels: 10
+final crop changed tokens: 4
+break-blue stroke tokens: 103
 no strong cc current/adjusted: 0/0
 
 selected samples:
-- L08#011 性: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 4, 'strong': 1}, adjusted={'strong': 2, 'anti_dropped': 3}
-- L28#004 心: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 2, 'strong': 3}, adjusted={'strong': 4, 'anti_dropped': 1}
-- L22#028 年: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 1, 'strong': 1, 'weak_rescued': 1}, adjusted={'anti_dropped': 2, 'strong': 1}
-- L20#003 核: Q2 param-sensitive, crop_changed=True, current={'strong': 2, 'weak_rescued': 1}, adjusted={'strong': 2, 'anti_dropped': 1}
-- L08#020 消: Q2 param-sensitive, crop_changed=False, current={'strong': 4, 'anti_dropped': 4}, adjusted={'strong': 5, 'anti_dropped': 3}
-- L24#027 运: Q2 param-sensitive, crop_changed=True, current={'strong': 4, 'anti_dropped': 1}, adjusted={'strong': 4, 'anti_dropped': 1}
-- L07#024 这: Q2 param-sensitive, crop_changed=False, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
-- L30#027 适: Q2 param-sensitive, crop_changed=False, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
+- L28#004 心: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'anti_dropped': 8, 'strong': 3}, adjusted={'anti_dropped': 7, 'strong': 4}
+- L33#002 通: Q2 param-sensitive, crop_changed=False, break_blue=True, current={'anti_dropped': 6, 'strong': 1}, adjusted={'anti_dropped': 5, 'strong': 2}
+- L24#027 运: Q2 param-sensitive, crop_changed=True, break_blue=True, current={'anti_dropped': 3, 'strong': 4}, adjusted={'anti_dropped': 3, 'strong': 4}
+- L25#019 年: Q2 loose/noisy, crop_changed=False, break_blue=True, current={'anti_dropped': 9, 'strong': 1}, adjusted={'anti_dropped': 9, 'strong': 1}
+- L08#011 性: Q2 param-sensitive, crop_changed=True, break_blue=False, current={'anti_dropped': 6, 'strong': 1}, adjusted={'anti_dropped': 5, 'strong': 2}
+- L07#028 选: Q2 param-sensitive, crop_changed=False, break_blue=True, current={'strong': 1, 'anti_dropped': 4}, adjusted={'strong': 2, 'anti_dropped': 3}
+- L33#016 适: Q2 param-sensitive, crop_changed=False, break_blue=True, current={'anti_dropped': 4, 'strong': 1}, adjusted={'anti_dropped': 3, 'strong': 2}
+- L28#003 核: Q2 loose/noisy, crop_changed=False, break_blue=True, current={'strong': 2, 'anti_dropped': 7}, adjusted={'strong': 2, 'anti_dropped': 7}
 
 interpretation:
 - The requested adjustment makes the left strong area moderately more permissive and the right strong area stricter.
