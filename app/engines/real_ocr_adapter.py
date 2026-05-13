@@ -3,7 +3,7 @@
 确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
 """
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Optional
 
 import numpy as np
@@ -18,7 +18,9 @@ from app.core.ocr_ir import (
     OcrIrLine,
     OcrIrToken,
     classify_ir_text,
+    is_cjk_char,
 )
+from app.core.wordbox_anchor import refine_wordbox_anchors
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Char, Line, ProofStatus
@@ -433,6 +435,51 @@ class ApiOcrEngine:
             cursor = end
         return chars
 
+    def _refine_tokens_with_wordbox_anchor(
+        self,
+        *,
+        page_image: np.ndarray,
+        line_bbox: BBox,
+        tokens: list[OcrIrToken],
+    ) -> list[OcrIrToken]:
+        pairs = [
+            (token.text, token.bbox)
+            for token in tokens
+            if token.bbox is not None and token.bbox.area > 0
+        ]
+        if not pairs:
+            return tokens
+        anchors = refine_wordbox_anchors(
+            page_image,
+            line_bbox,
+            pairs,
+            include_non_cjk=True,
+        )
+        if len(anchors) != len(pairs):
+            return tokens
+
+        refined: list[OcrIrToken] = []
+        pair_idx = 0
+        for token in tokens:
+            if token.bbox is None or token.bbox.area <= 0:
+                refined.append(token)
+                continue
+            anchor = anchors[pair_idx]
+            pair_idx += 1
+            if (
+                anchor.kind == "cjk"
+                and is_cjk_char(token.text.strip())
+                and anchor.crop_bbox.area > 0
+            ):
+                refined.append(replace(
+                    token,
+                    bbox=anchor.crop_bbox,
+                    bbox_granularity=CHAR_BBOX_GRANULARITY_CHAR,
+                ))
+            else:
+                refined.append(token)
+        return refined
+
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64
         import cv2
@@ -504,12 +551,20 @@ class ApiOcrEngine:
                     token_row = self._select_token_row_for_line(token_rows, bbox)
                     if token_row is not None:
                         used_token_rows.add(id(token_row))
+                line_tokens = (
+                    self._refine_tokens_with_wordbox_anchor(
+                        page_image=image_bgr,
+                        line_bbox=bbox,
+                        tokens=token_row.ir_tokens,
+                    )
+                    if token_row else []
+                )
                 ir_lines.append(OcrIrLine(
                     text=line_text,
                     confidence=score,
                     bbox=bbox,
                     source_text=OCR_IR_SOURCE_REC_TEXT,
-                    tokens=token_row.ir_tokens if token_row else [],
+                    tokens=line_tokens,
                     review_flags=review_flags,
                 ))
 
@@ -519,12 +574,17 @@ class ApiOcrEngine:
                         continue
                     if token_row.bbox is None or token_row.bbox.area <= 0:
                         continue
+                    line_tokens = self._refine_tokens_with_wordbox_anchor(
+                        page_image=image_bgr,
+                        line_bbox=token_row.bbox,
+                        tokens=token_row.ir_tokens,
+                    )
                     ir_lines.append(OcrIrLine(
                         text="".join(token_row.tokens),
                         confidence=0.0,
                         bbox=token_row.bbox,
                         source_text=OCR_IR_SOURCE_TOKEN_TEXT,
-                        tokens=token_row.ir_tokens,
+                        tokens=line_tokens,
                         review_flags=[OCR_IR_TOKEN_TEXT_FALLBACK_FLAG],
                     ))
 

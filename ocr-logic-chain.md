@@ -350,16 +350,35 @@ rescue_right_anti_guard = 8%  # 右侧救回 guard 随右反辐射区延长 3%
 
 这样后续微调参数时，可以按 Q0/Q1/Q2/Q3 分层回归，确认“风险样本改善”没有破坏“稳定样本”。主程序默认展示可使用最高可信 refined crop，但导出和人工终审必须能回退到 raw token bbox。
 
+## 7.4 主程序集成点（当前分支）
+
+本轮已把实验链路接回主程序，而不是继续停留在外部脚本：
+
+- `app/core/wordbox_anchor.py`：新增主程序内的 PP-OCRv5 word-box anchor 模块。输入为整页/裁图图像、PP-OCRv5 `text_word/text_word_boxes` 解析出的 token bbox，以及行 bbox；输出 `TokenAnchor`，包含 `source_bbox`、`ownership_x`、`ink_bbox`、`crop_bbox`、`status`、`confidence` 和规则 notes。它继承 Claude v12 的核心规则：真实 word box 作主锚、邻 token 中点 ownership、CJK 辐射 seed、side crumb suppression、multi-CC union、右侧不扩张、左侧只在 seed-hit component 真实突破时允许 overflow。
+- `app/engines/real_ocr_adapter.py`：在 `ApiOcrEngine` 解析出 `OcrIrToken` 后、构造 `Line.chars` 前调用 wordbox anchor。只有单字 CJK token 会把 proof-facing bbox 替换为 refined `crop_bbox`，并保持 `bbox_source=ocr / bbox_granularity=char`；数字、英文、公式、标点、混合 token 不进 CJK 辐射主链，继续保留原始 OCR token bbox 语义。
+- `app/controllers/workflow_controller.py`：API proof engine 支持页级 OCR 时，`start_layout_analysis()` 会同时启动 Structure layout worker 与 PP-OCRv5 proof OCR worker。PP-OCRv5 在临时整页容器中先跑完整页 line/token；Structure 完成后，再把 proof lines 归属到 Structure blocks。若当前 engine 不支持页级 proof OCR（例如本地旧模式），仍回退到旧的 layout 完成后自动 OCR。
+- `app/services/ocr_pipeline.py`：开放 `assign_page_ocr_lines_to_blocks()`，用于“proof OCR 先完成、layout 后完成”的并发合并路径；归属逻辑仍复用原来的 overlap/center 规则，避免并发路径和串行路径分叉。
+- `app/services/char_index_service.py`：纵校默认只索引 CJK key。数字、标点、拉丁、公式默认不展示，避免当前未收稳的非 CJK 图继续污染纵校集合；诊断/历史测试可显式 `include_non_cjk=True` 恢复旧的数字 run / 公式 token 集合。
+
+当前主链因此变为：用户触发版面分析 → Structure 产生版面容器，同时 PP-OCRv5 产生 line/token/word-box → wordbox anchor 只收紧 CJK 单字 token → proof lines 归属到 Structure 容器 → VProof 默认只展示 CJK refined/word token 集合。`line bbox` 仍只做上下文、ownership 和 HProof 行图，不再作为 VProof 单字真值。
+
+残余边界必须继续诚实处理：
+
+1. 目前主程序数据模型还没有持久化 `raw_token_bbox/refined_bbox/quality_tier/profile_name/risk_flags/component_counts/refine_status`，所以本轮只把 refined crop 接入 proof-facing bbox；下一轮应扩展 `Char` 元数据，确保 UI 能在 raw/refined 之间切换。
+2. 纯 CJK 多字 token 仍保持 `ocr/word` token 集合，不拆成伪精确单字。只有后续补齐“token 内受限细拆 + 分级回归”后，才允许提升为候选 char。
+3. 非 CJK 并非完全废弃：OCR 文本、HProof、导出仍保留数字/公式/字母文本；只是 VProof 图像集合默认隐藏，避免当前阶段把未稳定的 token 图当成正文单字图。
+
 ## 8. 公式 / 数字 / 普通文本策略
 
-纵校集合不再把所有字符都等价处理：
+纵校集合不再把所有字符都等价处理。当前用户验收阶段默认只展示 CJK；非 CJK 集合保留为诊断/后续开关，不再默认进入 VProof 图像面板：
 
-| 类型 | 判定 | 集合 key | bbox 策略 | 排序 |
-| --- | --- | --- | --- | --- |
-| 普通中文/正文 | CJK 或普通文字 | 单字，或可靠 word token | 单字 bbox / word bbox | 普通文字区 |
-| 连续数字 | `isdigit()` 连续 run | 整体数字，如 `2026` | 合并整段 bbox | 数字区，短到长 |
-| 公式 token | 非 CJK，含拉丁/希腊/数学符号，如 `A+B`、`x1` | 整体公式 | 合并整段 bbox | 数字下面 |
-| 标点/符号 | 纯标点/纯符号 | 一般不抢主题 | 仅在独立可靠时进入 | 符号区 |
+| 类型 | 判定 | 默认 VProof | 诊断/可选语义 |
+| --- | --- | --- | --- |
+| CJK 单字 | 单字汉字 token | 展示 refined char crop | `wordbox_anchor` 可替换 proof-facing bbox |
+| 纯 CJK 多字 token | 多字中文共用 word bbox | 作为 CJK token 集合展示，不拆伪 char | 后续满足受限细拆条件时再提升 |
+| 连续数字 | `isdigit()` 连续 run | 默认隐藏 | `include_non_cjk=True` 时合并成整体数字，如 `2026` |
+| 公式 token | 非 CJK，含拉丁/希腊/数学符号，如 `A+B`、`x1` | 默认隐藏 | `include_non_cjk=True` 时整体公式 token |
+| 标点/符号/拉丁 | 纯标点、符号或英文 | 默认隐藏 | 仅作为 OCR 文本和诊断，不抢正文主题 |
 
 公式按整体走的原因：用户反馈的“公式字母边角料小图”来自把 `A+B` 这类公式片段拆成单个字母/符号后再裁图，单个 bbox 很容易只剩边缘或和相邻符号互相串框。公式与数字一样，本质上更适合作为不可拆 token 校对：用户需要确认的是整个变量/表达式片段，而不是把每个公式字母混入正文单字集合。
 
@@ -373,8 +392,9 @@ number / 公式是否应单独建属性框，要按层级区分：
 当前实现位置：
 
 - `app/core/ocr_ir.py::is_formula_token/is_formula_char` 定义公式 token 语义。
-- `CharIndexService._iter_index_units()` 把连续公式 run 合成一个 token。
-- `_sort_key()` 把公式 token 排到数字 token 之后，普通标点/符号之前。
+- `CharIndexService._maybe_add()` 默认过滤非 CJK key；`include_non_cjk=True` 时才恢复数字、公式、拉丁诊断集合。
+- `CharIndexService._iter_index_units()` 仍保留连续数字与公式 run 合并逻辑，供后续打开非 CJK 纵校开关时复用。
+- `_sort_key()` 仍保留数字/公式排序规则，避免诊断集合打开后排序退化。
 
 ## 9. Inspector flatten / parser 收口
 

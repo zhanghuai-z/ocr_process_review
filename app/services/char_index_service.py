@@ -13,7 +13,7 @@ from app.core.char_bbox_utils import (
     ensure_line_char_bboxes,
     is_meaningful_text_bbox,
 )
-from app.core.ocr_ir import is_formula_char, is_formula_token
+from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 
@@ -137,8 +137,9 @@ CharIndexEntry = CharEntry
 class CharIndexService:
     """全文字符索引。"""
 
-    def __init__(self, *, include_fallback: bool = False) -> None:
+    def __init__(self, *, include_fallback: bool = False, include_non_cjk: bool = False) -> None:
         self._include_fallback = include_fallback
+        self._include_non_cjk = include_non_cjk
         self._index: Dict[str, List[CharEntry]] = {}
         self._freq: Counter[str] = Counter()
 
@@ -404,6 +405,8 @@ class CharIndexService:
             return
         if not self._include_fallback and self._is_fallback_unit(bbox_source, bbox_granularity):
             return
+        if not self._include_non_cjk and not self._is_cjk_index_key(glyph):
+            return
         key = (id(line), char_idx, glyph)
         if key in seen:
             return
@@ -438,6 +441,10 @@ class CharIndexService:
         if source != "ocr":
             return True
         return granularity in {"", "fallback", "unavailable", "line"}
+
+    def _is_cjk_index_key(self, glyph: str) -> bool:
+        compact = "".join(ch for ch in str(glyph) if not ch.isspace())
+        return bool(compact) and all(is_cjk_char(ch) for ch in compact)
 
     def query(self, char: str) -> List[CharEntry]:
         if not char:
