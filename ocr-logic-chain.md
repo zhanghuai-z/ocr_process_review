@@ -284,12 +284,12 @@ python app/experiments/run_radiation_zone_comparison.py
 
 输出在 `paddle-char-box-samples/radiation-zone-comparison/`：
 
-- `01_radiation_scope_current_vs_adjusted.png`：首个页面的当前 v11 与调整后辐射区对比。
+- `01_radiation_scope_current_vs_adjusted.png`：首个页面的当前 v11 与调整后辐射区横向对比，列为“当前作用域 / 当前成品字 / 调整后作用域 / 调整后成品字”。
 - `02_bbox_quality_tier_matrix.png`：bbox 质量分级与允许调参范围。
 - `03_radiation_scope_report.txt`：首个页面的参数敏感 token 列表与解释。
 - `04_page_scope_overview.png`：按页统计的参数敏感概览。
 - `05_page_scope_batch_report.txt`：20 页批量统计报告。
-- `pages/*_radiation_scope_current_vs_adjusted.png`：每页独立的作用域样例图。
+- `pages/*_radiation_scope_current_vs_adjusted.png`：每页独立的横向作用域与成品字样例图。
 - `radiation_zone_comparison_summary.json`：可复核的 bbox、zone、component label 与页级统计。
 
 颜色语义必须固定，避免误读：
@@ -317,7 +317,7 @@ rescue_left_anti_guard = 0%
 rescue_right_anti_guard = 10%  # 右侧救回 guard 随右反辐射区延长 5%
 ```
 
-这组调整的作用是：左侧稍微更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 320 个 token 对该 scope profile 变化敏感；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 有明确的局部作用，但不应全局替换默认 profile。
+这组调整的作用是：左侧稍微更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。当前批量使用 Claude `.cache` 中 20 页真实 `returnWordBox` JSON 与本仓库对应 tif：共评估 17026 个 CJK token，其中 324 个 token 对该 scope/crop profile 变化敏感，194 个 token 的最终成品字 crop 实际变化；当前/调整后的 `no strong cc` 均为 0。结论是该 profile 有明确的局部作用，但不应全局替换默认 profile。
 
 建议把后续参数做成质量分级 profile：
 

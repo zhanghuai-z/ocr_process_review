@@ -6,17 +6,18 @@ orange is rescue domain, not anti-radiation; it is shown to explain which weak c
 
 cjk tokens evaluated: 874
 parameter-sensitive tokens by scope labels: 10
+final crop changed tokens: 5
 no strong cc current/adjusted: 0/0
 
 selected samples:
-- L08#020 消: Q2 param-sensitive, current={'strong': 4, 'anti_dropped': 4}, adjusted={'strong': 5, 'anti_dropped': 3}
-- L08#011 性: Q2 param-sensitive, current={'anti_dropped': 4, 'strong': 1}, adjusted={'strong': 2, 'anti_dropped': 3}
-- L07#024 这: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
-- L30#027 适: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
-- L33#002 通: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
-- L28#004 心: Q2 param-sensitive, current={'anti_dropped': 2, 'strong': 3}, adjusted={'strong': 4, 'anti_dropped': 1}
-- L07#012 消: Q2 loose/noisy, current={'anti_dropped': 5, 'strong': 3}, adjusted={'anti_dropped': 5, 'strong': 3}
-- L07#028 选: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 2, 'anti_dropped': 1}
+- L08#011 性: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 4, 'strong': 1}, adjusted={'strong': 2, 'anti_dropped': 3}
+- L28#004 心: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 2, 'strong': 3}, adjusted={'strong': 4, 'anti_dropped': 1}
+- L22#028 年: Q2 param-sensitive, crop_changed=True, current={'anti_dropped': 1, 'strong': 1, 'weak_rescued': 1}, adjusted={'anti_dropped': 2, 'strong': 1}
+- L24#027 运: Q2 param-sensitive, crop_changed=True, current={'strong': 4, 'anti_dropped': 1}, adjusted={'strong': 3, 'anti_dropped': 2}
+- L20#003 核: Q2 param-sensitive, crop_changed=True, current={'strong': 2, 'weak_rescued': 1}, adjusted={'strong': 2, 'anti_dropped': 1}
+- L08#020 消: Q2 param-sensitive, crop_changed=False, current={'strong': 4, 'anti_dropped': 4}, adjusted={'strong': 5, 'anti_dropped': 3}
+- L07#024 这: Q2 param-sensitive, crop_changed=False, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
+- L30#027 适: Q2 param-sensitive, crop_changed=False, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
 
 interpretation:
 - The requested adjustment makes the left strong area moderately more permissive and the right strong area stricter.
