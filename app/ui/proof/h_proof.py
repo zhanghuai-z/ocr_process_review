@@ -206,7 +206,7 @@ class _LinePair(QFrame):
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
-        self._text_lbl.setStyleSheet("font-size:17px; padding:1px 0; color:#222;")
+        self._text_lbl.setStyleSheet("font-size:30px; padding:0; color:#222;")
         self._text_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -218,8 +218,8 @@ class _LinePair(QFrame):
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
-        self._editor.setStyleSheet("font-size:17px; padding:1px 6px;")
-        self._editor.setMaximumHeight(38)
+        self._editor.setStyleSheet("font-size:30px; padding:0 6px;")
+        self._editor.setMaximumHeight(58)
         self._editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )

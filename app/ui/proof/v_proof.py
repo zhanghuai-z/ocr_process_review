@@ -263,15 +263,15 @@ class VProofPanel(QWidget):
 
         # 左：单字列表 + 搜索
         left_box = self._build_char_list()
-        left_box.setMinimumWidth(160)
-        left_box.setMaximumWidth(240)
+        left_box.setMinimumWidth(130)
+        left_box.setMaximumWidth(190)
         h_split.addWidget(left_box)
 
         # 右：垂直分割（上gallery | 下文本/图）
         right_box = self._build_right_area()
         h_split.addWidget(right_box)
         h_split.setStretchFactor(0, 1)
-        h_split.setStretchFactor(1, 4)
+        h_split.setStretchFactor(1, 5)
 
         root.addWidget(h_split, 1)
 
@@ -325,7 +325,7 @@ class VProofPanel(QWidget):
 
         # 上：gallery 网格（固定高度）
         gallery_box = self._build_gallery_strip()
-        gallery_box.setFixedHeight(GALLERY_THUMB * 4 + 34)
+        gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
         v.addWidget(gallery_box)
 
         sep = QFrame()
@@ -343,7 +343,7 @@ class VProofPanel(QWidget):
         bottom_split.addWidget(bl_box)
         bottom_split.addWidget(br_box)
         bottom_split.setStretchFactor(0, 1)
-        bottom_split.setStretchFactor(1, 2)
+        bottom_split.setStretchFactor(1, 3)
 
         v.addWidget(bottom_split, 1)
         return box

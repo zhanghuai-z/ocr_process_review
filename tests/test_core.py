@@ -4941,10 +4941,45 @@ def test_vproof_text_highlight_targets_single_entry():
     print("test_vproof_text_highlight_targets_single_entry PASSED")
 
 
+def test_vproof_highlight_can_repeat_without_losing_state():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="甲乙丙",
+        confidence=0.9,
+        bbox=BBox(1, 1, 60, 10),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="丙", confidence=0.9, bbox=BBox(40, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-repeat.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.load_pages([page])
+
+    for token in ("甲", "乙", "丙", "甲", "乙"):
+        entry = panel._char_svc.query(token)[0]
+        panel._highlight_char_in_text(token, focus_entry=entry)
+        panel._highlight_char_in_viewer(entry)
+        assert len(panel._text_edit.extraSelections()) == 1
+        assert panel._text_edit.textCursor().selectedText() == token
+        assert panel._viewer._highlight_item is not None
+
+    panel.close()
+
+    print("test_vproof_highlight_can_repeat_without_losing_state PASSED")
+
+
 def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
+    pair_styles = open(h_proof.__file__, encoding="utf-8").read()
+    assert "font-size:30px" in pair_styles
 
     print("test_hproof_visual_size_is_compact PASSED")
 
@@ -5129,6 +5164,7 @@ if __name__ == "__main__":
     test_top_nav_moves_layout_run_button_and_removes_prev_next()
     test_vproof_gallery_uses_wrapping_white_grid()
     test_vproof_text_highlight_targets_single_entry()
+    test_vproof_highlight_can_repeat_without_losing_state()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
