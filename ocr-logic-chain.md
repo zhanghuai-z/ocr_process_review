@@ -245,6 +245,33 @@ flowchart TD
 
 后续若实现，应放在 proof 几何正规化链中，作为 `ocr/word` token 的可选 refine 阶段：输入 `Line`、`Char` token 元数据和整页图，输出带来源标记的候选子框。该阶段不能覆盖原始 Paddle bbox，应保留 `raw_token_bbox`、`refined_bbox`、`refine_status` 和失败原因，UI 可把它作为“自动细拆建议”，人工仍可回退到 token 图。
 
+## 7.2 wordbox_anchor 规则消融结论
+
+本轮继续沿 Claude/Codex 的 `wordbox_anchor` 路线做规则拆解，而不是另起一套算法。可复跑脚本为 `app/experiments/run_wordbox_anchor_ablation.py`，输入是持久化的 `paddle-char-box-samples/wordbox-anchor-ablation/120166_ppocrv5_return_word_box.json` 与 `file/244771纵校/120166.tif`。输出证据在 `paddle-char-box-samples/wordbox-anchor-ablation/`：
+
+- `01_rule_on_off_samples.png`：同一 token 在 full/no ownership/no edge crumb/largest/no clip 下的切图对比；
+- `02_success_failure_residual_samples.png`：full anchor 的成功与残留高风险样本；
+- `03_rule_contribution_ranking.png`：规则贡献排序卡片；
+- `04_ablation_report.txt`：统计报告；
+- `wordbox_anchor_ablation_summary.json`：可复核统计与样本 token id。
+
+当前真实材料的基础事实：`text_word` 能完整重建 `rec_texts`，token 类型为 `CJK=874`、`number=19`、`punct=86`、`latin=13`、`formula=6`。因此真实 `text_word_boxes` 主链应是：`zip(text_word, text_word_boxes)` 作为唯一顺序与几何锚点，Structure 继续只提供 layout 容器；line bbox 只作为 HProof 行图、ownership 上下文、行高参考和诊断，不再作为 VProof 单字真值。
+
+消融统计显示，full anchor 在 874 个 CJK token 上把原始 `cc1=427 / cc2+=447` 收到 `cc1=803 / cc2+=71`，CJK 可绑定率为 `100%`。规则贡献按本页实测排序：
+
+1. **edge crumb suppression**：贡献最大。关闭后 `cc2+` 从 full 的 `71` 升到 `228`，多出 `157` 个噪声多连通域；它压制的是 source bbox 边缘小而窄、贴边的邻字碎片。
+2. **ownership intervals**：关闭后 `cc2+` 从 `71` 升到 `130`，多出 `59` 个邻字归属错误；它压制的是质心已经属于相邻 token 的 component。
+3. **union multi-CC**：不能删。只取最大 component 会丢掉 `71` 个合法多笔画/分体汉字的部件，例如 `术/动/品/需/三/以` 这类 cc2+ 或 cc3 字。
+4. **non-CJK split**：应保留为分流规则。它把 124 个 number/latin/formula/punct token 挡在 CJK glyph lane 之外；不分流时会出现 `fallback_source_box=13`，公式/标点/数字也会被 CJK 规则错误消费。
+5. **source/ownership crop clamp**：本页贡献低，是 guardrail。`no_source_clip` 与 full 的 cc 和 outside 计数相同；在 120166 上不是决定性规则，但对更差 word box 仍可防止 crop 过界。
+6. **quick_simple / realloc / white-margin**：偏性能和视觉白边优化。Claude v11 action log 中 `realloc` 和 `wm` 次数很高，但它们主要影响裁图留白与观感，不替代 ownership、edge crumb、union 的正确性作用；`stop-on-ink` 已被 v11 文档弃用，不应重新引入。
+
+多笔画汉字最稳判据不是“只要 cc=1”，而是：先限定在 PP-OCRv5 source word box 内，再按 ownership/edge crumb 过滤，最后对同一 ownership 内保留的 components 做 union。`cc2+` 在中文里是正常形态，不应被当作错误；错误的是把邻字碎片或非 CJK token 混进来。
+
+边角料最稳压制规则是两层：第一层按相邻 token 中点划 ownership，component 质心不在当前 ownership 内就丢；第二层丢掉贴 source 左右边的小面积窄 component。正常字区间/line 级形状过滤只能做 guardrail，不应作为主绑定规则。
+
+数字 / 公式 / 混合数字行必须先靠 OCR 文本/token 分类分流：正文内 `2016` 之类数字 run 不单独建 Structure 框，也不从 line 连通域猜；在 VProof 集合层合并为 number token。公式/变量片段按 formula token/run 处理；独立公式可以由 Structure `EQUATION` 提供容器，但 proof text/bbox 仍由 PP-OCRv5 line/token 主链负责。
+
 ## 8. 公式 / 数字 / 普通文本策略
 
 纵校集合不再把所有字符都等价处理：
