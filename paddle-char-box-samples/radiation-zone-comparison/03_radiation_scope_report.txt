@@ -1,7 +1,8 @@
-radiation zone comparison
+radiation zone comparison - page 120166
 ========================================================================
 current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%
-adjusted: left strong extends 5% (left inset 5%), right strong shrinks 5% (right inset 25%), rescue anti guard grows by 5%
+adjusted: left strong extends 3% (left red anti shrinks 10%->7%), right strong shrinks 5% (right red anti grows 20%->25%)
+orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.
 
 cjk tokens evaluated: 874
 parameter-sensitive tokens by scope labels: 10
@@ -16,11 +17,9 @@ selected samples:
 - L28#004 心: Q2 param-sensitive, current={'anti_dropped': 2, 'strong': 3}, adjusted={'strong': 4, 'anti_dropped': 1}
 - L07#012 消: Q2 loose/noisy, current={'anti_dropped': 5, 'strong': 3}, adjusted={'anti_dropped': 5, 'strong': 3}
 - L07#028 选: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 2, 'anti_dropped': 1}
-- L33#016 适: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 2, 'anti_dropped': 1}
-- L22#028 年: Q2 param-sensitive, current={'anti_dropped': 1, 'strong': 1, 'weak_rescued': 1}, adjusted={'anti_dropped': 2, 'strong': 1}
 
 interpretation:
-- The requested adjustment makes the left strong area more permissive and the right strong area stricter.
+- The requested adjustment makes the left strong area moderately more permissive and the right strong area stricter.
 - This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.
 - It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.
 - Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.

@@ -417,6 +417,8 @@ def _make_scope_comparison(
     current_evals: dict[tuple[int, int], ZoneEval],
     adjusted_evals: dict[tuple[int, int], ZoneEval],
     output_path: Path,
+    *,
+    page_id: str,
 ) -> None:
     latin = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
     latin_small = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
@@ -424,15 +426,15 @@ def _make_scope_comparison(
     panel_w, row_h, label_w, header_h = 360, 250, 230, 84
     image = Image.new("RGB", (label_w + panel_w * 2, header_h + len(samples) * row_h), (245, 245, 245))
     draw = ImageDraw.Draw(image)
-    draw.text((16, 12), "Radiation scope comparison on real PP-OCRv5 word boxes", fill=(0, 0, 0), font=latin)
+    draw.text((16, 12), f"Radiation scope comparison on real PP-OCRv5 word boxes - page {page_id}", fill=(0, 0, 0), font=latin)
     draw.text(
         (16, 38),
-        "green=strong direct keep, red=anti/weak edge, orange=rescue domain, cyan=ownership, blue=hard_bound",
+        "green=strong direct keep, red=anti/weak edge, orange=rescue domain (not anti), cyan=ownership, blue=hard_bound",
         fill=(40, 40, 40),
         font=latin_small,
     )
     draw.text((label_w + 8, 58), "current v11: L strong inset 10%, R 20%, rescue R guard 5%", fill=(20, 20, 20), font=latin_small)
-    draw.text((label_w + panel_w + 8, 58), "adjusted: L strong +5% (5%), R strong -5% (25%), anti guard +5%", fill=(20, 20, 20), font=latin_small)
+    draw.text((label_w + panel_w + 8, 58), "adjusted: L strong +3% (7%), R strong -5% (25%); red anti L 7% / R 25%", fill=(20, 20, 20), font=latin_small)
     for row, token in enumerate(samples):
         y = header_h + row * row_h
         current = current_evals[token.id]
@@ -504,8 +506,9 @@ def _make_tier_matrix(output_path: Path) -> None:
     image.save(output_path)
 
 
-def _make_report(
+def _make_page_report(
     output_path: Path,
+    page_id: str,
     samples: list[TokenRef],
     current_evals: dict[tuple[int, int], ZoneEval],
     adjusted_evals: dict[tuple[int, int], ZoneEval],
@@ -519,10 +522,11 @@ def _make_report(
     current_no_strong = sum(1 for eval_item in current_evals.values() if eval_item.no_strong)
     adjusted_no_strong = sum(1 for eval_item in adjusted_evals.values() if eval_item.no_strong)
     lines = [
-        "radiation zone comparison",
+        f"radiation zone comparison - page {page_id}",
         "=" * 72,
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
-        "adjusted: left strong extends 5% (left inset 5%), right strong shrinks 5% (right inset 25%), rescue anti guard grows by 5%",
+        "adjusted: left strong extends 3% (left red anti shrinks 10%->7%), right strong shrinks 5% (right red anti grows 20%->25%)",
+        "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
         f"parameter-sensitive tokens by scope labels: {len(changed)}",
@@ -541,7 +545,7 @@ def _make_report(
         [
             "",
             "interpretation:",
-            "- The requested adjustment makes the left strong area more permissive and the right strong area stricter.",
+            "- The requested adjustment makes the left strong area moderately more permissive and the right strong area stricter.",
             "- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.",
             "- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.",
             "- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.",
@@ -550,8 +554,82 @@ def _make_report(
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_comparison(image_path: Path, json_path: Path, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _make_overview(output_path: Path, page_summaries: list[dict[str, Any]]) -> None:
+    title_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    head_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+    text_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+    row_h = 34
+    image = Image.new("RGB", (1380, 90 + row_h * len(page_summaries)), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((24, 20), "Page-level radiation scope sensitivity overview", fill=(0, 0, 0), font=title_font)
+    draw.text(
+        (24, 54),
+        "red=anti/weak region; orange=rescue domain, not anti. Adjusted profile: left strong +3%, right strong -5%.",
+        fill=(80, 0, 0),
+        font=text_font,
+    )
+    columns = [
+        ("page", 24),
+        ("cjk", 130),
+        ("sensitive", 220),
+        ("current no-strong", 350),
+        ("adjusted no-strong", 520),
+        ("selected examples", 720),
+    ]
+    y = 92
+    for label, x in columns:
+        draw.text((x, y), label, fill=(0, 90, 160), font=head_font)
+    y += 30
+    for summary in page_summaries:
+        examples = ", ".join(f"L{line:02d}#{token:03d}{text}" for line, token, text in summary["selected_examples"][:6])
+        values = [
+            summary["page_id"],
+            str(summary["cjk_total"]),
+            str(summary["parameter_sensitive_count"]),
+            str(summary["current_no_strong_count"]),
+            str(summary["adjusted_no_strong_count"]),
+            examples,
+        ]
+        for (_, x), value in zip(columns, values):
+            draw.text((x, y), value, fill=(20, 20, 20), font=text_font)
+        y += row_h
+    image.save(output_path)
+
+
+def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) -> None:
+    total_cjk = sum(item["cjk_total"] for item in page_summaries)
+    total_sensitive = sum(item["parameter_sensitive_count"] for item in page_summaries)
+    lines = [
+        "radiation zone comparison - page batch",
+        "=" * 72,
+        "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
+        "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
+        "Adjusted profile: left strong extends 3% (left anti shrinks 10%->7%); right strong shrinks 5% (right anti grows 20%->25%).",
+        "",
+        f"pages evaluated: {len(page_summaries)}",
+        f"cjk tokens evaluated: {total_cjk}",
+        f"parameter-sensitive tokens: {total_sensitive}",
+        "",
+        "per-page summary:",
+    ]
+    for summary in page_summaries:
+        examples = ", ".join(f"L{line:02d}#{token:03d}{text}" for line, token, text in summary["selected_examples"][:8])
+        lines.append(
+            f"- {summary['page_id']}: cjk={summary['cjk_total']} sensitive={summary['parameter_sensitive_count']} "
+            f"no_strong={summary['current_no_strong_count']}/{summary['adjusted_no_strong_count']} examples={examples}"
+        )
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_page_comparison(
+    page_id: str,
+    image_path: Path,
+    json_path: Path,
+    output_dir: Path,
+    *,
+    samples_per_page: int,
+    write_top_level: bool = False,
+) -> dict[str, Any]:
     image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if image_bgr is None:
         raise RuntimeError(f"Cannot read image: {image_path}")
@@ -567,23 +645,47 @@ def run_comparison(image_path: Path, json_path: Path, output_dir: Path) -> None:
     )
     adjusted_spec = ZoneSpec(
         name="adjusted scope",
-        left_inset_ratio=0.05,
+        left_inset_ratio=0.07,
         right_inset_ratio=0.25,
-        rescue_left_guard_ratio=0.05,
+        rescue_left_guard_ratio=0.00,
         rescue_right_guard_ratio=0.10,
     )
     current_evals = {token.id: _evaluate_zone(image_bgr, token, current_spec) for token in tokens}
     adjusted_evals = {token.id: _evaluate_zone(image_bgr, token, adjusted_spec) for token in tokens}
-    samples = _select_samples(tokens, current_evals, adjusted_evals, limit=10)
-    _make_scope_comparison(image_bgr, samples, current_evals, adjusted_evals, output_dir / "01_radiation_scope_current_vs_adjusted.png")
-    _make_tier_matrix(output_dir / "02_bbox_quality_tier_matrix.png")
-    _make_report(output_dir / "03_radiation_scope_report.txt", samples, current_evals, adjusted_evals)
-    payload = {
+    samples = _select_samples(tokens, current_evals, adjusted_evals, limit=samples_per_page)
+    pages_dir = output_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    page_image = pages_dir / f"{page_id}_radiation_scope_current_vs_adjusted.png"
+    _make_scope_comparison(image_bgr, samples, current_evals, adjusted_evals, page_image, page_id=page_id)
+    if write_top_level:
+        _make_scope_comparison(
+            image_bgr,
+            samples,
+            current_evals,
+            adjusted_evals,
+            output_dir / "01_radiation_scope_current_vs_adjusted.png",
+            page_id=page_id,
+        )
+        _make_page_report(output_dir / "03_radiation_scope_report.txt", page_id, samples, current_evals, adjusted_evals)
+    changed = [
+        token_id
+        for token_id in current_evals
+        if current_evals[token_id].counts != adjusted_evals[token_id].counts
+        or current_evals[token_id].no_strong != adjusted_evals[token_id].no_strong
+    ]
+    payload: dict[str, Any] = {
+        "page_id": page_id,
         "source_image": str(image_path),
         "source_json": str(json_path),
+        "page_visual": str(page_image),
         "current_spec": current_spec.__dict__,
         "adjusted_spec": adjusted_spec.__dict__,
+        "cjk_total": len(tokens),
+        "parameter_sensitive_count": len(changed),
+        "current_no_strong_count": sum(1 for eval_item in current_evals.values() if eval_item.no_strong),
+        "adjusted_no_strong_count": sum(1 for eval_item in adjusted_evals.values() if eval_item.no_strong),
         "sample_token_ids": [list(token.id) for token in samples],
+        "selected_examples": [(token.line, token.token, token.text) for token in samples],
         "samples": [
             {
                 "id": list(token.id),
@@ -595,6 +697,49 @@ def run_comparison(image_path: Path, json_path: Path, output_dir: Path) -> None:
             for token in samples
         ],
     }
+    return payload
+
+
+def run_batch_comparison(
+    image_dir: Path,
+    json_dir: Path,
+    output_dir: Path,
+    *,
+    page_ids: list[str],
+    samples_per_page: int,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    page_payloads: list[dict[str, Any]] = []
+    for index, page_id in enumerate(page_ids):
+        image_path = image_dir / f"{page_id}.tif"
+        json_path = json_dir / f"{page_id}_ppocrv5_return_word_box.json"
+        if not image_path.exists() or not json_path.exists():
+            continue
+        page_payloads.append(
+            run_page_comparison(
+                page_id,
+                image_path,
+                json_path,
+                output_dir,
+                samples_per_page=samples_per_page,
+                write_top_level=(index == 0),
+            )
+        )
+    if not page_payloads:
+        raise RuntimeError(f"No matching page image/json pairs under {image_dir} and {json_dir}")
+    _make_tier_matrix(output_dir / "02_bbox_quality_tier_matrix.png")
+    _make_overview(output_dir / "04_page_scope_overview.png", page_payloads)
+    _make_batch_report(output_dir / "05_page_scope_batch_report.txt", page_payloads)
+    payload = {
+        "pages": page_payloads,
+        "legend": {
+            "green": "strong direct-keep radiation zone",
+            "red": "anti/weak edge zone",
+            "orange": "weak-zone rescue domain, not anti-radiation",
+            "cyan": "ownership interval",
+            "blue": "hard_bound extraction area",
+        },
+    }
     (output_dir / "radiation_zone_comparison_summary.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -604,11 +749,18 @@ def run_comparison(image_path: Path, json_path: Path, output_dir: Path) -> None:
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Visualize current and adjusted wordbox_anchor radiation scopes.")
-    parser.add_argument("--image", type=Path, default=repo_root / "file/244771纵校/120166.tif")
-    parser.add_argument("--json", type=Path, default=repo_root / "paddle-char-box-samples/wordbox-anchor-ablation/120166_ppocrv5_return_word_box.json")
+    parser.add_argument("--image-dir", type=Path, default=repo_root / "file/244771纵校")
+    parser.add_argument("--json-dir", type=Path, default=repo_root.parent / "claude/.cache")
     parser.add_argument("--output", type=Path, default=repo_root / "paddle-char-box-samples/radiation-zone-comparison")
+    parser.add_argument(
+        "--pages",
+        default="120166,120167,120168,120169,120170,120171,120172,120173,120174,120175,120176,120177,120178,120179,120180,120183,120184,120185,120186,120187",
+        help="Comma-separated page ids to process.",
+    )
+    parser.add_argument("--samples-per-page", type=int, default=8)
     args = parser.parse_args()
-    run_comparison(args.image, args.json, args.output)
+    page_ids = [item.strip() for item in args.pages.split(",") if item.strip()]
+    run_batch_comparison(args.image_dir, args.json_dir, args.output, page_ids=page_ids, samples_per_page=args.samples_per_page)
 
 
 if __name__ == "__main__":

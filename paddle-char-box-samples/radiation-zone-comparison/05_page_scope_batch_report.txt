@@ -1,0 +1,31 @@
+radiation zone comparison - page batch
+========================================================================
+Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.
+Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.
+Adjusted profile: left strong extends 3% (left anti shrinks 10%->7%); right strong shrinks 5% (right anti grows 20%->25%).
+
+pages evaluated: 20
+cjk tokens evaluated: 17026
+parameter-sensitive tokens: 320
+
+per-page summary:
+- 120166: cjk=874 sensitive=10 no_strong=0/0 examples=L08#020消, L08#011性, L07#024这, L30#027适, L33#002通, L28#004心, L07#012消, L07#028选
+- 120167: cjk=975 sensitive=21 no_strong=0/0 examples=L28#001份, L05#028消, L28#003均, L05#002消, L15#003总, L17#003总, L28#000省, L13#003业
+- 120168: cjk=796 sensitive=10 no_strong=0/0 examples=L00#011年, L27#004洋, L24#019业, L30#009流, L31#024还, L40#032治, L04#003总, L12#026方
+- 120169: cjk=615 sensitive=6 no_strong=0/0 examples=L07#013心, L09#027年, L10#006性, L04#001心, L37#000年, L37#001份, L37#003定, L14#000变
+- 120170: cjk=956 sensitive=8 no_strong=0/0 examples=L22#023均, L21#013慰, L00#007济, L03#002适, L11#002进, L00#011年, L14#025调, L16#019验
+- 120171: cjk=794 sensitive=31 no_strong=0/0 examples=L61#033业, L04#025这, L09#029进, L61#031业, L07#017一, L22#000二, L65#031流, L00#020政
+- 120172: cjk=700 sensitive=27 no_strong=0/0 examples=L13#001业, L02#006业, L00#011年, L00#003济, L62#008进, L62#027进, L63#033的, L71#024的
+- 120173: cjk=779 sensitive=18 no_strong=0/0 examples=L26#001均, L93#012还, L70#001份, L98#028总, L70#002固, L05#007进, L24#003支, L77#001本
+- 120174: cjk=775 sensitive=11 no_strong=0/0 examples=L13#001消, L00#011年, L09#002消, L16#002这, L17#008通, L18#011进, L19#000快, L10#003总
+- 120175: cjk=765 sensitive=29 no_strong=0/0 examples=L18#003消, L27#002总, L31#004总, L15#017消, L17#002没, L00#020政, L88#002同, L00#031配
+- 120176: cjk=1028 sensitive=14 no_strong=0/0 examples=L15#027消, L23#023调, L02#027消, L12#026途, L03#033疗, L28#017适, L18#027意, L04#017对
+- 120177: cjk=1080 sensitive=11 no_strong=0/0 examples=L21#029这, L29#008将, L21#012间, L24#000这, L31#023溢, L02#015消, L32#024消, L00#021激
+- 120178: cjk=1152 sensitive=17 no_strong=0/0 examples=L29#004消, L34#020消, L33#033适, L19#034源, L09#002源, L19#029领, L18#028预, L30#001将
+- 120179: cjk=685 sensitive=4 no_strong=0/0 examples=L02#001源, L35#004冰, L00#006一, L02#021标, L18#028来, L01#033动, L00#002发, L00#020政
+- 120180: cjk=488 sensitive=25 no_strong=0/0 examples=L02#035思, L06#037北, L26#034商, L02#014财, L16#026过, L24#027支, L15#021与, L20#032省
+- 120183: cjk=670 sensitive=17 no_strong=0/0 examples=L23#012济, L00#020业, L03#003恩, L00#022要, L00#014聚, L00#024生, L06#027率, L00#012业
+- 120184: cjk=957 sensitive=5 no_strong=0/0 examples=L00#011年, L25#013溢, L25#004洁, L33#002剔, L05#006只, L23#034效, L34#022势, L00#003济
+- 120185: cjk=1073 sensitive=7 no_strong=0/0 examples=L19#009态, L08#032进, L16#015将, L01#035效, L23#031司, L27#013函, L00#022要, L09#028浩
+- 120186: cjk=909 sensitive=15 no_strong=0/0 examples=L03#020焱, L00#011年, L26#018息, L00#003济, L04#017进, L06#022性, L13#009这, L20#004进
+- 120187: cjk=955 sensitive=34 no_strong=0/0 examples=L28#029心, L02#011间, L05#006基, L01#007这, L01#004条, L20#029终, L10#013和, L16#022进
