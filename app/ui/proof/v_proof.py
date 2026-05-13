@@ -48,8 +48,8 @@ from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
 
-CHAR_LIST_THUMB = 28
-GALLERY_THUMB   = 36
+CHAR_LIST_THUMB = 22
+GALLERY_THUMB   = 28
 LOW_CONF        = 0.80
 
 
@@ -325,7 +325,7 @@ class VProofPanel(QWidget):
 
         # 上：gallery 网格（固定高度）
         gallery_box = self._build_gallery_strip()
-        gallery_box.setFixedHeight(GALLERY_THUMB * 4 + 42)
+        gallery_box.setFixedHeight(GALLERY_THUMB * 4 + 34)
         v.addWidget(gallery_box)
 
         sep = QFrame()
