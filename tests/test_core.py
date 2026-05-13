@@ -4892,6 +4892,7 @@ def test_top_nav_moves_layout_run_button_and_removes_prev_next():
 def test_vproof_gallery_uses_wrapping_white_grid():
     from PySide6.QtCore import Qt
 
+    from app.ui.proof import v_proof
     from app.ui.proof.v_proof import VProofPanel
 
     _get_qapp()
@@ -4902,9 +4903,50 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._gallery_view.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert "background:#ffffff" in panel._gallery_view.styleSheet()
     assert "background:#ffffff" in panel._char_list.styleSheet()
+    assert v_proof.GALLERY_THUMB <= 36
+    assert v_proof.CHAR_LIST_THUMB <= 28
+    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 44
     panel.close()
 
     print("test_vproof_gallery_uses_wrapping_white_grid PASSED")
+
+
+def test_vproof_text_highlight_targets_single_entry():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="甲乙",
+        confidence=0.9,
+        bbox=BBox(1, 1, 40, 10),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-highlight.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.load_pages([page])
+    entry = panel._char_svc.query("乙")[0]
+
+    panel._highlight_char_in_text("乙", focus_entry=entry)
+
+    selections = panel._text_edit.extraSelections()
+    assert len(selections) == 1
+    assert selections[0].cursor.selectedText() == "乙"
+    panel.close()
+
+    print("test_vproof_text_highlight_targets_single_entry PASSED")
+
+
+def test_hproof_visual_size_is_compact():
+    from app.ui.proof import h_proof
+
+    assert h_proof.IMAGE_ROW_H <= 32
+
+    print("test_hproof_visual_size_is_compact PASSED")
 
 
 def test_image_viewer_char_boxes_update_char_bbox():
@@ -5086,6 +5128,8 @@ if __name__ == "__main__":
     test_vproof_merge_pages_preserves_current_page_text()
     test_top_nav_moves_layout_run_button_and_removes_prev_next()
     test_vproof_gallery_uses_wrapping_white_grid()
+    test_vproof_text_highlight_targets_single_entry()
+    test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()

@@ -334,7 +334,7 @@ class ImageViewer(QGraphicsView):
             self._block_items.remove((item, block))
             self.block_deleted.emit(block)
 
-    def highlight_bbox(self, bbox: BBox) -> None:
+    def highlight_bbox(self, bbox: BBox, *, zoom: bool = False) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
         # 清除旧的高亮
         if hasattr(self, "_highlight_item") and self._highlight_item is not None:
@@ -349,8 +349,17 @@ class ImageViewer(QGraphicsView):
         rect.setZValue(10)
         self._scene.addItem(rect)
         self._highlight_item = rect
-        # 滚动到该位置
-        self.ensureVisible(rect)
+        if zoom:
+            pad = max(80, int(max(bbox.w, bbox.h) * 4))
+            target = QRectF(
+                bbox.x - pad,
+                bbox.y - pad,
+                bbox.w + pad * 2,
+                bbox.h + pad * 2,
+            ).intersected(self._scene.sceneRect())
+            if target.isValid() and target.width() > 0 and target.height() > 0:
+                self.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
+        self.centerOn(rect)
 
     def show_line_highlight(self, bbox: BBox, flagged: bool = False) -> QGraphicsRectItem:
         color = _LINE_HIGHLIGHT if flagged else _LINE_OK_COLOR

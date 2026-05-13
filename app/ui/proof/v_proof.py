@@ -34,7 +34,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem,
-    QPlainTextEdit, QPushButton, QSplitter, QStyle,
+    QPlainTextEdit, QPushButton, QSplitter, QStyle, QTextEdit,
     QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
@@ -48,8 +48,8 @@ from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
 
-CHAR_LIST_THUMB = 44
-GALLERY_THUMB   = 72   # gallery 水平条高度（较大缩略图）
+CHAR_LIST_THUMB = 28
+GALLERY_THUMB   = 36
 LOW_CONF        = 0.80
 
 
@@ -134,12 +134,12 @@ class _GalleryModel(QAbstractListModel):
 
 
 class _GalleryDelegate(QStyledItemDelegate):
-    SIZE = GALLERY_THUMB + 28  # 图 + 标签
+    SIZE = GALLERY_THUMB + 8
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         r = option.rect
         pix: Optional[QPixmap] = index.data(Qt.ItemDataRole.DecorationRole)
-        img_r = r.adjusted(2, 2, -2, -(28))
+        img_r = r.adjusted(2, 2, -2, -2)
         if pix and not pix.isNull():
             scaled = pix.scaled(
                 img_r.size(),
@@ -162,15 +162,6 @@ class _GalleryDelegate(QStyledItemDelegate):
                 Qt.AlignmentFlag.AlignCenter,
                 fallback[:4],  # 最多显4字
             )
-
-        # 标签
-        lbl = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        painter.setPen(QColor("#888"))
-        lbl_r = r.adjusted(0, GALLERY_THUMB + 2, 0, 0)
-        painter.drawText(
-            lbl_r, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-            lbl,
-        )
 
         # 选中边框
         if option.state & QStyle.StateFlag.State_Selected:
@@ -334,7 +325,7 @@ class VProofPanel(QWidget):
 
         # 上：gallery 网格（固定高度）
         gallery_box = self._build_gallery_strip()
-        gallery_box.setFixedHeight(GALLERY_THUMB * 3 + 54)
+        gallery_box.setFixedHeight(GALLERY_THUMB * 4 + 42)
         v.addWidget(gallery_box)
 
         sep = QFrame()
@@ -524,6 +515,7 @@ class VProofPanel(QWidget):
         flat_text, self._text_map = _build_text_map(page)
         self._updating = True
         self._text_edit.setPlainText(flat_text)
+        self._text_edit.setExtraSelections([])
         self._updating = False
         self._status_lbl.setText("")
         self._status_lbl.setStyleSheet("")
@@ -567,14 +559,12 @@ class VProofPanel(QWidget):
         self, char: str, focus_entry: Optional[CharEntry] = None,
     ) -> None:
         doc = self._text_edit.document()
-        # 先清除全文格式
         clear_cur = QTextCursor(doc)
         clear_cur.select(QTextCursor.SelectionType.Document)
         clear_cur.setCharFormat(QTextCharFormat())
         fmt = QTextCharFormat()
         fmt.setBackground(QColor("#ffe8a3"))
         fmt.setForeground(QColor("#0b57d0"))
-        # 只高亮当前 occurrence。gallery 已展示同类集合，正文区负责一一对应定位。
         target_pos: Optional[int] = None
         if focus_entry is not None:
             target_pos = self._entry_text_pos(focus_entry)
@@ -585,27 +575,31 @@ class VProofPanel(QWidget):
         if target_pos is not None:
             place = QTextCursor(doc)
             place.setPosition(target_pos)
-            # 选中整个 token（对多字符 token 如 "2016" 正确选中全部）
             for _ in range(len(char)):
                 place.movePosition(
                     QTextCursor.MoveOperation.NextCharacter,
                     QTextCursor.MoveMode.KeepAnchor,
                 )
-            place.setCharFormat(fmt)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = QTextCursor(place)
+            selection.format = fmt
+            self._text_edit.setExtraSelections([selection])
             self._text_edit.setTextCursor(place)
             self._text_edit.ensureCursorVisible()
+        else:
+            self._text_edit.setExtraSelections([])
 
     def _highlight_char_in_viewer(self, entry: CharEntry) -> None:
         if not self._pages:
             return
         cur_page = self._pages[self._current_page_idx]
         if entry.page_path == cur_page.display_image_path:
-            self._viewer.highlight_bbox(entry.bbox)
+            self._viewer.highlight_bbox(entry.bbox, zoom=True)
         else:
             for i, p in enumerate(self._pages):
                 if p.display_image_path == entry.page_path:
                     self._load_page(i)
-                    self._viewer.highlight_bbox(entry.bbox)
+                    self._viewer.highlight_bbox(entry.bbox, zoom=True)
                     break
 
     # ─────────────────── Gallery 点击 ───────────────────────
