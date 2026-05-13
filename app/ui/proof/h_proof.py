@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
-from app.core.char_bbox_utils import refine_line_bbox
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -314,12 +313,12 @@ class _LinePair(QFrame):
         if image is None:
             self._img_lbl.setText("（无图像）")
             return
-        refined = refine_line_bbox(bb, image)
         H, W = image.shape[:2]
-        x1 = max(0, refined.x)
-        y1 = max(0, refined.y - ROW_PAD_Y)
-        x2 = min(W, refined.x2)
-        y2 = min(H, refined.y2 + ROW_PAD_Y)
+        line_box = bb.normalize()
+        x1 = max(0, line_box.x)
+        y1 = max(0, line_box.y - ROW_PAD_Y)
+        x2 = min(W, line_box.x2)
+        y2 = min(H, line_box.y2 + ROW_PAD_Y)
         if x2 <= x1 or y2 <= y1:
             self._img_lbl.setText("（行框异常）")
             return
@@ -425,19 +424,9 @@ class _LinePair(QFrame):
         self._editor.blockSignals(False)
 
     def _highlight_low_conf(self) -> None:
-        if not self._line.chars:
-            return
-        red = QTextCharFormat()
-        red.setBackground(QColor(255, 140, 0, 70))
-        normal = QTextCharFormat()
-        text = self._line.text or ""
-        for i, ch in enumerate(self._line.chars):
-            if i >= len(text):
-                break
-            cur = self._editor.textCursor()
-            cur.setPosition(i)
-            cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
-            cur.setCharFormat(red if ch.confidence < LOW_CONF else normal)
+        cur = QTextCursor(self._editor.document())
+        cur.select(QTextCursor.SelectionType.Document)
+        cur.setCharFormat(QTextCharFormat())
 
     def _refresh_status(self) -> None:
         status = self._line.proof_status
@@ -631,17 +620,20 @@ class HProofPanel(QWidget):
             QTimer.singleShot(100, self._load_visible_images)
 
     def _refresh_page_filter(self) -> None:
+        from pathlib import Path
+
         current = self._page_combo.currentData()
-        page_numbers = [
-            page.page_number
+        page_options = [
+            (page.page_number, Path(page.source_path or page.image_path).name)
             for page in self._pages
             if any(True for _ in iter_unique_page_hproof_lines(page))
         ]
+        page_numbers = [page_number for page_number, _name in page_options]
         self._filter_updating = True
         self._page_combo.clear()
         self._page_combo.addItem("全部页面", None)
-        for page_number in page_numbers:
-            self._page_combo.addItem(f"第 {page_number} 页", page_number)
+        for page_number, name in page_options:
+            self._page_combo.addItem(f"第 {page_number} 页  {name}", page_number)
         if current in page_numbers:
             index = self._page_combo.findData(current)
             self._page_combo.setCurrentIndex(index)

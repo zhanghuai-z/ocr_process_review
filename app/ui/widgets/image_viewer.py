@@ -343,10 +343,10 @@ class ImageViewer(QGraphicsView):
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QPen, QColor
         rect = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
-        pen = QPen(QColor("#FF8C00"), 2)
+        pen = QPen(QColor("#FF8C00"), 4 if zoom else 2)
         rect.setPen(pen)
-        rect.setBrush(QColor(255, 140, 0, 40))
-        rect.setZValue(10)
+        rect.setBrush(QColor(255, 140, 0, 80 if zoom else 40))
+        rect.setZValue(80 if zoom else 10)
         self._scene.addItem(rect)
         self._highlight_item = rect
         if zoom:
