@@ -272,6 +272,63 @@ flowchart TD
 
 数字 / 公式 / 混合数字行必须先靠 OCR 文本/token 分类分流：正文内 `2016` 之类数字 run 不单独建 Structure 框，也不从 line 连通域猜；在 VProof 集合层合并为 number token。公式/变量片段按 formula token/run 处理；独立公式可以由 Structure `EQUATION` 提供容器，但 proof text/bbox 仍由 PP-OCRv5 line/token 主链负责。
 
+## 7.3 PP-OCRv5 bbox 质量分级与辐射区参数 profile
+
+后续调参不能再使用“全局改一个参数”的方式。`wordbox_anchor` 的主要风险不是某个参数绝对好坏，而是不同质量的 PP-OCRv5 `text_word_boxes` 需要不同处理强度：紧框、松框、左偏旁被裁、右侧邻字蹭入、细横字、非 CJK token 的风险完全不同。如果把某个 Q2 风险样本调好后全局应用，很容易把原本 Q0 稳定字带坏。
+
+本轮新增辐射区作用域可视化脚本：
+
+```bash
+python app/experiments/run_radiation_zone_comparison.py
+```
+
+输出在 `paddle-char-box-samples/radiation-zone-comparison/`：
+
+- `01_radiation_scope_current_vs_adjusted.png`：真实 PP-OCRv5 word box 上的当前 v11 与调整后辐射区对比。绿色为强辐射区，红色为弱/反辐射边缘区，橙色为弱区救回作用域，青色为 ownership，蓝色为 hard_bound。
+- `02_bbox_quality_tier_matrix.png`：bbox 质量分级与允许调参范围。
+- `03_radiation_scope_report.txt`：参数敏感 token 列表与解释。
+- `radiation_zone_comparison_summary.json`：可复核的 bbox、zone 和 component label。
+
+当前 v11 参数语义：
+
+```text
+strong_left_inset = 10%
+strong_right_inset = 20%
+rescue_right_anti_guard = 5%
+```
+
+本轮按要求绘制的调整 profile：
+
+```text
+strong_left_inset = 5%    # 左强辐射区向左延长 5%
+strong_right_inset = 25%  # 右强辐射区向左缩减 5%
+rescue_left_anti_guard = 5%
+rescue_right_anti_guard = 10%  # 反/弱区 guard 增长 5%
+```
+
+这组调整的作用是：左侧更宽容，适合保护被 PP-OCRv5 紧框裁到的左偏旁；右侧更严格，适合压制右邻字碎片。`120166` 上 874 个 CJK token 中，按 scope label 统计只有 10 个 token 对这组参数变化敏感，且 `no strong cc` 仍为 `0/0`。这说明该调整有明确作用域，但不应全局替换默认 profile。
+
+建议把后续参数做成质量分级 profile：
+
+| 等级 | bbox 信号 | 参数策略 | UI / 导出语义 |
+|---|---|---|---|
+| Q0 stable | 单/少量 cc，source 边距正常，当前与调整 profile 结果一致 | 使用默认 v11，不做自适应扩张 | 可默认展示 refined crop |
+| Q1 edge-risk | 墨迹贴 source 边，疑似紧框或单侧偏移 | 只允许单侧小幅放宽，例如左偏旁保护 profile | 标记为边缘风险，保留 raw token bbox |
+| Q2 loose/noisy | 出现 `anti_dropped`、`weak_rescued`、multi-CC 或参数敏感 | 使用更严格 ownership、edge crumb、反区 guard，并保留 profile 对比结果 | UI 标黄，人工可看 raw/refined 对比 |
+| Q3 fallback | 无强区 cc、无墨迹、非 CJK/mixed token、细横特殊失败 | 不强行生成 glyph crop，保持 token/raw bbox 或人工处理 | 不能静默导出为精确单字真值 |
+
+工程落地时，profile 只能生成候选，不能覆盖原始 Paddle bbox。每个候选必须保留：
+
+- `raw_token_bbox`
+- `refined_bbox`
+- `quality_tier`
+- `profile_name`
+- `risk_flags`
+- `component_counts`
+- `refine_status`
+
+这样后续微调参数时，可以按 Q0/Q1/Q2/Q3 分层回归，确认“风险样本改善”没有破坏“稳定样本”。主程序默认展示可使用最高可信 refined crop，但导出和人工终审必须能回退到 raw token bbox。
+
 ## 8. 公式 / 数字 / 普通文本策略
 
 纵校集合不再把所有字符都等价处理：

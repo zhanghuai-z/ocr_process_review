@@ -1,0 +1,26 @@
+radiation zone comparison
+========================================================================
+current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%
+adjusted: left strong extends 5% (left inset 5%), right strong shrinks 5% (right inset 25%), rescue anti guard grows by 5%
+
+cjk tokens evaluated: 874
+parameter-sensitive tokens by scope labels: 10
+no strong cc current/adjusted: 0/0
+
+selected samples:
+- L08#020 消: Q2 param-sensitive, current={'strong': 4, 'anti_dropped': 4}, adjusted={'strong': 5, 'anti_dropped': 3}
+- L08#011 性: Q2 param-sensitive, current={'anti_dropped': 4, 'strong': 1}, adjusted={'strong': 2, 'anti_dropped': 3}
+- L07#024 这: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
+- L30#027 适: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
+- L33#002 通: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 3}, adjusted={'strong': 2, 'anti_dropped': 2}
+- L28#004 心: Q2 param-sensitive, current={'anti_dropped': 2, 'strong': 3}, adjusted={'strong': 4, 'anti_dropped': 1}
+- L07#012 消: Q2 loose/noisy, current={'anti_dropped': 5, 'strong': 3}, adjusted={'anti_dropped': 5, 'strong': 3}
+- L07#028 选: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 2, 'anti_dropped': 1}
+- L33#016 适: Q2 param-sensitive, current={'strong': 1, 'anti_dropped': 2}, adjusted={'strong': 2, 'anti_dropped': 1}
+- L22#028 年: Q2 param-sensitive, current={'anti_dropped': 1, 'strong': 1, 'weak_rescued': 1}, adjusted={'anti_dropped': 2, 'strong': 1}
+
+interpretation:
+- The requested adjustment makes the left strong area more permissive and the right strong area stricter.
+- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.
+- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.
+- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.

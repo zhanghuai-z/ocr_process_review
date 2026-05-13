@@ -1,0 +1,2063 @@
+{
+  "source_image": "/mnt/d/project/ocr_process/worktrees/gpt/file/244771纵校/120166.tif",
+  "source_json": "/mnt/d/project/ocr_process/worktrees/gpt/paddle-char-box-samples/wordbox-anchor-ablation/120166_ppocrv5_return_word_box.json",
+  "current_spec": {
+    "name": "current v11",
+    "left_inset_ratio": 0.1,
+    "right_inset_ratio": 0.2,
+    "y_inset_ratio": 0.15,
+    "tol_ratio": 0.08,
+    "min_tol": 3,
+    "y_pad_ratio": 0.15,
+    "weak_y_overlap_ratio": 0.25,
+    "weak_area_ratio": 0.05,
+    "rescue_left_guard_ratio": 0.0,
+    "rescue_right_guard_ratio": 0.05
+  },
+  "adjusted_spec": {
+    "name": "adjusted scope",
+    "left_inset_ratio": 0.05,
+    "right_inset_ratio": 0.25,
+    "y_inset_ratio": 0.15,
+    "tol_ratio": 0.08,
+    "min_tol": 3,
+    "y_pad_ratio": 0.15,
+    "weak_y_overlap_ratio": 0.25,
+    "weak_area_ratio": 0.05,
+    "rescue_left_guard_ratio": 0.05,
+    "rescue_right_guard_ratio": 0.1
+  },
+  "sample_token_ids": [
+    [
+      8,
+      20
+    ],
+    [
+      8,
+      11
+    ],
+    [
+      7,
+      24
+    ],
+    [
+      30,
+      27
+    ],
+    [
+      33,
+      2
+    ],
+    [
+      28,
+      4
+    ],
+    [
+      7,
+      12
+    ],
+    [
+      7,
+      28
+    ],
+    [
+      33,
+      16
+    ],
+    [
+      22,
+      28
+    ]
+  ],
+  "samples": [
+    {
+      "id": [
+        8,
+        20
+      ],
+      "text": "消",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 8,
+        "token": 20,
+        "text": "消",
+        "spec": "current v11",
+        "source_bbox": [
+          1354,
+          952,
+          1408,
+          1001
+        ],
+        "ownership": [
+          1354.5,
+          1407.5
+        ],
+        "hard_bound": [
+          1350,
+          945,
+          1412,
+          1008
+        ],
+        "strong": [
+          1359,
+          959,
+          1398,
+          994
+        ],
+        "rescue_domain": [
+          1354.5,
+          1405.3
+        ],
+        "counts": {
+          "strong": 4,
+          "anti_dropped": 4
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1351,
+              962,
+              1366,
+              998
+            ],
+            "area": 133,
+            "cx": 1358.31,
+            "cy": 982.67,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1351,
+              966,
+              1359,
+              974
+            ],
+            "area": 35,
+            "cx": 1354.83,
+            "cy": 969.69,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1355,
+              955,
+              1364,
+              964
+            ],
+            "area": 36,
+            "cx": 1359.28,
+            "cy": 958.83,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1366,
+              956,
+              1375,
+              966
+            ],
+            "area": 44,
+            "cx": 1370.41,
+            "cy": 960.8,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1367,
+              953,
+              1393,
+              999
+            ],
+            "area": 529,
+            "cx": 1379.36,
+            "cy": 976.48,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1404,
+              976,
+              1412,
+              980
+            ],
+            "area": 19,
+            "cx": 1407.79,
+            "cy": 977.74,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1407,
+              996,
+              1412,
+              999
+            ],
+            "area": 10,
+            "cx": 1409.4,
+            "cy": 997.4,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1408,
+              958,
+              1412,
+              972
+            ],
+            "area": 40,
+            "cx": 1409.97,
+            "cy": 964.8,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 8,
+        "token": 20,
+        "text": "消",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1354,
+          952,
+          1408,
+          1001
+        ],
+        "ownership": [
+          1354.5,
+          1407.5
+        ],
+        "hard_bound": [
+          1350,
+          945,
+          1412,
+          1008
+        ],
+        "strong": [
+          1356,
+          959,
+          1395,
+          994
+        ],
+        "rescue_domain": [
+          1356.7,
+          1402.6
+        ],
+        "counts": {
+          "strong": 5,
+          "anti_dropped": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1351,
+              962,
+              1366,
+              998
+            ],
+            "area": 133,
+            "cx": 1358.31,
+            "cy": 982.67,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1351,
+              966,
+              1359,
+              974
+            ],
+            "area": 35,
+            "cx": 1354.83,
+            "cy": 969.69,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1355,
+              955,
+              1364,
+              964
+            ],
+            "area": 36,
+            "cx": 1359.28,
+            "cy": 958.83,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1366,
+              956,
+              1375,
+              966
+            ],
+            "area": 44,
+            "cx": 1370.41,
+            "cy": 960.8,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1367,
+              953,
+              1393,
+              999
+            ],
+            "area": 529,
+            "cx": 1379.36,
+            "cy": 976.48,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1404,
+              976,
+              1412,
+              980
+            ],
+            "area": 19,
+            "cx": 1407.79,
+            "cy": 977.74,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1407,
+              996,
+              1412,
+              999
+            ],
+            "area": 10,
+            "cx": 1409.4,
+            "cy": 997.4,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1408,
+              958,
+              1412,
+              972
+            ],
+            "area": 40,
+            "cx": 1409.97,
+            "cy": 964.8,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        8,
+        11
+      ],
+      "text": "性",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 8,
+        "token": 11,
+        "text": "性",
+        "spec": "current v11",
+        "source_bbox": [
+          894,
+          952,
+          949,
+          1001
+        ],
+        "ownership": [
+          890.75,
+          948.0
+        ],
+        "hard_bound": [
+          886,
+          945,
+          953,
+          1008
+        ],
+        "strong": [
+          899,
+          959,
+          938,
+          994
+        ],
+        "rescue_domain": [
+          894.0,
+          946.25
+        ],
+        "counts": {
+          "anti_dropped": 4,
+          "strong": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              893,
+              968,
+              898,
+              978
+            ],
+            "area": 33,
+            "cx": 895.36,
+            "cy": 973.18,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              900,
+              955,
+              939,
+              1000
+            ],
+            "area": 670,
+            "cx": 915.61,
+            "cy": 976.67,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              947,
+              971,
+              953,
+              973
+            ],
+            "area": 11,
+            "cx": 949.73,
+            "cy": 971.55,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              949,
+              984,
+              953,
+              993
+            ],
+            "area": 26,
+            "cx": 950.85,
+            "cy": 988.58,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              950,
+              961,
+              953,
+              963
+            ],
+            "area": 6,
+            "cx": 951.0,
+            "cy": 961.5,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 8,
+        "token": 11,
+        "text": "性",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          894,
+          952,
+          949,
+          1001
+        ],
+        "ownership": [
+          890.75,
+          948.0
+        ],
+        "hard_bound": [
+          886,
+          945,
+          953,
+          1008
+        ],
+        "strong": [
+          896,
+          959,
+          936,
+          994
+        ],
+        "rescue_domain": [
+          896.75,
+          943.5
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              893,
+              968,
+              898,
+              978
+            ],
+            "area": 33,
+            "cx": 895.36,
+            "cy": 973.18,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              900,
+              955,
+              939,
+              1000
+            ],
+            "area": 670,
+            "cx": 915.61,
+            "cy": 976.67,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              947,
+              971,
+              953,
+              973
+            ],
+            "area": 11,
+            "cx": 949.73,
+            "cy": 971.55,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              949,
+              984,
+              953,
+              993
+            ],
+            "area": 26,
+            "cx": 950.85,
+            "cy": 988.58,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              950,
+              961,
+              953,
+              963
+            ],
+            "area": 6,
+            "cx": 951.0,
+            "cy": 961.5,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        7,
+        24
+      ],
+      "text": "这",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 7,
+        "token": 24,
+        "text": "这",
+        "spec": "current v11",
+        "source_bbox": [
+          1552,
+          872,
+          1606,
+          925
+        ],
+        "ownership": [
+          1546.75,
+          1602.0
+        ],
+        "hard_bound": [
+          1542,
+          865,
+          1607,
+          932
+        ],
+        "strong": [
+          1557,
+          879,
+          1596,
+          918
+        ],
+        "rescue_domain": [
+          1552.0,
+          1602.0
+        ],
+        "counts": {
+          "strong": 1,
+          "anti_dropped": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1544,
+              876,
+              1590,
+              921
+            ],
+            "area": 634,
+            "cx": 1568.01,
+            "cy": 902.81,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1548,
+              878,
+              1556,
+              888
+            ],
+            "area": 42,
+            "cx": 1551.86,
+            "cy": 882.81,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1597,
+              889,
+              1607,
+              919
+            ],
+            "area": 106,
+            "cx": 1603.0,
+            "cy": 900.13,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1598,
+              879,
+              1607,
+              883
+            ],
+            "area": 23,
+            "cx": 1602.78,
+            "cy": 881.09,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 7,
+        "token": 24,
+        "text": "这",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1552,
+          872,
+          1606,
+          925
+        ],
+        "ownership": [
+          1546.75,
+          1602.0
+        ],
+        "hard_bound": [
+          1542,
+          865,
+          1607,
+          932
+        ],
+        "strong": [
+          1554,
+          879,
+          1593,
+          918
+        ],
+        "rescue_domain": [
+          1554.7,
+          1600.6
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 2
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1544,
+              876,
+              1590,
+              921
+            ],
+            "area": 634,
+            "cx": 1568.01,
+            "cy": 902.81,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1548,
+              878,
+              1556,
+              888
+            ],
+            "area": 42,
+            "cx": 1551.86,
+            "cy": 882.81,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1597,
+              889,
+              1607,
+              919
+            ],
+            "area": 106,
+            "cx": 1603.0,
+            "cy": 900.13,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1598,
+              879,
+              1607,
+              883
+            ],
+            "area": 23,
+            "cx": 1602.78,
+            "cy": 881.09,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        30,
+        27
+      ],
+      "text": "适",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 30,
+        "token": 27,
+        "text": "适",
+        "spec": "current v11",
+        "source_bbox": [
+          1842,
+          2666,
+          1895,
+          2722
+        ],
+        "ownership": [
+          1839.0,
+          1893.0
+        ],
+        "hard_bound": [
+          1835,
+          2658,
+          1898,
+          2730
+        ],
+        "strong": [
+          1847,
+          2674,
+          1885,
+          2714
+        ],
+        "rescue_domain": [
+          1842.0,
+          1892.35
+        ],
+        "counts": {
+          "strong": 1,
+          "anti_dropped": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1835,
+              2670,
+              1881,
+              2715
+            ],
+            "area": 732,
+            "cx": 1859.51,
+            "cy": 2695.93,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1839,
+              2673,
+              1847,
+              2682
+            ],
+            "area": 42,
+            "cx": 1843.02,
+            "cy": 2677.02,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1889,
+              2673,
+              1898,
+              2676
+            ],
+            "area": 25,
+            "cx": 1893.32,
+            "cy": 2674.0,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1891,
+              2680,
+              1898,
+              2715
+            ],
+            "area": 192,
+            "cx": 1893.77,
+            "cy": 2696.72,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 30,
+        "token": 27,
+        "text": "适",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1842,
+          2666,
+          1895,
+          2722
+        ],
+        "ownership": [
+          1839.0,
+          1893.0
+        ],
+        "hard_bound": [
+          1835,
+          2658,
+          1898,
+          2730
+        ],
+        "strong": [
+          1844,
+          2674,
+          1882,
+          2714
+        ],
+        "rescue_domain": [
+          1844.65,
+          1889.7
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 2
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1835,
+              2670,
+              1881,
+              2715
+            ],
+            "area": 732,
+            "cx": 1859.51,
+            "cy": 2695.93,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1839,
+              2673,
+              1847,
+              2682
+            ],
+            "area": 42,
+            "cx": 1843.02,
+            "cy": 2677.02,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1889,
+              2673,
+              1898,
+              2676
+            ],
+            "area": 25,
+            "cx": 1893.32,
+            "cy": 2674.0,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1891,
+              2680,
+              1898,
+              2715
+            ],
+            "area": 192,
+            "cx": 1893.77,
+            "cy": 2696.72,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        33,
+        2
+      ],
+      "text": "通",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 33,
+        "token": 2,
+        "text": "通",
+        "spec": "current v11",
+        "source_bbox": [
+          424,
+          2898,
+          478,
+          2951
+        ],
+        "ownership": [
+          421.5,
+          475.5
+        ],
+        "hard_bound": [
+          417,
+          2891,
+          480,
+          2958
+        ],
+        "strong": [
+          429,
+          2905,
+          468,
+          2944
+        ],
+        "rescue_domain": [
+          424.0,
+          475.3
+        ],
+        "counts": {
+          "strong": 1,
+          "anti_dropped": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              417,
+              2907,
+              461,
+              2950
+            ],
+            "area": 858,
+            "cx": 441.03,
+            "cy": 2930.46,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              420,
+              2909,
+              428,
+              2918
+            ],
+            "area": 40,
+            "cx": 423.7,
+            "cy": 2913.1,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              470,
+              2924,
+              480,
+              2949
+            ],
+            "area": 105,
+            "cx": 475.89,
+            "cy": 2935.93,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              476,
+              2909,
+              480,
+              2917
+            ],
+            "area": 19,
+            "cx": 478.05,
+            "cy": 2911.47,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 33,
+        "token": 2,
+        "text": "通",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          424,
+          2898,
+          478,
+          2951
+        ],
+        "ownership": [
+          421.5,
+          475.5
+        ],
+        "hard_bound": [
+          417,
+          2891,
+          480,
+          2958
+        ],
+        "strong": [
+          426,
+          2905,
+          465,
+          2944
+        ],
+        "rescue_domain": [
+          426.7,
+          472.6
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 2
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              417,
+              2907,
+              461,
+              2950
+            ],
+            "area": 858,
+            "cx": 441.03,
+            "cy": 2930.46,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              420,
+              2909,
+              428,
+              2918
+            ],
+            "area": 40,
+            "cx": 423.7,
+            "cy": 2913.1,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              470,
+              2924,
+              480,
+              2949
+            ],
+            "area": 105,
+            "cx": 475.89,
+            "cy": 2935.93,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              476,
+              2909,
+              480,
+              2917
+            ],
+            "area": 19,
+            "cx": 478.05,
+            "cy": 2911.47,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        28,
+        4
+      ],
+      "text": "心",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 28,
+        "token": 4,
+        "text": "心",
+        "spec": "current v11",
+        "source_bbox": [
+          571,
+          2508,
+          626,
+          2570
+        ],
+        "ownership": [
+          572.5,
+          624.5
+        ],
+        "hard_bound": [
+          568,
+          2499,
+          629,
+          2579
+        ],
+        "strong": [
+          576,
+          2517,
+          615,
+          2561
+        ],
+        "rescue_domain": [
+          572.5,
+          623.25
+        ],
+        "counts": {
+          "anti_dropped": 2,
+          "strong": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              568,
+              2540,
+              575,
+              2555
+            ],
+            "area": 58,
+            "cx": 571.33,
+            "cy": 2548.4,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              580,
+              2531,
+              603,
+              2563
+            ],
+            "area": 224,
+            "cx": 587.08,
+            "cy": 2551.89,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              586,
+              2523,
+              594,
+              2534
+            ],
+            "area": 47,
+            "cx": 590.02,
+            "cy": 2527.57,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              601,
+              2537,
+              611,
+              2551
+            ],
+            "area": 61,
+            "cx": 606.33,
+            "cy": 2543.72,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              619,
+              2521,
+              629,
+              2564
+            ],
+            "area": 130,
+            "cx": 625.29,
+            "cy": 2544.87,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 28,
+        "token": 4,
+        "text": "心",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          571,
+          2508,
+          626,
+          2570
+        ],
+        "ownership": [
+          572.5,
+          624.5
+        ],
+        "hard_bound": [
+          568,
+          2499,
+          629,
+          2579
+        ],
+        "strong": [
+          573,
+          2517,
+          613,
+          2561
+        ],
+        "rescue_domain": [
+          573.75,
+          620.5
+        ],
+        "counts": {
+          "strong": 4,
+          "anti_dropped": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              568,
+              2540,
+              575,
+              2555
+            ],
+            "area": 58,
+            "cx": 571.33,
+            "cy": 2548.4,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              580,
+              2531,
+              603,
+              2563
+            ],
+            "area": 224,
+            "cx": 587.08,
+            "cy": 2551.89,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              586,
+              2523,
+              594,
+              2534
+            ],
+            "area": 47,
+            "cx": 590.02,
+            "cy": 2527.57,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              601,
+              2537,
+              611,
+              2551
+            ],
+            "area": 61,
+            "cx": 606.33,
+            "cy": 2543.72,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              619,
+              2521,
+              629,
+              2564
+            ],
+            "area": 130,
+            "cx": 625.29,
+            "cy": 2544.87,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        7,
+        12
+      ],
+      "text": "消",
+      "quality": "Q2 loose/noisy",
+      "current": {
+        "line": 7,
+        "token": 12,
+        "text": "消",
+        "spec": "current v11",
+        "source_bbox": [
+          919,
+          872,
+          972,
+          925
+        ],
+        "ownership": [
+          913.5,
+          968.5
+        ],
+        "hard_bound": [
+          909,
+          865,
+          973,
+          932
+        ],
+        "strong": [
+          924,
+          879,
+          962,
+          918
+        ],
+        "rescue_domain": [
+          919.0,
+          968.5
+        ],
+        "counts": {
+          "anti_dropped": 5,
+          "strong": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              913,
+              889,
+              921,
+              898
+            ],
+            "area": 35,
+            "cx": 917.2,
+            "cy": 893.06,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              914,
+              879,
+              929,
+              922
+            ],
+            "area": 168,
+            "cx": 920.96,
+            "cy": 900.58,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              928,
+              880,
+              937,
+              889
+            ],
+            "area": 40,
+            "cx": 932.88,
+            "cy": 884.0,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              929,
+              876,
+              955,
+              923
+            ],
+            "area": 545,
+            "cx": 942.0,
+            "cy": 900.06,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              967,
+              900,
+              973,
+              903
+            ],
+            "area": 14,
+            "cx": 970.0,
+            "cy": 901.21,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              968,
+              920,
+              973,
+              923
+            ],
+            "area": 11,
+            "cx": 970.45,
+            "cy": 921.27,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              970,
+              882,
+              973,
+              884
+            ],
+            "area": 6,
+            "cx": 971.0,
+            "cy": 882.5,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              970,
+              886,
+              973,
+              895
+            ],
+            "area": 19,
+            "cx": 971.32,
+            "cy": 890.68,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 7,
+        "token": 12,
+        "text": "消",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          919,
+          872,
+          972,
+          925
+        ],
+        "ownership": [
+          913.5,
+          968.5
+        ],
+        "hard_bound": [
+          909,
+          865,
+          973,
+          932
+        ],
+        "strong": [
+          921,
+          879,
+          959,
+          918
+        ],
+        "rescue_domain": [
+          921.65,
+          966.7
+        ],
+        "counts": {
+          "anti_dropped": 5,
+          "strong": 3
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              913,
+              889,
+              921,
+              898
+            ],
+            "area": 35,
+            "cx": 917.2,
+            "cy": 893.06,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              914,
+              879,
+              929,
+              922
+            ],
+            "area": 168,
+            "cx": 920.96,
+            "cy": 900.58,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              928,
+              880,
+              937,
+              889
+            ],
+            "area": 40,
+            "cx": 932.88,
+            "cy": 884.0,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              929,
+              876,
+              955,
+              923
+            ],
+            "area": 545,
+            "cx": 942.0,
+            "cy": 900.06,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              967,
+              900,
+              973,
+              903
+            ],
+            "area": 14,
+            "cx": 970.0,
+            "cy": 901.21,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              968,
+              920,
+              973,
+              923
+            ],
+            "area": 11,
+            "cx": 970.45,
+            "cy": 921.27,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              970,
+              882,
+              973,
+              884
+            ],
+            "area": 6,
+            "cx": 971.0,
+            "cy": 882.5,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              970,
+              886,
+              973,
+              895
+            ],
+            "area": 19,
+            "cx": 971.32,
+            "cy": 890.68,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        7,
+        28
+      ],
+      "text": "选",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 7,
+        "token": 28,
+        "text": "选",
+        "spec": "current v11",
+        "source_bbox": [
+          1763,
+          872,
+          1817,
+          925
+        ],
+        "ownership": [
+          1762.5,
+          1813.0
+        ],
+        "hard_bound": [
+          1758,
+          865,
+          1818,
+          932
+        ],
+        "strong": [
+          1768,
+          879,
+          1807,
+          918
+        ],
+        "rescue_domain": [
+          1763.0,
+          1813.0
+        ],
+        "counts": {
+          "strong": 1,
+          "anti_dropped": 2
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1758,
+              876,
+              1800,
+              920
+            ],
+            "area": 741,
+            "cx": 1779.5,
+            "cy": 901.16,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1760,
+              879,
+              1767,
+              888
+            ],
+            "area": 40,
+            "cx": 1763.12,
+            "cy": 883.17,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1807,
+              875,
+              1818,
+              921
+            ],
+            "area": 217,
+            "cx": 1814.09,
+            "cy": 899.6,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 7,
+        "token": 28,
+        "text": "选",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1763,
+          872,
+          1817,
+          925
+        ],
+        "ownership": [
+          1762.5,
+          1813.0
+        ],
+        "hard_bound": [
+          1758,
+          865,
+          1818,
+          932
+        ],
+        "strong": [
+          1765,
+          879,
+          1804,
+          918
+        ],
+        "rescue_domain": [
+          1765.7,
+          1811.6
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1758,
+              876,
+              1800,
+              920
+            ],
+            "area": 741,
+            "cx": 1779.5,
+            "cy": 901.16,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1760,
+              879,
+              1767,
+              888
+            ],
+            "area": 40,
+            "cx": 1763.12,
+            "cy": 883.17,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1807,
+              875,
+              1818,
+              921
+            ],
+            "area": 217,
+            "cx": 1814.09,
+            "cy": 899.6,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        33,
+        16
+      ],
+      "text": "适",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 33,
+        "token": 16,
+        "text": "适",
+        "spec": "current v11",
+        "source_bbox": [
+          1173,
+          2898,
+          1226,
+          2951
+        ],
+        "ownership": [
+          1169.75,
+          1224.25
+        ],
+        "hard_bound": [
+          1165,
+          2891,
+          1229,
+          2958
+        ],
+        "strong": [
+          1178,
+          2905,
+          1216,
+          2944
+        ],
+        "rescue_domain": [
+          1173.0,
+          1223.35
+        ],
+        "counts": {
+          "strong": 1,
+          "anti_dropped": 2
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1165,
+              2901,
+              1209,
+              2946
+            ],
+            "area": 727,
+            "cx": 1188.46,
+            "cy": 2926.73,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1167,
+              2903,
+              1176,
+              2914
+            ],
+            "area": 47,
+            "cx": 1171.4,
+            "cy": 2907.87,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1218,
+              2904,
+              1229,
+              2946
+            ],
+            "area": 261,
+            "cx": 1224.02,
+            "cy": 2922.98,
+            "label": "anti_dropped"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 33,
+        "token": 16,
+        "text": "适",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1173,
+          2898,
+          1226,
+          2951
+        ],
+        "ownership": [
+          1169.75,
+          1224.25
+        ],
+        "hard_bound": [
+          1165,
+          2891,
+          1229,
+          2958
+        ],
+        "strong": [
+          1175,
+          2905,
+          1213,
+          2944
+        ],
+        "rescue_domain": [
+          1175.65,
+          1220.7
+        ],
+        "counts": {
+          "strong": 2,
+          "anti_dropped": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1165,
+              2901,
+              1209,
+              2946
+            ],
+            "area": 727,
+            "cx": 1188.46,
+            "cy": 2926.73,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1167,
+              2903,
+              1176,
+              2914
+            ],
+            "area": 47,
+            "cx": 1171.4,
+            "cy": 2907.87,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1218,
+              2904,
+              1229,
+              2946
+            ],
+            "area": 261,
+            "cx": 1224.02,
+            "cy": 2922.98,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    },
+    {
+      "id": [
+        22,
+        28
+      ],
+      "text": "年",
+      "quality": "Q2 param-sensitive",
+      "current": {
+        "line": 22,
+        "token": 28,
+        "text": "年",
+        "spec": "current v11",
+        "source_bbox": [
+          1773,
+          2046,
+          1834,
+          2102
+        ],
+        "ownership": [
+          1760.75,
+          1828.5
+        ],
+        "hard_bound": [
+          1756,
+          2038,
+          1833,
+          2110
+        ],
+        "strong": [
+          1779,
+          2054,
+          1822,
+          2094
+        ],
+        "rescue_domain": [
+          1773.0,
+          1828.5
+        ],
+        "counts": {
+          "anti_dropped": 1,
+          "strong": 1,
+          "weak_rescued": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1756,
+              2072,
+              1758,
+              2085
+            ],
+            "area": 24,
+            "cx": 1756.46,
+            "cy": 2078.0,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1772,
+              2049,
+              1817,
+              2095
+            ],
+            "area": 594,
+            "cx": 1792.58,
+            "cy": 2068.37,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1826,
+              2055,
+              1833,
+              2090
+            ],
+            "area": 168,
+            "cx": 1828.14,
+            "cy": 2071.39,
+            "label": "weak_rescued"
+          }
+        ]
+      },
+      "adjusted": {
+        "line": 22,
+        "token": 28,
+        "text": "年",
+        "spec": "adjusted scope",
+        "source_bbox": [
+          1773,
+          2046,
+          1834,
+          2102
+        ],
+        "ownership": [
+          1760.75,
+          1828.5
+        ],
+        "hard_bound": [
+          1756,
+          2038,
+          1833,
+          2110
+        ],
+        "strong": [
+          1776,
+          2054,
+          1819,
+          2094
+        ],
+        "rescue_domain": [
+          1776.05,
+          1827.9
+        ],
+        "counts": {
+          "anti_dropped": 2,
+          "strong": 1
+        },
+        "no_strong": false,
+        "components": [
+          {
+            "bbox": [
+              1756,
+              2072,
+              1758,
+              2085
+            ],
+            "area": 24,
+            "cx": 1756.46,
+            "cy": 2078.0,
+            "label": "anti_dropped"
+          },
+          {
+            "bbox": [
+              1772,
+              2049,
+              1817,
+              2095
+            ],
+            "area": 594,
+            "cx": 1792.58,
+            "cy": 2068.37,
+            "label": "strong"
+          },
+          {
+            "bbox": [
+              1826,
+              2055,
+              1833,
+              2090
+            ],
+            "area": 168,
+            "cx": 1828.14,
+            "cy": 2071.39,
+            "label": "anti_dropped"
+          }
+        ]
+      }
+    }
+  ]
+}

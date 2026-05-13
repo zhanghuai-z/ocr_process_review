@@ -1,0 +1,615 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+
+@dataclass(frozen=True)
+class Box:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+    @property
+    def w(self) -> int:
+        return max(0, self.x2 - self.x1)
+
+    @property
+    def h(self) -> int:
+        return max(0, self.y2 - self.y1)
+
+    @property
+    def area(self) -> int:
+        return self.w * self.h
+
+    @property
+    def cx(self) -> float:
+        return (self.x1 + self.x2) / 2.0
+
+    def expand(self, pad: int) -> "Box":
+        return Box(self.x1 - pad, self.y1 - pad, self.x2 + pad, self.y2 + pad)
+
+    def clip(self, width: int, height: int) -> "Box":
+        return Box(
+            max(0, min(width, self.x1)),
+            max(0, min(height, self.y1)),
+            max(0, min(width, self.x2)),
+            max(0, min(height, self.y2)),
+        )
+
+    def to_list(self) -> list[int]:
+        return [self.x1, self.y1, self.x2, self.y2]
+
+
+@dataclass(frozen=True)
+class Component:
+    box: Box
+    area: int
+    cx: float
+    cy: float
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "bbox": self.box.to_list(),
+            "area": self.area,
+            "cx": round(self.cx, 2),
+            "cy": round(self.cy, 2),
+        }
+
+
+@dataclass(frozen=True)
+class ZoneSpec:
+    name: str
+    left_inset_ratio: float
+    right_inset_ratio: float
+    y_inset_ratio: float = 0.15
+    tol_ratio: float = 0.08
+    min_tol: int = 3
+    y_pad_ratio: float = 0.15
+    weak_y_overlap_ratio: float = 0.25
+    weak_area_ratio: float = 0.05
+    rescue_left_guard_ratio: float = 0.0
+    rescue_right_guard_ratio: float = 0.05
+
+
+@dataclass(frozen=True)
+class TokenRef:
+    line: int
+    token: int
+    text: str
+    line_box: Box
+    source: Box
+    ownership: tuple[float, float]
+
+    @property
+    def id(self) -> tuple[int, int]:
+        return (self.line, self.token)
+
+
+@dataclass(frozen=True)
+class ZoneEval:
+    token: TokenRef
+    spec: ZoneSpec
+    hard_bound: Box
+    strong: Box
+    rescue_domain: tuple[float, float]
+    components: tuple[Component, ...]
+    component_labels: tuple[str, ...]
+    no_strong: bool
+
+    @property
+    def counts(self) -> Counter[str]:
+        return Counter(self.component_labels)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "line": self.token.line,
+            "token": self.token.token,
+            "text": self.token.text,
+            "spec": self.spec.name,
+            "source_bbox": self.token.source.to_list(),
+            "ownership": [round(self.token.ownership[0], 2), round(self.token.ownership[1], 2)],
+            "hard_bound": self.hard_bound.to_list(),
+            "strong": self.strong.to_list(),
+            "rescue_domain": [round(self.rescue_domain[0], 2), round(self.rescue_domain[1], 2)],
+            "counts": dict(self.counts),
+            "no_strong": self.no_strong,
+            "components": [
+                {**component.to_json(), "label": label}
+                for component, label in zip(self.components, self.component_labels)
+            ],
+        }
+
+
+def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(path, size)
+
+
+def _bbox(raw: list[int | float]) -> Box:
+    x1, y1, x2, y2 = [int(round(value)) for value in raw[:4]]
+    return Box(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+
+def _is_cjk_char(text: str) -> bool:
+    return len(text) == 1 and (
+        "\u4e00" <= text <= "\u9fff"
+        or "\u3400" <= text <= "\u4dbf"
+        or "\uf900" <= text <= "\ufaff"
+    )
+
+
+def _foreground_mask(crop: np.ndarray) -> np.ndarray:
+    if crop.size == 0:
+        return np.zeros((0, 0), dtype=np.uint8)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    return mask
+
+
+def _extract_components(image_bgr: np.ndarray, region: Box, *, min_area_ratio: float = 0.0012) -> tuple[Component, ...]:
+    height, width = image_bgr.shape[:2]
+    box = region.clip(width, height)
+    if box.w <= 0 or box.h <= 0:
+        return ()
+    mask = _foreground_mask(image_bgr[box.y1:box.y2, box.x1:box.x2])
+    count, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    min_area = max(3, int(box.h * box.h * min_area_ratio))
+    min_side = max(1, int(box.h * 0.025))
+    components: list[Component] = []
+    for idx in range(1, count):
+        x, y, w, h, area = [int(value) for value in stats[idx]]
+        if area < min_area or w < min_side or h < min_side:
+            continue
+        components.append(
+            Component(
+                box=Box(box.x1 + x, box.y1 + y, box.x1 + x + w, box.y1 + y + h),
+                area=area,
+                cx=box.x1 + float(centroids[idx][0]),
+                cy=box.y1 + float(centroids[idx][1]),
+            )
+        )
+    return tuple(sorted(components, key=lambda item: (item.box.x1, item.box.y1)))
+
+
+def _intersects(a: Box, b: Box) -> bool:
+    return min(a.x2, b.x2) > max(a.x1, b.x1) and min(a.y2, b.y2) > max(a.y1, b.y1)
+
+
+def _ownership_intervals(line_box: Box, token_boxes: list[Box]) -> list[tuple[float, float]]:
+    centers = [box.cx for box in token_boxes]
+    intervals: list[tuple[float, float]] = []
+    for idx, center in enumerate(centers):
+        left = float(line_box.x1) if idx == 0 else (centers[idx - 1] + center) / 2.0
+        right = float(line_box.x2) if idx == len(centers) - 1 else (center + centers[idx + 1]) / 2.0
+        intervals.append((left, right))
+    return intervals
+
+
+def _load_tokens(pruned: dict[str, Any]) -> tuple[TokenRef, ...]:
+    tokens: list[TokenRef] = []
+    for line_idx, (text, line_raw, words, word_boxes_raw) in enumerate(
+        zip(pruned["rec_texts"], pruned["rec_boxes"], pruned["text_word"], pruned["text_word_boxes"])
+    ):
+        if "".join(words) != text:
+            raise ValueError(f"text_word does not reconstruct rec_texts at line {line_idx}")
+        line_box = _bbox(line_raw)
+        word_boxes = [_bbox(raw) for raw in word_boxes_raw]
+        ownerships = _ownership_intervals(line_box, word_boxes)
+        for token_idx, (word, source, ownership) in enumerate(zip(words, word_boxes, ownerships)):
+            if _is_cjk_char(word):
+                tokens.append(TokenRef(line_idx, token_idx, word, line_box, source, ownership))
+    return tuple(tokens)
+
+
+def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> ZoneEval:
+    height, width = image_bgr.shape[:2]
+    source = token.source
+    source_w = max(1, source.w)
+    source_h = max(1, source.h)
+    tol = max(spec.min_tol, int(source_w * spec.tol_ratio))
+    y_pad = max(2, int(source_h * spec.y_pad_ratio))
+    own_lo, own_hi = token.ownership
+    hard_bound = Box(
+        max(0, int(own_lo) - tol),
+        max(0, source.y1 - y_pad),
+        min(width, int(own_hi) + tol + 1),
+        min(height, source.y2 + y_pad),
+    )
+    strong = Box(
+        source.x1 + max(1, int(source_w * spec.left_inset_ratio)),
+        source.y1 + max(1, int(source_h * spec.y_inset_ratio)),
+        source.x2 - max(1, int(source_w * spec.right_inset_ratio)),
+        source.y2 - max(1, int(source_h * spec.y_inset_ratio)),
+    )
+    if strong.x1 >= strong.x2 or strong.y1 >= strong.y2:
+        return ZoneEval(token, spec, hard_bound, strong, (own_lo, own_hi), (), (), True)
+
+    components = _extract_components(image_bgr, hard_bound)
+    strong_components = [component for component in components if _intersects(component.box, strong)]
+    main_area = max((component.area for component in strong_components), default=max((c.area for c in components), default=0))
+    weak_area_threshold = max(8, int(main_area * spec.weak_area_ratio))
+    rescue_lo = max(own_lo, source.x1 + source_w * spec.rescue_left_guard_ratio)
+    rescue_hi = min(own_hi, source.x2 - source_w * spec.rescue_right_guard_ratio)
+
+    labels: list[str] = []
+    for component in components:
+        if _intersects(component.box, strong):
+            labels.append("strong")
+            continue
+        y_overlap = max(0, min(component.box.y2, source.y2) - max(component.box.y1, source.y1))
+        if (
+            rescue_lo <= component.cx <= rescue_hi
+            and y_overlap >= source_h * spec.weak_y_overlap_ratio
+            and component.area >= weak_area_threshold
+        ):
+            labels.append("weak_rescued")
+        else:
+            labels.append("anti_dropped")
+    return ZoneEval(
+        token=token,
+        spec=spec,
+        hard_bound=hard_bound,
+        strong=strong,
+        rescue_domain=(rescue_lo, rescue_hi),
+        components=components,
+        component_labels=tuple(labels),
+        no_strong=not strong_components,
+    )
+
+
+def _quality_label(current: ZoneEval, adjusted: ZoneEval) -> str:
+    source = current.token.source
+    components_in_source = [component for component in current.components if _intersects(component.box, source)]
+    if not components_in_source:
+        return "Q3 no ink / fallback"
+    ink = Box(
+        min(component.box.x1 for component in components_in_source),
+        min(component.box.y1 for component in components_in_source),
+        max(component.box.x2 for component in components_in_source),
+        max(component.box.y2 for component in components_in_source),
+    )
+    left_margin = (ink.x1 - source.x1) / max(1, source.w)
+    right_margin = (source.x2 - ink.x2) / max(1, source.w)
+    delta = current.counts != adjusted.counts or current.no_strong != adjusted.no_strong
+    if delta:
+        return "Q2 param-sensitive"
+    if current.counts.get("anti_dropped", 0) or current.counts.get("weak_rescued", 0) or len(components_in_source) >= 3:
+        return "Q2 loose/noisy"
+    if left_margin < 0.02 or right_margin < 0.02 or left_margin > 0.25 or right_margin > 0.25:
+        return "Q1 edge-risk"
+    return "Q0 stable"
+
+
+def _draw_translucent(base: Image.Image, rect: tuple[int, int, int, int], fill: tuple[int, int, int, int]) -> None:
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).rectangle(rect, fill=fill)
+    base.alpha_composite(overlay)
+
+
+def _rect_local(box: Box, origin: Box, scale: float) -> tuple[int, int, int, int]:
+    return (
+        int(round((box.x1 - origin.x1) * scale)),
+        int(round((box.y1 - origin.y1) * scale)),
+        int(round((box.x2 - origin.x1) * scale)),
+        int(round((box.y2 - origin.y1) * scale)),
+    )
+
+
+def _draw_zone_panel(
+    image_bgr: np.ndarray,
+    zone: ZoneEval,
+    *,
+    panel_w: int,
+    panel_h: int,
+    latin: ImageFont.FreeTypeFont,
+) -> Image.Image:
+    height, width = image_bgr.shape[:2]
+    view = zone.hard_bound.expand(max(12, zone.token.source.w // 2)).clip(width, height)
+    crop = image_bgr[view.y1:view.y2, view.x1:view.x2]
+    if crop.size == 0:
+        return Image.new("RGB", (panel_w, panel_h), (30, 30, 30))
+    tile = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    scale = min((panel_w - 12) / max(1, tile.width), (panel_h - 44) / max(1, tile.height))
+    tile = tile.resize((max(1, int(tile.width * scale)), max(1, int(tile.height * scale))), Image.Resampling.NEAREST)
+    panel = Image.new("RGBA", (panel_w, panel_h), (248, 248, 248, 255))
+    ox, oy = (panel_w - tile.width) // 2, 34
+    panel.alpha_composite(tile, (ox, oy))
+    shifted_origin = Box(view.x1 - int(round(ox / scale)), view.y1 - int(round(oy / scale)), view.x2, view.y2)
+
+    def rect(box: Box) -> tuple[int, int, int, int]:
+        return _rect_local(box, shifted_origin, scale)
+
+    draw = ImageDraw.Draw(panel)
+    draw.text((8, 7), zone.spec.name, fill=(20, 20, 20), font=latin)
+
+    source = zone.token.source
+    left_anti = Box(source.x1, source.y1, zone.strong.x1, source.y2)
+    right_anti = Box(zone.strong.x2, source.y1, source.x2, source.y2)
+    _draw_translucent(panel, rect(left_anti), (255, 80, 80, 65))
+    _draw_translucent(panel, rect(right_anti), (255, 80, 80, 65))
+    _draw_translucent(panel, rect(zone.strong), (0, 190, 80, 70))
+
+    rescue_box = Box(int(round(zone.rescue_domain[0])), source.y1, int(round(zone.rescue_domain[1])), source.y2)
+    _draw_translucent(panel, rect(rescue_box), (255, 190, 0, 42))
+
+    draw = ImageDraw.Draw(panel)
+    draw.rectangle(rect(zone.hard_bound), outline=(60, 120, 255), width=2)
+    draw.rectangle(rect(source), outline=(0, 0, 0), width=2)
+    draw.rectangle(rect(zone.strong), outline=(0, 150, 60), width=2)
+    draw.rectangle(rect(rescue_box), outline=(230, 150, 0), width=2)
+    own_box = Box(int(round(zone.token.ownership[0])), source.y1, int(round(zone.token.ownership[1])), source.y2)
+    draw.rectangle(rect(own_box), outline=(0, 180, 210), width=1)
+
+    colors = {
+        "strong": (0, 150, 60),
+        "weak_rescued": (230, 145, 0),
+        "anti_dropped": (220, 0, 0),
+    }
+    for component, label in zip(zone.components, zone.component_labels):
+        draw.rectangle(rect(component.box), outline=colors[label], width=3)
+
+    counts = zone.counts
+    draw.text(
+        (8, panel_h - 24),
+        f"S{counts.get('strong', 0)} R{counts.get('weak_rescued', 0)} D{counts.get('anti_dropped', 0)}",
+        fill=(20, 20, 20),
+        font=latin,
+    )
+    return panel.convert("RGB")
+
+
+def _select_samples(
+    tokens: tuple[TokenRef, ...],
+    current_evals: dict[tuple[int, int], ZoneEval],
+    adjusted_evals: dict[tuple[int, int], ZoneEval],
+    limit: int = 10,
+) -> list[TokenRef]:
+    scored: list[tuple[int, TokenRef]] = []
+    for token in tokens:
+        current = current_evals[token.id]
+        adjusted = adjusted_evals[token.id]
+        counts = current.counts
+        score = 0
+        if current.counts != adjusted.counts or current.no_strong != adjusted.no_strong:
+            score += 120
+        score += counts.get("anti_dropped", 0) * 25
+        score += counts.get("weak_rescued", 0) * 20
+        score += max(0, len(current.components) - 1) * 10
+        if token.text in {"一", "二", "三"}:
+            score += 45
+        if current.no_strong:
+            score += 60
+        if score:
+            scored.append((score, token))
+    scored.sort(key=lambda item: (-item[0], item[1].line, item[1].token))
+    selected: list[TokenRef] = []
+    used_texts: Counter[str] = Counter()
+    for _, token in scored:
+        if used_texts[token.text] >= 2:
+            continue
+        selected.append(token)
+        used_texts[token.text] += 1
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        for token in tokens:
+            if token not in selected:
+                selected.append(token)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def _make_scope_comparison(
+    image_bgr: np.ndarray,
+    samples: list[TokenRef],
+    current_evals: dict[tuple[int, int], ZoneEval],
+    adjusted_evals: dict[tuple[int, int], ZoneEval],
+    output_path: Path,
+) -> None:
+    latin = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+    latin_small = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 13)
+    cjk = _font("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", 24)
+    panel_w, row_h, label_w, header_h = 360, 250, 230, 84
+    image = Image.new("RGB", (label_w + panel_w * 2, header_h + len(samples) * row_h), (245, 245, 245))
+    draw = ImageDraw.Draw(image)
+    draw.text((16, 12), "Radiation scope comparison on real PP-OCRv5 word boxes", fill=(0, 0, 0), font=latin)
+    draw.text(
+        (16, 38),
+        "green=strong direct keep, red=anti/weak edge, orange=rescue domain, cyan=ownership, blue=hard_bound",
+        fill=(40, 40, 40),
+        font=latin_small,
+    )
+    draw.text((label_w + 8, 58), "current v11: L strong inset 10%, R 20%, rescue R guard 5%", fill=(20, 20, 20), font=latin_small)
+    draw.text((label_w + panel_w + 8, 58), "adjusted: L strong +5% (5%), R strong -5% (25%), anti guard +5%", fill=(20, 20, 20), font=latin_small)
+    for row, token in enumerate(samples):
+        y = header_h + row * row_h
+        current = current_evals[token.id]
+        adjusted = adjusted_evals[token.id]
+        qlabel = _quality_label(current, adjusted)
+        draw.text((10, y + 12), f"L{token.line:02d}#{token.token:03d}", fill=(0, 90, 160), font=latin)
+        draw.text((10, y + 38), token.text, fill=(180, 0, 0), font=cjk)
+        draw.text((54, y + 42), qlabel, fill=(40, 40, 40), font=latin_small)
+        draw.text((10, y + 82), f"src={token.source.to_list()}", fill=(40, 40, 40), font=latin_small)
+        draw.text(
+            (10, y + 104),
+            f"cur {dict(current.counts)}",
+            fill=(40, 40, 40),
+            font=latin_small,
+        )
+        draw.text(
+            (10, y + 126),
+            f"adj {dict(adjusted.counts)}",
+            fill=(40, 40, 40),
+            font=latin_small,
+        )
+        image.paste(_draw_zone_panel(image_bgr, current, panel_w=panel_w, panel_h=row_h, latin=latin_small), (label_w, y))
+        image.paste(_draw_zone_panel(image_bgr, adjusted, panel_w=panel_w, panel_h=row_h, latin=latin_small), (label_w + panel_w, y))
+        draw.rectangle([0, y, image.width - 1, y + row_h - 1], outline=(205, 205, 205))
+    image.save(output_path)
+
+
+def _make_tier_matrix(output_path: Path) -> None:
+    title_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+    head_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+    text_font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 15)
+    rows = [
+        ("Q0 stable", "single/clean cc, margins normal", "keep current v11; no adaptive widening", "safe default"),
+        ("Q1 edge-risk", "ink close to one source edge or bbox too tight", "small side-specific relax only; keep raw bbox", "mark review"),
+        ("Q2 loose/noisy", "anti_dropped/rescue/multi-cc or parameter-sensitive", "use stricter ownership + edge crumb; compare parameter profiles", "yellow"),
+        ("Q3 fallback", "no strong cc, no ink, or non-CJK mixed token", "do not force glyph crop; stay token/raw bbox", "manual/diagnostic"),
+    ]
+    image = Image.new("RGB", (1500, 520), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((24, 22), "Safe parameter tiering for variable PP-OCRv5 bbox quality", fill=(0, 0, 0), font=title_font)
+    headers = ["tier", "bbox quality signal", "allowed tuning", "UI/export rule"]
+    xs = [30, 250, 650, 1120]
+    y = 92
+    for x, header in zip(xs, headers):
+        draw.text((x, y), header, fill=(0, 90, 160), font=head_font)
+    y += 42
+    for row in rows:
+        draw.rectangle([20, y - 8, 1480, y + 78], outline=(220, 220, 220))
+        for x, value in zip(xs, row):
+            line = ""
+            yy = y
+            for word in value.split(" "):
+                trial = f"{line} {word}".strip()
+                if draw.textlength(trial, font=text_font) > 360 and line:
+                    draw.text((x, yy), line, fill=(20, 20, 20), font=text_font)
+                    yy += 22
+                    line = word
+                else:
+                    line = trial
+            if line:
+                draw.text((x, yy), line, fill=(20, 20, 20), font=text_font)
+        y += 92
+    draw.text(
+        (30, 472),
+        "Rule: adaptive parameters can promote a candidate level, but must never overwrite raw_token_bbox; high-risk crops stay reviewable.",
+        fill=(120, 0, 0),
+        font=text_font,
+    )
+    image.save(output_path)
+
+
+def _make_report(
+    output_path: Path,
+    samples: list[TokenRef],
+    current_evals: dict[tuple[int, int], ZoneEval],
+    adjusted_evals: dict[tuple[int, int], ZoneEval],
+) -> None:
+    changed = [
+        token
+        for token in current_evals
+        if current_evals[token].counts != adjusted_evals[token].counts
+        or current_evals[token].no_strong != adjusted_evals[token].no_strong
+    ]
+    current_no_strong = sum(1 for eval_item in current_evals.values() if eval_item.no_strong)
+    adjusted_no_strong = sum(1 for eval_item in adjusted_evals.values() if eval_item.no_strong)
+    lines = [
+        "radiation zone comparison",
+        "=" * 72,
+        "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
+        "adjusted: left strong extends 5% (left inset 5%), right strong shrinks 5% (right inset 25%), rescue anti guard grows by 5%",
+        "",
+        f"cjk tokens evaluated: {len(current_evals)}",
+        f"parameter-sensitive tokens by scope labels: {len(changed)}",
+        f"no strong cc current/adjusted: {current_no_strong}/{adjusted_no_strong}",
+        "",
+        "selected samples:",
+    ]
+    for token in samples:
+        current = current_evals[token.id]
+        adjusted = adjusted_evals[token.id]
+        lines.append(
+            f"- L{token.line:02d}#{token.token:03d} {token.text}: "
+            f"{_quality_label(current, adjusted)}, current={dict(current.counts)}, adjusted={dict(adjusted.counts)}"
+        )
+    lines.extend(
+        [
+            "",
+            "interpretation:",
+            "- The requested adjustment makes the left strong area more permissive and the right strong area stricter.",
+            "- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.",
+            "- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.",
+            "- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.",
+        ]
+    )
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def run_comparison(image_path: Path, json_path: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image_bgr is None:
+        raise RuntimeError(f"Cannot read image: {image_path}")
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    pruned = data["response"]["result"]["ocrResults"][0]["prunedResult"]
+    tokens = _load_tokens(pruned)
+    current_spec = ZoneSpec(
+        name="current v11",
+        left_inset_ratio=0.10,
+        right_inset_ratio=0.20,
+        rescue_left_guard_ratio=0.00,
+        rescue_right_guard_ratio=0.05,
+    )
+    adjusted_spec = ZoneSpec(
+        name="adjusted scope",
+        left_inset_ratio=0.05,
+        right_inset_ratio=0.25,
+        rescue_left_guard_ratio=0.05,
+        rescue_right_guard_ratio=0.10,
+    )
+    current_evals = {token.id: _evaluate_zone(image_bgr, token, current_spec) for token in tokens}
+    adjusted_evals = {token.id: _evaluate_zone(image_bgr, token, adjusted_spec) for token in tokens}
+    samples = _select_samples(tokens, current_evals, adjusted_evals, limit=10)
+    _make_scope_comparison(image_bgr, samples, current_evals, adjusted_evals, output_dir / "01_radiation_scope_current_vs_adjusted.png")
+    _make_tier_matrix(output_dir / "02_bbox_quality_tier_matrix.png")
+    _make_report(output_dir / "03_radiation_scope_report.txt", samples, current_evals, adjusted_evals)
+    payload = {
+        "source_image": str(image_path),
+        "source_json": str(json_path),
+        "current_spec": current_spec.__dict__,
+        "adjusted_spec": adjusted_spec.__dict__,
+        "sample_token_ids": [list(token.id) for token in samples],
+        "samples": [
+            {
+                "id": list(token.id),
+                "text": token.text,
+                "quality": _quality_label(current_evals[token.id], adjusted_evals[token.id]),
+                "current": current_evals[token.id].to_json(),
+                "adjusted": adjusted_evals[token.id].to_json(),
+            }
+            for token in samples
+        ],
+    }
+    (output_dir / "radiation_zone_comparison_summary.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def main() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(description="Visualize current and adjusted wordbox_anchor radiation scopes.")
+    parser.add_argument("--image", type=Path, default=repo_root / "file/244771纵校/120166.tif")
+    parser.add_argument("--json", type=Path, default=repo_root / "paddle-char-box-samples/wordbox-anchor-ablation/120166_ppocrv5_return_word_box.json")
+    parser.add_argument("--output", type=Path, default=repo_root / "paddle-char-box-samples/radiation-zone-comparison")
+    args = parser.parse_args()
+    run_comparison(args.image, args.json, args.output)
+
+
+if __name__ == "__main__":
+    main()
