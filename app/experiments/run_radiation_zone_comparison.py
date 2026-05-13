@@ -80,6 +80,12 @@ class ZoneSpec:
     y_pad_ratio: float = 0.15
     stroke_extension_ratio: float = 0.0
     adaptive_hard_bound_ratio: float = 0.0
+    seed_touch_tolerance_ratio: float = 0.0
+    min_seed_touch_tolerance: int = 0
+    max_seed_component_width_ratio: float = 99.0
+    max_seed_component_height_ratio: float = 99.0
+    allow_crop_overflow: bool = False
+    keep_source_body_components: bool = False
     weak_y_overlap_ratio: float = 0.25
     weak_area_ratio: float = 0.05
     rescue_left_guard_ratio: float = 0.0
@@ -202,6 +208,13 @@ def _intersects(a: Box, b: Box) -> bool:
     return min(a.x2, b.x2) > max(a.x1, b.x1) and min(a.y2, b.y2) > max(a.y1, b.y1)
 
 
+def _intersects_with_tolerance(a: Box, b: Box, tol: int) -> bool:
+    if tol <= 0:
+        return _intersects(a, b)
+    expanded = Box(b.x1 - tol, b.y1 - tol, b.x2 + tol, b.y2 + tol)
+    return _intersects(a, expanded)
+
+
 def _touch_sides(box: Box, bound: Box, margin: int = 1) -> tuple[str, ...]:
     sides: list[str] = []
     if box.x1 <= bound.x1 + margin:
@@ -282,6 +295,18 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
     )
     if strong.x1 >= strong.x2 or strong.y1 >= strong.y2:
         return ZoneEval(token, spec, initial_hard_bound, hard_bound, hard_bound, (), strong, extension, (own_lo, own_hi), (), (), None, source.clip(width, height), True)
+    seed_tol = max(spec.min_seed_touch_tolerance, int(source_w * spec.seed_touch_tolerance_ratio))
+
+    def is_subject_sized(component: Component) -> bool:
+        max_seed_width = max(
+            1,
+            int(source_w * spec.max_seed_component_width_ratio),
+            int(source_h * 0.75),
+        )
+        return (
+            component.box.w <= max_seed_width
+            and component.box.h <= max(1, int(source_h * spec.max_seed_component_height_ratio))
+        )
 
     def build_stroke_bound(bound: Box) -> Box:
         if spec.stroke_extension_ratio <= 0:
@@ -298,7 +323,11 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
     def extract_strong(bound: Box) -> tuple[Box, tuple[Component, ...], list[Component]]:
         search_bound = build_stroke_bound(bound)
         found_components = _extract_components(image_bgr, search_bound)
-        found_strong = [component for component in found_components if _intersects(component.box, strong)]
+        found_strong = [
+            component
+            for component in found_components
+            if is_subject_sized(component) and _intersects_with_tolerance(component.box, strong, seed_tol)
+        ]
         return search_bound, found_components, found_strong
 
     stroke_bound, components, strong_components = extract_strong(hard_bound)
@@ -335,10 +364,20 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
 
     labels: list[str] = []
     for component in components:
-        if _intersects(component.box, strong):
-            labels.append("strong")
+        if _intersects_with_tolerance(component.box, strong, seed_tol):
+            labels.append("strong" if is_subject_sized(component) else "weak_rescued")
             continue
         y_overlap = max(0, min(component.box.y2, source.y2) - max(component.box.y1, source.y1))
+        if (
+            spec.keep_source_body_components
+            and is_subject_sized(component)
+            and source.x1 <= component.cx <= source.x2
+            and _intersects(component.box, source)
+            and y_overlap >= source_h * 0.10
+            and component.area >= weak_area_threshold
+        ):
+            labels.append("weak_rescued")
+            continue
         if (
             _intersects(component.box, extension)
             and rescue_lo <= component.cx <= rescue_hi
@@ -356,15 +395,25 @@ def _evaluate_zone(image_bgr: np.ndarray, token: TokenRef, spec: ZoneSpec) -> Zo
     ink: Box | None = None
     crop = source.clip(width, height)
     if kept:
-        clip_lo = int(round(own_lo))
-        clip_hi = int(round(own_hi))
+        if spec.allow_crop_overflow:
+            clip_lo = stroke_bound.x1 if "L" in blue_sides else int(round(own_lo))
+            clip_hi = stroke_bound.x2 if "R" in blue_sides else int(round(own_hi))
+        else:
+            clip_lo = int(round(own_lo))
+            clip_hi = int(round(own_hi))
         xs1: list[int] = []
         ys1: list[int] = []
         xs2: list[int] = []
         ys2: list[int] = []
         for component in kept:
-            x1 = max(component.box.x1, clip_lo)
-            x2 = min(component.box.x2, clip_hi)
+            if spec.allow_crop_overflow and not is_subject_sized(component):
+                component_clip_lo = int(round(own_lo))
+                component_clip_hi = int(round(own_hi))
+            else:
+                component_clip_lo = clip_lo
+                component_clip_hi = clip_hi
+            x1 = max(component.box.x1, component_clip_lo)
+            x2 = min(component.box.x2, component_clip_hi)
             if x2 <= x1:
                 continue
             xs1.append(x1)
@@ -631,7 +680,7 @@ def _make_scope_comparison(
     draw.text((label_w + scope_w + crop_w + 8, 62), "adjusted scope", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + scope_w * 2 + crop_w + 8, 62), "adjusted final crop", fill=(20, 20, 20), font=latin_small)
     draw.text((label_w + 8, 80), "cur: red L10/R20", fill=(80, 80, 80), font=latin_small)
-    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: red L0/R25; blue +5% on touch", fill=(80, 80, 80), font=latin_small)
+    draw.text((label_w + scope_w + crop_w + 8, 80), "adj: L candidate + crop overflow; R seed tol", fill=(80, 80, 80), font=latin_small)
     for row, token in enumerate(samples):
         y = header_h + row * row_h
         current = current_evals[token.id]
@@ -742,8 +791,8 @@ def _make_page_report(
         "current v11: left strong inset=10%, right strong inset=20%, rescue right anti guard=5%",
         "adjusted: dark-green keep seed keeps right anti stricter (25%); light-green left extension reaches 0% but only rescues candidates, not direct crumbs",
         "orange is rescue domain, not anti-radiation; it is shown to explain which weak components may be rescued.",
-        "strong preservation: any component intersecting the dark-green keep seed is kept whole before ownership clipping; red anti does not cut its stroke.",
-        "blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion.",
+        "strong preservation: any component touching/intersecting the dark-green keep seed is kept whole; red anti does not cut its stroke.",
+        "blue adapts by 5% in the same direction when the main strong component touches it (10% strong : 5% blue = 2:1); purple stroke-search then follows the connected component to completion, and adjusted final crop is no longer re-clipped to ownership.",
         "",
         f"cjk tokens evaluated: {len(current_evals)}",
         f"effective parameter-sensitive tokens: {len(changed)}",
@@ -767,6 +816,7 @@ def _make_page_report(
             "",
             "interpretation:",
             "- The requested adjustment uses left extension as a candidate rescue/search area, while direct keep still comes from the dark-green subject seed.",
+            "- Final crop overflow is intentional: ownership remains a diagnostic guardrail, but it no longer cancels a kept stroke that already passed seed/anti filtering.",
             "- This is a useful side-specific profile for PP-OCRv5 boxes whose left radicals are often clipped while right neighbor crumbs leak in.",
             "- It is not safe as a global replacement yet; use it as a Q1/Q2 profile selected by bbox quality signals.",
             "- Raw PP-OCRv5 word boxes must remain L0 fallback truth while refined crops carry risk flags.",
@@ -832,8 +882,8 @@ def _make_batch_report(output_path: Path, page_summaries: list[dict[str, Any]]) 
         "Clarification: red is anti/weak radiation edge; orange is weak-zone rescue domain, not anti-radiation.",
         "Current v11: left strong inset=10%, right strong inset=20%, rescue right guard=5%.",
         "Adjusted profile: dark-green keep seed keeps right anti stricter at 25%; light-green left extension reaches 0% but only rescues candidates, not direct crumbs.",
-        "Strong preservation: a CC that intersects the dark-green keep seed is retained whole; red anti only filters fully-outside-seed CCs, then ownership may clip the final union.",
-        "Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion.",
+        "Strong preservation: a CC that touches/intersects the dark-green keep seed is retained whole; red anti only filters fully-outside-seed CCs.",
+        "Adaptive blue rule: if the main strong component touches blue, blue expands 5% in the same direction (2:1 against the 10% strong-left extension). Purple stroke-search then follows the connected component to completion; adjusted final crop is allowed to overflow ownership after seed/anti filtering.",
         "",
         f"pages evaluated: {len(page_summaries)}",
         f"cjk tokens evaluated: {total_cjk}",
@@ -883,6 +933,12 @@ def run_page_comparison(
         direct_right_inset_ratio=0.25,
         stroke_extension_ratio=0.25,
         adaptive_hard_bound_ratio=0.05,
+        seed_touch_tolerance_ratio=0.00,
+        min_seed_touch_tolerance=2,
+        max_seed_component_width_ratio=1.80,
+        max_seed_component_height_ratio=1.40,
+        allow_crop_overflow=True,
+        keep_source_body_components=True,
         rescue_left_guard_ratio=0.00,
         rescue_right_guard_ratio=0.10,
     )
