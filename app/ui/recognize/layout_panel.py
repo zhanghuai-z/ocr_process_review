@@ -22,6 +22,7 @@ class LayoutPanel(QWidget):
     """
     analysis_confirmed = Signal()
     page_selected = Signal(int)   # payload: page index
+    geometry_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -45,6 +46,13 @@ class LayoutPanel(QWidget):
         self._btn_run.setFixedSize(36, 36)
         self._btn_run.clicked.connect(self._request_analysis)
         title_row.addWidget(self._btn_run)
+
+        self._btn_char_boxes = QPushButton("字框")
+        self._btn_char_boxes.setCheckable(True)
+        self._btn_char_boxes.setChecked(True)
+        self._btn_char_boxes.setToolTip("显示/隐藏 OCR 字框；拖动字框会影响后续纵校裁图")
+        self._btn_char_boxes.clicked.connect(lambda: self._update_viewer(self._current_page_idx))
+        title_row.addWidget(self._btn_char_boxes)
 
         # 进度条（默认隐藏，分析期间显示不确定动画）
         self._progress_bar = QProgressBar()
@@ -75,6 +83,7 @@ class LayoutPanel(QWidget):
         self._viewer.block_moved.connect(self._on_block_moved)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted.connect(self._on_block_deleted)
+        self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
         splitter.addWidget(self._viewer)
 
         splitter.setStretchFactor(0, 1)
@@ -181,6 +190,8 @@ class LayoutPanel(QWidget):
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._viewer.show_blocks(page.blocks)
+            if self._btn_char_boxes.isChecked():
+                self._viewer.show_char_boxes(self._collect_page_chars(page))
         elif page.error_message:
             self._status_lbl.setText(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
@@ -206,6 +217,7 @@ class LayoutPanel(QWidget):
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
+        self.geometry_changed.emit()
 
     def _on_block_created(self, bbox: BBox) -> None:
         if not self._pages:
@@ -219,6 +231,9 @@ class LayoutPanel(QWidget):
         )
         page.blocks.append(new_block)
         self._viewer.show_blocks(page.blocks)
+        if self._btn_char_boxes.isChecked():
+            self._viewer.show_char_boxes(self._collect_page_chars(page))
+        self.geometry_changed.emit()
 
     def _on_block_deleted(self, block: Block) -> None:
         """viewer 键盘 Delete 已删除框 → 从 page 数据中移除。"""
@@ -231,6 +246,7 @@ class LayoutPanel(QWidget):
             self._type_combo.setEnabled(False)
             self._prop_bbox.setText("")
             self._prop_conf.hide()
+        self.geometry_changed.emit()
 
     def _delete_selected(self) -> None:
         """底部栏 ✕ 删除框 按钮。"""
@@ -242,6 +258,20 @@ class LayoutPanel(QWidget):
         new_type: BlockType = self._type_combo.currentData()
         if new_type:
             self._selected_block.block_type = new_type
+            self.geometry_changed.emit()
+
+    def _on_char_bbox_moved(self, char) -> None:
+        bb = char.bbox
+        if bb is not None:
+            self._prop_bbox.setText(f"字框 x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
+        self.geometry_changed.emit()
+
+    def _collect_page_chars(self, page: Page):
+        chars = []
+        for block in page.blocks:
+            for line in block.lines:
+                chars.extend([char for char in line.chars if char.bbox is not None])
+        return chars
 
     @property
     def run_button(self) -> QPushButton:

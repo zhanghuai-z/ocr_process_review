@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from app.models import BBox, Block, Line, Page
+from app.models import BBox, Block, BlockType, Line, Page
+
+
+PROOF_LINE_BLOCK_TYPES = {
+    BlockType.TEXT,
+    BlockType.TITLE,
+    BlockType.FIGURE_CAPTION,
+    BlockType.TABLE_CAPTION,
+    BlockType.REFERENCE,
+    BlockType.EQUATION,
+}
 
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
@@ -23,7 +33,9 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
     while preserving repeated text at different page positions.
     """
     seen: list[tuple[str, BBox]] = []
-    for block in page.text_blocks:
+    for block in page.blocks:
+        if block.block_type not in PROOF_LINE_BLOCK_TYPES:
+            continue
         for line_idx, line in enumerate(block.lines):
             if _is_duplicate_line(line, seen):
                 continue

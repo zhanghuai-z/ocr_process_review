@@ -429,6 +429,36 @@ class VProofPanel(QWidget):
         if pages:
             self._load_page(0)
 
+    def merge_pages(self, pages: List[Page]) -> None:
+        """Merge background OCR pages without overwriting current page text."""
+        if not self._pages or not self._text_map:
+            self.load_pages(pages)
+            return
+        current_page = self._pages[self._current_page_idx]
+        self._pages = pages
+        self._current_page_idx = self._find_page_index(current_page)
+        self._char_svc.build(pages)
+        selected = self._selected_char
+        self._rebuild_char_list()
+        if selected:
+            self._selected_char = selected
+            entries = self._char_svc.query(selected)
+            self._gallery_model.set_entries(entries)
+            self._gallery_hdr.setText(f'"{selected}"  共 {len(entries)} 处')
+        self._page_label.setText(f"页 {self._current_page_idx + 1} / {len(self._pages)}")
+
+    def _find_page_index(self, target: Page) -> int:
+        for idx, page in enumerate(self._pages):
+            if page is target:
+                return idx
+        for idx, page in enumerate(self._pages):
+            if (
+                page.display_image_path == target.display_image_path
+                and page.page_number == target.page_number
+            ):
+                return idx
+        return min(self._current_page_idx, max(0, len(self._pages) - 1))
+
     def reset(self) -> None:
         self._pages = []
         self._char_svc = CharIndexService()
@@ -480,7 +510,7 @@ class VProofPanel(QWidget):
         page = self._pages[idx]
         self._page_label.setText(f"页 {idx + 1} / {len(self._pages)}")
 
-        lines = [ln for b in page.text_blocks for ln in b.lines]
+        lines = [line for _block, line, _line_idx in iter_unique_page_text_lines(page)]
         if lines:
             avg_conf = sum(ln.confidence for ln in lines) / len(lines)
             self._conf_badge.set_score(avg_conf)
