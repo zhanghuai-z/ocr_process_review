@@ -47,6 +47,8 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
+TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
+TEXT_EDITOR_MAX_H = 42
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -206,7 +208,7 @@ class _LinePair(QFrame):
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
-        self._text_lbl.setStyleSheet("font-size:30px; padding:0; color:#222;")
+        self._text_lbl.setStyleSheet(f"font-size:{TEXT_FONT_PX}px; padding:0; color:#222;")
         self._text_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -218,8 +220,8 @@ class _LinePair(QFrame):
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
-        self._editor.setStyleSheet("font-size:30px; padding:0 6px;")
-        self._editor.setMaximumHeight(58)
+        self._editor.setStyleSheet(f"font-size:{TEXT_FONT_PX}px; padding:0 6px;")
+        self._editor.setMaximumHeight(TEXT_EDITOR_MAX_H)
         self._editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -344,8 +346,8 @@ class _LinePair(QFrame):
         if not self._editor.isHidden() and end > start:
             highlight_range = (start, end)
         elif not self._editor.isHidden():
-            pos = max(0, cursor.position() - 1)
-            if pos < len(self._line.chars):
+            pos = cursor.position() - 1
+            if 0 <= pos < len(self._line.chars):
                 highlight_range = (pos, pos + 1)
         if highlight_range is not None:
             start, end = highlight_range
