@@ -38,10 +38,11 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from app.models import Block, Line, Page, ProofStatus
+from app.models import Block, Line, OcrProject, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
+from app.core import quality_probe as qp
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
 # ── 样式常量 ──────────────────────────────────────────────────
@@ -104,6 +105,71 @@ class _RowEditor(QPlainTextEdit):
         if key == Qt.Key.Key_Escape:
             self.revert_requested.emit(); return
         super().keyPressEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────
+# 评测位（quality probe）辅助函数
+#
+# 这些函数把"真实文本 line.text"和"显示文本(可能含 fake_char)"之间
+# 的转换集中收口，调用方只需在【显示】点用 _displayed_text，
+# 在【保存】点用 _save_displayed_edit，
+# 即可保证 line.text 永远是真实文本，导出器不会拿到任何 fake_char。
+# 当 quality_probe 未启用 (active_store is None) 时，这两个函数完全
+# 退化成"和原行为一致"。
+# ─────────────────────────────────────────────────────────────
+
+def _resolve_block_line_index(page: Page, block: Block, line: Line) -> tuple[int, int] | None:
+    try:
+        bi = page.blocks.index(block)
+        li = block.lines.index(line)
+    except ValueError:
+        return None
+    return bi, li
+
+
+def _displayed_text(line: Line, page: Page, block: Block) -> str:
+    """返回应展示给用户的文本：未启用评测时即 line.text。"""
+    text = line.text or ""
+    store = qp.get_active_store()
+    if store is None:
+        return text
+    idx = _resolve_block_line_index(page, block, line)
+    if idx is None:
+        return text
+    bi, li = idx
+    probes = store.for_line(page.page_number, bi, li)
+    if not probes:
+        return text
+    return qp.apply_probes_to_display(text, probes)
+
+
+def _save_displayed_edit(line: Line, page: Page, block: Block,
+                         displayed_new_text: str) -> bool:
+    """把"显示空间"的编辑结果落盘到 ``line.text``（真实空间）。
+
+    返回 ``True`` 表示真的发生了变化（已 update_text）。
+    未启用评测时退化为：``displayed_new_text != line.text`` → ``line.update_text``。
+    """
+    store = qp.get_active_store()
+    if store is None:
+        if displayed_new_text != line.text:
+            line.update_text(displayed_new_text)
+            return True
+        return False
+    idx = _resolve_block_line_index(page, block, line)
+    if idx is None:
+        if displayed_new_text != line.text:
+            line.update_text(displayed_new_text)
+            return True
+        return False
+    bi, li = idx
+    true_text = qp.observe_user_action(
+        store, page.page_number, bi, li, line.text or "", displayed_new_text,
+    )
+    if true_text != line.text:
+        line.update_text(true_text)
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -210,7 +276,7 @@ class _LinePair(QFrame):
         tr.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
-        self._text_lbl = QLabel(self._line.text or "")
+        self._text_lbl = QLabel(_displayed_text(self._line, self._page, self._block))
         self._text_lbl.setMinimumHeight(TEXT_EDITOR_MAX_H)
         self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._text_lbl.setStyleSheet(self._text_style(TEXT_DEFAULT_COLOR))
@@ -284,7 +350,8 @@ class _LinePair(QFrame):
             # 保存编辑内容
             if not self._editor.isHidden():
                 new_text = self._editor.toPlainText()
-                if new_text != self._line.text:
+                # 注意：new_text 是“显示空间”文本，要和显示空间比较
+                if new_text != _displayed_text(self._line, self._page, self._block):
                     self.text_saved.emit(self._idx, new_text)
             bar_style = "background:transparent;"
             bg = "transparent"
@@ -299,7 +366,7 @@ class _LinePair(QFrame):
 
         if active:
             self._text_lbl.hide()
-            self._editor.setPlainText(self._line.text or "")
+            self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
             self._editor.setStyleSheet(
                 f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
                 f"line-height:{IMAGE_ROW_H}px; padding:2px 6px 0 6px; color:{TEXT_VISITED_COLOR};"
@@ -312,7 +379,7 @@ class _LinePair(QFrame):
             self.load_image()
         else:
             self._editor.hide()
-            self._text_lbl.setText(self._line.text or "")
+            self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
             self._text_lbl.setStyleSheet(
                 self._text_style(TEXT_VISITED_COLOR if self._visited else TEXT_DEFAULT_COLOR)
             )
@@ -427,7 +494,7 @@ class _LinePair(QFrame):
     def refresh_text(self) -> None:
         """外部更新 line.text 后刷新显示。"""
         if not self._active:
-            self._text_lbl.setText(self._line.text or "")
+            self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
         self._sync_text_metrics()
         self._refresh_status()
 
@@ -442,7 +509,7 @@ class _LinePair(QFrame):
         self._image_loaded = False
         self._line_crop = None
         if self._editor.isHidden():
-            self._text_lbl.setText(line.text or "")
+            self._text_lbl.setText(_displayed_text(line, page, block))
         self._refresh_status()
 
     @property
@@ -463,9 +530,20 @@ class _LinePair(QFrame):
         self.clicked.emit(self._idx)
 
     def _revert(self) -> None:
-        original = self._line.original_text or self._line.ocr_text or self._line.text or ""
+        # 还原到 OCR 原始文本；如果原文本位置上有评测位，还原后仍需
+        # 覆盖 fake_char 以保证评测过程不被“一键跳过”在显示上消除。
+        original_true = self._line.original_text or self._line.ocr_text or self._line.text or ""
+        store = qp.get_active_store()
+        original_display = original_true
+        if store is not None:
+            idx = _resolve_block_line_index(self._page, self._block, self._line)
+            if idx is not None:
+                bi, li = idx
+                probes = store.for_line(self._page.page_number, bi, li)
+                if probes:
+                    original_display = qp.apply_probes_to_display(original_true, probes)
         self._editor.blockSignals(True)
-        self._editor.setPlainText(original)
+        self._editor.setPlainText(original_display)
         self._editor.blockSignals(False)
 
     def _highlight_low_conf(self) -> None:
@@ -529,6 +607,22 @@ class HProofPanel(QWidget):
                     self._btn_flag, self._btn_skip):
             btn.setMinimumHeight(30)
             tl.addWidget(btn)
+
+        # 评测开关 + 报告按钮（默认关闭，明示是评测模式）
+        self._btn_quality_toggle = QPushButton("评测：关")
+        self._btn_quality_toggle.setCheckable(True)
+        self._btn_quality_toggle.setMinimumHeight(30)
+        self._btn_quality_toggle.setToolTip(
+            "启用后，校对界面会在少量正文位置插入形近假象字（不影响最终导出），"
+            "用来评估你的校对识别能力。"
+        )
+        self._btn_quality_toggle.clicked.connect(self._on_toggle_quality_probe)
+        tl.addWidget(self._btn_quality_toggle)
+
+        self._btn_quality_report = QPushButton("评测报告")
+        self._btn_quality_report.setMinimumHeight(30)
+        self._btn_quality_report.clicked.connect(self._on_show_quality_report)
+        tl.addWidget(self._btn_quality_report)
 
         tl.addStretch()
 
@@ -839,9 +933,8 @@ class HProofPanel(QWidget):
         """_LinePair 在 set_active(False) 时保存。"""
         if idx >= len(self._items):
             return
-        _, line, page, _ = self._items[idx]
-        if new_text != line.text:
-            line.update_text(new_text)
+        block, line, page, _ = self._items[idx]
+        if _save_displayed_edit(line, page, block, new_text):
             self._bus.publish(
                 "line.proof_changed",
                 page_id=page.id,
@@ -858,9 +951,8 @@ class HProofPanel(QWidget):
         pair = self._pairs[self._current_idx]
         if not pair._editor.isHidden():
             new_text = pair._editor.toPlainText()
-            _, line, page, _ = self._items[self._current_idx]
-            if new_text != line.text:
-                line.update_text(new_text)
+            block, line, page, _ = self._items[self._current_idx]
+            if _save_displayed_edit(line, page, block, new_text):
                 self._bus.publish(
                     "line.proof_changed",
                     page_id=page.id,
@@ -905,6 +997,68 @@ class HProofPanel(QWidget):
         pct = (diff_count / max(1, len(self._items))) * 100
         self._total_lbl.setText(f"总字数 {total_chars:,}")
         self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
+
+    # ── 评测位（quality probe）开关与报告 ─────────────────────
+
+    def _on_toggle_quality_probe(self, checked: bool) -> None:
+        """启用/关闭评测位假象字。
+
+        启用：基于当前 self._pages 采样，写入全局 active store；刷新所有行显示。
+        关闭：清空 active store；刷新所有行显示。
+        关键：这两条路径都不会改写 line.text，因此对最终导出无影响。
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        if checked:
+            if not self._pages:
+                QMessageBox.information(self, "评测", "尚无校对数据，无法启用评测。")
+                self._btn_quality_toggle.setChecked(False)
+                return
+            project = OcrProject(name="(proofing)", pages=list(self._pages))
+            store = qp.ProbeSampler(qp.SamplerConfig()).sample(project)
+            qp.set_active_store(store)
+            n = len(store)
+            if n == 0:
+                QMessageBox.information(
+                    self, "评测",
+                    "当前正文中没有可投放的位置（可能是页面太短或全是数字/公式/标题）。",
+                )
+                qp.reset_active_store()
+                self._btn_quality_toggle.setChecked(False)
+                return
+            self._btn_quality_toggle.setText(f"评测：开（{n} 处）")
+        else:
+            qp.reset_active_store()
+            self._btn_quality_toggle.setText("评测：关")
+        # 刷新所有可见行的显示
+        for pair in self._pairs:
+            pair.refresh_text()
+
+    def _on_show_quality_report(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        store = qp.get_active_store()
+        if store is None or len(store) == 0:
+            QMessageBox.information(
+                self, "评测报告",
+                "评测未启用或没有评测样本。请先在工具栏点击「评测：关」打开评测。",
+            )
+            return
+        rep = qp.score(store)
+        text = (
+            f"<b>校对质量等级：{rep.grade_label}</b>"
+            + (f"（{rep.grade}）" if rep.grade != "INSUFFICIENT" else "")
+            + f"<br><br>"
+            f"评测样本：{rep.total_probes} 处<br>"
+            f"<span style='color:#1a73e8;'>识破并改回正字：{rep.corrected}</span><br>"
+            f"<span style='color:#d93025;'>未察觉假象：{rep.missed}</span><br>"
+            f"<span style='color:#888;'>改成了第三种字：{rep.edited_other}</span><br>"
+            f"<span style='color:#888;'>该位置已被删除：{rep.deleted}</span><br>"
+            f"<span style='color:#888;'>尚未触及：{rep.pending}</span><br><br>"
+            f"<i>区间说明：{rep.band}</i><br><br>"
+            f"<small>注：评测位仅在校对界面显示，不会写入最终导出文本。</small>"
+        )
+        QMessageBox.information(self, "校对质量评测报告", text)
 
     # ── 懒加载图像 ─────────────────────────────────────────────
 
