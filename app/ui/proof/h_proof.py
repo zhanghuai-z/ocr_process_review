@@ -49,6 +49,8 @@ ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
 TEXT_EDITOR_MAX_H = 42
+LINE_PAIR_H = 54
+TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -146,31 +148,26 @@ class _LinePair(QFrame):
     # ── 构建 ──────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # === 图像行 ===
-        img_row = QWidget()
-        img_row.setFixedHeight(IMAGE_ROW_H + 8)
-        il = QHBoxLayout(img_row)
-        il.setContentsMargins(0, 2, 8, 2)
-        il.setSpacing(0)
+        self.setFixedHeight(LINE_PAIR_H)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 2, 8, 2)
+        root.setSpacing(6)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
         self._active_bar.setStyleSheet("background: transparent;")
-        il.addWidget(self._active_bar)
+        root.addWidget(self._active_bar)
+        self._active_bar2 = self._active_bar
 
-        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
-        self._lbl_img_hdr.setFixedWidth(LABEL_W)
+        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
+        self._lbl_img_hdr.setFixedWidth(58)
         self._lbl_img_hdr.setObjectName("muted")
         self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        il.addWidget(self._lbl_img_hdr)
+        root.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -181,34 +178,24 @@ class _LinePair(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        il.addWidget(self._img_lbl, 1)
+        root.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
 
-        root.addWidget(img_row)
-
-        # === 识别文本行 ===
-        txt_row = QWidget()
-        tr = QHBoxLayout(txt_row)
-        tr.setContentsMargins(0, 2, 8, 4)
-        tr.setSpacing(0)
-
-        # 占位（左边框相同宽度）
-        self._active_bar2 = QWidget()
-        self._active_bar2.setFixedWidth(4)
-        self._active_bar2.setStyleSheet("background: transparent;")
-        tr.addWidget(self._active_bar2)
-
-        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
-        self._lbl_txt_hdr.setFixedWidth(LABEL_W)
+        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
+        self._lbl_txt_hdr.setFixedWidth(58)
         self._lbl_txt_hdr.setObjectName("muted")
         self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        tr.addWidget(self._lbl_txt_hdr)
+        root.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
-        self._text_lbl.setStyleSheet(f"font-size:{TEXT_FONT_PX}px; padding:0; color:#222;")
+        self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._text_lbl.setStyleSheet(
+            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+            "padding:0; color:#222;"
+        )
         self._text_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -216,12 +203,18 @@ class _LinePair(QFrame):
         self._text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        tr.addWidget(self._text_lbl, 1)
+        root.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
-        self._editor.setStyleSheet(f"font-size:{TEXT_FONT_PX}px; padding:0 6px;")
-        self._editor.setMaximumHeight(TEXT_EDITOR_MAX_H)
+        self._editor.setStyleSheet(
+            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+            "padding:0 6px;"
+        )
+        self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
+        self._editor.document().setDocumentMargin(0)
+        self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -235,7 +228,7 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        tr.addWidget(self._editor, 1)
+        root.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 状态标签
         self._status_lbl = QLabel()
@@ -245,18 +238,10 @@ class _LinePair(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._refresh_status()
-        tr.addWidget(self._status_lbl)
-
-        root.addWidget(txt_row)
-
-        # 分隔线
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#edf0f5; margin:0; padding:0;")
-        root.addWidget(sep)
+        root.addWidget(self._status_lbl)
 
         # 注册点击区域
-        for w in (self, img_row, txt_row, self._img_lbl, self._text_lbl):
+        for w in (self, self._img_lbl, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
             w.mousePressEvent = self._on_click  # type: ignore[method-assign]
 
     # ── 对外接口 ──────────────────────────────────────────────
@@ -394,8 +379,8 @@ class _LinePair(QFrame):
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
-        self._lbl_img_hdr.setText(f"图像行 {line_in_page}")
-        self._lbl_txt_hdr.setText(f"识别文本 {line_in_page}")
+        self._lbl_img_hdr.setText(f"图像 {line_in_page}")
+        self._lbl_txt_hdr.setText(f"文本 {line_in_page}")
         self._image_loaded = False
         self._line_crop = None
         if self._editor.isHidden():

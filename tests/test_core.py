@@ -4930,10 +4930,14 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._gallery_view.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert "background:#ffffff" in panel._gallery_view.styleSheet()
     assert "background:#ffffff" in panel._char_list.styleSheet()
-    assert v_proof.GALLERY_THUMB <= 18
-    assert v_proof.CHAR_LIST_THUMB <= 12
-    assert panel._left_box.maximumWidth() <= 150
-    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 30
+    assert v_proof.GALLERY_THUMB == 27
+    assert v_proof.CHAR_LIST_THUMB == 18
+    assert panel._left_box.maximumWidth() <= 170
+    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 35
+    assert panel._gallery_box.parentWidget() is panel._proof_column
+    assert panel._ocr_text_box.parentWidget() is panel._proof_column
+    assert panel._candidate_box.parentWidget() is panel._proof_column
+    assert "border:0" in panel._candidate_box.styleSheet()
     panel.close()
 
     print("test_vproof_gallery_uses_wrapping_white_grid PASSED")
@@ -5039,12 +5043,52 @@ def test_vproof_highlight_survives_repeated_page_switches():
     print("test_vproof_highlight_survives_repeated_page_switches PASSED")
 
 
+def test_vproof_candidate_provider_interface_is_prepared():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    class Provider:
+        def __init__(self):
+            self.requests = []
+
+        def suggest_candidates(self, request):
+            self.requests.append(request)
+            return ["甲", "由"]
+
+    _get_qapp()
+    line = Line(
+        text="田",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="田", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page = Page(image_path="/tmp/vproof-candidate.png", width=100, height=100, page_number=3)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.load_pages([page])
+    provider = Provider()
+    panel.set_candidate_provider(provider)
+
+    entry = panel._char_svc.query("田")[0]
+    panel._update_candidate_panel(entry)
+
+    assert provider.requests
+    assert provider.requests[0].token == "田"
+    assert provider.requests[0].page_number == 3
+    assert "候选：甲、由" == panel._candidate_hint.text()
+    panel.close()
+
+    print("test_vproof_candidate_provider_interface_is_prepared PASSED")
+
+
 def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
     assert h_proof.TEXT_FONT_PX == 18
     assert h_proof.TEXT_EDITOR_MAX_H <= 42
+    assert h_proof.LINE_PAIR_H == 54
+    assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
 
     print("test_hproof_visual_size_is_compact PASSED")
 
@@ -5232,6 +5276,7 @@ if __name__ == "__main__":
     test_vproof_text_highlight_targets_single_entry()
     test_vproof_highlight_can_repeat_without_losing_state()
     test_vproof_highlight_survives_repeated_page_switches()
+    test_vproof_candidate_provider_interface_is_prepared()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()
