@@ -33,6 +33,13 @@ from app.core.api_profiles import (
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
+from app.core.paddle_response import (
+    iter_layout_records_from_item,
+    iter_ocr_records_from_item,
+    pruned_result,
+    result_dict,
+    result_items,
+)
 from app.models import Block, BlockType, Page
 
 logger = get_logger(__name__)
@@ -178,65 +185,10 @@ class LayoutAnalyzer:
         return (max_x, max_y) if found else None
 
     def _iter_layout_records_from_item(self, item: dict) -> List[dict]:
-        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
-        candidates: List[dict] = []
-
-        for container in (
-            item,
-            pruned,
-            pruned.get("layout_det_res", {}),
-            item.get("layout_det_res", {}),
-        ):
-            if not isinstance(container, dict):
-                continue
-            for key in ("boxes", "layout_boxes", "regions", "blocks"):
-                values = container.get(key)
-                if isinstance(values, list):
-                    candidates.extend(v for v in values if isinstance(v, dict))
-
-        for container in (pruned, item):
-            values = container.get("parsing_res_list", {}) if isinstance(container, dict) else {}
-            if isinstance(values, list):
-                candidates.extend(v for v in values if isinstance(v, dict))
-
-        return candidates
+        return iter_layout_records_from_item(item)
 
     def _iter_ocr_records_from_item(self, item: dict) -> List[dict]:
-        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
-        ocr_res = (
-            pruned.get("overall_ocr_res")
-            or item.get("overall_ocr_res")
-            or pruned
-            or item
-        )
-        if not isinstance(ocr_res, dict):
-            return []
-
-        texts = ocr_res.get("rec_texts") or ocr_res.get("texts") or []
-        scores = ocr_res.get("rec_scores") or ocr_res.get("scores") or []
-        boxes = (
-            ocr_res.get("rec_boxes")
-            or ocr_res.get("rec_polys")
-            or ocr_res.get("rec_polygons")
-            or ocr_res.get("boxes")
-            or ocr_res.get("polys")
-            or ocr_res.get("dt_polys")
-            or []
-        )
-
-        records: List[dict] = []
-        count = max(len(boxes), len(texts))
-        for index in range(count):
-            record = {
-                "label": "text",
-                "text": texts[index] if index < len(texts) else "",
-            }
-            if index < len(boxes):
-                record["bbox"] = boxes[index]
-            if index < len(scores):
-                record["score"] = scores[index]
-            records.append(record)
-        return records
+        return iter_ocr_records_from_item(item)
 
     def _append_api_block(
         self,
@@ -300,15 +252,15 @@ class LayoutAnalyzer:
         return order + 1
 
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
-        result = data.get("result", {}) if isinstance(data, dict) else {}
-        layout_results = result.get("layoutParsingResults", [])
+        result = result_dict(data)
+        layout_results = result_items(data, "layoutParsingResults")
         data_info = result.get("dataInfo") if isinstance(result, dict) else None
         page_blocks: List[Block] = []
         raw_overlay_items: List[tuple[str, object]] = []
         seen: set[tuple] = set()
         order = 0
 
-        for item in layout_results if isinstance(layout_results, list) else []:
+        for item in layout_results:
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
@@ -331,8 +283,8 @@ class LayoutAnalyzer:
         if page_blocks:
             return page_blocks, raw_overlay_items
 
-        ocr_results = result.get("ocrResults", [])
-        for item in ocr_results if isinstance(ocr_results, list) else []:
+        ocr_results = result_items(data, "ocrResults")
+        for item in ocr_results:
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             for record in self._iter_ocr_records_from_item(item):
                 order = self._append_api_block(
@@ -407,7 +359,7 @@ class LayoutAnalyzer:
           4) layout_det_res.boxes 的最大坐标外推
           5) (1.0, 1.0)
         """
-        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
+        pruned = pruned_result(item)
         raw_max = self._raw_bbox_max_from_item(item)
 
         data_shape = self._shape_from_data_info(data_info)

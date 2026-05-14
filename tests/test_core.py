@@ -695,6 +695,114 @@ def test_proof_status_helper_rules():
     print("test_proof_status_helper_rules PASSED")
 
 
+def test_paddle_response_helpers_unpack_records():
+    from app.core.paddle_response import (
+        iter_layout_records_from_item,
+        iter_ocr_preferred_items,
+        iter_ocr_records_from_item,
+        result_items,
+        word_box_rows,
+    )
+
+    layout_item = {
+        "prunedResult": {
+            "layout_det_res": {"boxes": [{"label": "text", "coordinate": [1, 2, 11, 12]}]},
+            "parsing_res_list": [{"block_label": "title", "block_bbox": [3, 4, 20, 30]}],
+        }
+    }
+    ocr_item = {
+        "prunedResult": {
+            "overall_ocr_res": {
+                "rec_texts": ["天地"],
+                "rec_scores": [0.93],
+                "rec_boxes": [[10, 20, 50, 40]],
+            },
+            "textWord": [["天", "地"]],
+            "textWordBoxes": [[
+                [[10, 20], [25, 20], [25, 40], [10, 40]],
+                [[26, 20], [50, 20], [50, 40], [26, 40]],
+            ]],
+        }
+    }
+    data = {"result": {"layoutParsingResults": [layout_item], "ocrResults": [ocr_item]}}
+
+    assert result_items(data, "layoutParsingResults") == [layout_item]
+    assert iter_ocr_preferred_items(data) == [ocr_item]
+    assert len(iter_layout_records_from_item(layout_item)) == 2
+    assert iter_ocr_records_from_item(ocr_item)[0]["text"] == "天地"
+    token_rows, region_rows = word_box_rows(ocr_item)
+    assert token_rows == [["天", "地"]]
+    assert len(region_rows[0]) == 2
+
+    print("test_paddle_response_helpers_unpack_records PASSED")
+
+
+def test_ocr_ir_builder_builds_rec_and_token_fallback_lines():
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.core.ocr_ir import OCR_IR_SOURCE_REC_TEXT, OCR_IR_SOURCE_TOKEN_TEXT, OCR_IR_TOKEN_TEXT_FALLBACK_FLAG
+    from app.core.ocr_ir_builder import build_ir_lines_from_item
+    from app.models import BBox
+
+    rec_item = {
+        "prunedResult": {
+            "overall_ocr_res": {
+                "rec_texts": ["天地"],
+                "rec_scores": [93],
+                "rec_boxes": [[10, 20, 50, 40]],
+            },
+            "text_word": [["天", "地"]],
+            "text_word_region": [[
+                [[10, 20], [25, 20], [25, 40], [10, 40]],
+                [[26, 20], [50, 20], [50, 40], [26, 40]],
+            ]],
+        }
+    }
+
+    lines = build_ir_lines_from_item(
+        rec_item,
+        image_shape=(80, 80),
+        fallback_bbox=BBox(0, 0, 80, 80),
+    )
+    assert len(lines) == 1
+    assert lines[0].source_text == OCR_IR_SOURCE_REC_TEXT
+    assert lines[0].confidence == 0.93
+    assert lines[0].bbox == BBox(10, 20, 40, 20)
+    assert [token.text for token in lines[0].tokens] == ["天", "地"]
+    assert lines[0].review_flags == []
+
+    missing_bbox_item = {
+        "prunedResult": {
+            "overall_ocr_res": {"rec_texts": ["缺框"], "rec_scores": [0.5]},
+        }
+    }
+    missing = build_ir_lines_from_item(
+        missing_bbox_item,
+        image_shape=(80, 80),
+        fallback_bbox=BBox(0, 0, 80, 80),
+    )
+    assert missing[0].review_flags == [MISSING_LINE_BBOX_FLAG]
+
+    token_only_item = {
+        "prunedResult": {
+            "text_word": [["甲", "乙"]],
+            "text_word_region": [[
+                [[1, 2], [10, 2], [10, 20], [1, 20]],
+                [[11, 2], [20, 2], [20, 20], [11, 20]],
+            ]],
+        }
+    }
+    token_only = build_ir_lines_from_item(
+        token_only_item,
+        image_shape=(80, 80),
+        fallback_bbox=BBox(0, 0, 80, 80),
+    )
+    assert token_only[0].text == "甲乙"
+    assert token_only[0].source_text == OCR_IR_SOURCE_TOKEN_TEXT
+    assert token_only[0].review_flags == [OCR_IR_TOKEN_TEXT_FALLBACK_FLAG]
+
+    print("test_ocr_ir_builder_builds_rec_and_token_fallback_lines PASSED")
+
+
 def test_api_ocr_engine_requests_return_word_box():
     import numpy as np
     import requests
@@ -5355,6 +5463,8 @@ if __name__ == "__main__":
     test_fake_ocr_engine()
     test_confidence_normalization()
     test_proof_status_helper_rules()
+    test_paddle_response_helpers_unpack_records()
+    test_ocr_ir_builder_builds_rec_and_token_fallback_lines()
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()

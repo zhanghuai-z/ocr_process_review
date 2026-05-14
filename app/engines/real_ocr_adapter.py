@@ -3,24 +3,29 @@
 确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
 """
 from __future__ import annotations
-from dataclasses import dataclass, replace
-from typing import List, Optional
+from dataclasses import replace
+from typing import List
 
 import numpy as np
 
 from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox
-from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
+from app.core.char_bbox_utils import is_meaningful_text_bbox
 from app.core.ocr_ir import (
-    OCR_IR_SOURCE_REC_TEXT,
-    OCR_IR_SOURCE_TOKEN_TEXT,
-    OCR_IR_TOKEN_TEXT_FALLBACK_FLAG,
     OcrIrLine,
     OcrIrToken,
-    classify_ir_text,
     is_cjk_char,
 )
+from app.core.ocr_ir_builder import (
+    CHAR_BBOX_GRANULARITY_CHAR,
+    CHAR_BBOX_GRANULARITY_FALLBACK,
+    CHAR_BBOX_GRANULARITY_WORD,
+    CHAR_BBOX_SOURCE_FALLBACK,
+    CHAR_BBOX_SOURCE_OCR,
+    build_ir_lines_from_item,
+)
+from app.core.paddle_response import iter_ocr_preferred_items
 from app.core.proof_status import normalize_confidence, proof_status_for
 from app.core.wordbox_anchor import refine_wordbox_anchors
 from app.engines import OcrContext
@@ -29,18 +34,6 @@ from app.models import BBox, Char, Line
 from app.core.app_config import get_config
 
 logger = get_logger(__name__)
-CHAR_BBOX_SOURCE_OCR = "ocr"
-CHAR_BBOX_SOURCE_FALLBACK = "fallback"
-CHAR_BBOX_GRANULARITY_CHAR = "char"
-CHAR_BBOX_GRANULARITY_WORD = "word"
-CHAR_BBOX_GRANULARITY_FALLBACK = "fallback"
-
-@dataclass
-class TokenRow:
-    tokens: list[str]
-    regions: list
-    bbox: Optional[BBox]
-    ir_tokens: list[OcrIrToken]
 
 def get_engine_description(mode: str = "") -> str:
     """返回当前 OCR 引擎描述。"""
@@ -133,182 +126,12 @@ class ApiOcrEngine:
         body.update(get_api_request_options(profile, endpoint_url))
         return body
 
-    def _iter_result_items(self, data: dict) -> list[dict]:
-        result = data.get("result", {}) if isinstance(data, dict) else {}
-        ocr_results = result.get("ocrResults")
-        if isinstance(ocr_results, list) and ocr_results:
-            return [item for item in ocr_results if isinstance(item, dict)]
-        layout_results = result.get("layoutParsingResults")
-        if isinstance(layout_results, list):
-            return [item for item in layout_results if isinstance(item, dict)]
-        return []
-
-    def _extract_overall_ocr_res(self, item: dict) -> dict:
-        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
-        if not isinstance(pruned, dict):
-            pruned = {}
-        ocr_res = pruned.get("overall_ocr_res")
-        if isinstance(ocr_res, dict):
-            return ocr_res
-        direct = item.get("overall_ocr_res")
-        if isinstance(direct, dict):
-            return direct
-        if isinstance(item, dict) and any(key in item for key in ("rec_texts", "rec_boxes", "rec_polys", "dt_polys")):
-            return item
-        return {}
-
-    def _first_list_from_sources(self, sources: list[dict], keys: tuple[str, ...]) -> list:
-        for source in sources:
-            for key in keys:
-                value = source.get(key)
-                if isinstance(value, list):
-                    return value
-        return []
-
-    def _extract_word_box_rows(self, item: dict) -> tuple[list, list]:
-        pruned = item.get("prunedResult", {}) if isinstance(item, dict) else {}
-        if not isinstance(pruned, dict):
-            pruned = {}
-        ocr_res = self._extract_overall_ocr_res(item)
-        direct = item if isinstance(item, dict) else {}
-        sources = [pruned, direct, ocr_res]
-        token_rows = self._first_list_from_sources(sources, ("text_word", "textWord"))
-        region_rows = self._first_list_from_sources(
-            sources,
-            ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"),
-        )
-        return token_rows, region_rows
-
     def _bbox_from_region(self, region, image_shape=None) -> BBox | None:
         return bbox_from_variant(region, image_shape=image_shape)
-
-    def _normalize_token_texts(self, token_row) -> list[str]:
-        if isinstance(token_row, str):
-            return [token_row]
-        if not isinstance(token_row, (list, tuple)):
-            return []
-        tokens: list[str] = []
-        for token in token_row:
-            if token is None:
-                continue
-            token_text = str(token)
-            if token_text == "":
-                continue
-            tokens.append(token_text)
-        return tokens
-
-    def _merge_bboxes(self, boxes: list[BBox]) -> Optional[BBox]:
-        if not boxes:
-            return None
-        x1 = min(box.x for box in boxes)
-        y1 = min(box.y for box in boxes)
-        x2 = max(box.x2 for box in boxes)
-        y2 = max(box.y2 for box in boxes)
-        return BBox.from_xyxy(x1, y1, x2, y2).normalize()
-
-    def _bbox_overlap_ratio(self, first: Optional[BBox], second: Optional[BBox]) -> float:
-        if first is None or second is None or first.area <= 0 or second.area <= 0:
-            return 0.0
-        x1 = max(first.x, second.x)
-        y1 = max(first.y, second.y)
-        x2 = min(first.x2, second.x2)
-        y2 = min(first.y2, second.y2)
-        inter = max(0, x2 - x1) * max(0, y2 - y1)
-        if inter <= 0:
-            return 0.0
-        return inter / float(min(first.area, second.area))
-
-    def _build_token_rows(self, item: dict, image_shape=None) -> list[TokenRow]:
-        token_rows, region_rows = self._extract_word_box_rows(item)
-        rows: list[TokenRow] = []
-        for token_row, region_row in zip(token_rows, region_rows):
-            tokens = [token.strip() for token in self._normalize_token_texts(token_row) if token.strip()]
-            if not tokens or not isinstance(region_row, (list, tuple)):
-                continue
-            paired_tokens: list[str] = []
-            paired_regions: list = []
-            boxes: list[BBox] = []
-            ir_tokens: list[OcrIrToken] = []
-            for token_idx, (token_text, raw_region) in enumerate(zip(tokens, region_row)):
-                bbox = self._bbox_from_region(raw_region, image_shape)
-                if bbox is None or bbox.area <= 0:
-                    continue
-                paired_tokens.append(token_text)
-                paired_regions.append(raw_region)
-                boxes.append(bbox)
-                ir_tokens.append(OcrIrToken(
-                    text=token_text,
-                    bbox=bbox,
-                    row_index=len(rows),
-                    token_index=token_idx,
-                    raw_region=raw_region,
-                    kind=classify_ir_text(token_text),
-                    bbox_granularity=(
-                        CHAR_BBOX_GRANULARITY_CHAR
-                        if len(token_text) == 1
-                        else CHAR_BBOX_GRANULARITY_WORD
-                    ),
-                ))
-            if not paired_tokens:
-                continue
-            rows.append(TokenRow(
-                tokens=paired_tokens,
-                regions=paired_regions,
-                bbox=self._merge_bboxes(boxes),
-                ir_tokens=ir_tokens,
-            ))
-        return rows
-
-    def _compact_text(self, text: str) -> str:
-        return "".join(ch for ch in str(text) if not ch.isspace())
-
-    def _token_row_matches_line(self, row: TokenRow, line_text: str) -> bool:
-        return self._compact_text("".join(row.tokens)) == self._compact_text(line_text)
-
-    def _fallback_token_row_for_missing_line_bbox(
-        self,
-        token_rows: list[TokenRow],
-        row_idx: int,
-        line_text: str,
-    ) -> Optional[TokenRow]:
-        if row_idx >= len(token_rows):
-            return None
-        row = token_rows[row_idx]
-        if row.bbox is None or row.bbox.area <= 0:
-            return None
-        if not self._token_row_matches_line(row, line_text):
-            return None
-        return row
 
     def _unverified_full_crop_bbox(self, image_bgr: np.ndarray) -> BBox:
         height, width = image_bgr.shape[:2]
         return BBox(0, 0, max(1, int(width)), max(1, int(height)))
-
-    def _select_token_row_for_line(self, token_rows: list[TokenRow], line_bbox: BBox) -> Optional[TokenRow]:
-        scored: list[tuple[float, float, int, int, TokenRow]] = []
-        line_center_y = line_bbox.y + line_bbox.h / 2.0
-        for idx, row in enumerate(token_rows):
-            overlap = self._bbox_overlap_ratio(row.bbox, line_bbox)
-            if overlap <= 0:
-                continue
-            row_center_y = row.bbox.y + row.bbox.h / 2.0 if row.bbox else line_center_y
-            distance = abs(row_center_y - line_center_y)
-            scored.append((-overlap, distance, row.bbox.x if row.bbox else 0, idx, row))
-        if not scored:
-            return None
-        scored.sort()
-        return scored[0][4]
-
-    def _looks_like_existing_ir_line(self, ir_lines: list[OcrIrLine], row: TokenRow) -> bool:
-        row_text = self._compact_text("".join(row.tokens))
-        if not row_text or row.bbox is None:
-            return True
-        for ir_line in ir_lines:
-            if self._compact_text(ir_line.text) != row_text:
-                continue
-            if self._bbox_overlap_ratio(ir_line.bbox, row.bbox) >= 0.80:
-                return True
-        return False
 
     def _find_token_span(
         self,
@@ -471,74 +294,21 @@ class ApiOcrEngine:
         data = resp.json()
 
         ir_lines: list[OcrIrLine] = []
-        for item in self._iter_result_items(data):
-            ocr_res = self._extract_overall_ocr_res(item)
-            texts = ocr_res.get("rec_texts", [])
-            scores = ocr_res.get("rec_scores", [])
-            boxes = (
-                ocr_res.get("rec_boxes")
-                or ocr_res.get("rec_polys")
-                or ocr_res.get("rec_polygons")
-                or ocr_res.get("dt_polys")
-                or []
+        def refine_tokens(line_bbox: BBox, tokens: list[OcrIrToken]) -> list[OcrIrToken]:
+            return self._refine_tokens_with_wordbox_anchor(
+                page_image=image_bgr,
+                line_bbox=line_bbox,
+                tokens=tokens,
             )
-            token_rows = self._build_token_rows(item, image_bgr.shape[:2])
-            used_token_rows: set[int] = set()
-            for idx, text in enumerate(texts):
-                line_text = str(text)
-                if not line_text:
-                    continue
-                score = normalize_confidence(scores[idx]) if idx < len(scores) else 0.0
-                bbox = self._bbox_from_region(boxes[idx], image_bgr.shape[:2]) if idx < len(boxes) else None
-                review_flags: list[str] = []
-                if bbox is None or bbox.area <= 0:
-                    token_row = self._fallback_token_row_for_missing_line_bbox(token_rows, idx, line_text)
-                    if token_row is None:
-                        bbox = self._unverified_full_crop_bbox(image_bgr)
-                        review_flags.append(MISSING_LINE_BBOX_FLAG)
-                    else:
-                        bbox = token_row.bbox
-                        used_token_rows.add(id(token_row))
-                else:
-                    token_row = self._select_token_row_for_line(token_rows, bbox)
-                    if token_row is not None:
-                        used_token_rows.add(id(token_row))
-                line_tokens = (
-                    self._refine_tokens_with_wordbox_anchor(
-                        page_image=image_bgr,
-                        line_bbox=bbox,
-                        tokens=token_row.ir_tokens,
-                    )
-                    if token_row else []
-                )
-                ir_lines.append(OcrIrLine(
-                    text=line_text,
-                    confidence=score,
-                    bbox=bbox,
-                    source_text=OCR_IR_SOURCE_REC_TEXT,
-                    tokens=line_tokens,
-                    review_flags=review_flags,
-                ))
 
-            if not texts:
-                for token_row in token_rows:
-                    if id(token_row) in used_token_rows or self._looks_like_existing_ir_line(ir_lines, token_row):
-                        continue
-                    if token_row.bbox is None or token_row.bbox.area <= 0:
-                        continue
-                    line_tokens = self._refine_tokens_with_wordbox_anchor(
-                        page_image=image_bgr,
-                        line_bbox=token_row.bbox,
-                        tokens=token_row.ir_tokens,
-                    )
-                    ir_lines.append(OcrIrLine(
-                        text="".join(token_row.tokens),
-                        confidence=0.0,
-                        bbox=token_row.bbox,
-                        source_text=OCR_IR_SOURCE_TOKEN_TEXT,
-                        tokens=line_tokens,
-                        review_flags=[OCR_IR_TOKEN_TEXT_FALLBACK_FLAG],
-                    ))
+        for item in iter_ocr_preferred_items(data):
+            ir_lines.extend(build_ir_lines_from_item(
+                item,
+                image_shape=image_bgr.shape[:2],
+                fallback_bbox=self._unverified_full_crop_bbox(image_bgr),
+                existing_lines=ir_lines,
+                refine_tokens=refine_tokens,
+            ))
 
         lines: List[Line] = []
         for ir_line in ir_lines:
