@@ -30,6 +30,7 @@ from app.core.api_profiles import (
     infer_api_model_profile_from_endpoint,
     resolve_api_endpoint_for_role,
 )
+from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
@@ -117,55 +118,7 @@ class LayoutAnalyzer:
 
     def _extract_bbox_from_coordinate(self, coord, page: Page):
         """兼容 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
-        if isinstance(coord, dict):
-            if {"x", "y", "w", "h"} <= set(coord.keys()):
-                return sanitize_xyxy_bbox(
-                    [
-                        coord.get("x", 0),
-                        coord.get("y", 0),
-                        coord.get("x", 0) + coord.get("w", 0),
-                        coord.get("y", 0) + coord.get("h", 0),
-                    ],
-                    page.width,
-                    page.height,
-                )
-            if {"x1", "y1", "x2", "y2"} <= set(coord.keys()):
-                return sanitize_xyxy_bbox(
-                    [
-                        coord.get("x1", 0),
-                        coord.get("y1", 0),
-                        coord.get("x2", 0),
-                        coord.get("y2", 0),
-                    ],
-                    page.width,
-                    page.height,
-                )
-
-        if not isinstance(coord, (list, tuple)):
-            return None
-
-        if len(coord) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in coord[:4]):
-            xs = [float(pt[0]) for pt in coord[:4]]
-            ys = [float(pt[1]) for pt in coord[:4]]
-            return sanitize_xyxy_bbox(
-                [min(xs), min(ys), max(xs), max(ys)],
-                page.width,
-                page.height,
-            )
-
-        flat_numbers = [float(v) for v in coord if isinstance(v, (int, float))]
-        if len(flat_numbers) >= 8 and len(flat_numbers) % 2 == 0:
-            xs = flat_numbers[::2]
-            ys = flat_numbers[1::2]
-            return sanitize_xyxy_bbox(
-                [min(xs), min(ys), max(xs), max(ys)],
-                page.width,
-                page.height,
-            )
-
-        if len(coord) >= 4:
-            return sanitize_xyxy_bbox(coord[:4], page.width, page.height)
-        return None
+        return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
 
     def _extract_label_from_record(self, record: dict, default: str = "unknown") -> str:
         for key in (
@@ -191,11 +144,7 @@ class LayoutAnalyzer:
         return None
 
     def _extract_bbox_from_record(self, record: dict, page: Page):
-        for key in (
-            "coordinate", "bbox", "box", "block_bbox", "block_box",
-            "polygon", "poly", "points", "block_polygon_points",
-            "rec_box", "rec_bbox", "rec_poly", "rec_polys",
-        ):
+        for key in BBOX_FIELD_KEYS:
             if key in record:
                 bbox = self._extract_bbox_from_coordinate(record.get(key), page)
                 if bbox and bbox.area > 0:
@@ -203,11 +152,7 @@ class LayoutAnalyzer:
         return None
 
     def _raw_bbox_max_from_record(self, record: dict) -> tuple[float, float] | None:
-        for key in (
-            "coordinate", "bbox", "box", "block_bbox", "block_box",
-            "polygon", "poly", "points", "block_polygon_points",
-            "rec_box", "rec_bbox", "rec_poly", "rec_polys",
-        ):
+        for key in BBOX_FIELD_KEYS:
             if key not in record:
                 continue
             max_xy = self._raw_bbox_max_from_coordinate(record.get(key))
@@ -217,51 +162,7 @@ class LayoutAnalyzer:
 
     def _raw_bbox_max_from_coordinate(self, coord: object) -> tuple[float, float] | None:
         """Extract raw max x/y before scaling or clamping."""
-        if coord is None:
-            return None
-        if isinstance(coord, dict):
-            if {"x", "y", "w", "h"}.issubset(coord.keys()):
-                try:
-                    return (
-                        float(coord["x"]) + float(coord["w"]),
-                        float(coord["y"]) + float(coord["h"]),
-                    )
-                except (TypeError, ValueError):
-                    return None
-            xs: list[float] = []
-            ys: list[float] = []
-            for x_key, y_key in (("x1", "y1"), ("x2", "y2"), ("x3", "y3"), ("x4", "y4")):
-                if x_key not in coord or y_key not in coord:
-                    continue
-                try:
-                    xs.append(float(coord[x_key]))
-                    ys.append(float(coord[y_key]))
-                except (TypeError, ValueError):
-                    return None
-            return (max(xs), max(ys)) if xs and ys else None
-
-        if isinstance(coord, (list, tuple)):
-            if coord and all(isinstance(point, (list, tuple)) for point in coord):
-                xs: list[float] = []
-                ys: list[float] = []
-                for point in coord:
-                    if len(point) < 2:
-                        continue
-                    try:
-                        xs.append(float(point[0]))
-                        ys.append(float(point[1]))
-                    except (TypeError, ValueError):
-                        return None
-                return (max(xs), max(ys)) if xs and ys else None
-            try:
-                values = [float(value) for value in coord]
-            except (TypeError, ValueError):
-                return None
-            if len(values) >= 8 and len(values) % 2 == 0:
-                return max(values[0::2]), max(values[1::2])
-            if len(values) >= 4:
-                return max(values[0], values[2]), max(values[1], values[3])
-        return None
+        return raw_bbox_max_from_variant(coord)
 
     def _raw_bbox_max_from_item(self, item: dict) -> tuple[float, float] | None:
         max_x = 0.0
@@ -709,7 +610,9 @@ class LayoutAnalyzer:
         for i, item in enumerate(items):
             raw_type = item.get("type", "unknown")
             bbox_raw = item.get("bbox", [0, 0, 0, 0])
-            bbox = sanitize_xyxy_bbox(bbox_raw, page.width, page.height)
+            bbox = bbox_from_variant(bbox_raw, max_w=page.width, max_h=page.height)
+            if bbox is None:
+                continue
             if bbox.area <= 0:
                 continue
             page.blocks.append(Block(

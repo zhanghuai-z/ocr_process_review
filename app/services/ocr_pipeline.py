@@ -18,10 +18,11 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
+from app.core.proof_status import apply_auto_flag
 from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
-    Block, BlockType, BBox, Line, OcrProject, Page, ProofStatus,
+    Block, BlockType, BBox, Line, OcrProject, Page,
 )
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
@@ -38,10 +39,6 @@ OCR_LINE_CONTAINER_BLOCK_TYPES = {
     BlockType.REFERENCE,
     BlockType.EQUATION,
 }
-
-# 自动标记低置信行阈值
-AUTO_FLAG_THRESHOLD = 0.80
-
 
 @dataclass
 class OcrProgress:
@@ -231,9 +228,7 @@ class OcrPipeline:
                     char.bbox,
                     source_space=bbox_space,
                 )
-            if line.confidence < AUTO_FLAG_THRESHOLD:
-                if line.proof_status == ProofStatus.UNCHECKED:
-                    line.proof_status = ProofStatus.AUTO_FLAGGED
+            apply_auto_flag(line)
             if not line.ocr_text:
                 line.ocr_text = line.text
             if not line.original_text:

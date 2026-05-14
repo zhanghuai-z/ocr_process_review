@@ -9,7 +9,8 @@ from typing import List, Optional
 import numpy as np
 
 from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
-from app.core.bbox_utils import bbox_from_quad, bbox_from_xyxy, sanitize_xyxy_bbox
+from app.core.bbox_extraction import bbox_from_variant
+from app.core.bbox_utils import sanitize_xyxy_bbox
 from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG, is_meaningful_text_bbox
 from app.core.ocr_ir import (
     OCR_IR_SOURCE_REC_TEXT,
@@ -20,13 +21,13 @@ from app.core.ocr_ir import (
     classify_ir_text,
     is_cjk_char,
 )
+from app.core.proof_status import normalize_confidence, proof_status_for
 from app.core.wordbox_anchor import refine_wordbox_anchors
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.models import BBox, Char, Line, ProofStatus
+from app.models import BBox, Char, Line
 from app.core.app_config import get_config
 
-AUTO_FLAG_THRESHOLD = 0.80
 logger = get_logger(__name__)
 CHAR_BBOX_SOURCE_OCR = "ocr"
 CHAR_BBOX_SOURCE_FALLBACK = "fallback"
@@ -40,23 +41,6 @@ class TokenRow:
     regions: list
     bbox: Optional[BBox]
     ir_tokens: list[OcrIrToken]
-
-
-def normalize_confidence(score) -> float:
-    """统一把引擎分数归一化到 0~1。
-
-    有些服务可能返回 0~1，也可能返回 0~100；这里统一处理，避免
-    置信度链路断掉后影响自动标记、UI 徽章和后续校对流程。
-    """
-    try:
-        value = float(score)
-    except (TypeError, ValueError):
-        return 0.0
-
-    if value > 1.0 and value <= 100.0:
-        value = value / 100.0
-    return max(0.0, min(value, 1.0))
-
 
 def get_engine_description(mode: str = "") -> str:
     """返回当前 OCR 引擎描述。"""
@@ -126,11 +110,7 @@ class LocalOcrEngine:
                 text=text,
                 confidence=float(score),
                 bbox=bbox,
-                proof_status=(
-                    ProofStatus.AUTO_FLAGGED
-                    if score < AUTO_FLAG_THRESHOLD
-                    else ProofStatus.UNCHECKED
-                ),
+                proof_status=proof_status_for(score),
             ))
         return lines
 
@@ -199,36 +179,8 @@ class ApiOcrEngine:
         )
         return token_rows, region_rows
 
-    def _clamp_parsed_bbox(self, bbox: BBox, image_shape=None) -> BBox:
-        normalized = bbox.normalize()
-        if image_shape is None:
-            return normalized
-        height, width = image_shape[:2]
-        return normalized.clamp(int(width), int(height))
-
     def _bbox_from_region(self, region, image_shape=None) -> BBox | None:
-        if isinstance(region, dict):
-            if {"x", "y", "w", "h"} <= set(region.keys()):
-                return self._clamp_parsed_bbox(BBox.from_dict(region), image_shape)
-            for key in ("coordinate", "bbox", "box", "points", "polygon", "poly"):
-                value = region.get(key)
-                if value is not None:
-                    return self._bbox_from_region(value, image_shape)
-            return None
-        if not isinstance(region, (list, tuple)):
-            return None
-        if len(region) == 1 and isinstance(region[0], (list, tuple)):
-            return self._bbox_from_region(region[0], image_shape)
-        if len(region) >= 8 and all(not isinstance(v, (list, tuple)) for v in region[:8]):
-            pairs = list(zip(region[0::2], region[1::2]))
-            return self._clamp_parsed_bbox(bbox_from_quad(pairs[:4]), image_shape)
-        if len(region) >= 4 and all(not isinstance(v, (list, tuple)) for v in region[:4]):
-            return self._clamp_parsed_bbox(bbox_from_xyxy(region[:4]), image_shape)
-        if len(region) >= 4 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in region[:4]):
-            return self._clamp_parsed_bbox(bbox_from_quad(region[:4]), image_shape)
-        if len(region) >= 2 and all(isinstance(v, (list, tuple)) and len(v) >= 2 for v in region[:2]):
-            return self._clamp_parsed_bbox(bbox_from_quad(region[:2]), image_shape)
-        return None
+        return bbox_from_variant(region, image_shape=image_shape)
 
     def _normalize_token_texts(self, token_row) -> list[str]:
         if isinstance(token_row, str):
@@ -603,11 +555,7 @@ class ApiOcrEngine:
                 chars=chars,
                 ocr_text=ir_line.text,
                 review_flags=ir_line.review_flags,
-                proof_status=(
-                    ProofStatus.AUTO_FLAGGED
-                    if ir_line.review_flags or ir_line.confidence < AUTO_FLAG_THRESHOLD
-                    else ProofStatus.UNCHECKED
-                ),
+                proof_status=proof_status_for(ir_line.confidence, ir_line.review_flags),
             ))
         return lines
 

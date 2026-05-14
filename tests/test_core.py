@@ -290,6 +290,19 @@ def test_bbox_tools():
     print("test_bbox_tools PASSED")
 
 
+def test_bbox_extraction_helper_variants():
+    from app.core.bbox_extraction import bbox_from_variant, raw_bbox_max_from_variant
+    from app.models import BBox
+
+    assert bbox_from_variant({"x": 10, "y": 20, "w": 30, "h": 40}, max_w=100, max_h=100) == BBox(10, 20, 30, 40)
+    assert bbox_from_variant({"bbox": {"x1": 5, "y1": 6, "x2": 25, "y2": 36}}, max_w=100, max_h=100) == BBox(5, 6, 20, 30)
+    assert bbox_from_variant([10, 15, 30, 15, 30, 40, 10, 40], max_w=100, max_h=100) == BBox(10, 15, 20, 25)
+    assert bbox_from_variant([[90, 95], [130, 95], [130, 140], [90, 140]], max_w=100, max_h=100) == BBox(90, 95, 10, 5)
+    assert raw_bbox_max_from_variant({"coordinate": [1, 2, 11, 12]}) == (11.0, 12.0)
+
+    print("test_bbox_extraction_helper_variants PASSED")
+
+
 def test_component_matcher_extracts_and_classifies_cjk_tokens():
     import cv2
     import numpy as np
@@ -661,6 +674,25 @@ def test_confidence_normalization():
     assert normalize_badge_score("0.76") == 0.76
 
     print("test_confidence_normalization PASSED")
+
+
+def test_proof_status_helper_rules():
+    from app.core.proof_status import apply_auto_flag, proof_status_for
+    from app.models import BBox, Line, ProofStatus
+
+    assert proof_status_for(0.79) == ProofStatus.AUTO_FLAGGED
+    assert proof_status_for(0.80) == ProofStatus.UNCHECKED
+    assert proof_status_for(0.95, ["geometry_warning"]) == ProofStatus.AUTO_FLAGGED
+
+    line = Line(text="低置信", confidence=0.40, bbox=BBox(0, 0, 10, 10))
+    apply_auto_flag(line)
+    assert line.proof_status == ProofStatus.AUTO_FLAGGED
+
+    confirmed = Line(text="已确认", confidence=0.20, bbox=BBox(0, 0, 10, 10), proof_status=ProofStatus.OK)
+    apply_auto_flag(confirmed)
+    assert confirmed.proof_status == ProofStatus.OK
+
+    print("test_proof_status_helper_rules PASSED")
 
 
 def test_api_ocr_engine_requests_return_word_box():
@@ -5311,6 +5343,7 @@ def test_ocr_inspector_paddle_adapter_marks_word_not_fake_char():
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
+    test_bbox_extraction_helper_variants()
     test_block_type_mapping()
     test_project_store()
     test_project_store_clean_on_resave()
@@ -5321,6 +5354,7 @@ if __name__ == "__main__":
     test_export_html()
     test_fake_ocr_engine()
     test_confidence_normalization()
+    test_proof_status_helper_rules()
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
