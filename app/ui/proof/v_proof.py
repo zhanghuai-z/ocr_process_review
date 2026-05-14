@@ -19,7 +19,8 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Protocol, Tuple
 
 import cv2
 import numpy as np
@@ -32,7 +33,7 @@ from PySide6.QtGui import (
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFrame, QHBoxLayout, QLabel,
+    QAbstractItemView, QHBoxLayout, QLabel,
     QLineEdit, QListView, QListWidget, QListWidgetItem,
     QPlainTextEdit, QPushButton, QSplitter, QStyle, QTextEdit,
     QStyledItemDelegate, QVBoxLayout, QWidget,
@@ -48,9 +49,23 @@ from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
 
-CHAR_LIST_THUMB = 12
-GALLERY_THUMB   = 18
+CHAR_LIST_THUMB = 18
+GALLERY_THUMB   = 27
 LOW_CONF        = 0.80
+
+
+@dataclass(frozen=True)
+class LlmCandidateRequest:
+    token: str
+    page_number: int
+    line_text: str
+    char_index: int
+    context_text: str
+
+
+class LlmCandidateProvider(Protocol):
+    def suggest_candidates(self, request: LlmCandidateRequest) -> List[str]:
+        ...
 
 
 # ─────────────────────────────────────────────────────────────
@@ -220,6 +235,7 @@ class VProofPanel(QWidget):
         self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
+        self._candidate_provider: Optional[LlmCandidateProvider] = None
         self._updating = False
         self._build_ui()
 
@@ -265,8 +281,8 @@ class VProofPanel(QWidget):
         # 左：单字列表 + 搜索
         self._main_split = h_split
         self._left_box = self._build_char_list()
-        self._left_box.setMinimumWidth(100)
-        self._left_box.setMaximumWidth(150)
+        self._left_box.setMinimumWidth(110)
+        self._left_box.setMaximumWidth(170)
         h_split.addWidget(self._left_box)
 
         # 右：垂直分割（上gallery | 下文本/图）
@@ -321,33 +337,52 @@ class VProofPanel(QWidget):
 
     def _build_right_area(self) -> QWidget:
         box = QWidget()
-        v = QVBoxLayout(box)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
+        root = QHBoxLayout(box)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 上：gallery 网格（固定高度）
+        self._content_split = QSplitter(Qt.Orientation.Horizontal)
+        self._content_split.setHandleWidth(1)
+
+        self._proof_column = QWidget()
+        col = QVBoxLayout(self._proof_column)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        # 左列上：gallery 网格。与同列 OCR 文本自然等宽。
         self._gallery_box = self._build_gallery_strip()
         self._gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
-        v.addWidget(self._gallery_box)
+        col.addWidget(self._gallery_box)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#e3e8ef;")
-        v.addWidget(sep)
+        self._candidate_box = self._build_candidate_panel()
+        col.addWidget(self._candidate_box)
 
-        # 下：OCR 文本 | 原图（QSplitter）
-        self._bottom_split = QSplitter(Qt.Orientation.Horizontal)
-        self._bottom_split.setHandleWidth(1)
+        self._ocr_text_box = self._build_ocr_text()
+        col.addWidget(self._ocr_text_box, 1)
 
-        bl_box = self._build_ocr_text()
-        br_box = self._build_viewer()
+        self._viewer_box = self._build_viewer()
+        self._content_split.addWidget(self._proof_column)
+        self._content_split.addWidget(self._viewer_box)
+        self._content_split.setStretchFactor(0, 1)
+        self._content_split.setStretchFactor(1, 4)
+        root.addWidget(self._content_split)
+        return box
 
-        self._bottom_split.addWidget(bl_box)
-        self._bottom_split.addWidget(br_box)
-        self._bottom_split.setStretchFactor(0, 1)
-        self._bottom_split.setStretchFactor(1, 4)
-
-        v.addWidget(self._bottom_split, 1)
+    def _build_candidate_panel(self) -> QWidget:
+        box = QWidget()
+        box.setObjectName("candidatePanel")
+        box.setFixedHeight(70)
+        box.setStyleSheet("QWidget#candidatePanel { background:#ffffff; border:0; }")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(2)
+        self._candidate_title = QLabel("候选字（LLM 预留）")
+        self._candidate_title.setObjectName("sectionTitle")
+        self._candidate_hint = QLabel("未选择字符；候选字接口已预留，默认不调用外部模型")
+        self._candidate_hint.setObjectName("muted")
+        self._candidate_hint.setWordWrap(True)
+        layout.addWidget(self._candidate_title)
+        layout.addWidget(self._candidate_hint)
         return box
 
     def _build_gallery_strip(self) -> QWidget:
@@ -462,7 +497,11 @@ class VProofPanel(QWidget):
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])
+        self._candidate_hint.setText("未选择字符；候选字接口已预留，默认不调用外部模型")
         self._page_label.setText("页 0 / 0")
+
+    def set_candidate_provider(self, provider: Optional[LlmCandidateProvider]) -> None:
+        self._candidate_provider = provider
 
     # ─────────────────── 字符列表 ────────────────────────────
 
@@ -548,6 +587,7 @@ class VProofPanel(QWidget):
         target = entries[0] if entries else None
         if target:
             self._highlight_char_in_viewer(target)
+            self._update_candidate_panel(target)
             # 选中首条 gallery 条目与当前定位保持一致
             first_idx = self._gallery_model.index(0, 0)
             self._gallery_view.setCurrentIndex(first_idx)
@@ -608,6 +648,28 @@ class VProofPanel(QWidget):
                     self._viewer.highlight_bbox(entry.bbox, zoom=True)
                     break
 
+    def _candidate_request_for_entry(self, entry: CharEntry) -> LlmCandidateRequest:
+        line_text = entry.line.text or ""
+        return LlmCandidateRequest(
+            token=entry.token_text or entry.char,
+            page_number=entry.page_number,
+            line_text=line_text,
+            char_index=entry.char_idx,
+            context_text=self._text_edit.toPlainText(),
+        )
+
+    def _update_candidate_panel(self, entry: CharEntry) -> None:
+        request = self._candidate_request_for_entry(entry)
+        if self._candidate_provider is None:
+            self._candidate_hint.setText(
+                f"当前字：{request.token}  · 第 {request.page_number} 页，"
+                "LLM 候选接口已预留（默认关闭）"
+            )
+            return
+        candidates = self._candidate_provider.suggest_candidates(request)
+        text = "、".join(candidates) if candidates else "无候选"
+        self._candidate_hint.setText(f"候选：{text}")
+
     # ─────────────────── Gallery 点击 ───────────────────────
 
     def _on_gallery_clicked(self, index: QModelIndex) -> None:
@@ -615,6 +677,7 @@ class VProofPanel(QWidget):
         if entry is None:
             return
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
+        self._update_candidate_panel(entry)
         # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
             n = len(self._char_svc.query(self._selected_char))
