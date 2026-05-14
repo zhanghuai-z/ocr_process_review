@@ -594,3 +594,143 @@ def test_export_clean_under_large_change_attack(tmp_path):
         assert "瞾" not in body, f"fake_char 残留进导出文本：{body!r}"
     finally:
         reset_active_store()
+
+
+# ════════════════════════════════════════════════════════════════
+# Blocker A regression: small-change path must scrub fake_char
+# even when user inserted/deleted 1-2 chars before the probe
+# (causing positional shift)
+# ════════════════════════════════════════════════════════════════
+
+def test_reverse_small_change_fake_leaks_when_user_inserts_before_probe():
+    """用户在 probe 之前插入 1 个字符 → probe 位置漂移 → 旧实现下 fake_char 残留。
+
+    精准回归：构造 1 字符插入场景，断言返回真实文本不含 fake_char。
+    """
+    # 真实文本：probe 在 idx=7 ("已")
+    before = "今天我们来学习已经发生过的历史"
+    probes = [Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己")]
+    displayed = apply_probes_to_display(before, probes)
+    # displayed = "今天我们来学习己经发生过的历史"
+    assert displayed[7] == "己"
+    # 用户在最前面插入 1 个字符 "X"，没动 probe → fake "己" 现在在 idx=8
+    user_text = "X" + displayed   # 长度 +1，进 small-change 分支
+    assert abs(len(user_text) - len(before)) <= 2
+    true_text, results = reverse_display_to_true(before, user_text, probes)
+    # 关键不变量：返回真实文本绝不能含 fake_char
+    assert "己" not in true_text, (
+        f"small-change 路径漏 fake_char：true_text={true_text!r}"
+    )
+
+
+def test_reverse_small_change_fake_leaks_when_user_deletes_before_probe():
+    """用户在 probe 之前删除 1 个字符 → probe 位置漂移 → fake_char 漂到 idx-1。"""
+    before = "今天我们来学习已经发生过的历史"
+    probes = [Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己")]
+    displayed = apply_probes_to_display(before, probes)
+    # 用户删掉首字符 "今"，长度 -1
+    user_text = displayed[1:]   # "天我们来学习己经发生过的历史"，"己" 现在在 idx=6
+    assert abs(len(user_text) - len(before)) <= 2
+    true_text, _ = reverse_display_to_true(before, user_text, probes)
+    assert "己" not in true_text, (
+        f"small-change 路径漏 fake_char：true_text={true_text!r}"
+    )
+
+
+def test_reverse_small_change_multiple_probes_with_drift():
+    """多个 probe + 用户插入字符：所有 fake_char 都必须被清掉。"""
+    before = "今天我们来学习已经发生过的历史末日故事"   # "末" at idx=14
+    probes = [
+        Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"),
+        Probe(ProbeKey(1, 0, 0, 14), true_char="末", fake_char="未"),
+    ]
+    displayed = apply_probes_to_display(before, probes)
+    # 用户在中间删 1 字 + 在末尾加 1 字（净变化 0，但每个 probe 位置都漂移）
+    # 这里简化为：在 idx=3 处插一个字符 → 两个 fake 都右移 1 位
+    user_text = displayed[:3] + "Y" + displayed[3:]
+    assert abs(len(user_text) - len(before)) <= 2
+    true_text, _ = reverse_display_to_true(before, user_text, probes)
+    assert "己" not in true_text and "未" not in true_text, (
+        f"small-change 路径漏 fake_char：true_text={true_text!r}"
+    )
+
+
+def test_reverse_small_change_end_to_end_no_fake_in_line_text():
+    """端到端：observe → update_text 后，line.text 绝不含 fake_char。"""
+    from app.core.quality_probe import (
+        ProbeStore, set_active_store, reset_active_store, observe_user_action,
+        apply_probes_to_display,
+    )
+    line = _line("今天我们来学习已经发生过的历史")
+    block = _block(BlockType.TEXT, [line])
+    page = _page(1, [block])
+    project = _project([page])
+    store = ProbeStore()
+    store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"))
+    set_active_store(store)
+    try:
+        probes = store.for_line(1, 0, 0)
+        displayed = apply_probes_to_display(line.text, probes)
+        # 用户在前面插 1 字符（small-change 分支）
+        user_text = "X" + displayed
+        new_true = observe_user_action(store, 1, 0, 0, line.text, user_text)
+        line.update_text(new_true)
+        # 强约束
+        assert "己" not in line.text, f"line.text 含 fake_char：{line.text!r}"
+    finally:
+        reset_active_store()
+
+
+# ════════════════════════════════════════════════════════════════
+# Blocker B regression: h_proof manual toggle must use AppConfig
+# ════════════════════════════════════════════════════════════════
+
+def test_manual_toggle_uses_app_config_thresholds(monkeypatch, tmp_path):
+    """手动开评测路径必须走 sampler_config_from_app_config，不能 new 默认 SamplerConfig。
+
+    通过 monkeypatch sampler_config_from_app_config 返回一个识别明显的非默认配置，
+    再触发 HProofPanel._on_toggle_quality_probe(True)，断言返回的 store 用了这个配置。
+    """
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+
+    from app.core import quality_probe as qp_mod
+    from app.ui.proof.h_proof import HProofPanel
+
+    # 构造一个明显不同于默认的 SamplerConfig (seed=固定值便于比对)
+    sentinel_cfg = qp_mod.SamplerConfig(
+        target_ratio=0.99,   # 极高比例 → 触发 max_total cap
+        min_total=2, max_total=3, max_per_page=10, max_per_line=1,
+        seed=12345,
+    )
+    captured = {}
+
+    def fake_from_app_config():
+        captured["called"] = True
+        return sentinel_cfg
+
+    monkeypatch.setattr(qp_mod, "sampler_config_from_app_config", fake_from_app_config)
+    # 同时也要 monkeypatch h_proof 模块里的引用（它通过 `from app.core import quality_probe as qp` 导入，所以 qp.sampler_config_from_app_config 是同一个对象）
+    # → 上面 setattr 在 qp_mod 上已生效
+
+    # 构造一个最小项目供 HProofPanel 采样
+    proj = _build_dense_project(n_pages=2, lines_per_page=4)
+    panel = HProofPanel()
+    panel.load_pages(proj.pages)
+
+    # 手动触发开评测
+    panel._on_toggle_quality_probe(True)
+    try:
+        assert captured.get("called"), "手动开评测没有调用 sampler_config_from_app_config"
+        store = qp_mod.get_active_store()
+        assert store is not None
+        # 因为 max_total=3，store 大小应 ≤ 3（断定确实用了 sentinel_cfg 的上限）
+        assert len(store) <= sentinel_cfg.max_total, (
+            f"manual toggle 没遵守 sentinel_cfg.max_total={sentinel_cfg.max_total}, "
+            f"实际投放 {len(store)}（说明走了默认 SamplerConfig）"
+        )
+    finally:
+        qp_mod.reset_active_store()
+        panel.deleteLater()

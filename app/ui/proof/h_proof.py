@@ -1015,7 +1015,10 @@ class HProofPanel(QWidget):
                 self._btn_quality_toggle.setChecked(False)
                 return
             project = OcrProject(name="(proofing)", pages=list(self._pages))
-            store = qp.ProbeSampler(qp.SamplerConfig()).sample(project)
+            # 手动开评测必须和自动触发路径一样从 AppConfig 读取阈值，
+            # 否则用户调过的 quality_probe_* 设置会被绕过 (Blocker B 修复)。
+            cfg = qp.sampler_config_from_app_config()
+            store = qp.ProbeSampler(cfg).sample(project)
             qp.set_active_store(store)
             n = len(store)
             if n == 0:

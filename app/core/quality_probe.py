@@ -496,7 +496,27 @@ def reverse_display_to_true(
         else:
             # 用户改成了别的字 —— 保留用户修改，不强制还原
             observations.append((p, "edited_other"))
-    return "".join(chars), observations
+
+    # ──────────────────────────────────────────────────────────
+    # 关键安全网 (Blocker A 修复)：small-change 路径下，用户在 probe 之前/后
+    # 插入或删除 1-2 个字符，会让真正含 fake_char 的位置漂移到 char_index ± δ。
+    # 上面的 ``chars[idx]`` 比对只看精确位置，错过了漂移后的 fake_char。
+    # 在这里做一次"全文 scrub"：对每个 probe，检查最终 chars 里是否仍残留它的
+    # ``fake_char``；若是，就把所有出现替换成 ``true_char``。
+    #
+    # 这是写回 ``line.text`` 前的最后一道防线 —— 即使前面所有判定都失误，
+    # 这一步也能保证返回的真实文本绝不含 probe 的 fake_char。
+    #
+    # 副作用 trade-off：若用户**有意**输入了与某 probe 的 fake_char 相同的
+    # 字符（例如输入"己"，而某 probe 的 fake_char 也是"己"），这里会被改成
+    # ``true_char``。这是已知且可接受的代价 —— 与污染最终导出文本相比，
+    # 偶尔被替换一个字符是远更轻的影响，并且用户可以重新输入。
+    # ──────────────────────────────────────────────────────────
+    cleaned_str = "".join(chars)
+    for p in probes:
+        if p.fake_char and p.fake_char != p.true_char and p.fake_char in cleaned_str:
+            cleaned_str = cleaned_str.replace(p.fake_char, p.true_char)
+    return cleaned_str, observations
 
 
 def observe_user_action(
