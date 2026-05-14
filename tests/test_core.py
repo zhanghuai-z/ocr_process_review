@@ -2973,41 +2973,82 @@ def test_api_model_profile_helpers():
 
 
 def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
+    """Layout role 已全面切到 PaddleOCR-VL-1.5；OCR proof role 仍走 PP-OCRv5。
+
+    所有官方预设 (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 在 role="layout"
+    下都被 strong-redirect 到 paddleocr-vl-1.5 预设 URL。
+    自托管根 URL 仍只做 /ocr <-> /layout-parsing 后缀切换。
+    """
     from app.core.api_profiles import (
         get_api_model_profile_url,
         resolve_api_endpoint_for_role,
     )
 
-    structure_url = get_api_model_profile_url("pp-structurev3")
+    vl_url = get_api_model_profile_url("paddleocr-vl-1.5")
     ocr_url = get_api_model_profile_url("pp-ocrv5")
+    structure_url = get_api_model_profile_url("pp-structurev3")
     structure_root = structure_url.removesuffix("/layout-parsing")
     ocr_root = ocr_url.removesuffix("/ocr")
+    vl_root = vl_url.removesuffix("/layout-parsing")
 
+    # Layout role: 任何官方 PP-* 预设 -> VL-1.5
     assert resolve_api_endpoint_for_role(
         structure_url,
         profile="pp-structurev3",
         role="layout",
-    ) == structure_url
+    ) == vl_url
+    assert resolve_api_endpoint_for_role(
+        ocr_url,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == vl_url
+    assert resolve_api_endpoint_for_role(
+        structure_root,
+        profile="pp-structurev3",
+        role="layout",
+    ) == vl_url
+    assert resolve_api_endpoint_for_role(
+        ocr_root,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == vl_url
+    # 旧 paddleocr-vl 预设也归入 VL-1.5（统一升级到 1.5）
+    old_vl_url = get_api_model_profile_url("paddleocr-vl")
+    assert resolve_api_endpoint_for_role(
+        old_vl_url,
+        profile="paddleocr-vl",
+        role="layout",
+    ) == vl_url
+    # VL-1.5 自身保持
+    assert resolve_api_endpoint_for_role(
+        vl_url,
+        profile="paddleocr-vl-1.5",
+        role="layout",
+    ) == vl_url
+
+    # OCR role: 任何 layout 预设 -> PP-OCRv5；PP-OCRv5 自身保持
     assert resolve_api_endpoint_for_role(
         structure_url,
         profile="pp-structurev3",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        ocr_url,
-        profile="pp-ocrv5",
-        role="layout",
-    ) == structure_url
+        vl_url,
+        profile="paddleocr-vl-1.5",
+        role="ocr",
+    ) == ocr_url
     assert resolve_api_endpoint_for_role(
         structure_root,
         profile="pp-structurev3",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        ocr_root,
+        ocr_url,
         profile="pp-ocrv5",
-        role="layout",
-    ) == structure_url
+        role="ocr",
+    ) == ocr_url
+
+    # 自托管根 URL: 不做 host 跳转，仅按后缀切换
     assert resolve_api_endpoint_for_role(
         "https://self-hosted.example.com",
         profile="",
@@ -3018,6 +3059,11 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         profile="",
         role="ocr",
     ) == "https://self-hosted.example.com/ocr"
+    assert resolve_api_endpoint_for_role(
+        "https://self-hosted.example.com/ocr",
+        profile="",
+        role="layout",
+    ) == "https://self-hosted.example.com/layout-parsing"
 
     print("test_api_endpoint_role_resolution_keeps_layout_and_proof_separate PASSED")
 

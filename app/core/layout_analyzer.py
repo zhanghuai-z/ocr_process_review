@@ -25,7 +25,11 @@ from typing import Iterable, List
 
 from PySide6.QtCore import QThread, Signal
 
-from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
+from app.core.api_profiles import (
+    get_api_request_options,
+    infer_api_model_profile_from_endpoint,
+    resolve_api_endpoint_for_role,
+)
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.models import Block, BlockType, Page
@@ -730,6 +734,15 @@ class LayoutAnalyzer:
             profile=cfg.get("api_model_profile", ""),
             role="layout",
         )
+        # 主链 layout 已被 strong-redirect 到 VL-1.5；但配置里仍可能是旧
+        # profile (pp-structurev3 / pp-ocrv5)。这里按最终 endpoint 重推
+        # profile，保证 _build_api_request_body 选出正确的 request_family
+        # (vl-layout vs ocr-word-box)，不会把 OCR detector/recognizer 参数误发
+        # 到 VL 端点。与 Inspector 处理保持一致。
+        effective_profile = (
+            infer_api_model_profile_from_endpoint(url)
+            or cfg.get("api_model_profile", "")
+        )
         timeout = cfg["api_timeout"]
         token = cfg.get("api_token", "")
         layout_model_name = cfg.get("api_layout_model_name", "").strip()
@@ -753,7 +766,7 @@ class LayoutAnalyzer:
                 file_b64,
                 1,
                 layout_model_name,
-                profile=cfg.get("api_model_profile", ""),
+                profile=effective_profile,
                 endpoint_url=url,
             ),
             headers=headers,
