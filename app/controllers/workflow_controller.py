@@ -62,6 +62,10 @@ class WorkflowController(QObject):
         self._pending_proof_pages: Optional[List[Page]] = None
         self._auto_start_ocr_after_layout = True
         self._queued_ocr_progress_callback: Optional[Callable] = None
+        # proof 面板同步状态（供 sync_proof_panels 使用）
+        self._proof_loaded_line_count: int = 0
+        self._hproof_panel = None
+        self._vproof_panel = None
 
     # ------------------------------------------------------------------ project management
 
@@ -100,6 +104,115 @@ class WorkflowController(QObject):
         if not self._project:
             return 0
         return sum(len(page.recognizable_blocks) for page in self._project.pages)
+
+    # ── 收口给 MainWindow 的窄 accessor ──────────────────────────────
+    # 这些 property 是为了让 MainWindow 不必直接读 ``self._controller.project.*``
+    # 拿 pages / 计算行数 / 判 analyzed-or-completed。语义和原 inline 读完全一致，
+    # 仅多了一层 None-safe，便于未建项目时也能安全调用。
+
+    @property
+    def pages(self) -> List[Page]:
+        """当前项目的 pages；无项目时返回空列表（不抛异常）。"""
+        if self._project is None:
+            return []
+        return self._project.pages
+
+    @property
+    def has_pages(self) -> bool:
+        return bool(self._project and self._project.pages)
+
+    @property
+    def total_line_count(self) -> int:
+        """所有 page 的 total_lines 之和；无项目时返回 0。"""
+        if self._project is None:
+            return 0
+        return sum(p.total_lines for p in self._project.pages)
+
+    @property
+    def is_fully_analyzed(self) -> bool:
+        """所有 page 都已完成版面分析；无 page 时返回 False。"""
+        if not self._project or not self._project.pages:
+            return False
+        return all(p.is_analyzed for p in self._project.pages)
+
+    @property
+    def ocr_completed(self) -> bool:
+        """OCR 是否完成（与 OcrProject.ocr_completed 同义）；无项目时 False。"""
+        if self._project is None:
+            return False
+        return self._project.ocr_completed
+
+    @property
+    def cache_dir(self) -> "Path":
+        """项目对应的缓存目录：``<.ocrproj 所在目录>/.cache``；
+        临时项目（未保存）落在当前工作目录的 ``./.cache``。
+
+        把 ``self._controller._project.db_path`` 这种私有访问收掉，避免
+        MainWindow 触手伸进 controller 的实现细节。
+        """
+        from pathlib import Path as _Path
+        db_path = self._project.db_path if self._project else None
+        return _Path(db_path or ".").parent / ".cache"
+
+    def page_number_at(self, idx: int) -> Optional[int]:
+        """按位置返回 page_number；越界或无项目时 None。"""
+        if not self._project or not (0 <= idx < len(self._project.pages)):
+            return None
+        return self._project.pages[idx].page_number
+
+    # ── proof 面板同步：把"merge vs load"判定从 MainWindow 收回 ──────
+    # 之前 MainWindow 自己 sum(total_lines) 决定 load 还是 merge，并维护
+    # ``_proof_loaded_line_count``。现在所有权收到 controller，MainWindow
+    # 只要在合适时机调 ``sync_proof_panels()``。
+
+    def register_proof_panels(self, hproof, vproof) -> None:
+        """注册两个校对面板，供 ``sync_proof_panels`` / ``refresh_proof_quality_probe_state`` 使用。"""
+        self._hproof_panel = hproof
+        self._vproof_panel = vproof
+
+    def sync_proof_panels(self, *, force_load: bool = False) -> None:
+        """根据当前 project.pages 的行数同步两个校对面板。
+
+        - ``force_load=True``：不论之前是否已 load 过，都走 load_pages（用于
+          打开项目这种"全量初始化"场景）。
+        - 否则按"已加载 → merge / 未加载 → load"切换，与原 MainWindow 实现等价。
+        - 若行数没变化则什么都不做（避免 OCR 进度回调里频繁刷新）。
+        """
+        panels = (getattr(self, "_hproof_panel", None),
+                  getattr(self, "_vproof_panel", None))
+        if not all(panels) or not self.has_pages:
+            return
+        line_count = self.total_line_count
+        if line_count <= 0:
+            return
+        if force_load:
+            for p in panels:
+                p.load_pages(self._project.pages)
+            self._proof_loaded_line_count = line_count
+            return
+        if line_count == getattr(self, "_proof_loaded_line_count", 0):
+            return
+        if getattr(self, "_proof_loaded_line_count", 0) > 0:
+            for p in panels:
+                p.merge_pages(self._project.pages)
+        else:
+            for p in panels:
+                p.load_pages(self._project.pages)
+        self._proof_loaded_line_count = line_count
+
+    def reset_proof_sync_state(self) -> None:
+        """新建/打开项目前清掉 proof 同步计数。"""
+        self._proof_loaded_line_count = 0
+
+    def refresh_proof_quality_probe_state(self) -> None:
+        """让两个校对面板刷新 quality-probe 显示（如果支持）。"""
+        for panel in (getattr(self, "_hproof_panel", None),
+                      getattr(self, "_vproof_panel", None)):
+            if panel is None:
+                continue
+            fn = getattr(panel, "refresh_quality_probe_state", None)
+            if callable(fn):
+                fn()
 
     def new_project(self, name: str, db_path: str) -> bool:
         """创建新项目。"""

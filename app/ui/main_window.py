@@ -172,7 +172,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = WorkflowController()
         self._current_step: int = STEP_IMPORT
-        self._proof_loaded_line_count: int = 0
         self._current_page_number: int = 1
 
         self.setWindowTitle("OCR 后处理")
@@ -236,6 +235,8 @@ class MainWindow(QMainWindow):
 
         # ----- Controller 信号 -> UI -----
 
+        # 让 controller 拥有 proof 同步 ownership（merge vs load 决策 + line_count 跟踪）
+        self._controller.register_proof_panels(self._hproof_panel, self._vproof_panel)
         self._controller.project_changed.connect(self._on_project_changed)
         self._controller.step_enabled_changed.connect(self._top_nav.set_enabled_up_to)
         self._controller.step_requested.connect(self._go_to_step)
@@ -291,16 +292,12 @@ class MainWindow(QMainWindow):
         self._top_nav.set_active(step)
         self._current_step = step
         if step in (STEP_HPROOF, STEP_VPROOF):
-            # 进入校对步骤：尝试触发评测位采样（auto_enable=False 或已有 store 时跳过）
+            # 进入校对步骤：触发评测位采样 + 让 controller 通知两个面板刷新
+            # （ownership 在 controller 侧；MainWindow 只发触发信号）
             self._controller.ensure_quality_probe_sampled()
-            # 提示校对面板刷新显示（让显示空间叠加 probe）
             if step == STEP_HPROOF:
                 self._hproof_panel.set_current_page_number(self._current_page_number)
-                if hasattr(self._hproof_panel, "refresh_quality_probe_state"):
-                    self._hproof_panel.refresh_quality_probe_state()
-            else:
-                if hasattr(self._vproof_panel, "refresh_quality_probe_state"):
-                    self._vproof_panel.refresh_quality_probe_state()
+            self._controller.refresh_proof_quality_probe_state()
         elif step == STEP_LAYOUT:
             self._layout_panel.set_current_page_number(self._current_page_number)
 
@@ -316,9 +313,9 @@ class MainWindow(QMainWindow):
         self._controller.request_step(self._current_step + 1)
 
     def _on_layout_page_selected(self, idx: int) -> None:
-        project = self._controller.project
-        if project and 0 <= idx < len(project.pages):
-            self._current_page_number = project.pages[idx].page_number
+        page_number = self._controller.page_number_at(idx)
+        if page_number is not None:
+            self._current_page_number = page_number
             self._hproof_panel.set_current_page_number(self._current_page_number)
 
     def _on_hproof_page_selected(self, page_number: int) -> None:
@@ -344,14 +341,11 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
-        """OCR 完成（由 controller 发出，业务事件）。"""
-        if self._proof_loaded_line_count > 0:
-            self._hproof_panel.merge_pages(pages)
-            self._vproof_panel.merge_pages(pages)
-        else:
-            self._hproof_panel.load_pages(pages)
-            self._vproof_panel.load_pages(pages)
-        self._proof_loaded_line_count = sum(page.total_lines for page in pages)
+        """OCR 完成（由 controller 发出，业务事件）。
+
+        proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
+        controller 内部，MainWindow 只触发同步并决定步骤跳转。"""
+        self._controller.sync_proof_panels()
         if self._current_step < STEP_HPROOF:
             self._go_to_step(STEP_HPROOF)
 
@@ -359,22 +353,8 @@ class MainWindow(QMainWindow):
         if progress.total_pages > 0:
             current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
             self._ocr_placeholder.update_progress(current, progress.total_pages)
-        self._refresh_proof_panels_if_available()
-
-    def _refresh_proof_panels_if_available(self) -> None:
-        project = self._controller.project
-        if not project or not project.pages:
-            return
-        line_count = sum(page.total_lines for page in project.pages)
-        if line_count <= 0 or line_count == self._proof_loaded_line_count:
-            return
-        if self._proof_loaded_line_count > 0:
-            self._hproof_panel.merge_pages(project.pages)
-            self._vproof_panel.merge_pages(project.pages)
-        else:
-            self._hproof_panel.load_pages(project.pages)
-            self._vproof_panel.load_pages(project.pages)
-        self._proof_loaded_line_count = line_count
+        # proof 同步 ownership 在 controller；这里只发触发
+        self._controller.sync_proof_panels()
 
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
@@ -396,7 +376,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if self._controller.new_project(name, path):
-            self._proof_loaded_line_count = 0
+            self._controller.reset_proof_sync_state()
             self._go_to_step(STEP_IMPORT)
             self._import_panel.reset()
 
@@ -407,18 +387,16 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if self._controller.open_project(path):
-            project = self._controller.project
-            if project and project.pages:
-                self._layout_panel.set_pages(project.pages)
+            self._controller.reset_proof_sync_state()
+            if self._controller.has_pages:
+                pages = self._controller.pages
+                self._layout_panel.set_pages(pages)
                 self._top_nav.set_layout_run_enabled(True)
-                if all(p.is_analyzed for p in project.pages):
-                    self._layout_panel.show_analysis_result(project.pages)
-                if project.ocr_completed:
-                    self._hproof_panel.load_pages(project.pages)
-                    self._vproof_panel.load_pages(project.pages)
-                    self._proof_loaded_line_count = sum(page.total_lines for page in project.pages)
-                else:
-                    self._proof_loaded_line_count = 0
+                if self._controller.is_fully_analyzed:
+                    self._layout_panel.show_analysis_result(pages)
+                if self._controller.ocr_completed:
+                    # 全量初始化 proof 面板（force_load=True 跳过 merge 路径）
+                    self._controller.sync_proof_panels(force_load=True)
             self._go_to_step(self._controller.get_open_step())
 
     def _save_project(self) -> None:
@@ -439,8 +417,8 @@ class MainWindow(QMainWindow):
             self._controller.ensure_transient_project("未命名项目")
 
         try:
-            from pathlib import Path
-            cache_dir = Path(self._controller._project.db_path or ".").parent / ".cache"
+            # 用 controller.cache_dir 取代 self._controller._project.db_path 私有访问
+            cache_dir = self._controller.cache_dir
             importer = ImportService(cache_dir=cache_dir)
             result = importer.import_paths(paths)
 
@@ -453,7 +431,7 @@ class MainWindow(QMainWindow):
                 return
 
             self._controller.on_images_ready(result.pages)
-            self._proof_loaded_line_count = 0
+            self._controller.reset_proof_sync_state()
             self._top_nav.set_layout_run_enabled(True)
 
             if result.failed:
@@ -478,19 +456,19 @@ class MainWindow(QMainWindow):
         self._go_to_step(STEP_LAYOUT)
 
     def _start_layout_analysis(self) -> None:
-        if not self._controller.project or not self._controller.project.pages:
+        if not self._controller.has_pages:
             return
         self._layout_panel.run_button.setEnabled(False)
         self._top_nav.set_layout_run_enabled(False)
-        if not self._controller.start_layout_analysis(self._controller.project.pages):
+        if not self._controller.start_layout_analysis(self._controller.pages):
             self._layout_panel.run_button.setEnabled(True)
             self._top_nav.set_layout_run_enabled(True)
 
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""
-        if not self._controller.project or not self._controller.project.pages:
+        if not self._controller.has_pages:
             return
-        pages = self._controller.project.pages
+        pages = self._controller.pages
         if self._controller.get_recognizable_block_count() == 0:
             return  # 无可识别块，静默跳过
         self._ocr_placeholder.reset()
@@ -501,10 +479,10 @@ class MainWindow(QMainWindow):
     # ── 导出 ────────────────────────────────────────────────────
 
     def _show_export_dialog(self) -> None:
-        project = self._controller.project
-        if not project or not project.pages:
+        if not self._controller.has_pages:
             QMessageBox.information(self, "提示", "请先完成 OCR 识别再导出")
             return
+        project = self._controller.project
 
         # 导出前检查
         summary = project.get_export_summary()
