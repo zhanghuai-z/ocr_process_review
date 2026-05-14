@@ -63,6 +63,10 @@ class LlmCandidateRequest:
     line_text: str
     char_index: int
     context_text: str
+    bbox_source: str = ""
+    bbox_granularity: str = ""
+    collection_kind: str = ""
+    confidence: float = 0.0
 
 
 class LlmCandidateProvider(Protocol):
@@ -666,19 +670,66 @@ class VProofPanel(QWidget):
             line_text=line_text,
             char_index=entry.char_idx,
             context_text=self._text_edit.toPlainText(),
+            bbox_source=entry.bbox_source,
+            bbox_granularity=entry.bbox_granularity,
+            collection_kind=entry.collection_kind,
+            confidence=float(entry.confidence),
         )
 
     def _update_candidate_panel(self, entry: CharEntry) -> None:
         request = self._candidate_request_for_entry(entry)
+        signals = self._candidate_signals_for_entry(entry)
         if self._candidate_provider is None:
+            candidates = self._explainable_candidates_for_entry(entry)
+            candidate_text = "、".join(candidates) if candidates else request.token
             self._candidate_hint.setText(
-                f"当前字：{request.token}  · 第 {request.page_number} 页，"
-                "LLM 候选接口已预留（默认关闭）"
+                f"候选：{candidate_text}\n"
+                f"信号：{signals}\n"
+                "VL/OCR 信号先给可解释依据；LLM 作为补充建议，不替代人工终审。"
             )
             return
         candidates = self._candidate_provider.suggest_candidates(request)
         text = "、".join(candidates) if candidates else "无候选"
-        self._candidate_hint.setText(f"候选：{text}")
+        self._candidate_hint.setText(f"候选：{text}\n信号：{signals}")
+
+    def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
+        candidates: List[str] = []
+        for value in (
+            entry.token_text or entry.char,
+            self._line_char_at(entry.line.ocr_text, entry.char_idx),
+            self._line_char_at(entry.line.llm_suggestion, entry.char_idx),
+        ):
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    def _line_char_at(self, text: str, index: int) -> str:
+        if 0 <= index < len(text):
+            return text[index]
+        return ""
+
+    def _candidate_signals_for_entry(self, entry: CharEntry) -> str:
+        block = self._block_for_entry(entry)
+        block_info = block.block_type.value if block else "unknown"
+        note = (block.note or "").split("|", 1)[0].strip() if block and block.note else ""
+        parts = [
+            f"bbox={entry.bbox_source}/{entry.bbox_granularity}",
+            f"collection={entry.collection_kind}",
+            f"conf={entry.confidence:.2f}",
+            f"layout={block_info}",
+        ]
+        if note:
+            parts.append(f"vl_note={note[:24]}")
+        return "；".join(parts)
+
+    def _block_for_entry(self, entry: CharEntry) -> Optional[Block]:
+        for page in self._pages:
+            if page.page_number != entry.page_number:
+                continue
+            for block in page.blocks:
+                if block.order == entry.block_order:
+                    return block
+        return None
 
     # ─────────────────── Gallery 点击 ───────────────────────
 

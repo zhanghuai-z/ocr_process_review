@@ -48,8 +48,11 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
-TEXT_EDITOR_MAX_H = 42
+TEXT_ROW_H = IMAGE_ROW_H + 8
+TEXT_EDITOR_MAX_H = 36
 TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
+TEXT_DEFAULT_COLOR = "#c5221f"
+TEXT_VISITED_COLOR = "#188038"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -140,6 +143,7 @@ class _LinePair(QFrame):
         self._line_crop = None
         self._line_crop_origin: tuple[int, int] = (0, 0)
         self._line_image_display_width = 0
+        self._visited = False
 
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -186,8 +190,9 @@ class _LinePair(QFrame):
         root.addWidget(img_row)
 
         txt_row = QWidget()
+        txt_row.setFixedHeight(TEXT_ROW_H)
         tr = QHBoxLayout(txt_row)
-        tr.setContentsMargins(0, 2, 8, 4)
+        tr.setContentsMargins(0, 2, 8, 2)
         tr.setSpacing(0)
 
         self._active_bar2 = QWidget()
@@ -206,11 +211,9 @@ class _LinePair(QFrame):
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
+        self._text_lbl.setMinimumHeight(TEXT_EDITOR_MAX_H)
         self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._text_lbl.setStyleSheet(
-            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0; color:#222;"
-        )
+        self._text_lbl.setStyleSheet(self._text_style(TEXT_DEFAULT_COLOR))
         self._text_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -224,7 +227,7 @@ class _LinePair(QFrame):
         self._editor = _RowEditor()
         self._editor.setStyleSheet(
             f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0 6px;"
+            f"line-height:{IMAGE_ROW_H}px; padding:2px 6px 0 6px; color:{TEXT_VISITED_COLOR};"
         )
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
         self._editor.document().setDocumentMargin(0)
@@ -274,6 +277,7 @@ class _LinePair(QFrame):
         self._active = active
         blue = "#1a73e8"
         if active:
+            self._visited = True
             bar_style = f"background:{blue}; border-radius:2px;"
             bg = "#f0f6ff"
         else:
@@ -296,6 +300,10 @@ class _LinePair(QFrame):
         if active:
             self._text_lbl.hide()
             self._editor.setPlainText(self._line.text or "")
+            self._editor.setStyleSheet(
+                f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+                f"line-height:{IMAGE_ROW_H}px; padding:2px 6px 0 6px; color:{TEXT_VISITED_COLOR};"
+            )
             self._sync_text_metrics()
             self._highlight_low_conf()
             self._editor.show()
@@ -305,6 +313,9 @@ class _LinePair(QFrame):
         else:
             self._editor.hide()
             self._text_lbl.setText(self._line.text or "")
+            self._text_lbl.setStyleSheet(
+                self._text_style(TEXT_VISITED_COLOR if self._visited else TEXT_DEFAULT_COLOR)
+            )
             self._sync_text_metrics()
             self._text_lbl.show()
             self._render_line_image()
@@ -406,6 +417,12 @@ class _LinePair(QFrame):
             )
         self._text_lbl.setFont(font)
         self._editor.setFont(font)
+
+    def _text_style(self, color: str) -> str:
+        return (
+            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+            f"line-height:{IMAGE_ROW_H}px; padding:2px 0 0 0; color:{color};"
+        )
 
     def refresh_text(self) -> None:
         """外部更新 line.text 后刷新显示。"""

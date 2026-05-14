@@ -5158,12 +5158,16 @@ def test_vproof_candidate_provider_interface_is_prepared():
     panel.set_candidate_provider(provider)
 
     entry = panel._char_svc.query("田")[0]
-    panel._update_candidate_panel(entry)
+    panel._gallery_model.set_entries([entry])
+    panel._on_gallery_clicked(panel._gallery_model.index(0, 0))
 
     assert provider.requests
     assert provider.requests[0].token == "田"
     assert provider.requests[0].page_number == 3
-    assert "候选：甲、由" == panel._candidate_hint.text()
+    assert provider.requests[0].bbox_source == "ocr"
+    assert provider.requests[0].bbox_granularity == "char"
+    assert panel._candidate_hint.text().startswith("候选：甲、由")
+    assert "bbox=ocr/char" in panel._candidate_hint.text()
     panel.close()
 
     print("test_vproof_candidate_provider_interface_is_prepared PASSED")
@@ -5178,7 +5182,9 @@ def test_hproof_visual_size_is_compact():
 
     assert h_proof.IMAGE_ROW_H <= 32
     assert h_proof.TEXT_FONT_PX == 18
-    assert h_proof.TEXT_EDITOR_MAX_H <= 42
+    assert h_proof.TEXT_EDITOR_MAX_H == 36
+    assert h_proof.TEXT_DEFAULT_COLOR == "#c5221f"
+    assert h_proof.TEXT_VISITED_COLOR == "#188038"
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
 
     _get_qapp()
