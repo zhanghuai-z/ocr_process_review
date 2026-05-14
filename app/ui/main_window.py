@@ -171,8 +171,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._controller = WorkflowController()
-        self._current_step: int = STEP_IMPORT
-        self._current_page_number: int = 1
+        # 注意：_current_step / _current_page_number 的 ownership 已收到
+        # WorkflowController；此处不再持有镜像。MainWindow 通过 controller 的
+        # current_step_changed / current_page_number_changed signal 同步 UI。
 
         self.setWindowTitle("OCR 后处理")
         _screen = QApplication.primaryScreen().availableGeometry()
@@ -239,6 +240,10 @@ class MainWindow(QMainWindow):
         self._controller.register_proof_panels(self._hproof_panel, self._vproof_panel)
         self._controller.project_changed.connect(self._on_project_changed)
         self._controller.step_enabled_changed.connect(self._top_nav.set_enabled_up_to)
+        # view-state signals: controller 是 ownership 持有者，MainWindow 只订阅
+        self._controller.current_step_changed.connect(self._on_current_step_changed)
+        self._controller.current_page_number_changed.connect(self._on_current_page_number_changed)
+        self._controller.layout_run_enabled_changed.connect(self._top_nav.set_layout_run_enabled)
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
@@ -287,40 +292,58 @@ class MainWindow(QMainWindow):
     # ── 步骤切换 ───────────────────────────────────────────────
 
     def _go_to_step(self, step: int) -> None:
-        """直接跳转到步骤（不经过 controller 校验）。"""
-        self._stack.setCurrentIndex(step)
-        self._top_nav.set_active(step)
-        self._current_step = step
+        """直接跳转到步骤（不经过 controller 校验）。
+
+        controller 是 current_step 的唯一真值。这里通过 set_current_step 通知
+        controller，由 current_step_changed signal 驱动 UI 同步（_on_current_step_changed）。
+        proof / layout 的副作用（采样 / 刷新 / 设置 page_number）也只读
+        controller.current_page_number，避免两边状态错位。
+        """
+        self._controller.set_current_step(step)
         if step in (STEP_HPROOF, STEP_VPROOF):
-            # 进入校对步骤：触发评测位采样 + 让 controller 只刷新当前 step 对应
-            # 的那一个面板（与原行为一致：进横校只刷横校；进纵校只刷纵校）。
             self._controller.ensure_quality_probe_sampled()
             if step == STEP_HPROOF:
-                self._hproof_panel.set_current_page_number(self._current_page_number)
+                self._hproof_panel.set_current_page_number(
+                    self._controller.current_page_number)
             self._controller.refresh_proof_quality_probe_state(step)
         elif step == STEP_LAYOUT:
-            self._layout_panel.set_current_page_number(self._current_page_number)
+            self._layout_panel.set_current_page_number(
+                self._controller.current_page_number)
+
+    def _on_current_step_changed(self, step: int) -> None:
+        """controller.current_step_changed → 同步 stack 和顶部栏激活态。"""
+        self._stack.setCurrentIndex(step)
+        self._top_nav.set_active(step)
+
+    def _on_current_page_number_changed(self, page_number: int) -> None:
+        """controller.current_page_number_changed → 同步两个相关面板。"""
+        # h_proof / layout 都需要知道当前页（v_proof 用自己的 gallery 选择）
+        self._hproof_panel.set_current_page_number(page_number)
+        self._layout_panel.set_current_page_number(page_number)
 
     def _on_step_clicked(self, step: int) -> None:
         """用户点击步骤栏按钮 → 让 controller 判断是否允许跳转。"""
         self._controller.request_step(step)
 
     def _prev_step(self) -> None:
-        if self._current_step > STEP_LAYOUT:
-            self._controller.request_step(self._current_step - 1)
+        cur = self._controller.current_step
+        if cur > STEP_LAYOUT:
+            self._controller.request_step(cur - 1)
 
     def _next_step(self) -> None:
-        self._controller.request_step(self._current_step + 1)
+        self._controller.request_step(self._controller.current_step + 1)
 
     def _on_layout_page_selected(self, idx: int) -> None:
         page_number = self._controller.page_number_at(idx)
         if page_number is not None:
-            self._current_page_number = page_number
-            self._hproof_panel.set_current_page_number(self._current_page_number)
+            # ownership 在 controller，set_current_page_number 会 emit signal
+            # 由 _on_current_page_number_changed 同步两个面板。
+            self._controller.set_current_page_number(page_number)
 
     def _on_hproof_page_selected(self, page_number: int) -> None:
-        self._current_page_number = page_number
-        self._layout_panel.set_current_page_number(page_number)
+        # controller 持有 ownership；signal 会回到 _on_current_page_number_changed
+        # 同步 layout/hproof（hproof 自己已经发起，重复 setText no-op）。
+        self._controller.set_current_page_number(page_number)
 
     # ── Controller 回调 ─────────────────────────────────────────
 
@@ -331,7 +354,7 @@ class MainWindow(QMainWindow):
         """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
         self._layout_panel.show_analysis_result(pages)
         self._layout_panel.run_button.setEnabled(True)
-        self._top_nav.set_layout_run_enabled(True)
+        self._controller.set_layout_run_enabled(True)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
             self._status_bar.showMessage(
@@ -346,7 +369,7 @@ class MainWindow(QMainWindow):
         proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
         controller 内部，MainWindow 只触发同步并决定步骤跳转。"""
         self._controller.sync_proof_panels()
-        if self._current_step < STEP_HPROOF:
+        if self._controller.current_step < STEP_HPROOF:
             self._go_to_step(STEP_HPROOF)
 
     def _on_ocr_progress(self, progress) -> None:
@@ -359,7 +382,7 @@ class MainWindow(QMainWindow):
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
         self._layout_panel.run_button.setEnabled(True)
-        self._top_nav.set_layout_run_enabled(True)
+        self._controller.set_layout_run_enabled(True)
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
         QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
@@ -391,7 +414,7 @@ class MainWindow(QMainWindow):
             if self._controller.has_pages:
                 pages = self._controller.pages
                 self._layout_panel.set_pages(pages)
-                self._top_nav.set_layout_run_enabled(True)
+                self._controller.set_layout_run_enabled(True)
                 if self._controller.is_fully_analyzed:
                     self._layout_panel.show_analysis_result(pages)
                 if self._controller.ocr_completed:
@@ -432,7 +455,7 @@ class MainWindow(QMainWindow):
 
             self._controller.on_images_ready(result.pages)
             self._controller.reset_proof_sync_state()
-            self._top_nav.set_layout_run_enabled(True)
+            self._controller.set_layout_run_enabled(True)
 
             if result.failed:
                 fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
@@ -459,10 +482,10 @@ class MainWindow(QMainWindow):
         if not self._controller.has_pages:
             return
         self._layout_panel.run_button.setEnabled(False)
-        self._top_nav.set_layout_run_enabled(False)
+        self._controller.set_layout_run_enabled(False)
         if not self._controller.start_layout_analysis(self._controller.pages):
             self._layout_panel.run_button.setEnabled(True)
-            self._top_nav.set_layout_run_enabled(True)
+            self._controller.set_layout_run_enabled(True)
 
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""

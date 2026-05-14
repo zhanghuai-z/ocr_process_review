@@ -17,6 +17,7 @@ from app.core.ocr_ir import (
 )
 from app.core.paddle_response import overall_ocr_res, word_box_rows
 from app.core.proof_status import normalize_confidence
+from app.core.spatial_matching import merge_bboxes, min_area_overlap_ratio, select_token_row_for_line
 from app.models import BBox
 
 CHAR_BBOX_SOURCE_OCR = "ocr"
@@ -54,29 +55,6 @@ def normalize_token_texts(token_row) -> list[str]:
             continue
         tokens.append(token_text)
     return tokens
-
-
-def merge_bboxes(boxes: list[BBox]) -> Optional[BBox]:
-    if not boxes:
-        return None
-    x1 = min(box.x for box in boxes)
-    y1 = min(box.y for box in boxes)
-    x2 = max(box.x2 for box in boxes)
-    y2 = max(box.y2 for box in boxes)
-    return BBox.from_xyxy(x1, y1, x2, y2).normalize()
-
-
-def bbox_overlap_ratio(first: Optional[BBox], second: Optional[BBox]) -> float:
-    if first is None or second is None or first.area <= 0 or second.area <= 0:
-        return 0.0
-    x1 = max(first.x, second.x)
-    y1 = max(first.y, second.y)
-    x2 = min(first.x2, second.x2)
-    y2 = min(first.y2, second.y2)
-    inter = max(0, x2 - x1) * max(0, y2 - y1)
-    if inter <= 0:
-        return 0.0
-    return inter / float(min(first.area, second.area))
 
 
 def build_token_rows(item: dict, image_shape=None) -> list[TokenRow]:
@@ -145,22 +123,6 @@ def fallback_token_row_for_missing_line_bbox(
     return row
 
 
-def select_token_row_for_line(token_rows: list[TokenRow], line_bbox: BBox) -> Optional[TokenRow]:
-    scored: list[tuple[float, float, int, int, TokenRow]] = []
-    line_center_y = line_bbox.y + line_bbox.h / 2.0
-    for idx, row in enumerate(token_rows):
-        overlap = bbox_overlap_ratio(row.bbox, line_bbox)
-        if overlap <= 0:
-            continue
-        row_center_y = row.bbox.y + row.bbox.h / 2.0 if row.bbox else line_center_y
-        distance = abs(row_center_y - line_center_y)
-        scored.append((-overlap, distance, row.bbox.x if row.bbox else 0, idx, row))
-    if not scored:
-        return None
-    scored.sort()
-    return scored[0][4]
-
-
 def looks_like_existing_ir_line(ir_lines: list[OcrIrLine], row: TokenRow) -> bool:
     row_text = compact_text("".join(row.tokens))
     if not row_text or row.bbox is None:
@@ -168,7 +130,7 @@ def looks_like_existing_ir_line(ir_lines: list[OcrIrLine], row: TokenRow) -> boo
     for ir_line in ir_lines:
         if compact_text(ir_line.text) != row_text:
             continue
-        if bbox_overlap_ratio(ir_line.bbox, row.bbox) >= 0.80:
+        if min_area_overlap_ratio(ir_line.bbox, row.bbox) >= 0.80:
             return True
     return False
 

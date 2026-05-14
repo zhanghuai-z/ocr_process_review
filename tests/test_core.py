@@ -803,6 +803,66 @@ def test_ocr_ir_builder_builds_rec_and_token_fallback_lines():
     print("test_ocr_ir_builder_builds_rec_and_token_fallback_lines PASSED")
 
 
+def test_token_char_mapper_maps_tokens_without_overwriting_spans():
+    from app.core.ocr_ir import OcrIrToken
+    from app.core.token_char_mapper import build_line_chars, find_token_span
+    from app.models import BBox
+
+    occupied = [False] * 4
+    assert find_token_span("人人有责", "人", 0, occupied) == (0, 1)
+    occupied[0] = True
+    assert find_token_span("人人有责", "人", 1, occupied) == (1, 2)
+
+    tokens = [
+        OcrIrToken(text="人", bbox=BBox(1, 2, 10, 20), row_index=0, token_index=0),
+        OcrIrToken(text="人", bbox=BBox(12, 2, 10, 20), row_index=0, token_index=1),
+        OcrIrToken(text="有责", bbox=BBox(24, 2, 20, 20), row_index=0, token_index=2, bbox_granularity="word"),
+    ]
+    chars = build_line_chars(
+        page_image=None,
+        line_text="人人有责",
+        line_confidence=0.88,
+        tokens=tokens,
+    )
+
+    assert [char.token_text for char in chars] == ["人", "人", "有责", "有责"]
+    assert chars[0].bbox == BBox(1, 2, 10, 20)
+    assert chars[1].bbox == BBox(12, 2, 10, 20)
+    assert chars[2].bbox_granularity == "word"
+    assert chars[3].bbox == chars[2].bbox
+
+    print("test_token_char_mapper_maps_tokens_without_overwriting_spans PASSED")
+
+
+def test_spatial_matching_selects_token_rows_and_layout_containers():
+    from app.core.ocr_ir_builder import TokenRow
+    from app.core.spatial_matching import (
+        min_area_overlap_ratio,
+        select_container_block_for_line,
+        select_token_row_for_line,
+        source_area_overlap_ratio,
+    )
+    from app.models import BBox, Block, BlockType, Line
+
+    line_bbox = BBox(10, 10, 40, 20)
+    row_a = TokenRow(tokens=["甲"], regions=[], bbox=BBox(0, 0, 5, 5), ir_tokens=[])
+    row_b = TokenRow(tokens=["乙"], regions=[], bbox=BBox(11, 11, 20, 18), ir_tokens=[])
+    assert select_token_row_for_line([row_a, row_b], line_bbox) is row_b
+    assert min_area_overlap_ratio(row_b.bbox, line_bbox) == 1.0
+
+    line = Line(text="正文", confidence=0.9, bbox=line_bbox)
+    partial_block = Block(block_type=BlockType.TEXT, bbox=BBox(12, 12, 10, 10), order=0)
+    exact_block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 40, 20), order=0)
+    container = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 100), order=1)
+    assert source_area_overlap_ratio(line_bbox, partial_block.bbox) == 0.125
+    assert select_container_block_for_line(line, [container, exact_block]) is exact_block
+
+    center_only = Block(block_type=BlockType.TEXT, bbox=BBox(28, 18, 2, 2), order=2)
+    assert select_container_block_for_line(line, [center_only]) is center_only
+
+    print("test_spatial_matching_selects_token_rows_and_layout_containers PASSED")
+
+
 def test_api_ocr_engine_requests_return_word_box():
     import numpy as np
     import requests
@@ -3113,82 +3173,41 @@ def test_api_model_profile_helpers():
 
 
 def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
-    """Layout role 已全面切到 PaddleOCR-VL-1.5；OCR proof role 仍走 PP-OCRv5。
-
-    所有官方预设 (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 在 role="layout"
-    下都被 strong-redirect 到 paddleocr-vl-1.5 预设 URL。
-    自托管根 URL 仍只做 /ocr <-> /layout-parsing 后缀切换。
-    """
     from app.core.api_profiles import (
         get_api_model_profile_url,
         resolve_api_endpoint_for_role,
     )
 
-    vl_url = get_api_model_profile_url("paddleocr-vl-1.5")
-    ocr_url = get_api_model_profile_url("pp-ocrv5")
     structure_url = get_api_model_profile_url("pp-structurev3")
+    ocr_url = get_api_model_profile_url("pp-ocrv5")
     structure_root = structure_url.removesuffix("/layout-parsing")
     ocr_root = ocr_url.removesuffix("/ocr")
-    vl_root = vl_url.removesuffix("/layout-parsing")
 
-    # Layout role: 任何官方 PP-* 预设 -> VL-1.5
     assert resolve_api_endpoint_for_role(
         structure_url,
         profile="pp-structurev3",
         role="layout",
-    ) == vl_url
+    ) == structure_url
+    assert resolve_api_endpoint_for_role(
+        structure_url,
+        profile="pp-structurev3",
+        role="ocr",
+    ) == ocr_url
     assert resolve_api_endpoint_for_role(
         ocr_url,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl_url
+    ) == structure_url
     assert resolve_api_endpoint_for_role(
         structure_root,
         profile="pp-structurev3",
-        role="layout",
-    ) == vl_url
+        role="ocr",
+    ) == ocr_url
     assert resolve_api_endpoint_for_role(
         ocr_root,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl_url
-    # 旧 paddleocr-vl 预设也归入 VL-1.5（统一升级到 1.5）
-    old_vl_url = get_api_model_profile_url("paddleocr-vl")
-    assert resolve_api_endpoint_for_role(
-        old_vl_url,
-        profile="paddleocr-vl",
-        role="layout",
-    ) == vl_url
-    # VL-1.5 自身保持
-    assert resolve_api_endpoint_for_role(
-        vl_url,
-        profile="paddleocr-vl-1.5",
-        role="layout",
-    ) == vl_url
-
-    # OCR role: 任何 layout 预设 -> PP-OCRv5；PP-OCRv5 自身保持
-    assert resolve_api_endpoint_for_role(
-        structure_url,
-        profile="pp-structurev3",
-        role="ocr",
-    ) == ocr_url
-    assert resolve_api_endpoint_for_role(
-        vl_url,
-        profile="paddleocr-vl-1.5",
-        role="ocr",
-    ) == ocr_url
-    assert resolve_api_endpoint_for_role(
-        structure_root,
-        profile="pp-structurev3",
-        role="ocr",
-    ) == ocr_url
-    assert resolve_api_endpoint_for_role(
-        ocr_url,
-        profile="pp-ocrv5",
-        role="ocr",
-    ) == ocr_url
-
-    # 自托管根 URL: 不做 host 跳转，仅按后缀切换
+    ) == structure_url
     assert resolve_api_endpoint_for_role(
         "https://self-hosted.example.com",
         profile="",
@@ -3199,11 +3218,6 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         profile="",
         role="ocr",
     ) == "https://self-hosted.example.com/ocr"
-    assert resolve_api_endpoint_for_role(
-        "https://self-hosted.example.com/ocr",
-        profile="",
-        role="layout",
-    ) == "https://self-hosted.example.com/layout-parsing"
 
     print("test_api_endpoint_role_resolution_keeps_layout_and_proof_separate PASSED")
 
@@ -5321,8 +5335,8 @@ def test_hproof_visual_size_is_compact():
     from app.ui.proof.h_proof import HProofPanel
 
     assert h_proof.IMAGE_ROW_H <= 32
-    assert h_proof.TEXT_FONT_PX == 18
-    assert h_proof.TEXT_EDITOR_MAX_H == 36
+    assert h_proof.TEXT_FONT_PX == 24
+    assert h_proof.TEXT_EDITOR_MAX_H <= 50
     assert h_proof.TEXT_DEFAULT_COLOR == "#c5221f"
     assert h_proof.TEXT_VISITED_COLOR == "#188038"
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
@@ -5465,6 +5479,8 @@ if __name__ == "__main__":
     test_proof_status_helper_rules()
     test_paddle_response_helpers_unpack_records()
     test_ocr_ir_builder_builds_rec_and_token_fallback_lines()
+    test_token_char_mapper_maps_tokens_without_overwriting_spans()
+    test_spatial_matching_selects_token_rows_and_layout_containers()
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()

@@ -280,3 +280,115 @@ def test_main_window_no_longer_owns_proof_loaded_line_count():
     assert code_lines == [], (
         f"_proof_loaded_line_count 应只属于 controller：{code_lines}"
     )
+
+
+
+# ── view-state ownership: current_step / current_page_number / layout_run_enabled ──
+# Phase 10：之前 MainWindow 持有 self._current_step / self._current_page_number
+# 并散落 6 处 self._top_nav.set_layout_run_enabled(...) 调用；现在 controller
+# 是唯一 ownership 持有者，通过 signal 外播。
+
+def test_current_step_default_is_step_import(ctrl):
+    assert ctrl.current_step == STEP_IMPORT
+
+
+def test_set_current_step_updates_value(ctrl):
+    ctrl.set_current_step(STEP_HPROOF)
+    assert ctrl.current_step == STEP_HPROOF
+
+
+def test_set_current_step_emits_signal_on_change(ctrl):
+    received = []
+    ctrl.current_step_changed.connect(lambda s: received.append(s))
+    ctrl.set_current_step(STEP_LAYOUT)
+    assert received == [STEP_LAYOUT]
+
+
+def test_set_current_step_no_signal_when_unchanged(ctrl):
+    ctrl.set_current_step(STEP_LAYOUT)
+    received = []
+    ctrl.current_step_changed.connect(lambda s: received.append(s))
+    ctrl.set_current_step(STEP_LAYOUT)  # 同值
+    assert received == []
+
+
+def test_current_page_number_default_is_one(ctrl):
+    assert ctrl.current_page_number == 1
+
+
+def test_set_current_page_number_updates_and_emits(ctrl):
+    received = []
+    ctrl.current_page_number_changed.connect(lambda n: received.append(n))
+    ctrl.set_current_page_number(7)
+    assert ctrl.current_page_number == 7
+    assert received == [7]
+
+
+def test_set_current_page_number_no_signal_when_unchanged(ctrl):
+    ctrl.set_current_page_number(3)
+    received = []
+    ctrl.current_page_number_changed.connect(lambda n: received.append(n))
+    ctrl.set_current_page_number(3)
+    assert received == []
+
+
+def test_layout_run_enabled_default_false(ctrl):
+    assert ctrl.layout_run_enabled is False
+
+
+def test_set_layout_run_enabled_updates_and_emits(ctrl):
+    received = []
+    ctrl.layout_run_enabled_changed.connect(lambda b: received.append(b))
+    ctrl.set_layout_run_enabled(True)
+    assert ctrl.layout_run_enabled is True
+    assert received == [True]
+    ctrl.set_layout_run_enabled(False)
+    assert received == [True, False]
+
+
+def test_set_layout_run_enabled_no_signal_when_unchanged(ctrl):
+    ctrl.set_layout_run_enabled(True)
+    received = []
+    ctrl.layout_run_enabled_changed.connect(lambda b: received.append(b))
+    ctrl.set_layout_run_enabled(True)
+    assert received == []
+
+
+# ── source check：MainWindow 不再持有 view-state ─────────────
+
+def test_main_window_no_longer_owns_current_step():
+    src = Path("app/ui/main_window.py").read_text(encoding="utf-8")
+    # 允许注释里出现 _current_step（用作说明），禁止代码读写 self._current_step
+    code_lines = [
+        ln for ln in src.splitlines()
+        if "self._current_step" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert code_lines == [], (
+        f"MainWindow 仍存在 self._current_step 读写：{code_lines}"
+    )
+
+
+def test_main_window_no_longer_owns_current_page_number():
+    src = Path("app/ui/main_window.py").read_text(encoding="utf-8")
+    code_lines = [
+        ln for ln in src.splitlines()
+        if "self._current_page_number" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert code_lines == [], (
+        f"MainWindow 仍存在 self._current_page_number 读写：{code_lines}"
+    )
+
+
+def test_main_window_routes_layout_run_enabled_via_controller():
+    """所有 set_layout_run_enabled 调用必须走 controller，不能再直接写 _top_nav。"""
+    src = Path("app/ui/main_window.py").read_text(encoding="utf-8")
+    bad = [
+        ln for ln in src.splitlines()
+        if "self._top_nav.set_layout_run_enabled(" in ln
+        and ".connect(" not in ln
+        and not ln.lstrip().startswith("#")
+    ]
+    assert bad == [], (
+        f"MainWindow 不应直接调用 _top_nav.set_layout_run_enabled，"
+        f"应通过 controller.set_layout_run_enabled：{bad}"
+    )

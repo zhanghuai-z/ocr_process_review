@@ -11,7 +11,6 @@ import numpy as np
 from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox
-from app.core.char_bbox_utils import is_meaningful_text_bbox
 from app.core.ocr_ir import (
     OcrIrLine,
     OcrIrToken,
@@ -19,18 +18,15 @@ from app.core.ocr_ir import (
 )
 from app.core.ocr_ir_builder import (
     CHAR_BBOX_GRANULARITY_CHAR,
-    CHAR_BBOX_GRANULARITY_FALLBACK,
-    CHAR_BBOX_GRANULARITY_WORD,
-    CHAR_BBOX_SOURCE_FALLBACK,
-    CHAR_BBOX_SOURCE_OCR,
     build_ir_lines_from_item,
 )
 from app.core.paddle_response import iter_ocr_preferred_items
 from app.core.proof_status import normalize_confidence, proof_status_for
+from app.core.token_char_mapper import build_line_chars
 from app.core.wordbox_anchor import refine_wordbox_anchors
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.models import BBox, Char, Line
+from app.models import BBox, Line
 from app.core.app_config import get_config
 
 logger = get_logger(__name__)
@@ -132,83 +128,6 @@ class ApiOcrEngine:
     def _unverified_full_crop_bbox(self, image_bgr: np.ndarray) -> BBox:
         height, width = image_bgr.shape[:2]
         return BBox(0, 0, max(1, int(width)), max(1, int(height)))
-
-    def _find_token_span(
-        self,
-        line_text: str,
-        token_text: str,
-        cursor: int,
-        occupied: list[bool],
-    ) -> tuple[int, int] | None:
-        token_len = len(token_text)
-        if token_len <= 0 or token_len > len(line_text):
-            return None
-        search_start = max(0, min(cursor, len(line_text) - token_len))
-        for start in range(search_start, len(line_text) - token_len + 1):
-            end = start + token_len
-            if line_text[start:end] != token_text:
-                continue
-            if any(occupied[start:end]):
-                continue
-            return start, end
-        for start in range(0, search_start):
-            end = start + token_len
-            if line_text[start:end] != token_text:
-                continue
-            if any(occupied[start:end]):
-                continue
-            return start, end
-        return None
-
-    def _build_line_chars(
-        self,
-        *,
-        page_image: np.ndarray,
-        line_text: str,
-        line_confidence: float,
-        tokens: list[OcrIrToken],
-    ) -> list[Char]:
-        chars = [
-            Char(
-                char=glyph,
-                confidence=float(line_confidence),
-                bbox=None,
-                bbox_source=CHAR_BBOX_SOURCE_FALLBACK,
-                bbox_granularity=CHAR_BBOX_GRANULARITY_FALLBACK,
-                token_text=glyph,
-            )
-            for glyph in line_text
-        ]
-        if not line_text:
-            return chars
-
-        occupied = [False] * len(line_text)
-        cursor = 0
-        for token in tokens:
-            token_text = token.text.strip()
-            if not token_text:
-                continue
-            bbox = token.bbox
-            if bbox is None or bbox.area <= 0:
-                continue
-            if not is_meaningful_text_bbox(page_image, bbox, token_text):
-                continue
-            span = self._find_token_span(line_text, token_text, cursor, occupied)
-            if span is None:
-                continue
-            start, end = span
-            for idx in range(start, end):
-                chars[idx] = Char(
-                    char=line_text[idx],
-                    confidence=float(line_confidence),
-                    bbox=bbox,
-                    bbox_source=token.bbox_source,
-                    bbox_granularity=token.bbox_granularity,
-                    token_text=token_text,
-                )
-                occupied[idx] = True
-            cursor = end
-        return chars
 
     def _refine_tokens_with_wordbox_anchor(
         self,
@@ -312,7 +231,7 @@ class ApiOcrEngine:
 
         lines: List[Line] = []
         for ir_line in ir_lines:
-            chars = self._build_line_chars(
+            chars = build_line_chars(
                 page_image=image_bgr,
                 line_text=ir_line.text,
                 line_confidence=ir_line.confidence,

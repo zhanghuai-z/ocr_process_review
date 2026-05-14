@@ -47,6 +47,10 @@ class WorkflowController(QObject):
     ocr_progress = Signal(object)          # OcrProgress
     worker_error = Signal(str)             # 错误消息
     status_message = Signal(str)           # 状态栏消息
+    # ── view-state ownership signals (本轮新增) ──
+    current_step_changed = Signal(int)     # 当前激活的 step
+    current_page_number_changed = Signal(int)  # 当前激活的 page_number
+    layout_run_enabled_changed = Signal(bool)  # 顶部"运行版面"按钮可用性
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,6 +70,10 @@ class WorkflowController(QObject):
         self._proof_loaded_line_count: int = 0
         self._hproof_panel = None
         self._vproof_panel = None
+        # view-state ownership: 哪个 step 激活、哪个 page_number 激活、版面按钮可用性
+        self._current_step: int = STEP_IMPORT
+        self._current_page_number: int = 1
+        self._layout_run_enabled: bool = False
 
     # ------------------------------------------------------------------ project management
 
@@ -223,6 +231,47 @@ class WorkflowController(QObject):
         fn = getattr(panel, "refresh_quality_probe_state", None)
         if callable(fn):
             fn()
+
+    # ── view-state accessors (current_step / current_page_number / layout_run_enabled) ──
+    # 这些 ownership 之前散在 MainWindow（self._current_step / self._current_page_number /
+    # 5 个手动 self._top_nav.set_layout_run_enabled(...) 调用），导致：
+    #   - 谁是 step 真值不清（MainWindow vs controller.max_step）
+    #   - prev/next step 计算用 MainWindow 局部缓存
+    #   - layout 按钮可用性散在 5 个 worker 生命周期点
+    # 现在 controller 统一持有 + 通过 signal 外播，MainWindow 退化为纯订阅者。
+
+    @property
+    def current_step(self) -> int:
+        return self._current_step
+
+    def set_current_step(self, step: int) -> None:
+        """更新当前 step；变化时 emit signal。MainWindow 侧通过 signal 同步 UI。"""
+        if step == self._current_step:
+            return
+        self._current_step = step
+        self.current_step_changed.emit(step)
+
+    @property
+    def current_page_number(self) -> int:
+        return self._current_page_number
+
+    def set_current_page_number(self, page_number: int) -> None:
+        """更新当前激活的 page_number；变化时 emit signal。"""
+        if page_number == self._current_page_number:
+            return
+        self._current_page_number = page_number
+        self.current_page_number_changed.emit(page_number)
+
+    @property
+    def layout_run_enabled(self) -> bool:
+        return self._layout_run_enabled
+
+    def set_layout_run_enabled(self, enabled: bool) -> None:
+        """更新版面运行按钮可用性；变化时 emit signal。"""
+        if enabled == self._layout_run_enabled:
+            return
+        self._layout_run_enabled = enabled
+        self.layout_run_enabled_changed.emit(enabled)
 
     def new_project(self, name: str, db_path: str) -> bool:
         """创建新项目。"""

@@ -19,6 +19,7 @@ import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.core.proof_status import apply_auto_flag
+from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
@@ -234,37 +235,6 @@ class OcrPipeline:
             if not line.original_text:
                 line.original_text = line.text
 
-    def _line_block_overlap_score(self, line: Line, block: Block) -> float:
-        line_box = line.bbox
-        block_box = block.bbox
-        if line_box.area <= 0 or block_box.area <= 0:
-            return 0.0
-        x1 = max(line_box.x, block_box.x)
-        y1 = max(line_box.y, block_box.y)
-        x2 = min(line_box.x2, block_box.x2)
-        y2 = min(line_box.y2, block_box.y2)
-        inter = max(0, x2 - x1) * max(0, y2 - y1)
-        return inter / float(line_box.area) if inter > 0 else 0.0
-
-    def _select_container_block(self, line: Line, blocks: list[Block]) -> Block | None:
-        scored: list[tuple[float, int, int, int, Block]] = []
-        center_x = line.bbox.x + line.bbox.w / 2.0
-        center_y = line.bbox.y + line.bbox.h / 2.0
-        for idx, block in enumerate(blocks):
-            overlap = self._line_block_overlap_score(line, block)
-            contains_center = (
-                block.bbox.x <= center_x <= block.bbox.x2
-                and block.bbox.y <= center_y <= block.bbox.y2
-            )
-            if overlap < 0.10 and not contains_center:
-                continue
-            score = max(overlap, 0.10 if contains_center else 0.0)
-            scored.append((score, -block.bbox.area, -block.order, -idx, block))
-        if not scored:
-            return None
-        scored.sort(reverse=True)
-        return scored[0][4]
-
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:
             if block.recognizable and block.block_type not in NON_OCR_BLOCK_TYPES:
@@ -276,7 +246,7 @@ class OcrPipeline:
         ]
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
-            block = self._select_container_block(line, containers)
+            block = select_container_block_for_line(line, containers)
             if block is None:
                 unmatched.append(line)
             else:
@@ -301,14 +271,7 @@ class OcrPipeline:
         self._assign_page_ocr_lines_to_blocks(page, lines)
 
     def _merge_line_bboxes(self, lines: list[Line]) -> BBox | None:
-        valid = [line.bbox for line in lines if line.bbox.area > 0]
-        if not valid:
-            return None
-        x1 = min(bbox.x for bbox in valid)
-        y1 = min(bbox.y for bbox in valid)
-        x2 = max(bbox.x2 for bbox in valid)
-        y2 = max(bbox.y2 for bbox in valid)
-        return BBox.from_xyxy(x1, y1, x2, y2)
+        return merge_bboxes([line.bbox for line in lines])
 
     def process_block(
         self,
