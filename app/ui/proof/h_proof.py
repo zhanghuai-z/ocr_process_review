@@ -43,6 +43,12 @@ from app.core.page_image_cache import PageImageCache
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
+from app.services.proof_probe_text_service import (
+    displayed_text as _displayed_text,
+    save_displayed_edit as _save_displayed_edit,
+    resolve_block_line_index as _resolve_block_line_index,
+)
+from app.services.proof_image_service import clamp_line_box_pixels
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
 # ── 样式常量 ──────────────────────────────────────────────────
@@ -108,68 +114,10 @@ class _RowEditor(QPlainTextEdit):
 
 
 # ─────────────────────────────────────────────────────────────
-# 评测位（quality probe）辅助函数
-#
-# 这些函数把"真实文本 line.text"和"显示文本(可能含 fake_char)"之间
-# 的转换集中收口，调用方只需在【显示】点用 _displayed_text，
-# 在【保存】点用 _save_displayed_edit，
-# 即可保证 line.text 永远是真实文本，导出器不会拿到任何 fake_char。
-# 当 quality_probe 未启用 (active_store is None) 时，这两个函数完全
-# 退化成"和原行为一致"。
+# 评测位 (quality probe) 显示↔真实 桥接
+# 共享实现见 app.services.proof_probe_text_service；本文件保留同名局部别名
+# 以保持调用点不变（_displayed_text / _save_displayed_edit / _resolve_block_line_index）。
 # ─────────────────────────────────────────────────────────────
-
-def _resolve_block_line_index(page: Page, block: Block, line: Line) -> tuple[int, int] | None:
-    try:
-        bi = page.blocks.index(block)
-        li = block.lines.index(line)
-    except ValueError:
-        return None
-    return bi, li
-
-
-def _displayed_text(line: Line, page: Page, block: Block) -> str:
-    """返回应展示给用户的文本：未启用评测时即 line.text。"""
-    text = line.text or ""
-    store = qp.get_active_store()
-    if store is None:
-        return text
-    idx = _resolve_block_line_index(page, block, line)
-    if idx is None:
-        return text
-    bi, li = idx
-    probes = store.for_line(page.page_number, bi, li)
-    if not probes:
-        return text
-    return qp.apply_probes_to_display(text, probes)
-
-
-def _save_displayed_edit(line: Line, page: Page, block: Block,
-                         displayed_new_text: str) -> bool:
-    """把"显示空间"的编辑结果落盘到 ``line.text``（真实空间）。
-
-    返回 ``True`` 表示真的发生了变化（已 update_text）。
-    未启用评测时退化为：``displayed_new_text != line.text`` → ``line.update_text``。
-    """
-    store = qp.get_active_store()
-    if store is None:
-        if displayed_new_text != line.text:
-            line.update_text(displayed_new_text)
-            return True
-        return False
-    idx = _resolve_block_line_index(page, block, line)
-    if idx is None:
-        if displayed_new_text != line.text:
-            line.update_text(displayed_new_text)
-            return True
-        return False
-    bi, li = idx
-    true_text = qp.observe_user_action(
-        store, page.page_number, bi, li, line.text or "", displayed_new_text,
-    )
-    if true_text != line.text:
-        line.update_text(true_text)
-        return True
-    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -403,14 +351,11 @@ class _LinePair(QFrame):
             self._img_lbl.setText("（无图像）")
             return
         H, W = image.shape[:2]
-        line_box = bb.normalize()
-        x1 = max(0, line_box.x)
-        y1 = max(0, line_box.y - ROW_PAD_Y)
-        x2 = min(W, line_box.x2)
-        y2 = min(H, line_box.y2 + ROW_PAD_Y)
-        if x2 <= x1 or y2 <= y1:
+        clamped = clamp_line_box_pixels(bb, W, H, pad_y=ROW_PAD_Y)
+        if clamped is None:
             self._img_lbl.setText("（行框异常）")
             return
+        x1, y1, x2, y2 = clamped
         crop = image[y1:y2, x1:x2].copy()
         self._line_crop = crop
         self._line_crop_origin = (x1, y1)

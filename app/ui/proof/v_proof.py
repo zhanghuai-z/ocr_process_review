@@ -45,6 +45,14 @@ from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
 from app.services.char_index_service import CharEntry, CharIndexService
+from app.services.proof_probe_text_service import (
+    displayed_text as _proof_displayed_text,
+    save_displayed_edit as _proof_save_displayed_edit,
+    resolve_block_line_index as _proof_resolve_block_line_index,
+)
+from app.services.proof_image_service import (
+    verified_char_crop as _shared_verified_char_crop,
+)
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.image_viewer import ImageViewer
 
@@ -86,33 +94,12 @@ def _verified_char_crop(
     size: int = GALLERY_THUMB,
     pad: Optional[int] = None,
 ) -> Optional[QPixmap]:
-    """带坐标校验的裁图。坐标超出图像范围时记录 WARNING 并自动修正。
+    """裁图坐标校验薄封装 —— 实际逻辑在 ``app.services.proof_image_service``。
 
-    pad 为 None 时根据 bbox 尺寸自适应：~10% 且不超 6 像素，
-    避免纵排字中高度 ~40px 的字被固定 12px 填充拽进邻字。
+    保留本地名以维持调用点不变，并保留 ``size`` 默认 ``GALLERY_THUMB`` 这个
+    UI 侧默认值（service 函数不带默认 size，由这里集中决定）。
     """
-    img = cache.get_image(page_path)
-    if img is None:
-        return None
-    H, W = img.shape[:2]
-    if pad is None:
-        pad = max(1, min(int(min(bbox.w, bbox.h) * 0.10), 6))
-    # 检查坐标合理性
-    if bbox.x < 0 or bbox.y < 0 or bbox.x + bbox.w > W or bbox.y + bbox.h > H:
-        logger.warning(
-            "char bbox out of bounds: bbox=(%d,%d,%d,%d) img=(%d×%d) path=%s",
-            bbox.x, bbox.y, bbox.w, bbox.h, W, H, page_path,
-        )
-        # 修正到图像边界内：先修正左上角，再用修正后的 x/y 计算宽高（之前的错误是用原始 bbox.x/y）
-        clamped_x = max(0, min(bbox.x, W - 1))
-        clamped_y = max(0, min(bbox.y, H - 1))
-        bbox = BBox(
-            clamped_x,
-            clamped_y,
-            max(1, min(bbox.w, W - clamped_x)),
-            max(1, min(bbox.h, H - clamped_y)),
-        )
-    return cache.get_char_crop(page_path, bbox, size, pad=pad)
+    return _shared_verified_char_crop(cache, page_path, bbox, size, pad=pad)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -226,58 +213,22 @@ def _build_text_map(
 
 
 # ─── quality_probe display ↔ true text 桥接 ──────────────────────
+# 共享实现见 app.services.proof_probe_text_service。
+# 这里保留 _vproof_* 名称以维持调用点不变，但内部直接转发；签名调换 page/line
+# 顺序仅为兼容 v_proof 的旧调用习惯。
+
 def _vproof_resolve_block_line_index(page: Page, block: Block, line: Line):
-    try:
-        bi = page.blocks.index(block)
-        li = block.lines.index(line)
-    except ValueError:
-        return None
-    return bi, li
+    return _proof_resolve_block_line_index(page, block, line)
 
 
 def _vproof_displayed_text(page: Page, block: Block, line: Line) -> str:
-    """返回显示空间文本：未启用评测 → line.text；启用 → 叠加 probe。"""
-    text = line.text or ""
-    store = qp.get_active_store()
-    if store is None:
-        return text
-    idx = _vproof_resolve_block_line_index(page, block, line)
-    if idx is None:
-        return text
-    bi, li = idx
-    probes = store.for_line(page.page_number, bi, li)
-    if not probes:
-        return text
-    return qp.apply_probes_to_display(text, probes)
+    return _proof_displayed_text(line, page, block)
 
 
 def _vproof_save_displayed_line(
     page: Page, block: Block, line: Line, displayed_new_text: str
 ) -> bool:
-    """把"显示空间编辑结果"还原成真实空间，写回 line.text。
-
-    返回 True 表示 line.text 真发生了变化。
-    """
-    store = qp.get_active_store()
-    if store is None:
-        if displayed_new_text != (line.text or ""):
-            line.update_text(displayed_new_text)
-            return True
-        return False
-    idx = _vproof_resolve_block_line_index(page, block, line)
-    if idx is None:
-        if displayed_new_text != (line.text or ""):
-            line.update_text(displayed_new_text)
-            return True
-        return False
-    bi, li = idx
-    true_text = qp.observe_user_action(
-        store, page.page_number, bi, li, line.text or "", displayed_new_text,
-    )
-    if true_text != (line.text or ""):
-        line.update_text(true_text)
-        return True
-    return False
+    return _proof_save_displayed_edit(line, page, block, displayed_new_text)
 
 
 # ─────────────────────────────────────────────────────────────
