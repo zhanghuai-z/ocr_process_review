@@ -19,6 +19,7 @@ from app.core.api_profiles import (
     match_api_model_profile_from_url,
     resolve_api_endpoint,
 )
+from app.core.llm_rules import get_default_llm_rules_path
 from app.core.ocr_config import get_config, update_config
 
 
@@ -555,6 +556,46 @@ class ApiSettingsDialog(QDialog):
         api_layout.addLayout(api_body)
         root.addWidget(self._api_card)
 
+        self._llm_card, llm_layout = _section_card(
+            "候选字 / LLM 设置",
+            "供纵校候选字模块使用；默认只保存配置，不会在校对时自动调用模型。",
+        )
+        llm_form = QVBoxLayout()
+        llm_form.setContentsMargins(0, 0, 0, 0)
+        llm_form.setSpacing(10)
+
+        self._llm_url_edit = QLineEdit()
+        self._llm_url_edit.setPlaceholderText("https://llm.example.com/v1/chat/completions")
+        self._llm_url_edit.setClearButtonEnabled(True)
+        llm_form.addLayout(_form_row("模型 URL", self._llm_url_edit))
+
+        llm_key_row = QWidget()
+        llm_key_layout = QHBoxLayout(llm_key_row)
+        llm_key_layout.setContentsMargins(0, 0, 0, 0)
+        llm_key_layout.setSpacing(6)
+        self._llm_key_edit = QLineEdit()
+        self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._llm_key_edit.setPlaceholderText("候选字 LLM API Key")
+        llm_key_layout.addWidget(self._llm_key_edit, 1)
+        self._btn_show_llm_key = QPushButton("显示")
+        self._btn_show_llm_key.setObjectName("subtleBtn")
+        self._btn_show_llm_key.setCheckable(True)
+        self._btn_show_llm_key.setFixedWidth(64)
+        self._btn_show_llm_key.toggled.connect(self._toggle_llm_key_visibility)
+        llm_key_layout.addWidget(self._btn_show_llm_key)
+        llm_form.addLayout(_form_row("API Key", llm_key_row))
+
+        self._llm_rules_edit = QLineEdit()
+        self._llm_rules_edit.setPlaceholderText(str(get_default_llm_rules_path()))
+        self._llm_rules_edit.setClearButtonEnabled(True)
+        llm_form.addLayout(_form_row("规则文件", self._llm_rules_edit))
+        rules_note = QLabel("留空时读取 resources/llm_rules/default_rules.txt；可改为自定义系统提示词/规则文件。")
+        rules_note.setObjectName("noteLabel")
+        rules_note.setWordWrap(True)
+        llm_form.addLayout(_note_row(rules_note))
+        llm_layout.addLayout(llm_form)
+        root.addWidget(self._llm_card)
+
         root.addStretch()
 
         self._footer_note = QLabel(
@@ -594,6 +635,10 @@ class ApiSettingsDialog(QDialog):
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
         self._btn_show_token.setChecked(False)
+        self._llm_url_edit.setText(cfg.get("llm_endpoint", ""))
+        self._llm_key_edit.setText(cfg.get("llm_api_key", ""))
+        self._llm_rules_edit.setText(cfg.get("llm_rules_path", ""))
+        self._btn_show_llm_key.setChecked(False)
         self._on_mode_changed()
 
     def _set_mode_card_selected(self, card: QFrame, selected: bool) -> None:
@@ -656,6 +701,14 @@ class ApiSettingsDialog(QDialog):
             self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self._btn_show_token.setText("显示")
 
+    def _toggle_llm_key_visibility(self, checked: bool) -> None:
+        if checked:
+            self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            self._btn_show_llm_key.setText("隐藏")
+        else:
+            self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._btn_show_llm_key.setText("显示")
+
     def _save_and_accept(self) -> None:
         api_url = self._url_edit.text().strip().rstrip("/")
         update_config(
@@ -665,6 +718,9 @@ class ApiSettingsDialog(QDialog):
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
             api_layout_model_name="",
+            llm_endpoint=self._llm_url_edit.text().strip(),
+            llm_api_key=self._llm_key_edit.text().strip(),
+            llm_rules_path=self._llm_rules_edit.text().strip(),
         )
         self.accept()
 

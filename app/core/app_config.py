@@ -23,7 +23,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "llm_pre_review_enabled": False,
     "llm_provider": "fake",        # "fake" | "http" | "openai-compatible" | "local"
     "llm_endpoint": "",
+    "llm_api_key": "",
     "llm_model": "",
+    "llm_rules_path": "",
     "llm_timeout": 30,
     "llm_batch_lines": 30,
     "llm_send_context": True,
@@ -99,6 +101,9 @@ def get_config() -> dict[str, Any]:
         "api_token": cfg.get("api_token", ""),
         "api_layout_model_name": cfg.get("api_layout_model_name", ""),
         "api_model_profile": cfg.get("api_model_profile", ""),
+        "llm_endpoint": cfg.get("llm_endpoint", ""),
+        "llm_api_key": cfg.get("llm_api_key", ""),
+        "llm_rules_path": cfg.get("llm_rules_path", ""),
     }
 
 
@@ -112,6 +117,9 @@ def update_config(**kwargs: Any) -> None:
         "api_timeout": "api_timeout",
         "api_token": "api_token",
         "api_layout_model_name": "api_layout_model_name",
+        "llm_endpoint": "llm_endpoint",
+        "llm_api_key": "llm_api_key",
+        "llm_rules_path": "llm_rules_path",
     }
     for k, v in kwargs.items():
         if k in mapping:

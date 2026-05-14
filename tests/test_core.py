@@ -3193,6 +3193,45 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     print("test_api_settings_dialog_reverse_matches_url_and_persists_profile PASSED")
 
 
+def test_api_settings_dialog_persists_llm_candidate_settings():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._llm_url_edit.setText("https://llm.example.com/v1/chat/completions")
+        dialog._llm_key_edit.setText("llm-secret")
+        dialog._llm_rules_edit.setText("resources/llm_rules/default_rules.txt")
+
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["llm_endpoint"] == "https://llm.example.com/v1/chat/completions"
+        assert cfg["llm_api_key"] == "llm-secret"
+        assert cfg["llm_rules_path"] == "resources/llm_rules/default_rules.txt"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_persists_llm_candidate_settings PASSED")
+
+
+def test_llm_rules_loads_default_rules_file():
+    from app.core.llm_rules import get_default_llm_rules_path, load_llm_rules
+
+    rules = load_llm_rules()
+
+    assert get_default_llm_rules_path().exists()
+    assert "Do not overwrite final proof text automatically" in rules
+
+    print("test_llm_rules_loads_default_rules_file PASSED")
+
+
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -4984,6 +5023,9 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._ocr_text_box.parentWidget() is panel._proof_column
     assert panel._candidate_box.parentWidget() is panel._proof_column
     assert "border:0" in panel._candidate_box.styleSheet()
+    one_row_height = panel._gallery_box.maximumHeight()
+    panel._resize_gallery_for_entries(24)
+    assert panel._gallery_box.maximumHeight() > one_row_height
     panel.close()
 
     print("test_vproof_gallery_uses_wrapping_white_grid PASSED")
@@ -5128,13 +5170,28 @@ def test_vproof_candidate_provider_interface_is_prepared():
 
 
 def test_hproof_visual_size_is_compact():
+    from PySide6.QtWidgets import QVBoxLayout
+
+    from app.models import BBox, Block, BlockType, Line, Page
     from app.ui.proof import h_proof
+    from app.ui.proof.h_proof import HProofPanel
 
     assert h_proof.IMAGE_ROW_H <= 32
     assert h_proof.TEXT_FONT_PX == 18
     assert h_proof.TEXT_EDITOR_MAX_H <= 42
-    assert h_proof.LINE_PAIR_H == 54
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
+
+    _get_qapp()
+    page = Page(image_path="/tmp/hproof-layout.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
+        Line(text="上下交替", confidence=0.9, bbox=BBox(1, 1, 60, 10)),
+    ])]
+    panel = HProofPanel()
+    panel.load_pages([page])
+    assert isinstance(panel._pairs[0].layout(), QVBoxLayout)
+    assert panel._pairs[0]._lbl_img_hdr.text().startswith("图像行")
+    assert panel._pairs[0]._lbl_txt_hdr.text().startswith("识别文本")
+    panel.close()
 
     print("test_hproof_visual_size_is_compact PASSED")
 
@@ -5294,6 +5351,8 @@ if __name__ == "__main__":
     test_import_service_sequential_page_numbers()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
+    test_api_settings_dialog_persists_llm_candidate_settings()
+    test_llm_rules_loads_default_rules_file()
     test_api_model_profile_helpers()
     test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
     test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()

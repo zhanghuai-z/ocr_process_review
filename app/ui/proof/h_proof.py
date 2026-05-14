@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QImage, QKeySequence, QPixmap, QShortcut,
+    QColor, QFont, QFontMetrics, QImage, QKeySequence, QPixmap, QShortcut,
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -49,7 +49,6 @@ ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
 TEXT_EDITOR_MAX_H = 42
-LINE_PAIR_H = 54
 TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
@@ -140,6 +139,7 @@ class _LinePair(QFrame):
         self._image_loaded = False
         self._line_crop = None
         self._line_crop_origin: tuple[int, int] = (0, 0)
+        self._line_image_display_width = 0
 
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -148,26 +148,30 @@ class _LinePair(QFrame):
     # ── 构建 ──────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.setFixedHeight(LINE_PAIR_H)
-        root = QHBoxLayout(self)
-        root.setContentsMargins(0, 2, 8, 2)
-        root.setSpacing(6)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        img_row = QWidget()
+        img_row.setFixedHeight(IMAGE_ROW_H + 8)
+        il = QHBoxLayout(img_row)
+        il.setContentsMargins(0, 2, 8, 2)
+        il.setSpacing(0)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
         self._active_bar.setStyleSheet("background: transparent;")
-        root.addWidget(self._active_bar)
-        self._active_bar2 = self._active_bar
+        il.addWidget(self._active_bar)
 
-        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
-        self._lbl_img_hdr.setFixedWidth(58)
+        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
+        self._lbl_img_hdr.setFixedWidth(LABEL_W)
         self._lbl_img_hdr.setObjectName("muted")
         self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        root.addWidget(self._lbl_img_hdr)
+        il.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -178,16 +182,27 @@ class _LinePair(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        root.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
+        il.addWidget(self._img_lbl, 1)
+        root.addWidget(img_row)
 
-        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
-        self._lbl_txt_hdr.setFixedWidth(58)
+        txt_row = QWidget()
+        tr = QHBoxLayout(txt_row)
+        tr.setContentsMargins(0, 2, 8, 4)
+        tr.setSpacing(0)
+
+        self._active_bar2 = QWidget()
+        self._active_bar2.setFixedWidth(4)
+        self._active_bar2.setStyleSheet("background: transparent;")
+        tr.addWidget(self._active_bar2)
+
+        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
+        self._lbl_txt_hdr.setFixedWidth(LABEL_W)
         self._lbl_txt_hdr.setObjectName("muted")
         self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        root.addWidget(self._lbl_txt_hdr)
+        tr.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(self._line.text or "")
@@ -203,7 +218,7 @@ class _LinePair(QFrame):
         self._text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        root.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
+        tr.addWidget(self._text_lbl, 1)
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
@@ -228,7 +243,7 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        root.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
+        tr.addWidget(self._editor, 1)
 
         # 状态标签
         self._status_lbl = QLabel()
@@ -238,10 +253,17 @@ class _LinePair(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._refresh_status()
-        root.addWidget(self._status_lbl)
+        tr.addWidget(self._status_lbl)
+
+        root.addWidget(txt_row)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#edf0f5; margin:0; padding:0;")
+        root.addWidget(sep)
 
         # 注册点击区域
-        for w in (self, self._img_lbl, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
+        for w in (self, img_row, txt_row, self._img_lbl, self._text_lbl):
             w.mousePressEvent = self._on_click  # type: ignore[method-assign]
 
     # ── 对外接口 ──────────────────────────────────────────────
@@ -274,6 +296,7 @@ class _LinePair(QFrame):
         if active:
             self._text_lbl.hide()
             self._editor.setPlainText(self._line.text or "")
+            self._sync_text_metrics()
             self._highlight_low_conf()
             self._editor.show()
             self._editor.setFocus()
@@ -282,6 +305,7 @@ class _LinePair(QFrame):
         else:
             self._editor.hide()
             self._text_lbl.setText(self._line.text or "")
+            self._sync_text_metrics()
             self._text_lbl.show()
             self._render_line_image()
 
@@ -366,11 +390,28 @@ class _LinePair(QFrame):
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
+        self._line_image_display_width = rw
+        self._sync_text_metrics()
+
+    def _sync_text_metrics(self) -> None:
+        text = self._editor.toPlainText() if not self._editor.isHidden() else (self._line.text or "")
+        font = QFont("Noto Sans CJK SC")
+        font.setPixelSize(TEXT_FONT_PX)
+        if self._line_image_display_width > 0 and len(text) > 1:
+            natural = QFontMetrics(font).horizontalAdvance(text)
+            spacing = (self._line_image_display_width - natural) / max(1, len(text) - 1)
+            font.setLetterSpacing(
+                QFont.SpacingType.AbsoluteSpacing,
+                max(-1.0, min(12.0, spacing)),
+            )
+        self._text_lbl.setFont(font)
+        self._editor.setFont(font)
 
     def refresh_text(self) -> None:
         """外部更新 line.text 后刷新显示。"""
         if not self._active:
             self._text_lbl.setText(self._line.text or "")
+        self._sync_text_metrics()
         self._refresh_status()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
@@ -379,8 +420,8 @@ class _LinePair(QFrame):
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
-        self._lbl_img_hdr.setText(f"图像 {line_in_page}")
-        self._lbl_txt_hdr.setText(f"文本 {line_in_page}")
+        self._lbl_img_hdr.setText(f"图像行 {line_in_page}")
+        self._lbl_txt_hdr.setText(f"识别文本 {line_in_page}")
         self._image_loaded = False
         self._line_crop = None
         if self._editor.isHidden():

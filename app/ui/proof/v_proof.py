@@ -52,6 +52,8 @@ logger = logging.getLogger(__name__)
 CHAR_LIST_THUMB = 18
 GALLERY_THUMB   = 27
 LOW_CONF        = 0.80
+GALLERY_ITEMS_PER_ROW = 8
+GALLERY_MAX_ROWS = 4
 
 
 @dataclass(frozen=True)
@@ -351,7 +353,7 @@ class VProofPanel(QWidget):
 
         # 左列上：gallery 网格。与同列 OCR 文本自然等宽。
         self._gallery_box = self._build_gallery_strip()
-        self._gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
+        self._resize_gallery_for_entries(0)
         col.addWidget(self._gallery_box)
 
         self._candidate_box = self._build_candidate_panel()
@@ -422,6 +424,11 @@ class VProofPanel(QWidget):
         layout.addWidget(self._gallery_view)
         return box
 
+    def _resize_gallery_for_entries(self, count: int) -> None:
+        rows = min(GALLERY_MAX_ROWS, max(1, (max(1, count) + GALLERY_ITEMS_PER_ROW - 1) // GALLERY_ITEMS_PER_ROW))
+        item_h = GALLERY_THUMB + 8
+        self._gallery_box.setFixedHeight(rows * item_h + 30)
+
     def _build_ocr_text(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -476,6 +483,7 @@ class VProofPanel(QWidget):
             self._selected_char = selected
             entries = self._char_svc.query(selected)
             self._gallery_model.set_entries(entries)
+            self._resize_gallery_for_entries(len(entries))
             self._gallery_hdr.setText(f'"{selected}"  共 {len(entries)} 处')
         self._page_label.setText(f"页 {self._current_page_idx + 1} / {len(self._pages)}")
 
@@ -497,6 +505,7 @@ class VProofPanel(QWidget):
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])
+        self._resize_gallery_for_entries(0)
         self._candidate_hint.setText("未选择字符；候选字接口已预留，默认不调用外部模型")
         self._page_label.setText("页 0 / 0")
 
@@ -575,6 +584,7 @@ class VProofPanel(QWidget):
 
         # 重置 gallery：清选中、滚回顶部
         self._gallery_model.set_entries(entries)
+        self._resize_gallery_for_entries(len(entries))
         self._gallery_view.clearSelection()
         if entries:
             self._gallery_view.scrollTo(

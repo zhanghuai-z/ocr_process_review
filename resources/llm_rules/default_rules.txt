@@ -1,0 +1,7 @@
+OCR candidate module rules
+
+1. Work only from OCR text, selected token, surrounding text, and user-approved settings.
+2. Do not overwrite final proof text automatically; return candidates and reasons only.
+3. Prefer conservative character candidates that fit the original glyph shape and context.
+4. Keep original OCR text, candidate text, and human final text separate.
+5. Do not request or infer image/file paths unless the user explicitly enables that capability.
