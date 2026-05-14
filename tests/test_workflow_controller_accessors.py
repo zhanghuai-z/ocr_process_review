@@ -211,24 +211,53 @@ def test_reset_proof_sync_state_resets_counter(ctrl):
     assert ctrl._proof_loaded_line_count == 0
 
 
-def test_refresh_proof_quality_probe_state_calls_both_panels(ctrl):
+# refresh_proof_quality_probe_state：原行为 = 进横校只刷横校，进纵校只刷纵校。
+# 上一轮把这一段抽进 controller 时一度写成"两个面板都刷"，会让隐藏的 panel
+# 也被 reload。这一轮把它修回成只刷激活那一个，并加 4 条精准回归。
+from app.controllers.workflow_controller import (
+    STEP_HPROOF as _STEP_HPROOF,
+    STEP_VPROOF as _STEP_VPROOF,
+    STEP_LAYOUT as _STEP_LAYOUT,
+)
+
+
+def test_refresh_proof_quality_probe_state_hproof_only_touches_h(ctrl):
     h = _StubPanel(); v = _StubPanel()
     ctrl.register_proof_panels(h, v)
-    ctrl.refresh_proof_quality_probe_state()
-    assert h.refresh_calls == 1 and v.refresh_calls == 1
+    ctrl.refresh_proof_quality_probe_state(_STEP_HPROOF)
+    assert h.refresh_calls == 1, "横校 step 必须刷横校"
+    assert v.refresh_calls == 0, "横校 step 不能刷到纵校（隐藏 panel 不应被 reload）"
 
 
-def test_refresh_proof_quality_probe_state_safe_when_panels_lack_method(ctrl):
+def test_refresh_proof_quality_probe_state_vproof_only_touches_v(ctrl):
+    h = _StubPanel(); v = _StubPanel()
+    ctrl.register_proof_panels(h, v)
+    ctrl.refresh_proof_quality_probe_state(_STEP_VPROOF)
+    assert v.refresh_calls == 1, "纵校 step 必须刷纵校"
+    assert h.refresh_calls == 0, "纵校 step 不能刷到横校（隐藏 panel 不应被 reload）"
+
+
+def test_refresh_proof_quality_probe_state_other_step_is_noop(ctrl):
+    """非 proof step（比如 LAYOUT）传进来时两个 panel 都不应被刷。"""
+    h = _StubPanel(); v = _StubPanel()
+    ctrl.register_proof_panels(h, v)
+    ctrl.refresh_proof_quality_probe_state(_STEP_LAYOUT)
+    assert h.refresh_calls == 0 and v.refresh_calls == 0
+
+
+def test_refresh_proof_quality_probe_state_safe_when_panel_lacks_method(ctrl):
     class _NoMethod:
         pass
     ctrl.register_proof_panels(_NoMethod(), _NoMethod())
     # 不应抛
-    ctrl.refresh_proof_quality_probe_state()
+    ctrl.refresh_proof_quality_probe_state(_STEP_HPROOF)
+    ctrl.refresh_proof_quality_probe_state(_STEP_VPROOF)
 
 
 def test_refresh_proof_quality_probe_state_safe_when_panels_not_registered(ctrl):
     # 默认状态：register 没调过，两个 attr 都是 None
-    ctrl.refresh_proof_quality_probe_state()
+    ctrl.refresh_proof_quality_probe_state(_STEP_HPROOF)
+    ctrl.refresh_proof_quality_probe_state(_STEP_VPROOF)
 
 
 # ── MainWindow 不应再有泄漏的 source 检查 ──────────────────────

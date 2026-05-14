@@ -292,12 +292,12 @@ class MainWindow(QMainWindow):
         self._top_nav.set_active(step)
         self._current_step = step
         if step in (STEP_HPROOF, STEP_VPROOF):
-            # 进入校对步骤：触发评测位采样 + 让 controller 通知两个面板刷新
-            # （ownership 在 controller 侧；MainWindow 只发触发信号）
+            # 进入校对步骤：触发评测位采样 + 让 controller 只刷新当前 step 对应
+            # 的那一个面板（与原行为一致：进横校只刷横校；进纵校只刷纵校）。
             self._controller.ensure_quality_probe_sampled()
             if step == STEP_HPROOF:
                 self._hproof_panel.set_current_page_number(self._current_page_number)
-            self._controller.refresh_proof_quality_probe_state()
+            self._controller.refresh_proof_quality_probe_state(step)
         elif step == STEP_LAYOUT:
             self._layout_panel.set_current_page_number(self._current_page_number)
 

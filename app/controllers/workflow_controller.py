@@ -204,15 +204,25 @@ class WorkflowController(QObject):
         """新建/打开项目前清掉 proof 同步计数。"""
         self._proof_loaded_line_count = 0
 
-    def refresh_proof_quality_probe_state(self) -> None:
-        """让两个校对面板刷新 quality-probe 显示（如果支持）。"""
-        for panel in (getattr(self, "_hproof_panel", None),
-                      getattr(self, "_vproof_panel", None)):
-            if panel is None:
-                continue
-            fn = getattr(panel, "refresh_quality_probe_state", None)
-            if callable(fn):
-                fn()
+    def refresh_proof_quality_probe_state(self, step: int) -> None:
+        """只刷新与 ``step`` 对应的那一个校对面板的 quality-probe 显示。
+
+        与原 MainWindow 行为等价：进横校时只刷横校，进纵校时只刷纵校；
+        ``step`` 不是 ``STEP_HPROOF/STEP_VPROOF`` 时静默 no-op。
+        **不要**写成"两个面板都刷"——隐藏的 panel 一起 reload 会触发不必要的
+        重排和样式重算（且不符合"行为零变化"承诺）。
+        """
+        if step == STEP_HPROOF:
+            panel = getattr(self, "_hproof_panel", None)
+        elif step == STEP_VPROOF:
+            panel = getattr(self, "_vproof_panel", None)
+        else:
+            return
+        if panel is None:
+            return
+        fn = getattr(panel, "refresh_quality_probe_state", None)
+        if callable(fn):
+            fn()
 
     def new_project(self, name: str, db_path: str) -> bool:
         """创建新项目。"""
