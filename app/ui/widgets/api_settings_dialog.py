@@ -558,7 +558,7 @@ class ApiSettingsDialog(QDialog):
         root.addStretch()
 
         self._footer_note = QLabel(
-            "保存后主程序固定走 API 双模型链：Structure 做版面，PP-OCRv5 做 proof OCR。"
+            "保存后主程序固定走 API 双模型链：PaddleOCR-VL-1.5 做版面，PP-OCRv5 做 proof OCR。"
         )
         self._footer_note.setObjectName("footerNote")
         self._footer_note.setWordWrap(True)
@@ -609,8 +609,8 @@ class ApiSettingsDialog(QDialog):
         ) if url else ""
 
         self._model_note.setText("")
-        self._summary_model.setText("自动双模型：Structure + PP-OCRv5")
-        self._summary_desc.setText("版面分析使用 layout role；横校/纵校 proof 使用 OCR role。")
+        self._summary_model.setText("自动双模型：PaddleOCR-VL-1.5 + PP-OCRv5")
+        self._summary_desc.setText("版面分析 (layout role) 走 PaddleOCR-VL-1.5；横校/纵校 proof (ocr role) 走 PP-OCRv5。")
 
         if not url:
             self._url_note.setText("请填写服务根地址或完整端点。")
@@ -728,7 +728,7 @@ class ApiSettingsDialog(QDialog):
                 kind = detect_api_result_kind(body)
                 kind_label = {
                     "ocr": "PP-OCRv5 /ocr",
-                    "layout": "PP-StructureV3 / VL /layout-parsing",
+                    "layout": "PaddleOCR-VL-1.5 /layout-parsing",
                     "unknown": "未知结构（请确认端点是否正确）",
                 }.get(kind, kind)
                 QMessageBox.information(

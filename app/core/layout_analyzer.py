@@ -1,14 +1,21 @@
-"""PP-StructureV3 layout analysis wrapper. Supports local / api modes.
+"""Layout analysis wrapper. Supports local / api modes.
 
-AiStudio Serving API (confirmed):
-  POST resolve_api_endpoint(api_url, api_model_profile)
-  Authorization: token <api_token>
-  Body: {"file": "<base64_JPEG>", "fileType": 1}
-  Response:
-    result.layoutParsingResults[0].prunedResult:
-      layout_det_res.boxes[]:
-        label:      str  (e.g. "doc_title", "paragraph", ...)
-        coordinate: [x1, y1, x2, y2]  (float, page coords)
+主链的 layout 角色已全面切换到 PaddleOCR-VL-1.5（替代 PP-StructureV3）：
+  resolve_api_endpoint_for_role(api_url, role="layout")
+    -> https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing  (官方预置)
+
+VL 响应与 Structure 在这里采用的抽取路径兑现上兼容：
+  result.layoutParsingResults[0].prunedResult:
+    layout_det_res.boxes[]:                    # 版面 bbox（供主程序块提取）
+      label:      str  (e.g. "text", "paragraph_title", "display_formula",
+                        "inline_formula", "formula_number", "footnote",
+                        "header", "number", ...)
+      coordinate: [x1, y1, x2, y2]
+    parsing_res_list[]:                        # 顶层阅读顺序 / 块内容
+      block_label / block_bbox / block_content
+    markdown.text:                             # 供下游导出 Markdown / LaTeX
+
+PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
 """
 from __future__ import annotations
 import base64

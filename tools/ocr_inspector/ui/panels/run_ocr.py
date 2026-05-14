@@ -402,18 +402,25 @@ def _run_api_ocr(image_path: str, params: dict[str, Any]) -> dict[str, Any]:
     import cv2
     import requests
 
-    from app.core.api_profiles import get_api_model_profile, resolve_api_endpoint
+    from app.core.api_profiles import (
+        get_api_model_profile,
+        infer_api_model_profile_from_endpoint,
+        resolve_api_endpoint_for_role,
+    )
     from app.core.ocr_config import get_config
 
     cfg = get_config()
     profile = str(cfg.get("api_model_profile", "") or "").strip()
-    url = resolve_api_endpoint(
+    url = resolve_api_endpoint_for_role(
         cfg.get("api_url", ""),
-        default_suffix="/layout-parsing",
         profile=profile,
+        role="layout",
     )
     if not url:
         raise RuntimeError("API URL is not configured. Open OCR 引擎设置 first.")
+    # 主链 layout 已全面切到 VL-1.5；这里跟随主程序路由后重新推断 profile，
+    # 以便后续 _build_api_request_body 能选出正确的 request_family。
+    profile = infer_api_model_profile_from_endpoint(url) or profile
 
     timeout = int(cfg.get("api_timeout", 30) or 30)
     token = str(cfg.get("api_token", "") or "").strip()

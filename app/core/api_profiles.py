@@ -132,6 +132,13 @@ def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> 
     return None
 
 
+# 主链 layout 角色固定走 PaddleOCR-VL-1.5（替代 PP-StructureV3）。
+# 仅当用户填写 *自定义* 根 URL 时，按后缀规则原地补 /layout-parsing；
+# 当用户配的是 *官方预置* (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 时，
+# 全部重定向到 paddleocr-vl-1.5 预置 URL，保证「全面替代 structure」。
+LAYOUT_DEFAULT_PROFILE = "paddleocr-vl-1.5"
+
+
 def resolve_api_endpoint_for_role(
     api_url: str | None,
     *,
@@ -141,7 +148,7 @@ def resolve_api_endpoint_for_role(
     """Resolve the concrete endpoint for the model role used by the main app.
 
     The proof workflow is intentionally dual-model:
-    - layout role -> Structure/VL `/layout-parsing`
+    - layout role -> PaddleOCR-VL-1.5 `/layout-parsing` (replaces PP-StructureV3)
     - OCR proof role -> PP-OCRv5 `/ocr`
 
     Official AiStudio presets use different hosts, so exact preset URLs are
@@ -166,14 +173,16 @@ def resolve_api_endpoint_for_role(
         )
 
     if role == "layout":
-        if profile_key == "pp-ocrv5":
-            return get_api_model_profile_url("pp-structurev3")
+        # 任何官方 PP-* 预置（包括旧的 pp-structurev3、纯 OCR pp-ocrv5、旧 VL）
+        # 都强制重定向到 paddleocr-vl-1.5 预置 URL。
+        if profile_key in ("pp-ocrv5", "pp-structurev3", "paddleocr-vl"):
+            return get_api_model_profile_url(LAYOUT_DEFAULT_PROFILE)
         if normalized.endswith("/ocr"):
             return f"{normalized[:-len('/ocr')]}/layout-parsing"
         return resolve_api_endpoint(
             normalized,
             default_suffix="/layout-parsing",
-            profile="pp-structurev3",
+            profile=LAYOUT_DEFAULT_PROFILE,
         )
 
     raise ValueError(f"Unknown API endpoint role: {role}")
@@ -187,7 +196,9 @@ def infer_api_model_profile_from_endpoint(endpoint_url: str | None) -> str | Non
     if normalized.endswith("/ocr"):
         return "pp-ocrv5"
     if normalized.endswith("/layout-parsing"):
-        return "pp-structurev3"
+        # 主链 layout 已切到 VL-1.5；自定义 /layout-parsing 端点按 VL family 处理
+        # （不再发送 OCR detector/recognizer 字段）。
+        return LAYOUT_DEFAULT_PROFILE
     return None
 
 
