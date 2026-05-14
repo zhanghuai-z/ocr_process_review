@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from app.core.logging import get_logger
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
+from app.core import quality_probe as qp
 from app.engines.real_ocr_adapter import create_engine
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page, PageStatus, ProofStatus,
@@ -110,6 +111,8 @@ class WorkflowController(QObject):
             self._project = OcrProject(name=name, db_path=db_path)
             self._project = self._store.save_project(self._project)
             self._max_step = STEP_IMPORT
+            # 切换项目：必须清空全局评测状态，避免旧项目的 probe 串到新项目
+            qp.reset_active_store()
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
             self.status_message.emit(f"新建项目：{db_path}")
@@ -132,6 +135,15 @@ class WorkflowController(QObject):
                 return False
             self._proof_crop_service.normalize_project(self._project)
 
+            # 切换项目：先清空全局评测状态，再尝试从 sidecar 恢复
+            qp.reset_active_store()
+            side = qp.sidecar_path_for_project(self._project.db_path)
+            if side:
+                loaded = qp.load_store_from_path(side)
+                if loaded is not None and len(loaded) > 0:
+                    qp.set_active_store(loaded)
+                    logger.info("Loaded quality probe sidecar: %d probes", len(loaded))
+
             self._max_step = self._compute_max_step()
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
@@ -148,6 +160,12 @@ class WorkflowController(QObject):
             return False
         try:
             self._store.save_project(self._project)
+            # 副带保存评测 sidecar（如果当前有 active store）
+            store = qp.get_active_store()
+            if store is not None and self._project.db_path:
+                side = qp.sidecar_path_for_project(self._project.db_path)
+                if side:
+                    qp.save_store_to_path(store, side)
             self.status_message.emit("项目已保存")
             return True
         except Exception as e:
@@ -170,9 +188,56 @@ class WorkflowController(QObject):
         except Exception as e:
             logger.warning("Auto-save failed: %s", e)
 
+    def ensure_quality_probe_sampled(self) -> bool:
+        """采样触发入口 —— 进入校对步骤时由 UI 调用。
+
+        触发规则：
+        1. 当前已有 active store → 不重采（用户/上次会话已经在用）。
+        2. AppConfig.quality_probe_auto_enable 为 False → 不自动触发。
+        3. 项目未完成 OCR → 不触发（无内容可投放）。
+        4. 否则按 SamplerConfig.from_app_config() 采样并设为 active。
+
+        返回 True 表示当前已存在可用的评测 store（无论本次是否新采）。
+        """
+        if not self._project:
+            return False
+        if qp.get_active_store() is not None:
+            return True
+        # 是否启用自动评测
+        try:
+            from app.core.app_config import AppConfig
+            auto = AppConfig.instance().get("quality_probe_auto_enable", True)
+            # QSettings 可能把 bool 存成字符串
+            if isinstance(auto, str):
+                auto = auto.strip().lower() not in ("0", "false", "no", "")
+            if not auto:
+                return False
+        except Exception:
+            pass
+        if not self._project.ocr_completed:
+            return False
+        try:
+            cfg = qp.sampler_config_from_app_config()
+            store = qp.ProbeSampler(cfg).sample(self._project)
+            if len(store) == 0:
+                return False
+            qp.set_active_store(store)
+            logger.info("Auto-sampled %d quality probes", len(store))
+            # 立即落盘 sidecar，避免崩溃丢失采样结果
+            if self._project.db_path:
+                side = qp.sidecar_path_for_project(self._project.db_path)
+                if side:
+                    qp.save_store_to_path(store, side)
+            return True
+        except Exception as e:
+            logger.warning("Quality probe sampling failed: %s", e)
+            return False
+
     def close(self) -> None:
         if self._store:
             self._store.close()
+        # 进程退出：清空全局评测状态
+        qp.reset_active_store()
 
     # ------------------------------------------------------------------ step management
 

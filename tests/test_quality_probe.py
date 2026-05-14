@@ -389,3 +389,208 @@ def test_txt_exporter_emits_no_fake_chars_after_round_trip(tmp_path):
         block = page.blocks[p.key.block_index]
         line = block.lines[p.key.line_index]
         assert line.text[p.key.char_index] == p.true_char
+
+
+# ════════════════════════════════════════════════════════════════
+# Blocker 1 regression: large-change reverse path must STRICTLY
+# scrub fake_char even when true_char already exists in user text
+# ════════════════════════════════════════════════════════════════
+
+def test_reverse_large_change_strips_fake_even_if_true_present():
+    """关键 blocker 回归测试：大改路径下，即使用户改写文本里已经包含 true_char，
+    也必须把所有 fake_char 都还原成 true_char。绝不允许 fake 残留进 line.text。"""
+    before = "今天我们来学习已经发生过的历史"
+    probes = [Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己")]
+    # 用户的改写文本里**同时**包含真字和假字 —— 旧实现的守卫会让 fake 留下来
+    rewritten = "用户重新写了一段完全不同的内容已经包含真字己字假象"
+    true_text, results = reverse_display_to_true(before, rewritten, probes)
+    assert all(obs == "edited_other" for _, obs in results)
+    # 强约束：返回真实文本绝不能含有 probe 的 fake_char
+    assert probes[0].fake_char not in true_text, (
+        f"fake_char {probes[0].fake_char!r} 残留在大改路径返回文本中：{true_text!r}"
+    )
+
+
+def test_reverse_large_change_strips_multiple_fake_occurrences():
+    """fake_char 在用户文本中出现多次时，全部都必须被替换。"""
+    before = "今天我们一起来学习已经发生过的历史故事"
+    probes = [Probe(ProbeKey(1, 0, 0, 8), true_char="已", fake_char="己")]
+    rewritten = "完全重写一段含有 己 又有 己 又有 己 字的长文本测试"
+    true_text, _ = reverse_display_to_true(before, rewritten, probes)
+    assert "己" not in true_text
+
+
+# ════════════════════════════════════════════════════════════════
+# Blocker 2 regression: fill pass must respect max_per_page
+# ════════════════════════════════════════════════════════════════
+
+def test_sampler_fill_pass_respects_max_per_page():
+    """单页可投放候选很多、其它页极少时，min_total 兜底循环不能在同一页堆 probe。"""
+    # 1 页 20 行，全部都是合格候选
+    sentence = "今天我们来学习已经发生过的历史故事"  # 含 "已"(7)
+    lines = [_line(sentence) for _ in range(20)]
+    project = _project([_page(1, [_block(BlockType.TEXT, lines)])])
+    cfg = SamplerConfig(min_total=8, max_per_page=2, seed=42)
+    store = ProbeSampler(cfg).sample(project)
+    # 只有 1 页存在，所以 max_per_page=2 必须严守：≤ 2 个 probe，即使 min_total=8
+    page1_probes = [p for p in store.all() if p.key.page_number == 1]
+    assert len(page1_probes) <= cfg.max_per_page, (
+        f"fill pass 突破了 max_per_page={cfg.max_per_page}，实际投放 {len(page1_probes)}"
+    )
+
+
+# ════════════════════════════════════════════════════════════════
+# Name/place avoidance: quote-adjacent short CJK runs must be skipped
+# ════════════════════════════════════════════════════════════════
+
+def test_name_quote_neighbor_raises_min_run():
+    """书名号 / 引号紧邻的短 CJK 段（≤5 字）不允许投放，即使段长 ≥ MIN_CJK_RUN(=4)。"""
+    from app.core.quality_probe import _NAME_GUARDED_MIN_RUN
+    # 5 字段 + 紧邻书名号
+    line = _line("书名《学习已历史》随后正常段落继续讨论已经历史很长很长很")
+    cands = candidate_indices_in_line(line)
+    text = line.text
+    # 《》 内 5 字段: 学习已经历史 (run=5) 应被排除
+    quoted_run_start = text.index("《") + 1
+    quoted_run_end = text.index("》")
+    assert all(not (quoted_run_start <= c < quoted_run_end) for c in cands), (
+        f"引号内的短段仍被采样：{cands}，文本：{text}"
+    )
+    # 但更长的"随后正常段落继续讨论已经历史很长很长" run 应仍可命中
+    assert len(cands) > 0
+
+
+# ════════════════════════════════════════════════════════════════
+# SamplerConfig.from_app_config 回灌
+# ════════════════════════════════════════════════════════════════
+
+def test_sampler_config_from_app_config_falls_back_when_qt_missing(monkeypatch):
+    """没有 Qt 或 AppConfig 时，应静默回落到 SamplerConfig 默认值。"""
+    import sys
+    from app.core import quality_probe as qp_mod
+    # 模拟 import 失败
+    monkeypatch.setitem(sys.modules, "app.core.app_config", None)
+    cfg = qp_mod.sampler_config_from_app_config()
+    assert isinstance(cfg, qp_mod.SamplerConfig)
+    assert cfg.target_ratio == 0.025  # 默认值
+
+
+# ════════════════════════════════════════════════════════════════
+# 持久化 sidecar
+# ════════════════════════════════════════════════════════════════
+
+def test_persistence_sidecar_round_trip(tmp_path):
+    from app.core.quality_probe import (
+        ProbeStore, Probe, ProbeKey,
+        save_store_to_path, load_store_from_path, sidecar_path_for_project,
+    )
+    store = ProbeStore()
+    store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己", observation="corrected"))
+    store.add(Probe(ProbeKey(2, 1, 0, 9), true_char="末", fake_char="未", observation="missed"))
+    db_path = str(tmp_path / "demo.ocrproj")
+    side = sidecar_path_for_project(db_path)
+    assert side.endswith(".qprobe.json")
+    assert save_store_to_path(store, side)
+    loaded = load_store_from_path(side)
+    assert loaded is not None
+    assert len(loaded) == 2
+    obs_map = {(p.key.page_number, p.key.char_index): p.observation for p in loaded.all()}
+    assert obs_map[(1, 7)] == "corrected"
+    assert obs_map[(2, 9)] == "missed"
+
+
+def test_persistence_sidecar_missing_returns_none(tmp_path):
+    from app.core.quality_probe import load_store_from_path, sidecar_path_for_project
+    side = sidecar_path_for_project(str(tmp_path / "no_such.ocrproj"))
+    assert load_store_from_path(side) is None
+
+
+def test_persistence_sidecar_corrupt_returns_none(tmp_path):
+    from app.core.quality_probe import load_store_from_path
+    bad = tmp_path / "bad.qprobe.json"
+    bad.write_text("not json{{", encoding="utf-8")
+    assert load_store_from_path(str(bad)) is None
+
+
+def test_sidecar_path_returns_none_for_transient_project():
+    from app.core.quality_probe import sidecar_path_for_project
+    assert sidecar_path_for_project(None) is None
+    assert sidecar_path_for_project("") is None
+
+
+# ════════════════════════════════════════════════════════════════
+# 混淆字表运行时扩展
+# ════════════════════════════════════════════════════════════════
+
+def test_register_confusion_group_adds_pair():
+    from app.core import quality_probe as qp_mod
+    # 选两个不在默认表里的形近字（如果将来加进默认表，请换别的字）
+    test_chars = ("晷", "暑")
+    # 确认默认表没收
+    assert "晷" not in qp_mod.CONFUSION_MAP or "暑" not in qp_mod.CONFUSION_MAP.get("晷", ())
+    qp_mod.register_confusion_group(test_chars)
+    assert "暑" in qp_mod.CONFUSION_MAP["晷"]
+    assert "晷" in qp_mod.CONFUSION_MAP["暑"]
+
+
+# ════════════════════════════════════════════════════════════════
+# 端到端：blocker 1 修复后导出器仍然干净
+# ════════════════════════════════════════════════════════════════
+
+def test_export_clean_under_large_change_attack(tmp_path):
+    """攻击场景：用户对若干 probe 行做大改写并保留 fake_char，
+    走完 observe → update_text → TxtExporter，导出真实文本里在 probe 位置周围
+    绝不应出现"凭空多出来的 fake_char"。
+
+    注意：本测试不能简单断言 `fake_char NOT IN body`，因为原始正文本就可能合法
+    地包含某些 fake_char（比如"入"和"人"在同一段中各有自然出现）。正确做法是
+    构造一段**真实文本中绝不出现 fake_char**的样本，然后断言这种字符不会被
+    probe 系统额外引入。
+    """
+    from app.core.quality_probe import (
+        ProbeSampler, SamplerConfig, set_active_store, reset_active_store,
+        observe_user_action, apply_probes_to_display,
+        register_confusion_group,
+    )
+    from app.export.txt import TxtExporter
+
+    # 使用极罕用的字符对：保证它们既能命中混淆表（注册一对），又不会自然出现
+    # 在我们构造的文本中。"曌"/"瞾"（武则天造字）极少出现在普通文本，安全。
+    register_confusion_group(("曌", "瞾"))
+    # 构造文本：包含 "曌" 作为 true_char，文本本身不含 "瞾"（fake）
+    sample = "今天的研究发现曌字十分罕见用作示例非常合适啊好的"
+    pages = [
+        _page(i + 1, [_block(BlockType.TEXT, [_line(sample) for _ in range(4)])])
+        for i in range(3)
+    ]
+    project = _project(pages)
+    # 直接构造 probes，无需采样
+    from app.core.quality_probe import ProbeStore, Probe, ProbeKey
+    store = ProbeStore()
+    char_idx = sample.index("曌")
+    for pg in project.pages:
+        for li in range(len(pg.blocks[0].lines)):
+            store.add(Probe(
+                key=ProbeKey(pg.page_number, 0, li, char_idx),
+                true_char="曌", fake_char="瞾",
+            ))
+    set_active_store(store)
+    try:
+        for page in project.pages:
+            for li, line in enumerate(page.blocks[0].lines):
+                probes = store.for_line(page.page_number, 0, li)
+                displayed = apply_probes_to_display(line.text, probes)
+                # 大改写：在前后塞一长段，确保进 large-change 分支
+                rewritten = "用户大幅改写测试" * 3 + displayed + "尾缀文本" * 3
+                new_text = observe_user_action(
+                    store, page.page_number, 0, li, line.text, rewritten,
+                )
+                if new_text != line.text:
+                    line.update_text(new_text)
+        out = tmp_path / "out.txt"
+        TxtExporter().export(project, str(out))
+        body = out.read_text(encoding="utf-8")
+        # 真实文本中本无 "瞾"，因此导出绝不能含有它
+        assert "瞾" not in body, f"fake_char 残留进导出文本：{body!r}"
+    finally:
+        reset_active_store()

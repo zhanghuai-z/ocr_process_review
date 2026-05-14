@@ -290,8 +290,17 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(step)
         self._top_nav.set_active(step)
         self._current_step = step
-        if step == STEP_HPROOF:
-            self._hproof_panel.set_current_page_number(self._current_page_number)
+        if step in (STEP_HPROOF, STEP_VPROOF):
+            # 进入校对步骤：尝试触发评测位采样（auto_enable=False 或已有 store 时跳过）
+            self._controller.ensure_quality_probe_sampled()
+            # 提示校对面板刷新显示（让显示空间叠加 probe）
+            if step == STEP_HPROOF:
+                self._hproof_panel.set_current_page_number(self._current_page_number)
+                if hasattr(self._hproof_panel, "refresh_quality_probe_state"):
+                    self._hproof_panel.refresh_quality_probe_state()
+            else:
+                if hasattr(self._vproof_panel, "refresh_quality_probe_state"):
+                    self._vproof_panel.refresh_quality_probe_state()
         elif step == STEP_LAYOUT:
             self._layout_panel.set_current_page_number(self._current_page_number)
 

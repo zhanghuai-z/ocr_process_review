@@ -43,6 +43,7 @@ from app.models import BBox, Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_state_bus import ProofStateBus
+from app.core import quality_probe as qp
 from app.services.char_index_service import CharEntry, CharIndexService
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.image_viewer import ImageViewer
@@ -211,14 +212,72 @@ def _build_text_map(
             parts.append("\n")
             pos += 1
         last_block = block
-        text = line.text or ""
-        for ci, _char in enumerate(text):
+        # 显示空间文本：若 quality_probe 启用，行内若干位置会被替换成 fake_char。
+        # 因为 apply_probes_to_display 是位置等长替换，char_idx 在真实空间和显示
+        # 空间是一一对应的，所以单字 mapping 仍然有效。
+        display_text = _vproof_displayed_text(page, block, line)
+        for ci, _char in enumerate(display_text):
             mapping.append((line, ci, pos, pos + 1))
             pos += 1
-        parts.append(text)
+        parts.append(display_text)
         parts.append("\n")
         pos += 1
     return "".join(parts), mapping
+
+
+# ─── quality_probe display ↔ true text 桥接 ──────────────────────
+def _vproof_resolve_block_line_index(page: Page, block: Block, line: Line):
+    try:
+        bi = page.blocks.index(block)
+        li = block.lines.index(line)
+    except ValueError:
+        return None
+    return bi, li
+
+
+def _vproof_displayed_text(page: Page, block: Block, line: Line) -> str:
+    """返回显示空间文本：未启用评测 → line.text；启用 → 叠加 probe。"""
+    text = line.text or ""
+    store = qp.get_active_store()
+    if store is None:
+        return text
+    idx = _vproof_resolve_block_line_index(page, block, line)
+    if idx is None:
+        return text
+    bi, li = idx
+    probes = store.for_line(page.page_number, bi, li)
+    if not probes:
+        return text
+    return qp.apply_probes_to_display(text, probes)
+
+
+def _vproof_save_displayed_line(
+    page: Page, block: Block, line: Line, displayed_new_text: str
+) -> bool:
+    """把"显示空间编辑结果"还原成真实空间，写回 line.text。
+
+    返回 True 表示 line.text 真发生了变化。
+    """
+    store = qp.get_active_store()
+    if store is None:
+        if displayed_new_text != (line.text or ""):
+            line.update_text(displayed_new_text)
+            return True
+        return False
+    idx = _vproof_resolve_block_line_index(page, block, line)
+    if idx is None:
+        if displayed_new_text != (line.text or ""):
+            line.update_text(displayed_new_text)
+            return True
+        return False
+    bi, li = idx
+    true_text = qp.observe_user_action(
+        store, page.page_number, bi, li, line.text or "", displayed_new_text,
+    )
+    if true_text != (line.text or ""):
+        line.update_text(true_text)
+        return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -781,9 +840,9 @@ class VProofPanel(QWidget):
                 idx += 1  # 跳过 block 间空行
             last_block = block
             if idx < len(lines_text):
-                new_text = lines_text[idx].rstrip()
-                if new_text != (line.text or ""):
-                    line.update_text(new_text)
+                new_displayed = lines_text[idx].rstrip()
+                # 走 quality_probe 桥：如有 probe，显示空间 → 真实空间转换 + observation 落地
+                if _vproof_save_displayed_line(page, block, line, new_displayed):
                     changed = True
                     self._bus.publish(
                         "line.proof_changed",
@@ -824,6 +883,14 @@ class VProofPanel(QWidget):
 
     def _next_page(self) -> None:
         self._load_page(self._current_page_idx + 1)
+
+    def refresh_quality_probe_state(self) -> None:
+        """供 main_window 进入纵校步骤时调用：当前页若已加载，重新渲染让显示
+        空间文本与全局 active store 对齐。"""
+        if not self._pages:
+            return
+        # 重新触发 _load_page，让 _build_text_map 用最新的 active store 渲染
+        self._load_page(self._current_page_idx)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()

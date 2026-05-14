@@ -1060,6 +1060,28 @@ class HProofPanel(QWidget):
         )
         QMessageBox.information(self, "校对质量评测报告", text)
 
+    def refresh_quality_probe_state(self) -> None:
+        """供 main_window 进入校对步骤时调用：把工具栏开关与全局 active store
+        对齐，并刷新所有 pair 显示。
+
+        当 controller.ensure_quality_probe_sampled() 自动触发采样后，UI 需要
+        立即把按钮文案切到"评测：开（N 处）"，并让所有行重新渲染。
+        """
+        store = qp.get_active_store()
+        if store is not None and len(store) > 0:
+            # 阻断 clicked 信号，避免 setChecked 触发 _on_toggle_quality_probe 重新采样
+            self._btn_quality_toggle.blockSignals(True)
+            self._btn_quality_toggle.setChecked(True)
+            self._btn_quality_toggle.setText(f"评测：开（{len(store)} 处）")
+            self._btn_quality_toggle.blockSignals(False)
+        else:
+            self._btn_quality_toggle.blockSignals(True)
+            self._btn_quality_toggle.setChecked(False)
+            self._btn_quality_toggle.setText("评测：关")
+            self._btn_quality_toggle.blockSignals(False)
+        for pair in self._pairs:
+            pair.refresh_text()
+
     # ── 懒加载图像 ─────────────────────────────────────────────
 
     def _load_visible_images(self) -> None:

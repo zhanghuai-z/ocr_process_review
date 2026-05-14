@@ -43,6 +43,15 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "tighten_padding": 6,
     "tighten_min_content_ratio": 0.002,
     "tighten_max_shrink_ratio": 0.85,
+
+    # 校对质量评测（quality probe）
+    # 这些键供 SamplerConfig.from_app_config 读取。改完无需重启即生效。
+    "quality_probe_target_ratio": 0.025,   # 投放比例 2.5%
+    "quality_probe_min_total": 8,
+    "quality_probe_max_total": 35,
+    "quality_probe_max_per_page": 2,
+    "quality_probe_max_per_line": 1,
+    "quality_probe_auto_enable": True,     # 打开有 OCR 数据的项目时是否自动启用评测
 }
 
 

@@ -157,6 +157,14 @@ _MATH_MARKERS = set("$^_{}=≈≠≤≥±∑∏∫√")  # noqa: RUF001
 # 也屏蔽反斜杠 (LaTeX 命令引导符)
 _MATH_MARKERS.add("\\")
 
+# CJK 引号/书名号/方头括号 —— 用于"人名/地名/书名"近似避让。
+# 出现这些符号附近的短 CJK 段（≤5 字）极可能是人名地名书名，强制提高 MIN_CJK_RUN
+# 阈值，避免在敏感串里投放假象字。
+_NAME_QUOTE_CHARS: frozenset[str] = frozenset(
+    "「」『』《》〈〉【】〖〗［］〔〕“”‘’"
+)
+_NAME_GUARDED_MIN_RUN = 6  # 紧邻名号符号时，CJK 段必须 ≥ 这么长才允许投放
+
 
 def _looks_like_math(text: str) -> bool:
     return any(c in _MATH_MARKERS for c in text)
@@ -225,7 +233,13 @@ def candidate_indices_in_line(line: Line) -> list[int]:
             j += 1
         run_start, run_end = i, j  # [run_start, run_end)
         run_len = run_end - run_start
-        if run_len >= MIN_CJK_RUN:
+        # 名号近邻判定：若 CJK 段紧邻引号/书名号（左 1 字或右 1 字），
+        # 则该段视为"可能是人名/地名/书名"，将最低段长门槛抬到 _NAME_GUARDED_MIN_RUN。
+        left_neighbor = text[run_start - 1] if run_start - 1 >= 0 else ""
+        right_neighbor = text[run_end] if run_end < n else ""
+        adj_quote = (left_neighbor in _NAME_QUOTE_CHARS) or (right_neighbor in _NAME_QUOTE_CHARS)
+        effective_min_run = _NAME_GUARDED_MIN_RUN if adj_quote else MIN_CJK_RUN
+        if run_len >= effective_min_run:
             inner_start = run_start + LINE_EDGE_GUARD
             inner_end = run_end - LINE_EDGE_GUARD
             # 同时也要避开整行行首/行尾保护
@@ -367,14 +381,18 @@ class ProbeSampler:
             per_page_count[page_no] = per_page_count.get(page_no, 0) + 1
             placed += 1
 
-        # 4. 若不足 min_total 但池子还有空间，做一轮"放宽 max_per_page"补足
+        # 4. 若不足 min_total 但池子还有空间，做一轮补足。
+        #    重要：此轮**仍然遵守 max_per_page / max_per_line**，绝不绕过页/行上限。
+        #    （早期实现允许在这里突破 max_per_page，会导致小项目所有 probe 砸到同一页，
+        #    严重影响校对体验且违反产品口径。）
         if placed < self.cfg.min_total:
             for page_no, bi, li, line, cands in per_line_pool:
                 if placed >= self.cfg.min_total:
                     break
-                line_key = (page_no, bi, li)
+                if per_page_count.get(page_no, 0) >= self.cfg.max_per_page:
+                    continue
                 if store.for_line(page_no, bi, li):
-                    continue  # 该行已投
+                    continue  # 该行已投，遵守 max_per_line
                 char_idx = rng.choice(cands)
                 true_ch = (line.text or "")[char_idx]
                 fake_options = CONFUSION_MAP.get(true_ch, ())
@@ -386,6 +404,7 @@ class ProbeSampler:
                     true_char=true_ch,
                     fake_char=fake_ch,
                 ))
+                per_page_count[page_no] = per_page_count.get(page_no, 0) + 1
                 placed += 1
 
         return store
@@ -443,11 +462,20 @@ def reverse_display_to_true(
     # 大幅改动 → 放弃逐位对齐，整段视为用户修改
     if abs(n_now - n_before) > 2:
         observations = [(p, "edited_other") for p in probes]
-        # 但仍要确保返回的文本里没有 fake_char（粗暴替换）
+        # 严格清洗：必须确保返回的真实文本里**没有任何已投放过的 fake_char**。
+        # 旧实现 "if true_char not in cleaned" 的守卫在 true_char 偶然出现在用户改写
+        # 文本里时会跳过替换，导致 fake_char 残留 → 写回 line.text → 污染最终导出。
+        # 现在对每个 probe 都至少替换一次（fake → true），即使 true_char 已存在；
+        # 然后再做一遍兜底扫描，确保没有任何 probe 的 fake_char 还留在结果里。
         cleaned = displayed_new_text
         for p in probes:
-            if p.fake_char in cleaned and p.true_char not in cleaned:
+            if p.fake_char and p.fake_char in cleaned:
                 cleaned = cleaned.replace(p.fake_char, p.true_char, 1)
+        # 兜底：可能某 probe 的 fake_char 仍残留（例如它在文本里出现了多次），
+        # 把它们全部替换成 true_char。这是写回真实文本前的最后一道防线。
+        for p in probes:
+            if p.fake_char and p.fake_char in cleaned:
+                cleaned = cleaned.replace(p.fake_char, p.true_char)
         return cleaned, observations
 
     chars = list(displayed_new_text)
@@ -570,6 +598,176 @@ def score(store: ProbeStore, *, min_observed_for_grade: int = 4) -> QualityRepor
         band=band,
         raw_score=raw,
     )
+
+
+# ──────────────────────────────────────────────────────────────────
+# 配置回灌 —— SamplerConfig 可从 AppConfig 读取，避免硬编码魔法数
+# ──────────────────────────────────────────────────────────────────
+
+# AppConfig key -> (SamplerConfig field, type-cast)
+_SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
+    "quality_probe_target_ratio": ("target_ratio", float),
+    "quality_probe_min_total": ("min_total", int),
+    "quality_probe_max_total": ("max_total", int),
+    "quality_probe_max_per_page": ("max_per_page", int),
+    "quality_probe_max_per_line": ("max_per_line", int),
+}
+
+
+def sampler_config_from_app_config() -> SamplerConfig:
+    """从 AppConfig 读取阈值，缺失键回落到 SamplerConfig 默认值。
+
+    Qt 不可用（CLI/测试环境）时静默回落。
+    """
+    cfg = SamplerConfig()
+    try:
+        from app.core.app_config import AppConfig
+    except Exception:
+        return cfg
+    try:
+        app_cfg = AppConfig.instance()
+    except Exception:
+        return cfg
+    for key, (field_name, caster) in _SAMPLER_CONFIG_KEYS.items():
+        raw = app_cfg.get(key, None)
+        if raw is None or raw == "":
+            continue
+        try:
+            setattr(cfg, field_name, caster(raw))
+        except (TypeError, ValueError):
+            continue
+    return cfg
+
+
+# ──────────────────────────────────────────────────────────────────
+# 混淆字表扩展 —— 支持 JSON sidecar 与运行时注册
+# ──────────────────────────────────────────────────────────────────
+
+# 内部记录："扩展组"。集中保存允许后续重建 CONFUSION_MAP。
+_EXTRA_CONFUSABLES: list[tuple[str, ...]] = []
+
+
+def _rebuild_confusion_map() -> None:
+    """根据 ``_CONFUSABLES_RAW`` + ``_EXTRA_CONFUSABLES`` 重建 CONFUSION_MAP。"""
+    global CONFUSION_MAP
+    merged = list(_CONFUSABLES_RAW) + [tuple(g) for g in _EXTRA_CONFUSABLES]
+    CONFUSION_MAP = _build_confusion_map(merged)
+
+
+def register_confusion_group(group: Iterable[str]) -> None:
+    """运行时追加一组形近字（去重后并入 CONFUSION_MAP）。
+
+    供 UI 设置面板 / 测试 / 项目热扩展使用。重复字符自动去重。
+    """
+    chars = tuple(dict.fromkeys(c for c in group if c))
+    if len(chars) < 2:
+        return
+    _EXTRA_CONFUSABLES.append(chars)
+    _rebuild_confusion_map()
+
+
+def _load_confusables_extra_file() -> None:
+    """启动时从 ``app/core/confusables_extra.json`` 加载用户/项目维护的扩展组。
+
+    JSON schema：``[["己","已","巳"], ["末","未"], ...]``。
+    缺文件、解析失败、格式不对都静默跳过 —— 这是软扩展点，绝不能让模块导入崩溃。
+    """
+    import json
+    from pathlib import Path
+    try:
+        path = Path(__file__).with_name("confusables_extra.json")
+        if not path.is_file():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            return
+        for group in data:
+            if isinstance(group, (list, tuple)):
+                register_confusion_group(group)
+    except Exception:
+        return
+
+
+_load_confusables_extra_file()
+
+
+# ──────────────────────────────────────────────────────────────────
+# 持久化 —— ProbeStore 序列化为 JSON sidecar
+# ──────────────────────────────────────────────────────────────────
+
+_SIDECAR_SUFFIX = ".qprobe.json"
+_SIDECAR_VERSION = 1
+
+
+def sidecar_path_for_project(db_path: Optional[str]) -> Optional[str]:
+    """根据项目 ``.ocrproj`` 路径推导 probe sidecar 路径。
+
+    None / 空字符串 / 临时项目（无 db_path） → 返回 None，调用方应跳过持久化。
+    """
+    if not db_path:
+        return None
+    return str(db_path) + _SIDECAR_SUFFIX
+
+
+def store_to_dict(store: ProbeStore) -> dict:
+    return {
+        "version": _SIDECAR_VERSION,
+        "probes": [p.to_dict() for p in store.all()],
+    }
+
+
+def store_from_dict(data: dict) -> ProbeStore:
+    store = ProbeStore()
+    if not isinstance(data, dict):
+        return store
+    if data.get("version") != _SIDECAR_VERSION:
+        return store
+    for raw in data.get("probes", []):
+        try:
+            key_d = raw.get("key", {})
+            probe = Probe(
+                key=ProbeKey(
+                    page_number=int(key_d["page_number"]),
+                    block_index=int(key_d["block_index"]),
+                    line_index=int(key_d["line_index"]),
+                    char_index=int(key_d["char_index"]),
+                ),
+                true_char=str(raw["true_char"]),
+                fake_char=str(raw["fake_char"]),
+                observation=str(raw.get("observation", "pending")),
+            )
+            store.add(probe)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return store
+
+
+def save_store_to_path(store: ProbeStore, path: str) -> bool:
+    """写入 sidecar JSON。失败返回 False，不抛异常（持久化是辅助路径）。"""
+    import json
+    from pathlib import Path
+    try:
+        Path(path).write_text(
+            json.dumps(store_to_dict(store), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def load_store_from_path(path: str) -> Optional[ProbeStore]:
+    """读取 sidecar JSON；不存在/损坏均返回 None。"""
+    import json
+    from pathlib import Path
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return store_from_dict(data)
 
 
 # ──────────────────────────────────────────────────────────────────
