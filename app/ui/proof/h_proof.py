@@ -35,12 +35,13 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
 from app.models import Block, Line, OcrProject, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.ui.proof.char_cell_row import CharCellRow
+from app.ui.widgets.page_directory import PageDirectoryList
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
@@ -55,16 +56,17 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
-TEXT_FONT_PX = 24    # 30px 回调为缩小 20%，继续贴近 32px 行图中线
-TEXT_EDITOR_MAX_H = 50
-LINE_PAIR_H = 54
+TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
+TEXT_EDITOR_MAX_H = 32
+# Phase 24：横校改为"上图下字"竖排布局：image_row(32) + text_row(32) +
+# 中间 spacing(4) + 上下各 ~4 px = 76 px。
+LINE_PAIR_H = 76
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
-# CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68，
-# 加上 _LinePair 上下各 ~4 px 自身布局 padding，给 76 px 不裁切。
-CELL_PAIR_H = 76
+# CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
+# Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
+# 上下 padding(8) = 112 px。
+CELL_PAIR_H = 112
 TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
-TEXT_DEFAULT_COLOR = "#c5221f"
-TEXT_VISITED_COLOR = "#188038"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -177,32 +179,40 @@ class _LinePair(QFrame):
 
     def _build_ui(self) -> None:
         self.setFixedHeight(LINE_PAIR_H)
-        # Phase 17 blocker：先用普通高度，cell mode 开启时由 _apply_pair_height 切到 CELL_PAIR_H。
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        content = QWidget()
-        row = QHBoxLayout(content)
-        row.setContentsMargins(0, 2, 8, 2)
-        row.setSpacing(6)
-        root.addWidget(content)
+        # Phase 24：改为"上图下字"竖排布局。
+        # 顶层 QHBoxLayout：[active_bar | content_v(image_row + text_row) | status_lbl]
+        # content_v 内部 = QVBoxLayout：上半 image_row、下半 text_row，各
+        # 自携带左侧行号 hdr + 内容主体（img / text_lbl|editor|cell_row）。
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 2, 8, 2)
+        root.setSpacing(6)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
         self._active_bar.setStyleSheet("background: transparent;")
-        row.addWidget(self._active_bar)
+        root.addWidget(self._active_bar)
         self._active_bar2 = self._active_bar
 
-        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
+        # 中间内容容器 —— 上图下字
+        self._content = QWidget()
+        content_v = QVBoxLayout(self._content)
+        content_v.setContentsMargins(0, 0, 0, 0)
+        content_v.setSpacing(4)
+
+        # ── 上：图像行 ─────────────────────────────────────
+        img_row = QHBoxLayout()
+        img_row.setContentsMargins(0, 0, 0, 0)
+        img_row.setSpacing(6)
+
+        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
         self._lbl_img_hdr.setFixedWidth(58)
         self._lbl_img_hdr.setObjectName("muted")
         self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        row.addWidget(self._lbl_img_hdr)
+        img_row.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -213,16 +223,22 @@ class _LinePair(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        row.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
+        img_row.addWidget(self._img_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
+        content_v.addLayout(img_row)
 
-        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
+        # ── 下：文本行 ─────────────────────────────────────
+        txt_row = QHBoxLayout()
+        txt_row.setContentsMargins(0, 0, 0, 0)
+        txt_row.setSpacing(6)
+
+        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
         self._lbl_txt_hdr.setFixedWidth(58)
         self._lbl_txt_hdr.setObjectName("muted")
         self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        row.addWidget(self._lbl_txt_hdr)
+        txt_row.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(_displayed_text(self._line, self._page, self._block))
@@ -238,7 +254,7 @@ class _LinePair(QFrame):
         self._text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        row.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
+        txt_row.addWidget(self._text_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
@@ -263,7 +279,12 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        row.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
+        txt_row.addWidget(self._editor, 1, Qt.AlignmentFlag.AlignVCenter)
+        # 占位以便后续 _build_cell_row 把 cell_row 也插到 txt_row（保留布局引用）。
+        self._txt_row = txt_row
+        content_v.addLayout(txt_row)
+
+        root.addWidget(self._content, 1)
 
         # 状态标签
         self._status_lbl = QLabel()
@@ -273,7 +294,7 @@ class _LinePair(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._refresh_status()
-        row.addWidget(self._status_lbl)
+        root.addWidget(self._status_lbl)
 
         # 注册点击区域。_img_lbl 走 cell_mode-aware 的反查（普通模式下仍是行激活）。
         for w in (self, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
@@ -384,10 +405,9 @@ class _LinePair(QFrame):
                 # Phase 14b: cell 末尾 → / Tab 越界 → 跨行（复用行级 next_req/prev_req）
                 self._cell_row.next_off_end.connect(self.next_req)
                 self._cell_row.prev_off_start.connect(self.prev_req)
-                # 插入到 root layout 的 editor 同位置
-                root = self.layout()
-                # editor 在 layout 中是倒数第二个 widget（最后一个是 status_lbl）
-                root.insertWidget(root.count() - 1, self._cell_row, 6)
+                # Phase 24：上图下字布局后，cell_row 应取代 editor/text_lbl
+                # 位于 _txt_row（image 行的下一行），而非 root QHBoxLayout。
+                self._txt_row.addWidget(self._cell_row, 1, Qt.AlignmentFlag.AlignVCenter)
             self._cell_row.show()
             if self._cell_row.has_cells:
                 self._cell_row.focus_first()
@@ -687,66 +707,28 @@ class HProofPanel(QWidget):
     # ── UI 构建 ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        # Phase 24：横校改为三栏布局：
+        #   左：复用版面分析的页面目录（PageDirectoryList）
+        #   中：原滚动列表（_LinePair 已改为上图下字）
+        #   右：工具栏 + 快捷键说明（用户明确要求"放进界面"）
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── 工具栏 ─────────────────────────────────────────────
-        toolbar = QWidget()
-        toolbar.setObjectName("toolbar")
-        toolbar.setFixedHeight(46)
-        tl = QHBoxLayout(toolbar)
-        tl.setContentsMargins(12, 0, 12, 0)
-        tl.setSpacing(4)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("hproofSplitter")
 
-        self._btn_prev = QPushButton("↑ 上一行")
-        self._btn_next = QPushButton("↓ 下一行")
-        self._btn_save = QPushButton("保存  Ctrl+S")
-        self._btn_save.setObjectName("primaryBtn")
-        self._btn_flag = QPushButton("⚑ 标记  F5")
-        self._btn_skip = QPushButton("跳过  F6")
+        # ── 左：页面目录 ────────────────────────────────────────
+        self._page_dir = PageDirectoryList()
+        self._page_dir.page_selected.connect(self._on_page_dir_selected)
+        splitter.addWidget(self._page_dir)
 
-        for btn in (self._btn_prev, self._btn_next, self._btn_save,
-                    self._btn_flag, self._btn_skip):
-            btn.setMinimumHeight(30)
-            tl.addWidget(btn)
+        # ── 中：滚动列表 ────────────────────────────────────────
+        center = QWidget()
+        center_v = QVBoxLayout(center)
+        center_v.setContentsMargins(0, 0, 0, 0)
+        center_v.setSpacing(0)
 
-        # Phase 11 task 2：字格模式开关（实验，line.chars 为空的行会回退）
-        from PySide6.QtWidgets import QToolButton  # local import：仅本处用
-        self._btn_cell_mode = QToolButton()
-        self._btn_cell_mode.setText("字格模式")
-        self._btn_cell_mode.setCheckable(True)
-        self._btn_cell_mode.setMinimumHeight(30)
-        self._btn_cell_mode.setToolTip(
-            "实验：把当前行拆成『一个字一个 cell』编辑。\n"
-            "用 Tab/←/→ 在 cell 间跳；Enter 提交并跳到下一处。\n"
-            "（line.chars 为空的行会显示回退提示）"
-        )
-        self._btn_cell_mode.toggled.connect(self._on_toggle_cell_mode)
-        tl.addWidget(self._btn_cell_mode)
-
-        # 评测/正确率统计 入口已迁移到 MainWindow『设置』菜单的「正确率统计…」。
-        # 这里不再放工具栏按钮，避免和设置入口重复。
-        tl.addStretch()
-
-        self._page_combo = QComboBox()
-        self._page_combo.setMinimumWidth(120)
-        self._page_combo.currentIndexChanged.connect(self._on_page_filter_changed)
-        tl.addWidget(self._page_combo)
-
-        self._progress_lbl = QLabel("0 / 0")
-        self._progress_lbl.setObjectName("muted")
-        tl.addWidget(self._progress_lbl)
-
-        # 统计徽章
-        self._stat_lbl = QLabel("")
-        self._stat_lbl.setObjectName("muted")
-        self._stat_lbl.setStyleSheet("font-size:11px; color:#666; margin-left:8px;")
-        tl.addWidget(self._stat_lbl)
-
-        root.addWidget(toolbar)
-
-        # ── 滚动列表 ───────────────────────────────────────────
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(
@@ -768,7 +750,105 @@ class HProofPanel(QWidget):
         self._list_layout.insertWidget(0, self._empty_lbl)
 
         self._scroll.setWidget(self._list_widget)
-        root.addWidget(self._scroll, 1)
+        center_v.addWidget(self._scroll, 1)
+        splitter.addWidget(center)
+
+        # ── 右：工具栏（垂直）+ 快捷键说明 ──────────────────────
+        right = QWidget()
+        right.setObjectName("hproofRightDock")
+        right.setMinimumWidth(180)
+        right.setMaximumWidth(260)
+        right_v = QVBoxLayout(right)
+        right_v.setContentsMargins(8, 8, 8, 8)
+        right_v.setSpacing(8)
+
+        # 操作按钮组
+        actions_lbl = QLabel("操作")
+        actions_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
+        right_v.addWidget(actions_lbl)
+
+        self._btn_prev = QPushButton("↑ 上一行")
+        self._btn_next = QPushButton("↓ 下一行")
+        self._btn_save = QPushButton("保存  Ctrl+S")
+        self._btn_save.setObjectName("primaryBtn")
+        self._btn_flag = QPushButton("⚑ 标记  F5")
+        self._btn_skip = QPushButton("跳过  F6")
+        for btn in (self._btn_prev, self._btn_next, self._btn_save,
+                    self._btn_flag, self._btn_skip):
+            btn.setMinimumHeight(30)
+            right_v.addWidget(btn)
+
+        # Phase 11 task 2：字格模式开关
+        from PySide6.QtWidgets import QToolButton
+        self._btn_cell_mode = QToolButton()
+        self._btn_cell_mode.setText("字格模式")
+        self._btn_cell_mode.setCheckable(True)
+        self._btn_cell_mode.setMinimumHeight(30)
+        self._btn_cell_mode.setToolTip(
+            "实验：把当前行拆成『一个字一个 cell』编辑。\n"
+            "用 Tab/←/→ 在 cell 间跳；Enter 提交并跳到下一处。"
+        )
+        self._btn_cell_mode.toggled.connect(self._on_toggle_cell_mode)
+        right_v.addWidget(self._btn_cell_mode)
+
+        # 页面选择 / 进度
+        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setStyleSheet("color:#e3e8ef; margin:6px 0;")
+        right_v.addWidget(sep1)
+
+        page_lbl = QLabel("页面")
+        page_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
+        right_v.addWidget(page_lbl)
+
+        self._page_combo = QComboBox()
+        self._page_combo.setMinimumWidth(120)
+        self._page_combo.currentIndexChanged.connect(self._on_page_filter_changed)
+        right_v.addWidget(self._page_combo)
+
+        self._progress_lbl = QLabel("0 / 0")
+        self._progress_lbl.setObjectName("muted")
+        right_v.addWidget(self._progress_lbl)
+
+        # 统计徽章
+        self._stat_lbl = QLabel("")
+        self._stat_lbl.setObjectName("muted")
+        self._stat_lbl.setStyleSheet("font-size:11px; color:#666;")
+        right_v.addWidget(self._stat_lbl)
+
+        # ── 快捷键说明（用户明确要求"放进界面"）────────────────
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color:#e3e8ef; margin:6px 0;")
+        right_v.addWidget(sep2)
+
+        self._shortcuts_lbl = QLabel(
+            "<b>快捷键</b><br>"
+            "<small>"
+            "Enter — 确认本行并跳下一行<br>"
+            "Ctrl+↑/↓ — 上/下一行（不确认）<br>"
+            "F5 — 标记当前行<br>"
+            "F6 — 跳过本行<br>"
+            "Esc — 还原到 OCR 原文<br>"
+            "Ctrl+S — 保存全部修改<br>"
+            "Tab / ←→ — 字格模式 cell 间跳"
+            "</small>"
+        )
+        self._shortcuts_lbl.setObjectName("hproofShortcuts")
+        self._shortcuts_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._shortcuts_lbl.setWordWrap(True)
+        self._shortcuts_lbl.setStyleSheet(
+            "color:#555; font-size:11px; padding:6px;"
+            "background:#f7f9fc; border:1px solid #e3e8ef; border-radius:4px;"
+        )
+        right_v.addWidget(self._shortcuts_lbl)
+
+        right_v.addStretch()
+        splitter.addWidget(right)
+
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([110, 9999, 220])
+        root.addWidget(splitter, 1)
 
         # ── 底部状态栏 ─────────────────────────────────────────
         statusbar = QWidget()
@@ -873,10 +953,14 @@ class HProofPanel(QWidget):
         from pathlib import Path
 
         current = self._page_combo.currentData()
+        # Phase 24：页面目录与 combo 同源（仅含有 hproof 行的页面）。
+        usable_pages = [
+            page for page in self._pages
+            if any(True for _ in iter_unique_page_hproof_lines(page))
+        ]
         page_options = [
             (page.page_number, Path(page.source_path or page.image_path).name)
-            for page in self._pages
-            if any(True for _ in iter_unique_page_hproof_lines(page))
+            for page in usable_pages
         ]
         page_numbers = [page_number for page_number, _name in page_options]
         self._filter_updating = True
@@ -887,6 +971,11 @@ class HProofPanel(QWidget):
         if current in page_numbers:
             index = self._page_combo.findData(current)
             self._page_combo.setCurrentIndex(index)
+        # 同步页面目录（左栏复用版面分析的 PageDirectoryList）
+        if hasattr(self, "_page_dir"):
+            self._page_dir.set_pages(usable_pages)
+            if current in page_numbers:
+                self._page_dir.set_current_index(page_numbers.index(current))
         self._filter_updating = False
 
     def _filtered_pages(self) -> List[Page]:
@@ -907,6 +996,20 @@ class HProofPanel(QWidget):
         index = self._page_combo.findData(page_number)
         if index >= 0 and self._page_combo.currentIndex() != index:
             self._page_combo.setCurrentIndex(index)
+        # Phase 24：同步左侧页面目录
+        if hasattr(self, "_page_dir") and index >= 1:
+            # combo 第 0 项是"全部页面"，page_dir 中的 row = combo index - 1
+            self._page_dir.set_current_index(index - 1)
+
+    def _on_page_dir_selected(self, dir_idx: int) -> None:
+        """Phase 24：左侧页面目录被点击 → 同步 combo（combo 索引 = dir_idx + 1
+        因为第 0 项是"全部页面"）。"""
+        if self._filter_updating:
+            return
+        combo_idx = dir_idx + 1
+        if 0 <= combo_idx < self._page_combo.count():
+            if self._page_combo.currentIndex() != combo_idx:
+                self._page_combo.setCurrentIndex(combo_idx)
 
     def _render_pages(self, pages: List[Page]) -> None:
         self._items.clear()

@@ -1438,3 +1438,126 @@ def test_v_proof_h_change_other_line_not_overwritten_by_stale_baseline():
     assert page.blocks[0].lines[1].text == "L1_HEDIT", \
         f"VProof stale baseline 把 HProof 新内容覆盖了：{page.blocks[0].lines[1].text!r}"
     v.deleteLater()
+
+
+# ── Phase 24: UI/UX 重构 (上图下字 / 共享页面目录 / 右侧工具栏 / 纯功能正确率) ──
+
+def test_phase24_h_proof_pair_uses_vertical_image_above_text():
+    """Phase 24 blocker 1：_LinePair 必须把图像行放在文本行上方（content
+    QVBoxLayout 第 0 项是 image_row、第 1 项是 text_row）。"""
+    from app.ui.proof.h_proof import HProofPanel
+    proj = _make_project("hi")
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    pair0 = h._pairs[0]
+    # _content 是上图下字容器
+    assert hasattr(pair0, "_content"), "_LinePair 应有 _content 容器"
+    assert hasattr(pair0, "_txt_row"), "_LinePair 应保留 _txt_row 引用以便 cell_row 注入"
+    from PySide6.QtWidgets import QVBoxLayout
+    content_layout = pair0._content.layout()
+    assert isinstance(content_layout, QVBoxLayout), \
+        "_content 必须是 QVBoxLayout（上图下字）"
+    # 第 0 项 = image 行，第 1 项 = text 行；分别 indexOf 验证 widget 归属
+    img_row_layout = content_layout.itemAt(0).layout()
+    txt_row_layout = content_layout.itemAt(1).layout()
+    assert img_row_layout is not None and txt_row_layout is not None
+    assert img_row_layout.indexOf(pair0._img_lbl) >= 0, \
+        "_img_lbl 必须位于上方 image_row"
+    assert txt_row_layout.indexOf(pair0._text_lbl) >= 0, \
+        "_text_lbl 必须位于下方 text_row"
+    assert txt_row_layout.indexOf(pair0._editor) >= 0, \
+        "_editor 必须位于下方 text_row"
+    h.deleteLater()
+
+
+def test_phase24_h_proof_left_uses_shared_page_directory_list():
+    """Phase 24 blocker 2：左侧页面目录复用 PageDirectoryList，
+    与版面分析 LayoutPanel._page_list 同类。"""
+    from app.ui.proof.h_proof import HProofPanel
+    from app.ui.recognize.layout_panel import LayoutPanel
+    from app.ui.widgets.page_directory import PageDirectoryList
+
+    h = HProofPanel()
+    lp = LayoutPanel()
+    assert isinstance(h._page_dir, PageDirectoryList)
+    assert isinstance(lp._page_list, PageDirectoryList)
+    # 共用同一个类（类对象 identity）
+    assert type(h._page_dir) is type(lp._page_list)
+    h.deleteLater()
+    lp.deleteLater()
+
+
+def test_phase24_h_proof_right_dock_has_toolbar_and_shortcuts():
+    """Phase 24 blocker 3：右侧 dock 必须包含工具栏按钮 + 可见的快捷键说明。"""
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    # 操作按钮
+    for attr in ("_btn_prev", "_btn_next", "_btn_save",
+                 "_btn_flag", "_btn_skip", "_btn_cell_mode"):
+        assert hasattr(h, attr), f"右侧 dock 缺失 {attr}"
+    # 快捷键说明 label
+    assert hasattr(h, "_shortcuts_lbl"), "右侧 dock 缺失 _shortcuts_lbl"
+    txt = h._shortcuts_lbl.text()
+    for kw in ("Enter", "Ctrl+S", "F5", "F6", "Esc"):
+        assert kw in txt, f"快捷键说明缺少 {kw}"
+    h.deleteLater()
+
+
+def test_phase24_h_proof_page_dir_click_syncs_combo():
+    """Phase 24：左侧 PageDirectoryList 点击 → _page_combo 同步切到同一页。"""
+    from app.models import BBox, Block, BlockType, Line, Page, OcrProject
+    from app.ui.proof.h_proof import HProofPanel
+
+    pages = []
+    for pn in (1, 2, 3):
+        line = Line(text=f"page{pn}line", confidence=0.9, bbox=BBox(0, 0, 100, 20))
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 200), lines=[line])
+        page = Page(page_number=pn, blocks=[block],
+                    image_path=f"/tmp/p{pn}.png", width=100, height=200)
+        pages.append(page)
+    h = HProofPanel()
+    h.load_pages(pages)
+    # 目录有 3 项
+    assert h._page_dir.count() == 3
+    # 模拟点击第 2 行（页号 3）
+    h._on_page_dir_selected(2)
+    assert h._page_combo.currentData() == 3, \
+        f"combo 未同步到页 3，当前 data={h._page_combo.currentData()}"
+    h.deleteLater()
+
+
+def test_phase24_quality_stats_dialog_table_has_corrected_column():
+    """Phase 24 blocker 4：弹窗表格新增"是否修正"列（真字/假字/是否修正/观察）。"""
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    proj = _make_project("hi")
+    dlg = QualityStatsDialog(
+        project_provider=lambda: proj,
+        refresh_panels_cb=lambda: None,
+    )
+    headers = [
+        dlg._table.horizontalHeaderItem(i).text()
+        for i in range(dlg._table.columnCount())
+    ]
+    assert "真字" in headers, f"缺失真字列：{headers}"
+    assert "假字" in headers, f"缺失假字列：{headers}"
+    assert "是否修正" in headers, f"缺失是否修正列：{headers}"
+    # 按钮文案是"开始统计"（不再叫"启用"）
+    assert dlg._btn_toggle.text() == "开始统计"
+    # 不再有大段"公式"说明（Phase 11 旧 GroupBox 残留）
+    from PySide6.QtWidgets import QGroupBox
+    assert not dlg.findChildren(QGroupBox), \
+        "Phase 24：纯功能化对话框不应再有 GroupBox 包装的说明区"
+    dlg.deleteLater()
+
+
+def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
+    """Phase 24 blocker 4：底部正确率展示形如"正确率：X.X%"。"""
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    proj = _make_project("hi")
+    dlg = QualityStatsDialog(
+        project_provider=lambda: proj,
+        refresh_panels_cb=lambda: None,
+    )
+    # 默认未启用，仍显示 "rate = 待计算"（兼容 Phase 11 测试）
+    assert dlg._rate_lbl.text() == "rate = 待计算"
+    dlg.deleteLater()

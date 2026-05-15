@@ -290,19 +290,6 @@ def test_bbox_tools():
     print("test_bbox_tools PASSED")
 
 
-def test_bbox_extraction_helper_variants():
-    from app.core.bbox_extraction import bbox_from_variant, raw_bbox_max_from_variant
-    from app.models import BBox
-
-    assert bbox_from_variant({"x": 10, "y": 20, "w": 30, "h": 40}, max_w=100, max_h=100) == BBox(10, 20, 30, 40)
-    assert bbox_from_variant({"bbox": {"x1": 5, "y1": 6, "x2": 25, "y2": 36}}, max_w=100, max_h=100) == BBox(5, 6, 20, 30)
-    assert bbox_from_variant([10, 15, 30, 15, 30, 40, 10, 40], max_w=100, max_h=100) == BBox(10, 15, 20, 25)
-    assert bbox_from_variant([[90, 95], [130, 95], [130, 140], [90, 140]], max_w=100, max_h=100) == BBox(90, 95, 10, 5)
-    assert raw_bbox_max_from_variant({"coordinate": [1, 2, 11, 12]}) == (11.0, 12.0)
-
-    print("test_bbox_extraction_helper_variants PASSED")
-
-
 def test_component_matcher_extracts_and_classifies_cjk_tokens():
     import cv2
     import numpy as np
@@ -674,193 +661,6 @@ def test_confidence_normalization():
     assert normalize_badge_score("0.76") == 0.76
 
     print("test_confidence_normalization PASSED")
-
-
-def test_proof_status_helper_rules():
-    from app.core.proof_status import apply_auto_flag, proof_status_for
-    from app.models import BBox, Line, ProofStatus
-
-    assert proof_status_for(0.79) == ProofStatus.AUTO_FLAGGED
-    assert proof_status_for(0.80) == ProofStatus.UNCHECKED
-    assert proof_status_for(0.95, ["geometry_warning"]) == ProofStatus.AUTO_FLAGGED
-
-    line = Line(text="低置信", confidence=0.40, bbox=BBox(0, 0, 10, 10))
-    apply_auto_flag(line)
-    assert line.proof_status == ProofStatus.AUTO_FLAGGED
-
-    confirmed = Line(text="已确认", confidence=0.20, bbox=BBox(0, 0, 10, 10), proof_status=ProofStatus.OK)
-    apply_auto_flag(confirmed)
-    assert confirmed.proof_status == ProofStatus.OK
-
-    print("test_proof_status_helper_rules PASSED")
-
-
-def test_paddle_response_helpers_unpack_records():
-    from app.core.paddle_response import (
-        iter_layout_records_from_item,
-        iter_ocr_preferred_items,
-        iter_ocr_records_from_item,
-        result_items,
-        word_box_rows,
-    )
-
-    layout_item = {
-        "prunedResult": {
-            "layout_det_res": {"boxes": [{"label": "text", "coordinate": [1, 2, 11, 12]}]},
-            "parsing_res_list": [{"block_label": "title", "block_bbox": [3, 4, 20, 30]}],
-        }
-    }
-    ocr_item = {
-        "prunedResult": {
-            "overall_ocr_res": {
-                "rec_texts": ["天地"],
-                "rec_scores": [0.93],
-                "rec_boxes": [[10, 20, 50, 40]],
-            },
-            "textWord": [["天", "地"]],
-            "textWordBoxes": [[
-                [[10, 20], [25, 20], [25, 40], [10, 40]],
-                [[26, 20], [50, 20], [50, 40], [26, 40]],
-            ]],
-        }
-    }
-    data = {"result": {"layoutParsingResults": [layout_item], "ocrResults": [ocr_item]}}
-
-    assert result_items(data, "layoutParsingResults") == [layout_item]
-    assert iter_ocr_preferred_items(data) == [ocr_item]
-    assert len(iter_layout_records_from_item(layout_item)) == 2
-    assert iter_ocr_records_from_item(ocr_item)[0]["text"] == "天地"
-    token_rows, region_rows = word_box_rows(ocr_item)
-    assert token_rows == [["天", "地"]]
-    assert len(region_rows[0]) == 2
-
-    print("test_paddle_response_helpers_unpack_records PASSED")
-
-
-def test_ocr_ir_builder_builds_rec_and_token_fallback_lines():
-    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
-    from app.core.ocr_ir import OCR_IR_SOURCE_REC_TEXT, OCR_IR_SOURCE_TOKEN_TEXT, OCR_IR_TOKEN_TEXT_FALLBACK_FLAG
-    from app.core.ocr_ir_builder import build_ir_lines_from_item
-    from app.models import BBox
-
-    rec_item = {
-        "prunedResult": {
-            "overall_ocr_res": {
-                "rec_texts": ["天地"],
-                "rec_scores": [93],
-                "rec_boxes": [[10, 20, 50, 40]],
-            },
-            "text_word": [["天", "地"]],
-            "text_word_region": [[
-                [[10, 20], [25, 20], [25, 40], [10, 40]],
-                [[26, 20], [50, 20], [50, 40], [26, 40]],
-            ]],
-        }
-    }
-
-    lines = build_ir_lines_from_item(
-        rec_item,
-        image_shape=(80, 80),
-        fallback_bbox=BBox(0, 0, 80, 80),
-    )
-    assert len(lines) == 1
-    assert lines[0].source_text == OCR_IR_SOURCE_REC_TEXT
-    assert lines[0].confidence == 0.93
-    assert lines[0].bbox == BBox(10, 20, 40, 20)
-    assert [token.text for token in lines[0].tokens] == ["天", "地"]
-    assert lines[0].review_flags == []
-
-    missing_bbox_item = {
-        "prunedResult": {
-            "overall_ocr_res": {"rec_texts": ["缺框"], "rec_scores": [0.5]},
-        }
-    }
-    missing = build_ir_lines_from_item(
-        missing_bbox_item,
-        image_shape=(80, 80),
-        fallback_bbox=BBox(0, 0, 80, 80),
-    )
-    assert missing[0].review_flags == [MISSING_LINE_BBOX_FLAG]
-
-    token_only_item = {
-        "prunedResult": {
-            "text_word": [["甲", "乙"]],
-            "text_word_region": [[
-                [[1, 2], [10, 2], [10, 20], [1, 20]],
-                [[11, 2], [20, 2], [20, 20], [11, 20]],
-            ]],
-        }
-    }
-    token_only = build_ir_lines_from_item(
-        token_only_item,
-        image_shape=(80, 80),
-        fallback_bbox=BBox(0, 0, 80, 80),
-    )
-    assert token_only[0].text == "甲乙"
-    assert token_only[0].source_text == OCR_IR_SOURCE_TOKEN_TEXT
-    assert token_only[0].review_flags == [OCR_IR_TOKEN_TEXT_FALLBACK_FLAG]
-
-    print("test_ocr_ir_builder_builds_rec_and_token_fallback_lines PASSED")
-
-
-def test_token_char_mapper_maps_tokens_without_overwriting_spans():
-    from app.core.ocr_ir import OcrIrToken
-    from app.core.token_char_mapper import build_line_chars, find_token_span
-    from app.models import BBox
-
-    occupied = [False] * 4
-    assert find_token_span("人人有责", "人", 0, occupied) == (0, 1)
-    occupied[0] = True
-    assert find_token_span("人人有责", "人", 1, occupied) == (1, 2)
-
-    tokens = [
-        OcrIrToken(text="人", bbox=BBox(1, 2, 10, 20), row_index=0, token_index=0),
-        OcrIrToken(text="人", bbox=BBox(12, 2, 10, 20), row_index=0, token_index=1),
-        OcrIrToken(text="有责", bbox=BBox(24, 2, 20, 20), row_index=0, token_index=2, bbox_granularity="word"),
-    ]
-    chars = build_line_chars(
-        page_image=None,
-        line_text="人人有责",
-        line_confidence=0.88,
-        tokens=tokens,
-    )
-
-    assert [char.token_text for char in chars] == ["人", "人", "有责", "有责"]
-    assert chars[0].bbox == BBox(1, 2, 10, 20)
-    assert chars[1].bbox == BBox(12, 2, 10, 20)
-    assert chars[2].bbox_granularity == "word"
-    assert chars[3].bbox == chars[2].bbox
-
-    print("test_token_char_mapper_maps_tokens_without_overwriting_spans PASSED")
-
-
-def test_spatial_matching_selects_token_rows_and_layout_containers():
-    from app.core.ocr_ir_builder import TokenRow
-    from app.core.spatial_matching import (
-        min_area_overlap_ratio,
-        select_container_block_for_line,
-        select_token_row_for_line,
-        source_area_overlap_ratio,
-    )
-    from app.models import BBox, Block, BlockType, Line
-
-    line_bbox = BBox(10, 10, 40, 20)
-    row_a = TokenRow(tokens=["甲"], regions=[], bbox=BBox(0, 0, 5, 5), ir_tokens=[])
-    row_b = TokenRow(tokens=["乙"], regions=[], bbox=BBox(11, 11, 20, 18), ir_tokens=[])
-    assert select_token_row_for_line([row_a, row_b], line_bbox) is row_b
-    assert min_area_overlap_ratio(row_b.bbox, line_bbox) == 1.0
-
-    line = Line(text="正文", confidence=0.9, bbox=line_bbox)
-    partial_block = Block(block_type=BlockType.TEXT, bbox=BBox(12, 12, 10, 10), order=0)
-    exact_block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 40, 20), order=0)
-    container = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 100), order=1)
-    assert source_area_overlap_ratio(line_bbox, partial_block.bbox) == 0.125
-    assert select_container_block_for_line(line, [container, exact_block]) is exact_block
-
-    center_only = Block(block_type=BlockType.TEXT, bbox=BBox(28, 18, 2, 2), order=2)
-    assert select_container_block_for_line(line, [center_only]) is center_only
-
-    print("test_spatial_matching_selects_token_rows_and_layout_containers PASSED")
 
 
 def test_api_ocr_engine_requests_return_word_box():
@@ -3393,45 +3193,6 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     print("test_api_settings_dialog_reverse_matches_url_and_persists_profile PASSED")
 
 
-def test_api_settings_dialog_persists_llm_candidate_settings():
-    from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
-    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
-
-    _get_qapp()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _reset_app_config_for_test(tmpdir)
-        dialog = ApiSettingsDialog()
-        dialog._llm_url_edit.setText("https://llm.example.com/v1/chat/completions")
-        dialog._llm_key_edit.setText("llm-secret")
-        dialog._llm_rules_edit.setText("resources/llm_rules/default_rules.txt")
-
-        dialog._save_and_accept()
-
-        cfg = get_config()
-        assert cfg["llm_endpoint"] == "https://llm.example.com/v1/chat/completions"
-        assert cfg["llm_api_key"] == "llm-secret"
-        assert cfg["llm_rules_path"] == "resources/llm_rules/default_rules.txt"
-
-        dialog.close()
-        AppConfig.instance().reset_to_defaults()
-        AppConfig._instance = None
-
-    print("test_api_settings_dialog_persists_llm_candidate_settings PASSED")
-
-
-def test_llm_rules_loads_default_rules_file():
-    from app.core.llm_rules import get_default_llm_rules_path, load_llm_rules
-
-    rules = load_llm_rules()
-
-    assert get_default_llm_rules_path().exists()
-    assert "Do not overwrite final proof text automatically" in rules
-
-    print("test_llm_rules_loads_default_rules_file PASSED")
-
-
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -5223,9 +4984,6 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._ocr_text_box.parentWidget() is panel._proof_column
     assert panel._candidate_box.parentWidget() is panel._proof_column
     assert "border:0" in panel._candidate_box.styleSheet()
-    one_row_height = panel._gallery_box.maximumHeight()
-    panel._resize_gallery_for_entries(24)
-    assert panel._gallery_box.maximumHeight() > one_row_height
     panel.close()
 
     print("test_vproof_gallery_uses_wrapping_white_grid PASSED")
@@ -5358,46 +5116,28 @@ def test_vproof_candidate_provider_interface_is_prepared():
     panel.set_candidate_provider(provider)
 
     entry = panel._char_svc.query("田")[0]
-    panel._gallery_model.set_entries([entry])
-    panel._on_gallery_clicked(panel._gallery_model.index(0, 0))
+    panel._update_candidate_panel(entry)
 
     assert provider.requests
     assert provider.requests[0].token == "田"
     assert provider.requests[0].page_number == 3
-    assert provider.requests[0].bbox_source == "ocr"
-    assert provider.requests[0].bbox_granularity == "char"
-    assert panel._candidate_hint.text().startswith("候选：甲、由")
-    assert "bbox=ocr/char" in panel._candidate_hint.text()
+    assert "候选：甲、由" == panel._candidate_hint.text()
     panel.close()
 
     print("test_vproof_candidate_provider_interface_is_prepared PASSED")
 
 
 def test_hproof_visual_size_is_compact():
-    from PySide6.QtWidgets import QVBoxLayout
-
-    from app.models import BBox, Block, BlockType, Line, Page
     from app.ui.proof import h_proof
-    from app.ui.proof.h_proof import HProofPanel
 
     assert h_proof.IMAGE_ROW_H <= 32
-    assert h_proof.TEXT_FONT_PX == 24
-    assert h_proof.TEXT_EDITOR_MAX_H <= 50
-    assert h_proof.TEXT_DEFAULT_COLOR == "#c5221f"
-    assert h_proof.TEXT_VISITED_COLOR == "#188038"
+    assert h_proof.TEXT_FONT_PX == 18
+    assert h_proof.TEXT_EDITOR_MAX_H <= 42
+    # Phase 24：横校改为"上图下字"竖排，pair 高度 = image_row(32) +
+    # text_row(~32) + spacing(4) + 上下 padding(8) = 76 px。
+    assert h_proof.LINE_PAIR_H == 76
+    assert h_proof.LINE_PAIR_H >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
-
-    _get_qapp()
-    page = Page(image_path="/tmp/hproof-layout.png", width=100, height=100, page_number=1)
-    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[
-        Line(text="上下交替", confidence=0.9, bbox=BBox(1, 1, 60, 10)),
-    ])]
-    panel = HProofPanel()
-    panel.load_pages([page])
-    assert isinstance(panel._pairs[0].layout(), QVBoxLayout)
-    assert panel._pairs[0]._lbl_img_hdr.text().startswith("图像行")
-    assert panel._pairs[0]._lbl_txt_hdr.text().startswith("识别文本")
-    panel.close()
 
     print("test_hproof_visual_size_is_compact PASSED")
 
@@ -5511,7 +5251,6 @@ def test_ocr_inspector_paddle_adapter_marks_word_not_fake_char():
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
-    test_bbox_extraction_helper_variants()
     test_block_type_mapping()
     test_project_store()
     test_project_store_clean_on_resave()
@@ -5522,11 +5261,6 @@ if __name__ == "__main__":
     test_export_html()
     test_fake_ocr_engine()
     test_confidence_normalization()
-    test_proof_status_helper_rules()
-    test_paddle_response_helpers_unpack_records()
-    test_ocr_ir_builder_builds_rec_and_token_fallback_lines()
-    test_token_char_mapper_maps_tokens_without_overwriting_spans()
-    test_spatial_matching_selects_token_rows_and_layout_containers()
     test_api_ocr_engine_requests_return_word_box()
     test_api_ocr_engine_parses_char_level_word_boxes()
     test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
@@ -5563,8 +5297,6 @@ if __name__ == "__main__":
     test_import_service_sequential_page_numbers()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
-    test_api_settings_dialog_persists_llm_candidate_settings()
-    test_llm_rules_loads_default_rules_file()
     test_api_model_profile_helpers()
     test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
     test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()

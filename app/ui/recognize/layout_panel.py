@@ -71,8 +71,10 @@ class LayoutPanel(QWidget):
         # 主区域（两栏：页面列表 + 图像查看器）
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左：页面列表（缩窄）
-        self._page_list = QListWidget()
+        # 左：页面列表（缩窄） —— Phase 24：复用共享 PageDirectoryList，
+        # 横校面板（HProofPanel）也用这同一份组件，避免目录展示分叉。
+        from app.ui.widgets.page_directory import PageDirectoryList
+        self._page_list = PageDirectoryList()
         self._page_list.setMaximumWidth(110)
         self._page_list.setMinimumWidth(60)
         self._page_list.currentRowChanged.connect(self._on_page_selected)
