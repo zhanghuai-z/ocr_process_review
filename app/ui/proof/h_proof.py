@@ -55,14 +55,16 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
-TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
-TEXT_EDITOR_MAX_H = 42
+TEXT_FONT_PX = 24    # 30px 回调为缩小 20%，继续贴近 32px 行图中线
+TEXT_EDITOR_MAX_H = 50
 LINE_PAIR_H = 54
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
 # CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68，
 # 加上 _LinePair 上下各 ~4 px 自身布局 padding，给 76 px 不裁切。
 CELL_PAIR_H = 76
 TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
+TEXT_DEFAULT_COLOR = "#c5221f"
+TEXT_VISITED_COLOR = "#188038"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -176,25 +178,31 @@ class _LinePair(QFrame):
     def _build_ui(self) -> None:
         self.setFixedHeight(LINE_PAIR_H)
         # Phase 17 blocker：先用普通高度，cell mode 开启时由 _apply_pair_height 切到 CELL_PAIR_H。
-        root = QHBoxLayout(self)
-        root.setContentsMargins(0, 2, 8, 2)
-        root.setSpacing(6)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        content = QWidget()
+        row = QHBoxLayout(content)
+        row.setContentsMargins(0, 2, 8, 2)
+        row.setSpacing(6)
+        root.addWidget(content)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
         self._active_bar.setStyleSheet("background: transparent;")
-        root.addWidget(self._active_bar)
+        row.addWidget(self._active_bar)
         self._active_bar2 = self._active_bar
 
-        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
+        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
         self._lbl_img_hdr.setFixedWidth(58)
         self._lbl_img_hdr.setObjectName("muted")
         self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        root.addWidget(self._lbl_img_hdr)
+        row.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -205,16 +213,16 @@ class _LinePair(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        root.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
 
-        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
+        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
         self._lbl_txt_hdr.setFixedWidth(58)
         self._lbl_txt_hdr.setObjectName("muted")
         self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        root.addWidget(self._lbl_txt_hdr)
+        row.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(_displayed_text(self._line, self._page, self._block))
@@ -230,7 +238,7 @@ class _LinePair(QFrame):
         self._text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        root.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
@@ -255,7 +263,7 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        root.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 状态标签
         self._status_lbl = QLabel()
@@ -265,7 +273,7 @@ class _LinePair(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._refresh_status()
-        root.addWidget(self._status_lbl)
+        row.addWidget(self._status_lbl)
 
         # 注册点击区域。_img_lbl 走 cell_mode-aware 的反查（普通模式下仍是行激活）。
         for w in (self, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
