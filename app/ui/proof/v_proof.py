@@ -727,7 +727,7 @@ class VProofPanel(QWidget):
             return
         candidates = self._candidate_provider.suggest_candidates(request)
         text = "、".join(candidates) if candidates else "无候选"
-        self._candidate_hint.setText(f"候选：{text}\n信号：{signals}")
+        self._candidate_hint.setText(f"候选：{text}")
 
     def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
         candidates: List[str] = []
