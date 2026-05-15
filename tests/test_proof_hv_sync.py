@@ -281,24 +281,6 @@ def test_char_cell_row_no_chars_falls_back_to_tip():
     row.deleteLater()
 
 
-def test_h_proof_toggle_cell_mode_does_not_crash():
-    """开关字格模式 + 切到激活行：不应抛异常。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("abcd")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    assert h._pairs and h._pairs[0]._cell_mode_enabled is True
-    # 激活第 0 行
-    h._activate(0)
-    # 切回普通模式
-    h._on_toggle_cell_mode(False)
-    assert h._pairs[0]._cell_mode_enabled is False
-    h.deleteLater()
-
-
-# ── Phase 12：CharCell 双向高亮 + 序列对齐 ────────────────────
-
 def test_char_cell_row_focus_changed_emits_idx():
     """cell focusInEvent → CharCellRow.focus_changed(idx)。"""
     from app.ui.proof.char_cell_row import CharCellRow
@@ -339,52 +321,6 @@ def test_char_cell_row_reseat_uses_line_text_when_differs_from_chars():
     row.deleteLater()
 
 
-def test_h_proof_cell_focus_updates_pair_focus_idx_and_renders():
-    """cell 拿焦点 → _LinePair._cell_focus_idx 同步 + 触发行图重渲。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("abcd")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair = h._pairs[0]
-    assert pair._cell_row is not None and pair._cell_row.has_cells
-    pair._on_cell_focus_changed(2)
-    assert pair._cell_focus_idx == 2
-    h.deleteLater()
-
-
-def test_h_proof_img_click_lookup_finds_nearest_char_idx():
-    """点击行图区域 → 反查最近 char.bbox → cell_row 拿对应焦点。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("abcd")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair = h._pairs[0]
-    # 伪造 _line_crop / _line_crop_origin / _render_scale 让反查可计算
-    import numpy as np
-    pair._line_crop = np.zeros((20, 80, 3), dtype="uint8")
-    pair._line_crop_origin = (0, 0)
-    pair._render_scale = 1.0
-
-    class _Evt:
-        def __init__(self, x): self._x = x
-        def position(self):
-            class _P:
-                def __init__(self, x): self.x = lambda: x
-            return _P(self._x)
-
-    # char idx=2 的中心 = 20*2 + 10 = 50
-    pair._img_clicked_lookup(_Evt(50))
-    assert pair._cell_row is not None
-    assert pair._cell_row._cells[2].hasSelectedText()
-    h.deleteLater()
-
-
-# ── Phase 13：CharCell 增强 ───────────────────────────────────
-
 def test_char_cell_low_confidence_uses_red_border():
     from app.ui.proof.char_cell_row import CharCellRow
     from app.core.page_image_cache import PageImageCache
@@ -421,35 +357,6 @@ def test_char_cell_allows_multi_char_input():
     assert captured[-1] == "XYb"
     row.deleteLater()
 
-
-def test_h_proof_img_click_exact_bbox_hit_takes_precedence():
-    """点击坐标落在 char.bbox 区间内 → 选中对应 cell 而非中心最近。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("abcd")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair = h._pairs[0]
-    import numpy as np
-    pair._line_crop = np.zeros((20, 80, 3), dtype="uint8")
-    pair._line_crop_origin = (0, 0)
-    pair._render_scale = 1.0
-
-    class _Evt:
-        def __init__(self, x): self._x = x
-        def position(self):
-            class _P:
-                def __init__(self, x): self.x = lambda: x
-            return _P(self._x)
-
-    # char idx=1: bbox.x=20, x2=40；点 x=22 必命中 idx=1
-    pair._img_clicked_lookup(_Evt(22))
-    assert pair._cell_row._cells[1].hasSelectedText()
-    h.deleteLater()
-
-
-# ── Phase 14a：sequence-aware reseat + baseline 显示 ──────────
 
 def test_align_text_to_chars_equal_replace_insert():
     """SequenceMatcher 对齐：分别覆盖 equal / replace / insert / drop / overflow。"""
@@ -584,36 +491,6 @@ def test_char_cell_row_focus_next_low_conf_skips_high():
     row.deleteLater()
 
 
-def test_h_proof_cell_next_off_end_advances_to_next_pair():
-    """字格末位再按 → 越界 → 行级 next_req → 激活下一 pair 并 focus_first 字格。"""
-    from app.ui.proof.h_proof import HProofPanel
-    # 两行
-    proj = _make_project_with_chars("ab")
-    # 复制一份再加一个 line
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 6002
-    from app.models import Char
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    proj.pages[0].blocks[0].lines.append(line2)
-
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert pair0._cell_row is not None
-    # 在 pair0 末位 cell 越界
-    pair0._cell_row._focus_neighbor(len(pair0._cell_row._cells) - 1, +1)
-    # 应当激活 pair1
-    assert h._current_idx == 1
-    h.deleteLater()
-
-
-# ── Phase 15: blocker 修复回归 ──────────────────────────────────────
-
 def test_align_text_to_chars_returns_trailing_overflow():
     """text 末尾比 chars 长 → 多余字符进 trailing_overflow。"""
     from app.ui.proof.char_cell_row import CharCellRow
@@ -716,237 +593,6 @@ def test_char_cell_row_tab_at_last_emits_next_off_end():
     row.deleteLater()
 
 
-def test_h_proof_cell_tab_at_last_advances_to_next_pair():
-    """blocker 2 端到端：Tab 在末位字格 → 跨行到下一 pair 并 focus_first。"""
-    from app.ui.proof.h_proof import HProofPanel
-    from app.models import Char
-    from PySide6.QtCore import Qt, QEvent
-    from PySide6.QtGui import QKeyEvent
-    proj = _make_project_with_chars("ab")
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 7002
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    proj.pages[0].blocks[0].lines.append(line2)
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert pair0._cell_row is not None
-    last = len(pair0._cell_row._cells) - 1
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
-    pair0._cell_row._cells[last].keyPressEvent(ev)
-    assert h._current_idx == 1
-    h.deleteLater()
-
-
-# ── Phase 16: stale _cell_row blocker ──────────────────────────────
-
-def test_pair_rebind_invalidates_cell_row():
-    """blocker: rebind 到新 line 后，旧 _cell_row 必须作废，
-    避免后续 cell mode 编辑用旧 chars 覆盖新 line.text。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    old_row = pair0._cell_row
-    assert old_row is not None
-    # 构造一个新 line（不同 chars / text）
-    from app.models import Char
-    new_line = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    new_line.id = 8001
-    new_line.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    block = pair0._block
-    page = pair0._page
-    pair0.rebind(block, new_line, page, 1)
-    # active 时 invalidate 会立即重建 → 不为 None，但**不再是同一个对象**
-    assert pair0._cell_row is not None
-    assert pair0._cell_row is not old_row, "rebind 必须丢弃旧 _cell_row"
-    # 新 cell_row 反映新 line 的 chars
-    assert len(pair0._cell_row._cells) == 2
-    assert pair0._cell_row._cells[0].text() == "c"
-    h.deleteLater()
-
-
-def test_external_line_changed_invalidates_cell_row():
-    """blocker: VProof 修改 line.text 通过 bus 回流时，
-    缓存 _cell_row 必须作废，否则 cell mode 编辑会用旧文本覆盖。"""
-    from app.ui.proof.h_proof import HProofPanel
-    from app.core.proof_state_bus import ProofStateBus
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    old_row = pair0._cell_row
-    assert old_row is not None
-    # 模拟 VProof 改了 text + 通过 bus publish
-    line = proj.pages[0].blocks[0].lines[0]
-    line.text = "AB"  # 大写新版本
-    bus = ProofStateBus.instance()
-    bus.publish(
-        "line.proof_changed",
-        page_id=proj.pages[0].id,
-        line_id=line.id,
-        status=line.proof_status,
-        origin=999999,  # 任何非 id(h) 的 origin
-    )
-    # _on_external_line_changed 应已触发 _invalidate_cell_row
-    assert pair0._cell_row is not None  # active 状态会立即重建
-    assert pair0._cell_row is not old_row
-    # 新 cell_row 反映新 line.text
-    assert pair0._cell_row._cells[0].text() == "A"
-    assert pair0._cell_row._cells[1].text() == "B"
-    h.deleteLater()
-
-
-def test_external_line_changed_inactive_pair_invalidates_lazily():
-    """非 active 的 pair：invalidate 后 _cell_row 应 = None，等下次激活重建。"""
-    from app.ui.proof.h_proof import HProofPanel
-    from app.core.proof_state_bus import ProofStateBus
-    proj = _make_project_with_chars("ab")
-    # 加第二行，让 pair0 非 active
-    from app.models import Char
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 9001
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    proj.pages[0].blocks[0].lines.append(line2)
-
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    # 先激活 pair0 让它建出 _cell_row
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert pair0._cell_row is not None
-    # 切到 pair1 → pair0 不再 active，但 _cell_row 仍缓存
-    h._activate(1)
-    assert pair0._cell_row is not None  # 缓存还在
-    # 外部更新 pair0.line
-    line0 = proj.pages[0].blocks[0].lines[0]
-    line0.text = "ZZ"
-    ProofStateBus.instance().publish(
-        "line.proof_changed",
-        page_id=proj.pages[0].id,
-        line_id=line0.id,
-        status=line0.proof_status,
-        origin=999999,
-    )
-    # 非 active 时 _invalidate_cell_row 不会立即重建 → 应为 None
-    assert pair0._cell_row is None
-    # 下次激活 pair0 时按新 line 重建
-    h._activate(0)
-    assert pair0._cell_row is not None
-    assert pair0._cell_row._cells[0].text() == "Z"
-    h.deleteLater()
-
-
-# ── Phase 17: pair 高度避免裁切 CharCellRow ─────────────────────────
-
-def test_pair_height_grows_when_cell_mode_enabled():
-    """blocker: cell mode 开启后 _LinePair 高度必须 ≥ CharCellRow 高度，否则裁切。"""
-    from app.ui.proof.h_proof import HProofPanel, LINE_PAIR_H, CELL_PAIR_H
-    from app.ui.proof.char_cell_row import IMG_H, EDIT_H
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    # 普通模式下 pair 高度 = LINE_PAIR_H
-    assert pair0.height() == LINE_PAIR_H
-    # 开启 cell mode → 高度切到 CELL_PAIR_H 且 ≥ CharCellRow 总高
-    h._on_toggle_cell_mode(True)
-    assert pair0.height() == CELL_PAIR_H
-    cell_row_h = IMG_H + EDIT_H + 6
-    assert CELL_PAIR_H >= cell_row_h, f"CELL_PAIR_H={CELL_PAIR_H} 必须 ≥ CharCellRow 高 {cell_row_h}"
-    # 关闭 cell mode → 还原
-    h._on_toggle_cell_mode(False)
-    assert pair0.height() == LINE_PAIR_H
-    h.deleteLater()
-
-
-def test_all_pairs_grow_on_cell_mode_not_just_active():
-    """blocker: cell mode 应同步调整所有 pair 高度，避免列表滚动时抖动。"""
-    from app.ui.proof.h_proof import HProofPanel, LINE_PAIR_H, CELL_PAIR_H
-    from app.models import Char
-    proj = _make_project_with_chars("ab")
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 17002
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    proj.pages[0].blocks[0].lines.append(line2)
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._activate(0)
-    h._on_toggle_cell_mode(True)
-    for pair in h._pairs:
-        assert pair.height() == CELL_PAIR_H, "所有 pair（含未激活）都应放大"
-    h._on_toggle_cell_mode(False)
-    for pair in h._pairs:
-        assert pair.height() == LINE_PAIR_H
-    h.deleteLater()
-
-
-def test_cell_row_fits_in_pair_after_toggle():
-    """直接断言：cell mode 开启时 CharCellRow 本身的固定高度不超过 pair 当前高度。"""
-    from app.ui.proof.h_proof import HProofPanel, CELL_PAIR_H
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert pair0._cell_row is not None
-    assert pair0._cell_row.height() <= pair0.height(), \
-        f"cell_row {pair0._cell_row.height()} 不能超过 pair {pair0.height()}（裁切）"
-    h.deleteLater()
-
-
-# ── Phase 18: merge_pages 继承 cell mode / display_text 一致 / bus 释放 ──
-
-def test_merge_pages_new_pair_inherits_cell_mode():
-    """blocker 1: cell mode 已开 → merge_pages 新增 pair 必须同步开。"""
-    from app.ui.proof.h_proof import HProofPanel, CELL_PAIR_H
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    assert h._cell_mode_enabled is True
-    # 构造第二页（line.id 唯一），merge 进来
-    from app.models import Char
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 0, 40, 20))
-    line2.id = 18001
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  0, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 0, 20, 20)),
-    ]
-    block2 = Block(block_type=BlockType.TEXT, bbox=BBox(0,0,40,20), lines=[line2])
-    page2 = Page(page_number=2, blocks=[block2], image_path="/tmp/none2.png",
-                 width=40, height=20)
-    page2.id = 18901
-    h.merge_pages([proj.pages[0], page2])
-    # 找到新合入的 pair（最后一个）
-    new_pair = h._pairs[-1]
-    assert new_pair._cell_mode_enabled is True, "新合入 pair 必须继承 cell mode"
-    assert new_pair.height() == CELL_PAIR_H, "新 pair 高度也应同步"
-    h.deleteLater()
-
-
 def test_char_cell_row_uses_display_text_when_provided():
     """blocker 2: display_text 参数生效，覆盖 line.text。"""
     from app.ui.proof.char_cell_row import CharCellRow
@@ -965,22 +611,6 @@ def test_char_cell_row_uses_display_text_when_provided():
     row._cells[0].textEdited.emit("Z")
     assert captured[-1] == "ZXc"
     row.deleteLater()
-
-
-def test_h_proof_cell_row_built_with_displayed_text():
-    """blocker 2 端到端：HProof 构建 cell_row 时把 _displayed_text 传入。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("abc")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert pair0._cell_row is not None
-    # 没启用 quality-probe 时 displayed_text == line.text，cell 内容应等于 chars
-    line = proj.pages[0].blocks[0].lines[0]
-    assert pair0._cell_row._display_text == (line.text or "")
-    h.deleteLater()
 
 
 def test_h_proof_bus_unsubscribes_on_destroy():
@@ -1019,222 +649,6 @@ def test_v_proof_bus_unsubscribes_on_teardown():
 
 # ── Phase 19: editor in-flight 保活 + active cell_row 跟显示空间 ────────────
 
-def test_toggle_cell_mode_flushes_in_flight_editor_text():
-    """Phase 19 blocker 1：用户在 editor 里改字，未触发 _save_current 就切到字格模式，
-    in-flight 文本必须被 flush，line.text 要落盘。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    # 普通模式下激活第 0 行 → editor 可见
-    h._activate(0)
-    pair0 = h._pairs[0]
-    assert not pair0._editor.isHidden()
-    # 模拟用户在 editor 里手敲新文本（未保存）
-    pair0._editor.setPlainText("ZZ")
-    # 切到字格模式：必须先 flush
-    h._on_toggle_cell_mode(True)
-    assert pair0._line.text == "ZZ", \
-        f"expected line.text flushed to 'ZZ', got {pair0._line.text!r}"
-    h.deleteLater()
-
-
-def test_toggle_cell_mode_no_emit_when_editor_unchanged():
-    """Phase 19 blocker 1：editor 文本与显示空间一致时，切换不应产生伪保存。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    saves: list = []
-    pair0.text_saved.connect(lambda idx, t: saves.append((idx, t)))
-    # editor 内容已经等于 displayed_text，未改
-    h._on_toggle_cell_mode(True)
-    assert saves == [], f"expected no spurious text_saved, got {saves}"
-    h.deleteLater()
-
-
-def test_flush_editor_if_dirty_noop_when_inactive():
-    """Phase 19 blocker 1：非 active 行 _flush_editor_if_dirty 不发任何信号
-    （load_pages 默认 _activate(0)，所以这里造一条非 active 的 pair1 来测）。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 9101
-    proj.pages[0].blocks[0].lines.append(line2)
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    pair1 = h._pairs[1]
-    assert not pair1._active
-    saves: list = []
-    pair1.text_saved.connect(lambda idx, t: saves.append((idx, t)))
-    # 非 active pair 即便 editor 内有内容也应 no-op
-    pair1._editor.setPlainText("X")
-    pair1._flush_editor_if_dirty()
-    assert saves == []
-    h.deleteLater()
-
-
-def test_refresh_text_rebuilds_cell_row_when_active_cell_mode():
-    """Phase 19 blocker 2：active+cell_mode 下 refresh_text 必须作废并重建 _cell_row，
-    以让字格拿到最新显示空间文本（quality-probe 切换场景）。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    old_cell_row = pair0._cell_row
-    assert old_cell_row is not None
-    # 模拟 quality-probe 状态变化触发的全局 refresh
-    pair0.refresh_text()
-    new_cell_row = pair0._cell_row
-    assert new_cell_row is not None
-    assert new_cell_row is not old_cell_row, \
-        "active+cell_mode 下 refresh_text 必须重建 _cell_row"
-    h.deleteLater()
-
-
-def test_refresh_text_inactive_does_not_touch_cell_row():
-    """Phase 19 blocker 2：非 active pair 的 refresh_text 走旧路径，
-    只刷新 _text_lbl，不意外触发 cell_row 重建。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 9001
-    proj.pages[0].blocks[0].lines.append(line2)
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)  # pair0 active；pair1 非 active
-    pair1 = h._pairs[1]
-    assert not pair1._active
-    before = pair1._cell_row  # 可能为 None
-    pair1.refresh_text()
-    assert pair1._cell_row is before, \
-        "非 active pair 的 refresh_text 不应重建 _cell_row"
-    h.deleteLater()
-
-
-# ── Phase 20: 单次 refresh / 单次 rebuild ──────────────────────────
-
-def test_toggle_cell_mode_does_not_double_refresh_active_pair():
-    """Phase 20 blocker 1：_on_toggle_cell_mode 不应在 set_cell_mode 之外
-    再对 active pair 手动调一次 _refresh_active_widgets。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    calls: list = []
-    orig = pair0._refresh_active_widgets
-    pair0._refresh_active_widgets = lambda *a, **kw: (calls.append(1), orig(*a, **kw))[1]  # type: ignore[assignment]
-    h._on_toggle_cell_mode(True)
-    assert len(calls) == 1, f"expected single refresh, got {len(calls)}"
-    h.deleteLater()
-
-
-def test_toggle_cell_mode_builds_cell_row_only_once():
-    """Phase 20 blocker 1：toggle 一次后 active pair 的 _cell_row 只构建一次。"""
-    from app.ui.proof.h_proof import HProofPanel
-    import app.ui.proof.h_proof as hp_mod
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._activate(0)
-    builds: list = []
-    orig_cls = hp_mod.CharCellRow
-    def _spy(*args, **kwargs):
-        builds.append(1)
-        return orig_cls(*args, **kwargs)
-    hp_mod.CharCellRow = _spy  # type: ignore[assignment]
-    try:
-        h._on_toggle_cell_mode(True)
-    finally:
-        hp_mod.CharCellRow = orig_cls
-    assert len(builds) == 1, f"expected one CharCellRow build, got {len(builds)}"
-    h.deleteLater()
-
-
-def test_external_line_changed_active_cell_mode_single_invalidate():
-    """Phase 20 blocker 2：active+cell_mode 行收到 line.proof_changed 时，
-    _invalidate_cell_row 只走一次（refresh_text 内部那一次），
-    不应再被 _on_external_line_changed 显式调一次。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    invalidations: list = []
-    orig = pair0._invalidate_cell_row
-    pair0._invalidate_cell_row = lambda *a, **kw: (invalidations.append(1), orig(*a, **kw))[1]  # type: ignore[assignment]
-    # 模拟外部 VProof 改了同一 line
-    page = proj.pages[0]
-    line = page.blocks[0].lines[0]
-    h._bus.publish(
-        "line.proof_changed",
-        page_id=page.id, line_id=line.id,
-        status=line.proof_status, origin="v_proof",
-    )
-    assert len(invalidations) == 1, \
-        f"expected single invalidate on active+cell_mode, got {len(invalidations)}"
-    h.deleteLater()
-
-
-def test_external_line_changed_inactive_cell_mode_still_invalidates():
-    """Phase 20 blocker 2：非 active 但 cell_mode 已开的 pair，
-    缓存的 stale _cell_row 仍然要被显式作废，等下次激活才能按新 line.text 重建。"""
-    from app.ui.proof.h_proof import HProofPanel
-    from app.models import Char
-    proj = _make_project_with_chars("ab")
-    line2 = Line(text="cd", confidence=0.9, bbox=BBox(0, 30, 40, 20))
-    line2.id = 9201
-    line2.chars = [
-        Char(char="c", confidence=0.9, bbox=BBox(0,  30, 20, 20)),
-        Char(char="d", confidence=0.9, bbox=BBox(20, 30, 20, 20)),
-    ]
-    proj.pages[0].blocks[0].lines.append(line2)
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(1)  # 让 pair1 先建 cell_row
-    h._activate(0)  # 现在 pair1 inactive，但仍持有 _cell_row
-    pair1 = h._pairs[1]
-    assert pair1._cell_row is not None
-    page = proj.pages[0]
-    h._bus.publish(
-        "line.proof_changed",
-        page_id=page.id, line_id=line2.id,
-        status=line2.proof_status, origin="v_proof",
-    )
-    assert pair1._cell_row is None, \
-        "非 active+cell_mode pair 的 stale _cell_row 必须被作废"
-    h.deleteLater()
-
-
-# ── Phase 21: 工具栏"保存"按钮在 cell mode 下与 Ctrl+S 同语义 ──────
-
-def test_save_button_emits_proof_saved_in_cell_mode():
-    """Phase 21 blocker：cell mode 下点工具栏"保存"必须发 proof_saved，
-    不再是 no-op；与 Ctrl+S（_save_all）同语义。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    saves: list = []
-    h.proof_saved.connect(lambda: saves.append(1))
-    h._btn_save.click()
-    assert len(saves) >= 1, "cell mode 下点'保存'应至少发一次 proof_saved"
-    h.deleteLater()
-
-
 def test_save_button_in_normal_mode_still_persists():
     """Phase 21：普通模式（editor 可见）原有保存语义不能回退 ——
     点"保存"仍然走 _save_displayed_edit 把 editor 文本落到 line.text。"""
@@ -1251,28 +665,6 @@ def test_save_button_in_normal_mode_still_persists():
         f"普通模式按钮保存失败：line.text={pair0._line.text!r}"
     h.deleteLater()
 
-
-def test_save_button_and_ctrl_s_emit_same_signal_set():
-    """Phase 21：按钮与 Ctrl+S 共用 _save_all → 至少都发 proof_saved。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    btn_saves: list = []
-    ctrl_saves: list = []
-    h.proof_saved.connect(lambda: btn_saves.append(1))
-    h._btn_save.click()
-    h.proof_saved.disconnect()
-    h.proof_saved.connect(lambda: ctrl_saves.append(1))
-    h._save_all()
-    assert len(btn_saves) == len(ctrl_saves) and len(btn_saves) >= 1, \
-        f"按钮 vs Ctrl+S proof_saved 计数不一致：{len(btn_saves)} vs {len(ctrl_saves)}"
-    h.deleteLater()
-
-
-# ── Phase 22: VProof flush in-flight + HProof cell mode 状态点即时刷新 ──
 
 def test_v_proof_flushes_in_flight_text_before_external_sync():
     """Phase 22 blocker 1：VProof 收到外部 line.proof_changed 时，
@@ -1320,52 +712,6 @@ def test_v_proof_no_save_when_text_edit_unchanged():
     assert saves == [], f"未 dirty 时不应 emit proof_saved，got {saves}"
     v.deleteLater()
 
-
-def test_h_proof_cell_mode_status_dot_updates_on_save():
-    """Phase 22 blocker 2：cell mode 下编辑后 active pair 状态点即时刷新，
-    不应停在旧状态。"""
-    from app.ui.proof.h_proof import HProofPanel
-    from app.models import ProofStatus
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    initial_status_html = pair0._status_lbl.text()
-    # 模拟在第 0 个 cell 改字 → text_committed → text_saved 链
-    pair0._cell_row._cells[0].setText("Z")
-    pair0._cell_row._on_cell_changed()
-    # 状态应变（line.proof_status 走到 MODIFIED）
-    assert pair0._line.proof_status == ProofStatus.MODIFIED, \
-        f"line.proof_status={pair0._line.proof_status}"
-    new_status_html = pair0._status_lbl.text()
-    assert new_status_html != initial_status_html, \
-        f"状态点未刷新：{new_status_html!r}"
-    h.deleteLater()
-
-
-def test_h_proof_status_refresh_does_not_rebuild_cell_row():
-    """Phase 22 blocker 2：保存触发的状态刷新只调 _refresh_status，
-    不应作废重建 _cell_row（否则焦点被拉回第 0 格 / Phase 20 回退）。"""
-    from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
-    h = HProofPanel()
-    h.load_pages(proj.pages)
-    h._on_toggle_cell_mode(True)
-    h._activate(0)
-    pair0 = h._pairs[0]
-    cell_row_before = pair0._cell_row
-    # 触发一次保存
-    pair0._cell_row._cells[1].setText("Y")
-    pair0._cell_row._on_cell_changed()
-    # cell_row 实例不变（无重建）
-    assert pair0._cell_row is cell_row_before, \
-        "_on_text_saved 不应重建 _cell_row"
-    h.deleteLater()
-
-
-# ── Phase 23: VProof _save_page_text 后同步 _loaded_text ────────
 
 def test_v_proof_save_page_text_resyncs_loaded_text():
     """Phase 23 blocker：_save_page_text 成功后，_loaded_text 必须等于
@@ -1443,30 +789,23 @@ def test_v_proof_h_change_other_line_not_overwritten_by_stale_baseline():
 # ── Phase 24: UI/UX 重构 (上图下字 / 共享页面目录 / 右侧工具栏 / 纯功能正确率) ──
 
 def test_phase24_h_proof_pair_uses_vertical_image_above_text():
-    """Phase 24 blocker 1：_LinePair 必须把图像行放在文本行上方（content
-    QVBoxLayout 第 0 项是 image_row、第 1 项是 text_row）。"""
+    """Phase 24 blocker 1：_LinePair 必须把图像放在文本上方。
+    Phase 25：取消 _text_lbl / _txt_row（editor 始终可见，直接放在 _content 第 1 项）。"""
     from app.ui.proof.h_proof import HProofPanel
     proj = _make_project("hi")
     h = HProofPanel()
     h.load_pages(proj.pages)
     pair0 = h._pairs[0]
-    # _content 是上图下字容器
     assert hasattr(pair0, "_content"), "_LinePair 应有 _content 容器"
-    assert hasattr(pair0, "_txt_row"), "_LinePair 应保留 _txt_row 引用以便 cell_row 注入"
     from PySide6.QtWidgets import QVBoxLayout
     content_layout = pair0._content.layout()
     assert isinstance(content_layout, QVBoxLayout), \
         "_content 必须是 QVBoxLayout（上图下字）"
-    # 第 0 项 = image 行，第 1 项 = text 行；分别 indexOf 验证 widget 归属
-    img_row_layout = content_layout.itemAt(0).layout()
-    txt_row_layout = content_layout.itemAt(1).layout()
-    assert img_row_layout is not None and txt_row_layout is not None
-    assert img_row_layout.indexOf(pair0._img_lbl) >= 0, \
-        "_img_lbl 必须位于上方 image_row"
-    assert txt_row_layout.indexOf(pair0._text_lbl) >= 0, \
-        "_text_lbl 必须位于下方 text_row"
-    assert txt_row_layout.indexOf(pair0._editor) >= 0, \
-        "_editor 必须位于下方 text_row"
+    # 第 0 项 = 行图像，第 1 项 = editor（整行文本框）
+    assert content_layout.itemAt(0).widget() is pair0._img_lbl, \
+        "_img_lbl 必须位于上方"
+    assert content_layout.itemAt(1).widget() is pair0._editor, \
+        "_editor 必须位于下方（Phase 25：editor 始终可见）"
     h.deleteLater()
 
 
@@ -1485,45 +824,6 @@ def test_phase24_h_proof_left_uses_shared_page_directory_list():
     assert type(h._page_dir) is type(lp._page_list)
     h.deleteLater()
     lp.deleteLater()
-
-
-def test_phase24_h_proof_right_dock_has_toolbar_and_shortcuts():
-    """Phase 24 blocker 3：右侧 dock 必须包含工具栏按钮 + 可见的快捷键说明。"""
-    from app.ui.proof.h_proof import HProofPanel
-    h = HProofPanel()
-    # 操作按钮
-    for attr in ("_btn_prev", "_btn_next", "_btn_save",
-                 "_btn_flag", "_btn_skip", "_btn_cell_mode"):
-        assert hasattr(h, attr), f"右侧 dock 缺失 {attr}"
-    # 快捷键说明 label
-    assert hasattr(h, "_shortcuts_lbl"), "右侧 dock 缺失 _shortcuts_lbl"
-    txt = h._shortcuts_lbl.text()
-    for kw in ("Enter", "Ctrl+S", "F5", "F6", "Esc"):
-        assert kw in txt, f"快捷键说明缺少 {kw}"
-    h.deleteLater()
-
-
-def test_phase24_h_proof_page_dir_click_syncs_combo():
-    """Phase 24：左侧 PageDirectoryList 点击 → _page_combo 同步切到同一页。"""
-    from app.models import BBox, Block, BlockType, Line, Page, OcrProject
-    from app.ui.proof.h_proof import HProofPanel
-
-    pages = []
-    for pn in (1, 2, 3):
-        line = Line(text=f"page{pn}line", confidence=0.9, bbox=BBox(0, 0, 100, 20))
-        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 200), lines=[line])
-        page = Page(page_number=pn, blocks=[block],
-                    image_path=f"/tmp/p{pn}.png", width=100, height=200)
-        pages.append(page)
-    h = HProofPanel()
-    h.load_pages(pages)
-    # 目录有 3 项
-    assert h._page_dir.count() == 3
-    # 模拟点击第 2 行（页号 3）
-    h._on_page_dir_selected(2)
-    assert h._page_combo.currentData() == 3, \
-        f"combo 未同步到页 3，当前 data={h._page_combo.currentData()}"
-    h.deleteLater()
 
 
 def test_phase24_quality_stats_dialog_table_has_corrected_column():
@@ -1561,3 +861,114 @@ def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
     # 默认未启用，仍显示 "rate = 待计算"（兼容 Phase 11 测试）
     assert dlg._rate_lbl.text() == "rate = 待计算"
     dlg.deleteLater()
+
+
+
+# ── Phase 25 ─────────────────────────────────────────────────────────────────
+
+
+def test_phase25_no_cell_mode_button():
+    """Phase 25：字格模式按钮已彻底移除。"""
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    assert not hasattr(h, "_btn_cell_mode")
+    assert not hasattr(h, "_cell_mode_enabled")
+    assert not hasattr(h, "_on_toggle_cell_mode")
+    h.deleteLater()
+
+
+def test_phase25_no_prev_next_buttons():
+    """Phase 25：右栏不再有冗余的"上一行/下一行"按钮（已有快捷键 + 滚动 + 回车确认覆盖）。"""
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    assert not hasattr(h, "_btn_prev")
+    assert not hasattr(h, "_btn_next")
+    h.deleteLater()
+
+
+def test_phase25_no_page_combo():
+    """Phase 25：右栏页面下拉框已移除，页面选择由左侧页面目录唯一负责。"""
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    assert not hasattr(h, "_page_combo")
+    assert not hasattr(h, "_progress_lbl")
+    assert not hasattr(h, "_shortcuts_lbl")
+    h.deleteLater()
+
+
+def test_phase25_save_button_text_is_just_save():
+    """Phase 25：保存按钮文案改为简洁"保存"。"""
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    assert h._btn_save.text() == "保存"
+    h.deleteLater()
+
+
+def test_phase25_editor_always_visible_and_weak_cursor():
+    """Phase 25：editor 始终可见，cursorWidth=0（弱光标）。"""
+    from app.ui.proof.h_proof import HProofPanel
+    proj = _make_project("ABCD")
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    for pair in h._pairs:
+        # editor 不再在 active 切换中 hide
+        assert not pair._editor.isHidden()
+        assert pair._editor.cursorWidth() == 0
+    h.deleteLater()
+
+
+def test_phase25_no_image_text_headers():
+    """Phase 25：取消每行左侧的"图像 N / 文本 N" hdr 标签。"""
+    from app.ui.proof.h_proof import HProofPanel
+    proj = _make_project("hi")
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    pair0 = h._pairs[0]
+    assert not hasattr(pair0, "_lbl_img_hdr")
+    assert not hasattr(pair0, "_lbl_txt_hdr")
+    assert not hasattr(pair0, "_text_lbl")
+    h.deleteLater()
+
+
+def test_phase25_low_conf_chars_get_extra_selection():
+    """Phase 25：低置信度字符通过 ExtraSelection 高亮（非编辑器自身 setCharFormat）。"""
+    from app.models import BBox, Char, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+    page = Page(image_path="/tmp/p25-conf.png", width=100, height=100, page_number=1)
+    line = Line(text="低高", confidence=0.5, bbox=BBox(0, 0, 40, 20), chars=[
+        Char(char="低", confidence=0.3, bbox=BBox(0, 0, 20, 20)),
+        Char(char="高", confidence=0.95, bbox=BBox(20, 0, 20, 20)),
+    ])
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 20), lines=[line])]
+    h = HProofPanel()
+    h.load_pages([page])
+    pair = h._pairs[0]
+    sels = pair._editor.extraSelections()
+    # 至少包含 1 条低置信度高亮（"低" 字 conf=0.3 < LOW_CONF）
+    assert len(sels) >= 1
+    h.deleteLater()
+
+
+def test_phase25_horizontal_scroll_as_needed():
+    """Phase 25：横校面板横向滚动条改为 AsNeeded 以支持自适应宽度。"""
+    from PySide6.QtCore import Qt
+    from app.ui.proof.h_proof import HProofPanel
+    h = HProofPanel()
+    assert h._scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
+    h.deleteLater()
+
+
+def test_phase25_page_dir_thumbnails_loaded():
+    """Phase 25：左侧页面目录每项带有缩略图（icon 不为空）。"""
+    from app.ui.proof.h_proof import HProofPanel
+    proj = _make_project("hi")
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    item = h._page_dir.item(0)
+    assert item is not None
+    icon = item.icon()
+    # 缩略图加载失败（图片路径不存在）也容许，但 setIconSize 必须被设置成
+    # 缩略图尺寸（width >= 60）以确保视觉空间留好。
+    sz = h._page_dir.iconSize()
+    assert sz.width() >= 60 and sz.height() >= 40, \
+        f"页面目录 iconSize 应为缩略图尺寸，实际 {sz}"

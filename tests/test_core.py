@@ -4831,7 +4831,8 @@ def test_hproof_page_filter_keeps_pages_separate():
     panel.load_pages([page1, page2])
     assert len(panel._pairs) == 2
 
-    panel._page_combo.setCurrentIndex(panel._page_combo.findData(2))
+    # Phase 25：页面过滤通过 set_current_page_number / 页面目录唯一入口
+    panel.set_current_page_number(2)
 
     assert len(panel._pairs) == 1
     assert panel._items[0][2] is page2
@@ -5116,15 +5117,87 @@ def test_vproof_candidate_provider_interface_is_prepared():
     panel.set_candidate_provider(provider)
 
     entry = panel._char_svc.query("田")[0]
-    panel._update_candidate_panel(entry)
+    panel._gallery_model.set_entries([entry])
+    panel._on_gallery_clicked(panel._gallery_model.index(0, 0))
 
     assert provider.requests
     assert provider.requests[0].token == "田"
     assert provider.requests[0].page_number == 3
-    assert "候选：甲、由" == panel._candidate_hint.text()
+    assert provider.requests[0].bbox_source == "ocr"
+    assert provider.requests[0].bbox_granularity == "char"
+    assert panel._candidate_hint.text().startswith("候选：甲、由")
+    assert [button.text() for button in panel._candidate_buttons] == ["甲", "由"]
+    assert "bbox=ocr/char" in panel._candidate_hint.text()
     panel.close()
 
     print("test_vproof_candidate_provider_interface_is_prepared PASSED")
+
+
+def test_vproof_gallery_keyboard_selection_refreshes_linked_panels():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="田田",
+        confidence=0.9,
+        bbox=BBox(1, 1, 40, 10),
+        chars=[
+            Char(char="田", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="田", confidence=0.8, bbox=BBox(20, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-keyboard.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.load_pages([page])
+    entries = panel._char_svc.query("田")
+    panel._selected_char = "田"
+    panel._gallery_model.set_entries(entries)
+
+    panel._gallery_view.setCurrentIndex(panel._gallery_model.index(0, 0))
+    first_pos = panel._text_edit.textCursor().selectionStart()
+    panel._gallery_view.setCurrentIndex(panel._gallery_model.index(1, 0))
+
+    assert panel._current_candidate_entry is entries[1]
+    assert panel._text_edit.textCursor().selectedText() == "田"
+    assert panel._text_edit.textCursor().selectionStart() != first_pos
+    assert panel._viewer._highlight_item is not None
+    assert len(panel._candidate_buttons) >= 2
+    assert "由" in [button.text() for button in panel._candidate_buttons]
+    panel.close()
+
+    print("test_vproof_gallery_keyboard_selection_refreshes_linked_panels PASSED")
+
+
+def test_vproof_candidate_button_applies_to_ocr_text():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="田",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="田", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page = Page(image_path="/tmp/vproof-candidate-apply.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.load_pages([page])
+    entry = panel._char_svc.query("田")[0]
+
+    panel._selected_char = "田"
+    panel._current_candidate_entry = entry
+    panel._update_candidate_panel(entry)
+    button_by_text = {button.text(): button for button in panel._candidate_buttons}
+    button_by_text["由"].click()
+
+    assert panel._text_edit.toPlainText().startswith("由")
+    assert "待保存" in panel._status_lbl.text()
+    panel.close()
+
+    print("test_vproof_candidate_button_applies_to_ocr_text PASSED")
 
 
 def test_hproof_visual_size_is_compact():
@@ -5326,6 +5399,8 @@ if __name__ == "__main__":
     test_vproof_highlight_can_repeat_without_losing_state()
     test_vproof_highlight_survives_repeated_page_switches()
     test_vproof_candidate_provider_interface_is_prepared()
+    test_vproof_gallery_keyboard_selection_refreshes_linked_panels()
+    test_vproof_candidate_button_applies_to_ocr_text()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_layout_analyzer_builds_api_payload()

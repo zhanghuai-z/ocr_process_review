@@ -63,6 +63,20 @@ GALLERY_THUMB   = 27
 GALLERY_ITEMS_PER_ROW = 8
 GALLERY_MAX_ROWS = 4
 LOW_CONF        = 0.80
+DEFAULT_CONFUSABLE_CANDIDATES = {
+    "田": ["由", "甲", "申"],
+    "由": ["田", "甲", "申"],
+    "甲": ["田", "由", "申"],
+    "申": ["田", "由", "甲"],
+    "日": ["曰", "目", "口"],
+    "曰": ["日", "目", "口"],
+    "目": ["日", "曰", "自"],
+    "己": ["已", "巳"],
+    "已": ["己", "巳"],
+    "巳": ["己", "已"],
+    "未": ["末"],
+    "末": ["未"],
+}
 
 
 @dataclass(frozen=True)
@@ -251,6 +265,8 @@ class VProofPanel(QWidget):
         self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
+        self._current_candidate_entry: Optional[CharEntry] = None
+        self._candidate_buttons: List[QPushButton] = []
         self._candidate_provider: Optional[LlmCandidateProvider] = None
         self._updating = False
         # Phase 22 blocker 1：_load_page 后存基线文本，用于 _on_external_line_changed
@@ -407,17 +423,20 @@ class VProofPanel(QWidget):
     def _build_candidate_panel(self) -> QWidget:
         box = QWidget()
         box.setObjectName("candidatePanel")
-        box.setFixedHeight(70)
+        box.setFixedHeight(90)
         box.setStyleSheet("QWidget#candidatePanel { background:#ffffff; border:0; }")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(2)
         self._candidate_title = QLabel("候选字（LLM 预留）")
         self._candidate_title.setObjectName("sectionTitle")
+        self._candidate_buttons_row = QHBoxLayout()
+        self._candidate_buttons_row.setSpacing(4)
         self._candidate_hint = QLabel("未选择字符；候选字接口已预留，默认不调用外部模型")
         self._candidate_hint.setObjectName("muted")
         self._candidate_hint.setWordWrap(True)
         layout.addWidget(self._candidate_title)
+        layout.addLayout(self._candidate_buttons_row)
         layout.addWidget(self._candidate_hint)
         return box
 
@@ -453,6 +472,9 @@ class VProofPanel(QWidget):
         )
         self._gallery_view.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
+        )
+        self._gallery_view.selectionModel().currentChanged.connect(
+            self._on_gallery_current_changed
         )
         self._gallery_view.clicked.connect(self._on_gallery_clicked)
         layout.addWidget(self._gallery_view)
@@ -545,6 +567,8 @@ class VProofPanel(QWidget):
         self._text_edit.clear()
         self._gallery_model.set_entries([])
         self._resize_gallery_for_entries(0)
+        self._current_candidate_entry = None
+        self._clear_candidate_buttons()
         self._candidate_hint.setText("未选择字符；候选字接口已预留，默认不调用外部模型")
         self._page_label.setText("页 0 / 0")
 
@@ -633,16 +657,16 @@ class VProofPanel(QWidget):
                 QAbstractItemView.ScrollHint.PositionAtTop,
             )
         self._gallery_hdr.setText(f'"{tok}"  共 {len(entries)} 处')
-
-        # 先定位原图（可能触发翻页 → setPlainText 重置文本），再高亮文本
         target = entries[0] if entries else None
         if target:
-            self._highlight_char_in_viewer(target)
-            self._update_candidate_panel(target)
-            # 选中首条 gallery 条目与当前定位保持一致
             first_idx = self._gallery_model.index(0, 0)
             self._gallery_view.setCurrentIndex(first_idx)
-        self._highlight_char_in_text(tok, focus_entry=target)
+            self._sync_gallery_entry(first_idx)
+        else:
+            self._current_candidate_entry = None
+            self._clear_candidate_buttons()
+            self._candidate_hint.setText("无可用候选；当前字符没有可定位的 OCR 几何")
+            self._highlight_char_in_text(tok, focus_entry=None)
 
     def _rebuild_text_lookup(self, page: Page) -> None:
         _flat_text, self._text_map = _build_text_map(page)
@@ -718,6 +742,7 @@ class VProofPanel(QWidget):
         signals = self._candidate_signals_for_entry(entry)
         if self._candidate_provider is None:
             candidates = self._explainable_candidates_for_entry(entry)
+            self._set_candidate_buttons(candidates)
             candidate_text = "、".join(candidates) if candidates else request.token
             self._candidate_hint.setText(
                 f"候选：{candidate_text}\n"
@@ -726,8 +751,9 @@ class VProofPanel(QWidget):
             )
             return
         candidates = self._candidate_provider.suggest_candidates(request)
+        self._set_candidate_buttons(candidates)
         text = "、".join(candidates) if candidates else "无候选"
-        self._candidate_hint.setText(f"候选：{text}")
+        self._candidate_hint.setText(f"候选：{text}\n信号：{signals}")
 
     def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
         candidates: List[str] = []
@@ -738,7 +764,48 @@ class VProofPanel(QWidget):
         ):
             if value and value not in candidates:
                 candidates.append(value)
+        token = entry.token_text or entry.char
+        for value in DEFAULT_CONFUSABLE_CANDIDATES.get(token, []):
+            if value and value not in candidates:
+                candidates.append(value)
         return candidates
+
+    def _clear_candidate_buttons(self) -> None:
+        while self._candidate_buttons_row.count():
+            item = self._candidate_buttons_row.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._candidate_buttons = []
+
+    def _set_candidate_buttons(self, candidates: List[str]) -> None:
+        self._clear_candidate_buttons()
+        for candidate in candidates:
+            button = QPushButton(candidate)
+            button.setObjectName("candidateButton")
+            button.setMinimumHeight(24)
+            button.setToolTip(f"替换当前选中字为：{candidate}")
+            button.clicked.connect(
+                lambda _checked=False, value=candidate: self._apply_candidate(value)
+            )
+            self._candidate_buttons_row.addWidget(button)
+            self._candidate_buttons.append(button)
+        self._candidate_buttons_row.addStretch()
+
+    def _apply_candidate(self, candidate: str) -> None:
+        entry = self._current_candidate_entry
+        if entry is None:
+            return
+        token = entry.token_text or entry.char
+        self._highlight_char_in_text(token, focus_entry=entry)
+        cursor = self._text_edit.textCursor()
+        if not cursor.hasSelection():
+            return
+        cursor.insertText(candidate)
+        self._text_edit.setTextCursor(cursor)
+        self._text_edit.setFocus()
+        self._status_lbl.setText("● 已应用候选，待保存")
+        self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
 
     def _line_char_at(self, text: str, index: int) -> str:
         if 0 <= index < len(text):
@@ -771,9 +838,16 @@ class VProofPanel(QWidget):
     # ─────────────────── Gallery 点击 ───────────────────────
 
     def _on_gallery_clicked(self, index: QModelIndex) -> None:
+        self._sync_gallery_entry(index)
+
+    def _on_gallery_current_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        self._sync_gallery_entry(current)
+
+    def _sync_gallery_entry(self, index: QModelIndex) -> None:
         entry: Optional[CharEntry] = index.data(Qt.ItemDataRole.UserRole)
         if entry is None:
             return
+        self._current_candidate_entry = entry
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
         self._update_candidate_panel(entry)
         # 更新标题：让用户清楚当前看的是哪页

@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, Line, OcrProject, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
-from app.ui.proof.char_cell_row import CharCellRow
 from app.ui.widgets.page_directory import PageDirectoryList
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
@@ -163,11 +162,6 @@ class _LinePair(QFrame):
         self._image_loaded = False
         self._line_crop = None
         self._line_crop_origin: tuple[int, int] = (0, 0)
-        # Phase 11 task 2：字格模式开关 + 懒构建的 CharCellRow
-        self._cell_mode_enabled = False
-        self._cell_row: CharCellRow | None = None
-        # Phase 12：cell_mode 下当前聚焦的 cell idx；用于行图像高亮
-        self._cell_focus_idx: int | None = None
         # 最近一次行图像缩放比例，用于把 _img_lbl 上的点击位置反查回原图坐标
         self._render_scale: float = 1.0
 
@@ -179,13 +173,12 @@ class _LinePair(QFrame):
 
     def _build_ui(self) -> None:
         self.setFixedHeight(LINE_PAIR_H)
-        # Phase 24：改为"上图下字"竖排布局。
-        # 顶层 QHBoxLayout：[active_bar | content_v(image_row + text_row) | status_lbl]
-        # content_v 内部 = QVBoxLayout：上半 image_row、下半 text_row，各
-        # 自携带左侧行号 hdr + 内容主体（img / text_lbl|editor|cell_row）。
+        # Phase 25：彻底取消字格模式 / 取消"图像/文本"hdr 标签 / 整行文本框
+        # 始终可见。布局保留 Phase 24 的"上图下字"骨架：
+        #   root QHBoxLayout = [active_bar | content_v(img_row, editor) | status]
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 2, 8, 2)
-        root.setSpacing(6)
+        root.setSpacing(4)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
@@ -194,26 +187,13 @@ class _LinePair(QFrame):
         root.addWidget(self._active_bar)
         self._active_bar2 = self._active_bar
 
-        # 中间内容容器 —— 上图下字
+        # 中间内容容器：上图下字
         self._content = QWidget()
         content_v = QVBoxLayout(self._content)
         content_v.setContentsMargins(0, 0, 0, 0)
-        content_v.setSpacing(4)
+        content_v.setSpacing(2)
 
-        # ── 上：图像行 ─────────────────────────────────────
-        img_row = QHBoxLayout()
-        img_row.setContentsMargins(0, 0, 0, 0)
-        img_row.setSpacing(6)
-
-        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
-        self._lbl_img_hdr.setFixedWidth(58)
-        self._lbl_img_hdr.setObjectName("muted")
-        self._lbl_img_hdr.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        img_row.addWidget(self._lbl_img_hdr)
-
+        # ── 上：行图像（去掉左侧"图像 N"hdr，直接占满宽度）──────
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
         self._img_lbl.setAlignment(
@@ -222,54 +202,29 @@ class _LinePair(QFrame):
         self._img_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        img_row.addWidget(self._img_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
-        content_v.addLayout(img_row)
+        self._img_lbl.setStyleSheet("background:#fafbfc;")
+        content_v.addWidget(self._img_lbl)
 
-        # ── 下：文本行 ─────────────────────────────────────
-        txt_row = QHBoxLayout()
-        txt_row.setContentsMargins(0, 0, 0, 0)
-        txt_row.setSpacing(6)
-
-        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
-        self._lbl_txt_hdr.setFixedWidth(58)
-        self._lbl_txt_hdr.setObjectName("muted")
-        self._lbl_txt_hdr.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        txt_row.addWidget(self._lbl_txt_hdr)
-
-        # 文本展示（非激活）
-        self._text_lbl = QLabel(_displayed_text(self._line, self._page, self._block))
-        self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._text_lbl.setStyleSheet(
-            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0; color:#222;"
-        )
-        self._text_lbl.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        self._text_lbl.setWordWrap(False)
-        self._text_lbl.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        txt_row.addWidget(self._text_lbl, 1, Qt.AlignmentFlag.AlignVCenter)
-
-        # 文本编辑器（激活时可见）
+        # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
         self._editor = _RowEditor()
         self._editor.setStyleSheet(
+            # font-family 与图像下沿对齐：用等宽优先 + 紧凑行高，便于人工
+            # 快速逐字确认；padding 0 让首字对齐图像左侧首字。
             f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0 6px;"
+            "padding:0; background:#ffffff; border:1px solid #e3e8ef;"
         )
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
-        self._editor.document().setDocumentMargin(0)
+        self._editor.document().setDocumentMargin(2)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._editor.hide()
+        # Phase 25：弱光标 —— cursor width 0，不显示插入符；逐字定位/高亮
+        # 通过 extraSelections + cursor.setPosition 体现。
+        self._editor.setCursorWidth(0)
+        # 初始填入显示空间文本
+        self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
         # 信号转发
         self._editor.confirm_requested.connect(lambda: self.confirmed.emit(self._idx))
         self._editor.prev_requested.connect(self.prev_req)
@@ -277,12 +232,13 @@ class _LinePair(QFrame):
         self._editor.flag_requested.connect(self.flag_req)
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
+        self._editor.selectionChanged.connect(self._refresh_extra_selections)
         self._editor.selectionChanged.connect(self._render_line_image)
+        self._editor.cursorPositionChanged.connect(self._refresh_extra_selections)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        txt_row.addWidget(self._editor, 1, Qt.AlignmentFlag.AlignVCenter)
-        # 占位以便后续 _build_cell_row 把 cell_row 也插到 txt_row（保留布局引用）。
-        self._txt_row = txt_row
-        content_v.addLayout(txt_row)
+        # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
+        self._editor.textChanged.connect(self._refresh_extra_selections)
+        content_v.addWidget(self._editor)
 
         root.addWidget(self._content, 1)
 
@@ -296,10 +252,14 @@ class _LinePair(QFrame):
         self._refresh_status()
         root.addWidget(self._status_lbl)
 
-        # 注册点击区域。_img_lbl 走 cell_mode-aware 的反查（普通模式下仍是行激活）。
-        for w in (self, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
+        # 行级单击（active_bar / 整体）走 _on_click 激活本行；图像点击走
+        # _img_clicked_lookup（仍按字 bbox 反查 + cursor 定位到该字）。
+        for w in (self, self._active_bar):
             w.mousePressEvent = self._on_click  # type: ignore[method-assign]
         self._img_lbl.mousePressEvent = self._img_clicked_lookup  # type: ignore[method-assign]
+
+        # 首次绘制置信度底色
+        self._refresh_extra_selections()
 
     # ── 对外接口 ──────────────────────────────────────────────
 
@@ -311,162 +271,92 @@ class _LinePair(QFrame):
         if active:
             bar_style = f"background:{blue}; border-radius:2px;"
             bg = "#f0f6ff"
+            self._editor.setFocus()
         else:
-            # 保存编辑内容
-            if not self._editor.isHidden():
-                new_text = self._editor.toPlainText()
-                # 注意：new_text 是“显示空间”文本，要和显示空间比较
-                if new_text != _displayed_text(self._line, self._page, self._block):
-                    self.text_saved.emit(self._idx, new_text)
+            # 切走前先把 in-flight 文本保存（编辑器始终可见）
+            self._flush_editor_if_dirty()
             bar_style = "background:transparent;"
             bg = "transparent"
 
         self._active_bar.setStyleSheet(bar_style)
         self._active_bar2.setStyleSheet(bar_style)
-        self._img_lbl.setStyleSheet(f"background:#fafbfc; padding:2px 0;")
         self.setStyleSheet(
             f"QFrame#linePair {{ background:{bg}; }}"
             if active else ""
         )
-
-        if active:
-            self._text_lbl.hide()
-            self._refresh_active_widgets()
-        else:
-            self._editor.hide()
-            if self._cell_row is not None:
-                self._cell_row.hide()
-            self._cell_focus_idx = None
-            self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
-            self._text_lbl.show()
-            self._render_line_image()
-
         self._refresh_status()
-
-    def set_cell_mode(self, enabled: bool) -> None:
-        """切换字格模式。仅当本行 active 时才会真正切换可见控件，
-        非 active 行只记录状态，等下次 set_active(True) 时按状态构建。
-
-        Phase 17 blocker：必须在所有 pair 上同步调整 fixedHeight，
-        否则 cell mode 下 CharCellRow(68) 会被 LINE_PAIR_H(54) 裁掉下半截，
-        且全局 panel 滚动时不希望行高跳变。
-
-        Phase 19 blocker 1：切换前先把 active 行 editor 里 in-flight
-        未保存文本 flush 出去，否则 _refresh_active_widgets 会直接 hide
-        editor，新文本就丢了。"""
-        if self._cell_mode_enabled == enabled:
-            return
-        # Phase 19 blocker 1：切换前先 flush editor 未保存文本
-        self._flush_editor_if_dirty()
-        self._cell_mode_enabled = enabled
-        self._apply_pair_height()
-        if self._active:
-            # 重新走一遍 active=True 路径，让可见控件按新状态切换
-            self._refresh_active_widgets()
+        self._refresh_extra_selections()
+        self._render_line_image()
 
     def _flush_editor_if_dirty(self) -> None:
-        """Phase 19 blocker 1：若 active 行 editor 当前可见且文本与显示空间
-        不一致，则发 text_saved，让面板把它通过 _save_displayed_edit 落盘。
-        与 set_active(False) 里现有逻辑同口径。"""
-        if not self._active:
-            return
-        if self._editor.isHidden():
-            return
+        """若 editor 当前文本与显示空间文本不一致，发 text_saved 让面板落盘。
+        Phase 25：editor 始终可见，不再判 isHidden。"""
         new_text = self._editor.toPlainText()
         if new_text != _displayed_text(self._line, self._page, self._block):
             self.text_saved.emit(self._idx, new_text)
 
-    def _apply_pair_height(self) -> None:
-        """Phase 17 blocker：按 cell mode 状态切 pair fixedHeight，避免裁切。"""
-        target = CELL_PAIR_H if self._cell_mode_enabled else LINE_PAIR_H
-        if self.height() != target:
-            self.setFixedHeight(target)
+    # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
-    def _refresh_active_widgets(self) -> None:
-        """active 状态下按 _cell_mode_enabled 切换 editor / cell_row 显示。"""
-        # 不论何种模式，先统一把两侧隐藏；激活的那侧再 show
-        self._editor.hide()
-        if self._cell_row is not None:
-            self._cell_row.hide()
-        if self._cell_mode_enabled:
-            if self._cell_row is None:
-                # Phase 18 blocker 2：用显示空间文本（含 quality-probe fake_char）
-                # 构建字格，与保存路径 _save_displayed_edit 的输入空间一致。
-                self._cell_row = CharCellRow(
-                    self._line, self._page, self._cache,
-                    parent=self,
-                    display_text=_displayed_text(self._line, self._page, self._block),
-                )
-                self._cell_row.text_committed.connect(self._on_cell_text_committed)
-                self._cell_row.commit_requested.connect(
-                    lambda: self.confirmed.emit(self._idx)
-                )
-                self._cell_row.focus_changed.connect(self._on_cell_focus_changed)
-                # Phase 14b: cell 末尾 → / Tab 越界 → 跨行（复用行级 next_req/prev_req）
-                self._cell_row.next_off_end.connect(self.next_req)
-                self._cell_row.prev_off_start.connect(self.prev_req)
-                # Phase 24：上图下字布局后，cell_row 应取代 editor/text_lbl
-                # 位于 _txt_row（image 行的下一行），而非 root QHBoxLayout。
-                self._txt_row.addWidget(self._cell_row, 1, Qt.AlignmentFlag.AlignVCenter)
-            self._cell_row.show()
-            if self._cell_row.has_cells:
-                self._cell_row.focus_first()
-        else:
-            self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
-            self._highlight_low_conf()
-            self._editor.show()
-            self._editor.setFocus()
-        self.load_image()
+    def _refresh_extra_selections(self) -> None:
+        """根据 line.chars 的置信度 + 当前光标位置生成 extraSelections：
+        - 低置信度字符：浅红/橙底色
+        - 当前光标所在/选中字符：蓝色边框（用 outline 风格的 background）
 
-    def _invalidate_cell_row(self) -> None:
-        """Phase 16 blocker: 销毁缓存的 _cell_row。
-
-        使用场景（任何会让底层 line.text / line.chars 变化的入口）：
-          1. rebind() —— pair 指向新 Line，旧 cell_row 是旧 Line 上 build 的
-          2. HProofPanel._on_external_line_changed() —— VProof 改完文本回流
-        销毁后：若本 pair 仍然 active 且 cell_mode 开着，会立刻按新 line 重建 UI；
-        否则等下次 _refresh_active_widgets 时按需懒构。
+        弱光标即"看不到 caret，但有当前字格高亮"。
         """
-        if self._cell_row is None:
-            return
-        # 切断信号、移出 layout、释放
         try:
-            self._cell_row.text_committed.disconnect()
-            self._cell_row.commit_requested.disconnect()
-            self._cell_row.focus_changed.disconnect()
-            self._cell_row.next_off_end.disconnect()
-            self._cell_row.prev_off_start.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        self._cell_row.hide()
-        self._cell_row.setParent(None)
-        self._cell_row.deleteLater()
-        self._cell_row = None
-        self._cell_focus_idx = None
-        # 若仍 active 且 cell_mode 开着，立即重建（保持用户视觉不闪 → 等同于
-        # editor 模式下 _on_external_line_changed 会立即 setPlainText）。
-        if self._active and self._cell_mode_enabled:
-            self._refresh_active_widgets()
-
-    def _on_cell_text_committed(self, new_text: str) -> None:
-        """字格模式：每次 cell 编辑都同步到 line（不等失焦）。
-
-        发 text_saved 让 HProofPanel._save_pair 走统一保存路径。"""
-        if new_text != _displayed_text(self._line, self._page, self._block):
-            self.text_saved.emit(self._idx, new_text)
-
-    def _on_cell_focus_changed(self, idx: int) -> None:
-        """cell_mode 下某 cell 拿到焦点 → 重渲染行图高亮该字。"""
-        if self._cell_focus_idx == idx:
+            from PySide6.QtWidgets import QTextEdit
+        except Exception:
             return
-        self._cell_focus_idx = idx
-        self._render_line_image()
+        editor = self._editor
+        doc_text = editor.toPlainText()
+        sels: list = []
+
+        # 1) 置信度底色（按 line.chars 一一映射；超出/缺失按 OK 处理）
+        chars = self._line.chars or []
+        n = min(len(doc_text), len(chars))
+        for i in range(n):
+            conf = getattr(chars[i], "confidence", 1.0) or 1.0
+            if conf >= LOW_CONF:
+                continue
+            sel = QTextEdit.ExtraSelection()
+            cur = QTextCursor(editor.document())
+            cur.setPosition(i)
+            cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
+            fmt = QTextCharFormat()
+            # 红/橙阶梯
+            if conf < 0.5:
+                fmt.setBackground(QColor("#fde0e0"))
+            else:
+                fmt.setBackground(QColor("#fff1d6"))
+            sel.format = fmt
+            sel.cursor = cur
+            sels.append(sel)
+
+        # 2) 当前字（光标所在位置或 selection 范围）边框/底色
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+        else:
+            pos = cursor.position()
+            start, end = pos, min(pos + 1, len(doc_text))
+        if end > start and self._active:
+            sel = QTextEdit.ExtraSelection()
+            cur = QTextCursor(editor.document())
+            cur.setPosition(start)
+            cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            fmt = QTextCharFormat()
+            fmt.setBackground(QColor("#cfe2ff"))   # 蓝色高亮 = 当前字
+            sel.format = fmt
+            sel.cursor = cur
+            sels.append(sel)
+
+        editor.setExtraSelections(sels)
 
     def _img_clicked_lookup(self, event) -> None:
-        """点击行图区域时：cell_mode 下反查最近的 char.bbox → 把焦点送回对应 cell。
-        非 cell_mode 维持原行级激活行为。"""
-        if not (self._cell_mode_enabled and self._active and self._cell_row
-                and self._cell_row.has_cells and self._line.chars):
+        """点击行图区域：先按 char.bbox 反查最近的字 → 把 editor 光标定到该字。
+        若无 chars 信息则退回行级激活。"""
+        if not self._line.chars:
             self._on_click(event)
             return
         # 反查：把 _img_lbl 内 px 坐标 → 原图坐标 → 找最近 char
@@ -477,28 +367,39 @@ class _LinePair(QFrame):
             click_x = float(event.x())
         ox, _oy = self._line_crop_origin
         scale = self._render_scale or 1.0
-        # _img_lbl 是 left-aligned 的 pixmap；click_x 对应 crop 内偏移 / scale
         orig_x = ox + click_x / scale
-        # Phase 13: 先做精确命中（落在某 char.bbox 区间内）
+        target_idx = None
         for i, ch in enumerate(self._line.chars):
             if ch.bbox is None:
                 continue
             if ch.bbox.x <= orig_x <= ch.bbox.x2:
-                self._cell_row.focus_cell(i)
-                return
-        # fallback：中心距离最近
-        best_idx = None
-        best_dist = float("inf")
-        for i, ch in enumerate(self._line.chars):
-            if ch.bbox is None:
-                continue
-            cx = (ch.bbox.x + ch.bbox.x2) / 2.0
-            d = abs(cx - orig_x)
-            if d < best_dist:
-                best_dist = d
-                best_idx = i
-        if best_idx is not None:
-            self._cell_row.focus_cell(best_idx)
+                target_idx = i
+                break
+        if target_idx is None:
+            best_dist = float("inf")
+            for i, ch in enumerate(self._line.chars):
+                if ch.bbox is None:
+                    continue
+                cx = (ch.bbox.x + ch.bbox.x2) / 2.0
+                d = abs(cx - orig_x)
+                if d < best_dist:
+                    best_dist = d
+                    target_idx = i
+        if target_idx is None:
+            self._on_click(event)
+            return
+        # 先激活本行
+        if not self._active:
+            # 复用 _on_click 的 emit 路径
+            self._on_click(event)
+        # 把 editor 光标定到该字
+        from PySide6.QtGui import QTextCursor
+        cur = self._editor.textCursor()
+        cur.setPosition(target_idx)
+        cur.setPosition(target_idx + 1, QTextCursor.MoveMode.KeepAnchor)
+        self._editor.setTextCursor(cur)
+        self._editor.setFocus()
+        self._refresh_extra_selections()
 
     def load_image(self) -> None:
         """懒加载行图像。"""
@@ -535,19 +436,15 @@ class _LinePair(QFrame):
             return
         crop = self._line_crop.copy()
         highlight_range: tuple[int, int] | None = None
-        if (self._active and self._cell_mode_enabled
-                and self._cell_focus_idx is not None
-                and 0 <= self._cell_focus_idx < len(self._line.chars)):
-            # cell_mode：高亮当前聚焦 cell 对应的 char.bbox
-            highlight_range = (self._cell_focus_idx, self._cell_focus_idx + 1)
-        elif not self._editor.isHidden():
+        # Phase 25：editor 始终可见，按光标/选区在行图上高亮对应 char.bbox。
+        if self._active:
             cursor = self._editor.textCursor()
             start = min(cursor.selectionStart(), cursor.selectionEnd())
             end = max(cursor.selectionStart(), cursor.selectionEnd())
             if end > start:
                 highlight_range = (start, end)
             else:
-                pos = cursor.position() - 1
+                pos = cursor.position()
                 if 0 <= pos < len(self._line.chars):
                     highlight_range = (pos, pos + 1)
         if highlight_range is not None:
@@ -585,18 +482,20 @@ class _LinePair(QFrame):
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
 
     def refresh_text(self) -> None:
-        """外部更新 line.text 后刷新显示。
+        """外部（VProof / probe 切换）更新 line.text 后同步 editor 文本。
 
-        Phase 19 blocker 2：active + cell_mode 时，缓存的 _cell_row 上挂的是
-        旧的 display_text（quality-probe 切换前的显示空间），必须作废重建，
-        否则普通行标签已经按新 active store 更新了，但字格仍显示旧空间文本。
-        _invalidate_cell_row 会在 active+cell_mode 下立刻按当前 line+display
-        重建 _cell_row。"""
-        if not self._active:
-            self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
-        elif self._cell_mode_enabled:
-            self._invalidate_cell_row()
+        Phase 25：editor 始终可见 → 直接 blockSignals + setPlainText 重写当前
+        文本，避免触发 dirty flush。active 行上若用户正在编辑，会被覆盖
+        （这是与 V 同步的既有行为；实时 dirty 已通过 _flush_editor_if_dirty
+        在 set_active 切走前落盘）。
+        """
+        new_disp = _displayed_text(self._line, self._page, self._block)
+        if self._editor.toPlainText() != new_disp:
+            self._editor.blockSignals(True)
+            self._editor.setPlainText(new_disp)
+            self._editor.blockSignals(False)
         self._refresh_status()
+        self._refresh_extra_selections()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
@@ -604,16 +503,14 @@ class _LinePair(QFrame):
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
-        self._lbl_img_hdr.setText(f"图像 {line_in_page}")
-        self._lbl_txt_hdr.setText(f"文本 {line_in_page}")
         self._image_loaded = False
         self._line_crop = None
-        if self._editor.isHidden():
-            self._text_lbl.setText(_displayed_text(line, page, block))
-        # Phase 16 blocker：rebind 后旧 _cell_row 是旧 line 上 build 的，必须作废，
-        # 否则 cell mode 编辑会用旧 char 内容覆盖新 line.text。
-        self._invalidate_cell_row()
+        # Phase 25：editor 始终可见。rebind 不触碰 editor 内容，
+        # 与 Phase 24 之前 "isHidden() 才同步" 的行为等价 —— 这样用户在原行上
+        # 未提交的编辑（dirty 文本）不会被 merge_pages 路径上的 rebind 覆盖。
+        # 真正的"显示空间已变"由 refresh_text() 单独负责。
         self._refresh_status()
+        self._refresh_extra_selections()
 
     @property
     def line(self) -> Line:
@@ -650,9 +547,9 @@ class _LinePair(QFrame):
         self._editor.blockSignals(False)
 
     def _highlight_low_conf(self) -> None:
-        cur = QTextCursor(self._editor.document())
-        cur.select(QTextCursor.SelectionType.Document)
-        cur.setCharFormat(QTextCharFormat())
+        # Phase 25：低置信度高亮已经通过 _refresh_extra_selections 实现
+        # （per-char ExtraSelection 背景色），这里保留方法仅为兼容旧调用点。
+        self._refresh_extra_selections()
 
     def _refresh_status(self) -> None:
         status = self._line.proof_status
@@ -680,10 +577,9 @@ class HProofPanel(QWidget):
         self._pairs: List[_LinePair] = []
         self._current_idx: int = 0
         self._filter_updating = False
+        self._selected_page_number: int | None = None  # Phase 25：左侧目录唯一过滤源
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
-        # Phase 18 blocker 1：面板级 cell_mode 状态，merge_pages 新建 pair 时同步。
-        self._cell_mode_enabled: bool = False
         # H/V 校对联动：订阅其他 panel 编辑事件；origin == id(self) 的事件忽略。
         # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
         self._bus_unsub = self._bus.subscribe(
@@ -732,7 +628,7 @@ class HProofPanel(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
 
@@ -762,84 +658,25 @@ class HProofPanel(QWidget):
         right_v.setContentsMargins(8, 8, 8, 8)
         right_v.setSpacing(8)
 
-        # 操作按钮组
+        # 操作按钮组（Phase 25：右栏精简，只剩保存 / 标记 / 跳过）
         actions_lbl = QLabel("操作")
         actions_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
         right_v.addWidget(actions_lbl)
 
-        self._btn_prev = QPushButton("↑ 上一行")
-        self._btn_next = QPushButton("↓ 下一行")
-        self._btn_save = QPushButton("保存  Ctrl+S")
+        self._btn_save = QPushButton("保存")
         self._btn_save.setObjectName("primaryBtn")
+        self._btn_save.setToolTip("保存所有修改  (Ctrl+S)")
         self._btn_flag = QPushButton("⚑ 标记  F5")
         self._btn_skip = QPushButton("跳过  F6")
-        for btn in (self._btn_prev, self._btn_next, self._btn_save,
-                    self._btn_flag, self._btn_skip):
+        for btn in (self._btn_save, self._btn_flag, self._btn_skip):
             btn.setMinimumHeight(30)
             right_v.addWidget(btn)
 
-        # Phase 11 task 2：字格模式开关
-        from PySide6.QtWidgets import QToolButton
-        self._btn_cell_mode = QToolButton()
-        self._btn_cell_mode.setText("字格模式")
-        self._btn_cell_mode.setCheckable(True)
-        self._btn_cell_mode.setMinimumHeight(30)
-        self._btn_cell_mode.setToolTip(
-            "实验：把当前行拆成『一个字一个 cell』编辑。\n"
-            "用 Tab/←/→ 在 cell 间跳；Enter 提交并跳到下一处。"
-        )
-        self._btn_cell_mode.toggled.connect(self._on_toggle_cell_mode)
-        right_v.addWidget(self._btn_cell_mode)
-
-        # 页面选择 / 进度
-        sep1 = QFrame(); sep1.setFrameShape(QFrame.Shape.HLine)
-        sep1.setStyleSheet("color:#e3e8ef; margin:6px 0;")
-        right_v.addWidget(sep1)
-
-        page_lbl = QLabel("页面")
-        page_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
-        right_v.addWidget(page_lbl)
-
-        self._page_combo = QComboBox()
-        self._page_combo.setMinimumWidth(120)
-        self._page_combo.currentIndexChanged.connect(self._on_page_filter_changed)
-        right_v.addWidget(self._page_combo)
-
-        self._progress_lbl = QLabel("0 / 0")
-        self._progress_lbl.setObjectName("muted")
-        right_v.addWidget(self._progress_lbl)
-
-        # 统计徽章
+        # 统计徽章（保留：用于全局进度小字提示）
         self._stat_lbl = QLabel("")
         self._stat_lbl.setObjectName("muted")
         self._stat_lbl.setStyleSheet("font-size:11px; color:#666;")
         right_v.addWidget(self._stat_lbl)
-
-        # ── 快捷键说明（用户明确要求"放进界面"）────────────────
-        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet("color:#e3e8ef; margin:6px 0;")
-        right_v.addWidget(sep2)
-
-        self._shortcuts_lbl = QLabel(
-            "<b>快捷键</b><br>"
-            "<small>"
-            "Enter — 确认本行并跳下一行<br>"
-            "Ctrl+↑/↓ — 上/下一行（不确认）<br>"
-            "F5 — 标记当前行<br>"
-            "F6 — 跳过本行<br>"
-            "Esc — 还原到 OCR 原文<br>"
-            "Ctrl+S — 保存全部修改<br>"
-            "Tab / ←→ — 字格模式 cell 间跳"
-            "</small>"
-        )
-        self._shortcuts_lbl.setObjectName("hproofShortcuts")
-        self._shortcuts_lbl.setTextFormat(Qt.TextFormat.RichText)
-        self._shortcuts_lbl.setWordWrap(True)
-        self._shortcuts_lbl.setStyleSheet(
-            "color:#555; font-size:11px; padding:6px;"
-            "background:#f7f9fc; border:1px solid #e3e8ef; border-radius:4px;"
-        )
-        right_v.addWidget(self._shortcuts_lbl)
 
         right_v.addStretch()
         splitter.addWidget(right)
@@ -847,7 +684,7 @@ class HProofPanel(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([110, 9999, 220])
+        splitter.setSizes([180, 9999, 180])
         root.addWidget(splitter, 1)
 
         # ── 底部状态栏 ─────────────────────────────────────────
@@ -864,7 +701,6 @@ class HProofPanel(QWidget):
             lbl.setStyleSheet("font-size:11px; color:#666;")
             sl.addWidget(lbl)
 
-        # 图例
         for color, label in (
             ("#4CAF50", "与原文一致"),
             ("#FF9800", "疑似错误"),
@@ -882,16 +718,6 @@ class HProofPanel(QWidget):
         root.addWidget(statusbar)
 
         # ── 信号 ───────────────────────────────────────────────
-        self._btn_prev.clicked.connect(self._prev)
-        self._btn_next.clicked.connect(self._next)
-        # Phase 21 blocker：工具栏"保存"按钮原本走 _save_current，
-        # 在 cell mode 下 editor 隐藏 → _save_current 内部 isHidden 早退 → 全程
-        # no-op，连 proof_saved 都不发。Ctrl+S 走的是 _save_all（_save_current
-        # + 无条件 emit proof_saved），用户感知"保存还能用"。这里把按钮也指向
-        # _save_all，保持与 Ctrl+S 完全同语义。
-        # 注意：cell mode 下文本本身是按 cell 实时落盘的（textEdited → text_committed
-        # → _on_cell_text_committed → text_saved → _save_displayed_edit），
-        # 所以按钮的"保存"语义实际是"广播 proof_saved + 走一次现有保存路径"。
         self._btn_save.clicked.connect(self._save_all)
         self._btn_flag.clicked.connect(self._toggle_flag)
         self._btn_skip.clicked.connect(self._next)
@@ -946,70 +772,63 @@ class HProofPanel(QWidget):
         if added:
             self._empty_lbl.setVisible(False)
             self._update_stats()
-            self._progress_lbl.setText(f"{self._current_idx + 1} / {len(self._pairs)}")
             QTimer.singleShot(100, self._load_visible_images)
 
     def _refresh_page_filter(self) -> None:
+        """Phase 25：仅维护左侧 PageDirectoryList 的页面项；不再有 combo。"""
         from pathlib import Path
 
-        current = self._page_combo.currentData()
-        # Phase 24：页面目录与 combo 同源（仅含有 hproof 行的页面）。
         usable_pages = [
             page for page in self._pages
             if any(True for _ in iter_unique_page_hproof_lines(page))
         ]
-        page_options = [
-            (page.page_number, Path(page.source_path or page.image_path).name)
-            for page in usable_pages
-        ]
-        page_numbers = [page_number for page_number, _name in page_options]
+        page_numbers = [p.page_number for p in usable_pages]
         self._filter_updating = True
-        self._page_combo.clear()
-        self._page_combo.addItem("全部页面", None)
-        for page_number, name in page_options:
-            self._page_combo.addItem(f"第 {page_number} 页  {name}", page_number)
-        if current in page_numbers:
-            index = self._page_combo.findData(current)
-            self._page_combo.setCurrentIndex(index)
-        # 同步页面目录（左栏复用版面分析的 PageDirectoryList）
         if hasattr(self, "_page_dir"):
             self._page_dir.set_pages(usable_pages)
-            if current in page_numbers:
-                self._page_dir.set_current_index(page_numbers.index(current))
+            if self._selected_page_number in page_numbers:
+                self._page_dir.set_current_index(
+                    page_numbers.index(self._selected_page_number)
+                )
+        # 若选中页消失（被移除），回退到"全部页面"
+        if self._selected_page_number is not None and                 self._selected_page_number not in page_numbers:
+            self._selected_page_number = None
         self._filter_updating = False
 
     def _filtered_pages(self) -> List[Page]:
-        page_number = self._page_combo.currentData()
-        if page_number is None:
+        if self._selected_page_number is None:
             return self._pages
-        return [page for page in self._pages if page.page_number == page_number]
-
-    def _on_page_filter_changed(self) -> None:
-        if self._filter_updating:
-            return
-        page_number = self._page_combo.currentData()
-        if page_number is not None:
-            self.page_selected.emit(int(page_number))
-        self._render_pages(self._filtered_pages())
+        return [p for p in self._pages if p.page_number == self._selected_page_number]
 
     def set_current_page_number(self, page_number: int) -> None:
-        index = self._page_combo.findData(page_number)
-        if index >= 0 and self._page_combo.currentIndex() != index:
-            self._page_combo.setCurrentIndex(index)
-        # Phase 24：同步左侧页面目录
-        if hasattr(self, "_page_dir") and index >= 1:
-            # combo 第 0 项是"全部页面"，page_dir 中的 row = combo index - 1
-            self._page_dir.set_current_index(index - 1)
+        """外部联动调用：把过滤器切换到指定页。"""
+        self._selected_page_number = int(page_number)
+        # 同步左侧目录视觉
+        if hasattr(self, "_page_dir"):
+            usable_numbers = [
+                p.page_number for p in self._pages
+                if any(True for _ in iter_unique_page_hproof_lines(p))
+            ]
+            if page_number in usable_numbers:
+                self._page_dir.set_current_index(usable_numbers.index(page_number))
+        self._render_pages(self._filtered_pages())
 
     def _on_page_dir_selected(self, dir_idx: int) -> None:
-        """Phase 24：左侧页面目录被点击 → 同步 combo（combo 索引 = dir_idx + 1
-        因为第 0 项是"全部页面"）。"""
+        """Phase 25：左栏页面目录是页面过滤的唯一入口。点击 → 切换过滤 + 重渲染。"""
         if self._filter_updating:
             return
-        combo_idx = dir_idx + 1
-        if 0 <= combo_idx < self._page_combo.count():
-            if self._page_combo.currentIndex() != combo_idx:
-                self._page_combo.setCurrentIndex(combo_idx)
+        usable_pages = [
+            page for page in self._pages
+            if any(True for _ in iter_unique_page_hproof_lines(page))
+        ]
+        if not (0 <= dir_idx < len(usable_pages)):
+            return
+        target = usable_pages[dir_idx]
+        if self._selected_page_number == target.page_number:
+            return
+        self._selected_page_number = target.page_number
+        self.page_selected.emit(int(target.page_number))
+        self._render_pages(self._filtered_pages())
 
     def _render_pages(self, pages: List[Page]) -> None:
         self._items.clear()
@@ -1072,10 +891,6 @@ class HProofPanel(QWidget):
         pair.skip_req.connect(self._next)
         self._pairs.append(pair)
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
-        # Phase 18 blocker 1：merge_pages 期间新增 pair 必须继承当前面板 cell mode，
-        # 否则会出现"已开启字格模式，但新合入的页仍是普通模式"的不一致。
-        if self._cell_mode_enabled:
-            pair.set_cell_mode(True)
 
     def _line_key(self, block: Block, line: Line, page: Page, line_idx: int) -> tuple:
         bbox = line.bbox.normalize()
@@ -1095,7 +910,6 @@ class HProofPanel(QWidget):
 
     def reset(self) -> None:
         self.load_pages([])
-        self._progress_lbl.setText("0 / 0")
         self._stat_lbl.setText("")
         self._total_lbl.setText("总字数 0")
         self._diff_lbl.setText("差异 0 (0%)")
@@ -1121,7 +935,6 @@ class HProofPanel(QWidget):
         pair.set_active(True)
         # 滚动到可见
         QTimer.singleShot(30, lambda: self._scroll.ensureWidgetVisible(pair, 0, 40))
-        self._progress_lbl.setText(f"{idx + 1} / {len(self._pairs)}")
 
     def _on_pair_clicked(self, idx: int) -> None:
         if idx != self._current_idx:
@@ -1179,20 +992,20 @@ class HProofPanel(QWidget):
         if not self._pairs or self._current_idx >= len(self._pairs):
             return
         pair = self._pairs[self._current_idx]
-        if not pair._editor.isHidden():
-            new_text = pair._editor.toPlainText()
-            block, line, page, _ = self._items[self._current_idx]
-            if _save_displayed_edit(line, page, block, new_text):
-                self._bus.publish(
-                    "line.proof_changed",
-                    page_id=page.id,
-                    line_id=line.id,
-                    status=line.proof_status.value,
-                    origin=id(self),
-                )
-                self.proof_saved.emit()
-                pair.refresh_text()
-                self._update_stats()
+        # Phase 25：editor 始终可见，直接读其当前文本与 line 比较保存
+        new_text = pair._editor.toPlainText()
+        block, line, page, _ = self._items[self._current_idx]
+        if _save_displayed_edit(line, page, block, new_text):
+            self._bus.publish(
+                "line.proof_changed",
+                page_id=page.id,
+                line_id=line.id,
+                status=line.proof_status.value,
+                origin=id(self),
+            )
+            self.proof_saved.emit()
+            pair.refresh_text()
+            self._update_stats()
 
     def _save_all(self) -> None:
         self._save_current()
@@ -1235,21 +1048,7 @@ class HProofPanel(QWidget):
         for i, (block, line, page, _li) in enumerate(self._items):
             if line.id == line_id:
                 pair = self._pairs[i]
-                if i == self._current_idx and not pair._editor.isHidden():
-                    pair._editor.blockSignals(True)
-                    pair._editor.setPlainText(_displayed_text(line, page, block))
-                    pair._editor.blockSignals(False)
-                # Phase 16 blocker：底层 line.text 已被 VProof 改写，
-                # 缓存的 _cell_row 是旧 line.text 上算出的 cell_inits / trailing_overflow，
-                # 必须作废，否则 cell mode 下一次编辑会用旧内容覆盖新文本。
-                # Phase 20 blocker 2：active+cell_mode 行的作废+重建由
-                # refresh_text 内部统一负责（Phase 19 起即如此）；这里如果再显式
-                # 调一次 _invalidate_cell_row，就会双重作废+重建，焦点被拉回第 0 格。
-                # 只在非 active pair 上显式作废 —— 此时 refresh_text 不会自动作废，
-                # 但用户尚未激活该行，缓存的 stale cell_row 必须先丢掉，
-                # 等下次 _refresh_active_widgets 才会按新 line.text 重新构建。
-                if not pair._active:
-                    pair._invalidate_cell_row()
+                # Phase 25：editor 始终可见 → 直接走 refresh_text 同步显示文本。
                 pair.refresh_text()
                 touched = True
         if touched:
@@ -1265,19 +1064,6 @@ class HProofPanel(QWidget):
         self._total_lbl.setText(f"总字数 {total_chars:,}")
         self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
 
-
-    def _on_toggle_cell_mode(self, checked: bool) -> None:
-        """字格模式切换：广播到所有 _LinePair；当前行立即 re-activate
-        以让可见控件按新状态切换。
-
-        Phase 18 blocker 1：同步面板级状态，让 merge_pages 后新建 pair 自动继承。
-
-        Phase 20 blocker 1：active pair 的 _refresh_active_widgets 由 set_cell_mode
-        自身在状态变化分支里负责调用（Phase 17 起即如此），这里再补一次
-        会让 active 行可见地闪一下、cell_row 还会被构建两次。删掉手动二次刷新。"""
-        self._cell_mode_enabled = checked
-        for pair in self._pairs:
-            pair.set_cell_mode(checked)
 
     def refresh_quality_probe_state(self) -> None:
         """重新渲染所有可见行，使显示空间文本与全局 active store 对齐。
