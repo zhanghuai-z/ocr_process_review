@@ -686,10 +686,11 @@ def test_reverse_small_change_end_to_end_no_fake_in_line_text():
 # ════════════════════════════════════════════════════════════════
 
 def test_manual_toggle_uses_app_config_thresholds(monkeypatch, tmp_path):
-    """手动开评测路径必须走 sampler_config_from_app_config，不能 new 默认 SamplerConfig。
+    """手动开「正确率统计」必须走 sampler_config_from_app_config，不能 new 默认 SamplerConfig。
 
-    通过 monkeypatch sampler_config_from_app_config 返回一个识别明显的非默认配置，
-    再触发 HProofPanel._on_toggle_quality_probe(True)，断言返回的 store 用了这个配置。
+    Phase 11：原 HProofPanel 工具栏「评测：开」入口已迁移到设置→正确率统计 对话框。
+    本测试改为驱动 QualityStatsDialog._on_toggle(True)，仍然断言 manual toggle
+    路径走 AppConfig 阈值。
     """
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -697,11 +698,10 @@ def test_manual_toggle_uses_app_config_thresholds(monkeypatch, tmp_path):
     app = QApplication.instance() or QApplication([])
 
     from app.core import quality_probe as qp_mod
-    from app.ui.proof.h_proof import HProofPanel
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
 
-    # 构造一个明显不同于默认的 SamplerConfig (seed=固定值便于比对)
     sentinel_cfg = qp_mod.SamplerConfig(
-        target_ratio=0.99,   # 极高比例 → 触发 max_total cap
+        target_ratio=0.99,
         min_total=2, max_total=3, max_per_page=10, max_per_line=1,
         seed=12345,
     )
@@ -712,25 +712,22 @@ def test_manual_toggle_uses_app_config_thresholds(monkeypatch, tmp_path):
         return sentinel_cfg
 
     monkeypatch.setattr(qp_mod, "sampler_config_from_app_config", fake_from_app_config)
-    # 同时也要 monkeypatch h_proof 模块里的引用（它通过 `from app.core import quality_probe as qp` 导入，所以 qp.sampler_config_from_app_config 是同一个对象）
-    # → 上面 setattr 在 qp_mod 上已生效
 
-    # 构造一个最小项目供 HProofPanel 采样
     proj = _build_dense_project(n_pages=2, lines_per_page=4)
-    panel = HProofPanel()
-    panel.load_pages(proj.pages)
 
-    # 手动触发开评测
-    panel._on_toggle_quality_probe(True)
+    dlg = QualityStatsDialog(
+        project_provider=lambda: proj,
+        refresh_panels_cb=lambda: None,
+    )
     try:
-        assert captured.get("called"), "手动开评测没有调用 sampler_config_from_app_config"
+        dlg._on_toggle(True)
+        assert captured.get("called"), "手动开统计没有调用 sampler_config_from_app_config"
         store = qp_mod.get_active_store()
         assert store is not None
-        # 因为 max_total=3，store 大小应 ≤ 3（断定确实用了 sentinel_cfg 的上限）
         assert len(store) <= sentinel_cfg.max_total, (
             f"manual toggle 没遵守 sentinel_cfg.max_total={sentinel_cfg.max_total}, "
             f"实际投放 {len(store)}（说明走了默认 SamplerConfig）"
         )
     finally:
         qp_mod.reset_active_store()
-        panel.deleteLater()
+        dlg.deleteLater()

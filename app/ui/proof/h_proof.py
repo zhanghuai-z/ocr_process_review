@@ -30,7 +30,7 @@ from typing import List, Optional, Tuple
 import cv2
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QImage, QKeySequence, QPixmap, QShortcut,
+    QColor, QImage, QKeySequence, QPixmap, QShortcut,
     QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, Line, OcrProject, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
+from app.ui.proof.char_cell_row import CharCellRow
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
@@ -55,11 +56,13 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
-TEXT_ROW_H = IMAGE_ROW_H + 8
-TEXT_EDITOR_MAX_H = 36
+TEXT_EDITOR_MAX_H = 42
+LINE_PAIR_H = 54
+# Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
+# CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68，
+# 加上 _LinePair 上下各 ~4 px 自身布局 padding，给 76 px 不裁切。
+CELL_PAIR_H = 76
 TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
-TEXT_DEFAULT_COLOR = "#c5221f"
-TEXT_VISITED_COLOR = "#188038"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80
@@ -156,8 +159,13 @@ class _LinePair(QFrame):
         self._image_loaded = False
         self._line_crop = None
         self._line_crop_origin: tuple[int, int] = (0, 0)
-        self._line_image_display_width = 0
-        self._visited = False
+        # Phase 11 task 2：字格模式开关 + 懒构建的 CharCellRow
+        self._cell_mode_enabled = False
+        self._cell_row: CharCellRow | None = None
+        # Phase 12：cell_mode 下当前聚焦的 cell idx；用于行图像高亮
+        self._cell_focus_idx: int | None = None
+        # 最近一次行图像缩放比例，用于把 _img_lbl 上的点击位置反查回原图坐标
+        self._render_scale: float = 1.0
 
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -166,30 +174,27 @@ class _LinePair(QFrame):
     # ── 构建 ──────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        img_row = QWidget()
-        img_row.setFixedHeight(IMAGE_ROW_H + 8)
-        il = QHBoxLayout(img_row)
-        il.setContentsMargins(0, 2, 8, 2)
-        il.setSpacing(0)
+        self.setFixedHeight(LINE_PAIR_H)
+        # Phase 17 blocker：先用普通高度，cell mode 开启时由 _apply_pair_height 切到 CELL_PAIR_H。
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 2, 8, 2)
+        root.setSpacing(6)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
         self._active_bar.setStyleSheet("background: transparent;")
-        il.addWidget(self._active_bar)
+        root.addWidget(self._active_bar)
+        self._active_bar2 = self._active_bar
 
-        self._lbl_img_hdr = QLabel(f"图像行 {self._line_in_page}")
-        self._lbl_img_hdr.setFixedWidth(LABEL_W)
+        self._lbl_img_hdr = QLabel(f"图像 {self._line_in_page}")
+        self._lbl_img_hdr.setFixedWidth(58)
         self._lbl_img_hdr.setObjectName("muted")
         self._lbl_img_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_img_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        il.addWidget(self._lbl_img_hdr)
+        root.addWidget(self._lbl_img_hdr)
 
         self._img_lbl = QLabel()
         self._img_lbl.setFixedHeight(IMAGE_ROW_H)
@@ -200,34 +205,24 @@ class _LinePair(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._img_lbl.setStyleSheet("background:#fafbfc; padding:2px 0;")
-        il.addWidget(self._img_lbl, 1)
-        root.addWidget(img_row)
+        root.addWidget(self._img_lbl, 5, Qt.AlignmentFlag.AlignVCenter)
 
-        txt_row = QWidget()
-        txt_row.setFixedHeight(TEXT_ROW_H)
-        tr = QHBoxLayout(txt_row)
-        tr.setContentsMargins(0, 2, 8, 2)
-        tr.setSpacing(0)
-
-        self._active_bar2 = QWidget()
-        self._active_bar2.setFixedWidth(4)
-        self._active_bar2.setStyleSheet("background: transparent;")
-        tr.addWidget(self._active_bar2)
-
-        self._lbl_txt_hdr = QLabel(f"识别文本 {self._line_in_page}")
-        self._lbl_txt_hdr.setFixedWidth(LABEL_W)
+        self._lbl_txt_hdr = QLabel(f"文本 {self._line_in_page}")
+        self._lbl_txt_hdr.setFixedWidth(58)
         self._lbl_txt_hdr.setObjectName("muted")
         self._lbl_txt_hdr.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._lbl_txt_hdr.setStyleSheet("font-size:11px; color:#999; padding-right:8px;")
-        tr.addWidget(self._lbl_txt_hdr)
+        root.addWidget(self._lbl_txt_hdr)
 
         # 文本展示（非激活）
         self._text_lbl = QLabel(_displayed_text(self._line, self._page, self._block))
-        self._text_lbl.setMinimumHeight(TEXT_EDITOR_MAX_H)
         self._text_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._text_lbl.setStyleSheet(self._text_style(TEXT_DEFAULT_COLOR))
+        self._text_lbl.setStyleSheet(
+            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+            "padding:0; color:#222;"
+        )
         self._text_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
@@ -235,13 +230,13 @@ class _LinePair(QFrame):
         self._text_lbl.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        tr.addWidget(self._text_lbl, 1)
+        root.addWidget(self._text_lbl, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 文本编辑器（激活时可见）
         self._editor = _RowEditor()
         self._editor.setStyleSheet(
             f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            f"line-height:{IMAGE_ROW_H}px; padding:2px 6px 0 6px; color:{TEXT_VISITED_COLOR};"
+            "padding:0 6px;"
         )
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
         self._editor.document().setDocumentMargin(0)
@@ -260,7 +255,7 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        tr.addWidget(self._editor, 1)
+        root.addWidget(self._editor, 6, Qt.AlignmentFlag.AlignVCenter)
 
         # 状态标签
         self._status_lbl = QLabel()
@@ -270,18 +265,12 @@ class _LinePair(QFrame):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self._refresh_status()
-        tr.addWidget(self._status_lbl)
+        root.addWidget(self._status_lbl)
 
-        root.addWidget(txt_row)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color:#edf0f5; margin:0; padding:0;")
-        root.addWidget(sep)
-
-        # 注册点击区域
-        for w in (self, img_row, txt_row, self._img_lbl, self._text_lbl):
+        # 注册点击区域。_img_lbl 走 cell_mode-aware 的反查（普通模式下仍是行激活）。
+        for w in (self, self._text_lbl, self._lbl_img_hdr, self._lbl_txt_hdr):
             w.mousePressEvent = self._on_click  # type: ignore[method-assign]
+        self._img_lbl.mousePressEvent = self._img_clicked_lookup  # type: ignore[method-assign]
 
     # ── 对外接口 ──────────────────────────────────────────────
 
@@ -291,7 +280,6 @@ class _LinePair(QFrame):
         self._active = active
         blue = "#1a73e8"
         if active:
-            self._visited = True
             bar_style = f"background:{blue}; border-radius:2px;"
             bg = "#f0f6ff"
         else:
@@ -314,28 +302,175 @@ class _LinePair(QFrame):
 
         if active:
             self._text_lbl.hide()
-            self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
-            self._editor.setStyleSheet(
-                f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-                f"line-height:{IMAGE_ROW_H}px; padding:2px 6px 0 6px; color:{TEXT_VISITED_COLOR};"
-            )
-            self._sync_text_metrics()
-            self._highlight_low_conf()
-            self._editor.show()
-            self._editor.setFocus()
-            # 确保图像已加载
-            self.load_image()
+            self._refresh_active_widgets()
         else:
             self._editor.hide()
+            if self._cell_row is not None:
+                self._cell_row.hide()
+            self._cell_focus_idx = None
             self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
-            self._text_lbl.setStyleSheet(
-                self._text_style(TEXT_VISITED_COLOR if self._visited else TEXT_DEFAULT_COLOR)
-            )
-            self._sync_text_metrics()
             self._text_lbl.show()
             self._render_line_image()
 
         self._refresh_status()
+
+    def set_cell_mode(self, enabled: bool) -> None:
+        """切换字格模式。仅当本行 active 时才会真正切换可见控件，
+        非 active 行只记录状态，等下次 set_active(True) 时按状态构建。
+
+        Phase 17 blocker：必须在所有 pair 上同步调整 fixedHeight，
+        否则 cell mode 下 CharCellRow(68) 会被 LINE_PAIR_H(54) 裁掉下半截，
+        且全局 panel 滚动时不希望行高跳变。
+
+        Phase 19 blocker 1：切换前先把 active 行 editor 里 in-flight
+        未保存文本 flush 出去，否则 _refresh_active_widgets 会直接 hide
+        editor，新文本就丢了。"""
+        if self._cell_mode_enabled == enabled:
+            return
+        # Phase 19 blocker 1：切换前先 flush editor 未保存文本
+        self._flush_editor_if_dirty()
+        self._cell_mode_enabled = enabled
+        self._apply_pair_height()
+        if self._active:
+            # 重新走一遍 active=True 路径，让可见控件按新状态切换
+            self._refresh_active_widgets()
+
+    def _flush_editor_if_dirty(self) -> None:
+        """Phase 19 blocker 1：若 active 行 editor 当前可见且文本与显示空间
+        不一致，则发 text_saved，让面板把它通过 _save_displayed_edit 落盘。
+        与 set_active(False) 里现有逻辑同口径。"""
+        if not self._active:
+            return
+        if self._editor.isHidden():
+            return
+        new_text = self._editor.toPlainText()
+        if new_text != _displayed_text(self._line, self._page, self._block):
+            self.text_saved.emit(self._idx, new_text)
+
+    def _apply_pair_height(self) -> None:
+        """Phase 17 blocker：按 cell mode 状态切 pair fixedHeight，避免裁切。"""
+        target = CELL_PAIR_H if self._cell_mode_enabled else LINE_PAIR_H
+        if self.height() != target:
+            self.setFixedHeight(target)
+
+    def _refresh_active_widgets(self) -> None:
+        """active 状态下按 _cell_mode_enabled 切换 editor / cell_row 显示。"""
+        # 不论何种模式，先统一把两侧隐藏；激活的那侧再 show
+        self._editor.hide()
+        if self._cell_row is not None:
+            self._cell_row.hide()
+        if self._cell_mode_enabled:
+            if self._cell_row is None:
+                # Phase 18 blocker 2：用显示空间文本（含 quality-probe fake_char）
+                # 构建字格，与保存路径 _save_displayed_edit 的输入空间一致。
+                self._cell_row = CharCellRow(
+                    self._line, self._page, self._cache,
+                    parent=self,
+                    display_text=_displayed_text(self._line, self._page, self._block),
+                )
+                self._cell_row.text_committed.connect(self._on_cell_text_committed)
+                self._cell_row.commit_requested.connect(
+                    lambda: self.confirmed.emit(self._idx)
+                )
+                self._cell_row.focus_changed.connect(self._on_cell_focus_changed)
+                # Phase 14b: cell 末尾 → / Tab 越界 → 跨行（复用行级 next_req/prev_req）
+                self._cell_row.next_off_end.connect(self.next_req)
+                self._cell_row.prev_off_start.connect(self.prev_req)
+                # 插入到 root layout 的 editor 同位置
+                root = self.layout()
+                # editor 在 layout 中是倒数第二个 widget（最后一个是 status_lbl）
+                root.insertWidget(root.count() - 1, self._cell_row, 6)
+            self._cell_row.show()
+            if self._cell_row.has_cells:
+                self._cell_row.focus_first()
+        else:
+            self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
+            self._highlight_low_conf()
+            self._editor.show()
+            self._editor.setFocus()
+        self.load_image()
+
+    def _invalidate_cell_row(self) -> None:
+        """Phase 16 blocker: 销毁缓存的 _cell_row。
+
+        使用场景（任何会让底层 line.text / line.chars 变化的入口）：
+          1. rebind() —— pair 指向新 Line，旧 cell_row 是旧 Line 上 build 的
+          2. HProofPanel._on_external_line_changed() —— VProof 改完文本回流
+        销毁后：若本 pair 仍然 active 且 cell_mode 开着，会立刻按新 line 重建 UI；
+        否则等下次 _refresh_active_widgets 时按需懒构。
+        """
+        if self._cell_row is None:
+            return
+        # 切断信号、移出 layout、释放
+        try:
+            self._cell_row.text_committed.disconnect()
+            self._cell_row.commit_requested.disconnect()
+            self._cell_row.focus_changed.disconnect()
+            self._cell_row.next_off_end.disconnect()
+            self._cell_row.prev_off_start.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        self._cell_row.hide()
+        self._cell_row.setParent(None)
+        self._cell_row.deleteLater()
+        self._cell_row = None
+        self._cell_focus_idx = None
+        # 若仍 active 且 cell_mode 开着，立即重建（保持用户视觉不闪 → 等同于
+        # editor 模式下 _on_external_line_changed 会立即 setPlainText）。
+        if self._active and self._cell_mode_enabled:
+            self._refresh_active_widgets()
+
+    def _on_cell_text_committed(self, new_text: str) -> None:
+        """字格模式：每次 cell 编辑都同步到 line（不等失焦）。
+
+        发 text_saved 让 HProofPanel._save_pair 走统一保存路径。"""
+        if new_text != _displayed_text(self._line, self._page, self._block):
+            self.text_saved.emit(self._idx, new_text)
+
+    def _on_cell_focus_changed(self, idx: int) -> None:
+        """cell_mode 下某 cell 拿到焦点 → 重渲染行图高亮该字。"""
+        if self._cell_focus_idx == idx:
+            return
+        self._cell_focus_idx = idx
+        self._render_line_image()
+
+    def _img_clicked_lookup(self, event) -> None:
+        """点击行图区域时：cell_mode 下反查最近的 char.bbox → 把焦点送回对应 cell。
+        非 cell_mode 维持原行级激活行为。"""
+        if not (self._cell_mode_enabled and self._active and self._cell_row
+                and self._cell_row.has_cells and self._line.chars):
+            self._on_click(event)
+            return
+        # 反查：把 _img_lbl 内 px 坐标 → 原图坐标 → 找最近 char
+        try:
+            pos = event.position()
+            click_x = pos.x()
+        except AttributeError:
+            click_x = float(event.x())
+        ox, _oy = self._line_crop_origin
+        scale = self._render_scale or 1.0
+        # _img_lbl 是 left-aligned 的 pixmap；click_x 对应 crop 内偏移 / scale
+        orig_x = ox + click_x / scale
+        # Phase 13: 先做精确命中（落在某 char.bbox 区间内）
+        for i, ch in enumerate(self._line.chars):
+            if ch.bbox is None:
+                continue
+            if ch.bbox.x <= orig_x <= ch.bbox.x2:
+                self._cell_row.focus_cell(i)
+                return
+        # fallback：中心距离最近
+        best_idx = None
+        best_dist = float("inf")
+        for i, ch in enumerate(self._line.chars):
+            if ch.bbox is None:
+                continue
+            cx = (ch.bbox.x + ch.bbox.x2) / 2.0
+            d = abs(cx - orig_x)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        if best_idx is not None:
+            self._cell_row.focus_cell(best_idx)
 
     def load_image(self) -> None:
         """懒加载行图像。"""
@@ -371,16 +506,22 @@ class _LinePair(QFrame):
         if self._line_crop is None:
             return
         crop = self._line_crop.copy()
-        cursor = self._editor.textCursor()
-        start = min(cursor.selectionStart(), cursor.selectionEnd())
-        end = max(cursor.selectionStart(), cursor.selectionEnd())
         highlight_range: tuple[int, int] | None = None
-        if not self._editor.isHidden() and end > start:
-            highlight_range = (start, end)
+        if (self._active and self._cell_mode_enabled
+                and self._cell_focus_idx is not None
+                and 0 <= self._cell_focus_idx < len(self._line.chars)):
+            # cell_mode：高亮当前聚焦 cell 对应的 char.bbox
+            highlight_range = (self._cell_focus_idx, self._cell_focus_idx + 1)
         elif not self._editor.isHidden():
-            pos = cursor.position() - 1
-            if 0 <= pos < len(self._line.chars):
-                highlight_range = (pos, pos + 1)
+            cursor = self._editor.textCursor()
+            start = min(cursor.selectionStart(), cursor.selectionEnd())
+            end = max(cursor.selectionStart(), cursor.selectionEnd())
+            if end > start:
+                highlight_range = (start, end)
+            else:
+                pos = cursor.position() - 1
+                if 0 <= pos < len(self._line.chars):
+                    highlight_range = (pos, pos + 1)
         if highlight_range is not None:
             start, end = highlight_range
             ox, oy = self._line_crop_origin
@@ -409,38 +550,24 @@ class _LinePair(QFrame):
             crop = cv2.resize(crop, (MAX_LINE_W, new_h), interpolation=cv2.INTER_AREA)
         else:
             crop = cv2.resize(crop, (new_w, IMAGE_ROW_H), interpolation=cv2.INTER_AREA)
+        self._render_scale = scale
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
-        self._line_image_display_width = rw
-        self._sync_text_metrics()
-
-    def _sync_text_metrics(self) -> None:
-        text = self._editor.toPlainText() if not self._editor.isHidden() else (self._line.text or "")
-        font = QFont("Noto Sans CJK SC")
-        font.setPixelSize(TEXT_FONT_PX)
-        if self._line_image_display_width > 0 and len(text) > 1:
-            natural = QFontMetrics(font).horizontalAdvance(text)
-            spacing = (self._line_image_display_width - natural) / max(1, len(text) - 1)
-            font.setLetterSpacing(
-                QFont.SpacingType.AbsoluteSpacing,
-                max(-1.0, min(12.0, spacing)),
-            )
-        self._text_lbl.setFont(font)
-        self._editor.setFont(font)
-
-    def _text_style(self, color: str) -> str:
-        return (
-            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            f"line-height:{IMAGE_ROW_H}px; padding:2px 0 0 0; color:{color};"
-        )
 
     def refresh_text(self) -> None:
-        """外部更新 line.text 后刷新显示。"""
+        """外部更新 line.text 后刷新显示。
+
+        Phase 19 blocker 2：active + cell_mode 时，缓存的 _cell_row 上挂的是
+        旧的 display_text（quality-probe 切换前的显示空间），必须作废重建，
+        否则普通行标签已经按新 active store 更新了，但字格仍显示旧空间文本。
+        _invalidate_cell_row 会在 active+cell_mode 下立刻按当前 line+display
+        重建 _cell_row。"""
         if not self._active:
             self._text_lbl.setText(_displayed_text(self._line, self._page, self._block))
-        self._sync_text_metrics()
+        elif self._cell_mode_enabled:
+            self._invalidate_cell_row()
         self._refresh_status()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
@@ -449,12 +576,15 @@ class _LinePair(QFrame):
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
-        self._lbl_img_hdr.setText(f"图像行 {line_in_page}")
-        self._lbl_txt_hdr.setText(f"识别文本 {line_in_page}")
+        self._lbl_img_hdr.setText(f"图像 {line_in_page}")
+        self._lbl_txt_hdr.setText(f"文本 {line_in_page}")
         self._image_loaded = False
         self._line_crop = None
         if self._editor.isHidden():
             self._text_lbl.setText(_displayed_text(line, page, block))
+        # Phase 16 blocker：rebind 后旧 _cell_row 是旧 line 上 build 的，必须作废，
+        # 否则 cell mode 编辑会用旧 char 内容覆盖新 line.text。
+        self._invalidate_cell_row()
         self._refresh_status()
 
     @property
@@ -524,7 +654,27 @@ class HProofPanel(QWidget):
         self._filter_updating = False
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
+        # Phase 18 blocker 1：面板级 cell_mode 状态，merge_pages 新建 pair 时同步。
+        self._cell_mode_enabled: bool = False
+        # H/V 校对联动：订阅其他 panel 编辑事件；origin == id(self) 的事件忽略。
+        # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
+        self._bus_unsub = self._bus.subscribe(
+            "line.proof_changed", self._on_external_line_changed,
+        )
+        self.destroyed.connect(lambda *_: self._teardown_bus())
         self._build_ui()
+
+    def _teardown_bus(self) -> None:
+        """Phase 18 blocker 3：释放 ProofStateBus 订阅。
+
+        QObject.destroyed 信号在 Python 端仍可调用 unsubscribe；幂等，多次安全。"""
+        unsub = getattr(self, "_bus_unsub", None)
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
+            self._bus_unsub = None
 
     # ── UI 构建 ────────────────────────────────────────────────
 
@@ -553,22 +703,22 @@ class HProofPanel(QWidget):
             btn.setMinimumHeight(30)
             tl.addWidget(btn)
 
-        # 评测开关 + 报告按钮（默认关闭，明示是评测模式）
-        self._btn_quality_toggle = QPushButton("评测：关")
-        self._btn_quality_toggle.setCheckable(True)
-        self._btn_quality_toggle.setMinimumHeight(30)
-        self._btn_quality_toggle.setToolTip(
-            "启用后，校对界面会在少量正文位置插入形近假象字（不影响最终导出），"
-            "用来评估你的校对识别能力。"
+        # Phase 11 task 2：字格模式开关（实验，line.chars 为空的行会回退）
+        from PySide6.QtWidgets import QToolButton  # local import：仅本处用
+        self._btn_cell_mode = QToolButton()
+        self._btn_cell_mode.setText("字格模式")
+        self._btn_cell_mode.setCheckable(True)
+        self._btn_cell_mode.setMinimumHeight(30)
+        self._btn_cell_mode.setToolTip(
+            "实验：把当前行拆成『一个字一个 cell』编辑。\n"
+            "用 Tab/←/→ 在 cell 间跳；Enter 提交并跳到下一处。\n"
+            "（line.chars 为空的行会显示回退提示）"
         )
-        self._btn_quality_toggle.clicked.connect(self._on_toggle_quality_probe)
-        tl.addWidget(self._btn_quality_toggle)
+        self._btn_cell_mode.toggled.connect(self._on_toggle_cell_mode)
+        tl.addWidget(self._btn_cell_mode)
 
-        self._btn_quality_report = QPushButton("评测报告")
-        self._btn_quality_report.setMinimumHeight(30)
-        self._btn_quality_report.clicked.connect(self._on_show_quality_report)
-        tl.addWidget(self._btn_quality_report)
-
+        # 评测/正确率统计 入口已迁移到 MainWindow『设置』菜单的「正确率统计…」。
+        # 这里不再放工具栏按钮，避免和设置入口重复。
         tl.addStretch()
 
         self._page_combo = QComboBox()
@@ -646,7 +796,15 @@ class HProofPanel(QWidget):
         # ── 信号 ───────────────────────────────────────────────
         self._btn_prev.clicked.connect(self._prev)
         self._btn_next.clicked.connect(self._next)
-        self._btn_save.clicked.connect(self._save_current)
+        # Phase 21 blocker：工具栏"保存"按钮原本走 _save_current，
+        # 在 cell mode 下 editor 隐藏 → _save_current 内部 isHidden 早退 → 全程
+        # no-op，连 proof_saved 都不发。Ctrl+S 走的是 _save_all（_save_current
+        # + 无条件 emit proof_saved），用户感知"保存还能用"。这里把按钮也指向
+        # _save_all，保持与 Ctrl+S 完全同语义。
+        # 注意：cell mode 下文本本身是按 cell 实时落盘的（textEdited → text_committed
+        # → _on_cell_text_committed → text_saved → _save_displayed_edit），
+        # 所以按钮的"保存"语义实际是"广播 proof_saved + 走一次现有保存路径"。
+        self._btn_save.clicked.connect(self._save_all)
         self._btn_flag.clicked.connect(self._toggle_flag)
         self._btn_skip.clicked.connect(self._next)
 
@@ -803,6 +961,10 @@ class HProofPanel(QWidget):
         pair.skip_req.connect(self._next)
         self._pairs.append(pair)
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
+        # Phase 18 blocker 1：merge_pages 期间新增 pair 必须继承当前面板 cell mode，
+        # 否则会出现"已开启字格模式，但新合入的页仍是普通模式"的不一致。
+        if self._cell_mode_enabled:
+            pair.set_cell_mode(True)
 
     def _line_key(self, block: Block, line: Line, page: Page, line_idx: int) -> tuple:
         bbox = line.bbox.normalize()
@@ -868,6 +1030,7 @@ class HProofPanel(QWidget):
             page_id=page.id,
             line_id=line.id,
             status=ProofStatus.OK.value,
+            origin=id(self),
         )
         self.proof_saved.emit()
         self._pairs[idx].refresh_text()
@@ -875,7 +1038,14 @@ class HProofPanel(QWidget):
         self._next()
 
     def _on_text_saved(self, idx: int, new_text: str) -> None:
-        """_LinePair 在 set_active(False) 时保存。"""
+        """_LinePair 在 set_active(False) 时保存；cell mode 下每次 cell 编辑
+        也走这里（_LinePair._on_cell_text_committed → text_saved）。
+
+        Phase 22 blocker 2：保存成功后，被改动行的 proof_status 通常会从
+        UNCHECKED 变 MODIFIED。必须立即刷新该 pair 的状态点 ——
+        但**不能**调 pair.refresh_text()（active+cell_mode 下它会作废重建
+        _cell_row → 把焦点拉回第 0 格）。直接调 _refresh_status() 只更新
+        状态标签，不触碰 _cell_row / editor / 焦点。"""
         if idx >= len(self._items):
             return
         block, line, page, _ = self._items[idx]
@@ -885,9 +1055,13 @@ class HProofPanel(QWidget):
                 page_id=page.id,
                 line_id=line.id,
                 status=line.proof_status.value,
+                origin=id(self),
             )
             self.proof_saved.emit()
             self._update_stats()
+            # Phase 22 blocker 2：即时刷新 active pair 状态点
+            if 0 <= idx < len(self._pairs):
+                self._pairs[idx]._refresh_status()
 
     def _save_current(self, *, silent: bool = False) -> None:
         """将当前编辑器内容保存到 line 对象。"""
@@ -903,6 +1077,7 @@ class HProofPanel(QWidget):
                     page_id=page.id,
                     line_id=line.id,
                     status=line.proof_status.value,
+                    origin=id(self),
                 )
                 self.proof_saved.emit()
                 pair.refresh_text()
@@ -927,11 +1102,47 @@ class HProofPanel(QWidget):
             page_id=page.id,
             line_id=line.id,
             status=new_status.value,
+            origin=id(self),
         )
         self._pairs[self._current_idx].refresh_text()
         self._update_stats()
 
     # ── 统计 ───────────────────────────────────────────────────
+
+    def _on_external_line_changed(self, **kwargs) -> None:
+        """收到外部（纵校）发来的 line.proof_changed → 找到本 panel 中
+        line.id 匹配的行，刷新该行显示并重算统计。
+
+        回路保护：origin == id(self) 时直接跳过（自己 publish 的事件）。
+        """
+        if kwargs.get("origin") == id(self):
+            return
+        line_id = kwargs.get("line_id")
+        if line_id is None:
+            return
+        touched = False
+        for i, (block, line, page, _li) in enumerate(self._items):
+            if line.id == line_id:
+                pair = self._pairs[i]
+                if i == self._current_idx and not pair._editor.isHidden():
+                    pair._editor.blockSignals(True)
+                    pair._editor.setPlainText(_displayed_text(line, page, block))
+                    pair._editor.blockSignals(False)
+                # Phase 16 blocker：底层 line.text 已被 VProof 改写，
+                # 缓存的 _cell_row 是旧 line.text 上算出的 cell_inits / trailing_overflow，
+                # 必须作废，否则 cell mode 下一次编辑会用旧内容覆盖新文本。
+                # Phase 20 blocker 2：active+cell_mode 行的作废+重建由
+                # refresh_text 内部统一负责（Phase 19 起即如此）；这里如果再显式
+                # 调一次 _invalidate_cell_row，就会双重作废+重建，焦点被拉回第 0 格。
+                # 只在非 active pair 上显式作废 —— 此时 refresh_text 不会自动作废，
+                # 但用户尚未激活该行，缓存的 stale cell_row 必须先丢掉，
+                # 等下次 _refresh_active_widgets 才会按新 line.text 重新构建。
+                if not pair._active:
+                    pair._invalidate_cell_row()
+                pair.refresh_text()
+                touched = True
+        if touched:
+            self._update_stats()
 
     def _update_stats(self) -> None:
         total_chars = sum(len(ln.text or "") for _, ln, _, _ in self._items)
@@ -943,90 +1154,25 @@ class HProofPanel(QWidget):
         self._total_lbl.setText(f"总字数 {total_chars:,}")
         self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
 
-    # ── 评测位（quality probe）开关与报告 ─────────────────────
 
-    def _on_toggle_quality_probe(self, checked: bool) -> None:
-        """启用/关闭评测位假象字。
+    def _on_toggle_cell_mode(self, checked: bool) -> None:
+        """字格模式切换：广播到所有 _LinePair；当前行立即 re-activate
+        以让可见控件按新状态切换。
 
-        启用：基于当前 self._pages 采样，写入全局 active store；刷新所有行显示。
-        关闭：清空 active store；刷新所有行显示。
-        关键：这两条路径都不会改写 line.text，因此对最终导出无影响。
-        """
-        from PySide6.QtWidgets import QMessageBox
+        Phase 18 blocker 1：同步面板级状态，让 merge_pages 后新建 pair 自动继承。
 
-        if checked:
-            if not self._pages:
-                QMessageBox.information(self, "评测", "尚无校对数据，无法启用评测。")
-                self._btn_quality_toggle.setChecked(False)
-                return
-            project = OcrProject(name="(proofing)", pages=list(self._pages))
-            # 手动开评测必须和自动触发路径一样从 AppConfig 读取阈值，
-            # 否则用户调过的 quality_probe_* 设置会被绕过 (Blocker B 修复)。
-            cfg = qp.sampler_config_from_app_config()
-            store = qp.ProbeSampler(cfg).sample(project)
-            qp.set_active_store(store)
-            n = len(store)
-            if n == 0:
-                QMessageBox.information(
-                    self, "评测",
-                    "当前正文中没有可投放的位置（可能是页面太短或全是数字/公式/标题）。",
-                )
-                qp.reset_active_store()
-                self._btn_quality_toggle.setChecked(False)
-                return
-            self._btn_quality_toggle.setText(f"评测：开（{n} 处）")
-        else:
-            qp.reset_active_store()
-            self._btn_quality_toggle.setText("评测：关")
-        # 刷新所有可见行的显示
+        Phase 20 blocker 1：active pair 的 _refresh_active_widgets 由 set_cell_mode
+        自身在状态变化分支里负责调用（Phase 17 起即如此），这里再补一次
+        会让 active 行可见地闪一下、cell_row 还会被构建两次。删掉手动二次刷新。"""
+        self._cell_mode_enabled = checked
         for pair in self._pairs:
-            pair.refresh_text()
-
-    def _on_show_quality_report(self) -> None:
-        from PySide6.QtWidgets import QMessageBox
-
-        store = qp.get_active_store()
-        if store is None or len(store) == 0:
-            QMessageBox.information(
-                self, "评测报告",
-                "评测未启用或没有评测样本。请先在工具栏点击「评测：关」打开评测。",
-            )
-            return
-        rep = qp.score(store)
-        text = (
-            f"<b>校对质量等级：{rep.grade_label}</b>"
-            + (f"（{rep.grade}）" if rep.grade != "INSUFFICIENT" else "")
-            + f"<br><br>"
-            f"评测样本：{rep.total_probes} 处<br>"
-            f"<span style='color:#1a73e8;'>识破并改回正字：{rep.corrected}</span><br>"
-            f"<span style='color:#d93025;'>未察觉假象：{rep.missed}</span><br>"
-            f"<span style='color:#888;'>改成了第三种字：{rep.edited_other}</span><br>"
-            f"<span style='color:#888;'>该位置已被删除：{rep.deleted}</span><br>"
-            f"<span style='color:#888;'>尚未触及：{rep.pending}</span><br><br>"
-            f"<i>区间说明：{rep.band}</i><br><br>"
-            f"<small>注：评测位仅在校对界面显示，不会写入最终导出文本。</small>"
-        )
-        QMessageBox.information(self, "校对质量评测报告", text)
+            pair.set_cell_mode(checked)
 
     def refresh_quality_probe_state(self) -> None:
-        """供 main_window 进入校对步骤时调用：把工具栏开关与全局 active store
-        对齐，并刷新所有 pair 显示。
+        """重新渲染所有可见行，使显示空间文本与全局 active store 对齐。
 
-        当 controller.ensure_quality_probe_sampled() 自动触发采样后，UI 需要
-        立即把按钮文案切到"评测：开（N 处）"，并让所有行重新渲染。
-        """
-        store = qp.get_active_store()
-        if store is not None and len(store) > 0:
-            # 阻断 clicked 信号，避免 setChecked 触发 _on_toggle_quality_probe 重新采样
-            self._btn_quality_toggle.blockSignals(True)
-            self._btn_quality_toggle.setChecked(True)
-            self._btn_quality_toggle.setText(f"评测：开（{len(store)} 处）")
-            self._btn_quality_toggle.blockSignals(False)
-        else:
-            self._btn_quality_toggle.blockSignals(True)
-            self._btn_quality_toggle.setChecked(False)
-            self._btn_quality_toggle.setText("评测：关")
-            self._btn_quality_toggle.blockSignals(False)
+        Phase 11：「评测：开/关」工具栏按钮已迁移到设置→正确率统计 对话框，
+        所以这里只剩刷新 pair 显示一件事。"""
         for pair in self._pairs:
             pair.refresh_text()
 

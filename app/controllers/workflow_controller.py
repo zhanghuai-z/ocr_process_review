@@ -241,6 +241,11 @@ class WorkflowController(QObject):
     # 现在 controller 统一持有 + 通过 signal 外播，MainWindow 退化为纯订阅者。
 
     @property
+    def project(self):
+        """当前 OcrProject（可能为 None）。供需要整个项目的入口（如正确率统计）使用。"""
+        return self._project
+
+    @property
     def current_step(self) -> int:
         return self._current_step
 

@@ -281,6 +281,10 @@ class MainWindow(QMainWindow):
         act_ocr_cfg = QAction("OCR 引擎设置…", self)
         act_ocr_cfg.triggered.connect(self._show_ocr_settings)
         settings_m.addAction(act_ocr_cfg)
+        # Phase 11：原 h_proof 工具栏「评测开关 + 报告」入口迁移到这里。
+        act_quality_stats = QAction("正确率统计…", self)
+        act_quality_stats.triggered.connect(self._show_quality_stats)
+        settings_m.addAction(act_quality_stats)
 
         help_m = menu.addMenu("帮助(&H)")
         act_about = QAction("关于", self)
@@ -536,6 +540,27 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         self._controller.close()
         super().closeEvent(event)
+
+    def _show_quality_stats(self) -> None:
+        """打开『正确率统计』对话框。
+
+        - project 通过 lambda 延迟取，避免 dialog 持过期引用
+        - 启用/关闭后回调到 panel 的 refresh_quality_probe_state，让显示和 active store 一致
+        """
+        from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+        dlg = QualityStatsDialog(
+            project_provider=lambda: self._controller.project,
+            refresh_panels_cb=self._refresh_proof_panels_after_quality_toggle,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _refresh_proof_panels_after_quality_toggle(self) -> None:
+        """正确率统计开关切换后，把 active store 的变化同步到两个 proof 面板。"""
+        for panel in (self._hproof_panel, self._vproof_panel):
+            fn = getattr(panel, "refresh_quality_probe_state", None)
+            if callable(fn):
+                fn()
 
     def _show_ocr_settings(self) -> None:
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog

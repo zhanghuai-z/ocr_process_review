@@ -61,8 +61,6 @@ logger = logging.getLogger(__name__)
 CHAR_LIST_THUMB = 18
 GALLERY_THUMB   = 27
 LOW_CONF        = 0.80
-GALLERY_ITEMS_PER_ROW = 8
-GALLERY_MAX_ROWS = 4
 
 
 @dataclass(frozen=True)
@@ -72,10 +70,6 @@ class LlmCandidateRequest:
     line_text: str
     char_index: int
     context_text: str
-    bbox_source: str = ""
-    bbox_granularity: str = ""
-    collection_kind: str = ""
-    confidence: float = 0.0
 
 
 class LlmCandidateProvider(Protocol):
@@ -253,7 +247,27 @@ class VProofPanel(QWidget):
         self._selected_char: str = ""
         self._candidate_provider: Optional[LlmCandidateProvider] = None
         self._updating = False
+        # Phase 22 blocker 1：_load_page 后存基线文本，用于 _on_external_line_changed
+        # 判断"_text_edit 是否有未保存输入"，避免外部同步覆盖用户在编辑的内容。
+        self._loaded_text: str = ""
         self._build_ui()
+        # H/V 校对联动：订阅其他 panel 的编辑事件，本 panel 自己 publish 的事件
+        # 通过 origin == id(self) 过滤掉以避免回路。
+        # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
+        self._bus_unsub = self._bus.subscribe(
+            "line.proof_changed", self._on_external_line_changed,
+        )
+        self.destroyed.connect(lambda *_: self._teardown_bus())
+
+    def _teardown_bus(self) -> None:
+        """Phase 18 blocker 3：释放 ProofStateBus 订阅，幂等。"""
+        unsub = getattr(self, "_bus_unsub", None)
+        if unsub is not None:
+            try:
+                unsub()
+            except Exception:
+                pass
+            self._bus_unsub = None
 
     # ─────────────────── UI ───────────────────────────────────
 
@@ -367,7 +381,7 @@ class VProofPanel(QWidget):
 
         # 左列上：gallery 网格。与同列 OCR 文本自然等宽。
         self._gallery_box = self._build_gallery_strip()
-        self._resize_gallery_for_entries(0)
+        self._gallery_box.setFixedHeight(GALLERY_THUMB * 2 + 30)
         col.addWidget(self._gallery_box)
 
         self._candidate_box = self._build_candidate_panel()
@@ -438,11 +452,6 @@ class VProofPanel(QWidget):
         layout.addWidget(self._gallery_view)
         return box
 
-    def _resize_gallery_for_entries(self, count: int) -> None:
-        rows = min(GALLERY_MAX_ROWS, max(1, (max(1, count) + GALLERY_ITEMS_PER_ROW - 1) // GALLERY_ITEMS_PER_ROW))
-        item_h = GALLERY_THUMB + 8
-        self._gallery_box.setFixedHeight(rows * item_h + 30)
-
     def _build_ocr_text(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -497,7 +506,6 @@ class VProofPanel(QWidget):
             self._selected_char = selected
             entries = self._char_svc.query(selected)
             self._gallery_model.set_entries(entries)
-            self._resize_gallery_for_entries(len(entries))
             self._gallery_hdr.setText(f'"{selected}"  共 {len(entries)} 处')
         self._page_label.setText(f"页 {self._current_page_idx + 1} / {len(self._pages)}")
 
@@ -519,7 +527,6 @@ class VProofPanel(QWidget):
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])
-        self._resize_gallery_for_entries(0)
         self._candidate_hint.setText("未选择字符；候选字接口已预留，默认不调用外部模型")
         self._page_label.setText("页 0 / 0")
 
@@ -584,6 +591,8 @@ class VProofPanel(QWidget):
         self._text_edit.setPlainText(flat_text)
         self._text_edit.setExtraSelections([])
         self._updating = False
+        # Phase 22 blocker 1：保存"刚加载完成时的纯净文本"作为 dirty 判断基线
+        self._loaded_text = flat_text
         self._status_lbl.setText("")
         self._status_lbl.setStyleSheet("")
 
@@ -598,7 +607,6 @@ class VProofPanel(QWidget):
 
         # 重置 gallery：清选中、滚回顶部
         self._gallery_model.set_entries(entries)
-        self._resize_gallery_for_entries(len(entries))
         self._gallery_view.clearSelection()
         if entries:
             self._gallery_view.scrollTo(
@@ -680,66 +688,19 @@ class VProofPanel(QWidget):
             line_text=line_text,
             char_index=entry.char_idx,
             context_text=self._text_edit.toPlainText(),
-            bbox_source=entry.bbox_source,
-            bbox_granularity=entry.bbox_granularity,
-            collection_kind=entry.collection_kind,
-            confidence=float(entry.confidence),
         )
 
     def _update_candidate_panel(self, entry: CharEntry) -> None:
         request = self._candidate_request_for_entry(entry)
-        signals = self._candidate_signals_for_entry(entry)
         if self._candidate_provider is None:
-            candidates = self._explainable_candidates_for_entry(entry)
-            candidate_text = "、".join(candidates) if candidates else request.token
             self._candidate_hint.setText(
-                f"候选：{candidate_text}\n"
-                f"信号：{signals}\n"
-                "VL/OCR 信号先给可解释依据；LLM 作为补充建议，不替代人工终审。"
+                f"当前字：{request.token}  · 第 {request.page_number} 页，"
+                "LLM 候选接口已预留（默认关闭）"
             )
             return
         candidates = self._candidate_provider.suggest_candidates(request)
         text = "、".join(candidates) if candidates else "无候选"
-        self._candidate_hint.setText(f"候选：{text}\n信号：{signals}")
-
-    def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
-        candidates: List[str] = []
-        for value in (
-            entry.token_text or entry.char,
-            self._line_char_at(entry.line.ocr_text, entry.char_idx),
-            self._line_char_at(entry.line.llm_suggestion, entry.char_idx),
-        ):
-            if value and value not in candidates:
-                candidates.append(value)
-        return candidates
-
-    def _line_char_at(self, text: str, index: int) -> str:
-        if 0 <= index < len(text):
-            return text[index]
-        return ""
-
-    def _candidate_signals_for_entry(self, entry: CharEntry) -> str:
-        block = self._block_for_entry(entry)
-        block_info = block.block_type.value if block else "unknown"
-        note = (block.note or "").split("|", 1)[0].strip() if block and block.note else ""
-        parts = [
-            f"bbox={entry.bbox_source}/{entry.bbox_granularity}",
-            f"collection={entry.collection_kind}",
-            f"conf={entry.confidence:.2f}",
-            f"layout={block_info}",
-        ]
-        if note:
-            parts.append(f"vl_note={note[:24]}")
-        return "；".join(parts)
-
-    def _block_for_entry(self, entry: CharEntry) -> Optional[Block]:
-        for page in self._pages:
-            if page.page_number != entry.page_number:
-                continue
-            for block in page.blocks:
-                if block.order == entry.block_order:
-                    return block
-        return None
+        self._candidate_hint.setText(f"候选：{text}")
 
     # ─────────────────── Gallery 点击 ───────────────────────
 
@@ -800,6 +761,7 @@ class VProofPanel(QWidget):
                         page_id=page.id,
                         line_id=line.id,
                         status=line.proof_status.value,
+                        origin=id(self),
                     )
             idx += 1
         self.proof_saved.emit()
@@ -807,6 +769,14 @@ class VProofPanel(QWidget):
         self._status_lbl.setStyleSheet(
             "color: #4CAF50; font-size: 12px;" if changed else ""
         )
+        # Phase 23 blocker：保存后必须把 _loaded_text 同步到当前 _text_edit
+        # 内容，否则后续同页外部 line.proof_changed 触发的 dirty 检查
+        # 会一直为 True，把 HProof 刚改的别行又用 _text_edit 里 stale
+        # 的整页文本（由 _save_page_text 回写）覆盖掉。
+        # 取 toPlainText 而非重建 _build_text_map：保存路径会做 scrub
+        # （fake_char 落盘前移除）；以"用户当前所见"为基线最直观，
+        # 也避免在保存后强制 setPlainText 把光标位置打断。
+        self._loaded_text = self._text_edit.toPlainText()
         if changed:
             self._char_svc.build(self._pages)
             self._rebuild_char_list()
@@ -823,6 +793,7 @@ class VProofPanel(QWidget):
                     page_id=page.id,
                     line_id=line.id,
                     status=ProofStatus.OK.value,
+                    origin=id(self),
                 )
         self.proof_saved.emit()
         self._status_lbl.setText("本页已确认")
@@ -834,6 +805,39 @@ class VProofPanel(QWidget):
 
     def _next_page(self) -> None:
         self._load_page(self._current_page_idx + 1)
+
+    def _on_external_line_changed(self, **kwargs) -> None:
+        """收到外部（横校）发来的 line.proof_changed → 当前页若包含这一行，
+        重渲染当前页文本，让显示和 line.text 同步。
+
+        line.text 已被对方 update_text 改过，self._text_map 里的 (Line, ...) 引用
+        指向同一对象，所以重新 _build_text_map 即拿到新值。
+        """
+        if kwargs.get("origin") == id(self):
+            return
+        if not self._pages:
+            return
+        line_id = kwargs.get("line_id")
+        page_id = kwargs.get("page_id")
+        if line_id is None:
+            return
+        cur_page = self._pages[self._current_page_idx]
+        if page_id is not None and cur_page.id != page_id:
+            return
+        # 当前页有这一行才重渲染
+        for _block, line, _li in iter_unique_page_text_lines(cur_page):
+            if line.id == line_id:
+                # Phase 22 blocker 1：先把用户在 _text_edit 里尚未保存的输入
+                # 落盘（走 _save_page_text 同样的 quality_probe 桥），否则
+                # 紧接着的 _load_page 会用 page 当前 line.text 重新渲染，
+                # 把用户在编辑的文本静默覆盖掉。
+                if self._text_edit.toPlainText() != self._loaded_text:
+                    self._save_page_text()
+                self._load_page(self._current_page_idx)
+                # char list / gallery 也需要重建以反映新文本
+                self._char_svc.build(self._pages)
+                self._rebuild_char_list()
+                return
 
     def refresh_quality_probe_state(self) -> None:
         """供 main_window 进入纵校步骤时调用：当前页若已加载，重新渲染让显示
