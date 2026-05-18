@@ -421,20 +421,24 @@ class VProofPanel(QWidget):
         return box
 
     def _build_candidate_panel(self) -> QWidget:
+        # 候选字区（极简版）：标题 + ≤5 个候选按钮一行。
+        # 设计原则：UI 不再暴露 LLM 字样和长说明；候选来源/分数靠 tooltip。
         box = QWidget()
         box.setObjectName("candidatePanel")
-        box.setFixedHeight(90)
+        box.setFixedHeight(54)
         box.setStyleSheet("QWidget#candidatePanel { background:#ffffff; border:0; }")
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(2)
-        self._candidate_title = QLabel("候选字（LLM 预留）")
+        self._candidate_title = QLabel("候选字")
         self._candidate_title.setObjectName("sectionTitle")
         self._candidate_buttons_row = QHBoxLayout()
         self._candidate_buttons_row.setSpacing(4)
-        self._candidate_hint = QLabel("未选择字符；候选字接口已预留，默认不调用外部模型")
+        # 单行 hint：仅在无候选时短提示用；正常情况下隐藏，不再放整段解释。
+        self._candidate_hint = QLabel("")
         self._candidate_hint.setObjectName("muted")
-        self._candidate_hint.setWordWrap(True)
+        self._candidate_hint.setStyleSheet("font-size:11px; color:#888;")
+        self._candidate_hint.hide()
         layout.addWidget(self._candidate_title)
         layout.addLayout(self._candidate_buttons_row)
         layout.addWidget(self._candidate_hint)
@@ -569,7 +573,7 @@ class VProofPanel(QWidget):
         self._resize_gallery_for_entries(0)
         self._current_candidate_entry = None
         self._clear_candidate_buttons()
-        self._candidate_hint.setText("未选择字符；候选字接口已预留，默认不调用外部模型")
+        self._candidate_hint.hide()
         self._page_label.setText("页 0 / 0")
 
     def set_candidate_provider(self, provider: Optional[LlmCandidateProvider]) -> None:
@@ -665,7 +669,8 @@ class VProofPanel(QWidget):
         else:
             self._current_candidate_entry = None
             self._clear_candidate_buttons()
-            self._candidate_hint.setText("无可用候选；当前字符没有可定位的 OCR 几何")
+            self._candidate_hint.setText("无候选")
+            self._candidate_hint.show()
             self._highlight_char_in_text(tok, focus_entry=None)
 
     def _rebuild_text_lookup(self, page: Page) -> None:
@@ -738,37 +743,59 @@ class VProofPanel(QWidget):
         )
 
     def _update_candidate_panel(self, entry: CharEntry) -> None:
+        # 极简版：UI 上只摆 ≤5 个候选按钮；不显示分数/来源/LLM 字样/解释段。
+        # 第一候选由 _ranked_candidates 决定（最高可信来源优先）。
         request = self._candidate_request_for_entry(entry)
-        signals = self._candidate_signals_for_entry(entry)
-        if self._candidate_provider is None:
-            candidates = self._explainable_candidates_for_entry(entry)
-            self._set_candidate_buttons(candidates)
-            candidate_text = "、".join(candidates) if candidates else request.token
-            self._candidate_hint.setText(
-                f"候选：{candidate_text}\n"
-                f"信号：{signals}\n"
-                "VL/OCR 信号先给可解释依据；LLM 作为补充建议，不替代人工终审。"
-            )
-            return
-        candidates = self._candidate_provider.suggest_candidates(request)
+        candidates = self._ranked_candidates(entry, request)[:5]
         self._set_candidate_buttons(candidates)
-        text = "、".join(candidates) if candidates else "无候选"
-        self._candidate_hint.setText(f"候选：{text}\n信号：{signals}")
+        if candidates:
+            self._candidate_hint.hide()
+        else:
+            self._candidate_hint.setText("无候选")
+            self._candidate_hint.show()
 
-    def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
-        candidates: List[str] = []
-        for value in (
-            entry.token_text or entry.char,
-            self._line_char_at(entry.line.ocr_text, entry.char_idx),
-            self._line_char_at(entry.line.llm_suggestion, entry.char_idx),
-        ):
-            if value and value not in candidates:
-                candidates.append(value)
+    def _ranked_candidates(
+        self, entry: CharEntry, request: LlmCandidateRequest,
+    ) -> List[str]:
+        """按可信度从高到低聚合候选字，去重后返回 list。
+
+        优先级（高 → 低）：
+          1. 当前显示字 / token 自身（保留第一位 = 现有识别结果）
+          2. line.ocr_text 在同 char_index 上的字（如果与显示字不同，说明本次有 probe 或后续修正）
+          3. line.llm_suggestion 在同 char_index 上的字
+          4. 注入的 LlmCandidateProvider 返回值（不在 UI 标 LLM）
+          5. DEFAULT_CONFUSABLE_CANDIDATES 易混淆字（兜底）
+
+        provider 失败/未注入时静默跳过，不显示错误提示，保持 UI 干净。
+        """
+        ranked: List[str] = []
+
+        def _push(value: str) -> None:
+            if value and value not in ranked:
+                ranked.append(value)
+
+        _push(entry.token_text or entry.char)
+        _push(self._line_char_at(entry.line.ocr_text, entry.char_idx))
+        _push(self._line_char_at(entry.line.llm_suggestion, entry.char_idx))
+
+        if self._candidate_provider is not None:
+            try:
+                provider_out = self._candidate_provider.suggest_candidates(request)
+            except Exception:
+                provider_out = []
+            for value in provider_out:
+                _push(value)
+
         token = entry.token_text or entry.char
         for value in DEFAULT_CONFUSABLE_CANDIDATES.get(token, []):
-            if value and value not in candidates:
-                candidates.append(value)
-        return candidates
+            _push(value)
+
+        return ranked
+
+    def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
+        # 保留以兼容旧调用点；内部委托给 _ranked_candidates。
+        request = self._candidate_request_for_entry(entry)
+        return self._ranked_candidates(entry, request)[:5]
 
     def _clear_candidate_buttons(self) -> None:
         while self._candidate_buttons_row.count():
@@ -779,12 +806,17 @@ class VProofPanel(QWidget):
         self._candidate_buttons = []
 
     def _set_candidate_buttons(self, candidates: List[str]) -> None:
+        # 极简版：第一候选用 primaryBtn 样式强调，其余 candidateButton。
+        # 不再附带 LLM/来源标签到按钮可见文本上。
         self._clear_candidate_buttons()
-        for candidate in candidates:
+        for idx, candidate in enumerate(candidates):
             button = QPushButton(candidate)
-            button.setObjectName("candidateButton")
+            button.setObjectName("primaryBtn" if idx == 0 else "candidateButton")
             button.setMinimumHeight(24)
-            button.setToolTip(f"替换当前选中字为：{candidate}")
+            button.setToolTip(
+                f"替换当前选中字为：{candidate}"
+                + ("（最高可信候选）" if idx == 0 else "")
+            )
             button.clicked.connect(
                 lambda _checked=False, value=candidate: self._apply_candidate(value)
             )
