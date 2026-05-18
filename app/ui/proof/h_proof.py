@@ -110,10 +110,15 @@ class _RowEditor(QPlainTextEdit):
     skip_requested    = Signal()
     revert_requested  = Signal()
     length_violation  = Signal(str)  # 试图改变长度时发出原因字符串
+    # hproof-visual-marking 升级：鼠标悬停字符位置变化（-1 = 离开 editor 区域）
+    hover_char_changed = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._fixed_length: Optional[int] = None
+        self._last_hover_idx: int = -1
+        # 启用鼠标跟踪：无需按下也能收到 mouseMoveEvent，用于图字 hover 联动
+        self.setMouseTracking(True)
 
     def set_fixed_length(self, n: Optional[int]) -> None:
         """启用/关闭固定长度模式。n=None 表示自由编辑。"""
@@ -209,6 +214,28 @@ class _RowEditor(QPlainTextEdit):
                 return
         cur.insertText(text)
 
+    # ── 鼠标悬停 → 字符索引（hproof-visual-marking）─────────
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        super().mouseMoveEvent(event)
+        try:
+            pos = event.position().toPoint()
+        except AttributeError:
+            pos = event.pos()
+        cur = self.cursorForPosition(pos)
+        idx = cur.position()
+        # 末尾点击会落到 len(text)；当成离开
+        if idx >= len(self.toPlainText()):
+            idx = -1
+        if idx != self._last_hover_idx:
+            self._last_hover_idx = idx
+            self.hover_char_changed.emit(idx)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        super().leaveEvent(event)
+        if self._last_hover_idx != -1:
+            self._last_hover_idx = -1
+            self.hover_char_changed.emit(-1)
+
 
 # ─────────────────────────────────────────────────────────────
 # 评测位 (quality probe) 显示↔真实 桥接
@@ -255,6 +282,9 @@ class _LinePair(QFrame):
         self._line_crop_origin: tuple[int, int] = (0, 0)
         # 最近一次行图像缩放比例，用于把 _img_lbl 上的点击位置反查回原图坐标
         self._render_scale: float = 1.0
+        # hproof-visual-marking：editor 鼠标悬停的字符索引（-1 = 未悬停）。
+        # _render_line_image 会按 active 选区/光标 + 这个 hover idx 联合画框。
+        self._hover_char_idx: int = -1
 
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -325,6 +355,8 @@ class _LinePair(QFrame):
         self._editor.revert_requested.connect(self._revert)
         # Task #2: 长度违规 → 浮动 tooltip 提示（不弹模态）
         self._editor.length_violation.connect(self._on_length_violation)
+        # hproof-visual-marking：鼠标悬停 editor → 在行图上高亮对应字
+        self._editor.hover_char_changed.connect(self._on_editor_hover_char)
         self._editor.selectionChanged.connect(self._refresh_extra_selections)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._refresh_extra_selections)
@@ -397,6 +429,9 @@ class _LinePair(QFrame):
 
         仅在当前显示文本与 chars 数量已经一致时启用固定长度约束；如果底层数据
         本身已经失配，则先保留自由编辑，避免把现有坏状态锁死到不可恢复。
+
+        Tooltip 行为：只有"启用固定模式"那次才设非空 tooltip；其余情况清掉。
+        留下空字符串会让 Qt 偶发弹出"空白 hover 框"。
         """
         chars = self._line.chars or []
         text_len = len(self._editor.toPlainText())
@@ -405,22 +440,43 @@ class _LinePair(QFrame):
         if fixed is not None:
             self._editor.setToolTip(f"固定 {fixed} 字：请直接覆盖，不要删改长度")
         else:
-            self._editor.setToolTip("")
+            # 显式 clear 而非 setToolTip("")；后者在部分 Qt 下仍会触发空 hover 框
+            self._editor.setToolTip("")  # noqa: PLE0245 -- 仍需调用以覆盖上一行旧值
+            # 但同时关闭"hover 区域 tooltip"残留：把 attribute 关掉
+            self._editor.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, False)
 
     def _on_length_violation(self, reason: str) -> None:
-        """固定长度模式下的非模态反馈。"""
-        self._status_lbl.setToolTip(reason)
+        """固定长度模式下的非模态反馈。
+
+        本轮（hproof-visual-marking）变更：
+        - 不再调用 ``_status_lbl.setToolTip(reason)`` —— 那是会**长期残留**的
+          "悬停提示"，下次鼠标扫过状态点又弹出，是空白 hover 框的来源之一。
+        - 调 ``QToolTip.showText`` 时不再传 ``rect`` 参数。Qt 把 rect 当作
+          "在此区域内只要悬停就重弹同一条 tooltip"的 hover-zone；当前函数本意
+          只是一次性反馈，传 rect 会让用户后续随便扫过 editor 都重弹。
+        """
         try:
-            from PySide6.QtWidgets import QToolTip
             QToolTip.showText(
                 self._editor.mapToGlobal(self._editor.rect().bottomLeft()),
                 reason,
                 self._editor,
-                self._editor.rect(),
-                1500,
             )
         except Exception:
             pass
+
+    def _on_editor_hover_char(self, idx: int) -> None:
+        """editor 鼠标悬停字符 idx 变化 → 在行图上画 hover 框（图字对应升级）。
+
+        只在 aligned 时生效；否则保留行级显示，不假装能定位到某字。
+        """
+        if not self._chars_aligned():
+            new_idx = -1
+        else:
+            new_idx = idx if 0 <= idx < len(self._line.chars) else -1
+        if new_idx == self._hover_char_idx:
+            return
+        self._hover_char_idx = new_idx
+        self._render_line_image()
 
     # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
@@ -437,12 +493,57 @@ class _LinePair(QFrame):
             return False
         return len(self._editor.toPlainText()) == len(self._line.chars)
 
-    def _refresh_extra_selections(self) -> None:
-        """根据 line.chars 的置信度 + 当前光标位置生成 extraSelections：
-        - 低置信度字符：浅红/橙底色（仅在图字严格一一对应时绘制）
-        - 当前光标所在/选中字符：蓝色边框（用 outline 风格的 background）
+    # ── 文本颜色规则（hproof-visual-marking 升级）─────────────
+    # 规则（按优先级从高到低评估，结果决定字的前景色）：
+    #   1. 已人工修正                → 黑     #222   "再无置信度问题"
+    #   2. char.confidence < 0.5     → 红     #c62828 "错字 / 高风险"
+    #   3. char.confidence < 0.80    → 橙     #e8801f "可疑"
+    #         · 若同位置 LLM 建议字符 != 当前字，升级到红（双源都质疑）
+    #   4. char.confidence ≥ 0.95    → 绿     #2e7d32 "高置信"
+    #   5. 其余 (0.80~0.95)          → 默认黑（不上色 / 普通黑字）
+    #
+    # 设计意图：
+    # · 颜色只在 chars 严格一一对应时绘制。失配时全部回退默认黑字（更诚实）。
+    # · "人工修正"判定通过 ocr_text 字符与当前字差异，配合 fixed_length 的
+    #   等长保证 → text[i] vs ocr_text[i] 一一比对稳定。
+    # · LLM 升级仅在已经"可疑"区段触发，避免对原本高置信字的过度警告。
 
-        弱光标即"看不到 caret，但有当前字格高亮"。
+    _COLOR_FIXED   = "#222222"
+    _COLOR_HIGH    = "#2e7d32"
+    _COLOR_SUSPECT = "#e8801f"
+    _COLOR_ERROR   = "#c62828"
+
+    def _classify_char_color(self, i: int) -> Optional[str]:
+        """返回第 i 个字应有的前景色 hex；None = 默认黑字（不上色）。"""
+        chars = self._line.chars or []
+        if not (0 <= i < len(chars)):
+            return None
+        text = self._editor.toPlainText()
+        if i >= len(text):
+            return None
+        # 1) 人工修正：等长前提下 text[i] vs ocr_text[i] 比对；不同 → 黑
+        ocr = self._line.ocr_text or self._line.original_text or ""
+        if len(ocr) == len(text) and i < len(ocr) and text[i] != ocr[i]:
+            return self._COLOR_FIXED
+        conf = getattr(chars[i], "confidence", 1.0) or 1.0
+        if conf < 0.5:
+            return self._COLOR_ERROR
+        if conf < LOW_CONF:
+            # LLM 升级：若同位置 LLM 建议字符存在且与当前不同 → 升到红
+            llm = self._line.llm_suggestion or ""
+            if len(llm) == len(text) and i < len(llm) and llm[i] != text[i]:
+                return self._COLOR_ERROR
+            return self._COLOR_SUSPECT
+        if conf >= 0.95:
+            return self._COLOR_HIGH
+        return None
+
+    def _refresh_extra_selections(self) -> None:
+        """生成 editor 的 extraSelections：
+        - 按 :meth:`_classify_char_color` 给每个字上前景色（绿/橙/红/黑）。
+        - 当前光标所在/选中字：蓝色淡背景（"当前字"指示，配合弱光标）。
+
+        Phase 25 起 caret 宽度=0，弱光标完全靠这套 extraSelections 表达。
         """
         try:
             from PySide6.QtWidgets import QTextEdit
@@ -453,24 +554,24 @@ class _LinePair(QFrame):
         sels: list = []
 
         aligned = self._chars_aligned()
-        # 1) 置信度底色：仅在图字严格一一对应时按 line.chars 一一映射；
-        # 不齐时不画，避免错位“假象”——降级由 _refresh_status 的 ⚠ 提示。
+        # 1) 前景色：仅在图字严格一一对应时绘制
         if aligned:
             chars = self._line.chars or []
-            n = len(chars)
+            n = min(len(chars), len(doc_text))
             for i in range(n):
-                conf = getattr(chars[i], "confidence", 1.0) or 1.0
-                if conf >= LOW_CONF:
+                color = self._classify_char_color(i)
+                if color is None:
                     continue
                 sel = QTextEdit.ExtraSelection()
                 cur = QTextCursor(editor.document())
                 cur.setPosition(i)
                 cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
                 fmt = QTextCharFormat()
-                if conf < 0.5:
-                    fmt.setBackground(QColor("#fde0e0"))
-                else:
-                    fmt.setBackground(QColor("#fff1d6"))
+                fmt.setForeground(QColor(color))
+                # 错字额外给一个非常淡的红底，"必须修"更醒目；其他颜色不加底色
+                # 避免与"当前字"的蓝底冲突。
+                if color == self._COLOR_ERROR:
+                    fmt.setBackground(QColor("#fdecec"))
                 sel.format = fmt
                 sel.cursor = cur
                 sels.append(sel)
@@ -609,6 +710,22 @@ class _LinePair(QFrame):
                     overlay = crop.copy()
                     cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 128, 255), -1)
                     crop = cv2.addWeighted(overlay, 0.18, crop, 0.82, 0)
+        # hproof-visual-marking：editor 鼠标悬停 → 在行图上画绿色细框
+        # （与"当前字"蓝框区分；当 hover idx 与当前字重叠时，蓝框已经画过，
+        # 此处的绿框会叠在外侧 1px，仍能看出"鼠标正在指这个字"）。
+        if (
+            self._chars_aligned()
+            and 0 <= self._hover_char_idx < len(self._line.chars)
+        ):
+            ox, oy = self._line_crop_origin
+            char = self._line.chars[self._hover_char_idx]
+            if char.bbox is not None:
+                x1 = max(0, char.bbox.x - ox)
+                y1 = max(0, char.bbox.y - oy)
+                x2 = min(crop.shape[1] - 1, char.bbox.x2 - ox)
+                y2 = min(crop.shape[0] - 1, char.bbox.y2 - oy)
+                if x2 > x1 and y2 > y1:
+                    cv2.rectangle(crop, (x1, y1), (x2, y2), (40, 167, 69), 1)
         h, w = crop.shape[:2]
         # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）。
         # 严格保持宽高比：先按高度缩放；若超宽再按宽度缩放重算高度。
@@ -705,23 +822,25 @@ class _LinePair(QFrame):
         status = self._line.proof_status
         color = _STATUS_COLOR.get(status, "#ccc")
         label = _STATUS_LABEL.get(status, "")
-        # proof UI clarity（Task #1）：图字不齐时，必须明示降级而非伪装一一对应
+        # Task #1 升级：fixed_length 模式下 text_n 永远等于 char_n，aligned 一直成立。
+        # 这里只在真正异常时给 ⚠ 提示；正常情况下不再"为了诚实而提示"，避免
+        # 用户每行都看到一条空有解释、没有动作意义的 hover。
         text_n = len(self._editor.toPlainText()) if hasattr(self, "_editor") else 0
         char_n = len(self._line.chars) if self._line.chars else 0
         unaligned = bool(self._line.chars) and text_n != char_n
         warn = ""
-        tip = ""
         if unaligned:
-            warn = " <span style='color:#c62828;font-size:11px;' title='图字未对齐'>⚠</span>"
+            warn = " <span style='color:#c62828;font-size:11px;'>⚠</span>"
             tip = (
-                f"图字未对齐：文本 {text_n} 字 ≠ 图像字符 {char_n} 字 → "
-                f"逐字高亮已停用，仅做行级对齐"
+                f"图字未对齐：文本 {text_n} 字 ≠ 图像字符 {char_n} 字\n"
+                f"已停用逐字高亮；请把文本改回 {char_n} 字以恢复图字一一对应"
             )
-        elif not self._line.chars:
-            tip = "本行无字符 bbox（OCR 未给出 chars），仅行级对齐"
+        else:
+            tip = ""
         self._status_lbl.setText(
             f"<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
         )
+        # 空字符串显式覆盖任何上一轮残留 tip，避免空白 hover 框残影
         self._status_lbl.setToolTip(tip)
 
 
@@ -867,10 +986,10 @@ class HProofPanel(QWidget):
             sl.addWidget(lbl)
 
         for color, label in (
-            ("#4CAF50", "与原文一致"),
-            ("#FF9800", "疑似错误"),
-            ("#c8d0db", "待确认"),
-            ("#1a73e8", "已修改"),
+            ("#2e7d32", "高置信"),
+            ("#e8801f", "可疑"),
+            ("#c62828", "错字 / 高风险"),
+            ("#222222", "已修正"),
         ):
             dot = QLabel(
                 f"<span style='color:{color}'>●</span>"
