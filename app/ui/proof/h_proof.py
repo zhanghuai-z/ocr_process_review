@@ -35,7 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSplitter, QToolTip, QVBoxLayout, QWidget,
 )
 
 from app.models import Block, Line, OcrProject, Page, ProofStatus
