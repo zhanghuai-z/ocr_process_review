@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from pathlib import Path
+import re
 from typing import Iterable, List
 
 from app.models import Block, BlockType, Line, OcrProject, Page
@@ -23,6 +25,13 @@ BLOCK_LABELS: dict[BlockType, str] = {
     BlockType.REFERENCE: "参考文献",
     BlockType.EQUATION: "公式",
     BlockType.UNKNOWN: "未知块",
+}
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
 }
 
 
@@ -74,6 +83,25 @@ def get_block_label(block: Block) -> str:
 def format_bbox(bbox) -> str:
     """将 bbox 格式化为稳定的 x,y,w,h 字符串。"""
     return f"{bbox.x},{bbox.y},{bbox.w},{bbox.h}"
+
+
+def sanitize_export_filename(name: str, fallback: str = "ocr_export") -> str:
+    """生成跨平台安全的导出文件名主体。"""
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", (name or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ._")
+    if not cleaned:
+        cleaned = fallback
+    if cleaned.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
+        cleaned = f"{cleaned}_"
+    return cleaned[:120]
+
+
+def build_export_path(out_dir: str | Path, project_name: str, fmt: str) -> Path:
+    """根据项目名和格式生成安全落盘路径，并确保输出目录存在。"""
+    directory = Path(out_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = fmt.lower().lstrip(".")
+    return directory / f"{sanitize_export_filename(project_name)}.{suffix}"
 
 
 def iter_export_pages(project: OcrProject) -> Iterable[Page]:

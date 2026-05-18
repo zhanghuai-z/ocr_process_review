@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
         self._controller.set_layout_run_enabled(True)
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
-        if self._controller.current_step == STEP_LAYOUT or "版面分析" in msg:
+        if self._controller.current_step in (STEP_LAYOUT, STEP_OCR) or "版面分析" in msg:
             self._layout_panel.finish_analysis_progress(msg)
             self._top_bar.set_status("warn", "失败")
             self._status_bar.showMessage(f"处理失败：{msg}")

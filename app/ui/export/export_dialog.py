@@ -1,6 +1,5 @@
 """导出对话框：多格式选择 + 路径 + 导出进度。"""
 from __future__ import annotations
-from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -11,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import OcrProject
+from app.services.export_service import build_export_path
 
 
 class ExportWorker(QThread):
@@ -31,11 +31,12 @@ class ExportWorker(QThread):
             self.progress.emit(f"正在导出 {fmt.upper()}…", index - 1, total)
             try:
                 exporter = get_exporter(fmt)
-                out_path = str(Path(self._out_dir) / f"{self._project.name}.{fmt}")
+                out_path = str(build_export_path(self._out_dir, self._project.name, fmt))
                 exporter.export(self._project, out_path)
+                self.progress.emit(f"{fmt.upper()} 导出完成", index, total)
             except Exception as e:
                 errors.append(f"{fmt}: {e}")
-            self.progress.emit(f"{fmt.upper()} 导出完成", index, total)
+                self.progress.emit(f"{fmt.upper()} 导出失败", index, total)
         if errors:
             self.completed.emit(False, "\n".join(errors))
         else:

@@ -804,6 +804,53 @@ def test_export_worker_reports_completion_progress():
     print("test_export_worker_reports_completion_progress PASSED")
 
 
+def test_export_filename_sanitizes_invalid_project_name():
+    from app.services.export_service import build_export_path, sanitize_export_filename
+
+    assert sanitize_export_filename(' 卷/一:测试*? ') == "卷_一_测试"
+    assert sanitize_export_filename("CON") == "CON_"
+    assert sanitize_export_filename("CON.txt") == "CON.txt_"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = build_export_path(tmpdir, '卷/一:测试*?', "txt")
+        assert out_path.parent.exists()
+        assert out_path.name == "卷_一_测试.txt"
+
+    print("test_export_filename_sanitizes_invalid_project_name PASSED")
+
+
+def test_export_worker_sanitizes_project_name_for_all_formats():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.export_service import sanitize_export_filename
+    from app.ui.export.export_dialog import ExportWorker
+
+    _get_qapp()
+    bb = BBox(0, 0, 100, 20)
+    project = OcrProject(name='卷/一:测试*?', pages=[
+        Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+            Block(block_type=BlockType.TITLE, bbox=bb, lines=[
+                Line(text="标题", confidence=0.9, bbox=bb),
+            ]),
+            Block(block_type=BlockType.TEXT, bbox=bb, lines=[
+                Line(text="正文", confidence=0.9, bbox=bb),
+            ]),
+        ]),
+    ])
+    completed = []
+    formats = ["txt", "md", "rtf", "pdf", "xml", "html", "docx"]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        worker = ExportWorker(project, formats, tmpdir)
+        worker.completed.connect(lambda ok, msg: completed.append((ok, msg)))
+        worker.run()
+        base = sanitize_export_filename(project.name)
+        for fmt in formats:
+            assert os.path.exists(os.path.join(tmpdir, f"{base}.{fmt}"))
+
+    assert completed == [(True, "")]
+
+    print("test_export_worker_sanitizes_project_name_for_all_formats PASSED")
+
+
 def test_layout_panel_analysis_progress_lifecycle():
     from app.models import Page
     from app.ui.recognize.layout_panel import LayoutPanel
@@ -847,7 +894,7 @@ def test_workflow_controller_layout_progress_signal():
 def test_main_window_layout_error_is_status_only():
     from PySide6.QtWidgets import QMessageBox
 
-    from app.controllers.workflow_controller import STEP_LAYOUT
+    from app.controllers.workflow_controller import STEP_LAYOUT, STEP_OCR
     from app.ui.main_window import MainWindow
 
     _get_qapp()
@@ -860,6 +907,10 @@ def test_main_window_layout_error_is_status_only():
         window._on_worker_error("所有页面版面分析失败：网络错误")
         assert calls == []
         assert "网络错误" in window.statusBar().currentMessage()
+        window._go_to_step(STEP_OCR)
+        window._on_worker_error("OCR 自动衔接失败")
+        assert calls == []
+        assert "OCR 自动衔接失败" in window.statusBar().currentMessage()
     finally:
         QMessageBox.critical = original_critical
         window.close()
@@ -5746,6 +5797,8 @@ if __name__ == "__main__":
     test_export_dialog_offers_markdown()
     test_export_default_styles_map_to_html_docx_and_pdf()
     test_export_worker_reports_completion_progress()
+    test_export_filename_sanitizes_invalid_project_name()
+    test_export_worker_sanitizes_project_name_for_all_formats()
     test_layout_panel_analysis_progress_lifecycle()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()
