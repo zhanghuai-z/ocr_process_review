@@ -238,6 +238,8 @@ class _LinePair(QFrame):
         self._editor.cursorPositionChanged.connect(self._render_line_image)
         # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
         self._editor.textChanged.connect(self._refresh_extra_selections)
+        # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
+        self._editor.textChanged.connect(self._refresh_status)
         content_v.addWidget(self._editor)
 
         root.addWidget(self._content, 1)
@@ -297,9 +299,22 @@ class _LinePair(QFrame):
 
     # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
+    def _chars_aligned(self) -> bool:
+        """Editor 文本是否与 ``line.chars`` 严格一一对应。
+
+        proof UI clarity（Task #1）：图像 char.bbox 与文本下标的映射只有在
+        ``len(text) == len(chars)`` 时才可靠。一旦用户编辑增删字符、或 OCR
+        本身就给出错位的 chars 列表，**就不要**伪装成"第 i 字 ↔ 第 i 个
+        bbox"——而是改走降级路径（不画逐字底色 / 不画图像逐字高亮 /
+        点击行图退回行级激活），并由 :meth:`_refresh_status` 显式 ⚠ 标记。
+        """
+        if not self._line.chars:
+            return False
+        return len(self._editor.toPlainText()) == len(self._line.chars)
+
     def _refresh_extra_selections(self) -> None:
         """根据 line.chars 的置信度 + 当前光标位置生成 extraSelections：
-        - 低置信度字符：浅红/橙底色
+        - 低置信度字符：浅红/橙底色（仅在图字严格一一对应时绘制）
         - 当前光标所在/选中字符：蓝色边框（用 outline 风格的 background）
 
         弱光标即"看不到 caret，但有当前字格高亮"。
@@ -312,26 +327,28 @@ class _LinePair(QFrame):
         doc_text = editor.toPlainText()
         sels: list = []
 
-        # 1) 置信度底色（按 line.chars 一一映射；超出/缺失按 OK 处理）
-        chars = self._line.chars or []
-        n = min(len(doc_text), len(chars))
-        for i in range(n):
-            conf = getattr(chars[i], "confidence", 1.0) or 1.0
-            if conf >= LOW_CONF:
-                continue
-            sel = QTextEdit.ExtraSelection()
-            cur = QTextCursor(editor.document())
-            cur.setPosition(i)
-            cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
-            fmt = QTextCharFormat()
-            # 红/橙阶梯
-            if conf < 0.5:
-                fmt.setBackground(QColor("#fde0e0"))
-            else:
-                fmt.setBackground(QColor("#fff1d6"))
-            sel.format = fmt
-            sel.cursor = cur
-            sels.append(sel)
+        aligned = self._chars_aligned()
+        # 1) 置信度底色：仅在图字严格一一对应时按 line.chars 一一映射；
+        # 不齐时不画，避免错位“假象”——降级由 _refresh_status 的 ⚠ 提示。
+        if aligned:
+            chars = self._line.chars or []
+            n = len(chars)
+            for i in range(n):
+                conf = getattr(chars[i], "confidence", 1.0) or 1.0
+                if conf >= LOW_CONF:
+                    continue
+                sel = QTextEdit.ExtraSelection()
+                cur = QTextCursor(editor.document())
+                cur.setPosition(i)
+                cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
+                fmt = QTextCharFormat()
+                if conf < 0.5:
+                    fmt.setBackground(QColor("#fde0e0"))
+                else:
+                    fmt.setBackground(QColor("#fff1d6"))
+                sel.format = fmt
+                sel.cursor = cur
+                sels.append(sel)
 
         # 2) 当前字（光标所在位置或 selection 范围）边框/底色
         cursor = editor.textCursor()
@@ -355,8 +372,10 @@ class _LinePair(QFrame):
 
     def _img_clicked_lookup(self, event) -> None:
         """点击行图区域：先按 char.bbox 反查最近的字 → 把 editor 光标定到该字。
-        若无 chars 信息则退回行级激活。"""
-        if not self._line.chars:
+        若 chars 缺失 / 图字未严格一一对应，退回行级激活（不强行定位以免错位）。
+        """
+        if not self._chars_aligned():
+            # 降级：不假装能定到某字，仅激活本行 + 提示原因
             self._on_click(event)
             return
         # 反查：把 _img_lbl 内 px 坐标 → 原图坐标 → 找最近 char
@@ -437,7 +456,9 @@ class _LinePair(QFrame):
         crop = self._line_crop.copy()
         highlight_range: tuple[int, int] | None = None
         # Phase 25：editor 始终可见，按光标/选区在行图上高亮对应 char.bbox。
-        if self._active:
+        # proof UI clarity（Task #1）：仅当文本与 chars 严格一一对应才画框，
+        # 否则不强行画——避免把"第 N 字"高亮到了别的字 bbox 上的假象。
+        if self._active and self._chars_aligned():
             cursor = self._editor.textCursor()
             start = min(cursor.selectionStart(), cursor.selectionEnd())
             end = max(cursor.selectionStart(), cursor.selectionEnd())
@@ -555,9 +576,24 @@ class _LinePair(QFrame):
         status = self._line.proof_status
         color = _STATUS_COLOR.get(status, "#ccc")
         label = _STATUS_LABEL.get(status, "")
+        # proof UI clarity（Task #1）：图字不齐时，必须明示降级而非伪装一一对应
+        text_n = len(self._editor.toPlainText()) if hasattr(self, "_editor") else 0
+        char_n = len(self._line.chars) if self._line.chars else 0
+        unaligned = bool(self._line.chars) and text_n != char_n
+        warn = ""
+        tip = ""
+        if unaligned:
+            warn = " <span style='color:#c62828;font-size:11px;' title='图字未对齐'>⚠</span>"
+            tip = (
+                f"图字未对齐：文本 {text_n} 字 ≠ 图像字符 {char_n} 字 → "
+                f"逐字高亮已停用，仅做行级对齐"
+            )
+        elif not self._line.chars:
+            tip = "本行无字符 bbox（OCR 未给出 chars），仅行级对齐"
         self._status_lbl.setText(
-            f"<span style='color:{color};font-size:11px;'>● {label}</span>"
+            f"<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
         )
+        self._status_lbl.setToolTip(tip)
 
 
 # ─────────────────────────────────────────────────────────────

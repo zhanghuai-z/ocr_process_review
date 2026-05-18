@@ -5385,9 +5385,14 @@ def test_vproof_candidate_provider_interface_is_prepared():
     assert provider.requests[0].page_number == 3
     assert provider.requests[0].bbox_source == "ocr"
     assert provider.requests[0].bbox_granularity == "char"
-    assert panel._candidate_hint.text().startswith("候选：甲、由")
-    assert [button.text() for button in panel._candidate_buttons] == ["甲", "由"]
-    assert "bbox=ocr/char" in panel._candidate_hint.text()
+    # proof UI clarity（Task #3）：候选区不再展示 "候选：…｜bbox=ocr/char｜…"
+    # 这种解释文案；只保留最多 5 个候选按钮，第一候选 = 当前最高可信来源。
+    button_texts = [button.text() for button in panel._candidate_buttons]
+    assert button_texts[:1] == ["田"]  # 当前字（最高可信）排首位
+    assert "甲" in button_texts and "由" in button_texts  # provider 候选并入
+    assert len(button_texts) <= 5
+    # hint 不再承担长解释；有候选时应被隐藏（或为空）
+    assert not panel._candidate_hint.isVisible() or panel._candidate_hint.text() == ""
     panel.close()
 
     print("test_vproof_candidate_provider_interface_is_prepared PASSED")
