@@ -43,6 +43,7 @@ class WorkflowController(QObject):
     step_enabled_changed = Signal(int)     # 允许的最大步骤
     step_requested = Signal(int)           # 请求跳转步骤
     layout_finished = Signal(object)       # List[Page]
+    layout_progress = Signal(int, int)     # current_index, total
     ocr_finished = Signal(object)          # List[Page]
     ocr_progress = Signal(object)          # OcrProgress
     worker_error = Signal(str)             # 错误消息
@@ -573,6 +574,7 @@ class WorkflowController(QObject):
 
     def _on_layout_progress(self, current: int, total: int) -> None:
         """版面分析进度更新。"""
+        self.layout_progress.emit(current, total)
         self.status_message.emit(f"版面分析中… 第 {current + 1}/{total} 页")
 
     def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> bool:

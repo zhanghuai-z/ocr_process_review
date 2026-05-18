@@ -723,6 +723,150 @@ def test_export_dialog_offers_markdown():
     print("test_export_dialog_offers_markdown PASSED")
 
 
+def test_export_default_styles_map_to_html_docx_and_pdf():
+    from docx import Document
+
+    from app.export.docx_exporter import DocxExporter
+    from app.export.html import HtmlExporter
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    title_bb = BBox(0, 0, 100, 20)
+    body_bb = BBox(0, 30, 100, 20)
+    equation_bb = BBox(0, 60, 100, 20)
+    project = OcrProject(name="StyleExport", pages=[
+        Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+            Block(block_type=BlockType.TITLE, bbox=title_bb, order=0, lines=[
+                Line(text="章节标题", confidence=0.95, bbox=title_bb),
+            ]),
+            Block(block_type=BlockType.TEXT, bbox=body_bb, order=1, lines=[
+                Line(text="正文内容", confidence=0.90, bbox=body_bb),
+            ]),
+            Block(block_type=BlockType.EQUATION, bbox=equation_bb, order=2, lines=[
+                Line(text="E = mc^2", confidence=0.88, bbox=equation_bb),
+            ]),
+        ]),
+    ])
+
+    paths = []
+    try:
+        for suffix in (".html", ".docx", ".pdf"):
+            f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            paths.append(f.name)
+            f.close()
+        html_path, docx_path, pdf_path = paths
+
+        HtmlExporter().export(project, html_path)
+        html = open(html_path, encoding="utf-8").read()
+        assert 'class="block block-title"' in html
+        assert 'class="block block-body"' in html
+        assert 'class="block block-equation"' in html
+
+        DocxExporter().export(project, docx_path)
+        doc = Document(docx_path)
+        styled = {p.text.strip(): p.style.name for p in doc.paragraphs if p.text.strip()}
+        assert styled["章节标题"].startswith("Heading")
+        assert styled["正文内容"] == "Normal"
+
+        PdfExporter().export(project, pdf_path)
+        assert os.path.getsize(pdf_path) > 0
+        print("test_export_default_styles_map_to_html_docx_and_pdf PASSED")
+    finally:
+        for path in paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_export_worker_reports_completion_progress():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.ui.export.export_dialog import ExportWorker
+
+    _get_qapp()
+    bb = BBox(0, 0, 100, 20)
+    project = OcrProject(name="WorkerExport", pages=[
+        Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+            Block(block_type=BlockType.TEXT, bbox=bb, lines=[
+                Line(text="导出内容", confidence=0.9, bbox=bb),
+            ]),
+        ]),
+    ])
+    events = []
+    completed = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        worker = ExportWorker(project, ["txt"], tmpdir)
+        worker.progress.connect(lambda msg, current, total: events.append((msg, current, total)))
+        worker.completed.connect(lambda ok, msg: completed.append((ok, msg)))
+        worker.run()
+        assert os.path.exists(os.path.join(tmpdir, "WorkerExport.txt"))
+    assert events[-1] == ("TXT 导出完成", 1, 1)
+    assert completed == [(True, "")]
+
+    print("test_export_worker_reports_completion_progress PASSED")
+
+
+def test_layout_panel_analysis_progress_lifecycle():
+    from app.models import Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    panel = LayoutPanel()
+    try:
+        panel.set_pages([Page(image_path="/tmp/img.jpg", width=100, height=100)])
+        panel.start_analysis_progress(2)
+        assert not panel._progress_bar.isHidden()
+        assert panel._progress_bar.maximum() == 2
+        panel.update_analysis_progress(0, 2)
+        assert panel._progress_bar.value() == 1
+        assert "1/2" in panel._status_lbl.text()
+        panel.finish_analysis_progress("完成")
+        assert panel._progress_bar.isHidden()
+        assert panel._status_lbl.text() == "完成"
+    finally:
+        panel.close()
+
+    print("test_layout_panel_analysis_progress_lifecycle PASSED")
+
+
+def test_workflow_controller_layout_progress_signal():
+    from app.controllers.workflow_controller import WorkflowController
+
+    controller = WorkflowController()
+    events = []
+    statuses = []
+    controller.layout_progress.connect(lambda current, total: events.append((current, total)))
+    controller.status_message.connect(statuses.append)
+
+    controller._on_layout_progress(1, 3)
+
+    assert events == [(1, 3)]
+    assert statuses[-1] == "版面分析中… 第 2/3 页"
+
+    print("test_workflow_controller_layout_progress_signal PASSED")
+
+
+def test_main_window_layout_error_is_status_only():
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.controllers.workflow_controller import STEP_LAYOUT
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    calls = []
+    original_critical = QMessageBox.critical
+    QMessageBox.critical = lambda *args, **kwargs: calls.append(args)
+    window = MainWindow()
+    try:
+        window._go_to_step(STEP_LAYOUT)
+        window._on_worker_error("所有页面版面分析失败：网络错误")
+        assert calls == []
+        assert "网络错误" in window.statusBar().currentMessage()
+    finally:
+        QMessageBox.critical = original_critical
+        window.close()
+
+    print("test_main_window_layout_error_is_status_only PASSED")
+
+
 # =====================================================================
 # Fake OCR 引擎测试
 # =====================================================================
@@ -5600,6 +5744,11 @@ if __name__ == "__main__":
     test_export_markdown_structure()
     test_export_formats_share_structured_blocks()
     test_export_dialog_offers_markdown()
+    test_export_default_styles_map_to_html_docx_and_pdf()
+    test_export_worker_reports_completion_progress()
+    test_layout_panel_analysis_progress_lifecycle()
+    test_workflow_controller_layout_progress_signal()
+    test_main_window_layout_error_is_status_only()
     test_fake_ocr_engine()
     test_confidence_normalization()
     test_api_ocr_engine_requests_return_word_box()

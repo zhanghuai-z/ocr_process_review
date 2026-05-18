@@ -207,7 +207,7 @@ class LayoutPanel(QWidget):
 
     def show_analysis_result(self, pages: List[Page]) -> None:
         """版面分析完成后，更新显示（保持当前选中页）并自动触发 OCR 流程。"""
-        self._progress_bar.hide()
+        self.finish_analysis_progress()
         self._pages = pages
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
@@ -220,6 +220,24 @@ class LayoutPanel(QWidget):
             )
         else:
             self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")
+
+    def start_analysis_progress(self, total_pages: int) -> None:
+        self._progress_bar.setRange(0, max(1, total_pages))
+        self._progress_bar.setValue(0)
+        self._progress_bar.show()
+        self._status_lbl.setText(f"正在分析版面… 0/{total_pages}")
+
+    def update_analysis_progress(self, current: int, total: int) -> None:
+        current_done = max(0, min(current + 1, total))
+        self._progress_bar.setRange(0, max(1, total))
+        self._progress_bar.setValue(current_done)
+        self._progress_bar.show()
+        self._status_lbl.setText(f"正在分析版面… {current_done}/{total}")
+
+    def finish_analysis_progress(self, message: str = "") -> None:
+        self._progress_bar.hide()
+        if message:
+            self._status_lbl.setText(message)
 
     def set_current_page_number(self, page_number: int) -> None:
         for idx, page in enumerate(self._pages):
@@ -234,8 +252,7 @@ class LayoutPanel(QWidget):
 
     def _request_analysis(self) -> None:
         """触发版面分析（由主窗口的 run_button.clicked 同时连接），显示进度条。"""
-        self._progress_bar.show()
-        self._status_lbl.setText("正在分析…")
+        self.start_analysis_progress(len(self._pages))
 
     def _on_page_selected(self, idx: int) -> None:
         if 0 <= idx < len(self._pages):

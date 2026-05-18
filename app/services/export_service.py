@@ -7,6 +7,7 @@
 - XML / HTML 保留空块结构，TXT / Markdown 默认只输出有文本的块。
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from typing import Iterable, List
 
 from app.models import Block, BlockType, Line, OcrProject, Page
@@ -23,6 +24,35 @@ BLOCK_LABELS: dict[BlockType, str] = {
     BlockType.EQUATION: "公式",
     BlockType.UNKNOWN: "未知块",
 }
+
+
+@dataclass(frozen=True)
+class ExportBlockStyle:
+    """默认导出样式预设中的块样式。"""
+    name: str
+    html_class: str
+    docx_style: str
+    font_size_pt: int
+    line_height_mm: int
+    italic: bool = False
+
+
+DEFAULT_STYLE_PRESET: dict[BlockType, ExportBlockStyle] = {
+    BlockType.TITLE: ExportBlockStyle("标题", "block-title", "Heading 2", 16, 10),
+    BlockType.TEXT: ExportBlockStyle("正文", "block-body", "Normal", 12, 8),
+    BlockType.REFERENCE: ExportBlockStyle("参考文献", "block-reference", "Normal", 11, 7),
+    BlockType.FIGURE_CAPTION: ExportBlockStyle("图注", "block-caption", "Caption", 10, 6, italic=True),
+    BlockType.TABLE_CAPTION: ExportBlockStyle("表注", "block-caption", "Caption", 10, 6, italic=True),
+    BlockType.EQUATION: ExportBlockStyle("公式", "block-equation", "Normal", 12, 8),
+    BlockType.TABLE: ExportBlockStyle("表格", "block-table", "Normal", 11, 7),
+    BlockType.FIGURE: ExportBlockStyle("图片", "block-figure", "Normal", 11, 7),
+    BlockType.UNKNOWN: ExportBlockStyle("未知块", "block-unknown", "Normal", 12, 8),
+}
+
+
+def get_block_style(block: Block) -> ExportBlockStyle:
+    """返回当前块在 HTML/DOCX/PDF/RTF 中共享的默认样式。"""
+    return DEFAULT_STYLE_PRESET.get(block.block_type, DEFAULT_STYLE_PRESET[BlockType.UNKNOWN])
 
 
 def get_export_text(line: Line) -> str:

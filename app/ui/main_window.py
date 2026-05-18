@@ -273,6 +273,7 @@ class MainWindow(QMainWindow):
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
+        self._controller.layout_progress.connect(self._layout_panel.update_analysis_progress)
         self._controller.ocr_progress.connect(self._on_ocr_progress)
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._status_bar.showMessage)
@@ -448,6 +449,11 @@ class MainWindow(QMainWindow):
         self._controller.set_layout_run_enabled(True)
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
+        if self._controller.current_step == STEP_LAYOUT or "版面分析" in msg:
+            self._layout_panel.finish_analysis_progress(msg)
+            self._top_bar.set_status("warn", "失败")
+            self._status_bar.showMessage(f"处理失败：{msg}")
+            return
         QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
 
     # ── 文件操作 ───────────────────────────────────────────────
@@ -546,8 +552,10 @@ class MainWindow(QMainWindow):
             return
         self._layout_panel.run_button.setEnabled(False)
         self._controller.set_layout_run_enabled(False)
+        self._layout_panel.start_analysis_progress(len(self._controller.pages))
         self._top_bar.set_status("running", "运行中…")
         if not self._controller.start_layout_analysis(self._controller.pages):
+            self._layout_panel.finish_analysis_progress("版面分析未启动")
             self._layout_panel.run_button.setEnabled(True)
             self._controller.set_layout_run_enabled(True)
             self._top_bar.set_status("idle", "未运行")

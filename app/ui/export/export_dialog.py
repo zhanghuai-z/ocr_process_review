@@ -14,8 +14,8 @@ from app.models import OcrProject
 
 
 class ExportWorker(QThread):
-    progress = Signal(str)
-    finished = Signal(bool, str)
+    progress = Signal(str, int, int)
+    completed = Signal(bool, str)
 
     def __init__(self, project: OcrProject, formats: List[str], out_dir: str):
         super().__init__()
@@ -26,18 +26,20 @@ class ExportWorker(QThread):
     def run(self) -> None:
         from app.export import get_exporter
         errors = []
-        for fmt in self._formats:
-            self.progress.emit(f"正在导出 {fmt.upper()}…")
+        total = len(self._formats)
+        for index, fmt in enumerate(self._formats, start=1):
+            self.progress.emit(f"正在导出 {fmt.upper()}…", index - 1, total)
             try:
                 exporter = get_exporter(fmt)
                 out_path = str(Path(self._out_dir) / f"{self._project.name}.{fmt}")
                 exporter.export(self._project, out_path)
             except Exception as e:
                 errors.append(f"{fmt}: {e}")
+            self.progress.emit(f"{fmt.upper()} 导出完成", index, total)
         if errors:
-            self.finished.emit(False, "\n".join(errors))
+            self.completed.emit(False, "\n".join(errors))
         else:
-            self.finished.emit(True, "")
+            self.completed.emit(True, "")
 
 
 class ExportDialog(QDialog):
@@ -47,6 +49,7 @@ class ExportDialog(QDialog):
         super().__init__(parent)
         self._project = project
         self._worker: ExportWorker | None = None
+        self._btn_start = None
         self.setWindowTitle("导出")
         self.setMinimumWidth(420)
         self._build_ui()
@@ -98,7 +101,8 @@ class ExportDialog(QDialog):
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        btns.button(QDialogButtonBox.StandardButton.Ok).setText("开始导出")
+        self._btn_start = btns.button(QDialogButtonBox.StandardButton.Ok)
+        self._btn_start.setText("开始导出")
         btns.accepted.connect(self._start_export)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
@@ -120,18 +124,31 @@ class ExportDialog(QDialog):
             return
 
         self._progress_bar.setVisible(True)
-        self._progress_bar.setRange(0, 0)  # 不确定模式
+        self._progress_bar.setRange(0, len(selected))
+        self._progress_bar.setValue(0)
+        self._progress_lbl.setText("准备导出…")
+        if self._btn_start is not None:
+            self._btn_start.setEnabled(False)
 
         self._worker = ExportWorker(self._project, selected, out_dir)
-        self._worker.progress.connect(self._progress_lbl.setText)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.completed.connect(self._on_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
+    def _on_progress(self, message: str, current: int, total: int) -> None:
+        self._progress_lbl.setText(message)
+        self._progress_bar.setRange(0, max(1, total))
+        self._progress_bar.setValue(max(0, min(current, total)))
+
     def _on_finished(self, ok: bool, msg: str) -> None:
-        self._progress_bar.setVisible(False)
         if ok:
+            self._progress_bar.setValue(self._progress_bar.maximum())
             self._progress_lbl.setText("✓ 导出完成")
-            QMessageBox.information(self, "完成", "所有格式导出成功！")
             self.accept()
         else:
+            if self._btn_start is not None:
+                self._btn_start.setEnabled(True)
+            self._progress_bar.setVisible(False)
+            self._progress_lbl.setText("导出失败")
             QMessageBox.critical(self, "导出失败", msg)
