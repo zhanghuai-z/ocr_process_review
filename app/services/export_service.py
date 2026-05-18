@@ -1,9 +1,28 @@
-"""导出服务：统一导出文本来源、导出前状态检查。"""
-from __future__ import annotations
-from pathlib import Path
-from typing import List
+"""导出服务：统一导出文本来源、结构顺序和导出前状态检查。
 
-from app.models import Line, OcrProject
+结构化导出初版口径：
+- XML / HTML / Markdown / TXT 都按项目 -> 页 -> 块 -> 行读取；
+- 行文本统一读取人工最终文本 line.text；
+- 块按 order 优先、坐标兜底排序，尽量贴近原稿阅读顺序；
+- XML / HTML 保留空块结构，TXT / Markdown 默认只输出有文本的块。
+"""
+from __future__ import annotations
+from typing import Iterable, List
+
+from app.models import Block, BlockType, Line, OcrProject, Page
+
+
+BLOCK_LABELS: dict[BlockType, str] = {
+    BlockType.TEXT: "正文",
+    BlockType.TITLE: "标题",
+    BlockType.FIGURE: "图片",
+    BlockType.FIGURE_CAPTION: "图注",
+    BlockType.TABLE: "表格",
+    BlockType.TABLE_CAPTION: "表注",
+    BlockType.REFERENCE: "参考文献",
+    BlockType.EQUATION: "公式",
+    BlockType.UNKNOWN: "未知块",
+}
 
 
 def get_export_text(line: Line) -> str:
@@ -15,6 +34,37 @@ def get_export_text(line: Line) -> str:
     - 不读取 ocr_text（除非人工未修改且没有原始文本）
     """
     return line.text
+
+
+def get_block_label(block: Block) -> str:
+    """返回导出时使用的人类可读块类型。"""
+    return BLOCK_LABELS.get(block.block_type, block.block_type.value)
+
+
+def format_bbox(bbox) -> str:
+    """将 bbox 格式化为稳定的 x,y,w,h 字符串。"""
+    return f"{bbox.x},{bbox.y},{bbox.w},{bbox.h}"
+
+
+def iter_export_pages(project: OcrProject) -> Iterable[Page]:
+    """按页码输出页面，页码缺失时保持原列表顺序。"""
+    return sorted(project.pages, key=lambda page: page.page_number)
+
+
+def iter_export_blocks(page: Page, *, include_empty: bool = False) -> Iterable[Block]:
+    """按统一阅读顺序输出块。"""
+    blocks = sorted(
+        page.blocks,
+        key=lambda block: (block.order, block.bbox.y, block.bbox.x),
+    )
+    for block in blocks:
+        if include_empty or block.lines or block.note:
+            yield block
+
+
+def iter_export_lines(block: Block) -> Iterable[Line]:
+    """输出块内行，统一文本来源由 get_export_text 控制。"""
+    return block.lines
 
 
 def check_export_readiness(project: OcrProject) -> List[str]:

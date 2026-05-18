@@ -5,6 +5,14 @@ from jinja2 import Environment, BaseLoader
 
 from app.export.base import ExporterBase
 from app.models import OcrProject
+from app.services.export_service import (
+    format_bbox,
+    get_block_label,
+    get_export_text,
+    iter_export_blocks,
+    iter_export_lines,
+    iter_export_pages,
+)
 
 _TEMPLATE = """\
 <!DOCTYPE html>
@@ -19,6 +27,7 @@ _TEMPLATE = """\
   .page-header { color:#569cd6; border-bottom:1px solid #3c3c3c;
                  padding:8px 0; margin-top:32px; }
   .block  { margin:12px 0 12px 16px; }
+  .block-title { color:#c586c0; font-size:12px; margin:4px 0; }
   .line   { margin:2px 0; line-height:1.8; }
   .flagged { color:#f44336; }
   .modified{ color:#ffa726; }
@@ -29,19 +38,20 @@ _TEMPLATE = """\
 <body>
 <h1>{{ project.name }}</h1>
 <p class="meta">共 {{ project.page_count }} 页，{{ project.total_lines }} 行</p>
-{% for page in project.pages %}
+{% for page in iter_pages(project) %}
 <div class="page-header">第 {{ page.page_number }} 页
   <span class="meta">{{ page.image_path }}</span></div>
-{% for block in page.text_blocks %}
+{% for block in iter_blocks(page, include_empty=True) %}
 <div class="block" data-type="{{ block.block_type.value }}"
-     data-bbox="{{ block.bbox.x }},{{ block.bbox.y }},{{ block.bbox.w }},{{ block.bbox.h }}">
-{% for line in block.lines %}
+     data-bbox="{{ format_bbox(block.bbox) }}">
+  <div class="block-title">{{ block_label(block) }} #{{ block.order }}</div>
+{% for line in iter_lines(block) %}
   <div class="line {% if line.proof_status.value == 'auto_flagged' %}flagged
     {% elif line.proof_status.value == 'modified' %}modified
     {% elif line.proof_status.value == 'ok' %}ok{% endif %}"
        data-conf="{{ '%.2f'|format(line.confidence) }}"
-       data-bbox="{{ line.bbox.x }},{{ line.bbox.y }},{{ line.bbox.w }},{{ line.bbox.h }}">
-    {{ line.text }}
+       data-bbox="{{ format_bbox(line.bbox) }}">
+    {{ line_text(line) }}
     <span class="meta">{{ '%.0f'|format(line.confidence*100) }}%</span>
   </div>
 {% endfor %}
@@ -56,8 +66,16 @@ _TEMPLATE = """\
 class HtmlExporter(ExporterBase):
 
     def export(self, project: OcrProject, out_path: str) -> None:
-        env = Environment(loader=BaseLoader())
+        env = Environment(loader=BaseLoader(), autoescape=True)
         tmpl = env.from_string(_TEMPLATE)
-        html = tmpl.render(project=project)
+        html = tmpl.render(
+            project=project,
+            iter_pages=iter_export_pages,
+            iter_blocks=iter_export_blocks,
+            iter_lines=iter_export_lines,
+            line_text=get_export_text,
+            block_label=get_block_label,
+            format_bbox=format_bbox,
+        )
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(html)

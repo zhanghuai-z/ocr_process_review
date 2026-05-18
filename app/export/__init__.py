@@ -20,6 +20,9 @@ def get_exporter(fmt: str) -> ExporterBase:
         case "html":
             from app.export.html import HtmlExporter
             return HtmlExporter()
+        case "md" | "markdown":
+            from app.export.markdown import MarkdownExporter
+            return MarkdownExporter()
         case "docx":
             from app.export.docx_exporter import DocxExporter
             return DocxExporter()

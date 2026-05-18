@@ -622,6 +622,107 @@ def test_export_html():
         os.unlink(out_path)
 
 
+def test_export_markdown_structure():
+    from app.export.markdown import MarkdownExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    bb = BBox(10, 20, 200, 30)
+    page = Page(
+        image_path="/tmp/img.jpg",
+        width=800,
+        height=600,
+        page_number=1,
+        blocks=[
+            Block(block_type=BlockType.TITLE, bbox=bb, order=0, lines=[
+                Line(text="章节标题", confidence=0.95, bbox=bb),
+            ]),
+            Block(block_type=BlockType.TEXT, bbox=BBox(10, 80, 200, 80), order=1, lines=[
+                Line(text="正文第一行", confidence=0.90, bbox=BBox(10, 80, 200, 24)),
+                Line(text="正文第二行", confidence=0.91, bbox=BBox(10, 110, 200, 24)),
+            ]),
+            Block(block_type=BlockType.EQUATION, bbox=BBox(10, 180, 200, 30), order=2, lines=[
+                Line(text="E = mc^2", confidence=0.88, bbox=BBox(10, 180, 200, 30)),
+            ]),
+            Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(10, 230, 200, 30), order=3, lines=[
+                Line(text="图一 示例", confidence=0.93, bbox=BBox(10, 230, 200, 30)),
+            ]),
+        ],
+    )
+    project = OcrProject(name="MdTest", pages=[page])
+    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
+        out_path = f.name
+    try:
+        MarkdownExporter().export(project, out_path)
+        content = open(out_path, encoding="utf-8").read()
+        assert content.startswith("# MdTest")
+        assert "## 第 1 页" in content
+        assert '<!-- block type="title"' in content
+        assert "### 章节标题" in content
+        assert "正文第一行" in content
+        assert '<!-- line bbox="10,80,200,24"' in content
+        assert "$$\nE = mc^2\n$$" in content
+        assert "*图注：图一 示例*" in content
+        print("test_export_markdown_structure PASSED")
+    finally:
+        os.unlink(out_path)
+
+
+def test_export_formats_share_structured_blocks():
+    from app.export import get_exporter
+    from app.export.markdown import MarkdownExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    text_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 60, 100, 20),
+        order=2,
+        lines=[Line(text="正文", confidence=0.9, bbox=BBox(0, 60, 100, 20))],
+    )
+    caption_block = Block(
+        block_type=BlockType.TABLE_CAPTION,
+        bbox=BBox(0, 20, 100, 20),
+        order=1,
+        lines=[Line(text="表注文字", confidence=0.9, bbox=BBox(0, 20, 100, 20))],
+    )
+    page = Page(
+        image_path="/tmp/img.jpg",
+        width=800,
+        height=600,
+        blocks=[text_block, caption_block],
+    )
+    project = OcrProject(name="StructuredExport", pages=[page])
+
+    assert isinstance(get_exporter("markdown"), MarkdownExporter)
+    for fmt in ("txt", "html", "xml", "md"):
+        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
+            out_path = f.name
+        try:
+            exporter = get_exporter(fmt)
+            exporter.export(project, out_path)
+            content = open(out_path, encoding="utf-8").read()
+            assert "表注文字" in content
+            assert content.index("表注文字") < content.index("正文")
+        finally:
+            os.unlink(out_path)
+
+    print("test_export_formats_share_structured_blocks PASSED")
+
+
+def test_export_dialog_offers_markdown():
+    from app.models import OcrProject
+    from app.ui.export.export_dialog import ExportDialog
+
+    _get_qapp()
+    dialog = ExportDialog(OcrProject(name="DialogExport"))
+    try:
+        assert "md" in dialog._checkboxes
+        assert dialog._checkboxes["md"].isChecked()
+    finally:
+        dialog.close()
+
+    print("test_export_dialog_offers_markdown PASSED")
+
+
 # =====================================================================
 # Fake OCR 引擎测试
 # =====================================================================
@@ -5491,6 +5592,9 @@ if __name__ == "__main__":
     test_export_txt()
     test_export_xml()
     test_export_html()
+    test_export_markdown_structure()
+    test_export_formats_share_structured_blocks()
+    test_export_dialog_offers_markdown()
     test_fake_ocr_engine()
     test_confidence_normalization()
     test_api_ocr_engine_requests_return_word_box()

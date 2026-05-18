@@ -3,6 +3,12 @@ from lxml import etree
 
 from app.export.base import ExporterBase
 from app.models import OcrProject
+from app.services.export_service import (
+    get_export_text,
+    iter_export_blocks,
+    iter_export_lines,
+    iter_export_pages,
+)
 
 
 class XmlExporter(ExporterBase):
@@ -12,14 +18,14 @@ class XmlExporter(ExporterBase):
         root.set("name", project.name)
         root.set("pages", str(project.page_count))
 
-        for page in project.pages:
+        for page in iter_export_pages(project):
             page_el = etree.SubElement(root, "Page")
             page_el.set("number", str(page.page_number))
             page_el.set("image", page.image_path)
             page_el.set("width", str(page.width))
             page_el.set("height", str(page.height))
 
-            for block in page.blocks:
+            for block in iter_export_blocks(page, include_empty=True):
                 block_el = etree.SubElement(page_el, "Block")
                 block_el.set("type", block.block_type.value)
                 bb = block.bbox
@@ -30,7 +36,7 @@ class XmlExporter(ExporterBase):
                 block_el.set("order", str(block.order))
                 block_el.set("confidence", f"{block.avg_confidence:.4f}")
 
-                for line in block.lines:
+                for line in iter_export_lines(block):
                     line_el = etree.SubElement(block_el, "Line")
                     bb2 = line.bbox
                     line_el.set("x", str(bb2.x))
@@ -39,7 +45,7 @@ class XmlExporter(ExporterBase):
                     line_el.set("h", str(bb2.h))
                     line_el.set("confidence", f"{line.confidence:.4f}")
                     line_el.set("status", line.proof_status.value)
-                    line_el.text = line.text
+                    line_el.text = get_export_text(line)
 
                     for char in line.chars:
                         char_el = etree.SubElement(line_el, "Char")
