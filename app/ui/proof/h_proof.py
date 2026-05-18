@@ -89,7 +89,19 @@ _STATUS_LABEL = {
 # ─────────────────────────────────────────────────────────────
 
 class _RowEditor(QPlainTextEdit):
-    """嵌入行内的单行文本编辑器，拦截专用快捷键。"""
+    """嵌入行内的单行文本编辑器，拦截专用快捷键。
+
+    Task #2（固定元素数下编辑限制）：当 ``self._fixed_length`` 不为 None 时
+    （= 行有 ``line.chars``，图像元素数固定），输入行为强制为"覆写模式"：
+
+    - 普通字符输入：若无 selection，自动选中光标处的下一字 → 由 super 替换；
+      若有 selection，必须替换为等长文本（多了截断、少了不接受）。
+    - Backspace / Delete / Cut：一律拒绝（弹一次性 tooltip 提示）。
+    - 粘贴：通过 insertFromMimeData 拦截，截断到 selection 长度（或 0）。
+
+    这保证用户不会"silently 把文本删短"，最终落盘文本与图像 char.bbox 数
+    永远等长，图字一一对应不会跑偏。
+    """
 
     confirm_requested = Signal()
     prev_requested    = Signal()
@@ -97,6 +109,23 @@ class _RowEditor(QPlainTextEdit):
     flag_requested    = Signal()
     skip_requested    = Signal()
     revert_requested  = Signal()
+    length_violation  = Signal(str)  # 试图改变长度时发出原因字符串
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._fixed_length: Optional[int] = None
+
+    def set_fixed_length(self, n: Optional[int]) -> None:
+        """启用/关闭固定长度模式。n=None 表示自由编辑。"""
+        self._fixed_length = n
+
+    def fixed_length(self) -> Optional[int]:
+        return self._fixed_length
+
+    # ── 编辑约束 ──────────────────────────────────────────────
+
+    def _is_fixed(self) -> bool:
+        return self._fixed_length is not None
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         key = event.key()
@@ -116,7 +145,69 @@ class _RowEditor(QPlainTextEdit):
             self.skip_requested.emit(); return
         if key == Qt.Key.Key_Escape:
             self.revert_requested.emit(); return
+
+        if self._is_fixed():
+            # 1) 删除键：禁止
+            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+                self.length_violation.emit("固定 {} 字，不允许删除（请直接覆盖错字）".format(self._fixed_length))
+                return
+            # 2) Ctrl+X 剪切：禁止
+            if ctrl and key == Qt.Key.Key_X:
+                self.length_violation.emit("固定长度模式：剪切已禁用，请改用覆盖")
+                return
+            # 3) 普通字符输入（含 IME 单字键）：转为覆写模式
+            txt = event.text()
+            if txt and txt.isprintable() and not ctrl and key not in (
+                Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Home, Qt.Key.Key_End,
+            ):
+                cur = self.textCursor()
+                if not cur.hasSelection():
+                    # 自动选中下一字（行末时则不允许扩，否则会增长）
+                    if cur.position() >= len(self.toPlainText()):
+                        self.length_violation.emit("行末不允许追加（覆写模式）")
+                        return
+                    cur.setPosition(cur.position())
+                    cur.setPosition(cur.position() + 1, QTextCursor.MoveMode.KeepAnchor)
+                    self.setTextCursor(cur)
+                # 让 super 做替换；selection 范围 == 输入长度时维持长度不变
+                # （单字输入会替换 selection 内的 1 字 → 长度不变）
+                if len(cur.selectedText()) != len(txt):
+                    # 多字符输入与 selection 长度不匹配 → 拒绝（避免静默改长）
+                    self.length_violation.emit("输入长度需与选中字数相等（覆写模式）")
+                    return
+
         super().keyPressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:  # type: ignore[override]
+        """粘贴：固定长度模式下必须等长（按 selection 长度截断/拒绝）。"""
+        if not self._is_fixed():
+            super().insertFromMimeData(source)
+            return
+        text = source.text() if source is not None else ""
+        if not text:
+            return
+        # 去掉换行避免破坏单行模型
+        text = text.replace("\r", "").replace("\n", "")
+        cur = self.textCursor()
+        if not cur.hasSelection():
+            # 选中后续等量字符（取 min(粘贴长度, 剩余字数)）
+            doc_len = len(self.toPlainText())
+            avail = doc_len - cur.position()
+            take = min(len(text), avail)
+            if take <= 0:
+                self.length_violation.emit("行末不允许追加（覆写模式）")
+                return
+            cur.setPosition(cur.position() + take, QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cur)
+            text = text[:take]
+        else:
+            sel_len = len(cur.selectedText())
+            if len(text) > sel_len:
+                text = text[:sel_len]
+            elif len(text) < sel_len:
+                self.length_violation.emit("粘贴文本短于选中字数，已拒绝（覆写模式）")
+                return
+        cur.insertText(text)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -232,6 +323,8 @@ class _LinePair(QFrame):
         self._editor.flag_requested.connect(self.flag_req)
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
+        # Task #2: 长度违规 → 浮动 tooltip 提示（不弹模态）
+        self._editor.length_violation.connect(self._on_length_violation)
         self._editor.selectionChanged.connect(self._refresh_extra_selections)
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._refresh_extra_selections)
@@ -240,6 +333,8 @@ class _LinePair(QFrame):
         self._editor.textChanged.connect(self._refresh_extra_selections)
         # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
         self._editor.textChanged.connect(self._refresh_status)
+        # Task #2：按 line.chars 锁定编辑器固定长度（图字一一对应不变）
+        self._apply_fixed_length_to_editor()
         content_v.addWidget(self._editor)
 
         root.addWidget(self._content, 1)
@@ -296,6 +391,36 @@ class _LinePair(QFrame):
         new_text = self._editor.toPlainText()
         if new_text != _displayed_text(self._line, self._page, self._block):
             self.text_saved.emit(self._idx, new_text)
+
+    def _apply_fixed_length_to_editor(self) -> None:
+        """按当前 line.chars 状态启用/关闭固定长度覆写模式。
+
+        仅在当前显示文本与 chars 数量已经一致时启用固定长度约束；如果底层数据
+        本身已经失配，则先保留自由编辑，避免把现有坏状态锁死到不可恢复。
+        """
+        chars = self._line.chars or []
+        text_len = len(self._editor.toPlainText())
+        fixed = len(chars) if chars and text_len == len(chars) else None
+        self._editor.set_fixed_length(fixed)
+        if fixed is not None:
+            self._editor.setToolTip(f"固定 {fixed} 字：请直接覆盖，不要删改长度")
+        else:
+            self._editor.setToolTip("")
+
+    def _on_length_violation(self, reason: str) -> None:
+        """固定长度模式下的非模态反馈。"""
+        self._status_lbl.setToolTip(reason)
+        try:
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.showText(
+                self._editor.mapToGlobal(self._editor.rect().bottomLeft()),
+                reason,
+                self._editor,
+                self._editor.rect(),
+                1500,
+            )
+        except Exception:
+            pass
 
     # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
@@ -515,6 +640,8 @@ class _LinePair(QFrame):
             self._editor.blockSignals(True)
             self._editor.setPlainText(new_disp)
             self._editor.blockSignals(False)
+        # 显示文本变了 → 字数可能变 → 重新评估 fixed_length
+        self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
 
@@ -530,6 +657,8 @@ class _LinePair(QFrame):
         # 与 Phase 24 之前 "isHidden() 才同步" 的行为等价 —— 这样用户在原行上
         # 未提交的编辑（dirty 文本）不会被 merge_pages 路径上的 rebind 覆盖。
         # 真正的"显示空间已变"由 refresh_text() 单独负责。
+        # Task #2：新行可能 chars 数不同 → 重新评估 fixed_length
+        self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
 

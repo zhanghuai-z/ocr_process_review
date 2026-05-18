@@ -96,7 +96,8 @@ class _RatioRing(QWidget):
             # 从 12 点钟方向起，顺时针绘制 → Qt 角度系统中起点 = 90*16，
             # sweep 为负即顺时针。
             painter.drawArc(rect, 90 * 16, -sweep)
-            center_main = f"{r * 100:.1f}%"
+            # Task #4: 保留两位小数
+            center_main = f"{r * 100:.2f}%"
 
         # 中心主数字
         painter.setPen(QColor("#222"))
@@ -326,18 +327,18 @@ class QualityStatsDialog(QDialog):
 
         rep = qp.score(store)
         rated = rep.corrected + rep.missed + rep.edited_other
-        if rep.grade == "INSUFFICIENT" or rated == 0:
-            self._ring.set_ratio(None, f"样本不足 · 已修正 {rep.corrected} / {rated}")
-            self._rate_lbl.setText(
-                f"rate = 样本不足 (corrected={rep.corrected} / rated={rated})"
-            )
+        # Task #4：不再展示"样本不足"文案；rated==0 时按 0.00% 处理。
+        # rep.grade 仍可能是 INSUFFICIENT（quality_probe 核心语义保留），
+        # 但 UI 层一律以 ratio=corrected/max(rated,1) 显示。
+        if rated == 0:
+            ratio = 0.0
         else:
             ratio = rep.corrected / rated
-            self._ring.set_ratio(ratio, f"已修正 {rep.corrected} / 总观察 {rated}")
-            self._rate_lbl.setText(
-                f"rate = {ratio * 100:.1f}% "
-                f"(corrected={rep.corrected} / rated={rated}; 等级={rep.grade})"
-            )
+        self._ring.set_ratio(ratio, f"已修正 {rep.corrected} / 总观察 {rated}")
+        self._rate_lbl.setText(
+            f"rate = {ratio * 100:.2f}% "
+            f"(corrected={rep.corrected} / rated={rated})"
+        )
 
         # 始终把最新明细同步到详情子窗（隐藏即可，便于测试/外部直接读 _table）
         self._ensure_detail_dialog().populate()
