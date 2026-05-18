@@ -1,12 +1,15 @@
 """共享页面目录列表组件。
 
-Phase 24：原 LayoutPanel 左侧页面列表抽为可复用 widget，由 LayoutPanel /
-HProofPanel 共用。
-Phase 25：每个页面项加上缩略图（PageImageCache 加载 → 等比缩放 → setIcon），
-   提升页面定位效率，maxWidth 同步放大以容纳 thumbnail 列。
+PageDir 行版式（对齐 Pencil 设计稿 N56wj）：
 
-对外接口：
-- ``set_pages(pages)`` 重建条目（每页一行：缩略图 + "第 N 页 / 文件名"）
+    ┌─────────────────────────────────────┐
+    │ │ ┌──┐  第 1 页              [校] │  62h（选中态左侧 3px brand 条）
+    │ │ │📄│  filename.jpg              │
+    │ │ └──┘                            │
+    └─────────────────────────────────────┘
+
+对外接口（保持稳定）：
+- ``set_pages(pages)`` 重建条目
 - ``set_current_index(idx)`` 同步选中行（不触发 page_selected）
 - ``page_selected: Signal(int)`` 用户点击切换时派发当前 index
 """
@@ -16,29 +19,101 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QListWidget, QListWidgetItem
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
+)
 
 from app.models import Page
+from app.models.enums import PageStatus
 
-# Phase 25：缩略图尺寸 —— 80x60 兼顾纵横，足以辨识版面
-_THUMB_W = 80
-_THUMB_H = 60
+# 缩略图固定 38×46（对齐设计稿）
+_THUMB_W = 38
+_THUMB_H = 46
+_ROW_H   = 62
+
+# PageStatus → (badge_text, badge_kind)  kind 命中 QLabel#pageBadge[kind=...]
+_STATUS_BADGE: dict[str, tuple[str, str]] = {
+    PageStatus.LAYOUT_DONE.value:       ("版", "done"),
+    PageStatus.LAYOUT_CONFIRMED.value:  ("版", "done"),
+    PageStatus.OCR_DONE.value:          ("识", "running"),
+    PageStatus.PRE_REVIEW_DONE.value:   ("预", "running"),
+    PageStatus.PROOFING.value:          ("校", "warn"),
+    PageStatus.PROOF_DONE.value:        ("✓", "done"),
+    PageStatus.ERROR.value:             ("!", "err"),
+}
+
+
+class _PageRow(QWidget):
+    """单条页面行：缩略图 + 标题 + 文件名 + 状态徽章。"""
+
+    def __init__(self, page: Page, thumbnail: QPixmap | None, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pageRow")
+        self.setFixedHeight(_ROW_H)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(10)
+
+        # 缩略图
+        thumb_lbl = QLabel()
+        thumb_lbl.setObjectName("pageThumb")
+        thumb_lbl.setFixedSize(_THUMB_W, _THUMB_H)
+        thumb_lbl.setAlignment(Qt.AlignCenter)
+        thumb_lbl.setScaledContents(False)
+        if thumbnail is not None and not thumbnail.isNull():
+            thumb_lbl.setPixmap(thumbnail)
+        else:
+            thumb_lbl.setText("📄")
+        row.addWidget(thumb_lbl)
+
+        # 文本
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+        title = QLabel(f"第 {page.page_number} 页")
+        title.setObjectName("pageRowTitle")
+        text_col.addWidget(title)
+
+        src = getattr(page, "source_path", None) or getattr(page, "image_path", None) or ""
+        fname = Path(src).name if src else ""
+        fname_lbl = QLabel(fname)
+        fname_lbl.setObjectName("pageRowFile")
+        fname_lbl.setToolTip(fname)
+        # 文件名过长省略
+        fm = fname_lbl.fontMetrics()
+        elided = fm.elidedText(fname, Qt.ElideMiddle, 130)
+        fname_lbl.setText(elided)
+        text_col.addWidget(fname_lbl)
+        row.addLayout(text_col, 1)
+
+        # 状态徽章
+        status_val = getattr(getattr(page, "status", None), "value", None)
+        badge = _STATUS_BADGE.get(status_val)
+        if badge is not None:
+            text, kind = badge
+            badge_lbl = QLabel(text)
+            badge_lbl.setObjectName("pageBadge")
+            badge_lbl.setProperty("kind", kind)
+            badge_lbl.setAlignment(Qt.AlignCenter)
+            badge_lbl.setFixedSize(22, 18)
+            row.addWidget(badge_lbl)
 
 
 class PageDirectoryList(QListWidget):
-    """轻量子类，仅约束样式 / 信号契约，不引入额外业务状态。"""
+    """轻量子类：自定义行 widget + 固定 sizeHint。"""
 
     page_selected = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pageDirectoryList")
-        # Phase 25：缩略图列需要更宽
-        self.setMaximumWidth(180)
-        self.setMinimumWidth(100)
-        self.setIconSize(QSize(_THUMB_W, _THUMB_H))
-        self.setSpacing(2)
+        self.setMaximumWidth(240)
+        self.setMinimumWidth(180)
+        self.setSpacing(0)
+        self.setUniformItemSizes(True)
+        self.setVerticalScrollMode(self.ScrollMode.ScrollPerPixel)
         self._suppress_signal = False
         self.currentRowChanged.connect(self._on_row_changed)
 
@@ -49,17 +124,12 @@ class PageDirectoryList(QListWidget):
         try:
             self.clear()
             for page in pages:
-                src = getattr(page, "source_path", None) or page.image_path or ""
-                fname = Path(src).name if src else ""
-                label = f"第 {page.page_number} 页"
-                if fname:
-                    label += f"\n{fname}"
-                item = QListWidgetItem(label)
-                # Phase 25：缩略图（失败则留空 icon，列表仍可用）
-                pm = self._make_thumbnail(page)
-                if pm is not None and not pm.isNull():
-                    item.setIcon(QIcon(pm))
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(0, _ROW_H))
                 self.addItem(item)
+                pm = self._make_thumbnail(page)
+                widget = _PageRow(page, pm)
+                self.setItemWidget(item, widget)
         finally:
             self._suppress_signal = False
 
@@ -75,11 +145,9 @@ class PageDirectoryList(QListWidget):
     # ── internal ──────────────────────────────────────────────
 
     def _make_thumbnail(self, page: Page) -> QPixmap | None:
-        """优先用 PageImageCache，fallback 直接 QPixmap.load。"""
         img_path = getattr(page, "image_path", None) or getattr(page, "source_path", None)
         if not img_path:
             return None
-        # 1) PageImageCache 已经加载/缓存的可走快路径
         try:
             from app.core.page_image_cache import PageImageCache
             cache = PageImageCache.instance()

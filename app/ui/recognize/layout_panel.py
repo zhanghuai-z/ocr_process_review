@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.ui.widgets.image_viewer import ImageViewer
+from app.ui.widgets.block_inspector import BlockInspector
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -23,6 +24,8 @@ class LayoutPanel(QWidget):
     analysis_confirmed = Signal()
     page_selected = Signal(int)   # payload: page index
     geometry_changed = Signal()
+    page_completed = Signal(int)  # 用户点「完成」时（payload: page idx）
+    edits_cancelled = Signal(int) # 用户点「取消」时（payload: page idx）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -34,67 +37,105 @@ class LayoutPanel(QWidget):
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # 标题行（含 ▶ 分析 按钮 + 进度条）
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(12, 6, 12, 0)
-
+        # run 按钮 / 进度条 / 状态标签 仍然保留，但不再占用顶栏空间：
+        #   run 按钮：隐藏（由 TopBar 的「运行版面分析」按钮接管）
+        #   progress / status：移动到底栏（见下文 bottom bar 区段）
         self._btn_run = QPushButton("▶")
-        self._btn_run.setToolTip("运行版面分析")
-        self._btn_run.setEnabled(False)
         self._btn_run.setObjectName("runBtn")
-        self._btn_run.setFixedSize(36, 36)
+        self._btn_run.setEnabled(False)
         self._btn_run.clicked.connect(self._request_analysis)
         self._btn_run.hide()
-        title_row.addWidget(self._btn_run)
 
-        self._btn_char_boxes = QPushButton("字框")
-        self._btn_char_boxes.setCheckable(True)
-        self._btn_char_boxes.setChecked(True)
-        self._btn_char_boxes.setToolTip("显示/隐藏 OCR 字框；拖动字框会影响后续纵校裁图")
-        self._btn_char_boxes.clicked.connect(lambda: self._update_viewer(self._current_page_idx))
-        title_row.addWidget(self._btn_char_boxes)
-
-        # 进度条（默认隐藏，分析期间显示不确定动画）
         self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 0)  # 不确定模式
+        self._progress_bar.setRange(0, 0)
         self._progress_bar.setFixedHeight(6)
         self._progress_bar.setTextVisible(False)
         self._progress_bar.hide()
-        title_row.addWidget(self._progress_bar, 1)
 
         self._status_lbl = QLabel("请先导入文件并运行版面分析")
         self._status_lbl.setObjectName("muted")
-        title_row.addWidget(self._status_lbl)
-        main_layout.addLayout(title_row)
 
         # 主区域（两栏：页面列表 + 图像查看器）
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 左：页面列表（缩窄） —— Phase 24：复用共享 PageDirectoryList，
-        # 横校面板（HProofPanel）也用这同一份组件，避免目录展示分叉。
+        # 左：页面目录——宍依设计稿的带缩略图 + 状态徽章的 PageDirectoryList。
         from app.ui.widgets.page_directory import PageDirectoryList
         self._page_list = PageDirectoryList()
-        self._page_list.setMaximumWidth(110)
-        self._page_list.setMinimumWidth(60)
         self._page_list.currentRowChanged.connect(self._on_page_selected)
         splitter.addWidget(self._page_list)
 
-        # 中：图像查看器（始终可编辑）
+        # 中：图像查看器 + 上方编辑工具条
+        viewer_wrap = QWidget()
+        vw_lay = QVBoxLayout(viewer_wrap)
+        vw_lay.setContentsMargins(0, 0, 0, 0)
+        vw_lay.setSpacing(0)
+
+        viewer_tb = QFrame()
+        viewer_tb.setObjectName("viewerToolbar")
+        viewer_tb.setFixedHeight(34)
+        vtl = QHBoxLayout(viewer_tb)
+        vtl.setContentsMargins(10, 0, 10, 0)
+        vtl.setSpacing(8)
+
+        self._btn_char_boxes = QPushButton("\u2318 \u5b57\u6846")
+        self._btn_char_boxes.setObjectName("toolToggle")
+        self._btn_char_boxes.setCheckable(True)
+        self._btn_char_boxes.setChecked(True)
+        self._btn_char_boxes.setToolTip("\u663e\u793a/\u9690\u85cf OCR \u5b57\u6846")
+        self._btn_char_boxes.clicked.connect(lambda: self._update_viewer(self._current_page_idx))
+        vtl.addWidget(self._btn_char_boxes)
+
+        vtl.addSpacing(6)
+        vtl.addWidget(QLabel("\u65b0\u5efa:"))
+        self._new_type_combo = QComboBox()
+        self._new_type_combo.setMinimumWidth(90)
+        for bt in BlockType:
+            self._new_type_combo.addItem(bt.value, bt)
+        vtl.addWidget(self._new_type_combo)
+
+        vtl.addSpacing(6)
+        vtl.addWidget(QLabel("\u9009\u4e2d:"))
+        self._type_combo = QComboBox()
+        self._type_combo.setEnabled(False)
+        self._type_combo.setMinimumWidth(90)
+        for bt in BlockType:
+            self._type_combo.addItem(bt.value, bt)
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        vtl.addWidget(self._type_combo)
+
+        # bbox / conf 标签随选中状态填充
+        self._prop_bbox = QLabel("")
+        self._prop_bbox.setObjectName("muted")
+        self._prop_conf = ConfidenceBadge(1.0)
+        self._prop_conf.hide()
+        vtl.addSpacing(8)
+        vtl.addWidget(self._prop_bbox)
+        vtl.addWidget(self._prop_conf)
+        vtl.addStretch(1)
+        vw_lay.addWidget(viewer_tb)
+
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
         self._viewer.block_moved.connect(self._on_block_moved)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted.connect(self._on_block_deleted)
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
-        splitter.addWidget(self._viewer)
+        vw_lay.addWidget(self._viewer, 1)
+        splitter.addWidget(viewer_wrap)
+
+        # 右：Inspector（选中块详情）
+        self._inspector = BlockInspector()
+        splitter.addWidget(self._inspector)
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 9)
-        splitter.setSizes([90, 9999])
-        main_layout.addWidget(splitter)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([220, 9999, 320])
+        main_layout.addWidget(splitter, 1)
 
-        # 底部属性栏（Delete 键删除；类型操作分两组）
+        # 底栏（设计稿语义：翻页 + 状态 + 完成 / 提交 / 取消）
         bottom = QFrame()
         bottom.setObjectName("toolbar")
         bottom.setFixedHeight(46)
@@ -102,61 +143,67 @@ class LayoutPanel(QWidget):
         bl.setContentsMargins(12, 0, 12, 0)
         bl.setSpacing(8)
 
-        # 新建框类型
-        bl.addWidget(QLabel("新建:"))
-        self._new_type_combo = QComboBox()
-        self._new_type_combo.setMinimumWidth(90)
-        for bt in BlockType:
-            self._new_type_combo.addItem(bt.value, bt)
-        bl.addWidget(self._new_type_combo)
+        # 左：翻页 < n/N >  ＋  状态
+        self._btn_prev = QPushButton("<")
+        self._btn_prev.setObjectName("pageNavBtn")
+        self._btn_prev.setFixedSize(30, 30)
+        self._btn_prev.setToolTip("上一页")
+        self._btn_prev.clicked.connect(lambda: self._goto_relative(-1))
+        bl.addWidget(self._btn_prev)
 
-        sep0 = QFrame()
-        sep0.setFrameShape(QFrame.Shape.VLine)
-        sep0.setFrameShadow(QFrame.Shadow.Sunken)
-        sep0.setStyleSheet("color:#e3e8ef; margin:8px 4px;")
-        bl.addWidget(sep0)
+        self._lbl_page_no = QLabel("0 / 0")
+        self._lbl_page_no.setObjectName("pageNavLabel")
+        self._lbl_page_no.setMinimumWidth(48)
+        self._lbl_page_no.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bl.addWidget(self._lbl_page_no)
 
-        # 选中块类型
-        bl.addWidget(QLabel("选中:"))
-        self._type_combo = QComboBox()
-        self._type_combo.setEnabled(False)
-        self._type_combo.setMinimumWidth(90)
-        for bt in BlockType:
-            self._type_combo.addItem(bt.value, bt)
-        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        bl.addWidget(self._type_combo)
+        self._btn_next = QPushButton(">")
+        self._btn_next.setObjectName("pageNavBtn")
+        self._btn_next.setFixedSize(30, 30)
+        self._btn_next.setToolTip("下一页")
+        self._btn_next.clicked.connect(lambda: self._goto_relative(+1))
+        bl.addWidget(self._btn_next)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        sep.setStyleSheet("color:#e3e8ef; margin:8px 4px;")
-        bl.addWidget(sep)
+        bl.addSpacing(16)
+        bl.addWidget(self._status_lbl)
+        bl.addWidget(self._progress_bar)
+        # progress 默认隐藏，但需要伸展能力
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setFixedWidth(120)
 
-        # bbox / conf 属性标签
-        self._prop_bbox = QLabel("")
-        self._prop_bbox.setObjectName("muted")
-        self._prop_conf = ConfidenceBadge(1.0)
-        self._prop_conf.hide()
-        bl.addWidget(self._prop_bbox)
-        bl.addWidget(self._prop_conf)
+        bl.addStretch(1)
 
-        bl.addStretch()
+        # 右：取消 / 完成 / 提交
+        self._btn_cancel = QPushButton("取消")
+        self._btn_cancel.setObjectName("secondaryBtn")
+        self._btn_cancel.setMinimumHeight(30)
+        self._btn_cancel.clicked.connect(self._on_cancel_clicked)
+        bl.addWidget(self._btn_cancel)
+
+        self._btn_done = QPushButton("完成本页")
+        self._btn_done.setObjectName("secondaryBtn")
+        self._btn_done.setMinimumHeight(30)
+        self._btn_done.clicked.connect(self._on_done_clicked)
+        bl.addWidget(self._btn_done)
+
+        self._btn_submit = QPushButton("提交并进入 OCR")
+        self._btn_submit.setObjectName("primaryBtn")
+        self._btn_submit.setMinimumHeight(30)
+        self._btn_submit.clicked.connect(self._on_submit_clicked)
+        bl.addWidget(self._btn_submit)
+
         main_layout.addWidget(bottom)
-
+        self._update_page_nav()
     # ------------------------------------------------------------------ public
 
     def set_pages(self, pages: List[Page]) -> None:
         """设置待分析的页面（已加载图片路径）。"""
         self._pages = pages
-        self._page_list.clear()
-        for i, page in enumerate(pages):
-            from pathlib import Path
-            self._page_list.addItem(
-                f"第 {page.page_number} 页\n{Path(page.source_path or page.image_path).name}"
-            )
+        self._page_list.set_pages(pages)
         self._btn_run.setEnabled(bool(pages))
         if pages:
-            self._page_list.setCurrentRow(0)
+            self._page_list.set_current_index(0)
+        self._update_page_nav()
 
     def show_analysis_result(self, pages: List[Page]) -> None:
         """版面分析完成后，更新显示（保持当前选中页）并自动触发 OCR 流程。"""
@@ -164,6 +211,7 @@ class LayoutPanel(QWidget):
         self._pages = pages
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
+        self._update_page_nav()
         total_blocks = sum(len(p.blocks) for p in pages)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
@@ -176,7 +224,10 @@ class LayoutPanel(QWidget):
     def set_current_page_number(self, page_number: int) -> None:
         for idx, page in enumerate(self._pages):
             if page.page_number == page_number:
-                self._page_list.setCurrentRow(idx)
+                self._page_list.set_current_index(idx)
+                self._current_page_idx = idx
+                self._update_viewer(idx)
+                self._update_page_nav()
                 return
 
     # ------------------------------------------------------------------ private
@@ -190,6 +241,7 @@ class LayoutPanel(QWidget):
         if 0 <= idx < len(self._pages):
             self._current_page_idx = idx
             self._update_viewer(idx)
+            self._update_page_nav()
             self.page_selected.emit(idx)
 
     def _update_viewer(self, idx: int) -> None:
@@ -207,6 +259,8 @@ class LayoutPanel(QWidget):
         self._type_combo.setEnabled(False)
         self._prop_bbox.setText("")
         self._prop_conf.hide()
+        self._inspector.clear()
+        self._inspector.set_page_stats(page)
 
     def _on_block_clicked(self, block: Block) -> None:
         self._selected_block = block
@@ -222,10 +276,12 @@ class LayoutPanel(QWidget):
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._prop_conf.set_score(block.avg_confidence)
         self._prop_conf.show()
+        self._inspector.set_block(block)
 
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
+        self._inspector.set_block(block)
         self.geometry_changed.emit()
 
     def _on_block_created(self, bbox: BBox) -> None:
@@ -255,6 +311,7 @@ class LayoutPanel(QWidget):
             self._type_combo.setEnabled(False)
             self._prop_bbox.setText("")
             self._prop_conf.hide()
+            self._inspector.clear()
         self.geometry_changed.emit()
 
     def _delete_selected(self) -> None:
@@ -281,6 +338,51 @@ class LayoutPanel(QWidget):
             for line in block.lines:
                 chars.extend([char for char in line.chars if char.bbox is not None])
         return chars
+
+    # ── 底栏：翻页 / 完成 / 取消 / 提交 ─────────────────────────
+
+    def _update_page_nav(self) -> None:
+        n = len(self._pages)
+        cur = (self._current_page_idx + 1) if n else 0
+        self._lbl_page_no.setText(f"{cur} / {n}")
+        self._btn_prev.setEnabled(n > 0 and self._current_page_idx > 0)
+        self._btn_next.setEnabled(n > 0 and self._current_page_idx < n - 1)
+        has_pages = n > 0
+        self._btn_done.setEnabled(has_pages)
+        self._btn_cancel.setEnabled(has_pages)
+        self._btn_submit.setEnabled(has_pages)
+
+    def _goto_relative(self, delta: int) -> None:
+        if not self._pages:
+            return
+        new_idx = self._current_page_idx + delta
+        if 0 <= new_idx < len(self._pages):
+            self._page_list.set_current_index(new_idx)
+            # 手动触发 viewer 更新（set_current_index 不会发 currentRowChanged）
+            self._current_page_idx = new_idx
+            self._update_viewer(new_idx)
+            self._update_page_nav()
+            self.page_selected.emit(new_idx)
+
+    def _on_done_clicked(self) -> None:
+        """完成本页编辑（占位：发出信号供控制器处理；当前仅状态提示）。"""
+        if not self._pages:
+            return
+        self._status_lbl.setText(f"第 {self._pages[self._current_page_idx].page_number} 页编辑已记录")
+        self.page_completed.emit(self._current_page_idx)
+
+    def _on_cancel_clicked(self) -> None:
+        """取消本页未提交的编辑（占位：发出信号供控制器处理）。"""
+        if not self._pages:
+            return
+        self._status_lbl.setText(f"已取消第 {self._pages[self._current_page_idx].page_number} 页编辑")
+        self.edits_cancelled.emit(self._current_page_idx)
+
+    def _on_submit_clicked(self) -> None:
+        """提交版面分析结果，进入 OCR 阶段。"""
+        if not self._pages:
+            return
+        self.analysis_confirmed.emit()
 
     @property
     def run_button(self) -> QPushButton:

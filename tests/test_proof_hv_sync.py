@@ -959,16 +959,18 @@ def test_phase25_horizontal_scroll_as_needed():
 
 
 def test_phase25_page_dir_thumbnails_loaded():
-    """Phase 25：左侧页面目录每项带有缩略图（icon 不为空）。"""
+    """Phase 25：左侧页面目录每项带有缩略图空间。"""
     from app.ui.proof.h_proof import HProofPanel
+    from PySide6.QtWidgets import QLabel
     proj = _make_project("hi")
     h = HProofPanel()
     h.load_pages(proj.pages)
     item = h._page_dir.item(0)
     assert item is not None
-    icon = item.icon()
-    # 缩略图加载失败（图片路径不存在）也容许，但 setIconSize 必须被设置成
-    # 缩略图尺寸（width >= 60）以确保视觉空间留好。
-    sz = h._page_dir.iconSize()
-    assert sz.width() >= 60 and sz.height() >= 40, \
-        f"页面目录 iconSize 应为缩略图尺寸，实际 {sz}"
+    row = h._page_dir.itemWidget(item)
+    assert row is not None
+    thumb = row.findChild(QLabel, "pageThumb")
+    assert thumb is not None
+    sz = thumb.size()
+    assert sz.width() >= 30 and sz.height() >= 40, \
+        f"页面目录缩略图控件尺寸异常，实际 {sz}"

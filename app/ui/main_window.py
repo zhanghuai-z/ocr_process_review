@@ -30,6 +30,8 @@ from app.ui.recognize.layout_panel import LayoutPanel
 from app.ui.proof.h_proof import HProofPanel
 from app.ui.proof.v_proof import VProofPanel
 from app.ui.export.export_dialog import ExportDialog
+from app.ui.widgets.nav_rail import NavRail
+from app.ui.widgets.top_bar import TopBar
 
 logger = get_logger(__name__)
 
@@ -92,6 +94,15 @@ _NAV_ITEMS = [
     ("②  横向校对",  STEP_HPROOF, frozenset({STEP_HPROOF})),
     ("③  纵向校对",  STEP_VPROOF, frozenset({STEP_VPROOF})),
 ]
+
+# TopBar 面包屑用的步骤名（不含 ①②③ 前缀）
+_STEP_BREADCRUMB = {
+    STEP_IMPORT: "导入",
+    STEP_LAYOUT: "版面分析",
+    STEP_OCR:    "OCR 识别",
+    STEP_HPROOF: "横向校对",
+    STEP_VPROOF: "纵向校对",
+}
 
 
 class TopNavBar(QWidget):
@@ -181,7 +192,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._connect_signals()
-        self._top_nav.set_enabled_up_to(self._controller.max_step)
+        self._nav_rail.set_enabled_up_to(self._controller.max_step)
         self._go_to_step(STEP_IMPORT)
 
     # ── UI 构建 ────────────────────────────────────────────────
@@ -189,16 +200,29 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
+
+        # 根布局：左 NavRail | 右（TopBar / Stack）
+        outer = QHBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # 顶部导航栏
-        self._top_nav = TopNavBar()
-        self._top_nav.step_clicked.connect(self._on_step_clicked)
-        self._top_nav.layout_run_clicked.connect(self._start_layout_analysis)
-        self._top_nav.export_clicked.connect(self._show_export_dialog)
-        outer.addWidget(self._top_nav)
+        # 左：竖向导航栏
+        self._nav_rail = NavRail()
+        self._nav_rail.step_clicked.connect(self._on_step_clicked)
+        self._nav_rail.settings_clicked.connect(self._show_ocr_settings)
+        outer.addWidget(self._nav_rail)
+
+        # 右：内容列
+        right_col = QWidget()
+        right_v = QVBoxLayout(right_col)
+        right_v.setContentsMargins(0, 0, 0, 0)
+        right_v.setSpacing(0)
+
+        # 顶部 TopBar（项目名 + 运行 + 导出）
+        self._top_bar = TopBar()
+        self._top_bar.layout_run_clicked.connect(self._start_layout_analysis)
+        self._top_bar.export_clicked.connect(self._show_export_dialog)
+        right_v.addWidget(self._top_bar)
 
         # 中：QStackedWidget
         self._stack = QStackedWidget()
@@ -215,7 +239,9 @@ class MainWindow(QMainWindow):
         ):
             self._stack.addWidget(w)
 
-        outer.addWidget(self._stack, 1)
+        right_v.addWidget(self._stack, 1)
+
+        outer.addWidget(right_col, 1)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -239,11 +265,11 @@ class MainWindow(QMainWindow):
         # 让 controller 拥有 proof 同步 ownership（merge vs load 决策 + line_count 跟踪）
         self._controller.register_proof_panels(self._hproof_panel, self._vproof_panel)
         self._controller.project_changed.connect(self._on_project_changed)
-        self._controller.step_enabled_changed.connect(self._top_nav.set_enabled_up_to)
+        self._controller.step_enabled_changed.connect(self._nav_rail.set_enabled_up_to)
         # view-state signals: controller 是 ownership 持有者，MainWindow 只订阅
         self._controller.current_step_changed.connect(self._on_current_step_changed)
         self._controller.current_page_number_changed.connect(self._on_current_page_number_changed)
-        self._controller.layout_run_enabled_changed.connect(self._top_nav.set_layout_run_enabled)
+        self._controller.layout_run_enabled_changed.connect(self._top_bar.set_layout_run_enabled)
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
@@ -293,6 +319,34 @@ class MainWindow(QMainWindow):
         ))
         help_m.addAction(act_about)
 
+        # 视图：主题切换
+        view_m = menu.addMenu("视图(&V)")
+        from app.core.app_config import AppConfig
+        from app.ui.styles import apply_theme, available_themes
+        current_theme = str(AppConfig.instance().get("theme") or "light").lower()
+        if current_theme == "dark_teal":
+            current_theme = "dark"
+        from PySide6.QtGui import QActionGroup
+        theme_group = QActionGroup(self)
+        theme_group.setExclusive(True)
+        for name in available_themes():
+            label = {"light": "浅色主题", "dark": "深色主题"}.get(name, name)
+            act = QAction(label, self, checkable=True)
+            act.setChecked(name == current_theme)
+            act.triggered.connect(lambda _checked, n=name: self._switch_theme(n))
+            theme_group.addAction(act)
+            view_m.addAction(act)
+
+    def _switch_theme(self, name: str) -> None:
+        from app.core.app_config import AppConfig
+        from app.ui.styles import apply_theme
+        app = QApplication.instance()
+        if app is None:
+            return
+        actual = apply_theme(app, name)
+        AppConfig.instance().set("theme", actual)
+        self._status_bar.showMessage(f"已切换到 {actual} 主题", 3000)
+
     # ── 步骤切换 ───────────────────────────────────────────────
 
     def _go_to_step(self, step: int) -> None:
@@ -317,7 +371,8 @@ class MainWindow(QMainWindow):
     def _on_current_step_changed(self, step: int) -> None:
         """controller.current_step_changed → 同步 stack 和顶部栏激活态。"""
         self._stack.setCurrentIndex(step)
-        self._top_nav.set_active(step)
+        self._nav_rail.set_active(step)
+        self._top_bar.set_step_name(_STEP_BREADCRUMB.get(step, ""))
 
     def _on_current_page_number_changed(self, page_number: int) -> None:
         """controller.current_page_number_changed → 同步两个相关面板。"""
@@ -352,7 +407,9 @@ class MainWindow(QMainWindow):
     # ── Controller 回调 ─────────────────────────────────────────
 
     def _on_project_changed(self, project: OcrProject) -> None:
-        self._top_nav.set_project_name(f"项目：{project.name}")
+        self._top_bar.set_project_name(project.name)
+        # 新项目载入：复位状态徽章为「未运行版面分析」
+        self._top_bar.set_status("idle", "未运行")
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
         """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
@@ -361,10 +418,12 @@ class MainWindow(QMainWindow):
         self._controller.set_layout_run_enabled(True)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
+            self._top_bar.set_status("warn", f"完成 {len(pages) - failed}/{len(pages)}")
             self._status_bar.showMessage(
                 f"版面分析完成：{len(pages) - failed}/{len(pages)} 页成功，{failed} 页失败"
             )
         else:
+            self._top_bar.set_status("done", "已运行")
             self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
@@ -487,9 +546,11 @@ class MainWindow(QMainWindow):
             return
         self._layout_panel.run_button.setEnabled(False)
         self._controller.set_layout_run_enabled(False)
+        self._top_bar.set_status("running", "运行中…")
         if not self._controller.start_layout_analysis(self._controller.pages):
             self._layout_panel.run_button.setEnabled(True)
             self._controller.set_layout_run_enabled(True)
+            self._top_bar.set_status("idle", "未运行")
 
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""
