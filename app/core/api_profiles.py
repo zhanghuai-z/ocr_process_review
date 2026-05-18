@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import Any
 
 KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing")
+FIXED_LAYOUT_PROFILE = "paddleocr-vl-1.5"
+FIXED_OCR_PROFILE = "pp-ocrv5"
 
 PADDLE_COORD_STABILITY_FLAGS: dict[str, bool] = {
     "useDocOrientationClassify": False,
@@ -94,6 +96,25 @@ def match_api_model_profile_from_url(api_url: str | None) -> str | None:
     return None
 
 
+def normalize_api_base_url(api_url: str | None) -> str:
+    """Store API addresses as service roots, never concrete role endpoints."""
+    normalized = (api_url or "").strip().rstrip("/")
+    for suffix in KNOWN_API_ENDPOINT_SUFFIXES:
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def match_api_model_profile_from_base_url(api_url: str | None) -> str | None:
+    base = normalize_api_base_url(api_url)
+    if not base:
+        return None
+    for key, spec in API_MODEL_PROFILES.items():
+        if normalize_api_base_url(str(spec["url"])) == base:
+            return key
+    return None
+
+
 def default_endpoint_suffix_for_profile(profile: str | None, fallback: str = "/layout-parsing") -> str:
     if isinstance(profile, str) and profile in API_MODEL_PROFILES:
         return str(API_MODEL_PROFILES[profile].get("endpoint_suffix") or fallback)
@@ -159,17 +180,22 @@ def resolve_api_endpoint_for_role(
     if not normalized:
         return ""
 
-    profile_key = _profile_from_explicit_or_profile_url(normalized, profile)
+    base_url = normalize_api_base_url(normalized)
+    profile_key = (
+        match_api_model_profile_from_url(normalized)
+        or match_api_model_profile_from_base_url(base_url)
+        or _profile_from_explicit_or_profile_url(normalized, profile)
+    )
+    if profile_key:
+        fixed_profile = FIXED_OCR_PROFILE if role == "ocr" else FIXED_LAYOUT_PROFILE if role == "layout" else ""
+        if fixed_profile:
+            return get_api_model_profile_url(fixed_profile)
 
     if role == "ocr":
-        if profile_key and profile_key != "pp-ocrv5" and API_MODEL_PROFILES[profile_key].get("layout"):
-            return get_api_model_profile_url("pp-ocrv5")
-        if normalized.endswith("/layout-parsing"):
-            return f"{normalized[:-len('/layout-parsing')]}/ocr"
         return resolve_api_endpoint(
-            normalized,
+            base_url,
             default_suffix="/ocr",
-            profile="pp-ocrv5",
+            profile=FIXED_OCR_PROFILE,
         )
 
     if role == "layout":
@@ -180,7 +206,7 @@ def resolve_api_endpoint_for_role(
         if normalized.endswith("/ocr"):
             return f"{normalized[:-len('/ocr')]}/layout-parsing"
         return resolve_api_endpoint(
-            normalized,
+            base_url,
             default_suffix="/layout-parsing",
             profile=LAYOUT_DEFAULT_PROFILE,
         )

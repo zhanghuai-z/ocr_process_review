@@ -11,13 +11,15 @@ from PySide6.QtWidgets import (
 
 from app.core.api_profiles import (
     API_MODEL_PROFILES,
+    FIXED_LAYOUT_PROFILE,
     KNOWN_API_ENDPOINT_SUFFIXES,
     detect_api_result_kind,
     get_api_request_options,
     get_api_model_profile_options,
     get_api_model_profile_url,
     match_api_model_profile_from_url,
-    resolve_api_endpoint,
+    normalize_api_base_url,
+    resolve_api_endpoint_for_role,
 )
 from app.core.llm_rules import get_default_llm_rules_path
 from app.core.ocr_config import get_config, update_config
@@ -421,7 +423,7 @@ class ApiSettingsDialog(QDialog):
 
         self._api_card, api_layout = _section_card(
             "API 连接",
-            "填写服务根地址或完整端点即可。程序会按角色自动解析 layout 与 OCR 端点。",
+            "填写不带 /layout-parsing 或 /ocr 的服务根地址。程序会按固定模型链解析端点。",
         )
 
         self._api_mode_notice = QLabel()
@@ -543,7 +545,7 @@ class ApiSettingsDialog(QDialog):
 
         for text in (
             "服务根地址会按角色自动补全 /layout-parsing 与 /ocr。",
-            "如果粘贴完整 /layout-parsing 或 /ocr，程序会在同一 root 下切换角色端点。",
+            "如果粘贴完整端点，保存时会自动剥离为基础地址。",
             "Token 只保存在本机配置中，项目文件不写入 Token。",
         ):
             hint = QLabel(f"• {text}")
@@ -647,29 +649,35 @@ class ApiSettingsDialog(QDialog):
 
     def _refresh_api_preview(self) -> None:
         url = self._url_edit.text().strip()
-        resolved = resolve_api_endpoint(
+        base_url = normalize_api_base_url(url)
+        layout_endpoint = resolve_api_endpoint_for_role(
             url,
-            default_suffix="/layout-parsing",
-            profile=None,
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
+        ) if url else ""
+        ocr_endpoint = resolve_api_endpoint_for_role(
+            url,
+            profile="pp-ocrv5",
+            role="ocr",
         ) if url else ""
 
         self._model_note.setText("")
-        self._summary_model.setText("自动双模型：PaddleOCR-VL-1.5 + PP-OCRv5")
-        self._summary_desc.setText("版面分析 (layout role) 走 PaddleOCR-VL-1.5；横校/纵校 proof (ocr role) 走 PP-OCRv5。")
+        self._summary_model.setText("固定双模型：PaddleOCR-VL-1.5 + PP-OCRv5")
+        self._summary_desc.setText("版面分析固定走 PaddleOCR-VL-1.5；横校/纵校 proof OCR 固定走 PP-OCRv5。")
 
         if not url:
-            self._url_note.setText("请填写服务根地址或完整端点。")
+            self._url_note.setText("请填写不带端点后缀的服务根地址。")
             self._summary_endpoint_kind.setText("端点待填写")
             self._summary_endpoint.setText("尚未填写 API 地址。")
         elif any(url.rstrip("/").endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
             endpoint_type = "/ocr" if url.rstrip("/").endswith("/ocr") else "/layout-parsing"
-            self._url_note.setText("当前地址已包含完整端点，测试连接时将直接使用。")
-            self._summary_endpoint_kind.setText(f"当前端点：{endpoint_type}")
-            self._summary_endpoint.setText(url.rstrip("/"))
+            self._url_note.setText(f"当前地址包含 {endpoint_type}，保存时会自动改为基础地址：{base_url}")
+            self._summary_endpoint_kind.setText("保存为基础地址")
+            self._summary_endpoint.setText(f"base: {base_url}\nlayout: {layout_endpoint}\nocr: {ocr_endpoint}")
         else:
-            self._url_note.setText("当前地址未包含端点后缀，会按角色自动补全。")
-            self._summary_endpoint_kind.setText("自动补全：/layout-parsing")
-            self._summary_endpoint.setText(resolved)
+            self._url_note.setText("当前地址未包含端点后缀，会按固定模型链自动补全。")
+            self._summary_endpoint_kind.setText("固定链端点")
+            self._summary_endpoint.setText(f"layout: {layout_endpoint}\nocr: {ocr_endpoint}")
 
         self._summary_mode.setText("当前模式：API 双模型链")
         self._api_mode_notice.setText("只需维护 API 地址和 Token；模型分工由程序固定处理。")
@@ -710,7 +718,7 @@ class ApiSettingsDialog(QDialog):
             self._btn_show_llm_key.setText("显示")
 
     def _save_and_accept(self) -> None:
-        api_url = self._url_edit.text().strip().rstrip("/")
+        api_url = normalize_api_base_url(self._url_edit.text())
         update_config(
             mode="api",
             api_model_profile="",
@@ -728,12 +736,12 @@ class ApiSettingsDialog(QDialog):
 
     def _test_connection(self) -> None:
         import base64
-        import requests
+        from app.core.api_http import post_json_without_env_proxy
 
-        url = resolve_api_endpoint(
+        url = resolve_api_endpoint_for_role(
             self._url_edit.text().strip(),
-            default_suffix="/layout-parsing",
-            profile=None,
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
         )
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 API 地址。")
@@ -766,10 +774,10 @@ class ApiSettingsDialog(QDialog):
             payload = build_api_payload(
                 file_b64,
                 1,
-                profile=None,
+                profile=FIXED_LAYOUT_PROFILE,
                 endpoint_url=url,
             )
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp = post_json_without_env_proxy(url, json=payload, headers=headers, timeout=timeout)
             code = resp.status_code
             try:
                 body = resp.json()

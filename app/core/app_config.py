@@ -102,10 +102,12 @@ class AppConfig:
 # 兼容旧代码的快速访问
 def get_config() -> dict[str, Any]:
     """兼容旧 OCR 配置接口，返回 dict。"""
+    from app.core.api_profiles import normalize_api_base_url
+
     cfg = AppConfig.instance()
     return {
         "mode": cfg.get("ocr_mode", "api"),
-        "api_url": cfg.get("api_url", ""),
+        "api_url": normalize_api_base_url(cfg.get("api_url", "")),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),
         "api_layout_model_name": cfg.get("api_layout_model_name", ""),
@@ -132,4 +134,7 @@ def update_config(**kwargs: Any) -> None:
     }
     for k, v in kwargs.items():
         if k in mapping:
+            if k == "api_url":
+                from app.core.api_profiles import normalize_api_base_url
+                v = normalize_api_base_url(v)
             cfg.set(mapping[k], v)

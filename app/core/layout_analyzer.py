@@ -30,6 +30,7 @@ from app.core.api_profiles import (
     infer_api_model_profile_from_endpoint,
     resolve_api_endpoint_for_role,
 )
+from app.core.api_profiles import FIXED_LAYOUT_PROFILE, get_api_request_options, infer_api_model_profile_from_endpoint, resolve_api_endpoint_for_role
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
@@ -580,13 +581,13 @@ class LayoutAnalyzer:
     def _api_analyze(self, page: Page) -> Page:
         """Call the configured AiStudio model endpoint; raises on network/auth errors."""
         import cv2
-        import requests
+        from app.core.api_http import post_json_without_env_proxy
         from app.core.ocr_config import get_config
 
         cfg = get_config()
         url = resolve_api_endpoint_for_role(
             cfg["api_url"],
-            profile=cfg.get("api_model_profile", ""),
+            profile=FIXED_LAYOUT_PROFILE,
             role="layout",
         )
         # 主链 layout 已被 strong-redirect 到 VL-1.5；但配置里仍可能是旧
@@ -615,7 +616,7 @@ class LayoutAnalyzer:
         if token:
             headers["Authorization"] = f"token {token}"
 
-        resp = requests.post(
+        resp = post_json_without_env_proxy(
             url,
             json=self._build_api_request_body(
                 file_b64,

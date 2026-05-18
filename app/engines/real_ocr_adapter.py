@@ -8,7 +8,7 @@ from typing import List
 
 import numpy as np
 
-from app.core.api_profiles import get_api_request_options, resolve_api_endpoint_for_role
+from app.core.api_profiles import FIXED_OCR_PROFILE, get_api_request_options, resolve_api_endpoint_for_role
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox
 from app.core.ocr_ir import (
@@ -40,7 +40,7 @@ def get_engine_description(mode: str = "") -> str:
         api_url = cfg.get("api_url", "")
         endpoint = resolve_api_endpoint_for_role(
             api_url,
-            profile=cfg.get("api_model_profile", ""),
+            profile=FIXED_OCR_PROFILE,
             role="ocr",
         )
         return f"API OCR / Proof（PP-OCRv5：{endpoint or '未配置 URL'}）"
@@ -177,13 +177,13 @@ class ApiOcrEngine:
     def recognize(self, image_bgr: np.ndarray, context: OcrContext) -> List[Line]:
         import base64
         import cv2
-        import requests
+        from app.core.api_http import post_json_without_env_proxy
         from app.core.app_config import get_config
 
         cfg = get_config()
         url = resolve_api_endpoint_for_role(
             cfg["api_url"],
-            profile=cfg.get("api_model_profile", ""),
+            profile=FIXED_OCR_PROFILE,
             role="ocr",
         )
         timeout = cfg["api_timeout"]
@@ -198,12 +198,12 @@ class ApiOcrEngine:
         if token:
             headers["Authorization"] = f"token {token}"
 
-        resp = requests.post(
+        resp = post_json_without_env_proxy(
             url,
             json=self._build_request_body(
                 file_b64,
                 1,
-                profile=cfg.get("api_model_profile", ""),
+                profile=FIXED_OCR_PROFILE,
                 endpoint_url=url,
             ),
             headers=headers,

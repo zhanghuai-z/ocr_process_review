@@ -680,11 +680,12 @@ def test_api_ocr_engine_requests_return_word_box():
         def json(self):
             return {"result": {"layoutParsingResults": []}}
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
         captured["timeout"] = timeout
+        captured["proxies"] = kwargs.get("proxies")
         return DummyResponse()
 
     cfg = AppConfig.instance()
@@ -703,6 +704,7 @@ def test_api_ocr_engine_requests_return_word_box():
         lines = engine.recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
         assert lines == []
         assert captured["url"] == "https://example.com/ocr"
+        assert captured["proxies"] == {"http": None, "https": None, "all": None}
         assert captured["json"]["returnWordBox"] is True
         assert captured["json"]["useDocOrientationClassify"] is False
         assert captured["json"]["useDocUnwarping"] is False
@@ -2981,50 +2983,55 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
     """
     from app.core.api_profiles import (
         get_api_model_profile_url,
+        normalize_api_base_url,
         resolve_api_endpoint_for_role,
     )
 
-    vl_url = get_api_model_profile_url("paddleocr-vl-1.5")
+    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
     ocr_url = get_api_model_profile_url("pp-ocrv5")
     structure_url = get_api_model_profile_url("pp-structurev3")
     structure_root = structure_url.removesuffix("/layout-parsing")
+    vl15_root = vl15_url.removesuffix("/layout-parsing")
     ocr_root = ocr_url.removesuffix("/ocr")
-    vl_root = vl_url.removesuffix("/layout-parsing")
+    vl_root = vl15_url.removesuffix("/layout-parsing")
+
+    assert normalize_api_base_url(structure_url) == structure_root
+    assert normalize_api_base_url(ocr_url) == ocr_root
 
     # Layout role: 任何官方 PP-* 预设 -> VL-1.5
     assert resolve_api_endpoint_for_role(
         structure_url,
         profile="pp-structurev3",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
     assert resolve_api_endpoint_for_role(
         ocr_url,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
     assert resolve_api_endpoint_for_role(
         structure_root,
         profile="pp-structurev3",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
     assert resolve_api_endpoint_for_role(
         ocr_root,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
     # 旧 paddleocr-vl 预设也归入 VL-1.5（统一升级到 1.5）
     old_vl_url = get_api_model_profile_url("paddleocr-vl")
     assert resolve_api_endpoint_for_role(
         old_vl_url,
         profile="paddleocr-vl",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
     # VL-1.5 自身保持
     assert resolve_api_endpoint_for_role(
-        vl_url,
+        vl15_url,
         profile="paddleocr-vl-1.5",
         role="layout",
-    ) == vl_url
+    ) == vl15_url
 
     # OCR role: 任何 layout 预设 -> PP-OCRv5；PP-OCRv5 自身保持
     assert resolve_api_endpoint_for_role(
@@ -3033,13 +3040,23 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        vl_url,
+        vl15_url,
         profile="paddleocr-vl-1.5",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
         structure_root,
-        profile="pp-structurev3",
+        profile="",
+        role="layout",
+    ) == vl15_url
+    assert resolve_api_endpoint_for_role(
+        vl15_root,
+        profile="",
+        role="ocr",
+    ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        structure_root,
+        profile="",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
@@ -3047,6 +3064,16 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         profile="pp-ocrv5",
         role="ocr",
     ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        ocr_url,
+        profile="pp-ocrv5",
+        role="layout",
+    ) == vl15_url
+    assert resolve_api_endpoint_for_role(
+        ocr_root,
+        profile="",
+        role="layout",
+    ) == vl15_url
 
     # 自托管根 URL: 不做 host 跳转，仅按后缀切换
     assert resolve_api_endpoint_for_role(
@@ -3068,6 +3095,53 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
     print("test_api_endpoint_role_resolution_keeps_layout_and_proof_separate PASSED")
 
 
+def test_api_http_post_json_disables_environment_proxies():
+    import requests
+
+    from app.core.api_http import post_json_without_env_proxy
+
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+
+    def fake_post(url, json, headers, timeout, **kwargs):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        captured["proxies"] = kwargs.get("proxies")
+        return DummyResponse()
+
+    original_post = requests.post
+    original_env = {key: os.environ.get(key) for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+    requests.post = fake_post
+    os.environ["HTTP_PROXY"] = "http://bad-proxy.invalid:9999"
+    os.environ["HTTPS_PROXY"] = "http://bad-proxy.invalid:9999"
+    os.environ["ALL_PROXY"] = "http://bad-proxy.invalid:9999"
+    try:
+        response = post_json_without_env_proxy(
+            "https://example.com/ocr",
+            json={"image": "abc"},
+            headers={"Content-Type": "application/json"},
+            timeout=12,
+        )
+        assert response.status_code == 200
+        assert captured["url"] == "https://example.com/ocr"
+        assert captured["json"] == {"image": "abc"}
+        assert captured["timeout"] == 12
+        assert captured["proxies"] == {"http": None, "https": None, "all": None}
+    finally:
+        requests.post = original_post
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    print("test_api_http_post_json_disables_environment_proxies PASSED")
+
+
 def test_app_config_tracks_api_model_profile():
     from app.core.app_config import AppConfig, get_config, update_config
 
@@ -3087,7 +3161,7 @@ def test_app_config_tracks_api_model_profile():
     )
     current = get_config()
     assert current["api_model_profile"] == "paddleocr-vl-1.5"
-    assert current["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing"
+    assert current["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com"
     assert current["api_timeout"] == 12
     assert current["api_token"] == "demo"
     assert current["api_layout_model_name"] == ""
@@ -3114,7 +3188,7 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._api_model_row.isHidden()
     assert dialog._api_model_combo.currentIndex() == -1
     assert dialog._url_edit.text() == "https://example.com/root"
-    assert "自动双模型" in dialog._summary_model.text()
+    assert "固定双模型" in dialog._summary_model.text()
 
     cfg.reset_to_defaults()
 
@@ -3176,7 +3250,7 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
         dialog._token_edit.setText("secret")
         dialog._sync_model_from_url()
         assert dialog._api_model_combo.currentIndex() == -1
-        assert "自动双模型" in dialog._summary_model.text()
+        assert "固定双模型" in dialog._summary_model.text()
 
         dialog._save_and_accept()
 
@@ -3193,6 +3267,82 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     print("test_api_settings_dialog_reverse_matches_url_and_persists_profile PASSED")
 
 
+def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._url_edit.setText("https://example.com/custom/layout-parsing")
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["api_url"] == "https://example.com/custom"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_saves_base_url_from_endpoint_suffix PASSED")
+
+
+def test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5():
+    from app.core.api_profiles import get_api_model_profile_url, resolve_api_endpoint_for_role
+
+    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
+    ppocr_url = get_api_model_profile_url("pp-ocrv5")
+    vl15_root = vl15_url.removesuffix("/layout-parsing")
+    ppocr_root = ppocr_url.removesuffix("/ocr")
+
+    assert resolve_api_endpoint_for_role(vl15_root, role="layout") == vl15_url
+    assert resolve_api_endpoint_for_role(vl15_root, role="ocr") == ppocr_url
+    assert resolve_api_endpoint_for_role(ppocr_root, role="layout") == vl15_url
+    assert resolve_api_endpoint_for_role(ppocr_root, role="ocr") == ppocr_url
+
+    print("test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5 PASSED")
+
+
+def test_api_settings_dialog_persists_llm_candidate_settings():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._llm_url_edit.setText("https://llm.example.com/v1/chat/completions")
+        dialog._llm_key_edit.setText("llm-secret")
+        dialog._llm_rules_edit.setText("resources/llm_rules/default_rules.txt")
+
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["llm_endpoint"] == "https://llm.example.com/v1/chat/completions"
+        assert cfg["llm_api_key"] == "llm-secret"
+        assert cfg["llm_rules_path"] == "resources/llm_rules/default_rules.txt"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_persists_llm_candidate_settings PASSED")
+
+
+def test_llm_rules_loads_default_rules_file():
+    from app.core.llm_rules import get_default_llm_rules_path, load_llm_rules
+
+    rules = load_llm_rules()
+
+    assert get_default_llm_rules_path().exists()
+    assert "Do not overwrite final proof text automatically" in rules
+
+    print("test_llm_rules_loads_default_rules_file PASSED")
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -4328,8 +4478,10 @@ def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
         def json(self):
             return {"result": {"ocrResults": []}}
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
+        captured["json"] = json
+        captured["proxies"] = kwargs.get("proxies")
         return DummyResponse()
 
     original_post = requests.post
@@ -4345,6 +4497,7 @@ def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
     try:
         ApiOcrEngine().recognize(np.zeros((20, 30, 3), dtype=np.uint8), OcrContext())
         assert captured["url"] == "https://example.com/root/ocr"
+        assert captured["proxies"] == {"http": None, "https": None, "all": None}
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
@@ -4606,8 +4759,10 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
                 },
             }
 
-    def fake_post(url, json, headers, timeout):
+    def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
+        captured["json"] = json
+        captured["proxies"] = kwargs.get("proxies")
         return DummyResponse()
 
     original_post = requests.post
@@ -4627,6 +4782,10 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         page = Page(image_path=page_path, width=200, height=120)
         LayoutAnalyzer()._api_analyze(page)
         assert captured["url"] == "https://example.com/root/layout-parsing"
+        assert captured["proxies"] == {"http": None, "https": None, "all": None}
+        assert captured["json"]["useDocUnwarping"] is False
+        assert "returnWordBox" not in captured["json"]
+        assert "textDetLimitSideLen" not in captured["json"]
         assert len(page.blocks) == 1
         assert page.blocks[0].block_type == BlockType.TEXT
         assert "OCR行" in page.blocks[0].note
@@ -5370,8 +5529,13 @@ if __name__ == "__main__":
     test_import_service_sequential_page_numbers()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
+    test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
+    test_api_settings_dialog_persists_llm_candidate_settings()
+    test_llm_rules_loads_default_rules_file()
     test_api_model_profile_helpers()
     test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
+    test_api_http_post_json_disables_environment_proxies()
+    test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5()
     test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()
     test_api_ocr_engine_parses_paddle_coordinate_variants()
     test_api_request_builders_split_profile_params()
