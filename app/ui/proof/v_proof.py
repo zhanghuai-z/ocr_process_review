@@ -893,11 +893,53 @@ class VProofPanel(QWidget):
         request = self._candidate_request_for_entry(entry)
         candidates = self._ranked_candidates(entry, request)[:5]
         self._set_candidate_buttons(candidates)
-        if candidates:
-            self._candidate_hint.hide()
-        else:
+        if not candidates:
             self._candidate_hint.setText("无候选")
             self._candidate_hint.show()
+            return
+        # hproof-yaxis-verdicts 第 2 任务：1 候选 = 没有任何替代来源命中本字，
+        # 不代表"此字正确"。明确告诉用户这一点，避免"只剩 1 个 = 已确认"的误读。
+        if len(candidates) == 1:
+            reason = self._diagnose_single_candidate(entry, request)
+            self._candidate_hint.setText(
+                f"仅 1 候选：暂无替代建议，**不代表此字正确**。{reason}"
+            )
+            self._candidate_hint.show()
+        else:
+            self._candidate_hint.hide()
+
+    def _diagnose_single_candidate(
+        self, entry: CharEntry, request: "LlmCandidateRequest",
+    ) -> str:
+        """生成"仅 1 候选"的诚实诊断字符串。
+
+        说明 4 个候选来源各自为什么没贡献新字（去重后只剩当前字）：
+          1. line.ocr_text[i] 与当前字相同 / 缺失
+          2. line.llm_suggestion[i] 与当前字相同 / 缺失
+          3. LlmCandidateProvider 未注入 / 调用失败 / 返回空
+          4. DEFAULT_CONFUSABLE_CANDIDATES 字典里 token 无 entry
+
+        本函数 **只读** 不写状态；返回一段短文本拼接到 hint label。
+        """
+        reasons: List[str] = []
+        token = entry.token_text or entry.char
+        ocr_ch = self._line_char_at(entry.line.ocr_text, entry.char_idx)
+        llm_ch = self._line_char_at(entry.line.llm_suggestion, entry.char_idx)
+        if not ocr_ch:
+            reasons.append("OCR 无对应字")
+        elif ocr_ch == token:
+            reasons.append("OCR 与当前字一致")
+        if not llm_ch:
+            reasons.append("LLM 未给建议")
+        elif llm_ch == token:
+            reasons.append("LLM 建议与当前字一致")
+        if self._candidate_provider is None:
+            reasons.append("候选 provider 未接入")
+        if token not in DEFAULT_CONFUSABLE_CANDIDATES:
+            reasons.append(f"易混淆字典无 '{token}' 条目")
+        if not reasons:
+            return "（来源均无新字）"
+        return "原因：" + " / ".join(reasons) + "。"
 
     def _ranked_candidates(
         self, entry: CharEntry, request: LlmCandidateRequest,

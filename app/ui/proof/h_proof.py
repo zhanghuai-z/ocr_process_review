@@ -51,6 +51,8 @@ from app.services.proof_probe_text_service import (
 )
 from app.services.proof_image_service import clamp_line_box_pixels
 from app.ui.widgets.confidence_badge import ConfidenceBadge
+from app.ui.proof.aligned_ribbon import AlignmentRibbon
+from app.ui.proof import char_verdict as _cv
 
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
@@ -59,7 +61,10 @@ TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
 TEXT_EDITOR_MAX_H = 32
 # Phase 24：横校改为"上图下字"竖排布局：image_row(32) + text_row(32) +
 # 中间 spacing(4) + 上下各 ~4 px = 76 px。
-LINE_PAIR_H = 76
+# hproof-yaxis-verdicts：在 image_row 与 editor 之间插入 AlignmentRibbon(26 px)，
+# 作为图字 y 轴对应的真正承载层（替代上一轮 hover linkage 思路）。
+# image(32) + ribbon(26) + editor(32) + spacing(2×2) + padding(4) ≈ 104。
+LINE_PAIR_H = 104
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
 # CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
 # Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
@@ -326,6 +331,13 @@ class _LinePair(QFrame):
         self._img_lbl.setStyleSheet("background:#fafbfc;")
         content_v.addWidget(self._img_lbl)
 
+        # ── 中：y 轴对应条（hproof-yaxis-verdicts 第一任务）──────
+        # 把每个文本字按对应 char.bbox 的 x 中心绘制，让"图字 i ↔ 文字 i"
+        # 在纵向上严格对齐。详见 aligned_ribbon.py 模块 docstring。
+        self._ribbon = AlignmentRibbon(self)
+        self._ribbon.char_clicked.connect(self._on_ribbon_char_clicked)
+        content_v.addWidget(self._ribbon)
+
         # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
         self._editor = _RowEditor()
         self._editor.setStyleSheet(
@@ -361,8 +373,10 @@ class _LinePair(QFrame):
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._refresh_extra_selections)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
+        self._editor.cursorPositionChanged.connect(self._refresh_ribbon)
         # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
         self._editor.textChanged.connect(self._refresh_extra_selections)
+        self._editor.textChanged.connect(self._refresh_ribbon)
         # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
         self._editor.textChanged.connect(self._refresh_status)
         # Task #2：按 line.chars 锁定编辑器固定长度（图字一一对应不变）
@@ -477,6 +491,9 @@ class _LinePair(QFrame):
             return
         self._hover_char_idx = new_idx
         self._render_line_image()
+        ribbon = getattr(self, "_ribbon", None)
+        if ribbon is not None:
+            ribbon.set_hover_idx(new_idx)
 
     # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
@@ -493,54 +510,54 @@ class _LinePair(QFrame):
             return False
         return len(self._editor.toPlainText()) == len(self._line.chars)
 
-    # ── 文本颜色规则（hproof-visual-marking 升级）─────────────
-    # 规则（按优先级从高到低评估，结果决定字的前景色）：
-    #   1. 已人工修正                → 黑     #222   "再无置信度问题"
-    #   2. char.confidence < 0.5     → 红     #c62828 "错字 / 高风险"
-    #   3. char.confidence < 0.80    → 橙     #e8801f "可疑"
-    #         · 若同位置 LLM 建议字符 != 当前字，升级到红（双源都质疑）
-    #   4. char.confidence ≥ 0.95    → 绿     #2e7d32 "高置信"
-    #   5. 其余 (0.80~0.95)          → 默认黑（不上色 / 普通黑字）
+    # ── 文本颜色规则（hproof-yaxis-verdicts 第三任务）─────────
+    # 颜色 + 证据链由 :mod:`app.ui.proof.char_verdict` 集中负责，本文件只做调用。
     #
-    # 设计意图：
-    # · 颜色只在 chars 严格一一对应时绘制。失配时全部回退默认黑字（更诚实）。
-    # · "人工修正"判定通过 ocr_text 字符与当前字差异，配合 fixed_length 的
-    #   等长保证 → text[i] vs ocr_text[i] 一一比对稳定。
-    # · LLM 升级仅在已经"可疑"区段触发，避免对原本高置信字的过度警告。
+    # 关键变更（vs hproof-visual-marking 旧版）：
+    #   · "用户修改过 → 黑色 = 再无置信度问题" 已删除。用户本轮 TASK 明确：
+    #     橙/红仍参与正确性判断，不能因人工改过自动洗白。颜色现在只读
+    #     OCR confidence + LLM 双源一致性。
+    #   · "黑 = 校对过绝对正确" 当前 codebase 没有可靠证据链来源（quality_probe
+    #     禁改、Line 无字级核验字段）。本控件因此 **不再** 把任何字标成黑色
+    #     "绝对正确"，默认 unverified 用普通深灰；handoff 写明缺什么。
+    #   · "用户改过" 单独成为 ``user_modified`` 标志，UI 在 AlignmentRibbon
+    #     上画细下划线提示，但不改变颜色。
 
-    _COLOR_FIXED   = "#222222"
-    _COLOR_HIGH    = "#2e7d32"
-    _COLOR_SUSPECT = "#e8801f"
-    _COLOR_ERROR   = "#c62828"
-
-    def _classify_char_color(self, i: int) -> Optional[str]:
-        """返回第 i 个字应有的前景色 hex；None = 默认黑字（不上色）。"""
+    def _classify_char_verdict(self, i: int) -> Optional[_cv.CharVerdict]:
+        """返回第 i 个字的 verdict；下标越界 / 未对齐 → None。"""
         chars = self._line.chars or []
         if not (0 <= i < len(chars)):
             return None
         text = self._editor.toPlainText()
         if i >= len(text):
             return None
-        # 1) 人工修正：等长前提下 text[i] vs ocr_text[i] 比对；不同 → 黑
+        conf_raw = getattr(chars[i], "confidence", None)
+        try:
+            conf = float(conf_raw) if conf_raw is not None else None
+        except (TypeError, ValueError):
+            conf = None
         ocr = self._line.ocr_text or self._line.original_text or ""
-        if len(ocr) == len(text) and i < len(ocr) and text[i] != ocr[i]:
-            return self._COLOR_FIXED
-        conf = getattr(chars[i], "confidence", 1.0) or 1.0
-        if conf < 0.5:
-            return self._COLOR_ERROR
-        if conf < LOW_CONF:
-            # LLM 升级：若同位置 LLM 建议字符存在且与当前不同 → 升到红
-            llm = self._line.llm_suggestion or ""
-            if len(llm) == len(text) and i < len(llm) and llm[i] != text[i]:
-                return self._COLOR_ERROR
-            return self._COLOR_SUSPECT
-        if conf >= 0.95:
-            return self._COLOR_HIGH
-        return None
+        llm = self._line.llm_suggestion or ""
+        # 只在等长时取同下标字符；长度不一致时退回 None，避免错位比对
+        ocr_ch = ocr[i] if len(ocr) == len(text) and i < len(ocr) else None
+        llm_ch = llm[i] if len(llm) == len(text) and i < len(llm) else None
+        return _cv.classify_char(
+            confidence=conf,
+            text_char=text[i],
+            ocr_char=ocr_ch,
+            llm_char=llm_ch,
+        )
+
+    def _classify_char_color(self, i: int) -> Optional[str]:
+        """兼容旧调用点：返回颜色 hex；None = 默认（不上前景色）。"""
+        v = self._classify_char_verdict(i)
+        if v is None or v.color == _cv.COLOR_UNVERIFIED:
+            return None
+        return v.color
 
     def _refresh_extra_selections(self) -> None:
         """生成 editor 的 extraSelections：
-        - 按 :meth:`_classify_char_color` 给每个字上前景色（绿/橙/红/黑）。
+        - 按 verdict 给每个字上前景色（绿/橙/红/灰）。
         - 当前光标所在/选中字：蓝色淡背景（"当前字"指示，配合弱光标）。
 
         Phase 25 起 caret 宽度=0，弱光标完全靠这套 extraSelections 表达。
@@ -559,18 +576,18 @@ class _LinePair(QFrame):
             chars = self._line.chars or []
             n = min(len(chars), len(doc_text))
             for i in range(n):
-                color = self._classify_char_color(i)
-                if color is None:
+                verdict = self._classify_char_verdict(i)
+                if verdict is None or verdict.color == _cv.COLOR_UNVERIFIED:
                     continue
                 sel = QTextEdit.ExtraSelection()
                 cur = QTextCursor(editor.document())
                 cur.setPosition(i)
                 cur.setPosition(i + 1, QTextCursor.MoveMode.KeepAnchor)
                 fmt = QTextCharFormat()
-                fmt.setForeground(QColor(color))
+                fmt.setForeground(QColor(verdict.color))
                 # 错字额外给一个非常淡的红底，"必须修"更醒目；其他颜色不加底色
                 # 避免与"当前字"的蓝底冲突。
-                if color == self._COLOR_ERROR:
+                if verdict.color == _cv.COLOR_ERROR:
                     fmt.setBackground(QColor("#fdecec"))
                 sel.format = fmt
                 sel.cursor = cur
@@ -743,6 +760,84 @@ class _LinePair(QFrame):
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
+        # hproof-yaxis-verdicts：图渲完才知道 pixmap 实际宽度 → 同步刷新 ribbon
+        self._refresh_ribbon(pixmap_width=rw)
+
+    def _refresh_ribbon(self, *, pixmap_width: Optional[int] = None) -> None:
+        """根据当前 line / editor / 渲染参数刷新 AlignmentRibbon。
+
+        - chars 完整 + 全部有 bbox + len(text)==len(chars) + render_scale 就绪
+          → 走 aligned 路径：按 char.bbox 的 x 中心绘制每字。
+        - 任一条件不满足 → 走 degraded 路径：写出原因，绝不假装能 y 轴对应。
+        """
+        ribbon = getattr(self, "_ribbon", None)
+        if ribbon is None:
+            return
+        # ribbon 宽度优先用最新 pixmap 宽；否则沿用图标当前宽度（图未加载时给个最小值）
+        if pixmap_width is None:
+            pm = self._img_lbl.pixmap()
+            pixmap_width = pm.width() if pm is not None and not pm.isNull() else 200
+
+        text = self._editor.toPlainText()
+        chars = self._line.chars or []
+        if not chars:
+            ribbon.set_degraded("无逐字 bbox / 仅行级对应", pixmap_width)
+            return
+        if len(text) != len(chars):
+            ribbon.set_degraded(
+                f"图字未对齐：文本 {len(text)} 字 ≠ 图像字符 {len(chars)} 字 / 仅行级对应",
+                pixmap_width,
+            )
+            return
+        scale = self._render_scale or 0.0
+        if scale <= 0:
+            ribbon.set_degraded("图像未加载 / 暂无法 y 轴对应", pixmap_width)
+            return
+        # 任何 char 缺 bbox → 不能保证逐字对应 → 降级
+        ox, _oy = self._line_crop_origin
+        x_centers: list[Optional[float]] = []
+        widths: list[float] = []
+        for ch in chars:
+            if ch.bbox is None:
+                x_centers.append(None)
+                widths.append(12.0)
+                continue
+            xc_orig = (ch.bbox.x + ch.bbox.x2) / 2.0
+            w_orig = max(1.0, float(ch.bbox.x2 - ch.bbox.x))
+            x_centers.append((xc_orig - ox) * scale)
+            widths.append(w_orig * scale)
+        missing = sum(1 for v in x_centers if v is None)
+        if missing == len(chars):
+            ribbon.set_degraded("逐字 bbox 全部缺失 / 仅行级对应", pixmap_width)
+            return
+
+        verdicts = [self._classify_char_verdict(i) for i in range(len(chars))]
+        cursor = self._editor.textCursor()
+        cursor_idx = cursor.position() if 0 <= cursor.position() < len(chars) else -1
+        ribbon.set_aligned(
+            text=text,
+            x_centers=x_centers,
+            widths=widths,
+            verdicts=verdicts,
+            pixmap_width=pixmap_width,
+            cursor_idx=cursor_idx,
+            hover_idx=self._hover_char_idx,
+        )
+
+    def _on_ribbon_char_clicked(self, idx: int) -> None:
+        """点击 ribbon 上的某字 → 激活本行并把 editor 光标定到该字。"""
+        if idx < 0:
+            return
+        if not self._chars_aligned():
+            return
+        if not self._active:
+            self.clicked.emit(self._idx)
+        cur = self._editor.textCursor()
+        cur.setPosition(idx)
+        cur.setPosition(idx + 1, QTextCursor.MoveMode.KeepAnchor)
+        self._editor.setTextCursor(cur)
+        self._editor.setFocus()
+        self._refresh_extra_selections()
 
     def refresh_text(self) -> None:
         """外部（VProof / probe 切换）更新 line.text 后同步 editor 文本。
@@ -761,6 +856,7 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
+        self._refresh_ribbon()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
@@ -778,6 +874,7 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
+        self._refresh_ribbon()
 
     @property
     def line(self) -> Line:
