@@ -23,7 +23,7 @@ from app.core.quality_probe import (
     reverse_display_to_true,
     score,
 )
-from app.models import BBox, Block, Line, OcrProject, Page
+from app.models import BBox, Block, Char, Line, OcrProject, Page
 from app.models.enums import BlockType, ProofStatus
 
 
@@ -32,7 +32,22 @@ from app.models.enums import BlockType, ProofStatus
 # ──────────────────────────────────────────────────────────────────
 
 def _line(text: str, conf: float = 0.95) -> Line:
-    return Line(text=text, confidence=conf, bbox=BBox(0, 0, 100, 20))
+    return Line(
+        text=text,
+        confidence=conf,
+        bbox=BBox(0, 0, max(1, len(text)) * 12, 20),
+        chars=[
+            Char(
+                char=ch,
+                confidence=conf,
+                bbox=BBox(i * 12, 0, 12, 20),
+                bbox_source="ocr",
+                bbox_granularity="char",
+                token_text=ch,
+            )
+            for i, ch in enumerate(text)
+        ],
+    )
 
 
 def _block(btype: BlockType, lines: list[Line]) -> Block:
@@ -171,6 +186,49 @@ def test_sampler_deterministic_with_seed():
     s1 = [p.to_dict() for p in ProbeSampler(cfg).sample(proj).all()]
     s2 = [p.to_dict() for p in ProbeSampler(cfg).sample(proj).all()]
     assert s1 == s2
+
+
+def test_sampler_only_uses_chars_with_existing_crops():
+    text = "今天我们来学习已经发生过的历史事件本身"
+    no_crop_line = Line(text=text, confidence=0.95, bbox=BBox(0, 0, 240, 20), chars=[])
+    project_without_crops = _project([
+        _page(1, [_block(BlockType.TEXT, [no_crop_line])]),
+    ])
+    cfg = SamplerConfig(target_ratio=1.0, min_total=1, max_total=10, max_per_page=10, seed=2)
+    empty_store = ProbeSampler(cfg).sample(project_without_crops)
+    assert len(empty_store) == 0
+    assert empty_store.sampled_from_chars == 0
+
+    project_with_crops = _project([
+        _page(1, [_block(BlockType.TEXT, [_line(text)])]),
+    ])
+    store = ProbeSampler(cfg).sample(project_with_crops)
+    assert len(store) > 0
+    assert store.sampled_from_chars == sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    for probe in store.all():
+        line = project_with_crops.pages[0].blocks[0].lines[0]
+        assert line.chars[probe.key.char_index].bbox is not None
+
+
+def test_sampler_density_uses_n_per_thousand_or_ten_thousand_chars():
+    project = _build_dense_project(n_pages=2, lines_per_page=6)
+    cfg = SamplerConfig(
+        sand_count=10,
+        sand_unit_chars=1000,
+        min_total=1,
+        max_total=999,
+        max_per_page=999,
+        max_per_line=1,
+        seed=5,
+    )
+    store = ProbeSampler(cfg).sample(project)
+    expected = int(round(store.sampled_from_chars * 10 / 1000))
+    if expected > 0:
+        expected = max(cfg.min_total, expected)
+    assert store.target_probes == min(cfg.max_total, expected)
+    assert len(store) <= store.target_probes
+    assert store.sand_count == 10
+    assert store.sand_unit_chars == 1000
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -474,6 +532,28 @@ def test_sampler_config_from_app_config_falls_back_when_qt_missing(monkeypatch):
     cfg = qp_mod.sampler_config_from_app_config()
     assert isinstance(cfg, qp_mod.SamplerConfig)
     assert cfg.target_ratio == 0.025  # 默认值
+
+
+def test_sampler_config_reads_sand_density_from_app_config(tmp_path):
+    from PySide6.QtCore import QSettings
+    from app.core.app_config import AppConfig
+    from app.core import quality_probe as qp_mod
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    AppConfig._instance = None
+    cfg_store = AppConfig.instance()
+    cfg_store.reset_to_defaults()
+    cfg_store.set("quality_probe_sand_count", 7)
+    cfg_store.set("quality_probe_sand_unit_chars", 10000)
+    try:
+        cfg = qp_mod.sampler_config_from_app_config()
+        assert cfg.sand_count == 7
+        assert cfg.sand_unit_chars == 10000
+        assert cfg.target_density() == 7 / 10000
+    finally:
+        cfg_store.reset_to_defaults()
+        AppConfig._instance = None
 
 
 # ════════════════════════════════════════════════════════════════

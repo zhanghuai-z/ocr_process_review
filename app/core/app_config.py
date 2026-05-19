@@ -46,7 +46,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
     # 校对质量评测（quality probe）
     # 这些键供 SamplerConfig.from_app_config 读取。改完无需重启即生效。
-    "quality_probe_target_ratio": 0.025,   # 投放比例 2.5%
+    "quality_probe_sand_count": 25,        # 每 quality_probe_sand_unit_chars 个可切图字符投放几个沙子
+    "quality_probe_sand_unit_chars": 1000, # 1000=每千字；10000=每万字
+    "quality_probe_target_ratio": 0.025,   # 旧配置兼容：未设置 sand_count 时使用
     "quality_probe_min_total": 8,
     "quality_probe_max_total": 35,
     "quality_probe_max_per_page": 2,

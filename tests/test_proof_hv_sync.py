@@ -176,8 +176,20 @@ def test_quality_stats_dialog_opens_and_shows_no_active_store():
 
 def test_quality_stats_dialog_toggle_on_then_off():
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    from app.models import Char
     # 用一个稍长项目让 sampler 可能投放成功
-    line = Line(text="一二三四五六七八九十百千万", confidence=0.9, bbox=BBox(0, 0, 100, 20))
+    line = Line(text="今天我们来学习已经发生过的历史事件本身", confidence=0.9, bbox=BBox(0, 0, 240, 20))
+    line.chars = [
+        Char(
+            char=ch,
+            confidence=0.9,
+            bbox=BBox(i * 8, 0, 8, 20),
+            bbox_source="ocr",
+            bbox_granularity="char",
+            token_text=ch,
+        )
+        for i, ch in enumerate(line.text)
+    ]
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 200), lines=[line])
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
                 width=100, height=200)
@@ -878,7 +890,25 @@ def test_quality_stats_dialog_declares_sampling_scope_not_page_rate():
     assert "抽样字符" in note
     assert "不按页计分" in note
     assert "不是全量字符错误率" in note
+    assert "每千字或每万字" in note
     assert dlg.windowTitle() == "抽样字符校对观察"
+    dlg.deleteLater()
+
+
+def test_quality_stats_dialog_exposes_sand_density_controls():
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    dlg = QualityStatsDialog(
+        project_provider=lambda: _make_project("今天我们来学习已经发生过的历史事件本身"),
+        refresh_panels_cb=lambda: None,
+    )
+
+    dlg._sand_count_spin.setValue(3)
+    idx = dlg._sand_unit_combo.findData(10000)
+    dlg._sand_unit_combo.setCurrentIndex(idx)
+
+    assert dlg._sand_count_spin.value() == 3
+    assert dlg._sand_unit_combo.currentData() == 10000
+    assert dlg._sand_unit_combo.currentText() == "每万字"
     dlg.deleteLater()
 
 

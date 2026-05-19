@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QComboBox,
     QSizePolicy,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -235,13 +237,29 @@ class QualityStatsDialog(QDialog):
         top.addWidget(self._switch_status, 1)
         root.addLayout(top)
 
+        sand_row = QHBoxLayout()
+        sand_row.setSpacing(8)
+        sand_row.addWidget(QLabel("掺沙密度："))
+        self._sand_count_spin = QSpinBox()
+        self._sand_count_spin.setRange(0, 1000)
+        self._sand_count_spin.setSuffix(" 个")
+        self._sand_count_spin.setFixedWidth(90)
+        sand_row.addWidget(self._sand_count_spin)
+        self._sand_unit_combo = QComboBox()
+        self._sand_unit_combo.addItem("每千字", 1000)
+        self._sand_unit_combo.addItem("每万字", 10000)
+        self._sand_unit_combo.setFixedWidth(100)
+        sand_row.addWidget(self._sand_unit_combo)
+        sand_row.addStretch()
+        root.addLayout(sand_row)
+
         # 中部：圆环
         self._ring = _RatioRing()
         root.addWidget(self._ring, 1, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._scope_note = QLabel(
-            "统计口径：按抽样字符/假象字位置观察，不按页计分，也不是全量字符错误率；"
-            "只用于提示校对风险。"
+            "统计口径：按已有切图的抽样字符池投放假象字；密度为 N 个/每千字或每万字。"
+            "结果只表示观察到多少沙子被识破，不按页计分，也不是全量字符错误率。"
         )
         self._scope_note.setWordWrap(True)
         self._scope_note.setStyleSheet("color:#6b7280; font-size:12px;")
@@ -265,6 +283,7 @@ class QualityStatsDialog(QDialog):
         # 隐藏的兼容字段：保留旧测试断言用的 _rate_lbl 文本接口
         self._rate_lbl = QLabel("rate = 待计算", self)
         self._rate_lbl.hide()
+        self._load_sampler_controls()
 
     # ── 兼容外部测试：暴露详情表格 ──────────────────────────────
 
@@ -278,10 +297,31 @@ class QualityStatsDialog(QDialog):
             self._detail_dialog = QualityStatsDetailDialog(self)
         return self._detail_dialog
 
+    def _load_sampler_controls(self) -> None:
+        from app.core.app_config import AppConfig
+
+        cfg = AppConfig.instance()
+        try:
+            sand_count = int(cfg.get("quality_probe_sand_count", 25))
+            sand_unit = int(cfg.get("quality_probe_sand_unit_chars", 1000))
+        except (TypeError, ValueError):
+            sand_count, sand_unit = 25, 1000
+        self._sand_count_spin.setValue(max(0, sand_count))
+        idx = self._sand_unit_combo.findData(sand_unit)
+        self._sand_unit_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _save_sampler_controls(self) -> None:
+        from app.core.app_config import AppConfig
+
+        cfg = AppConfig.instance()
+        cfg.set("quality_probe_sand_count", self._sand_count_spin.value())
+        cfg.set("quality_probe_sand_unit_chars", self._sand_unit_combo.currentData())
+
     # ── 行为 ───────────────────────────────────────────────────
 
     def _on_toggle(self, checked: bool) -> None:
         if checked:
+            self._save_sampler_controls()
             project = self._project_provider()
             if project is None or not project.pages:
                 QMessageBox.information(
@@ -296,7 +336,7 @@ class QualityStatsDialog(QDialog):
             if len(store) == 0:
                 QMessageBox.information(
                     self, "正确率统计",
-                    "当前正文中没有可投放假象字的位置（页面太短或全是数字/公式/标题）。",
+                    "当前正文中没有可投放假象字的位置（页面太短、全是数字/公式/标题，或缺少已有切图字符）。",
                 )
                 qp.reset_active_store()
                 self._btn_toggle.setChecked(False)
@@ -337,6 +377,12 @@ class QualityStatsDialog(QDialog):
         rep = qp.score(store)
         judged = rep.corrected + rep.missed
         observed = judged + rep.edited_other + rep.deleted
+        density_label = "每万字" if getattr(store, "sand_unit_chars", 1000) == 10000 else "每千字"
+        sand_count = getattr(store, "sand_count", None)
+        density_text = (
+            f"掺沙 {sand_count} 个/{density_label}"
+            if sand_count is not None else "掺沙密度沿用旧比例"
+        )
         if judged == 0:
             ratio = 0.0
         else:
@@ -344,12 +390,13 @@ class QualityStatsDialog(QDialog):
         main_text = "观察中" if rep.grade == "INSUFFICIENT" else rep.grade_label
         self._ring.set_ratio(
             ratio,
-            f"抽样字符 {rep.corrected}/{judged} 识破 · 已观察 {observed}/{n}",
+            f"{density_text} · 已观察 {observed}/{n}",
             main_text,
         )
         self._rate_lbl.setText(
             f"sample_char_detection = {rep.corrected}/{judged} "
-            f"(observed={observed}/{n}; not_page_rate; not_full_error_rate)"
+            f"(observed={observed}/{n}; pool={getattr(store, 'sampled_from_chars', 0)}; "
+            f"{density_text}; not_page_rate; not_full_error_rate)"
         )
 
         # 始终把最新明细同步到详情子窗（隐藏即可，便于测试/外部直接读 _table）

@@ -795,11 +795,13 @@ def test_export_worker_reports_completion_progress():
     with tempfile.TemporaryDirectory() as tmpdir:
         worker = ExportWorker(project, ["txt"], tmpdir)
         worker.progress.connect(lambda msg, current, total: events.append((msg, current, total)))
-        worker.completed.connect(lambda ok, msg: completed.append((ok, msg)))
+        worker.completed.connect(completed.append)
         worker.run()
         assert os.path.exists(os.path.join(tmpdir, "WorkerExport.txt"))
     assert events[-1] == ("TXT 导出完成", 1, 1)
-    assert completed == [(True, "")]
+    assert len(completed) == 1
+    assert completed[0].all_ok is True
+    assert completed[0].successes[0].fmt == "txt"
 
     print("test_export_worker_reports_completion_progress PASSED")
 
@@ -840,15 +842,103 @@ def test_export_worker_sanitizes_project_name_for_all_formats():
     formats = ["txt", "md", "rtf", "pdf", "xml", "html", "docx"]
     with tempfile.TemporaryDirectory() as tmpdir:
         worker = ExportWorker(project, formats, tmpdir)
-        worker.completed.connect(lambda ok, msg: completed.append((ok, msg)))
+        worker.completed.connect(completed.append)
         worker.run()
         base = sanitize_export_filename(project.name)
         for fmt in formats:
             assert os.path.exists(os.path.join(tmpdir, f"{base}.{fmt}"))
 
-    assert completed == [(True, "")]
+    assert len(completed) == 1
+    assert completed[0].all_ok is True
+    assert {result.fmt for result in completed[0].successes} == set(formats)
 
     print("test_export_worker_sanitizes_project_name_for_all_formats PASSED")
+
+
+def test_export_worker_keeps_formats_independent_when_one_fails():
+    import app.export as export_module
+    from app.export.base import ExporterBase
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.export_service import sanitize_export_filename
+    from app.ui.export.export_dialog import ExportWorker
+
+    class WritingExporter(ExporterBase):
+        def __init__(self, label: str):
+            self._label = label
+
+        def export(self, project, out_path: str) -> None:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(self._label)
+
+    class FailingExporter(ExporterBase):
+        def export(self, project, out_path: str) -> None:
+            raise RuntimeError("pdf failed")
+
+    original_get_exporter = export_module.get_exporter
+    export_module.get_exporter = lambda fmt: FailingExporter() if fmt == "pdf" else WritingExporter(fmt)
+    try:
+        bb = BBox(0, 0, 100, 20)
+        project = OcrProject(name="IndependentExport", pages=[
+            Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+                Block(block_type=BlockType.TEXT, bbox=bb, lines=[
+                    Line(text="导出内容", confidence=0.9, bbox=bb),
+                ]),
+            ]),
+        ])
+        completed = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker = ExportWorker(project, ["txt", "pdf", "md"], tmpdir)
+            worker.completed.connect(completed.append)
+            worker.run()
+            base = sanitize_export_filename(project.name)
+            assert open(os.path.join(tmpdir, f"{base}.txt"), encoding="utf-8").read() == "txt"
+            assert open(os.path.join(tmpdir, f"{base}.md"), encoding="utf-8").read() == "md"
+            assert not os.path.exists(os.path.join(tmpdir, f"{base}.pdf"))
+
+        result = completed[0]
+        assert result.any_success is True
+        assert result.all_ok is False
+        assert [item.fmt for item in result.successes] == ["txt", "md"]
+        assert [item.fmt for item in result.failures] == ["pdf"]
+        assert "pdf failed" in result.summary()
+    finally:
+        export_module.get_exporter = original_get_exporter
+
+    print("test_export_worker_keeps_formats_independent_when_one_fails PASSED")
+
+
+def test_export_dialog_reports_partial_success_without_critical_error():
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.ui.export.export_dialog import ExportDialog, ExportFormatResult, ExportRunResult
+    from app.models import OcrProject
+
+    _get_qapp()
+    warnings = []
+    criticals = []
+    original_warning = QMessageBox.warning
+    original_critical = QMessageBox.critical
+    QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
+    QMessageBox.critical = lambda *args, **kwargs: criticals.append(args)
+    dialog = ExportDialog(OcrProject(name="PartialDialog"))
+    try:
+        dialog._progress_bar.setVisible(True)
+        dialog._progress_bar.setRange(0, 2)
+        result = ExportRunResult([
+            ExportFormatResult("txt", "/tmp/out.txt", True),
+            ExportFormatResult("pdf", "/tmp/out.pdf", False, "pdf failed"),
+        ])
+        dialog._on_finished(result)
+
+        assert dialog._progress_lbl.text() == "部分导出完成"
+        assert warnings and "部分导出完成" in warnings[0][1]
+        assert criticals == []
+    finally:
+        QMessageBox.warning = original_warning
+        QMessageBox.critical = original_critical
+        dialog.close()
+
+    print("test_export_dialog_reports_partial_success_without_critical_error PASSED")
 
 
 def test_layout_panel_analysis_progress_lifecycle():
@@ -5911,6 +6001,8 @@ if __name__ == "__main__":
     test_export_worker_reports_completion_progress()
     test_export_filename_sanitizes_invalid_project_name()
     test_export_worker_sanitizes_project_name_for_all_formats()
+    test_export_worker_keeps_formats_independent_when_one_fails()
+    test_export_dialog_reports_partial_success_without_critical_error()
     test_layout_panel_analysis_progress_lifecycle()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()

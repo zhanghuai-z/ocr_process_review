@@ -292,6 +292,10 @@ class ProbeStore:
     def __init__(self) -> None:
         self._by_line: dict[tuple[int, int, int], list[Probe]] = {}
         self._all: list[Probe] = []
+        self.sampled_from_chars: int = 0
+        self.target_probes: int = 0
+        self.sand_count: Optional[int] = None
+        self.sand_unit_chars: int = 1000
 
     def __len__(self) -> int:
         return len(self._all)
@@ -320,12 +324,44 @@ class ProbeStore:
 
 @dataclass
 class SamplerConfig:
-    target_ratio: float = 0.025      # 2.5%
+    target_ratio: float = 0.025      # 旧配置兼容：未设置 sand_count 时使用
+    sand_count: Optional[int] = None # 每 sand_unit_chars 个可切图字符投放几个沙子
+    sand_unit_chars: int = 1000
     min_total: int = 8
     max_total: int = 35
     max_per_page: int = 2
     max_per_line: int = 1
     seed: Optional[int] = None       # None = 随机；测试可固定
+
+    def target_density(self) -> float:
+        if self.sand_count is None:
+            return max(0.0, float(self.target_ratio))
+        return max(0.0, float(self.sand_count)) / max(1, int(self.sand_unit_chars))
+
+
+def _has_existing_cut_char(line: Line, idx: int) -> bool:
+    text = line.text or ""
+    if not (0 <= idx < len(text) and 0 <= idx < len(line.chars)):
+        return False
+    ch = line.chars[idx]
+    if ch.char != text[idx]:
+        return False
+    bbox = ch.bbox
+    return bbox is not None and bbox.w > 0 and bbox.h > 0
+
+
+def candidate_indices_with_existing_crops(line: Line) -> list[int]:
+    """返回既可投放假象字、又有现成字符切图支撑的位置。"""
+    return [idx for idx in candidate_indices_in_line(line) if _has_existing_cut_char(line, idx)]
+
+
+def count_existing_cjk_crop_chars(line: Line) -> int:
+    """统计 line 中已有切图且与文本对齐的 CJK 字符数。"""
+    return sum(
+        1
+        for idx, ch in enumerate(line.text or "")
+        if _is_cjk(ch) and _has_existing_cut_char(line, idx)
+    )
 
 
 class ProbeSampler:
@@ -338,23 +374,31 @@ class ProbeSampler:
 
         # 1. 收集所有 (page_number, block_index, line_index, candidate_char_indices)
         per_line_pool: list[tuple[int, int, int, Line, list[int]]] = []
-        total_cjk = 0
+        total_cut_cjk = 0
         for page in project.pages:
             for bi, block in enumerate(page.blocks):
                 if not is_block_eligible(block):
                     continue
                 for li, line in enumerate(block.lines):
-                    cands = candidate_indices_in_line(line)
+                    total_cut_cjk += count_existing_cjk_crop_chars(line)
+                    cands = candidate_indices_with_existing_crops(line)
                     if cands:
                         per_line_pool.append((page.page_number, bi, li, line, cands))
-                        total_cjk += sum(1 for c in (line.text or "") if _is_cjk(c))
 
+        store.sampled_from_chars = total_cut_cjk
+        store.sand_count = self.cfg.sand_count
+        store.sand_unit_chars = self.cfg.sand_unit_chars
         if not per_line_pool:
             return store
 
         # 2. 计算目标投放数
-        target = int(round(total_cjk * self.cfg.target_ratio))
-        target = max(self.cfg.min_total, min(self.cfg.max_total, target))
+        target = int(round(total_cut_cjk * self.cfg.target_density()))
+        if target > 0 or self.cfg.sand_count is None:
+            target = max(self.cfg.min_total, target)
+        target = min(self.cfg.max_total, target)
+        store.target_probes = target
+        if target <= 0:
+            return store
 
         # 3. 按 (page) 分桶，每页不超过 max_per_page；每行不超过 max_per_line
         rng.shuffle(per_line_pool)
@@ -626,6 +670,8 @@ def score(store: ProbeStore, *, min_observed_for_grade: int = 4) -> QualityRepor
 
 # AppConfig key -> (SamplerConfig field, type-cast)
 _SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
+    "quality_probe_sand_count": ("sand_count", int),
+    "quality_probe_sand_unit_chars": ("sand_unit_chars", int),
     "quality_probe_target_ratio": ("target_ratio", float),
     "quality_probe_min_total": ("min_total", int),
     "quality_probe_max_total": ("max_total", int),
@@ -732,6 +778,10 @@ def sidecar_path_for_project(db_path: Optional[str]) -> Optional[str]:
 def store_to_dict(store: ProbeStore) -> dict:
     return {
         "version": _SIDECAR_VERSION,
+        "sampled_from_chars": store.sampled_from_chars,
+        "target_probes": store.target_probes,
+        "sand_count": store.sand_count,
+        "sand_unit_chars": store.sand_unit_chars,
         "probes": [p.to_dict() for p in store.all()],
     }
 
@@ -742,6 +792,14 @@ def store_from_dict(data: dict) -> ProbeStore:
         return store
     if data.get("version") != _SIDECAR_VERSION:
         return store
+    try:
+        store.sampled_from_chars = int(data.get("sampled_from_chars", 0) or 0)
+        store.target_probes = int(data.get("target_probes", 0) or 0)
+        sand_count = data.get("sand_count", None)
+        store.sand_count = None if sand_count is None else int(sand_count)
+        store.sand_unit_chars = int(data.get("sand_unit_chars", 1000) or 1000)
+    except (TypeError, ValueError):
+        pass
     for raw in data.get("probes", []):
         try:
             key_d = raw.get("key", {})
