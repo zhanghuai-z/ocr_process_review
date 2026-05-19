@@ -288,6 +288,7 @@ def test_score_grades_by_band():
     assert make(7, 3).grade == "B"     # 70%
     assert make(5, 5).grade == "C"     # 50%
     assert make(2, 8).grade == "D"     # 20%
+    assert "抽样字符" in make(9, 1).band
 
 
 # ──────────────────────────────────────────────────────────────────

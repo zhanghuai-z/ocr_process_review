@@ -2487,6 +2487,91 @@ def test_workflow_controller_emits_ocr_progress_and_navigation():
     print("test_workflow_controller_emits_ocr_progress_and_navigation PASSED")
 
 
+def test_workflow_controller_ocr_done_does_not_force_hproof_step():
+    from app.controllers.workflow_controller import STEP_HPROOF, WorkflowController
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/no-force-hproof.png", width=120, height=80)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 0, 100, 40),
+            lines=[Line(text="完成", confidence=0.95, bbox=BBox(1, 2, 40, 16))],
+        )
+    ]
+    controller = WorkflowController()
+    controller._project = OcrProject(name="NoForceHProof", pages=[page])
+    steps = []
+    messages = []
+    controller.step_requested.connect(steps.append)
+    controller.status_message.connect(messages.append)
+
+    controller.on_ocr_done([page])
+
+    assert STEP_HPROOF not in steps
+    assert controller.can_enter_step(STEP_HPROOF)
+    assert any("校对已可进入" in message for message in messages)
+
+    print("test_workflow_controller_ocr_done_does_not_force_hproof_step PASSED")
+
+
+def test_main_window_ocr_finished_preserves_current_step():
+    from app.controllers.workflow_controller import STEP_HPROOF, STEP_OCR
+    from app.models import Page
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    window = MainWindow()
+    try:
+        window._controller.set_current_step(STEP_OCR)
+        synced = []
+        window._controller.sync_proof_panels = lambda *args, **kwargs: synced.append(True)  # type: ignore[method-assign]
+
+        window._on_ocr_finished([Page(image_path="/tmp/ocr-finished.png", width=10, height=10)])
+
+        assert synced == [True]
+        assert window._controller.current_step == STEP_OCR
+        assert window._stack.currentIndex() == STEP_OCR
+        assert window._controller.current_step != STEP_HPROOF
+    finally:
+        window.close()
+
+    print("test_main_window_ocr_finished_preserves_current_step PASSED")
+
+
+def test_empty_llm_config_does_not_block_ocr_done():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core.app_config import AppConfig, update_config
+    from app.engines.fake_llm_engine import FakeLlmPreReviewEngine
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    original_review = FakeLlmPreReviewEngine.review_lines
+
+    def raising_review(self, lines, options=None):
+        raise AssertionError("LLM pre-review must not be called from OCR completion")
+
+    FakeLlmPreReviewEngine.review_lines = raising_review
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(llm_pre_review_enabled=True, llm_endpoint="", llm_api_key="")
+    try:
+        line = Line(text="人工终审文本", confidence=0.91, bbox=BBox(1, 2, 40, 16))
+        page = Page(image_path="/tmp/llm-empty.png", width=120, height=80)
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40), lines=[line])]
+        controller = WorkflowController()
+        controller._project = OcrProject(name="LlmEmptyDoesNotBlock", pages=[page])
+
+        controller.on_ocr_done([page])
+
+        assert line.text == "人工终审文本"
+        assert line.llm_suggestion == ""
+    finally:
+        FakeLlmPreReviewEngine.review_lines = original_review
+        cfg.reset_to_defaults()
+
+    print("test_empty_llm_config_does_not_block_ocr_done PASSED")
+
+
 def test_workflow_controller_normalizes_loaded_project_geometry():
     import tempfile
     import cv2
@@ -3584,6 +3669,29 @@ def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
         AppConfig._instance = None
 
     print("test_api_settings_dialog_saves_base_url_from_endpoint_suffix PASSED")
+
+
+def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
+    from app.core.app_config import AppConfig
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+
+        note = dialog._llm_scope_note.text()
+        assert "候选/预审建议层" in note
+        assert "人工仍是终审" in note
+        assert "不会阻断主流程" in note
+        assert "颜色判定" in note
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking PASSED")
 
 
 def test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5():
@@ -5834,6 +5942,9 @@ if __name__ == "__main__":
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()
     test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
     test_workflow_controller_emits_ocr_progress_and_navigation()
+    test_workflow_controller_ocr_done_does_not_force_hproof_step()
+    test_main_window_ocr_finished_preserves_current_step()
+    test_empty_llm_config_does_not_block_ocr_done()
     test_workflow_controller_normalizes_loaded_project_geometry()
     test_export_service()
     test_import_service()
@@ -5841,6 +5952,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
+    test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
     test_api_settings_dialog_persists_llm_candidate_settings()
     test_llm_rules_loads_default_rules_file()
     test_api_model_profile_helpers()

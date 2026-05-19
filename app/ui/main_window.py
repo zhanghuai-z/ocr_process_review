@@ -431,10 +431,8 @@ class MainWindow(QMainWindow):
         """OCR 完成（由 controller 发出，业务事件）。
 
         proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
-        controller 内部，MainWindow 只触发同步并决定步骤跳转。"""
+        controller 内部。OCR 完成只开放校对入口，不再强制把用户带到横校。"""
         self._controller.sync_proof_panels()
-        if self._controller.current_step < STEP_HPROOF:
-            self._go_to_step(STEP_HPROOF)
 
     def _on_ocr_progress(self, progress) -> None:
         if progress.total_pages > 0:

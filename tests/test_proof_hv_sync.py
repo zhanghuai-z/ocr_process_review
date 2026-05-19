@@ -851,7 +851,7 @@ def test_phase24_quality_stats_dialog_table_has_corrected_column():
 
 
 def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
-    """Phase 24 blocker 4：底部正确率展示形如"正确率：X.X%"。"""
+    """Phase 24 兼容：未启用时保留隐藏 rate label 初始值。"""
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
     proj = _make_project("hi")
     dlg = QualityStatsDialog(
@@ -860,6 +860,21 @@ def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
     )
     # 默认未启用，仍显示 "rate = 待计算"（兼容 Phase 11 测试）
     assert dlg._rate_lbl.text() == "rate = 待计算"
+    dlg.deleteLater()
+
+
+def test_quality_stats_dialog_declares_sampling_scope_not_page_rate():
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    proj = _make_project("今天我们来学习已经发生过的历史事件本身")
+    dlg = QualityStatsDialog(
+        project_provider=lambda: proj,
+        refresh_panels_cb=lambda: None,
+    )
+    note = dlg._scope_note.text()
+    assert "抽样字符" in note
+    assert "不按页计分" in note
+    assert "不是全量字符错误率" in note
+    assert dlg.windowTitle() == "抽样字符校对观察"
     dlg.deleteLater()
 
 

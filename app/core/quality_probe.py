@@ -546,7 +546,7 @@ def observe_user_action(
 
 
 # ──────────────────────────────────────────────────────────────────
-# 评分 —— 输出等级 / 区间，不输出伪精确百分比
+# 评分 —— 输出抽样字符等级 / 区间，不输出伪精确的全量错误率
 # ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -559,8 +559,8 @@ class QualityReport:
     pending: int
     grade: str           # "A" / "B" / "C" / "D" / "INSUFFICIENT"
     grade_label: str     # "优秀 / 良好 / 一般 / 待加强 / 样本不足"
-    band: str            # 如 "校对识破假象 ≥ 85%"
-    raw_score: float     # 内部用，不暴露给用户
+    band: str            # 如 "抽样字符假象识破 ≥ 85%"，不是全量正确率
+    raw_score: float     # 内部用，不作为 UI 全量百分比暴露
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -592,19 +592,19 @@ def score(store: ProbeStore, *, min_observed_for_grade: int = 4) -> QualityRepor
             pending=pending,
             grade="INSUFFICIENT",
             grade_label="样本不足",
-            band="校对样本不足，暂不给出等级",
+            band="抽样字符观察不足，暂不给出等级",
             raw_score=0.0,
         )
 
     raw = corrected / max(1, judged)
     if raw >= 0.85:
-        grade, label, band = "A", "优秀", "校对识破假象 ≥ 85%"
+        grade, label, band = "A", "优秀", "抽样字符假象识破 ≥ 85%"
     elif raw >= 0.65:
-        grade, label, band = "B", "良好", "校对识破假象 65%–85%"
+        grade, label, band = "B", "良好", "抽样字符假象识破 65%–85%"
     elif raw >= 0.40:
-        grade, label, band = "C", "一般", "校对识破假象 40%–65%"
+        grade, label, band = "C", "一般", "抽样字符假象识破 40%–65%"
     else:
-        grade, label, band = "D", "待加强", "校对识破假象 < 40%"
+        grade, label, band = "D", "待加强", "抽样字符假象识破 < 40%"
 
     return QualityReport(
         total_probes=total,

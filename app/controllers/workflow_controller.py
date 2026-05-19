@@ -533,8 +533,9 @@ class WorkflowController(QObject):
 
         self._update_max_step()
         self.ocr_finished.emit(pages)
-        self.status_message.emit(f"识别完成，自动标记 {flagged} 行低置信度内容")
-        self.step_requested.emit(STEP_HPROOF)
+        self.status_message.emit(
+            f"识别完成，自动标记 {flagged} 行低置信度内容；横向/纵向校对已可进入"
+        )
 
         if self._store:
             self.save_project()

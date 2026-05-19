@@ -1,7 +1,7 @@
-"""正确率统计 对话框（proof UI clarity 重构）。
+"""抽样字符校对观察 对话框（proof UI clarity 重构）。
 
 设计变化（相对 Phase 24）：
-- 主窗变小：开关 + 圆环正确率 + 详情入口（按钮），不再把大表格堆在主窗
+- 主窗变小：开关 + 抽样观察圆环 + 详情入口（按钮），不再把大表格堆在主窗
 - 假象字明细放进 ``QualityStatsDetailDialog``，由"详情…"按钮打开
 - 圆环 ``_RatioRing`` 自绘，避免引入 QtCharts 依赖
 
@@ -41,22 +41,24 @@ from app.models import OcrProject
 
 
 # ─────────────────────────────────────────────────────────────
-# 自绘圆环正确率
+# 自绘圆环：抽样字符观察
 # ─────────────────────────────────────────────────────────────
 
 class _RatioRing(QWidget):
-    """正确率圆环：外环按 ratio 上色，中心显示百分比 + 副标签。"""
+    """抽样观察圆环：外环按内部 ratio 上色，中心显示等级/状态 + 副标签。"""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._ratio: Optional[float] = None  # None = 未启用 / 样本不足
+        self._main_text: str = ""
         self._sub_text: str = ""
         self.setMinimumSize(140, 140)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
-    def set_ratio(self, ratio: Optional[float], sub_text: str = "") -> None:
+    def set_ratio(self, ratio: Optional[float], sub_text: str = "", main_text: str = "") -> None:
         self._ratio = ratio
         self._sub_text = sub_text
+        self._main_text = main_text
         self.update()
 
     def paintEvent(self, _ev) -> None:  # type: ignore[override]
@@ -79,7 +81,7 @@ class _RatioRing(QWidget):
         # 数据环 + 中心文本
         if self._ratio is None:
             color = QColor("#9aa4b2")
-            center_main = "—"
+            center_main = self._main_text or "—"
         else:
             r = max(0.0, min(1.0, self._ratio))
             if r >= 0.95:
@@ -96,8 +98,7 @@ class _RatioRing(QWidget):
             # 从 12 点钟方向起，顺时针绘制 → Qt 角度系统中起点 = 90*16，
             # sweep 为负即顺时针。
             painter.drawArc(rect, 90 * 16, -sweep)
-            # Task #4: 保留两位小数
-            center_main = f"{r * 100:.2f}%"
+            center_main = self._main_text or "样本观察"
 
         # 中心主数字
         painter.setPen(QColor("#222"))
@@ -169,7 +170,7 @@ class QualityStatsDetailDialog(QDialog):
             self._summary.setText("尚未启用")
             return
         probes = store.all()
-        self._summary.setText(f"共 {len(probes)} 个假象字位置")
+        self._summary.setText(f"共 {len(probes)} 个抽样字符/假象字位置（非按页、非全量错误率）")
         self._table.setRowCount(len(probes))
         for r, p in enumerate(probes):
             obs = str(p.observation)
@@ -194,7 +195,7 @@ class QualityStatsDetailDialog(QDialog):
 # ─────────────────────────────────────────────────────────────
 
 class QualityStatsDialog(QDialog):
-    """正确率统计主窗（proof UI clarity：紧凑型）。"""
+    """抽样字符校对观察主窗（proof UI clarity：紧凑型）。"""
 
     def __init__(
         self,
@@ -203,7 +204,7 @@ class QualityStatsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("正确率统计")
+        self.setWindowTitle("抽样字符校对观察")
         self.setModal(True)
         # 紧凑主窗：360 × 320 足够开关 + 圆环 + 详情入口
         self.resize(360, 320)
@@ -237,6 +238,14 @@ class QualityStatsDialog(QDialog):
         # 中部：圆环
         self._ring = _RatioRing()
         root.addWidget(self._ring, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self._scope_note = QLabel(
+            "统计口径：按抽样字符/假象字位置观察，不按页计分，也不是全量字符错误率；"
+            "只用于提示校对风险。"
+        )
+        self._scope_note.setWordWrap(True)
+        self._scope_note.setStyleSheet("color:#6b7280; font-size:12px;")
+        root.addWidget(self._scope_note)
 
         # 详情入口 + 关闭
         bottom = QHBoxLayout()
@@ -322,22 +331,25 @@ class QualityStatsDialog(QDialog):
         n = len(store)
         self._btn_toggle.setChecked(True)
         self._btn_toggle.setText("停止统计")
-        self._switch_status.setText(f"当前：已启用（{n} 处）")
+        self._switch_status.setText(f"当前：已启用（{n} 个抽样字符）")
         self._switch_status.setStyleSheet("color:#1a73e8;")
 
         rep = qp.score(store)
-        rated = rep.corrected + rep.missed + rep.edited_other
-        # Task #4：不再展示"样本不足"文案；rated==0 时按 0.00% 处理。
-        # rep.grade 仍可能是 INSUFFICIENT（quality_probe 核心语义保留），
-        # 但 UI 层一律以 ratio=corrected/max(rated,1) 显示。
-        if rated == 0:
+        judged = rep.corrected + rep.missed
+        observed = judged + rep.edited_other + rep.deleted
+        if judged == 0:
             ratio = 0.0
         else:
-            ratio = rep.corrected / rated
-        self._ring.set_ratio(ratio, f"已修正 {rep.corrected} / 总观察 {rated}")
+            ratio = rep.corrected / judged
+        main_text = "观察中" if rep.grade == "INSUFFICIENT" else rep.grade_label
+        self._ring.set_ratio(
+            ratio,
+            f"抽样字符 {rep.corrected}/{judged} 识破 · 已观察 {observed}/{n}",
+            main_text,
+        )
         self._rate_lbl.setText(
-            f"rate = {ratio * 100:.2f}% "
-            f"(corrected={rep.corrected} / rated={rated})"
+            f"sample_char_detection = {rep.corrected}/{judged} "
+            f"(observed={observed}/{n}; not_page_rate; not_full_error_rate)"
         )
 
         # 始终把最新明细同步到详情子窗（隐藏即可，便于测试/外部直接读 _table）

@@ -560,7 +560,7 @@ class ApiSettingsDialog(QDialog):
 
         self._llm_card, llm_layout = _section_card(
             "候选字 / LLM 设置",
-            "供纵校候选字模块使用；默认只保存配置，不会在校对时自动调用模型。",
+            "供纵校候选字模块使用；默认只保存配置，不会在 OCR、版面分析或校对时自动调用模型。",
         )
         llm_form = QVBoxLayout()
         llm_form.setContentsMargins(0, 0, 0, 0)
@@ -595,6 +595,13 @@ class ApiSettingsDialog(QDialog):
         rules_note.setObjectName("noteLabel")
         rules_note.setWordWrap(True)
         llm_form.addLayout(_note_row(rules_note))
+        self._llm_scope_note = QLabel(
+            "当前 LLM 只定位为候选/预审建议层，人工仍是终审；未配置或关闭不会阻断主流程，"
+            "也不会把“修改后是否合格”的颜色判定交给 LLM。"
+        )
+        self._llm_scope_note.setObjectName("noteLabel")
+        self._llm_scope_note.setWordWrap(True)
+        llm_form.addLayout(_note_row(self._llm_scope_note))
         llm_layout.addLayout(llm_form)
         root.addWidget(self._llm_card)
 
