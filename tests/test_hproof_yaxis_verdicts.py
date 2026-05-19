@@ -149,30 +149,38 @@ def _make_simple_pair(line_text: str, chars_with_bbox: bool = True):
     return pair
 
 
-def test_line_pair_refresh_ribbon_degrades_when_chars_missing():
-    pair = _make_simple_pair("ab", chars_with_bbox=False)
-    # 强制 render_scale 就绪，避免被"图像未加载"路径拦截
-    pair._render_scale = 1.0
-    pair._refresh_ribbon(pixmap_width=100)
-    assert pair._ribbon.is_degraded()
+def test_line_pair_no_ribbon_widget():
+    """proof-layout-collections 第 1 任务：_LinePair 不再创建第三行
+    AlignmentRibbon。content_layout 仅含 image + editor 两项。"""
+    pair = _make_simple_pair("ab", chars_with_bbox=True)
+    assert not hasattr(pair, "_ribbon"), "_LinePair 不应再持有 _ribbon"
+    layout = pair._content.layout()
+    assert layout.count() == 2
     pair.deleteLater()
 
 
-def test_line_pair_refresh_ribbon_aligned_when_chars_match():
-    pair = _make_simple_pair("ab", chars_with_bbox=True)
-    pair._render_scale = 1.0
-    pair._refresh_ribbon(pixmap_width=100)
-    assert not pair._ribbon.is_degraded()
-    pair.deleteLater()
+def test_chars_aligned_rejects_multi_glyph_token():
+    """proof-layout-collections 第 2 任务：char.char 多于 1 个字符
+    （word/token 粒度）时，_chars_aligned 必须返回 False，避免
+    \u201c\u5750\u6807\u5bf9\u4e86\u4f46\u5185\u5bb9\u504f\u79fb\u201d。"""
+    from app.models import BBox, Char, Line, Page, Block, ProofStatus
+    from app.models.project import BlockType
+    from app.core.page_image_cache import PageImageCache
+    from app.ui.proof.h_proof import _LinePair
 
-
-def test_line_pair_refresh_ribbon_degrades_when_length_mismatch():
-    pair = _make_simple_pair("ab", chars_with_bbox=True)
-    pair._render_scale = 1.0
-    # editor 改字数 → 与 chars 不等长
+    chars = [
+        Char(char="he", confidence=0.9, bbox=BBox(0, 0, 20, 20)),
+        Char(char="llo", confidence=0.9, bbox=BBox(20, 0, 60, 20)),
+    ]
+    line = Line(text="he", confidence=0.9, bbox=BBox(0, 0, 80, 20),
+                chars=chars, proof_status=ProofStatus.UNCHECKED)
+    block = Block(block_type=BlockType.TEXT,
+                  bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="", width=80, height=20, blocks=[block])
+    pair = _LinePair(0, block, line, page, 1, PageImageCache.instance())
+    # editor 文本长度 == len(chars) (=2)，但 chars[0].char='he' 多 glyph
     pair._editor.blockSignals(True)
-    pair._editor.setPlainText("abc")
+    pair._editor.setPlainText("he")
     pair._editor.blockSignals(False)
-    pair._refresh_ribbon(pixmap_width=100)
-    assert pair._ribbon.is_degraded()
+    assert pair._chars_aligned() is False
     pair.deleteLater()

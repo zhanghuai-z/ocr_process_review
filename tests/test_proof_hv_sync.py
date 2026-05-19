@@ -813,15 +813,14 @@ def test_phase24_h_proof_pair_uses_vertical_image_above_text():
     content_layout = pair0._content.layout()
     assert isinstance(content_layout, QVBoxLayout), \
         "_content 必须是 QVBoxLayout（上图下字）"
-    # 第 0 项 = 行图像，第 1 项 = AlignmentRibbon（hproof-yaxis-verdicts 第 1 任务插入），
-    # 第 2 项 = editor（整行文本框）
+    # proof-layout-collections 第 1 任务：第三行文本（AlignmentRibbon）已去掉，
+    # _content 现在只有：第 0 项 = 行图像，第 1 项 = editor。
     assert content_layout.itemAt(0).widget() is pair0._img_lbl, \
         "_img_lbl 必须位于上方"
-    from app.ui.proof.aligned_ribbon import AlignmentRibbon
-    assert isinstance(content_layout.itemAt(1).widget(), AlignmentRibbon), \
-        "AlignmentRibbon 必须位于图像与 editor 之间（y 轴对应层）"
-    assert content_layout.itemAt(2).widget() is pair0._editor, \
-        "_editor 必须位于 ribbon 下方（Phase 25：editor 始终可见）"
+    assert content_layout.itemAt(1).widget() is pair0._editor, \
+        "_editor 必须紧贴行图下方（无第三行解释层）"
+    assert content_layout.count() == 2, \
+        "_content 仅含 image + editor 两项"
     h.deleteLater()
 
 

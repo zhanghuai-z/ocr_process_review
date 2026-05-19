@@ -51,20 +51,26 @@ from app.services.proof_probe_text_service import (
 )
 from app.services.proof_image_service import clamp_line_box_pixels
 from app.ui.widgets.confidence_badge import ConfidenceBadge
-from app.ui.proof.aligned_ribbon import AlignmentRibbon
 from app.ui.proof import char_verdict as _cv
+# NOTE: AlignmentRibbon 已从布局中移除（proof-layout-collections 第 1 任务）。
+# 用户原话：“既然已经做图字对应，就不要第三行文本行”。图字 y 轴对应
+# 现在改回只走 hover/click 联动（图像悬停 → editor 高亮当前字；editor
+# 光标变 → 图像画当前字 bbox），不再用 ribbon 重复绘制一行文本。模块文
+# 件保留以兼容历史测试，但不再实例化。
 
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
-TEXT_FONT_PX = 18    # 30px 缩小 40%，贴近 32px 行图中线
-TEXT_EDITOR_MAX_H = 32
-# Phase 24：横校改为"上图下字"竖排布局：image_row(32) + text_row(32) +
-# 中间 spacing(4) + 上下各 ~4 px = 76 px。
-# hproof-yaxis-verdicts：在 image_row 与 editor 之间插入 AlignmentRibbon(26 px)，
-# 作为图字 y 轴对应的真正承载层（替代上一轮 hover linkage 思路）。
-# image(32) + ribbon(26) + editor(32) + spacing(2×2) + padding(4) ≈ 104。
-LINE_PAIR_H = 104
+# proof-layout-collections 第 3 任务：用户反馈 “字体大小没有接近图中文字大小”。
+# 之前 18 px 在 32 px 行图下显得像 “两个系统”。提到 24 px 让 editor 文本
+# 与行图字体在视觉重心上接近（行图实际字高 ≈ 24-28 px）。editor 高度同步
+# 调大让光标不挤压。
+TEXT_FONT_PX = 24
+TEXT_EDITOR_MAX_H = 36
+# proof-layout-collections 第 1 任务：去掉 AlignmentRibbon 后，每行只剩
+# image_row(32) + editor(36) + spacing(2) + 上下 padding(4) ≈ 76 px。回到
+# 加 ribbon 之前的紧凑高度。
+LINE_PAIR_H = 76
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
 # CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
 # Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
@@ -331,12 +337,9 @@ class _LinePair(QFrame):
         self._img_lbl.setStyleSheet("background:#fafbfc;")
         content_v.addWidget(self._img_lbl)
 
-        # ── 中：y 轴对应条（hproof-yaxis-verdicts 第一任务）──────
-        # 把每个文本字按对应 char.bbox 的 x 中心绘制，让"图字 i ↔ 文字 i"
-        # 在纵向上严格对齐。详见 aligned_ribbon.py 模块 docstring。
-        self._ribbon = AlignmentRibbon(self)
-        self._ribbon.char_clicked.connect(self._on_ribbon_char_clicked)
-        content_v.addWidget(self._ribbon)
+        # proof-layout-collections 第 1 任务：AlignmentRibbon 已删除。
+        # 用户明确不要 “第三行文本行”。图字 y 轴对应改回只通过 editor↔image
+        # 的 hover/click 联动表达（_on_editor_hover_char / _img_clicked_lookup）。
 
         # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
         self._editor = _RowEditor()
@@ -373,10 +376,8 @@ class _LinePair(QFrame):
         self._editor.selectionChanged.connect(self._render_line_image)
         self._editor.cursorPositionChanged.connect(self._refresh_extra_selections)
         self._editor.cursorPositionChanged.connect(self._render_line_image)
-        self._editor.cursorPositionChanged.connect(self._refresh_ribbon)
         # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
         self._editor.textChanged.connect(self._refresh_extra_selections)
-        self._editor.textChanged.connect(self._refresh_ribbon)
         # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
         self._editor.textChanged.connect(self._refresh_status)
         # Task #2：按 line.chars 锁定编辑器固定长度（图字一一对应不变）
@@ -491,9 +492,6 @@ class _LinePair(QFrame):
             return
         self._hover_char_idx = new_idx
         self._render_line_image()
-        ribbon = getattr(self, "_ribbon", None)
-        if ribbon is not None:
-            ribbon.set_hover_idx(new_idx)
 
     # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
 
@@ -503,12 +501,25 @@ class _LinePair(QFrame):
         proof UI clarity（Task #1）：图像 char.bbox 与文本下标的映射只有在
         ``len(text) == len(chars)`` 时才可靠。一旦用户编辑增删字符、或 OCR
         本身就给出错位的 chars 列表，**就不要**伪装成"第 i 字 ↔ 第 i 个
-        bbox"——而是改走降级路径（不画逐字底色 / 不画图像逐字高亮 /
-        点击行图退回行级激活），并由 :meth:`_refresh_status` 显式 ⚠ 标记。
+        bbox"——而是改走降级路径。
+
+        proof-layout-collections（第 2 任务 “内容偏移”）重点加强：
+        即使 len(text) == len(chars)，只要任一 ``char.char`` 不是恰好 1 个
+        字符（word/token-granularity 的 char 可能是多字 token），“第 i 个
+        char ↔ 第 i 个文本字”也会被错位（OCR 给了 5 个 token 但文本 12 字
+        刷后成 12 个 glyph）。这是上一轮“坐标对了但内容偏移”的根因。
+        以后发现 chars 任一元素不是单字符 → 降级，不画逐字高亮。
         """
-        if not self._line.chars:
+        chars = self._line.chars
+        if not chars:
             return False
-        return len(self._editor.toPlainText()) == len(self._line.chars)
+        if len(self._editor.toPlainText()) != len(chars):
+            return False
+        for c in chars:
+            ch = c.char or ""
+            if len(ch) != 1:
+                return False
+        return True
 
     # ── 文本颜色规则（hproof-yaxis-verdicts 第三任务）─────────
     # 颜色 + 证据链由 :mod:`app.ui.proof.char_verdict` 集中负责，本文件只做调用。
@@ -760,84 +771,6 @@ class _LinePair(QFrame):
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
-        # hproof-yaxis-verdicts：图渲完才知道 pixmap 实际宽度 → 同步刷新 ribbon
-        self._refresh_ribbon(pixmap_width=rw)
-
-    def _refresh_ribbon(self, *, pixmap_width: Optional[int] = None) -> None:
-        """根据当前 line / editor / 渲染参数刷新 AlignmentRibbon。
-
-        - chars 完整 + 全部有 bbox + len(text)==len(chars) + render_scale 就绪
-          → 走 aligned 路径：按 char.bbox 的 x 中心绘制每字。
-        - 任一条件不满足 → 走 degraded 路径：写出原因，绝不假装能 y 轴对应。
-        """
-        ribbon = getattr(self, "_ribbon", None)
-        if ribbon is None:
-            return
-        # ribbon 宽度优先用最新 pixmap 宽；否则沿用图标当前宽度（图未加载时给个最小值）
-        if pixmap_width is None:
-            pm = self._img_lbl.pixmap()
-            pixmap_width = pm.width() if pm is not None and not pm.isNull() else 200
-
-        text = self._editor.toPlainText()
-        chars = self._line.chars or []
-        if not chars:
-            ribbon.set_degraded("无逐字 bbox / 仅行级对应", pixmap_width)
-            return
-        if len(text) != len(chars):
-            ribbon.set_degraded(
-                f"图字未对齐：文本 {len(text)} 字 ≠ 图像字符 {len(chars)} 字 / 仅行级对应",
-                pixmap_width,
-            )
-            return
-        scale = self._render_scale or 0.0
-        if scale <= 0:
-            ribbon.set_degraded("图像未加载 / 暂无法 y 轴对应", pixmap_width)
-            return
-        # 任何 char 缺 bbox → 不能保证逐字对应 → 降级
-        ox, _oy = self._line_crop_origin
-        x_centers: list[Optional[float]] = []
-        widths: list[float] = []
-        for ch in chars:
-            if ch.bbox is None:
-                x_centers.append(None)
-                widths.append(12.0)
-                continue
-            xc_orig = (ch.bbox.x + ch.bbox.x2) / 2.0
-            w_orig = max(1.0, float(ch.bbox.x2 - ch.bbox.x))
-            x_centers.append((xc_orig - ox) * scale)
-            widths.append(w_orig * scale)
-        missing = sum(1 for v in x_centers if v is None)
-        if missing == len(chars):
-            ribbon.set_degraded("逐字 bbox 全部缺失 / 仅行级对应", pixmap_width)
-            return
-
-        verdicts = [self._classify_char_verdict(i) for i in range(len(chars))]
-        cursor = self._editor.textCursor()
-        cursor_idx = cursor.position() if 0 <= cursor.position() < len(chars) else -1
-        ribbon.set_aligned(
-            text=text,
-            x_centers=x_centers,
-            widths=widths,
-            verdicts=verdicts,
-            pixmap_width=pixmap_width,
-            cursor_idx=cursor_idx,
-            hover_idx=self._hover_char_idx,
-        )
-
-    def _on_ribbon_char_clicked(self, idx: int) -> None:
-        """点击 ribbon 上的某字 → 激活本行并把 editor 光标定到该字。"""
-        if idx < 0:
-            return
-        if not self._chars_aligned():
-            return
-        if not self._active:
-            self.clicked.emit(self._idx)
-        cur = self._editor.textCursor()
-        cur.setPosition(idx)
-        cur.setPosition(idx + 1, QTextCursor.MoveMode.KeepAnchor)
-        self._editor.setTextCursor(cur)
-        self._editor.setFocus()
-        self._refresh_extra_selections()
 
     def refresh_text(self) -> None:
         """外部（VProof / probe 切换）更新 line.text 后同步 editor 文本。
@@ -856,7 +789,6 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
-        self._refresh_ribbon()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
@@ -874,7 +806,6 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
-        self._refresh_ribbon()
 
     @property
     def line(self) -> Line:

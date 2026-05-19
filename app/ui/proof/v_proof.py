@@ -566,27 +566,32 @@ class VProofPanel(QWidget):
         return box
 
     def _build_candidate_panel(self) -> QWidget:
-        # 候选字区（极简版）：标题 + ≤5 个候选按钮一行。
-        # 设计原则：UI 不再暴露 LLM 字样和长说明；候选来源/分数靠 tooltip。
+        # proof-layout-collections 第 4 任务：候选面板不再打印“不代表此字
+        # 正确 + 原因”这样的可见解释文本。诊断信息改走面板 tooltip，作为
+        # "鼠标悬停才看到"的不打扰提示。
+        #
+        # proof-layout-collections 第 5 任务：候选按钮不能压在下方 OCR 文本区
+        # 上。高度从 54 提到 64，并增加上下 padding，让 24px 按钮 + 标题 不
+        # 被压出边界。
         box = QWidget()
         box.setObjectName("candidatePanel")
-        box.setFixedHeight(54)
+        box.setFixedHeight(64)
         box.setStyleSheet("QWidget#candidatePanel { background:#ffffff; border:0; }")
         layout = QVBoxLayout(box)
-        layout.setContentsMargins(8, 4, 8, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
         self._candidate_title = QLabel("候选字")
         self._candidate_title.setObjectName("sectionTitle")
         self._candidate_buttons_row = QHBoxLayout()
-        self._candidate_buttons_row.setSpacing(4)
-        # 单行 hint：仅在无候选时短提示用；正常情况下隐藏，不再放整段解释。
+        self._candidate_buttons_row.setSpacing(6)
+        # 保留 _candidate_hint 作为不可见的 QLabel。代码里多处 _candidate_hint.setText /
+        # show / hide 有历史调用点。这里让它始终 hidden，文本只用于 tooltip
+        # 传递，不进入可见布局。
         self._candidate_hint = QLabel("")
         self._candidate_hint.setObjectName("muted")
-        self._candidate_hint.setStyleSheet("font-size:11px; color:#888;")
         self._candidate_hint.hide()
         layout.addWidget(self._candidate_title)
         layout.addLayout(self._candidate_buttons_row)
-        layout.addWidget(self._candidate_hint)
         return box
 
     def _build_gallery_strip(self) -> QWidget:
@@ -718,7 +723,7 @@ class VProofPanel(QWidget):
         self._resize_gallery_for_entries(0)
         self._current_candidate_entry = None
         self._clear_candidate_buttons()
-        self._candidate_hint.hide()
+        self._candidate_box.setToolTip("")
         self._page_label.setText("页 0 / 0")
 
     def set_candidate_provider(self, provider: Optional[LlmCandidateProvider]) -> None:
@@ -814,8 +819,7 @@ class VProofPanel(QWidget):
         else:
             self._current_candidate_entry = None
             self._clear_candidate_buttons()
-            self._candidate_hint.setText("无候选")
-            self._candidate_hint.show()
+            self._candidate_box.setToolTip("无候选")
             self._highlight_char_in_text(tok, focus_entry=None)
 
     def _rebuild_text_lookup(self, page: Page) -> None:
@@ -893,20 +897,19 @@ class VProofPanel(QWidget):
         request = self._candidate_request_for_entry(entry)
         candidates = self._ranked_candidates(entry, request)[:5]
         self._set_candidate_buttons(candidates)
+        # proof-layout-collections 第 4 任务：原本在面板底部画一段 “仅 1 候选，
+        # 不代表此字正确…原因…” 的解释文本。用户要求拿掉。诊断现在只作为
+        # 整个候选面板的 toolTip（鼠标悬停才看到），不侵占任何可见布局。
         if not candidates:
-            self._candidate_hint.setText("无候选")
-            self._candidate_hint.show()
+            self._candidate_box.setToolTip("无候选")
             return
-        # hproof-yaxis-verdicts 第 2 任务：1 候选 = 没有任何替代来源命中本字，
-        # 不代表"此字正确"。明确告诉用户这一点，避免"只剩 1 个 = 已确认"的误读。
         if len(candidates) == 1:
             reason = self._diagnose_single_candidate(entry, request)
-            self._candidate_hint.setText(
-                f"仅 1 候选：暂无替代建议，**不代表此字正确**。{reason}"
+            self._candidate_box.setToolTip(
+                f"仅 1 候选：暂无替代建议，不代表此字正确。{reason}"
             )
-            self._candidate_hint.show()
         else:
-            self._candidate_hint.hide()
+            self._candidate_box.setToolTip("")
 
     def _diagnose_single_candidate(
         self, entry: CharEntry, request: "LlmCandidateRequest",

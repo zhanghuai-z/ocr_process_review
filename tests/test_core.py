@@ -5862,12 +5862,12 @@ def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
-    assert h_proof.TEXT_FONT_PX == 18
+    # proof-layout-collections 第 3 任务：字号贴近行图字号。
+    assert h_proof.TEXT_FONT_PX == 24
     assert h_proof.TEXT_EDITOR_MAX_H <= 42
-    # hproof-yaxis-verdicts 第 1 任务：图像和 editor 之间新增 AlignmentRibbon
-    # （26 px y 轴对应条）。pair 高度 = image_row(32) + ribbon(26) +
-    # editor(32) + spacing(2×2) + 上下 padding(~10) ≈ 104 px。
-    assert h_proof.LINE_PAIR_H == 104
+    # proof-layout-collections 第 1 任务：第三行文本去掉，pair 高度
+    # 回到「图 + editor」的紧凑值（image_row 32 + editor 36 + spacing/padding ≈ 76）。
+    assert h_proof.LINE_PAIR_H == 76
     assert (
         h_proof.LINE_PAIR_H
         >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H

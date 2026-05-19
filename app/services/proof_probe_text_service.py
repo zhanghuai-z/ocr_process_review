@@ -65,12 +65,14 @@ def save_displayed_edit(
     if store is None:
         if displayed_new_text != (line.text or ""):
             line.update_text(displayed_new_text)
+            _sync_chars_glyphs(line, displayed_new_text)
             return True
         return False
     idx = resolve_block_line_index(page, block, line)
     if idx is None:
         if displayed_new_text != (line.text or ""):
             line.update_text(displayed_new_text)
+            _sync_chars_glyphs(line, displayed_new_text)
             return True
         return False
     bi, li = idx
@@ -79,5 +81,32 @@ def save_displayed_edit(
     )
     if true_text != (line.text or ""):
         line.update_text(true_text)
+        _sync_chars_glyphs(line, true_text)
         return True
     return False
+
+
+def _sync_chars_glyphs(line: Line, new_text: str) -> None:
+    """proof-layout-collections 第 6 任务（改字后集合迁移）：
+
+    ``CharIndexService.build`` 用 ``line.chars[i].char`` 作为索引键。
+    ``update_text`` 只改 ``line.text``\uff0c不动 ``line.chars``\u2014\u2014
+    若不同步\uff0c纵校重建索引后\u201c入\u201d 这个新字仍找不到这块切图，
+    切图也仍挂在\u201c人\u201d 集合下\uff0c迁移就是假的。
+
+    安全前提\uff1ah_proof 固定长度覆写模式保证 len(new_text) == len(chars)，
+    且每个 char.char 是单 glyph。两边都满足时才逐字同步\uff1b否则保持原样\uff0c
+    不冒险拆 token。
+    """
+    chars = getattr(line, "chars", None) or []
+    if not chars:
+        return
+    if len(new_text) != len(chars):
+        return
+    for ch, glyph in zip(chars, new_text):
+        if not getattr(ch, "char", None):
+            continue
+        if len(ch.char) != 1:
+            return
+    for ch, glyph in zip(chars, new_text):
+        ch.char = glyph
