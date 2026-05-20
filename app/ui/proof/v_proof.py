@@ -504,6 +504,13 @@ class VProofPanel(QWidget):
         # 到上/下一个同字出现。这些快捷键不抢占普通方向键。
         QShortcut(QKeySequence("Alt+Right"), self, activated=self._go_next_gallery)
         QShortcut(QKeySequence("Alt+Left"), self, activated=self._go_prev_gallery)
+        # proof-crosschar-batch 第 2 任务：真正全局的"字索引导航"，无论焦点
+        # 在 text_edit / batch_input / gallery 任何地方都能切到上/下一个字。
+        QShortcut(QKeySequence("Ctrl+."), self, activated=self._step_char_list_next)
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self._step_char_list_prev)
+        # 整页确认（= 点 ✅ 当前页）。Ctrl+Return 不和 _text_edit 原生快捷键冲突。
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._mark_page_ok)
+        QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._mark_page_ok)
 
     def _build_char_list(self) -> QWidget:
         box = QWidget()
@@ -530,11 +537,25 @@ class VProofPanel(QWidget):
         # proof-interaction-slots 第 4 任务：字符索引不再显示单字图，icon 区清零。
         self._char_list.setIconSize(QSize(0, 0))
         self._char_list.setSpacing(2)
+        # proof-crosschar-batch 第 1 任务：允许多选不同的字符。选中 N 项
+        # 后 gallery 会合并呈现这 N 个字的所有出现，批量改字可以跨字生效。
+        self._char_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self._char_list.setStyleSheet("QListWidget { background:#ffffff; } QListWidget::item { background:#ffffff; }")
         self._char_list.itemClicked.connect(self._on_char_clicked)
+        # proof-crosschar-batch 第 1 任务：多选/取消都走这个路径
+        self._char_list.itemSelectionChanged.connect(self._on_char_selection_changed)
         self._char_list.currentItemChanged.connect(
             lambda cur, _prev: self._on_char_clicked(cur) if cur else None
         )
+        # proof-crosschar-batch 第 2 任务：键盘协同
+        sc_charlist_all = QShortcut(QKeySequence("Ctrl+A"), self._char_list)
+        sc_charlist_all.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_charlist_all.activated.connect(self._select_all_visible_chars)
+        sc_charlist_esc = QShortcut(QKeySequence("Escape"), self._char_list)
+        sc_charlist_esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_charlist_esc.activated.connect(self._clear_char_list_multi)
         layout.addWidget(self._char_list)
         return box
 
@@ -717,6 +738,33 @@ class VProofPanel(QWidget):
         # 主动触发同步（currentChanged 已连，但保险）
         self._sync_gallery_entry(new_idx)
 
+    # proof-crosschar-batch 第 2 任务：全局 Ctrl+, / Ctrl+. 切字
+    def _step_char_list_next(self) -> None:
+        self._step_char_list(+1)
+
+    def _step_char_list_prev(self) -> None:
+        self._step_char_list(-1)
+
+    def _step_char_list(self, delta: int) -> None:
+        """跨可见 item 步进（跳过被搜索框过滤掉的）。"""
+        count = self._char_list.count()
+        if count <= 0:
+            return
+        cur_row = self._char_list.currentRow()
+        if cur_row < 0:
+            cur_row = 0
+        # 在可见 item 中找下一个
+        for step in range(1, count + 1):
+            row = (cur_row + delta * step) % count
+            it = self._char_list.item(row)
+            if it is not None and not it.isHidden():
+                self._char_list.setCurrentRow(row)
+                # 单选语义：清掉之前 Ctrl+A 留下的多选
+                self._char_list.clearSelection()
+                it.setSelected(True)
+                self._on_char_clicked(it)
+                return
+
     def _build_ocr_text(self) -> QWidget:
         box = QWidget()
         layout = QVBoxLayout(box)
@@ -760,14 +808,27 @@ class VProofPanel(QWidget):
             self.load_pages(pages)
             return
         current_page = self._pages[self._current_page_idx]
+        selected_tokens = self._selected_char_tokens()
         self._pages = pages
         self._current_page_idx = self._find_page_index(current_page)
         if self._pages:
             self._rebuild_text_lookup(self._pages[self._current_page_idx])
         self._char_svc.build(pages)
-        selected = self._selected_char
         self._rebuild_char_list()
-        if selected:
+        if len(selected_tokens) > 1:
+            merged: list[CharEntry] = []
+            for tok in selected_tokens:
+                merged.extend(self._char_svc.query(tok))
+            merged.sort(key=lambda e: (e.page_number, e.char_idx))
+            self._selected_char = "".join(selected_tokens)
+            self._gallery_model.set_entries(merged)
+            self._resize_gallery_for_entries(len(merged))
+            joined = " ".join(f'"{t}"' for t in selected_tokens)
+            self._gallery_hdr.setText(
+                f"跨字索引（{len(selected_tokens)} 字 / 共 {len(merged)} 处）：{joined}"
+            )
+        elif len(selected_tokens) == 1:
+            selected = selected_tokens[0]
             self._selected_char = selected
             entries = self._char_svc.query(selected)
             self._gallery_model.set_entries(entries)
@@ -861,6 +922,9 @@ class VProofPanel(QWidget):
     # ─────────────────── 单字列表点击 ───────────────────────
 
     def _on_char_clicked(self, item: QListWidgetItem) -> None:
+        # 单击 / 当前项变化的路径：保持原"切到这个字"语义；如果用户当前
+        # 多选了多个字（itemSelectionChanged 后续会被触发），最终以
+        # _on_char_selection_changed 看到的合并集为准。
         tok = item.data(Qt.ItemDataRole.UserRole)
         if not tok:
             return
@@ -887,6 +951,75 @@ class VProofPanel(QWidget):
             self._clear_candidate_buttons()
             self._candidate_box.setToolTip("无候选")
             self._highlight_char_in_text(tok, focus_entry=None)
+
+    # ───────── proof-crosschar-batch：跨字 batch 入口 ─────────
+
+    def _selected_char_tokens(self) -> list[str]:
+        """char_list 当前所有被选中的 token。顺序按它们在列表里的展示顺序。"""
+        items = self._char_list.selectedItems()
+        out: list[str] = []
+        for it in items:
+            tok = it.data(Qt.ItemDataRole.UserRole)
+            if tok and tok not in out:
+                out.append(tok)
+        return out
+
+    def _on_char_selection_changed(self) -> None:
+        """char_list 多选变化 → 把所有选中字的 entries 合并塞进 gallery。
+
+        - 0 选：保持原 _selected_char 状态（极少触发；clearSelection 路径）。
+        - 1 选：等价于 _on_char_clicked（由它先调用过，这里直接 return）。
+        - >=2 选：合并所有选中字的 entries，按 (page_number, char_idx) 排序后
+          一次塞进 gallery_model；批量改字现在跨字生效。
+        """
+        toks = self._selected_char_tokens()
+        if len(toks) <= 1:
+            return
+        merged: list[CharEntry] = []
+        for tok in toks:
+            merged.extend(self._char_svc.query(tok))
+        merged.sort(key=lambda e: (e.page_number, e.char_idx))
+        # 用拼接串当 "selected_char" 显示锚（仅用于标题）
+        self._selected_char = "".join(toks)
+        self._gallery_model.set_entries(merged)
+        self._resize_gallery_for_entries(len(merged))
+        self._gallery_view.clearSelection()
+        if merged:
+            first_idx = self._gallery_model.index(0, 0)
+            self._gallery_view.scrollTo(
+                first_idx, QAbstractItemView.ScrollHint.PositionAtTop
+            )
+            self._gallery_view.setCurrentIndex(first_idx)
+            self._sync_gallery_entry(first_idx)
+        joined = " ".join(f'"{t}"' for t in toks)
+        self._gallery_hdr.setText(
+            f"跨字索引（{len(toks)} 字 / 共 {len(merged)} 处）：{joined}"
+        )
+
+    def _select_all_visible_chars(self) -> None:
+        """proof-crosschar-batch 第 2 任务：Ctrl+A 选中 char_list 全部可见项。
+
+        受 _filter_char_list（搜索框）影响：只选当前未隐藏的 item。
+        """
+        self._char_list.blockSignals(True)
+        for i in range(self._char_list.count()):
+            it = self._char_list.item(i)
+            if not it.isHidden():
+                it.setSelected(True)
+        self._char_list.blockSignals(False)
+        # 手动触发一次合并
+        self._on_char_selection_changed()
+
+    def _clear_char_list_multi(self) -> None:
+        """proof-crosschar-batch 第 2 任务：Esc 收回到单选（当前项）。"""
+        cur = self._char_list.currentItem()
+        self._char_list.blockSignals(True)
+        self._char_list.clearSelection()
+        if cur is not None:
+            cur.setSelected(True)
+        self._char_list.blockSignals(False)
+        if cur is not None:
+            self._on_char_clicked(cur)
 
     def _rebuild_text_lookup(self, page: Page) -> None:
         _flat_text, self._text_map = _build_text_map(page)
@@ -1132,21 +1265,24 @@ class VProofPanel(QWidget):
             entries = [fallback_entry]
         if not entries:
             return 0
-        anchor = entries[0]
-        token = anchor.token_text or anchor.char
-        token_len = max(1, len(token))
+        # proof-crosschar-batch 第 1 任务：跨字 batch 时不同 entry 有不同
+        # token 长度，必须按 entry 自己的长度算 selection，不能再用 anchor.token_len
+        # 一刀切，否则会把多字 token 替换成多字时把后面字也吃掉 / 或留下尾巴。
         doc = self._text_edit.document()
-        positions: list[int] = []
+        pos_and_len: list[tuple[int, int]] = []
         for e in entries:
             pos = self._entry_text_pos(e)
-            if pos is not None:
-                positions.append(pos)
-        positions.sort(reverse=True)
+            if pos is None:
+                continue
+            tok = e.token_text or e.char or ""
+            pos_and_len.append((pos, max(1, len(tok))))
+        # 从后往前改，避免前面替换改变后面的 pos
+        pos_and_len.sort(key=lambda x: x[0], reverse=True)
         applied = 0
-        for pos in positions:
+        for pos, tlen in pos_and_len:
             cur = QTextCursor(doc)
             cur.setPosition(pos)
-            for _ in range(token_len):
+            for _ in range(tlen):
                 cur.movePosition(
                     QTextCursor.MoveOperation.NextCharacter,
                     QTextCursor.MoveMode.KeepAnchor,
@@ -1156,7 +1292,8 @@ class VProofPanel(QWidget):
                 applied += 1
         if applied == 0 and fallback_entry is not None:
             # 兜底：用旧的"先 highlight 再 insertText"路径
-            self._highlight_char_in_text(token, focus_entry=fallback_entry)
+            tok = fallback_entry.token_text or fallback_entry.char
+            self._highlight_char_in_text(tok, focus_entry=fallback_entry)
             cursor = self._text_edit.textCursor()
             if cursor.hasSelection():
                 cursor.insertText(new_text)
@@ -1230,6 +1367,15 @@ class VProofPanel(QWidget):
         entry = index.data(Qt.ItemDataRole.UserRole) if index.isValid() else None
         if entry is None or not self._selected_char:
             return
+        tokens = self._selected_char_tokens()
+        if len(tokens) > 1:
+            extra = f"  ·  已选 {sel_count} 个" if sel_count > 1 else ""
+            joined = " ".join(f'"{t}"' for t in tokens)
+            self._gallery_hdr.setText(
+                f"跨字索引（{len(tokens)} 字 / 共 {self._gallery_model.rowCount()} 处）"
+                f"{extra}：[第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位] {joined}"
+            )
+            return
         total = len(self._char_svc.query(self._selected_char))
         extra = f"  ·  已选 {sel_count} 个" if sel_count > 1 else ""
         self._gallery_hdr.setText(
@@ -1282,15 +1428,10 @@ class VProofPanel(QWidget):
         self._update_candidate_panel(entry)
         # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
-            n = len(self._char_svc.query(self._selected_char))
             sel_count = len(self._gallery_view.selectionModel().selectedIndexes())
-            extra = f" · 已选 {sel_count} 个" if sel_count > 1 else ""
-            self._gallery_hdr.setText(
-                f'"{self._selected_char}"  共 {n} 处  '
-                f'[第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位]{extra}'
-            )
+            self._refresh_gallery_header(index, sel_count)
             # 传入 entry 以精准定位到该出现，而非首次出现
-            self._highlight_char_in_text(self._selected_char, focus_entry=entry)
+            self._highlight_char_in_text(entry.token_text or entry.char, focus_entry=entry)
             # proof-interaction-slots 第 6 任务：点 gallery 切图 = 直接进入该字
             # 编辑态。_highlight_char_in_text 已把该字选中，这里另外把焦点转到
             # _text_edit，用户可以直接键入替代。不抢击键快捷：Alt+←/→ 仍
