@@ -941,6 +941,58 @@ def test_export_dialog_reports_partial_success_without_critical_error():
     print("test_export_dialog_reports_partial_success_without_critical_error PASSED")
 
 
+def test_export_dialog_surfaces_output_path_failure_from_real_worker():
+    from PySide6.QtCore import QEventLoop, QTimer
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.ui.export.export_dialog import ExportDialog
+
+    app = _get_qapp()
+    warnings = []
+    criticals = []
+    original_warning = QMessageBox.warning
+    original_critical = QMessageBox.critical
+    QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
+    QMessageBox.critical = lambda *args, **kwargs: criticals.append(args)
+    bb = BBox(0, 0, 100, 20)
+    project = OcrProject(name="PathFailureExport", pages=[
+        Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+            Block(block_type=BlockType.TEXT, bbox=bb, lines=[
+                Line(text="导出内容", confidence=0.9, bbox=bb),
+            ]),
+        ]),
+    ])
+    dialog = ExportDialog(project)
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blocked_path = os.path.join(tmpdir, "not_a_directory")
+            with open(blocked_path, "w", encoding="utf-8") as f:
+                f.write("blocks directory creation")
+            dialog._dir_edit.setText(blocked_path)
+            dialog._start_export()
+            worker = dialog._worker
+            assert worker is not None
+            if not worker.isFinished():
+                loop = QEventLoop()
+                worker.finished.connect(loop.quit)
+                QTimer.singleShot(5000, loop.quit)
+                loop.exec()
+            app.processEvents()
+
+            assert dialog._progress_lbl.text() == "导出失败"
+            assert dialog._btn_start is not None and dialog._btn_start.isEnabled()
+            assert warnings == []
+            assert criticals and "导出失败" in criticals[0][1]
+            assert "not_a_directory" in criticals[0][2]
+    finally:
+        QMessageBox.warning = original_warning
+        QMessageBox.critical = original_critical
+        dialog.close()
+
+    print("test_export_dialog_surfaces_output_path_failure_from_real_worker PASSED")
+
+
 def test_layout_panel_analysis_progress_lifecycle():
     from app.models import Page
     from app.ui.recognize.layout_panel import LayoutPanel
@@ -6003,6 +6055,7 @@ if __name__ == "__main__":
     test_export_worker_sanitizes_project_name_for_all_formats()
     test_export_worker_keeps_formats_independent_when_one_fails()
     test_export_dialog_reports_partial_success_without_critical_error()
+    test_export_dialog_surfaces_output_path_failure_from_real_worker()
     test_layout_panel_analysis_progress_lifecycle()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()

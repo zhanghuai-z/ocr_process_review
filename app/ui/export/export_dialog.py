@@ -69,8 +69,9 @@ class ExportWorker(QThread):
         total = len(self._formats)
         for index, fmt in enumerate(self._formats, start=1):
             self.progress.emit(f"正在导出 {fmt.upper()}…", index - 1, total)
-            out_path = str(build_export_path(self._out_dir, self._project.name, fmt))
+            out_path = ""
             try:
+                out_path = str(build_export_path(self._out_dir, self._project.name, fmt))
                 exporter = get_exporter(fmt)
                 exporter.export(self._project, out_path)
                 results.append(ExportFormatResult(fmt=fmt, out_path=out_path, ok=True))
