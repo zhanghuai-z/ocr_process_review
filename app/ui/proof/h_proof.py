@@ -96,6 +96,51 @@ _STATUS_LABEL = {
 
 
 # ─────────────────────────────────────────────────────────────
+# proof-slot-residual：固定槽位辅助函数
+# ─────────────────────────────────────────────────────────────
+
+def _chars_are_single_codepoint(chars) -> bool:
+    """chars 列表里每个 char.char 是否都恰好一个字符（含 1 个空格）。
+
+    word/token-granularity 的 chars 元素可能是 "2016"、"abc" 之类的多字符
+    token；这种情况下 1 char ↔ 1 codepoint 的槽位模型不成立。
+    """
+    if not chars:
+        return False
+    for c in chars:
+        ch = c.char or ""
+        if len(ch) != 1:
+            return False
+    return True
+
+
+def _canonicalize_text_to_slots(text: str, chars) -> tuple[str, bool]:
+    """把 displayed_text 规范化到 ``len(chars)`` 槽位。
+
+    返回 ``(canonical_text, slot_locked)``：
+
+    - chars 为空 / 含多字符 token → 不动文本，``slot_locked=False``。
+    - ``len(text) < len(chars)`` → 末尾用 ASCII 空格补到 len(chars)；锁定。
+    - ``len(text) == len(chars)`` → 不动；锁定。
+    - ``len(text) > len(chars)`` → **不**自动截断（可能截掉 quality probe
+      插入的 fake_char 或用户已写入的有效字）；保持自由编辑，``slot_locked=False``。
+
+    这就是 proof-slot-residual 第 1 任务要求的“OCR 元素数 = 槽位数，且
+    超短行自动补空白槽，超长行老老实实降级而不是悄悄删字”。
+    """
+    if not _chars_are_single_codepoint(chars):
+        return text, False
+    n = len(chars)
+    tl = len(text)
+    if tl == n:
+        return text, True
+    if tl < n:
+        return text + " " * (n - tl), True
+    # tl > n：拒绝自动截断
+    return text, False
+
+
+# ─────────────────────────────────────────────────────────────
 # 行内文本编辑器（拦截 Enter/方向键/F 键）
 # ─────────────────────────────────────────────────────────────
 
@@ -401,7 +446,11 @@ class _LinePair(QFrame):
         # 通过 extraSelections + cursor.setPosition 体现。
         self._editor.setCursorWidth(0)
         # 初始填入显示空间文本
-        self._editor.setPlainText(_displayed_text(self._line, self._page, self._block))
+        # proof-slot-residual 第 1 任务：加载时就把文本规范化到槽位数
+        # （仅在可锁定时补空；超长不动）。
+        _initial_disp = _displayed_text(self._line, self._page, self._block)
+        _canon, _ = _canonicalize_text_to_slots(_initial_disp, self._line.chars or [])
+        self._editor.setPlainText(_canon)
         # 信号转发
         self._editor.confirm_requested.connect(lambda: self.confirmed.emit(self._idx))
         self._editor.prev_requested.connect(self.prev_req)
@@ -813,6 +862,9 @@ class _LinePair(QFrame):
         在 set_active 切走前落盘）。
         """
         new_disp = _displayed_text(self._line, self._page, self._block)
+        # proof-slot-residual 第 1 任务：同步时也走槽位规范化，让 V/H
+        # 互同后本行的显示不会从“锁定”退回“自由”。
+        new_disp, _ = _canonicalize_text_to_slots(new_disp, self._line.chars or [])
         if self._editor.toPlainText() != new_disp:
             self._editor.blockSignals(True)
             self._editor.setPlainText(new_disp)
@@ -870,7 +922,11 @@ class _LinePair(QFrame):
                 if probes:
                     original_display = qp.apply_probes_to_display(original_true, probes)
         self._editor.blockSignals(True)
-        self._editor.setPlainText(original_display)
+        # proof-slot-residual 第 1 任务：还原后也补空到槽位数
+        _rev_canon, _ = _canonicalize_text_to_slots(
+            original_display, self._line.chars or []
+        )
+        self._editor.setPlainText(_rev_canon)
         self._editor.blockSignals(False)
 
     def _highlight_low_conf(self) -> None:

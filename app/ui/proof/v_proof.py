@@ -607,11 +607,37 @@ class VProofPanel(QWidget):
         layout.setSpacing(4)
 
         hdr = QHBoxLayout()
-        self._gallery_hdr = QLabel("相同字索引（请先在左侧选择一个字）")
+        self._gallery_hdr = QLabel("相同字索引（请先在左侧选择一个字)")
         self._gallery_hdr.setObjectName("sectionTitle")
         hdr.addWidget(self._gallery_hdr)
         hdr.addStretch()
         layout.addLayout(hdr)
+
+        # proof-slot-residual 第 2 任务：批量改字输入条。
+        # 上一轮 (interaction-slots) 只让"候选按钮"在多选时批量；本轮再加
+        #   - 行内输入框：键入任意字符 + Enter / 按"应用"立即批量替换。
+        #     这是用户最直接的"我自己来打字"路径，不依赖 LLM 候选。
+        #   - Ctrl+A：选中本字所有出现（widget 内置 ExtendedSelection 已支持，
+        #     这里再装一次显式快捷键，覆盖鼠标不在 gallery 时的场景）。
+        #   - Esc：清空 gallery 多选，回到单选当前项。
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(4)
+        self._batch_input = QLineEdit()
+        self._batch_input.setPlaceholderText("批量改为…（多选时生效）")
+        self._batch_input.setMaxLength(8)  # 允许 token-粒度多字符
+        self._batch_input.setClearButtonEnabled(True)
+        self._batch_input.returnPressed.connect(self._apply_batch_input)
+        self._batch_btn = QPushButton("批量应用")
+        self._batch_btn.clicked.connect(self._apply_batch_input)
+        self._batch_select_all_btn = QPushButton("全选 (Ctrl+A)")
+        self._batch_select_all_btn.clicked.connect(self._select_all_gallery)
+        self._batch_clear_btn = QPushButton("清选 (Esc)")
+        self._batch_clear_btn.clicked.connect(self._clear_gallery_selection)
+        batch_row.addWidget(self._batch_input, 1)
+        batch_row.addWidget(self._batch_btn)
+        batch_row.addWidget(self._batch_select_all_btn)
+        batch_row.addWidget(self._batch_clear_btn)
+        layout.addLayout(batch_row)
 
         self._gallery_view = QListView()
         self._gallery_view.setModel(self._gallery_model)
@@ -635,11 +661,26 @@ class VProofPanel(QWidget):
             # 用于批量修改。原单选模式在需要一次改多个相同字的切图时不可用。
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        # 让方向键 / Shift+方向键 / Ctrl+点击 走 Qt 原生 ExtendedSelection 行为。
+        self._gallery_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._gallery_view.selectionModel().currentChanged.connect(
             self._on_gallery_current_changed
         )
+        # proof-slot-residual 第 2 任务：选区数量变化 → 刷新标题 + 按钮状态
+        self._gallery_view.selectionModel().selectionChanged.connect(
+            self._on_gallery_selection_changed
+        )
         self._gallery_view.clicked.connect(self._on_gallery_clicked)
+        # widget-scoped Ctrl+A / Esc：仅当焦点在 gallery 内时触发
+        sc_all = QShortcut(QKeySequence("Ctrl+A"), self._gallery_view)
+        sc_all.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_all.activated.connect(self._select_all_gallery)
+        sc_esc = QShortcut(QKeySequence("Escape"), self._gallery_view)
+        sc_esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_esc.activated.connect(self._clear_gallery_selection)
         layout.addWidget(self._gallery_view)
+        # 初始按钮态
+        self._on_gallery_selection_changed()
         return box
 
     def _resize_gallery_for_entries(self, count: int) -> None:
@@ -1053,12 +1094,29 @@ class VProofPanel(QWidget):
         entry = self._current_candidate_entry
         if entry is None:
             return
-        # proof-interaction-slots 第 7 任务：若 gallery 里同时选中了多个出现，
-        # 把候选一次应用到所有"在当前页"的出现上（跨页留待后续；当前 UI 一次
-        # 只编辑一页文本）。单选时退化为原行为。
+        applied = self._apply_replacement_to_selected(candidate, fallback_entry=entry)
+        self._text_edit.setFocus()
+        if applied > 1:
+            self._status_lbl.setText(f"● 已批量应用候选到 {applied} 处，待保存")
+        else:
+            self._status_lbl.setText("● 已应用候选，待保存")
+        self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+
+    # ─────────────────── proof-slot-residual 批量改字共享路径 ─────────
+    def _apply_replacement_to_selected(
+        self, new_text: str, *, fallback_entry: Optional[CharEntry] = None,
+    ) -> int:
+        """把 ``new_text`` 应用到 gallery 当前选中的所有"当前页"出现。
+
+        - 多选 (>1)：仅替换在当前页的那部分 entry；跨页 entry 跳过，避免
+          无声修改不可见页（status 里会写出"跨页 N 处未改"）。
+        - 单选 / 无选区：退化为 ``fallback_entry`` 单点替换。
+        返回真正成功 insertText 的处数。
+        """
         sel_model = self._gallery_view.selectionModel()
         selected = list(sel_model.selectedIndexes()) if sel_model else []
         entries: list[CharEntry] = []
+        skipped_offpage = 0
         if len(selected) > 1:
             cur_page_path = self._pages[self._current_page_idx].display_image_path \
                 if self._pages else None
@@ -1067,22 +1125,24 @@ class VProofPanel(QWidget):
                 if e is None:
                     continue
                 if cur_page_path is not None and e.page_path != cur_page_path:
-                    # 跨页 entry：不在本次批量内动它，避免无声修改不可见页
+                    skipped_offpage += 1
                     continue
                 entries.append(e)
+        if not entries and fallback_entry is not None:
+            entries = [fallback_entry]
         if not entries:
-            entries = [entry]
-        token = entry.token_text or entry.char
+            return 0
+        anchor = entries[0]
+        token = anchor.token_text or anchor.char
         token_len = max(1, len(token))
         doc = self._text_edit.document()
-        applied = 0
-        # 倒序应用，避免前面 replace 改变了后面 entry 的位置
         positions: list[int] = []
         for e in entries:
             pos = self._entry_text_pos(e)
             if pos is not None:
                 positions.append(pos)
         positions.sort(reverse=True)
+        applied = 0
         for pos in positions:
             cur = QTextCursor(doc)
             cur.setPosition(pos)
@@ -1092,23 +1152,90 @@ class VProofPanel(QWidget):
                     QTextCursor.MoveMode.KeepAnchor,
                 )
             if cur.hasSelection():
-                cur.insertText(candidate)
+                cur.insertText(new_text)
                 applied += 1
-        if applied == 0:
-            # 兜底：旧的单选路径
-            self._highlight_char_in_text(token, focus_entry=entry)
+        if applied == 0 and fallback_entry is not None:
+            # 兜底：用旧的"先 highlight 再 insertText"路径
+            self._highlight_char_in_text(token, focus_entry=fallback_entry)
             cursor = self._text_edit.textCursor()
-            if not cursor.hasSelection():
-                return
-            cursor.insertText(candidate)
-            self._text_edit.setTextCursor(cursor)
-            applied = 1
+            if cursor.hasSelection():
+                cursor.insertText(new_text)
+                self._text_edit.setTextCursor(cursor)
+                applied = 1
+        if skipped_offpage:
+            # 在 status 里附带"未改"数量，老实告诉用户
+            self._status_lbl.setText(
+                f"● 已应用到 {applied} 处（跨页 {skipped_offpage} 处未改），待保存"
+            )
+            self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+        return applied
+
+    def _apply_batch_input(self) -> None:
+        """proof-slot-residual 第 2 任务：行内输入框 + Enter / 应用按钮。"""
+        new_text = self._batch_input.text()
+        if not new_text:
+            self._status_lbl.setText("批量改字：请先输入替换文本")
+            return
+        anchor = self._current_candidate_entry
+        applied = self._apply_replacement_to_selected(new_text, fallback_entry=anchor)
+        if applied == 0:
+            self._status_lbl.setText("批量改字：当前页没有可替换的目标")
+            return
         self._text_edit.setFocus()
         if applied > 1:
-            self._status_lbl.setText(f"● 已批量应用候选到 {applied} 处，待保存")
+            self._status_lbl.setText(f"● 已批量应用 \"{new_text}\" 到 {applied} 处，待保存")
         else:
-            self._status_lbl.setText("● 已应用候选，待保存")
+            self._status_lbl.setText(f"● 已应用 \"{new_text}\"，待保存")
         self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+
+    def _select_all_gallery(self) -> None:
+        """proof-slot-residual 第 2 任务：Ctrl+A / 按钮全选当前字所有出现。"""
+        count = self._gallery_model.rowCount()
+        if count <= 0:
+            return
+        sel = self._gallery_view.selectionModel()
+        top = self._gallery_model.index(0, 0)
+        bot = self._gallery_model.index(count - 1, 0)
+        from PySide6.QtCore import QItemSelection
+        sel.select(
+            QItemSelection(top, bot),
+            sel.SelectionFlag.ClearAndSelect,
+        )
+        sel.setCurrentIndex(top, sel.SelectionFlag.NoUpdate)
+
+    def _clear_gallery_selection(self) -> None:
+        """proof-slot-residual 第 2 任务：Esc / 按钮清空多选回到单选。"""
+        sel = self._gallery_view.selectionModel()
+        cur = sel.currentIndex()
+        sel.clearSelection()
+        if cur.isValid():
+            sel.select(cur, sel.SelectionFlag.Select)
+            sel.setCurrentIndex(cur, sel.SelectionFlag.NoUpdate)
+
+    def _on_gallery_selection_changed(self, *_args) -> None:
+        """选区数量变化 → 刷新批量按钮可用态、刷新标题里的"已选 N 个"。"""
+        sel = self._gallery_view.selectionModel() if hasattr(self, "_gallery_view") else None
+        n = len(sel.selectedIndexes()) if sel else 0
+        multi = n > 1
+        if hasattr(self, "_batch_btn"):
+            self._batch_btn.setEnabled(n >= 1)
+            self._batch_input.setEnabled(n >= 1)
+            self._batch_clear_btn.setEnabled(multi)
+        # 标题刷新：复用 _sync_gallery_entry 末尾的格式化，但只在有 current 时
+        cur = sel.currentIndex() if sel else None
+        if cur is not None and cur.isValid():
+            self._refresh_gallery_header(cur, n)
+
+    def _refresh_gallery_header(self, index: QModelIndex, sel_count: int) -> None:
+        entry = index.data(Qt.ItemDataRole.UserRole) if index.isValid() else None
+        if entry is None or not self._selected_char:
+            return
+        total = len(self._char_svc.query(self._selected_char))
+        extra = f"  ·  已选 {sel_count} 个" if sel_count > 1 else ""
+        self._gallery_hdr.setText(
+            f'"{self._selected_char}"  共 {total} 处  '
+            f'[第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位]{extra}'
+        )
 
     def _line_char_at(self, text: str, index: int) -> str:
         if 0 <= index < len(text):
