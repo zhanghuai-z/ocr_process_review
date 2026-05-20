@@ -499,6 +499,11 @@ class VProofPanel(QWidget):
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_page_text)
         QShortcut(QKeySequence("PageUp"), self, activated=self._prev_page)
         QShortcut(QKeySequence("PageDown"), self, activated=self._next_page)
+        # proof-interaction-slots 第 6 任务：点击切图 → 焦点走 _text_edit。
+        # 为了不把用户“困”在文本光标里，增加 Alt+← / Alt+→ 在 gallery 里切
+        # 到上/下一个同字出现。这些快捷键不抢占普通方向键。
+        QShortcut(QKeySequence("Alt+Right"), self, activated=self._go_next_gallery)
+        QShortcut(QKeySequence("Alt+Left"), self, activated=self._go_prev_gallery)
 
     def _build_char_list(self) -> QWidget:
         box = QWidget()
@@ -522,7 +527,8 @@ class VProofPanel(QWidget):
         layout.addWidget(self._char_search)
 
         self._char_list = QListWidget()
-        self._char_list.setIconSize(QSize(CHAR_LIST_THUMB, CHAR_LIST_THUMB))
+        # proof-interaction-slots 第 4 任务：字符索引不再显示单字图，icon 区清零。
+        self._char_list.setIconSize(QSize(0, 0))
         self._char_list.setSpacing(2)
         self._char_list.setStyleSheet("QListWidget { background:#ffffff; } QListWidget::item { background:#ffffff; }")
         self._char_list.itemClicked.connect(self._on_char_clicked)
@@ -625,7 +631,9 @@ class VProofPanel(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
         self._gallery_view.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection
+            # proof-interaction-slots 第 7 任务：改为扩展选择（Ctrl 点选 + Shift 跨选）
+            # 用于批量修改。原单选模式在需要一次改多个相同字的切图时不可用。
+            QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._gallery_view.selectionModel().currentChanged.connect(
             self._on_gallery_current_changed
@@ -635,12 +643,38 @@ class VProofPanel(QWidget):
         return box
 
     def _resize_gallery_for_entries(self, count: int) -> None:
+        # proof-interaction-slots 第 5 任务：相同字索引窗口更疏开。
+        # item 行高从 +8 提到 +14；外框冗余从 +30 提到 +44，让按钮/标题/
+        # gallery 三者之间有清晰间距，不再压字。
         rows = min(
             GALLERY_MAX_ROWS,
             max(1, (max(1, count) + GALLERY_ITEMS_PER_ROW - 1) // GALLERY_ITEMS_PER_ROW),
         )
-        item_h = GALLERY_THUMB + 8
-        self._gallery_box.setFixedHeight(rows * item_h + 30)
+        item_h = GALLERY_THUMB + 14
+        self._gallery_box.setFixedHeight(rows * item_h + 44)
+
+    def _go_next_gallery(self) -> None:
+        """proof-interaction-slots 第 6 任务：Alt+→ 在 gallery 里跳下一个出现。"""
+        self._step_gallery(+1)
+
+    def _go_prev_gallery(self) -> None:
+        """proof-interaction-slots 第 6 任务：Alt+← 在 gallery 里跳上一个出现。"""
+        self._step_gallery(-1)
+
+    def _step_gallery(self, delta: int) -> None:
+        count = self._gallery_model.rowCount()
+        if count <= 0:
+            return
+        sel = self._gallery_view.selectionModel()
+        cur = sel.currentIndex()
+        cur_row = cur.row() if cur.isValid() else -1
+        new_row = (cur_row + delta) % count
+        new_idx = self._gallery_model.index(new_row, 0)
+        sel.setCurrentIndex(
+            new_idx, sel.SelectionFlag.ClearAndSelect
+        )
+        # 主动触发同步（currentChanged 已连，但保险）
+        self._sync_gallery_entry(new_idx)
 
     def _build_ocr_text(self) -> QWidget:
         box = QWidget()
@@ -732,26 +766,17 @@ class VProofPanel(QWidget):
     # ─────────────────── 字符列表 ────────────────────────────
 
     def _rebuild_char_list(self) -> None:
-        # 封锁信号防止重建过程中 currentItemChanged 被触发 _on_char_clicked
+        # proof-interaction-slots 第 4 任务：字符索引改为纯文本索引。
+        # 只展示 "文本 ×数量"；不再设 icon（单字切图）、不再设
+        # “[char] / [token]” 后缀、不再设 tooltip。
         self._char_list.blockSignals(True)
         self._char_list.clear()
-        # CharIndexService.sorted_chars() 已按拼音/数字/标点分类排序
-        # 多字符 token（如 "2016"）直接作为一项
+        # 同时把 icon_size 设为 0，以防某些主题留出空白 icon 区。
+        self._char_list.setIconSize(QSize(0, 0))
         freqs = self._char_svc.sorted_chars()
         self._char_count_lbl.setText(f"共 {len(freqs)} 项")
         for tok, count in freqs:
-            entry = self._char_svc.first_entry(tok)
-            prefix = "token" if entry and entry.collection_kind == "token" else "char"
-            item = QListWidgetItem(f"{tok} ×{count}  [{prefix}]")
-            if entry:
-                item.setToolTip(
-                    f"{entry.bbox_source}/{entry.bbox_granularity} · {entry.collection_kind}"
-                )
-                pix = _verified_char_crop(
-                    self._cache, entry.page_path, entry.bbox, CHAR_LIST_THUMB
-                )
-                if pix:
-                    item.setIcon(QIcon(pix))
+            item = QListWidgetItem(f"{tok}  ×{count}")
             item.setData(Qt.ItemDataRole.UserRole, tok)
             self._char_list.addItem(item)
         self._char_list.blockSignals(False)
@@ -1028,15 +1053,61 @@ class VProofPanel(QWidget):
         entry = self._current_candidate_entry
         if entry is None:
             return
+        # proof-interaction-slots 第 7 任务：若 gallery 里同时选中了多个出现，
+        # 把候选一次应用到所有"在当前页"的出现上（跨页留待后续；当前 UI 一次
+        # 只编辑一页文本）。单选时退化为原行为。
+        sel_model = self._gallery_view.selectionModel()
+        selected = list(sel_model.selectedIndexes()) if sel_model else []
+        entries: list[CharEntry] = []
+        if len(selected) > 1:
+            cur_page_path = self._pages[self._current_page_idx].display_image_path \
+                if self._pages else None
+            for idx in selected:
+                e = idx.data(Qt.ItemDataRole.UserRole)
+                if e is None:
+                    continue
+                if cur_page_path is not None and e.page_path != cur_page_path:
+                    # 跨页 entry：不在本次批量内动它，避免无声修改不可见页
+                    continue
+                entries.append(e)
+        if not entries:
+            entries = [entry]
         token = entry.token_text or entry.char
-        self._highlight_char_in_text(token, focus_entry=entry)
-        cursor = self._text_edit.textCursor()
-        if not cursor.hasSelection():
-            return
-        cursor.insertText(candidate)
-        self._text_edit.setTextCursor(cursor)
+        token_len = max(1, len(token))
+        doc = self._text_edit.document()
+        applied = 0
+        # 倒序应用，避免前面 replace 改变了后面 entry 的位置
+        positions: list[int] = []
+        for e in entries:
+            pos = self._entry_text_pos(e)
+            if pos is not None:
+                positions.append(pos)
+        positions.sort(reverse=True)
+        for pos in positions:
+            cur = QTextCursor(doc)
+            cur.setPosition(pos)
+            for _ in range(token_len):
+                cur.movePosition(
+                    QTextCursor.MoveOperation.NextCharacter,
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+            if cur.hasSelection():
+                cur.insertText(candidate)
+                applied += 1
+        if applied == 0:
+            # 兜底：旧的单选路径
+            self._highlight_char_in_text(token, focus_entry=entry)
+            cursor = self._text_edit.textCursor()
+            if not cursor.hasSelection():
+                return
+            cursor.insertText(candidate)
+            self._text_edit.setTextCursor(cursor)
+            applied = 1
         self._text_edit.setFocus()
-        self._status_lbl.setText("● 已应用候选，待保存")
+        if applied > 1:
+            self._status_lbl.setText(f"● 已批量应用候选到 {applied} 处，待保存")
+        else:
+            self._status_lbl.setText("● 已应用候选，待保存")
         self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
 
     def _line_char_at(self, text: str, index: int) -> str:
@@ -1085,11 +1156,19 @@ class VProofPanel(QWidget):
         # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
             n = len(self._char_svc.query(self._selected_char))
+            sel_count = len(self._gallery_view.selectionModel().selectedIndexes())
+            extra = f" · 已选 {sel_count} 个" if sel_count > 1 else ""
             self._gallery_hdr.setText(
-                f'"{self._selected_char}"  共 {n} 处  [第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位]'
+                f'"{self._selected_char}"  共 {n} 处  '
+                f'[第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位]{extra}'
             )
             # 传入 entry 以精准定位到该出现，而非首次出现
             self._highlight_char_in_text(self._selected_char, focus_entry=entry)
+            # proof-interaction-slots 第 6 任务：点 gallery 切图 = 直接进入该字
+            # 编辑态。_highlight_char_in_text 已把该字选中，这里另外把焦点转到
+            # _text_edit，用户可以直接键入替代。不抢击键快捷：Alt+←/→ 仍
+            # 可在 gallery 里跳下一个字（见 _go_prev_gallery / _go_next_gallery）。
+            self._text_edit.setFocus()
 
     # ─────────────────── 原图 block 点击 ────────────────────
 

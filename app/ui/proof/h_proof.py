@@ -163,13 +163,51 @@ class _RowEditor(QPlainTextEdit):
             self.revert_requested.emit(); return
 
         if self._is_fixed():
-            # 1) 删除键：禁止
-            if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
-                self.length_violation.emit("固定 {} 字，不允许删除（请直接覆盖错字）".format(self._fixed_length))
+            # proof-interaction-slots 第 3 任务：固定槽位语义
+            #   - Backspace / Delete：不删字、不改长度，**将当前 / 邻位槽位
+            #     填充为空格**（line.chars 数量不变，文本对应字位置变成 " "）。
+            #   - 普通字符输入：仍按"自动选下一字 + 覆写"路径。
+            #   - 输入长度 > 选区长度：自动裁断到选区长度（不再拒绝，不再弹 tooltip）。
+            #   - Ctrl+X 剪切：把选区填空，而非拒绝。
+            #   注：blank 用 ASCII 空格 ' '；保存后 line.text 的相应字位置即为空。
+            blank = " "
+            if key == Qt.Key.Key_Backspace:
+                cur = self.textCursor()
+                if cur.hasSelection():
+                    text_len = len(cur.selectedText())
+                    cur.insertText(blank * text_len)
+                else:
+                    pos = cur.position()
+                    if pos <= 0:
+                        return
+                    cur.setPosition(pos - 1)
+                    cur.setPosition(pos, QTextCursor.MoveMode.KeepAnchor)
+                    cur.insertText(blank)
+                    # Backspace 行为习惯：光标停在被填空槽位之前
+                    cur.setPosition(pos - 1)
+                    self.setTextCursor(cur)
                 return
-            # 2) Ctrl+X 剪切：禁止
+            if key == Qt.Key.Key_Delete:
+                cur = self.textCursor()
+                if cur.hasSelection():
+                    text_len = len(cur.selectedText())
+                    cur.insertText(blank * text_len)
+                else:
+                    pos = cur.position()
+                    if pos >= len(self.toPlainText()):
+                        return
+                    cur.setPosition(pos)
+                    cur.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
+                    cur.insertText(blank)
+                    cur.setPosition(pos + 1)
+                    self.setTextCursor(cur)
+                return
+            # 2) Ctrl+X 剪切：填空（保持长度）
             if ctrl and key == Qt.Key.Key_X:
-                self.length_violation.emit("固定长度模式：剪切已禁用，请改用覆盖")
+                cur = self.textCursor()
+                if cur.hasSelection():
+                    text_len = len(cur.selectedText())
+                    cur.insertText(blank * text_len)
                 return
             # 3) 普通字符输入（含 IME 单字键）：转为覆写模式
             txt = event.text()
@@ -178,40 +216,44 @@ class _RowEditor(QPlainTextEdit):
             ):
                 cur = self.textCursor()
                 if not cur.hasSelection():
-                    # 自动选中下一字（行末时则不允许扩，否则会增长）
                     if cur.position() >= len(self.toPlainText()):
-                        self.length_violation.emit("行末不允许追加（覆写模式）")
+                        # 行末不允许追加（无 tooltip，静默拒绝，保持长度）
                         return
                     cur.setPosition(cur.position())
                     cur.setPosition(cur.position() + 1, QTextCursor.MoveMode.KeepAnchor)
                     self.setTextCursor(cur)
-                # 让 super 做替换；selection 范围 == 输入长度时维持长度不变
-                # （单字输入会替换 selection 内的 1 字 → 长度不变）
-                if len(cur.selectedText()) != len(txt):
-                    # 多字符输入与 selection 长度不匹配 → 拒绝（避免静默改长）
-                    self.length_violation.emit("输入长度需与选中字数相等（覆写模式）")
-                    return
+                # 输入长度 > 选区长度 → 裁断到选区长度，不再拒绝
+                sel_len = len(cur.selectedText())
+                if len(txt) > sel_len:
+                    txt = txt[:sel_len]
+                if len(txt) < sel_len:
+                    # 输入短于选区 → 余位填空（保长度）
+                    txt = txt + blank * (sel_len - len(txt))
+                cur.insertText(txt)
+                return
 
         super().keyPressEvent(event)
 
     def insertFromMimeData(self, source) -> None:  # type: ignore[override]
-        """粘贴：固定长度模式下必须等长（按 selection 长度截断/拒绝）。"""
+        """粘贴：固定长度模式下保长度。
+
+        proof-interaction-slots 第 3 任务：不再因长度不匹配拒绝粘贴，
+        而是截断 / 用空格补足，与键盘输入语义一致。
+        """
         if not self._is_fixed():
             super().insertFromMimeData(source)
             return
         text = source.text() if source is not None else ""
         if not text:
             return
-        # 去掉换行避免破坏单行模型
         text = text.replace("\r", "").replace("\n", "")
+        blank = " "
         cur = self.textCursor()
         if not cur.hasSelection():
-            # 选中后续等量字符（取 min(粘贴长度, 剩余字数)）
             doc_len = len(self.toPlainText())
             avail = doc_len - cur.position()
             take = min(len(text), avail)
             if take <= 0:
-                self.length_violation.emit("行末不允许追加（覆写模式）")
                 return
             cur.setPosition(cur.position() + take, QTextCursor.MoveMode.KeepAnchor)
             self.setTextCursor(cur)
@@ -221,8 +263,7 @@ class _RowEditor(QPlainTextEdit):
             if len(text) > sel_len:
                 text = text[:sel_len]
             elif len(text) < sel_len:
-                self.length_violation.emit("粘贴文本短于选中字数，已拒绝（覆写模式）")
-                return
+                text = text + blank * (sel_len - len(text))
         cur.insertText(text)
 
     # ── 鼠标悬停 → 字符索引（hproof-visual-marking）─────────
@@ -419,6 +460,14 @@ class _LinePair(QFrame):
         else:
             # 切走前先把 in-flight 文本保存（编辑器始终可见）
             self._flush_editor_if_dirty()
+            # proof-interaction-slots 第 2 任务：切行时清掉本行 editor 里的选中状态
+            # 和高亮调用。不清会让用户看到“他行还有选中感”。
+            cur = self._editor.textCursor()
+            if cur.hasSelection():
+                cur.clearSelection()
+                self._editor.setTextCursor(cur)
+            self._editor.setExtraSelections([])
+            self._hover_char_idx = -1
             bar_style = "background:transparent;"
             bg = "transparent"
 
@@ -442,42 +491,25 @@ class _LinePair(QFrame):
     def _apply_fixed_length_to_editor(self) -> None:
         """按当前 line.chars 状态启用/关闭固定长度覆写模式。
 
-        仅在当前显示文本与 chars 数量已经一致时启用固定长度约束；如果底层数据
-        本身已经失配，则先保留自由编辑，避免把现有坏状态锁死到不可恢复。
-
-        Tooltip 行为：只有"启用固定模式"那次才设非空 tooltip；其余情况清掉。
-        留下空字符串会让 Qt 偶发弹出"空白 hover 框"。
+        proof-interaction-slots 第 1+3 任务：
+        - 彻底不再给 editor 设任何 tooltip。以前为了提示"固定 N 字"
+          会 setToolTip；反复设空会在 Qt 上重出空白 hover 框残影。
+        - 固定模式本身仍启用（控制 keyPressEvent 里 Backspace/Delete 走
+          "填空字"路径不是拒绝）。
         """
         chars = self._line.chars or []
         text_len = len(self._editor.toPlainText())
         fixed = len(chars) if chars and text_len == len(chars) else None
         self._editor.set_fixed_length(fixed)
-        if fixed is not None:
-            self._editor.setToolTip(f"固定 {fixed} 字：请直接覆盖，不要删改长度")
-        else:
-            # 显式 clear 而非 setToolTip("")；后者在部分 Qt 下仍会触发空 hover 框
-            self._editor.setToolTip("")  # noqa: PLE0245 -- 仍需调用以覆盖上一行旧值
-            # 但同时关闭"hover 区域 tooltip"残留：把 attribute 关掉
-            self._editor.setAttribute(Qt.WidgetAttribute.WA_AlwaysShowToolTips, False)
 
     def _on_length_violation(self, reason: str) -> None:
-        """固定长度模式下的非模态反馈。
+        """保留接口以免旧信号连接报错，但不再弹 tooltip。
 
-        本轮（hproof-visual-marking）变更：
-        - 不再调用 ``_status_lbl.setToolTip(reason)`` —— 那是会**长期残留**的
-          "悬停提示"，下次鼠标扫过状态点又弹出，是空白 hover 框的来源之一。
-        - 调 ``QToolTip.showText`` 时不再传 ``rect`` 参数。Qt 把 rect 当作
-          "在此区域内只要悬停就重弹同一条 tooltip"的 hover-zone；当前函数本意
-          只是一次性反馈，传 rect 会让用户后续随便扫过 editor 都重弹。
+        proof-interaction-slots 第 1+3 任务：固定模式不再拒绝删除动作
+        （改为将槽位填空），也不再拒绝超长输入（裁断）。原"超长"、"禁删"
+        提示路径不再需要，也不再设 tooltip。
         """
-        try:
-            QToolTip.showText(
-                self._editor.mapToGlobal(self._editor.rect().bottomLeft()),
-                reason,
-                self._editor,
-            )
-        except Exception:
-            pass
+        return
 
     def _on_editor_hover_char(self, idx: int) -> None:
         """editor 鼠标悬停字符 idx 变化 → 在行图上画 hover 框（图字对应升级）。
@@ -868,8 +900,9 @@ class _LinePair(QFrame):
         self._status_lbl.setText(
             f"<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
         )
-        # 空字符串显式覆盖任何上一轮残留 tip，避免空白 hover 框残影
-        self._status_lbl.setToolTip(tip)
+        # proof-interaction-slots 第 1 任务：彻底不给 status_lbl 设 tooltip（连空串都不设）
+        # 避免 Qt 某些环境下“空白 hover 框”。是否未对齐已经用 warn 图标表达。
+        self._status_lbl.setToolTip("")
 
 
 # ─────────────────────────────────────────────────────────────
