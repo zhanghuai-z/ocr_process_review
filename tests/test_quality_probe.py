@@ -1,6 +1,7 @@
 """校对质量评测系统单元测试。"""
 from __future__ import annotations
 
+import math
 import pytest
 
 from app.core.quality_probe import (
@@ -213,22 +214,38 @@ def test_sampler_only_uses_chars_with_existing_crops():
 def test_sampler_density_uses_n_per_thousand_or_ten_thousand_chars():
     project = _build_dense_project(n_pages=2, lines_per_page=6)
     cfg = SamplerConfig(
-        sand_count=10,
+        sand_count=100,
         sand_unit_chars=1000,
-        min_total=1,
+        min_total=8,
         max_total=999,
-        max_per_page=999,
+        max_per_page=2,
         max_per_line=1,
         seed=5,
     )
     store = ProbeSampler(cfg).sample(project)
-    expected = int(round(store.sampled_from_chars * 10 / 1000))
-    if expected > 0:
-        expected = max(cfg.min_total, expected)
+    expected = math.ceil(store.sampled_from_chars * 100 / 1000)
     assert store.target_probes == min(cfg.max_total, expected)
     assert len(store) <= store.target_probes
-    assert store.sand_count == 10
+    per_page: dict[int, int] = {}
+    for probe in store.all():
+        per_page[probe.key.page_number] = per_page.get(probe.key.page_number, 0) + 1
+    assert any(count > 2 for count in per_page.values()), per_page
+    assert store.sand_count == 100
     assert store.sand_unit_chars == 1000
+
+
+def test_sampler_density_zero_disables_sand_without_min_floor():
+    project = _build_dense_project(n_pages=3, lines_per_page=4)
+    cfg = SamplerConfig(
+        sand_count=0,
+        sand_unit_chars=1000,
+        min_total=8,
+        max_total=35,
+        seed=5,
+    )
+    store = ProbeSampler(cfg).sample(project)
+    assert store.target_probes == 0
+    assert len(store) == 0
 
 
 # ──────────────────────────────────────────────────────────────────

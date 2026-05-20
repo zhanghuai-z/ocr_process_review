@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
-from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +34,29 @@ def _make_project(text="abcdef") -> OcrProject:
     )
     page.id = 9001
     return OcrProject(name="t", pages=[page])
+
+
+def _make_project_with_char_crops(text: str, *, n_pages: int = 1, lines_per_page: int = 1) -> OcrProject:
+    pages = []
+    for page_no in range(1, n_pages + 1):
+        lines = []
+        for line_no in range(lines_per_page):
+            line = Line(text=text, confidence=0.9, bbox=BBox(0, line_no * 24, len(text) * 10, 20))
+            line.chars = [
+                Char(
+                    char=ch,
+                    confidence=0.9,
+                    bbox=BBox(i * 10, line_no * 24, 10, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="char",
+                    token_text=ch,
+                )
+                for i, ch in enumerate(text)
+            ]
+            lines.append(line)
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, max(100, len(text) * 10), 200), lines=lines)
+        pages.append(Page(page_number=page_no, blocks=[block], image_path="/tmp/none.png", width=300, height=200))
+    return OcrProject(name="t", pages=pages)
 
 
 # ── H ↔ V 双向同步 ──────────────────────────────────────────────
@@ -878,7 +901,7 @@ def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
     dlg.deleteLater()
 
 
-def test_quality_stats_dialog_declares_sampling_scope_not_page_rate():
+def test_quality_stats_dialog_replaces_explanatory_note_with_status_feedback():
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
     proj = _make_project("今天我们来学习已经发生过的历史事件本身")
     dlg = QualityStatsDialog(
@@ -886,10 +909,10 @@ def test_quality_stats_dialog_declares_sampling_scope_not_page_rate():
         refresh_panels_cb=lambda: None,
     )
     note = dlg._scope_note.text()
-    assert "抽样字符" in note
-    assert "不按页计分" in note
-    assert "不是全量字符错误率" in note
-    assert "每千字或每万字" in note
+    assert "状态：未启用" in note
+    assert "自动保存" in note
+    assert "不是全量字符错误率" not in note
+    assert dlg._density_status.text().startswith("当前密度：")
     assert dlg.windowTitle() == "抽样字符校对观察"
     dlg.deleteLater()
 
@@ -909,6 +932,52 @@ def test_quality_stats_dialog_exposes_sand_density_controls():
     assert dlg._sand_unit_combo.currentData() == 10000
     assert dlg._sand_unit_combo.currentText() == "每万字"
     dlg.deleteLater()
+
+
+def test_quality_stats_dialog_saves_density_immediately_and_resamples_live(tmp_path):
+    from PySide6.QtCore import QSettings
+    from app.core.app_config import AppConfig
+    from app.core import quality_probe as qp_mod
+    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
+    AppConfig._instance = None
+    cfg_store = AppConfig.instance()
+    cfg_store.reset_to_defaults()
+    cfg_store.set("quality_probe_sand_count", 1)
+    cfg_store.set("quality_probe_sand_unit_chars", 1000)
+
+    refreshes = {"count": 0}
+    project = _make_project_with_char_crops(
+        "今天我们来学习已经发生过的历史事件本身",
+        n_pages=3,
+        lines_per_page=8,
+    )
+    dlg = QualityStatsDialog(
+        project_provider=lambda: project,
+        refresh_panels_cb=lambda: refreshes.update(count=refreshes["count"] + 1),
+    )
+    try:
+        dlg._on_toggle(True)
+        initial_store = qp_mod.get_active_store()
+        assert initial_store is not None
+        initial_count = len(initial_store)
+
+        dlg._sand_count_spin.setValue(50)
+
+        assert int(cfg_store.get("quality_probe_sand_count")) == 50
+        live_store = qp_mod.get_active_store()
+        assert live_store is not None
+        assert len(live_store) > initial_count
+        assert "已保存并生效" in dlg._density_status.text()
+        assert "候选池" in dlg._scope_note.text()
+        assert refreshes["count"] >= 2
+    finally:
+        dlg.deleteLater()
+        qp_mod.reset_active_store()
+        cfg_store.reset_to_defaults()
+        AppConfig._instance = None
 
 
 

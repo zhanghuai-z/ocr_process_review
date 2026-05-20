@@ -13,9 +13,9 @@
      就一定不会拿到 ``fake_char``。
 
 2. **采样约束**（在 ``ProbeSampler`` 中实现）
-   - 比例：``2%–3%``（默认 ``0.025``）
-   - 单任务下限 ``8``、上限 ``35``
-   - 单页 ``1–2`` 个
+   - 新配置按 ``sand_count / sand_unit_chars`` 计算全局密度。
+   - 旧比例配置仍兼容 ``target_ratio``、单任务下限和单页上限。
+   - 新密度模式不再套用旧的单页 2 个硬上限，避免用户调高密度后无感。
    - 单行最多 ``1`` 个
    - 用 seedable RNG 保证可复现
 
@@ -43,6 +43,7 @@
 """
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field, asdict
 from typing import Iterable, Optional
@@ -391,10 +392,12 @@ class ProbeSampler:
         if not per_line_pool:
             return store
 
-        # 2. 计算目标投放数
-        target = int(round(total_cut_cjk * self.cfg.target_density()))
-        if target > 0 or self.cfg.sand_count is None:
+        # 2. 计算目标投放数。新密度模式按全局字符池直接生效，不套旧 min_total。
+        if self.cfg.sand_count is None:
+            target = int(round(total_cut_cjk * self.cfg.target_density()))
             target = max(self.cfg.min_total, target)
+        else:
+            target = math.ceil(total_cut_cjk * self.cfg.target_density()) if self.cfg.sand_count > 0 else 0
         target = min(self.cfg.max_total, target)
         store.target_probes = target
         if target <= 0:
@@ -407,7 +410,7 @@ class ProbeSampler:
         for page_no, bi, li, line, cands in per_line_pool:
             if placed >= target:
                 break
-            if per_page_count.get(page_no, 0) >= self.cfg.max_per_page:
+            if self._page_limit_reached(per_page_count, page_no):
                 continue
             # 每行投 1 个；从行内候选随机选一个 char_index
             char_idx = rng.choice(cands)
@@ -425,15 +428,15 @@ class ProbeSampler:
             per_page_count[page_no] = per_page_count.get(page_no, 0) + 1
             placed += 1
 
-        # 4. 若不足 min_total 但池子还有空间，做一轮补足。
+        # 4. 旧比例模式若不足 min_total 但池子还有空间，做一轮补足。
         #    重要：此轮**仍然遵守 max_per_page / max_per_line**，绝不绕过页/行上限。
         #    （早期实现允许在这里突破 max_per_page，会导致小项目所有 probe 砸到同一页，
         #    严重影响校对体验且违反产品口径。）
-        if placed < self.cfg.min_total:
+        if self.cfg.sand_count is None and placed < self.cfg.min_total:
             for page_no, bi, li, line, cands in per_line_pool:
                 if placed >= self.cfg.min_total:
                     break
-                if per_page_count.get(page_no, 0) >= self.cfg.max_per_page:
+                if self._page_limit_reached(per_page_count, page_no):
                     continue
                 if store.for_line(page_no, bi, li):
                     continue  # 该行已投，遵守 max_per_line
@@ -452,6 +455,11 @@ class ProbeSampler:
                 placed += 1
 
         return store
+
+    def _page_limit_reached(self, per_page_count: dict[int, int], page_no: int) -> bool:
+        if self.cfg.sand_count is not None:
+            return False
+        return per_page_count.get(page_no, 0) >= self.cfg.max_per_page
 
 
 # ──────────────────────────────────────────────────────────────────

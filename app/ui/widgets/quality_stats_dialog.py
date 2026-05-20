@@ -213,6 +213,7 @@ class QualityStatsDialog(QDialog):
         self._project_provider = project_provider
         self._refresh_panels_cb = refresh_panels_cb
         self._detail_dialog: Optional[QualityStatsDetailDialog] = None
+        self._density_feedback = ""
         self._build_ui()
         self._refresh_view()
 
@@ -250,6 +251,9 @@ class QualityStatsDialog(QDialog):
         self._sand_unit_combo.addItem("每万字", 10000)
         self._sand_unit_combo.setFixedWidth(100)
         sand_row.addWidget(self._sand_unit_combo)
+        self._density_status = QLabel("")
+        self._density_status.setStyleSheet("color:#1a73e8;")
+        sand_row.addWidget(self._density_status, 1)
         sand_row.addStretch()
         root.addLayout(sand_row)
 
@@ -257,10 +261,7 @@ class QualityStatsDialog(QDialog):
         self._ring = _RatioRing()
         root.addWidget(self._ring, 1, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self._scope_note = QLabel(
-            "统计口径：按已有切图的抽样字符池投放假象字；密度为 N 个/每千字或每万字。"
-            "结果只表示观察到多少沙子被识破，不按页计分，也不是全量字符错误率。"
-        )
+        self._scope_note = QLabel("")
         self._scope_note.setWordWrap(True)
         self._scope_note.setStyleSheet("color:#6b7280; font-size:12px;")
         root.addWidget(self._scope_note)
@@ -284,6 +285,8 @@ class QualityStatsDialog(QDialog):
         self._rate_lbl = QLabel("rate = 待计算", self)
         self._rate_lbl.hide()
         self._load_sampler_controls()
+        self._sand_count_spin.valueChanged.connect(self._on_sampler_controls_changed)
+        self._sand_unit_combo.currentIndexChanged.connect(self._on_sampler_controls_changed)
 
     # ── 兼容外部测试：暴露详情表格 ──────────────────────────────
 
@@ -306,9 +309,13 @@ class QualityStatsDialog(QDialog):
             sand_unit = int(cfg.get("quality_probe_sand_unit_chars", 1000))
         except (TypeError, ValueError):
             sand_count, sand_unit = 25, 1000
+        self._sand_count_spin.blockSignals(True)
+        self._sand_unit_combo.blockSignals(True)
         self._sand_count_spin.setValue(max(0, sand_count))
         idx = self._sand_unit_combo.findData(sand_unit)
         self._sand_unit_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._sand_unit_combo.blockSignals(False)
+        self._sand_count_spin.blockSignals(False)
 
     def _save_sampler_controls(self) -> None:
         from app.core.app_config import AppConfig
@@ -316,6 +323,39 @@ class QualityStatsDialog(QDialog):
         cfg = AppConfig.instance()
         cfg.set("quality_probe_sand_count", self._sand_count_spin.value())
         cfg.set("quality_probe_sand_unit_chars", self._sand_unit_combo.currentData())
+        self._density_feedback = f"已保存：{self._density_text()}"
+
+    def _density_text(self) -> str:
+        return f"{self._sand_count_spin.value()} 个/{self._sand_unit_combo.currentText()}"
+
+    def _refresh_panels(self) -> None:
+        try:
+            self._refresh_panels_cb()
+        except Exception:
+            pass
+
+    def _resample_active_store(self) -> bool:
+        project = self._project_provider()
+        if project is None or not project.pages:
+            return False
+        cfg = qp.sampler_config_from_app_config()
+        store = qp.ProbeSampler(cfg).sample(project)
+        if len(store) == 0:
+            qp.reset_active_store()
+            self._btn_toggle.setChecked(False)
+            return False
+        qp.set_active_store(store)
+        self._density_feedback = (
+            f"已保存并生效：{self._density_text()}，投放 {len(store)}/{store.target_probes} 个"
+        )
+        return True
+
+    def _on_sampler_controls_changed(self, *_args) -> None:
+        self._save_sampler_controls()
+        if self._btn_toggle.isChecked():
+            self._resample_active_store()
+            self._refresh_panels()
+        self._refresh_view()
 
     # ── 行为 ───────────────────────────────────────────────────
 
@@ -330,10 +370,7 @@ class QualityStatsDialog(QDialog):
                 )
                 self._btn_toggle.setChecked(False)
                 return
-            cfg = qp.sampler_config_from_app_config()
-            store = qp.ProbeSampler(cfg).sample(project)
-            qp.set_active_store(store)
-            if len(store) == 0:
+            if not self._resample_active_store():
                 QMessageBox.information(
                     self, "正确率统计",
                     "当前正文中没有可投放假象字的位置（页面太短、全是数字/公式/标题，或缺少已有切图字符）。",
@@ -343,10 +380,7 @@ class QualityStatsDialog(QDialog):
                 return
         else:
             qp.reset_active_store()
-        try:
-            self._refresh_panels_cb()
-        except Exception:
-            pass
+        self._refresh_panels()
         self._refresh_view()
 
     def _open_detail(self) -> None:
@@ -363,26 +397,33 @@ class QualityStatsDialog(QDialog):
             self._btn_toggle.setText("开始统计")
             self._switch_status.setText("当前：未启用")
             self._switch_status.setStyleSheet("color:#666;")
+            self._density_status.setText(self._density_feedback or f"当前密度：{self._density_text()}")
+            self._scope_note.setText("状态：未启用；修改密度会自动保存。")
             self._ring.set_ratio(None, "")
             self._rate_lbl.setText("rate = 待计算")
             self._ensure_detail_dialog().populate()
             return
 
         n = len(store)
-        self._btn_toggle.setChecked(True)
-        self._btn_toggle.setText("停止统计")
-        self._switch_status.setText(f"当前：已启用（{n} 个抽样字符）")
-        self._switch_status.setStyleSheet("color:#1a73e8;")
-
-        rep = qp.score(store)
-        judged = rep.corrected + rep.missed
-        observed = judged + rep.edited_other + rep.deleted
         density_label = "每万字" if getattr(store, "sand_unit_chars", 1000) == 10000 else "每千字"
         sand_count = getattr(store, "sand_count", None)
         density_text = (
             f"掺沙 {sand_count} 个/{density_label}"
             if sand_count is not None else "掺沙密度沿用旧比例"
         )
+        self._btn_toggle.setChecked(True)
+        self._btn_toggle.setText("停止统计")
+        self._switch_status.setText(f"当前：已启用（{n} 个抽样字符）")
+        self._switch_status.setStyleSheet("color:#1a73e8;")
+        self._density_status.setText(self._density_feedback or f"已生效：{density_text}")
+        self._scope_note.setText(
+            f"候选池 {getattr(store, 'sampled_from_chars', 0)} 字；目标 {store.target_probes} 个；"
+            f"实际投放 {n} 个。"
+        )
+
+        rep = qp.score(store)
+        judged = rep.corrected + rep.missed
+        observed = judged + rep.edited_other + rep.deleted
         if judged == 0:
             ratio = 0.0
         else:
