@@ -288,7 +288,14 @@ class _GalleryModel(QAbstractListModel):
             return None
         entry = self._entries[index.row()]
         if role == Qt.ItemDataRole.DecorationRole:
-            return _verified_char_crop(self._cache, entry.page_path, entry.bbox, GALLERY_THUMB)
+            # vproof-gallery-rendering round 14：源 pix 必须 >= 实际绘制区域，
+            # 否则 delegate.paint 会从 56 → 66 上采样，糊成「图被放大」的观感。
+            # 用 2× 像素密度裁图，让 delegate 永远做 down-scale，CJK 笔画
+            # 清晰、不糊。
+            return _verified_char_crop(
+                self._cache, entry.page_path, entry.bbox,
+                _GalleryDelegate.SOURCE_PX,
+            )
         if role == Qt.ItemDataRole.DisplayRole:
             display_key = entry.token_text or entry.char
             return f"{index.row() + 1:03d}\nP{entry.page_number}-{display_key}"
@@ -309,10 +316,18 @@ class _GalleryDelegate(QStyledItemDelegate):
     # vproof-ime-persist-visibility round 12：+10 → +14，让 56px 缩略图周围
     # 留出 7px 内圈呼吸空间；总 cell 70×70，CJK 字在里面是真易读了。
     SIZE = GALLERY_THUMB + 14
+    # vproof-gallery-rendering round 14：源 pixmap 像素密度 = 2× cell size。
+    # 之前 model 用 GALLERY_THUMB(56) 取图，delegate 再 scale 到 66×66，
+    # 是 up-scale，CJK 笔画被插值放粗、看上去「图被放大」。
+    # 现在源 132×132，delegate 始终 down-scale → 清晰。
+    SOURCE_PX = (GALLERY_THUMB + 14) * 2
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         r = option.rect
         pix: Optional[QPixmap] = index.data(Qt.ItemDataRole.DecorationRole)
+        # vproof-gallery-rendering round 14：白底打底，避免 list view 默认
+        # 背景透出造成相邻 cell 看上去「粘连/挤」。
+        painter.fillRect(r, QColor("#ffffff"))
         img_r = r.adjusted(2, 2, -2, -2)
         if pix and not pix.isNull():
             scaled = pix.scaled(
@@ -320,8 +335,17 @@ class _GalleryDelegate(QStyledItemDelegate):
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
+            # vproof-gallery-rendering round 14：同时居中 X 和 Y。
+            # 之前只算 dx，drawPixmap 用 img_r.y() 顶对齐，导致瘦长/扁宽
+            # CJK 字（一、丨、丁）贴在格子顶部，下方留大白边 → 视觉「压字」。
             dx = (img_r.width() - scaled.width()) // 2
-            painter.drawPixmap(img_r.x() + dx, img_r.y(), scaled)
+            dy = (img_r.height() - scaled.height()) // 2
+            painter.drawPixmap(img_r.x() + dx, img_r.y() + dy, scaled)
+            # vproof-gallery-rendering round 14：cell 之间画 1px 浅灰分隔，
+            # 让相邻字不再视觉粘在一起；选中边框照旧覆盖此线。
+            painter.setPen(QColor("#e0e4ea"))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(r.adjusted(0, 0, -1, -1))
         else:
             painter.fillRect(img_r, QColor("#ffffff"))
             # 裁图失败时显示 token 内容作为占位，避免白块无信息
