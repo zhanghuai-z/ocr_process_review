@@ -169,6 +169,9 @@ class _RowEditor(QPlainTextEdit):
     length_violation  = Signal(str)  # 试图改变长度时发出原因字符串
     # hproof-visual-marking 升级：鼠标悬停字符位置变化（-1 = 离开 editor 区域）
     hover_char_changed = Signal(int)
+    # proof-direct-input-closure round 10 任务 1：编辑器获取焦点 / 点击 →
+    # 自动激活本行。signal 用 mouse + focus 两条路径覆盖，键盘 Tab 也算。
+    row_focus_requested = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -334,6 +337,17 @@ class _RowEditor(QPlainTextEdit):
             self._last_hover_idx = -1
             self.hover_char_changed.emit(-1)
 
+    # proof-direct-input-closure round 10 任务 1：mousePressEvent / focusInEvent
+    # 都发 row_focus_requested。上层 _LinePair 用它激活本行（之前只有
+    # 点 _active_bar / _img_lbl 才切行，点文本不行——这与用户直觉相反）。
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.row_focus_requested.emit()
+        super().mousePressEvent(event)
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        self.row_focus_requested.emit()
+        super().focusInEvent(event)
+
 
 # ─────────────────────────────────────────────────────────────
 # 评测位 (quality probe) 显示↔真实 桥接
@@ -430,12 +444,16 @@ class _LinePair(QFrame):
 
         # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
         self._editor = _RowEditor()
+        # proof-direct-input-closure round 10 任务 2：继续弱化"文本框感"。
+        # 之前的 border:1px solid #e3e8ef 让每行都像一个独立输入框，光
+        # 标心智依然强烈。去掉边框、底色随激活态走（激活 = #f0f6ff，
+        # 非激活 = transparent），让用户看到的是"一行可改的文字"，而
+        # 非"一个文本框"。
         self._editor.setStyleSheet(
-            # font-family 与图像下沿对齐：用等宽优先 + 紧凑行高，便于人工
-            # 快速逐字确认；padding 0 让首字对齐图像左侧首字。
             f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0; background:#ffffff; border:1px solid #e3e8ef;"
+            "padding:0; background:transparent; border:none;"
         )
+        self._editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
         self._editor.document().setDocumentMargin(2)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -471,6 +489,8 @@ class _LinePair(QFrame):
         self._editor.textChanged.connect(self._refresh_extra_selections)
         # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
         self._editor.textChanged.connect(self._refresh_status)
+        # proof-direct-input-closure round 10 任务 1：editor focus/click → 激活本行
+        self._editor.row_focus_requested.connect(self._on_editor_focus_in)
         # Task #2：按 line.chars 锁定编辑器固定长度（图字一一对应不变）
         self._apply_fixed_length_to_editor()
         content_v.addWidget(self._editor)
@@ -903,6 +923,14 @@ class _LinePair(QFrame):
     # ── 私有 ──────────────────────────────────────────────────
 
     def _on_click(self, event) -> None:
+        self.clicked.emit(self._idx)
+
+    def _on_editor_focus_in(self) -> None:
+        """proof-direct-input-closure round 10 任务 1：editor 内点击/取得焦点
+        即激活本行。不传 event；本行已经是 active 时静默忽略，避免对
+        cursor/focus 链路造成多余刷新。"""
+        if self._active:
+            return
         self.clicked.emit(self._idx)
 
     def _revert(self) -> None:
