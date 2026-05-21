@@ -422,12 +422,11 @@ class QualityStatsDialog(QDialog):
         )
 
         rep = qp.score(store)
-        judged = rep.corrected + rep.missed
-        observed = judged + rep.edited_other + rep.deleted
-        if judged == 0:
-            ratio = 0.0
-        else:
-            ratio = rep.corrected / judged
+        # 新设计：probe 只有两种观测状态 — pending / corrected
+        total = rep.total_probes
+        corrected = rep.corrected
+        observed = corrected
+        ratio = rep.detect_ratio
         main_text = "观察中" if rep.grade == "INSUFFICIENT" else rep.grade_label
         self._ring.set_ratio(
             ratio,
@@ -435,9 +434,9 @@ class QualityStatsDialog(QDialog):
             main_text,
         )
         self._rate_lbl.setText(
-            f"sample_char_detection = {rep.corrected}/{judged} "
+            f"sample_char_detection = {corrected}/{total} "
             f"(observed={observed}/{n}; pool={getattr(store, 'sampled_from_chars', 0)}; "
-            f"{density_text}; not_page_rate; not_full_error_rate)"
+            f"{density_text})"
         )
 
         # 始终把最新明细同步到详情子窗（隐藏即可，便于测试/外部直接读 _table）

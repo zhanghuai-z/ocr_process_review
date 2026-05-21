@@ -410,6 +410,19 @@ def _vproof_resolve_block_line_index(page: Page, block: Block, line: Line):
     return _proof_resolve_block_line_index(page, block, line)
 
 
+def _line_block_index(
+    pages: List[Page], page_number: int, line: Line
+) -> Optional[int]:
+    """在 ``pages`` 中找到 ``line`` 所属 block 的 index（quality_probe key 用）。"""
+    for page in pages:
+        if page.page_number != page_number:
+            continue
+        for bi, block in enumerate(page.blocks):
+            if line in block.lines:
+                return bi
+    return None
+
+
 def _vproof_displayed_text(page: Page, block: Block, line: Line) -> str:
     return _proof_displayed_text(line, page, block)
 
@@ -876,8 +889,16 @@ class VProofPanel(QWidget):
         self._batch_select_all_btn.clicked.connect(self._select_all_gallery)
         self._batch_clear_btn = QPushButton("清选 (Esc)")
         self._batch_clear_btn.clicked.connect(self._clear_gallery_selection)
+        # 质量探针：无损识别按钮 — 用户标记"我已注意到这格不属于本集合"，
+        # 不需要真的改字（不动 line.text），直接把命中的 probe 标为 corrected。
+        self._mark_observed_btn = QPushButton("标记已识别")
+        self._mark_observed_btn.setToolTip(
+            "对选中的格子标记为'已识别为掺沙'：不修改正文，仅作为校对质量观察信号。"
+        )
+        self._mark_observed_btn.clicked.connect(self._mark_selected_observed)
         batch_row.addWidget(self._batch_input, 1)
         batch_row.addWidget(self._batch_btn)
+        batch_row.addWidget(self._mark_observed_btn)
         batch_row.addWidget(self._batch_select_all_btn)
         batch_row.addWidget(self._batch_clear_btn)
         layout.addLayout(batch_row)
@@ -1076,6 +1097,7 @@ class VProofPanel(QWidget):
             merged: list[CharEntry] = []
             for tok in selected_tokens:
                 merged.extend(self._char_svc.query(tok))
+            merged.extend(self._extras_for_tokens(selected_tokens))
             merged.sort(key=lambda e: (e.page_number, e.char_idx))
             self._selected_char = "".join(selected_tokens)
             self._gallery_model.set_entries(merged)
@@ -1087,13 +1109,69 @@ class VProofPanel(QWidget):
         elif len(selected_tokens) == 1:
             selected = selected_tokens[0]
             self._selected_char = selected
-            entries = self._char_svc.query(selected)
+            entries = list(self._char_svc.query(selected))
+            entries.extend(self._extras_for_tokens([selected]))
             self._gallery_model.set_entries(entries)
             self._resize_gallery_for_entries(len(entries))
             self._gallery_hdr.setText(f'"{selected}"  共 {len(entries)} 处')
         else:
             self._resize_gallery_for_entries(0)
         self._page_label.setText(f"页 {self._current_page_idx + 1} / {len(self._pages)}")
+
+    # ───── quality_probe 装饰者：把探针补成顺手在同字 gallery 上多出现 ─────
+    def _extras_for_tokens(self, tokens: list[str]) -> list[CharEntry]:
+        """对指定 token 集，从 active probe store 里拼出额外的
+        CharEntry。这些 entry 指向“文中真实存在的近形字”的 crop，
+        但挂在 token 的 gallery 下面。未启用 / 无 store 时返回 [] 。
+        """
+        store = qp.get_active_store()
+        if store is None or not tokens or not self._pages:
+            return []
+        out: list[CharEntry] = []
+        for tok in tokens:
+            probes = qp.extras_for_gallery_char(store, tok)
+            for probe in probes:
+                key = probe.key
+                # 查找 page / block / line
+                page_idx = None
+                page = None
+                for pi, p in enumerate(self._pages):
+                    if p.page_number == key.page_number:
+                        page_idx = pi
+                        page = p
+                        break
+                if page is None:
+                    continue
+                if key.block_index >= len(page.blocks):
+                    continue
+                block = page.blocks[key.block_index]
+                if key.line_index >= len(block.lines):
+                    continue
+                line = block.lines[key.line_index]
+                chars = getattr(line, "chars", None) or []
+                if key.char_index >= len(chars):
+                    continue
+                ch = chars[key.char_index]
+                bbox = getattr(ch, "bbox", None)
+                if bbox is None:
+                    continue
+                out.append(CharEntry(
+                    char=tok,
+                    page_path=page.display_image_path,
+                    page_number=page.page_number,
+                    line=line,
+                    char_idx=key.char_index,
+                    bbox=bbox,
+                    page_idx=page_idx or 0,
+                    block_order=getattr(block, "order", 0) or 0,
+                    line_idx=key.line_index,
+                    confidence=getattr(ch, "confidence", 0.0) or 0.0,
+                    bbox_source=getattr(ch, "bbox_source", "") or "",
+                    bbox_granularity=getattr(ch, "bbox_granularity", "") or "",
+                    token_text=tok,  # 隐藏 probe 身份：贴上集合主字符标签
+                    collection_kind="char",
+                ))
+        return out
 
     def _find_page_index(self, target: Page) -> int:
         for idx, page in enumerate(self._pages):
@@ -1189,7 +1267,8 @@ class VProofPanel(QWidget):
         if not tok:
             return
         self._selected_char = tok
-        entries = self._char_svc.query(tok)
+        entries = list(self._char_svc.query(tok))
+        entries.extend(self._extras_for_tokens([tok]))
 
         # 重置 gallery：清选中、滚回顶部
         self._gallery_model.set_entries(entries)
@@ -1238,6 +1317,7 @@ class VProofPanel(QWidget):
         merged: list[CharEntry] = []
         for tok in toks:
             merged.extend(self._char_svc.query(tok))
+        merged.extend(self._extras_for_tokens(toks))
         merged.sort(key=lambda e: (e.page_number, e.char_idx))
         # 用拼接串当 "selected_char" 显示锚（仅用于标题）
         self._selected_char = "".join(toks)
@@ -1651,7 +1731,63 @@ class VProofPanel(QWidget):
                 f"● 已应用到 {applied} 处（跨页 {skipped_offpage} 处未改），待保存"
             )
             self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+        # 质量探针观测：用户针对某个槽位动了手，如果该位是 probe，则记 corrected
+        if applied:
+            store = qp.get_active_store()
+            if store is not None:
+                for e in entries:
+                    bi = _line_block_index(self._pages, e.page_number, e.line)
+                    if bi is None:
+                        continue
+                    qp.observe_slot_edit(
+                        store, e.page_number, bi, e.line_idx, e.char_idx,
+                    )
         return applied
+
+    def _mark_selected_observed(self) -> None:
+        """非破坏性识别路径：把当前 gallery 选区里命中 probe 的位置标 corrected。
+
+        - 不修改 line.text，不走 save_displayed_edit。
+        - 若无选区，则尝试以 current entry 兜底。
+        - status 反馈命中数；命中 0 时也写出"未命中 probe"，便于用户区分。
+        """
+        sel_model = self._gallery_view.selectionModel() if hasattr(self, "_gallery_view") else None
+        indexes = list(sel_model.selectedIndexes()) if sel_model else []
+        entries: list[CharEntry] = []
+        for idx in indexes:
+            e = idx.data(Qt.ItemDataRole.UserRole)
+            if e is not None:
+                entries.append(e)
+        if not entries and sel_model is not None:
+            cur = sel_model.currentIndex()
+            if cur.isValid():
+                e = cur.data(Qt.ItemDataRole.UserRole)
+                if e is not None:
+                    entries = [e]
+        if not entries:
+            self._status_lbl.setText("标记已识别：当前没有选中的格子")
+            return
+        store = qp.get_active_store()
+        if store is None:
+            self._status_lbl.setText("标记已识别：质量探针未启用")
+            return
+        hit = 0
+        for e in entries:
+            bi = _line_block_index(self._pages, e.page_number, e.line)
+            if bi is None:
+                continue
+            if qp.observe_slot_edit(store, e.page_number, bi, e.line_idx, e.char_idx):
+                hit += 1
+        if hit:
+            self._status_lbl.setText(
+                f"标记已识别：{hit}/{len(entries)} 处命中 probe（已记为 corrected，未改正文）"
+            )
+            self._status_lbl.setStyleSheet("color: #1a73e8; font-size: 12px;")
+        else:
+            self._status_lbl.setText(
+                f"标记已识别：所选 {len(entries)} 处均非 probe（不计分）"
+            )
+            self._status_lbl.setStyleSheet("color: #666; font-size: 12px;")
 
     def _apply_batch_input(self) -> None:
         """proof-slot-residual 第 2 任务：行内输入框 + Enter / 应用按钮。"""
@@ -1972,6 +2108,8 @@ class VProofPanel(QWidget):
             self._batch_btn.setEnabled(n >= 1)
             self._batch_input.setEnabled(n >= 1)
             self._batch_clear_btn.setEnabled(multi)
+        if hasattr(self, "_mark_observed_btn"):
+            self._mark_observed_btn.setEnabled(n >= 1)
         # 标题刷新：复用 _sync_gallery_entry 末尾的格式化，但只在有 current 时
         cur = sel.currentIndex() if sel else None
         if cur is not None and cur.isValid():
@@ -1990,7 +2128,8 @@ class VProofPanel(QWidget):
                 f"{extra}：[第 {entry.page_number} 页 / 第 {entry.char_idx + 1} 位] {joined}"
             )
             return
-        total = len(self._char_svc.query(self._selected_char))
+        # 探针 extras 也计入 total；直接读 gallery_model 的 rowCount 最不会错
+        total = self._gallery_model.rowCount()
         extra = f"  ·  已选 {sel_count} 个" if sel_count > 1 else ""
         self._gallery_hdr.setText(
             f'"{self._selected_char}"  共 {total} 处  '

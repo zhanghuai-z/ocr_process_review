@@ -1,45 +1,40 @@
 """校对质量评测 — 评测位/假象字（Quality Probe）系统。
 
-设计要点（必须严格遵守，否则会污染最终交付文本）：
+## 产品口径（Round 15 后）
 
-1. **数据分层**
-   - 评测位只是一个旁路记录，**绝不改写 line.text**。
-   - 真实文本始终保存在 ``line.text``。
-   - 用户校对界面在渲染时通过 ``apply_probes_to_display`` 把若干字符
-     替换成 ``fake_char`` 显示出来。
-   - 用户保存时通过 ``reverse_display_to_true`` 把"显示空间文本"还原成
-     "真实空间文本"，再写回 ``line.text``。
-   - 因此任何导出器（txt / docx / html / pdf / rtf / xml）只读 ``line.text``，
-     就一定不会拿到 ``fake_char``。
+"掺沙子"用来验证人工校对的质量。机制必须满足：
 
-2. **采样约束**（在 ``ProbeSampler`` 中实现）
-   - 新配置按 ``sand_count / sand_unit_chars`` 计算全局密度。
-   - 旧比例配置仍兼容 ``target_ratio``、单任务下限和单页上限。
-   - 新密度模式不再套用旧的单页 2 个硬上限，避免用户调高密度后无感。
-   - 单行最多 ``1`` 个
-   - 用 seedable RNG 保证可复现
+1. **少量、隐蔽** — 单次评测全文最多十几个 probe，单个同字 gallery 最多 1 个
+   假象 crop，绝不能"整集合都变成假象"。
+2. **假象字来源 = 文中真实存在的字** — 不许凭空生成假字，不许从字典里乱挑。
+3. **混淆发生在切图 / 字形层** — line.text **绝不被修改**。混淆的是 VProof
+   同字 gallery 里的 crop：在 "体" 的 gallery 中混入一个真实来自文档另一处
+   "休" 的 crop（视觉接近）。
+4. **若无合适的"文中已存在近形字"来源，则跳过** — 宁可不投放，也不硬造
+   荒谬错配。
+5. **不许图文错配** — 旧机制把 line.text[i] 替换成 fake_char、crop 仍然是
+   true_char 的图，肉眼一比就穿帮。新机制只动 gallery 来源、不动文本。
 
-3. **避让规则**
-   - ``BlockType`` 排除：TITLE / EQUATION / TABLE / TABLE_CAPTION /
-     FIGURE / FIGURE_CAPTION / REFERENCE / UNKNOWN
-   - 整行排除：行长 < ``MIN_LINE_LEN``、含 ≥50% 数字（数字串）、
-     行内含 LaTeX/数学符号（``$``、反斜杠、``^``、``_``、``{`` 等）。
-   - 字符排除：非 CJK（数字/字母/标点/空白）、不在混淆表里的字符、
-     行首/行尾各 1 字、行内"短 CJK 段"（连续 < 4 个 CJK 字符）的所有位置。
-     这条"短 CJK 段排除"是工程上对"人名/地名"的近似避让 —— 短独立 CJK
-     段往往就是人名地名签名等敏感串。
+## 数据模型
 
-4. **观测/统计**
-   - ``observe_user_action(line_id, displayed_new_text)`` 在用户保存时被调用，
-     既返回应该写回 ``line.text`` 的真实文本，也更新 probe 的 observation：
-     - ``"corrected"``：用户在该位置写回了 true_char（成功识破假象）
-     - ``"missed"``：用户保留了 fake_char（被假象骗过）
-     - ``"edited_other"``：用户把该位置写成了既不是 true 也不是 fake 的内容
-       （视为"修了，但可能是改错了"，单独归类，不计入正错）
-     - ``"deleted"``：该字符被删掉（改字数，按 missed 处理 + 标记）
-   - ``QualityScorer`` 给出**等级 + 区间**（不给伪精确百分比）。
+``Probe``：
+- ``key`` → 文档中一个真实位置，该位置 line.text[char_index] 上的字就是
+  ``fake_char``（已存在的、视觉近形字）。
+- ``true_char`` → 被掺沙的 gallery 字头；与 fake_char 在 ``CONFUSION_MAP``
+  中互为混淆字；同时文档里也至少有 1 处真实出现，否则用户根本不会进 gallery。
+- ``observation`` → ``pending`` / ``corrected``。当用户在 VProof 槽位编辑
+  框对 ``key`` 位置做出任何修改时，置 ``corrected``；其余保持 ``pending``。
 
-5. **本模块完全无 UI 依赖**，可被 CLI / pytest 单测。
+## VProof 集成
+
+- 用户点 "体" → ``CharIndexService.query("体")`` 给出真实 "体" 的 entries。
+- 同时调 ``extras_for_gallery_char(store, "体", project)``，返回若干
+  ``ProbeKey`` —— 它们指向文档里真实 "休" 的位置；VProof 把这些位置上的
+  ``CharEntry`` 作为掺沙 crop 附加到 gallery 末尾。
+- 用户若发现某个 crop 看起来不是 "体"，可点选并在槽位编辑框做修改；
+  ``observe_slot_edit`` 接收该信号，将 probe 标 ``corrected``。
+
+本模块**完全无 UI / Qt 依赖**，可被 CLI / pytest 单测。
 """
 from __future__ import annotations
 
@@ -54,8 +49,6 @@ from app.models.enums import BlockType
 
 # ──────────────────────────────────────────────────────────────────
 # 混淆字表 —— 形似 CJK 字符对，用作"假象字"的来源。
-# 仅包含视觉上人眼可能扫读时看错、但内容上足够明确的"明显形近字"。
-# 不包含同义字、繁简对、罕见字，避免给用户造成"系统居然在乱来"的不信任感。
 # ──────────────────────────────────────────────────────────────────
 
 _CONFUSABLES_RAW: tuple[tuple[str, ...], ...] = (
@@ -137,9 +130,9 @@ def _is_cjk(ch: str) -> bool:
         return False
     cp = ord(ch)
     return (
-        0x4E00 <= cp <= 0x9FFF       # CJK Unified
-        or 0x3400 <= cp <= 0x4DBF    # Ext A
-        or 0xF900 <= cp <= 0xFAFF    # Compat
+        0x4E00 <= cp <= 0x9FFF
+        or 0x3400 <= cp <= 0x4DBF
+        or 0xF900 <= cp <= 0xFAFF
     )
 
 
@@ -154,17 +147,13 @@ def _digit_ratio(text: str) -> float:
     return n / len(text)
 
 
-_MATH_MARKERS = set("$^_{}=≈≠≤≥±∑∏∫√")  # noqa: RUF001
-# 也屏蔽反斜杠 (LaTeX 命令引导符)
+_MATH_MARKERS = set("$^_{}=≈≠≤≥±∑∏∫√")
 _MATH_MARKERS.add("\\")
 
-# CJK 引号/书名号/方头括号 —— 用于"人名/地名/书名"近似避让。
-# 出现这些符号附近的短 CJK 段（≤5 字）极可能是人名地名书名，强制提高 MIN_CJK_RUN
-# 阈值，避免在敏感串里投放假象字。
 _NAME_QUOTE_CHARS: frozenset[str] = frozenset(
     "「」『』《》〈〉【】〖〗［］〔〕“”‘’"
 )
-_NAME_GUARDED_MIN_RUN = 6  # 紧邻名号符号时，CJK 段必须 ≥ 这么长才允许投放
+_NAME_GUARDED_MIN_RUN = 6
 
 
 def _looks_like_math(text: str) -> bool:
@@ -172,7 +161,7 @@ def _looks_like_math(text: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────
-# 行/块/字符可探测性判定
+# 行/块/字符可探测性判定（沿用 Round 14 前的口径）
 # ──────────────────────────────────────────────────────────────────
 
 EXCLUDED_BLOCK_TYPES: frozenset[BlockType] = frozenset({
@@ -186,10 +175,10 @@ EXCLUDED_BLOCK_TYPES: frozenset[BlockType] = frozenset({
     BlockType.UNKNOWN,
 })
 
-MIN_LINE_LEN = 6                # 行少于这么多字不投放
-MIN_CJK_RUN = 4                 # 连续 CJK 段至少这么长，且只能投放在段中间（非首末两字）
-MAX_DIGIT_RATIO_IN_LINE = 0.5   # 数字串行排除
-LINE_EDGE_GUARD = 1             # 行首行尾各保护这么多字符
+MIN_LINE_LEN = 6
+MIN_CJK_RUN = 4
+MAX_DIGIT_RATIO_IN_LINE = 0.5
+LINE_EDGE_GUARD = 1
 
 
 def is_block_eligible(block: Block) -> bool:
@@ -214,15 +203,18 @@ def is_line_eligible(line: Line) -> bool:
 
 
 def candidate_indices_in_line(line: Line) -> list[int]:
-    """返回行内可投放假象字的字符 index 列表（按真实文本空间）。"""
+    """返回行内"足以充当假象字来源"的字符 index 列表（按 line.text 空间）。
+
+    新口径下，候选的语义是：**这个字本身就在 CONFUSION_MAP 中**（即它至少
+    有一个视觉近形字），未来若需要 plant 它的近形字到对方 gallery 时，就
+    从这些位置里选一个真实坐标。
+    """
     text = line.text or ""
     if not is_line_eligible(line):
         return []
     n = len(text)
     cjk_flags = [_is_cjk(c) for c in text]
 
-    # 找出每个 index 所属的"连续 CJK 段"长度，以及在段内的位置
-    # 只接受位于"段长 >= MIN_CJK_RUN"且"非段首末 LINE_EDGE_GUARD 个字符"的 index
     cands: list[int] = []
     i = 0
     while i < n:
@@ -232,20 +224,15 @@ def candidate_indices_in_line(line: Line) -> list[int]:
         j = i
         while j < n and cjk_flags[j]:
             j += 1
-        run_start, run_end = i, j  # [run_start, run_end)
+        run_start, run_end = i, j
         run_len = run_end - run_start
-        # 名号近邻判定：若 CJK 段紧邻引号/书名号（左 1 字或右 1 字），
-        # 则该段视为"可能是人名/地名/书名"，将最低段长门槛抬到 _NAME_GUARDED_MIN_RUN。
         left_neighbor = text[run_start - 1] if run_start - 1 >= 0 else ""
         right_neighbor = text[run_end] if run_end < n else ""
         adj_quote = (left_neighbor in _NAME_QUOTE_CHARS) or (right_neighbor in _NAME_QUOTE_CHARS)
         effective_min_run = _NAME_GUARDED_MIN_RUN if adj_quote else MIN_CJK_RUN
         if run_len >= effective_min_run:
-            inner_start = run_start + LINE_EDGE_GUARD
-            inner_end = run_end - LINE_EDGE_GUARD
-            # 同时也要避开整行行首/行尾保护
-            inner_start = max(inner_start, LINE_EDGE_GUARD)
-            inner_end = min(inner_end, n - LINE_EDGE_GUARD)
+            inner_start = max(run_start + LINE_EDGE_GUARD, LINE_EDGE_GUARD)
+            inner_end = min(run_end - LINE_EDGE_GUARD, n - LINE_EDGE_GUARD)
             for k in range(inner_start, inner_end):
                 ch = text[k]
                 if ch in CONFUSION_MAP:
@@ -260,11 +247,11 @@ def candidate_indices_in_line(line: Line) -> list[int]:
 
 @dataclass
 class ProbeKey:
-    """结构化定位 key（不依赖 DB id，重载安全）。"""
+    """文档中一个真实位置的结构化定位（重载安全）。"""
     page_number: int
-    block_index: int            # Page.blocks 中的下标
-    line_index: int             # Block.lines 中的下标
-    char_index: int             # line.text 中字符下标（真实文本空间）
+    block_index: int
+    line_index: int
+    char_index: int
 
     def to_tuple(self) -> tuple[int, int, int, int]:
         return (self.page_number, self.block_index, self.line_index, self.char_index)
@@ -272,10 +259,21 @@ class ProbeKey:
 
 @dataclass
 class Probe:
+    """掺沙记录。
+
+    - ``key`` 指向**文档真实位置**，该位置 line.text 上的字符就是 ``fake_char``。
+    - ``true_char`` 是该 fake_char 的视觉近形字，且它本身在文档里也至少出现过
+      一次（否则用户不会进它的 gallery）。
+    - ``observation`` = ``pending`` / ``corrected``；当用户在 VProof 槽位编辑
+      对 ``key`` 这个位置做出任何修改时，置 ``corrected``。
+
+    **重要不变量**：本模块**不会**修改 line.text 中任何字符；line.text[key.char_index]
+    在投放前后始终等于 ``fake_char``。
+    """
     key: ProbeKey
     true_char: str
     fake_char: str
-    observation: str = "pending"   # pending / corrected / missed / edited_other / deleted
+    observation: str = "pending"
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -284,14 +282,16 @@ class Probe:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Probe 存储 —— 按 (page_number, block_index, line_index) 索引
+# Probe 存储 —— 索引到 (page, block, line) 与 true_char
 # ──────────────────────────────────────────────────────────────────
 
 class ProbeStore:
-    """单项目内的 probe 集合。线程内部默认非并发。"""
+    """单项目内的 probe 集合。"""
 
     def __init__(self) -> None:
         self._by_line: dict[tuple[int, int, int], list[Probe]] = {}
+        self._by_true_char: dict[str, list[Probe]] = {}
+        self._by_key: dict[tuple[int, int, int, int], Probe] = {}
         self._all: list[Probe] = []
         self.sampled_from_chars: int = 0
         self.target_probes: int = 0
@@ -305,40 +305,35 @@ class ProbeStore:
         self._all.append(probe)
         line_key = (probe.key.page_number, probe.key.block_index, probe.key.line_index)
         self._by_line.setdefault(line_key, []).append(probe)
-        # 行内按 char_index 升序，方便逆向映射
         self._by_line[line_key].sort(key=lambda p: p.key.char_index)
+        self._by_true_char.setdefault(probe.true_char, []).append(probe)
+        self._by_key[probe.key.to_tuple()] = probe
 
     def for_line(self, page_number: int, block_index: int, line_index: int) -> list[Probe]:
         return list(self._by_line.get((page_number, block_index, line_index), ()))
 
+    def for_true_char(self, char: str) -> list[Probe]:
+        return list(self._by_true_char.get(char, ()))
+
+    def by_key(self, key: ProbeKey) -> Optional[Probe]:
+        return self._by_key.get(key.to_tuple())
+
     def all(self) -> list[Probe]:
         return list(self._all)
 
+    def true_chars(self) -> list[str]:
+        return list(self._by_true_char.keys())
+
     def clear(self) -> None:
         self._by_line.clear()
+        self._by_true_char.clear()
+        self._by_key.clear()
         self._all.clear()
 
 
 # ──────────────────────────────────────────────────────────────────
-# 采样器
+# 候选位置辅助
 # ──────────────────────────────────────────────────────────────────
-
-@dataclass
-class SamplerConfig:
-    target_ratio: float = 0.025      # 旧配置兼容：未设置 sand_count 时使用
-    sand_count: Optional[int] = None # 每 sand_unit_chars 个可切图字符投放几个沙子
-    sand_unit_chars: int = 1000
-    min_total: int = 8
-    max_total: int = 35
-    max_per_page: int = 2
-    max_per_line: int = 1
-    seed: Optional[int] = None       # None = 随机；测试可固定
-
-    def target_density(self) -> float:
-        if self.sand_count is None:
-            return max(0.0, float(self.target_ratio))
-        return max(0.0, float(self.sand_count)) / max(1, int(self.sand_unit_chars))
-
 
 def _has_existing_cut_char(line: Line, idx: int) -> bool:
     text = line.text or ""
@@ -352,12 +347,11 @@ def _has_existing_cut_char(line: Line, idx: int) -> bool:
 
 
 def candidate_indices_with_existing_crops(line: Line) -> list[int]:
-    """返回既可投放假象字、又有现成字符切图支撑的位置。"""
+    """既可作沙源、又有现成 crop 的候选位置。"""
     return [idx for idx in candidate_indices_in_line(line) if _has_existing_cut_char(line, idx)]
 
 
 def count_existing_cjk_crop_chars(line: Line) -> int:
-    """统计 line 中已有切图且与文本对齐的 CJK 字符数。"""
     return sum(
         1
         for idx, ch in enumerate(line.text or "")
@@ -365,7 +359,48 @@ def count_existing_cjk_crop_chars(line: Line) -> int:
     )
 
 
+# ──────────────────────────────────────────────────────────────────
+# 采样器
+# ──────────────────────────────────────────────────────────────────
+
+@dataclass
+class SamplerConfig:
+    target_ratio: float = 0.025
+    sand_count: Optional[int] = None
+    sand_unit_chars: int = 1000
+    min_total: int = 8
+    max_total: int = 35
+    max_per_page: int = 2
+    max_per_line: int = 1
+    max_per_true_char: int = 1   # 单个同字 gallery 最多掺几个假象 crop（默认 1 = "整集合不假象化")
+    seed: Optional[int] = None
+
+    def target_density(self) -> float:
+        if self.sand_count is None:
+            return max(0.0, float(self.target_ratio))
+        return max(0.0, float(self.sand_count)) / max(1, int(self.sand_unit_chars))
+
+
+@dataclass
+class _Candidate:
+    key: ProbeKey
+    char: str                     # 该位置的真实字符（= 未来 probe.fake_char）
+
+
 class ProbeSampler:
+    """新口径采样器（Round 15）：
+
+    1. 扫全文，收集所有 "在 CONFUSION_MAP 中、有 crop 的可探测位置"。这些
+       位置就是未来沙子的**来源**（fake_char 真实出现的位置）。
+    2. 把候选按字符聚合得到 ``pool_by_char``。
+    3. 对每个候选 (key, fake_char)，确定 ``true_char`` 候选 =
+       ``CONFUSION_MAP[fake_char]`` 与 pool_by_char.keys() 的交集（保证
+       true_char 也确实在文档里出现过；并且 ``true_char != fake_char``）。
+       若交集为空，跳过该候选 —— 这就是"宁可不投，不硬造错配"。
+    4. 随机选 ``target`` 个 (key, fake_char) → 给每个分配 true_char，构造 Probe。
+       同时遵守 ``max_per_page`` / ``max_per_line`` / ``max_per_true_char``。
+    """
+
     def __init__(self, config: Optional[SamplerConfig] = None) -> None:
         self.cfg = config or SamplerConfig()
 
@@ -373,8 +408,8 @@ class ProbeSampler:
         rng = random.Random(self.cfg.seed)
         store = ProbeStore()
 
-        # 1. 收集所有 (page_number, block_index, line_index, candidate_char_indices)
-        per_line_pool: list[tuple[int, int, int, Line, list[int]]] = []
+        # 1. 扫整文档收集候选（既是 "可探测位置"，也将被当作沙子来源位置）
+        pool: list[_Candidate] = []
         total_cut_cjk = 0
         for page in project.pages:
             for bi, block in enumerate(page.blocks):
@@ -382,17 +417,21 @@ class ProbeSampler:
                     continue
                 for li, line in enumerate(block.lines):
                     total_cut_cjk += count_existing_cjk_crop_chars(line)
-                    cands = candidate_indices_with_existing_crops(line)
-                    if cands:
-                        per_line_pool.append((page.page_number, bi, li, line, cands))
+                    text = line.text or ""
+                    for idx in candidate_indices_with_existing_crops(line):
+                        pool.append(_Candidate(
+                            key=ProbeKey(page.page_number, bi, li, idx),
+                            char=text[idx],
+                        ))
 
         store.sampled_from_chars = total_cut_cjk
         store.sand_count = self.cfg.sand_count
         store.sand_unit_chars = self.cfg.sand_unit_chars
-        if not per_line_pool:
+        if not pool:
             return store
 
-        # 2. 计算目标投放数。新密度模式按全局字符池直接生效，不套旧 min_total。
+        # 2. 按字符聚合 + 计算目标投放数
+        chars_in_doc = {c.char for c in pool}
         if self.cfg.sand_count is None:
             target = int(round(total_cut_cjk * self.cfg.target_density()))
             target = max(self.cfg.min_total, target)
@@ -403,280 +442,140 @@ class ProbeSampler:
         if target <= 0:
             return store
 
-        # 3. 按 (page) 分桶，每页不超过 max_per_page；每行不超过 max_per_line
-        rng.shuffle(per_line_pool)
+        # 3. 随机洗牌，按上限投放
+        rng.shuffle(pool)
         per_page_count: dict[int, int] = {}
+        per_line_count: dict[tuple[int, int, int], int] = {}
+        per_true_char_count: dict[str, int] = {}
         placed = 0
-        for page_no, bi, li, line, cands in per_line_pool:
+
+        for cand in pool:
             if placed >= target:
                 break
-            if self._page_limit_reached(per_page_count, page_no):
+            line_key = (cand.key.page_number, cand.key.block_index, cand.key.line_index)
+            if per_page_count.get(cand.key.page_number, 0) >= self.cfg.max_per_page:
                 continue
-            # 每行投 1 个；从行内候选随机选一个 char_index
-            char_idx = rng.choice(cands)
-            true_ch = (line.text or "")[char_idx]
-            fake_options = CONFUSION_MAP.get(true_ch, ())
-            if not fake_options:
+            if per_line_count.get(line_key, 0) >= self.cfg.max_per_line:
                 continue
-            fake_ch = rng.choice(fake_options)
-            probe = Probe(
-                key=ProbeKey(page_no, bi, li, char_idx),
-                true_char=true_ch,
-                fake_char=fake_ch,
-            )
+            # 找出 fake_char=cand.char 的 true_char 候选 = 文档中真实存在的近形字
+            confusables = CONFUSION_MAP.get(cand.char, ())
+            true_options = [c for c in confusables if c in chars_in_doc and c != cand.char]
+            # 过滤掉已经达到 max_per_true_char 的 true_char
+            true_options = [c for c in true_options
+                            if per_true_char_count.get(c, 0) < self.cfg.max_per_true_char]
+            if not true_options:
+                # 关键产品口径：找不到"文中已存在的近形字"做 true_char，则跳过此候选
+                continue
+            true_ch = rng.choice(true_options)
+            probe = Probe(key=cand.key, true_char=true_ch, fake_char=cand.char)
             store.add(probe)
-            per_page_count[page_no] = per_page_count.get(page_no, 0) + 1
+            per_page_count[cand.key.page_number] = per_page_count.get(cand.key.page_number, 0) + 1
+            per_line_count[line_key] = per_line_count.get(line_key, 0) + 1
+            per_true_char_count[true_ch] = per_true_char_count.get(true_ch, 0) + 1
             placed += 1
-
-        # 4. 旧比例模式若不足 min_total 但池子还有空间，做一轮补足。
-        #    重要：此轮**仍然遵守 max_per_page / max_per_line**，绝不绕过页/行上限。
-        #    （早期实现允许在这里突破 max_per_page，会导致小项目所有 probe 砸到同一页，
-        #    严重影响校对体验且违反产品口径。）
-        if self.cfg.sand_count is None and placed < self.cfg.min_total:
-            for page_no, bi, li, line, cands in per_line_pool:
-                if placed >= self.cfg.min_total:
-                    break
-                if self._page_limit_reached(per_page_count, page_no):
-                    continue
-                if store.for_line(page_no, bi, li):
-                    continue  # 该行已投，遵守 max_per_line
-                char_idx = rng.choice(cands)
-                true_ch = (line.text or "")[char_idx]
-                fake_options = CONFUSION_MAP.get(true_ch, ())
-                if not fake_options:
-                    continue
-                fake_ch = rng.choice(fake_options)
-                store.add(Probe(
-                    key=ProbeKey(page_no, bi, li, char_idx),
-                    true_char=true_ch,
-                    fake_char=fake_ch,
-                ))
-                per_page_count[page_no] = per_page_count.get(page_no, 0) + 1
-                placed += 1
 
         return store
 
-    def _page_limit_reached(self, per_page_count: dict[int, int], page_no: int) -> bool:
-        if self.cfg.sand_count is not None:
-            return False
-        return per_page_count.get(page_no, 0) >= self.cfg.max_per_page
+
+# ──────────────────────────────────────────────────────────────────
+# Gallery 注入接口（供 VProof 调用）
+# ──────────────────────────────────────────────────────────────────
+
+def extras_for_gallery_char(store: Optional[ProbeStore], char: str) -> list[Probe]:
+    """返回所有"应当被掺入 ``char`` 的同字 gallery"的 probes。
+
+    VProof 拿到这些 probe 后，用 ``probe.key`` 去定位文档真实位置，构造对应
+    ``CharEntry`` 追加到 gallery 末尾。
+
+    若 ``store`` 为 None（评测未开启），返回空列表。
+    """
+    if store is None:
+        return []
+    return store.for_true_char(char)
 
 
 # ──────────────────────────────────────────────────────────────────
-# 显示空间 ↔ 真实空间映射
+# 观测接口（供 VProof 槽位编辑流程调用）
 # ──────────────────────────────────────────────────────────────────
 
-def apply_probes_to_display(text: str, probes: list[Probe]) -> str:
-    """把真实文本 ``text`` 按 ``probes`` 替换得到展示给用户的文本。
-
-    ``probes`` 列表必须按 ``char_index`` 升序（``ProbeStore`` 已保证）。
-    若某 probe 的 ``true_char`` 与 ``text[char_index]`` 不一致（说明真实文本
-    已被用户改过），跳过该 probe，返回原字符。
-    """
-    if not probes:
-        return text
-    chars = list(text)
-    for p in probes:
-        idx = p.key.char_index
-        if 0 <= idx < len(chars) and chars[idx] == p.true_char:
-            chars[idx] = p.fake_char
-    return "".join(chars)
-
-
-def reverse_display_to_true(
-    line_text_before: str,
-    displayed_new_text: str,
-    probes: list[Probe],
-) -> tuple[str, list[tuple[Probe, str]]]:
-    """把"用户编辑后的显示空间文本"还原回"真实空间文本"，并给出每个 probe 的判定。
-
-    判定原则：
-    - 显示文本和真实文本的对齐做不到完美（用户可能在 probe 之前/后插入或删字）。
-      因此采用**长度相同时按位置直接比对**的最简单策略；如果长度变化，
-      只要长度差异不大（≤ 2 字符），仍按头部对齐做比对；否则放弃判定，
-      所有 probe 标 ``edited_other``，并把整段文本作为真实文本写回（
-      用户已大幅改动）。
-
-    返回：(true_text_to_save, [(probe, observation)...])
-
-    重要不变量：
-    - 返回的 ``true_text_to_save`` **不含任何 fake_char**：
-      若用户保留了某 probe 的 fake_char，会被还原成 true_char 写回。
-    - 若用户在 probe 位置写了既非 true 也非 fake 的字符，原样保留
-      （视为用户的真实修改），probe 标 ``edited_other``。
-    """
-    if not probes:
-        return displayed_new_text, []
-
-    n_before = len(line_text_before)
-    n_now = len(displayed_new_text)
-
-    # 大幅改动 → 放弃逐位对齐，整段视为用户修改
-    if abs(n_now - n_before) > 2:
-        observations = [(p, "edited_other") for p in probes]
-        # 严格清洗：必须确保返回的真实文本里**没有任何已投放过的 fake_char**。
-        # 旧实现 "if true_char not in cleaned" 的守卫在 true_char 偶然出现在用户改写
-        # 文本里时会跳过替换，导致 fake_char 残留 → 写回 line.text → 污染最终导出。
-        # 现在对每个 probe 都至少替换一次（fake → true），即使 true_char 已存在；
-        # 然后再做一遍兜底扫描，确保没有任何 probe 的 fake_char 还留在结果里。
-        cleaned = displayed_new_text
-        for p in probes:
-            if p.fake_char and p.fake_char in cleaned:
-                cleaned = cleaned.replace(p.fake_char, p.true_char, 1)
-        # 兜底：可能某 probe 的 fake_char 仍残留（例如它在文本里出现了多次），
-        # 把它们全部替换成 true_char。这是写回真实文本前的最后一道防线。
-        for p in probes:
-            if p.fake_char and p.fake_char in cleaned:
-                cleaned = cleaned.replace(p.fake_char, p.true_char)
-        return cleaned, observations
-
-    chars = list(displayed_new_text)
-    observations: list[tuple[Probe, str]] = []
-    for p in probes:
-        idx = p.key.char_index
-        if idx >= len(chars):
-            observations.append((p, "deleted"))
-            continue
-        ch = chars[idx]
-        if ch == p.fake_char:
-            # 用户没察觉假象 —— 写回真实文本时还原
-            chars[idx] = p.true_char
-            observations.append((p, "missed"))
-        elif ch == p.true_char:
-            # 用户把假象改回了正字
-            observations.append((p, "corrected"))
-        else:
-            # 用户改成了别的字 —— 保留用户修改，不强制还原
-            observations.append((p, "edited_other"))
-
-    # ──────────────────────────────────────────────────────────
-    # 关键安全网 (Blocker A 修复)：small-change 路径下，用户在 probe 之前/后
-    # 插入或删除 1-2 个字符，会让真正含 fake_char 的位置漂移到 char_index ± δ。
-    # 上面的 ``chars[idx]`` 比对只看精确位置，错过了漂移后的 fake_char。
-    # 在这里做一次"全文 scrub"：对每个 probe，检查最终 chars 里是否仍残留它的
-    # ``fake_char``；若是，就把所有出现替换成 ``true_char``。
-    #
-    # 这是写回 ``line.text`` 前的最后一道防线 —— 即使前面所有判定都失误，
-    # 这一步也能保证返回的真实文本绝不含 probe 的 fake_char。
-    #
-    # 副作用 trade-off：若用户**有意**输入了与某 probe 的 fake_char 相同的
-    # 字符（例如输入"己"，而某 probe 的 fake_char 也是"己"），这里会被改成
-    # ``true_char``。这是已知且可接受的代价 —— 与污染最终导出文本相比，
-    # 偶尔被替换一个字符是远更轻的影响，并且用户可以重新输入。
-    # ──────────────────────────────────────────────────────────
-    cleaned_str = "".join(chars)
-    for p in probes:
-        if p.fake_char and p.fake_char != p.true_char and p.fake_char in cleaned_str:
-            cleaned_str = cleaned_str.replace(p.fake_char, p.true_char)
-    return cleaned_str, observations
-
-
-def observe_user_action(
-    store: ProbeStore,
+def observe_slot_edit(
+    store: Optional[ProbeStore],
     page_number: int,
     block_index: int,
     line_index: int,
-    line_text_before: str,
-    displayed_new_text: str,
-) -> str:
-    """便捷入口：在 UI 的"保存"路径上调用一次。
+    char_index: int,
+) -> bool:
+    """用户在 VProof 槽位编辑框对 ``(page, block, line, char_index)`` 做出修改时调用。
 
-    会就地更新 store 中相关 probe 的 observation，并返回应该写回 line.text
-    的真实文本。
+    如果该位置正好命中某个 probe，则将 observation 标 ``corrected`` 并返回
+    ``True``；否则返回 ``False`` 不做事。
     """
-    probes = store.for_line(page_number, block_index, line_index)
-    if not probes:
-        return displayed_new_text
-    true_text, results = reverse_display_to_true(line_text_before, displayed_new_text, probes)
-    for probe, obs in results:
-        # 一次"已观察"判定不应被后续重复保存覆写为更弱的状态。
-        # 优先级（高 → 低）：corrected > edited_other > missed > deleted > pending
-        priority = {"corrected": 4, "edited_other": 3, "missed": 2, "deleted": 1, "pending": 0}
-        if priority.get(obs, 0) >= priority.get(probe.observation, 0):
-            probe.observation = obs
-    return true_text
+    if store is None:
+        return False
+    key = ProbeKey(page_number, block_index, line_index, char_index)
+    probe = store.by_key(key)
+    if probe is None:
+        return False
+    probe.observation = "corrected"
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────
-# 评分 —— 输出抽样字符等级 / 区间，不输出伪精确的全量错误率
+# 评分
 # ──────────────────────────────────────────────────────────────────
 
 @dataclass
 class QualityReport:
     total_probes: int
     corrected: int
-    missed: int
-    edited_other: int
-    deleted: int
     pending: int
-    grade: str           # "A" / "B" / "C" / "D" / "INSUFFICIENT"
-    grade_label: str     # "优秀 / 良好 / 一般 / 待加强 / 样本不足"
-    band: str            # 如 "抽样字符假象识破 ≥ 85%"，不是全量正确率
-    raw_score: float     # 内部用，不作为 UI 全量百分比暴露
+    grade: str            # "A" / "B" / "C" / "D" / "INSUFFICIENT"
+    grade_label: str
+    band: str             # 简短描述区间
+    detect_ratio: float   # corrected / total （仅用于内部展示，不暴露假精度）
 
-    def to_dict(self) -> dict:
-        return asdict(self)
+
+_GRADE_LABELS = {
+    "A": "优秀",
+    "B": "良好",
+    "C": "一般",
+    "D": "较差",
+    "INSUFFICIENT": "样本不足",
+}
 
 
 def score(store: ProbeStore, *, min_observed_for_grade: int = 4) -> QualityReport:
     total = len(store)
-    corrected = missed = edited_other = deleted = pending = 0
-    for p in store.all():
-        if p.observation == "corrected":
-            corrected += 1
-        elif p.observation == "missed":
-            missed += 1
-        elif p.observation == "edited_other":
-            edited_other += 1
-        elif p.observation == "deleted":
-            deleted += 1
-        else:
-            pending += 1
-
-    judged = corrected + missed  # 只有这两类是干净的"是否识破"判定
-    if judged < min_observed_for_grade:
+    corrected = sum(1 for p in store.all() if p.observation == "corrected")
+    pending = total - corrected
+    if total < min_observed_for_grade:
         return QualityReport(
-            total_probes=total,
-            corrected=corrected,
-            missed=missed,
-            edited_other=edited_other,
-            deleted=deleted,
-            pending=pending,
-            grade="INSUFFICIENT",
-            grade_label="样本不足",
-            band="抽样字符观察不足，暂不给出等级",
-            raw_score=0.0,
+            total_probes=total, corrected=corrected, pending=pending,
+            grade="INSUFFICIENT", grade_label=_GRADE_LABELS["INSUFFICIENT"],
+            band=f"抽样字符过少（{total}/{min_observed_for_grade}）",
+            detect_ratio=0.0,
         )
-
-    raw = corrected / max(1, judged)
-    if raw >= 0.85:
-        grade, label, band = "A", "优秀", "抽样字符假象识破 ≥ 85%"
-    elif raw >= 0.65:
-        grade, label, band = "B", "良好", "抽样字符假象识破 65%–85%"
-    elif raw >= 0.40:
-        grade, label, band = "C", "一般", "抽样字符假象识破 40%–65%"
+    ratio = corrected / total if total else 0.0
+    if ratio >= 0.85:
+        grade = "A"
+    elif ratio >= 0.65:
+        grade = "B"
+    elif ratio >= 0.40:
+        grade = "C"
     else:
-        grade, label, band = "D", "待加强", "抽样字符假象识破 < 40%"
-
+        grade = "D"
+    band = f"抽样字符 {total}，识破 {corrected}（{int(round(ratio * 100))}%）"
     return QualityReport(
-        total_probes=total,
-        corrected=corrected,
-        missed=missed,
-        edited_other=edited_other,
-        deleted=deleted,
-        pending=pending,
-        grade=grade,
-        grade_label=label,
-        band=band,
-        raw_score=raw,
+        total_probes=total, corrected=corrected, pending=pending,
+        grade=grade, grade_label=_GRADE_LABELS[grade], band=band,
+        detect_ratio=ratio,
     )
 
 
 # ──────────────────────────────────────────────────────────────────
-# 配置回灌 —— SamplerConfig 可从 AppConfig 读取，避免硬编码魔法数
+# AppConfig → SamplerConfig
 # ──────────────────────────────────────────────────────────────────
 
-# AppConfig key -> (SamplerConfig field, type-cast)
 _SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
     "quality_probe_sand_count": ("sand_count", int),
     "quality_probe_sand_unit_chars": ("sand_unit_chars", int),
@@ -685,14 +584,11 @@ _SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
     "quality_probe_max_total": ("max_total", int),
     "quality_probe_max_per_page": ("max_per_page", int),
     "quality_probe_max_per_line": ("max_per_line", int),
+    "quality_probe_max_per_true_char": ("max_per_true_char", int),
 }
 
 
 def sampler_config_from_app_config() -> SamplerConfig:
-    """从 AppConfig 读取阈值，缺失键回落到 SamplerConfig 默认值。
-
-    Qt 不可用（CLI/测试环境）时静默回落。
-    """
     cfg = SamplerConfig()
     try:
         from app.core.app_config import AppConfig
@@ -714,25 +610,19 @@ def sampler_config_from_app_config() -> SamplerConfig:
 
 
 # ──────────────────────────────────────────────────────────────────
-# 混淆字表扩展 —— 支持 JSON sidecar 与运行时注册
+# 混淆字表运行时扩展
 # ──────────────────────────────────────────────────────────────────
 
-# 内部记录："扩展组"。集中保存允许后续重建 CONFUSION_MAP。
 _EXTRA_CONFUSABLES: list[tuple[str, ...]] = []
 
 
 def _rebuild_confusion_map() -> None:
-    """根据 ``_CONFUSABLES_RAW`` + ``_EXTRA_CONFUSABLES`` 重建 CONFUSION_MAP。"""
     global CONFUSION_MAP
     merged = list(_CONFUSABLES_RAW) + [tuple(g) for g in _EXTRA_CONFUSABLES]
     CONFUSION_MAP = _build_confusion_map(merged)
 
 
 def register_confusion_group(group: Iterable[str]) -> None:
-    """运行时追加一组形近字（去重后并入 CONFUSION_MAP）。
-
-    供 UI 设置面板 / 测试 / 项目热扩展使用。重复字符自动去重。
-    """
     chars = tuple(dict.fromkeys(c for c in group if c))
     if len(chars) < 2:
         return
@@ -741,11 +631,6 @@ def register_confusion_group(group: Iterable[str]) -> None:
 
 
 def _load_confusables_extra_file() -> None:
-    """启动时从 ``app/core/confusables_extra.json`` 加载用户/项目维护的扩展组。
-
-    JSON schema：``[["己","已","巳"], ["末","未"], ...]``。
-    缺文件、解析失败、格式不对都静默跳过 —— 这是软扩展点，绝不能让模块导入崩溃。
-    """
     import json
     from pathlib import Path
     try:
@@ -766,18 +651,16 @@ _load_confusables_extra_file()
 
 
 # ──────────────────────────────────────────────────────────────────
-# 持久化 —— ProbeStore 序列化为 JSON sidecar
+# 持久化 sidecar
 # ──────────────────────────────────────────────────────────────────
 
 _SIDECAR_SUFFIX = ".qprobe.json"
-_SIDECAR_VERSION = 1
+# Round 15 改了 Probe 语义：旧 v1 sidecar 的 (true_char, fake_char) 现在含义反了，
+# 一律不读，让 sampler 重采。
+_SIDECAR_VERSION = 2
 
 
 def sidecar_path_for_project(db_path: Optional[str]) -> Optional[str]:
-    """根据项目 ``.ocrproj`` 路径推导 probe sidecar 路径。
-
-    None / 空字符串 / 临时项目（无 db_path） → 返回 None，调用方应跳过持久化。
-    """
     if not db_path:
         return None
     return str(db_path) + _SIDECAR_SUFFIX
@@ -829,7 +712,6 @@ def store_from_dict(data: dict) -> ProbeStore:
 
 
 def save_store_to_path(store: ProbeStore, path: str) -> bool:
-    """写入 sidecar JSON。失败返回 False，不抛异常（持久化是辅助路径）。"""
     import json
     from pathlib import Path
     try:
@@ -843,7 +725,6 @@ def save_store_to_path(store: ProbeStore, path: str) -> bool:
 
 
 def load_store_from_path(path: str) -> Optional[ProbeStore]:
-    """读取 sidecar JSON；不存在/损坏均返回 None。"""
     import json
     from pathlib import Path
     try:

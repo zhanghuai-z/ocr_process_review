@@ -934,22 +934,13 @@ class _LinePair(QFrame):
         self.clicked.emit(self._idx)
 
     def _revert(self) -> None:
-        # 还原到 OCR 原始文本；如果原文本位置上有评测位，还原后仍需
-        # 覆盖 fake_char 以保证评测过程不被“一键跳过”在显示上消除。
+        # 还原到 OCR 原始文本。Round 15 后评测不再修改显示文本，
+        # 所以直接用 original_true 即可，无需 apply_probes_to_display。
         original_true = self._line.original_text or self._line.ocr_text or self._line.text or ""
-        store = qp.get_active_store()
-        original_display = original_true
-        if store is not None:
-            idx = _resolve_block_line_index(self._page, self._block, self._line)
-            if idx is not None:
-                bi, li = idx
-                probes = store.for_line(self._page.page_number, bi, li)
-                if probes:
-                    original_display = qp.apply_probes_to_display(original_true, probes)
         self._editor.blockSignals(True)
         # proof-slot-residual 第 1 任务：还原后也补空到槽位数
         _rev_canon, _ = _canonicalize_text_to_slots(
-            original_display, self._line.chars or []
+            original_true, self._line.chars or []
         )
         self._editor.setPlainText(_rev_canon)
         self._editor.blockSignals(False)

@@ -101,18 +101,18 @@ def test_displayed_text_active_store_no_probes_returns_line_text():
     assert displayed_text(line, page, block) == "hello"
 
 
-def test_displayed_text_with_probe_overlays_fake_char():
-    line = _line("今天我们来学习已经发生过的历史")
+def test_displayed_text_with_probe_does_NOT_overlay_line_text():
+    """Round 15 后：probe 不再修改显示文本， line.text 原样返回。"""
+    line = _line("今天我们来学习己经发生过的历史")
     block = _block([line])
     page = _page(1, [block])
     store = ProbeStore()
+    # 新语义：key.char_index 上本来就当 fake_char "己"， true_char "已" 是 gallery 归属
     store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"))
     set_active_store(store)
     shown = displayed_text(line, page, block)
-    assert shown[7] == "己"
-    # 关键：line.text 没被污染
-    assert "己" not in line.text
-    assert line.text[7] == "已"
+    assert shown == line.text
+    assert line.text[7] == "己"
 
 
 def test_save_displayed_edit_no_store_propagates_change():
@@ -131,19 +131,19 @@ def test_save_displayed_edit_no_store_no_change_returns_false():
     assert line.text == "abc"
 
 
-def test_save_displayed_edit_with_probe_strips_fake_char_from_line_text():
-    """端到端：用户漏改 fake_char 时，line.text 仍是真实文本。"""
-    line = _line("今天我们来学习已经发生过的历史")
+def test_save_displayed_edit_with_probe_does_not_touch_unrelated_text():
+    """Round 15 后：save_displayed_edit 不再反向剥离 fake_char，
+    只有调用者传进来的文本才会被写入 line.text。"""
+    line = _line("今天我们来学习己经发生过的历史")
     block = _block([line])
     page = _page(1, [block])
     store = ProbeStore()
     store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"))
     set_active_store(store)
-    shown = displayed_text(line, page, block)   # idx 7 = "己"
-    # 用户没改 → 保存原显示文本
-    save_displayed_edit(line, page, block, shown)
-    assert "己" not in line.text, f"line.text 被污染：{line.text!r}"
-    assert line.text[7] == "已"
+    shown = displayed_text(line, page, block)
+    # 用户未改 → 保存不发生任何变化
+    assert save_displayed_edit(line, page, block, shown) is False
+    assert line.text[7] == "己"
 
 
 def test_save_displayed_edit_block_not_in_page_falls_back_to_direct_write():

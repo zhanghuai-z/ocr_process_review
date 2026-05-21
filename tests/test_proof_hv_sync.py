@@ -200,11 +200,14 @@ def test_quality_stats_dialog_opens_and_shows_no_active_store():
     dlg.deleteLater()
 
 
-def test_quality_stats_dialog_toggle_on_then_off():
+def test_quality_stats_dialog_toggle_on_then_off(monkeypatch):
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    from PySide6.QtWidgets import QMessageBox
     from app.models import Char
-    # 用一个稍长项目让 sampler 可能投放成功
-    line = Line(text="今天我们来学习已经发生过的历史事件本身", confidence=0.9, bbox=BBox(0, 0, 240, 20))
+    # 防止 dialog 在零样本场景弹出阻塞模态
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    # 文本中刻意包含已知互为近形的字（己/已/巳、体/休、拼/并）以保证 sampler 能投放
+    line = Line(text="今天已学己事拼并体休巳过本身", confidence=0.9, bbox=BBox(0, 0, 240, 20))
     line.chars = [
         Char(
             char=ch,
@@ -959,11 +962,13 @@ def test_quality_stats_dialog_exposes_sand_density_controls():
     dlg.deleteLater()
 
 
-def test_quality_stats_dialog_saves_density_immediately_and_resamples_live(tmp_path):
+def test_quality_stats_dialog_saves_density_immediately_and_resamples_live(tmp_path, monkeypatch):
     from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QMessageBox
     from app.core.app_config import AppConfig
     from app.core import quality_probe as qp_mod
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
 
     QSettings.setDefaultFormat(QSettings.Format.IniFormat)
     QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(tmp_path))
@@ -975,7 +980,7 @@ def test_quality_stats_dialog_saves_density_immediately_and_resamples_live(tmp_p
 
     refreshes = {"count": 0}
     project = _make_project_with_char_crops(
-        "今天我们来学习已经发生过的历史事件本身",
+        "今天已学己事拼并体休巳过本身免兔末未鸟乌",
         n_pages=3,
         lines_per_page=8,
     )
