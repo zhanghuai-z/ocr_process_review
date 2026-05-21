@@ -60,13 +60,12 @@ from app.ui.widgets.image_viewer import ImageViewer
 logger = logging.getLogger(__name__)
 
 CHAR_LIST_THUMB = 18
-# proof-bbox-boxedit 第 4 任务：same-char gallery 上一轮还有"压字 / 半字"
-# 主要原因是 source crop = 27px 上采到 31×31，宽度比例 < 1 的 token (CJK 单字)
-# 还行，但宽 token（formula / 多字）会被严重压扁。把 thumb 抬到 34，delegate
-# 框抬到 44 (34+10)，里圈 padding 也加，让 token 不再被压。
-GALLERY_THUMB   = 34
-GALLERY_ITEMS_PER_ROW = 8
-GALLERY_MAX_ROWS = 4
+# vproof-ime-persist-visibility round 12 任务 1：相同字索引"挤到看不见"，再
+# 抬尺寸：thumb 34→56（CJK 56px 才真正易读），每行 8→6，最多 4→3 行。这把
+# 单 cell 像素面积 ×2.6，行间距由 +14 提到 +18，外框 +50。
+GALLERY_THUMB   = 56
+GALLERY_ITEMS_PER_ROW = 6
+GALLERY_MAX_ROWS = 3
 LOW_CONF        = 0.80
 DEFAULT_CONFUSABLE_CANDIDATES = {
     # 田/由/甲/申 系
@@ -307,8 +306,9 @@ class _GalleryModel(QAbstractListModel):
 
 
 class _GalleryDelegate(QStyledItemDelegate):
-    # proof-bbox-boxedit 第 4 任务：从 +8 抬到 +10，避免压字；里圈 padding 维持 2
-    SIZE = GALLERY_THUMB + 10
+    # vproof-ime-persist-visibility round 12：+10 → +14，让 56px 缩略图周围
+    # 留出 7px 内圈呼吸空间；总 cell 70×70，CJK 字在里面是真易读了。
+    SIZE = GALLERY_THUMB + 14
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         r = option.rect
@@ -471,9 +471,40 @@ class _GalleryListView(QListView):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._gallery_owner: Optional["VProofPanel"] = None
+        # vproof-ime-persist-visibility round 12 任务 2：QListView 默认不接 IME，
+        # 中文输入法不会把 commit 字符串发到这里。打开 WA_InputMethodEnabled，
+        # 并通过 inputMethodQuery 声明 ImEnabled=True，让 IME 真正把 commit
+        # string 通过 inputMethodEvent 投到本控件。
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
 
     def set_gallery_owner(self, owner: "VProofPanel") -> None:
         self._gallery_owner = owner
+
+    def inputMethodQuery(self, query):  # type: ignore[override]
+        # 必须告诉 IME 自己 enabled，否则 inputMethodEvent 不会派过来
+        if query == Qt.InputMethodQuery.ImEnabled:
+            return True
+        return super().inputMethodQuery(query)
+
+    def inputMethodEvent(self, event) -> None:  # type: ignore[override]
+        """vproof-ime-persist-visibility round 12 任务 2：真实中文 IME 闭环。
+
+        中文/日文 IME 不走 keyPressEvent 带 text；它走 QInputMethodEvent：
+          - preeditString()：候选条还在拼，不要落到模型上（吞掉，不渲染）
+          - commitString()：用户确认了，整段字符串送过来——这里就是真实输入。
+
+        commit string 直接当一段新文本覆盖当前 entry（可能多字，比如"好的"，
+        _gallery_direct_overwrite 内部走 _apply_replacement_to_selected，已
+        经支持多字 token）。"""
+        owner = self._gallery_owner
+        commit = event.commitString() if event else ""
+        if owner is None or not commit:
+            super().inputMethodEvent(event)
+            return
+        if owner._gallery_direct_overwrite(commit):
+            event.accept()
+            return
+        super().inputMethodEvent(event)
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         owner = self._gallery_owner
@@ -506,7 +537,6 @@ class _GalleryListView(QListView):
                 return
         super().keyPressEvent(event)
 
-
 class VProofPanel(QWidget):
     """纵校面板：参照 ui.jpg 三区域布局（左单字列表 + 顶gallery + 底OCR/图）。"""
 
@@ -537,6 +567,13 @@ class VProofPanel(QWidget):
         self._external_refresh_timer.setInterval(80)
         self._external_refresh_timer.timeout.connect(self._do_external_refresh)
         self._pending_external_lines: set[int] = set()
+        # vproof-ime-persist-visibility round 12 任务 3+4：本地直输/槽位编辑
+        # 之后需要把 _text_edit 落盘到 page.line.text 并重建 _char_svc，
+        # 否则切走再回来 / 字索引计数都是旧的。debounce 120ms 合并连续按键。
+        self._local_commit_timer = QTimer(self)
+        self._local_commit_timer.setSingleShot(True)
+        self._local_commit_timer.setInterval(120)
+        self._local_commit_timer.timeout.connect(self._commit_local_edits_and_refresh)
         self._build_ui()
         # H/V 校对联动：订阅其他 panel 的编辑事件，本 panel 自己 publish 的事件
         # 通过 origin == id(self) 过滤掉以避免回路。
@@ -829,6 +866,9 @@ class VProofPanel(QWidget):
         )
         # 让方向键 / Shift+方向键 / Ctrl+点击 走 Qt 原生 ExtendedSelection 行为。
         self._gallery_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # round 12 任务 2：QAbstractItemView 构造时会把 WA_InputMethodEnabled
+        # 设回 false，需要在所有 setXxx 之后再补一次，确保 IME 真的能投到这。
+        self._gallery_view.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self._gallery_view.selectionModel().currentChanged.connect(
             self._on_gallery_current_changed
         )
@@ -869,15 +909,14 @@ class VProofPanel(QWidget):
         return box
 
     def _resize_gallery_for_entries(self, count: int) -> None:
-        # proof-interaction-slots 第 5 任务：相同字索引窗口更疏开。
-        # item 行高从 +8 提到 +14；外框冗余从 +30 提到 +44，让按钮/标题/
-        # gallery 三者之间有清晰间距，不再压字。
+        # vproof-ime-persist-visibility round 12 任务 1：item_h 同步抬高到
+        # GALLERY_THUMB + 18；外框 +50；缩略图 70×70 + 行间距 + 标题/按钮一起。
         rows = min(
             GALLERY_MAX_ROWS,
             max(1, (max(1, count) + GALLERY_ITEMS_PER_ROW - 1) // GALLERY_ITEMS_PER_ROW),
         )
-        item_h = GALLERY_THUMB + 14
-        self._gallery_box.setFixedHeight(rows * item_h + 44)
+        item_h = GALLERY_THUMB + 18
+        self._gallery_box.setFixedHeight(rows * item_h + 50)
 
     def _go_next_gallery(self) -> None:
         """proof-interaction-slots 第 6 任务：Alt+→ 在 gallery 里跳下一个出现。"""
@@ -1696,6 +1735,8 @@ class VProofPanel(QWidget):
             # 同步预填 slot 输入框（不抢焦点）
             if hasattr(self, "_slot_edit_input") and not self._slot_edit_input.hasFocus():
                 self._slot_edit_input.setText(text)
+            # round 12 任务 3+4：debounce 120ms 把编辑落到 page.line.text + 重建索引
+            self._local_commit_timer.start()
             return True
         return False
 
@@ -1716,7 +1757,91 @@ class VProofPanel(QWidget):
         self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
         if hasattr(self, "_slot_edit_input") and not self._slot_edit_input.hasFocus():
             self._slot_edit_input.clear()
+        # round 12 任务 3+4：同样要落到 page 模型 + 重建字索引
+        self._local_commit_timer.start()
         return True
+
+    # ───── vproof-ime-persist-visibility round 12 任务 3+4：本地编辑落盘 ─────
+    def _commit_local_edits_and_refresh(self) -> None:
+        """把 _text_edit 当前内容保存到 page.line.text，并重建字索引/字列表。
+
+        本轮硬验收项 3 + 4 的核心：
+          - 任务 3：把"也"改成"好"切走再回来不应回退 —— 之前
+            _gallery_direct_overwrite 只动 _text_edit 的 QTextDocument，没回写
+            到 page.line.text，所以 _on_char_clicked 再次从 _char_svc.query 取
+            出来还是旧"也"。
+          - 任务 4：改"也"→"好"以后"也"的计数不变 —— 同样因为 _char_svc 没
+            重建，频次是冻结的。
+        debounce 120ms 走这里一次：保存 → 重建 _char_svc → 重建 _char_list →
+        恢复用户视角（之前选中的字 / gallery 行）。
+
+        诚实交代：走的是和 _do_external_refresh 同样的全量重建
+        (_char_svc.build(all pages))，没改成增量；超大工程上单次会有几百
+        ms 卡顿。本轮不动这一层。"""
+        if not self._pages:
+            return
+        if self._text_edit.toPlainText() == self._loaded_text:
+            return
+        prev_char = self._selected_char
+        sel_model = self._gallery_view.selectionModel() if self._gallery_view else None
+        prev_row = (
+            sel_model.currentIndex().row()
+            if sel_model and sel_model.currentIndex().isValid()
+            else 0
+        )
+        prev_entry = self._current_candidate_entry
+        # 1) 落盘
+        self._save_page_text()
+        # 2) 重建字索引
+        self._char_svc.build(self._pages)
+        # 3) 重建左侧字列表
+        self._rebuild_char_list()
+        # 4) 恢复字列表选中
+        target_char = prev_char
+        if prev_char:
+            still_there = any(
+                self._char_list.item(i).data(Qt.ItemDataRole.UserRole) == prev_char
+                for i in range(self._char_list.count())
+            )
+            if not still_there and prev_entry is not None:
+                new_char = self._lookup_token_at_entry_position(prev_entry)
+                if new_char:
+                    target_char = new_char
+        if target_char:
+            for i in range(self._char_list.count()):
+                it = self._char_list.item(i)
+                if it.data(Qt.ItemDataRole.UserRole) == target_char:
+                    self._char_list.blockSignals(True)
+                    self._char_list.setCurrentRow(i)
+                    self._char_list.blockSignals(False)
+                    self._on_char_clicked(it)
+                    break
+        # 5) 恢复 gallery 当前位置
+        new_count = self._gallery_model.rowCount()
+        if new_count > 0:
+            row = max(0, min(prev_row, new_count - 1))
+            idx = self._gallery_model.index(row, 0)
+            self._gallery_view.setCurrentIndex(idx)
+            self._sync_gallery_entry(idx)
+
+    def _lookup_token_at_entry_position(self, entry: "CharEntry") -> Optional[str]:
+        """根据 (page_number, block_order, line_idx, char_idx) 在当前 _pages
+        模型里查那个槽位现在是什么字。改字后原字消失时用它找到新字。"""
+        if not self._pages:
+            return None
+        for page in self._pages:
+            if page.page_number != entry.page_number:
+                continue
+            for block in page.blocks:
+                if block.order != entry.block_order:
+                    continue
+                if not (0 <= entry.line_idx < len(block.lines)):
+                    continue
+                line = block.lines[entry.line_idx]
+                txt = line.text or ""
+                if 0 <= entry.char_idx < len(txt):
+                    return txt[entry.char_idx]
+        return None
 
     def _select_all_gallery(self) -> None:
         """proof-slot-residual 第 2 任务：Ctrl+A / 按钮全选当前字所有出现。"""

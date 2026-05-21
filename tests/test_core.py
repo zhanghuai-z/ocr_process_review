@@ -5753,11 +5753,12 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     assert panel._gallery_view.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert "background:#ffffff" in panel._gallery_view.styleSheet()
     assert "background:#ffffff" in panel._char_list.styleSheet()
-    # proof-bbox-boxedit round 9: thumb 从 27 抬到 34 修"压字"，sizeHint 上限同步 ≤ 50
+    # proof-bbox-boxedit round 9: thumb 从 27 抬到 34；round 12 再抬到 56
+    # (CJK 真实可读)，sizeHint 上限同步放宽到 ≤ 80
     assert v_proof.GALLERY_THUMB >= 30
     assert v_proof.CHAR_LIST_THUMB == 18
     assert panel._left_box.maximumWidth() <= 170
-    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 50
+    assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 80
     assert panel._gallery_box.parentWidget() is panel._proof_column
     assert panel._ocr_text_box.parentWidget() is panel._proof_column
     assert panel._candidate_box.parentWidget() is panel._proof_column
