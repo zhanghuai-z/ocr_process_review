@@ -216,6 +216,14 @@ class QualityStatsDialog(QDialog):
         self._density_feedback = ""
         self._build_ui()
         self._refresh_view()
+        # Round 17 实时刷新：订阅 probe.observed → 每次更正立刻刷新本窗 + gallery
+        try:
+            from app.core.proof_state_bus import ProofStateBus
+            self._unsub_probe = ProofStateBus.instance().subscribe(
+                qp.TOPIC_PROBE_OBSERVED, self._on_probe_observed,
+            )
+        except Exception:
+            self._unsub_probe = None
 
     # ── UI ─────────────────────────────────────────────────────
 
@@ -389,6 +397,27 @@ class QualityStatsDialog(QDialog):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _on_probe_observed(self, **_payload) -> None:
+        """Round 17：probe.observed 事件回调 — 实时刷新评测窗 + 通知 panel 刷新 gallery。"""
+        try:
+            self._refresh_panels()
+        except Exception:
+            pass
+        try:
+            self._refresh_view()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):  # type: ignore[override]
+        unsub = getattr(self, "_unsub_probe", None)
+        if callable(unsub):
+            try:
+                unsub()
+            except Exception:
+                pass
+            self._unsub_probe = None
+        super().closeEvent(event)
 
     def _refresh_view(self) -> None:
         store = qp.get_active_store()

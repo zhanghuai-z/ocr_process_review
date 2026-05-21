@@ -649,10 +649,11 @@ class VProofPanel(QWidget):
         self._btn_next_page = QPushButton("下一页 →")
         self._btn_save = QPushButton("✎ 保存  Ctrl+S")
         self._btn_save.setObjectName("primaryBtn")
-        self._btn_ok = QPushButton("✓ 确认本页")
+        # Round 17：移除"确认本页"按钮。
+        # 纵校以"字"为单位推进（gallery → 槽位逐字），整页一键 OK 的语义不属于
+        # 纵校；行级 OK 标记由横校承担（HProof 行右上角已有"✓"），这里不再重复。
 
-        for btn in (self._btn_prev_page, self._btn_next_page,
-                    self._btn_save, self._btn_ok):
+        for btn in (self._btn_prev_page, self._btn_next_page, self._btn_save):
             btn.setMinimumHeight(30)
             tl.addWidget(btn)
 
@@ -688,7 +689,6 @@ class VProofPanel(QWidget):
         self._btn_prev_page.clicked.connect(self._prev_page)
         self._btn_next_page.clicked.connect(self._next_page)
         self._btn_save.clicked.connect(self._save_page_text)
-        self._btn_ok.clicked.connect(self._mark_page_ok)
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_page_text)
         QShortcut(QKeySequence("PageUp"), self, activated=self._prev_page)
@@ -702,9 +702,8 @@ class VProofPanel(QWidget):
         # 在 text_edit / batch_input / gallery 任何地方都能切到上/下一个字。
         QShortcut(QKeySequence("Ctrl+."), self, activated=self._step_char_list_next)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self._step_char_list_prev)
-        # 整页确认（= 点 ✅ 当前页）。Ctrl+Return 不和 _text_edit 原生快捷键冲突。
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._mark_page_ok)
-        QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._mark_page_ok)
+        # Round 17：去掉 Ctrl+Return / Ctrl+Enter 的"整页确认"绑定 ——
+        # 纵校无"页级 OK"语义。
 
     def _build_char_list(self) -> QWidget:
         box = QWidget()
@@ -1131,6 +1130,12 @@ class VProofPanel(QWidget):
         for tok in tokens:
             probes = qp.extras_for_gallery_char(store, tok)
             for probe in probes:
+                # Round 17：已 corrected 的 probe 不再作为"假象"展示。
+                # · 真实改字路径：line.text 已写为 true_char，自动出现在
+                #   _char_svc.query(tok) 里 —— 跳过避免重复。
+                # · 无损识别路径：用户已宣告识别完成，extras 也不再展示。
+                if probe.observation == "corrected":
+                    continue
                 key = probe.key
                 # 查找 page / block / line
                 page_idx = None
@@ -1732,6 +1737,7 @@ class VProofPanel(QWidget):
             )
             self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
         # 质量探针观测：用户针对某个槽位动了手，如果该位是 probe，则记 corrected
+        any_probe_hit = False
         if applied:
             store = qp.get_active_store()
             if store is not None:
@@ -1739,9 +1745,13 @@ class VProofPanel(QWidget):
                     bi = _line_block_index(self._pages, e.page_number, e.line)
                     if bi is None:
                         continue
-                    qp.observe_slot_edit(
+                    if qp.observe_slot_edit(
                         store, e.page_number, bi, e.line_idx, e.char_idx,
-                    )
+                    ):
+                        any_probe_hit = True
+        if any_probe_hit:
+            # Round 17：corrected probe 立刻进入正确集合 —— gallery 原地刷新。
+            self._refresh_current_char_gallery()
         return applied
 
     def _mark_selected_observed(self) -> None:
@@ -1783,11 +1793,30 @@ class VProofPanel(QWidget):
                 f"标记已识别：{hit}/{len(entries)} 处命中 probe（已记为 corrected，未改正文）"
             )
             self._status_lbl.setStyleSheet("color: #1a73e8; font-size: 12px;")
+            # Round 17：corrected probe 立刻从 extras 中消失（"进入正确集合"语义）
+            self._refresh_current_char_gallery()
         else:
             self._status_lbl.setText(
                 f"标记已识别：所选 {len(entries)} 处均非 probe（不计分）"
             )
             self._status_lbl.setStyleSheet("color: #666; font-size: 12px;")
+
+    def _refresh_current_char_gallery(self) -> None:
+        """Round 17：原地重建当前 selected_char 的 gallery（保持 _selected_char 不变）。
+
+        被 probe.observation 翻转后调用：保证 corrected probe 立即从 extras 退出，
+        以及"真正改字成 true_char"后该位置以 _char_svc 正常 entry 形式出现。
+        """
+        tok = self._selected_char
+        if not tok:
+            return
+        try:
+            entries = list(self._char_svc.query(tok))
+            entries.extend(self._extras_for_tokens([tok]))
+            self._gallery_model.set_entries(entries)
+            self._resize_gallery_for_entries(len(entries))
+        except Exception:
+            pass
 
     def _apply_batch_input(self) -> None:
         """proof-slot-residual 第 2 任务：行内输入框 + Enter / 应用按钮。"""
@@ -2275,22 +2304,7 @@ class VProofPanel(QWidget):
             self._char_svc.build(self._pages)
             self._rebuild_char_list()
 
-    def _mark_page_ok(self) -> None:
-        if not self._pages:
-            return
-        page = self._pages[self._current_page_idx]
-        for _block, line, _line_idx in iter_unique_page_text_lines(page):
-            if line.proof_status == ProofStatus.UNCHECKED:
-                line.proof_status = ProofStatus.OK
-                self._bus.publish(
-                    "line.proof_changed",
-                    page_id=page.id,
-                    line_id=line.id,
-                    status=ProofStatus.OK.value,
-                    origin=id(self),
-                )
-        self.proof_saved.emit()
-        self._status_lbl.setText("本页已确认")
+    # Round 17：页级 OK 标记已删除（不属于纵校语义）。
 
     # ─────────────────── 翻页 ───────────────────────────────
 

@@ -174,11 +174,11 @@ def test_sampler_skips_when_no_in_doc_confusable_exists():
     assert len(store) == 0
 
 
-def test_sampler_max_per_true_char_default_one():
-    """默认 max_per_true_char=1：单个 gallery 最多 1 个假象 crop。"""
+def test_sampler_max_per_true_char_respects_explicit_cap():
+    """Round 17：默认 max_per_true_char 已放宽到 99；显式压回 1 仍生效。"""
     project = _doc_with_both("体", "休", n_fake=20)
     cfg = SamplerConfig(target_ratio=1.0, seed=42, max_per_page=20,
-                        max_per_line=1)  # max_per_true_char 取默认 1
+                        max_per_line=1, max_per_true_char=1)
     store = ProbeSampler(cfg).sample(project)
     by_true = {}
     for p in store.all():

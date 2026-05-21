@@ -365,14 +365,21 @@ def count_existing_cjk_crop_chars(line: Line) -> int:
 
 @dataclass
 class SamplerConfig:
-    target_ratio: float = 0.025
+    """掺沙采样配置。
+
+    Round 17：上一轮 (max_per_page=2, max_per_line=1, max_per_true_char=1,
+    max_total=35) 把"密度"挤成"硬上限"，导致 1000 字文档配置 "每千字 20" 也只
+    出 2~4 颗沙。本轮把硬上限全部放宽，让 ``target_density`` 真正决定投放数
+    （仅保留极少量防御性上限以避免病态文档下整行/整页爆炸）。
+    """
+    target_ratio: float = 0.02
     sand_count: Optional[int] = None
     sand_unit_chars: int = 1000
-    min_total: int = 8
-    max_total: int = 35
-    max_per_page: int = 2
-    max_per_line: int = 1
-    max_per_true_char: int = 1   # 单个同字 gallery 最多掺几个假象 crop（默认 1 = "整集合不假象化")
+    min_total: int = 4
+    max_total: int = 999          # 仅作硬性保险（数千字工程也不会触发）
+    max_per_page: int = 999       # 不再按页限流，密度自己决定
+    max_per_line: int = 5         # 单行不超过 5 颗，避免病态短行被打满
+    max_per_true_char: int = 99   # 单字 gallery 不再被强行卡 1
     seed: Optional[int] = None
 
     def target_density(self) -> float:
@@ -498,6 +505,12 @@ def extras_for_gallery_char(store: Optional[ProbeStore], char: str) -> list[Prob
 # 观测接口（供 VProof 槽位编辑流程调用）
 # ──────────────────────────────────────────────────────────────────
 
+#: 通过事件总线广播：每当一个 probe 被标 corrected 时发布，载荷里带
+#: page/block/line/char_index/true_char/fake_char。QualityStatsDialog 订阅
+#: 此事件以做实时统计刷新。
+TOPIC_PROBE_OBSERVED = "probe.observed"
+
+
 def observe_slot_edit(
     store: Optional[ProbeStore],
     page_number: int,
@@ -507,8 +520,9 @@ def observe_slot_edit(
 ) -> bool:
     """用户在 VProof 槽位编辑框对 ``(page, block, line, char_index)`` 做出修改时调用。
 
-    如果该位置正好命中某个 probe，则将 observation 标 ``corrected`` 并返回
-    ``True``；否则返回 ``False`` 不做事。
+    如果该位置正好命中某个 probe，则将 observation 标 ``corrected``、
+    通过 ProofStateBus 广播 ``probe.observed`` 事件、并返回 ``True``；
+    否则返回 ``False`` 不做事。
     """
     if store is None:
         return False
@@ -516,7 +530,22 @@ def observe_slot_edit(
     probe = store.by_key(key)
     if probe is None:
         return False
+    was_pending = probe.observation != "corrected"
     probe.observation = "corrected"
+    if was_pending:
+        try:
+            from app.core.proof_state_bus import ProofStateBus
+            ProofStateBus.instance().publish(
+                TOPIC_PROBE_OBSERVED,
+                page_number=page_number,
+                block_index=block_index,
+                line_index=line_index,
+                char_index=char_index,
+                true_char=probe.true_char,
+                fake_char=probe.fake_char,
+            )
+        except Exception:
+            pass
     return True
 
 
