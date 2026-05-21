@@ -742,10 +742,27 @@ class VProofPanel(QWidget):
         col.addWidget(self._ocr_text_box, 1)
 
         self._viewer_box = self._build_viewer()
+        # vproof-window-balance round 13：窗口本身平衡，不是再放大缩略图。
+        # 1) proof_column 必须至少装得下 gallery 一行 6 个 56px 缩略图：
+        #    6 *(THUMB + 8 spacing margin) + 内框 padding ≈ 6*64 + 40 ≈ 424。
+        #    再留一点 OCR 文本/候选区可用空间 → 设 520。
+        # 2) viewer_box 不再"独吞 4 倍"；给它一个合理下限即可，让用户拖
+        #    splitter 时不会缩没。
+        # 3) stretchFactor 改成 1:1，让用户最大化窗口时两边等比例增长，
+        #    而不是把所有新空间都给图片。
+        # 4) setSizes 给出第一次显示时的明确尺寸，避免 Qt 用 sizeHint
+        #    自动给图片偏大的初值（这正是"怎么图片还变大了"的来源）。
+        proof_min_w = max(
+            520,
+            GALLERY_ITEMS_PER_ROW * (GALLERY_THUMB + 8) + 40,
+        )
+        self._proof_column.setMinimumWidth(proof_min_w)
+        self._viewer_box.setMinimumWidth(300)
         self._content_split.addWidget(self._proof_column)
         self._content_split.addWidget(self._viewer_box)
         self._content_split.setStretchFactor(0, 1)
-        self._content_split.setStretchFactor(1, 4)
+        self._content_split.setStretchFactor(1, 1)
+        self._content_split.setSizes([proof_min_w + 40, 720])
         root.addWidget(self._content_split)
         return box
 
