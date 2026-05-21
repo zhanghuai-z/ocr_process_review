@@ -25,7 +25,7 @@ from typing import List, Optional, Protocol, Tuple
 import cv2
 import numpy as np
 from PySide6.QtCore import (
-    QAbstractListModel, QModelIndex, QSize, Qt, Signal,
+    QAbstractListModel, QModelIndex, QSize, Qt, QTimer, Signal,
 )
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtGui import (
@@ -451,6 +451,62 @@ class _SlotAwareTextEdit(QPlainTextEdit):
 # 纵校面板
 # ─────────────────────────────────────────────────────────────
 
+
+class _GalleryListView(QListView):
+    """vproof-direct-overwrite-residual：相同字索引 gallery 的 QListView 子类。
+
+    在 keyPressEvent 里拦截"光标焦点在 gallery 时的直接输入"：
+      - 单字符可打印键（无 Ctrl/Alt/Meta）→ 覆盖当前 entry。
+      - Backspace / Delete（无修饰键）→ 把当前 entry 填成空白槽。
+    其它键全部 super()，让 Qt 原生 ExtendedSelection / Ctrl+A / Esc /
+    Ctrl+Alt+方向键等都正常工作。
+
+    这是 round 11 的核心修复：上一轮 round 10 把直输逻辑挂在 panel 的
+    eventFilter 上，但 `_sync_gallery_entry` 末尾会 `_slot_edit_input.setFocus()`，
+    导致用户选完 entry 之后键盘焦点根本不在 gallery_view，eventFilter
+    永远不会被触发。本轮把焦点保留在 gallery 上，并且把直输逻辑直接做
+    成 view 子类的 override，焦点流是真的。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._gallery_owner: Optional["VProofPanel"] = None
+
+    def set_gallery_owner(self, owner: "VProofPanel") -> None:
+        self._gallery_owner = owner
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        owner = self._gallery_owner
+        if owner is None:
+            super().keyPressEvent(event)
+            return
+        mods = event.modifiers()
+        # 任何 Ctrl/Alt/Meta（含 Ctrl+A 全选、Ctrl+Alt+→ 步进、Alt+↑ 跨行）一律放行
+        disallowed = (
+            Qt.KeyboardModifier.ControlModifier
+            | Qt.KeyboardModifier.AltModifier
+            | Qt.KeyboardModifier.MetaModifier
+        )
+        if mods & disallowed:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        # Backspace / Delete 裸键 → 把当前槽位填空白（保留长度）
+        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            if owner._gallery_direct_blank():
+                event.accept()
+                return
+            super().keyPressEvent(event)
+            return
+        # 其它可打印单字符 → 覆盖当前 entry
+        text = event.text()
+        if len(text) == 1 and text.isprintable() and not text.isspace():
+            if owner._gallery_direct_overwrite(text):
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
 class VProofPanel(QWidget):
     """纵校面板：参照 ui.jpg 三区域布局（左单字列表 + 顶gallery + 底OCR/图）。"""
 
@@ -474,6 +530,13 @@ class VProofPanel(QWidget):
         # Phase 22 blocker 1：_load_page 后存基线文本，用于 _on_external_line_changed
         # 判断"_text_edit 是否有未保存输入"，避免外部同步覆盖用户在编辑的内容。
         self._loaded_text: str = ""
+        # vproof-direct-overwrite-residual round 11 任务 2：外部事件 → 重渲染
+        # 通过 QTimer 单次延后合并。详见 _on_external_line_changed 的注释。
+        self._external_refresh_timer = QTimer(self)
+        self._external_refresh_timer.setSingleShot(True)
+        self._external_refresh_timer.setInterval(80)
+        self._external_refresh_timer.timeout.connect(self._do_external_refresh)
+        self._pending_external_lines: set[int] = set()
         self._build_ui()
         # H/V 校对联动：订阅其他 panel 的编辑事件，本 panel 自己 publish 的事件
         # 通过 origin == id(self) 过滤掉以避免回路。
@@ -741,7 +804,8 @@ class VProofPanel(QWidget):
         batch_row.addWidget(self._batch_clear_btn)
         layout.addLayout(batch_row)
 
-        self._gallery_view = QListView()
+        self._gallery_view = _GalleryListView()
+        self._gallery_view.set_gallery_owner(self)
         self._gallery_view.setModel(self._gallery_model)
         self._gallery_view.setItemDelegate(_GalleryDelegate(self._gallery_view))
         self._gallery_view.setViewMode(QListView.ViewMode.IconMode)
@@ -1600,6 +1664,60 @@ class VProofPanel(QWidget):
         )
         self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
 
+    # ─── vproof-direct-overwrite-residual round 11：gallery 直输回调 ───
+    def _gallery_direct_overwrite(self, text: str) -> bool:
+        """_GalleryListView.keyPressEvent 调用：把单字 ``text`` 覆盖当前 entry。
+
+        与 _apply_slot_edit_input 同一管道（清掉 gallery 多选 → 走
+        _apply_replacement_to_selected 的 fallback 路径 → 还原选区），但不读
+        _slot_edit_input、不需要用户切焦点。返回 True 表示已处理（按键应被吞）。
+        """
+        entry = self._current_candidate_entry
+        if entry is None:
+            return False
+        sel = self._gallery_view.selectionModel()
+        saved = list(sel.selectedIndexes()) if sel else []
+        cur_idx = sel.currentIndex() if sel else QModelIndex()
+        if sel:
+            sel.clearSelection()
+        try:
+            applied = self._apply_replacement_to_selected(text, fallback_entry=entry)
+        finally:
+            if sel:
+                for idx in saved:
+                    sel.select(idx, sel.SelectionFlag.Select)
+                if cur_idx.isValid():
+                    sel.setCurrentIndex(cur_idx, sel.SelectionFlag.NoUpdate)
+        if applied:
+            self._status_lbl.setText(
+                f'● 直输 P{entry.page_number}·#{entry.char_idx + 1} → "{text}"，待保存'
+            )
+            self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+            # 同步预填 slot 输入框（不抢焦点）
+            if hasattr(self, "_slot_edit_input") and not self._slot_edit_input.hasFocus():
+                self._slot_edit_input.setText(text)
+            return True
+        return False
+
+    def _gallery_direct_blank(self) -> bool:
+        """_GalleryListView.keyPressEvent 调用：Backspace/Delete 直接把当前
+        槽位填空白（保持长度）。返回 True 表示已处理。"""
+        entry = self._current_candidate_entry
+        if entry is None:
+            return False
+        pos = self._entry_text_pos(entry)
+        if pos is None:
+            return False
+        tok = entry.token_text or entry.char
+        self._fill_slot_with_blank(pos, pos + max(1, len(tok)))
+        self._status_lbl.setText(
+            f'● 直输 P{entry.page_number}·#{entry.char_idx + 1} 已清空为空白，待保存'
+        )
+        self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+        if hasattr(self, "_slot_edit_input") and not self._slot_edit_input.hasFocus():
+            self._slot_edit_input.clear()
+        return True
+
     def _select_all_gallery(self) -> None:
         """proof-slot-residual 第 2 任务：Ctrl+A / 按钮全选当前字所有出现。"""
         count = self._gallery_model.rowCount()
@@ -1769,10 +1887,21 @@ class VProofPanel(QWidget):
             self._refresh_gallery_header(index, sel_count)
             # 传入 entry 以精准定位到该出现，而非首次出现
             self._highlight_char_in_text(entry.token_text or entry.char, focus_entry=entry)
-            # proof-bbox-boxedit round 9 第 5 任务：用户主要注意力在 gallery，
-            # 上一轮把焦点转到 _text_edit 反而让注意力大幅跳走。改成把焦点放到
-            # 紧贴 gallery 的"当前槽位"输入框；想编辑这一槽直接打字即可。
-            self._slot_edit_input.setFocus()
+            # vproof-direct-overwrite-residual round 11 任务 1：上一轮把焦点
+            # 推到 _slot_edit_input，导致"在 gallery 上直接输入"假闭环——
+            # 用户敲键时键盘焦点根本不在 gallery_view，eventFilter 永远不响应。
+            # 本轮：选完 entry 把焦点留在 gallery_view，让 _GalleryListView
+            # 的 keyPressEvent 真正接到按键。_slot_edit_input 仍可用，但是
+            # 用户必须自己点过去才编辑，不再主动抢焦点。
+            # 注意：如果用户当前正在 _slot_edit_input / _batch_input / _text_edit
+            # 里打字（hasFocus），就别抢，以免吞他正打到一半的输入。
+            side_inputs = (
+                getattr(self, "_slot_edit_input", None),
+                getattr(self, "_batch_input", None),
+                self._text_edit,
+            )
+            if not any(w is not None and w.hasFocus() for w in side_inputs):
+                self._gallery_view.setFocus()
 
     # ─────────────────── 原图 block 点击 ────────────────────
 
@@ -1862,11 +1991,29 @@ class VProofPanel(QWidget):
         self._load_page(self._current_page_idx + 1)
 
     def _on_external_line_changed(self, **kwargs) -> None:
-        """收到外部（横校）发来的 line.proof_changed → 当前页若包含这一行，
-        重渲染当前页文本，让显示和 line.text 同步。
+        """收到外部（横校）发来的 line.proof_changed。
 
-        line.text 已被对方 update_text 改过，self._text_map 里的 (Line, ...) 引用
-        指向同一对象，所以重新 _build_text_map 即拿到新值。
+        vproof-direct-overwrite-residual round 11 任务 2 —— 卡死链路诚实排查：
+
+        ProofStateBus 是同步单线程 dispatch；上一轮 round 10 加的
+        ``_handling_external`` 重入闸其实是 placebo——同线程同步派发不会真的
+        递归进自己（自反消息也被 ``origin == id(self)`` 挡掉）。
+
+        真正会让 V-校"无响应"的原因是：HProof 一次大批保存会按行 publish N 条
+        ``line.proof_changed``。每条进到这里都会做一次：
+          (1) _save_page_text 把 V 侧本地 _text_edit 落盘；
+          (2) _load_page 重建当前页文本 + viewer 图像；
+          (3) _char_svc.build(self._pages) —— 扫全部 page 重建字索引；
+          (4) _rebuild_char_list —— 整个 QListWidget 重建。
+        N 行 × O(全工程字数) 的同步重建，主线程被占满，从外面看就是"卡死/无
+        响应"。
+
+        本轮做的是把这串重建动作 debounce 到 QTimer 单次延后：bus 收到 N 条
+        事件只会把 line.id 累到 pending set 里 + 重启 80ms timer；timer 到点
+        触发 _do_external_refresh，把"是否还要重建"做一次判断后只跑一次。这
+        样 N → 1。仍然是 best-effort 缓解，不是从根上让 char_svc.build 变成
+        增量；如果工程很大，单次重建本身仍会卡 ~几百毫秒，但不会再被 N 倍放
+        大。
         """
         if kwargs.get("origin") == id(self):
             return
@@ -1879,20 +2026,33 @@ class VProofPanel(QWidget):
         cur_page = self._pages[self._current_page_idx]
         if page_id is not None and cur_page.id != page_id:
             return
-        # 当前页有这一行才重渲染
+        # 当前页有这一行才入队；不在当前页的事件直接丢，因为切页时会自然刷新
         for _block, line, _li in iter_unique_page_text_lines(cur_page):
             if line.id == line_id:
-                # Phase 22 blocker 1：先把用户在 _text_edit 里尚未保存的输入
-                # 落盘（走 _save_page_text 同样的 quality_probe 桥），否则
-                # 紧接着的 _load_page 会用 page 当前 line.text 重新渲染，
-                # 把用户在编辑的文本静默覆盖掉。
-                if self._text_edit.toPlainText() != self._loaded_text:
-                    self._save_page_text()
-                self._load_page(self._current_page_idx)
-                # char list / gallery 也需要重建以反映新文本
-                self._char_svc.build(self._pages)
-                self._rebuild_char_list()
+                self._pending_external_lines.add(line_id)
+                self._external_refresh_timer.start()  # 80ms 内的 N 次 publish 合并成 1 次
                 return
+
+    def _do_external_refresh(self) -> None:
+        """vproof-direct-overwrite-residual round 11：debounced 外部刷新。
+
+        从 _on_external_line_changed 累积的 pending 事件里只触发一次重建。
+        与原先的同步路径相比，重建本身的代价没变，但 N→1 折叠掉了重复。
+        """
+        if not self._pages:
+            self._pending_external_lines.clear()
+            return
+        if not self._pending_external_lines:
+            return
+        self._pending_external_lines.clear()
+        # Phase 22 blocker 1：先把用户在 _text_edit 里尚未保存的输入落盘（走
+        # _save_page_text 同样的 quality_probe 桥），否则紧接着的 _load_page
+        # 会用 page 当前 line.text 重新渲染，把用户在编辑的文本静默覆盖掉。
+        if self._text_edit.toPlainText() != self._loaded_text:
+            self._save_page_text()
+        self._load_page(self._current_page_idx)
+        self._char_svc.build(self._pages)
+        self._rebuild_char_list()
 
     def refresh_quality_probe_state(self) -> None:
         """供 main_window 进入纵校步骤时调用：当前页若已加载，重新渲染让显示

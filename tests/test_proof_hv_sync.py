@@ -176,6 +176,9 @@ def test_v_proof_external_handler_reloads_current_page_when_line_matches():
         line_id=proj.pages[0].blocks[0].lines[0].id,
         origin=99999,
     )
+    # vproof-direct-overwrite-residual round 11: external refresh is debounced
+    # via QTimer now; flush it synchronously to keep the assertion semantics.
+    v._do_external_refresh()
     assert called["load"] == 1
     v.deleteLater()
 
@@ -740,6 +743,9 @@ def test_v_proof_flushes_in_flight_text_before_external_sync():
         status=line0.proof_status.value if hasattr(line0.proof_status, "value") else line0.proof_status,
         origin="h_proof_fake",
     )
+    # vproof-direct-overwrite-residual round 11: external refresh is debounced
+    # via QTimer now; flush it synchronously so flush-on-external-sync still runs.
+    v._do_external_refresh()
     # 用户的 in-flight 内容应已被持久化到 line.text
     assert line0.text == "HELLO_EDITED", \
         f"in-flight 文本未保住，line.text={line0.text!r}"
