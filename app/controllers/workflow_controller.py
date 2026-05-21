@@ -65,6 +65,7 @@ class WorkflowController(QObject):
         self._proof_ocr_worker = None
         self._pending_layout_pages: Optional[List[Page]] = None
         self._pending_proof_pages: Optional[List[Page]] = None
+        self._discard_parallel_proof_result: bool = False
         self._auto_start_ocr_after_layout = True
         self._queued_ocr_progress_callback: Optional[Callable] = None
         # proof 面板同步状态（供 sync_proof_panels 使用）
@@ -472,7 +473,6 @@ class WorkflowController(QObject):
 
     def on_layout_done(self, pages: List[Page]) -> None:
         """版面分析完成后的处理。"""
-        self._layout_worker = None
         self._project.pages = pages
 
         for page in pages:
@@ -497,7 +497,20 @@ class WorkflowController(QObject):
         if self._store:
             self.save_project()
 
-        if self._proof_ocr_worker or self._pending_proof_pages is not None:
+        if self._discard_parallel_proof_result:
+            self._pending_layout_pages = None
+            self._pending_proof_pages = None
+            self._discard_parallel_proof_result = False
+            queued_callback = self._queued_ocr_progress_callback
+            self._queued_ocr_progress_callback = None
+            if self.get_recognizable_block_count() == 0:
+                self.status_message.emit("版面分析完成，但 proof OCR 失败且没有可识别文字块")
+                return
+            self.status_message.emit("PP-OCRv5 proof OCR 失败，改用版面块 OCR 继续")
+            self.start_ocr(pages, notify_page_callback=queued_callback)
+            return
+
+        if self._worker_is_running(self._proof_ocr_worker) or self._pending_proof_pages is not None:
             self._pending_layout_pages = pages
             if self._pending_proof_pages is not None:
                 self._finish_parallel_proof_ocr()
@@ -520,7 +533,6 @@ class WorkflowController(QObject):
         这是业务完成事件，由 Worker 触发。
         与用户点击"进入校对"按钮的导航意图严格分离。
         """
-        self._ocr_worker = None
         self._project.pages = pages
 
         for page in pages:
@@ -559,10 +571,12 @@ class WorkflowController(QObject):
         from app.core.layout_analyzer import LayoutWorker
         self._pending_layout_pages = None
         self._pending_proof_pages = None
+        self._discard_parallel_proof_result = False
         parallel_started = self._start_parallel_proof_ocr(pages)
         self._auto_start_ocr_after_layout = not parallel_started
         self._queued_ocr_progress_callback = None
         self._layout_worker = LayoutWorker(pages)
+        self._connect_worker_cleanup("_layout_worker", self._layout_worker)
         self._layout_worker.page_done.connect(self._on_layout_progress)
         self._layout_worker.all_done.connect(self.on_layout_done)
         self._layout_worker.error.connect(self._on_worker_error)
@@ -598,6 +612,7 @@ class WorkflowController(QObject):
         pipeline = OcrPipeline(engine=engine)
 
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
+        self._connect_worker_cleanup("_ocr_worker", self._ocr_worker)
         self._ocr_worker.progress_state.connect(self._on_ocr_progress)
         if notify_page_callback:
             self._ocr_worker.progress_update.connect(notify_page_callback)
@@ -615,6 +630,7 @@ class WorkflowController(QObject):
         proof_pages = self._clone_pages_for_parallel_proof(pages)
         pipeline = OcrPipeline(engine=engine)
         self._proof_ocr_worker = OcrPipelineWorker(pipeline, proof_pages)
+        self._connect_worker_cleanup("_proof_ocr_worker", self._proof_ocr_worker)
         self._proof_ocr_worker.progress_state.connect(self._on_ocr_progress)
         self._proof_ocr_worker.all_done.connect(self._on_parallel_proof_done)
         self._proof_ocr_worker.error.connect(self._on_worker_error)
@@ -639,7 +655,9 @@ class WorkflowController(QObject):
         return proof_pages
 
     def _on_parallel_proof_done(self, pages: List[Page]) -> None:
-        self._proof_ocr_worker = None
+        if self._discard_parallel_proof_result:
+            self._pending_proof_pages = None
+            return
         self._pending_proof_pages = pages
         if self._pending_layout_pages is not None:
             self._finish_parallel_proof_ocr()
@@ -716,14 +734,34 @@ class WorkflowController(QObject):
             self.status_message.emit(progress.message)
 
     def _on_worker_error(self, msg: str) -> None:
-        self._layout_worker = None
-        self._ocr_worker = None
-        self._proof_ocr_worker = None
+        self._discard_parallel_proof_result = True
         self._pending_layout_pages = None
         self._pending_proof_pages = None
         logger.error("Worker error: %s", msg)
         self.worker_error.emit(msg)
         self.status_message.emit("处理失败")
+
+    def _connect_worker_cleanup(self, attr_name: str, worker) -> None:
+        finished = getattr(worker, "finished", None)
+        if finished is None or not hasattr(finished, "connect"):
+            return
+
+        def cleanup_finished(_attr=attr_name, _worker=worker) -> None:
+            self._clear_worker_ref(_attr, _worker)
+
+        finished.connect(cleanup_finished)
+
+    def _clear_worker_ref(self, attr_name: str, worker) -> None:
+        if getattr(self, attr_name, None) is worker:
+            setattr(self, attr_name, None)
+
+    def _worker_is_running(self, worker) -> bool:
+        if worker is None:
+            return False
+        try:
+            return bool(worker.isRunning())
+        except RuntimeError:
+            return False
 
 
 class OcrPipelineWorker(QThread):

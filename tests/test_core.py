@@ -2551,6 +2551,77 @@ def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignm
     print("test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment PASSED")
 
 
+def test_workflow_controller_keeps_qthreads_until_finished_after_error():
+    from app.controllers.workflow_controller import WorkflowController
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeRunningWorker:
+        def __init__(self):
+            self.finished = DummySignal()
+            self._running = True
+
+        def isRunning(self):
+            return self._running
+
+    controller = WorkflowController()
+    layout_worker = FakeRunningWorker()
+    proof_worker = FakeRunningWorker()
+    controller._layout_worker = layout_worker
+    controller._proof_ocr_worker = proof_worker
+    controller._connect_worker_cleanup("_layout_worker", layout_worker)
+    controller._connect_worker_cleanup("_proof_ocr_worker", proof_worker)
+
+    controller._on_worker_error("boom")
+
+    assert controller._layout_worker is layout_worker
+    assert controller._proof_ocr_worker is proof_worker
+    assert controller._discard_parallel_proof_result is True
+
+    layout_worker._running = False
+    layout_worker.finished.emit()
+    proof_worker._running = False
+    proof_worker.finished.emit()
+
+    assert controller._layout_worker is None
+    assert controller._proof_ocr_worker is None
+
+    print("test_workflow_controller_keeps_qthreads_until_finished_after_error PASSED")
+
+
+def test_workflow_controller_falls_back_to_block_ocr_when_parallel_proof_failed():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    controller = WorkflowController()
+    page = Page(image_path="/tmp/layout-fallback.png", width=100, height=80)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 90, 60), order=0)]
+    controller._project = OcrProject(name="FallbackOCR", pages=[page])
+    controller._discard_parallel_proof_result = True
+    callback = object()
+    controller._queued_ocr_progress_callback = callback
+    started = []
+    controller.start_ocr = lambda pages, notify_page_callback=None: started.append((pages, notify_page_callback)) or True
+
+    controller.on_layout_done([page])
+
+    assert started == [([page], callback)]
+    assert controller._discard_parallel_proof_result is False
+    assert controller._pending_layout_pages is None
+    assert controller._pending_proof_pages is None
+
+    print("test_workflow_controller_falls_back_to_block_ocr_when_parallel_proof_failed PASSED")
+
+
 def test_workflow_controller_emits_ocr_progress_and_navigation():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, OcrProject, Page
@@ -6091,6 +6162,8 @@ if __name__ == "__main__":
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()
     test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
+    test_workflow_controller_keeps_qthreads_until_finished_after_error()
+    test_workflow_controller_falls_back_to_block_ocr_when_parallel_proof_failed()
     test_workflow_controller_emits_ocr_progress_and_navigation()
     test_workflow_controller_ocr_done_does_not_force_hproof_step()
     test_main_window_ocr_finished_preserves_current_step()
