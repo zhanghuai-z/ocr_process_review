@@ -950,14 +950,19 @@ class VProofPanel(QWidget):
         return box
 
     def _resize_gallery_for_entries(self, count: int) -> None:
-        # vproof-ime-persist-visibility round 12 任务 1：item_h 同步抬高到
-        # GALLERY_THUMB + 18；外框 +50；缩略图 70×70 + 行间距 + 标题/按钮一起。
+        # vproof-gallery-rendering follow-up：之前只给整个 gallery_box 预留 +50，
+        # 但 box 里除了 QListView 还有标题行、单槽位编辑行、批量编辑行和
+        # layout 的 spacing/margins。真实 chrome 高度接近 100px，导致
+        # QListView 可用高度被吃掉，1 行时 item 会被纵向裁切，用户看到的仍是
+        # “压字”。这里按真实 chrome 预算给固定高度。
         rows = min(
             GALLERY_MAX_ROWS,
             max(1, (max(1, count) + GALLERY_ITEMS_PER_ROW - 1) // GALLERY_ITEMS_PER_ROW),
         )
         item_h = GALLERY_THUMB + 18
-        self._gallery_box.setFixedHeight(rows * item_h + 50)
+        chrome_h = 110
+        view_h = rows * item_h + 8
+        self._gallery_box.setFixedHeight(view_h + chrome_h)
 
     def _go_next_gallery(self) -> None:
         """proof-interaction-slots 第 6 任务：Alt+→ 在 gallery 里跳下一个出现。"""
