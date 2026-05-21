@@ -3783,6 +3783,8 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._api_model_combo.currentIndex() == -1
     assert dialog._url_edit.text() == "https://example.com/root"
     assert "固定双模型" in dialog._summary_model.text()
+    assert not dialog._timeout_row.isHidden()
+    assert dialog._timeout_spin.maximum() >= 600
 
     cfg.reset_to_defaults()
 
@@ -5098,6 +5100,7 @@ def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
     def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
         captured["json"] = json
+        captured["timeout"] = timeout
         captured["proxies"] = kwargs.get("proxies")
         return DummyResponse()
 
@@ -5379,6 +5382,7 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
         captured["json"] = json
+        captured["timeout"] = timeout
         captured["proxies"] = kwargs.get("proxies")
         return DummyResponse()
 
@@ -5399,6 +5403,7 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         page = Page(image_path=page_path, width=200, height=120)
         LayoutAnalyzer()._api_analyze(page)
         assert captured["url"] == "https://example.com/root/layout-parsing"
+        assert captured["timeout"] == 180
         assert captured["proxies"] == {"http": None, "https": None, "all": None}
         assert captured["json"]["useDocUnwarping"] is False
         assert "returnWordBox" not in captured["json"]

@@ -46,6 +46,8 @@ from app.models import Block, BlockType, Page
 logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
 LOCAL_LAYOUT_CANVAS_H = 608
+LAYOUT_API_TIMEOUT_FLOOR = 180
+LAYOUT_API_JPEG_QUALITY = 85
 
 
 class LayoutWorker(QThread):
@@ -599,7 +601,7 @@ class LayoutAnalyzer:
             infer_api_model_profile_from_endpoint(url)
             or cfg.get("api_model_profile", "")
         )
-        timeout = cfg["api_timeout"]
+        timeout = max(int(cfg["api_timeout"]), LAYOUT_API_TIMEOUT_FLOOR)
         token = cfg.get("api_token", "")
         layout_model_name = cfg.get("api_layout_model_name", "").strip()
 
@@ -607,7 +609,11 @@ class LayoutAnalyzer:
         if img is None:
             raise RuntimeError(f"Cannot read image: {page.display_image_path}")
         page.height, page.width = img.shape[:2]
-        ok, buf = cv2.imencode(".jpg", img)
+        ok, buf = cv2.imencode(
+            ".jpg",
+            img,
+            [int(cv2.IMWRITE_JPEG_QUALITY), LAYOUT_API_JPEG_QUALITY],
+        )
         if not ok:
             raise RuntimeError(f"Cannot encode image: {page.display_image_path}")
         file_b64 = base64.b64encode(buf.tobytes()).decode("ascii")

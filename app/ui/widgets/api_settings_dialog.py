@@ -486,14 +486,13 @@ class ApiSettingsDialog(QDialog):
         timeout_layout.setContentsMargins(0, 0, 0, 0)
         timeout_layout.setSpacing(0)
         self._timeout_spin = QSpinBox()
-        self._timeout_spin.setRange(5, 120)
+        self._timeout_spin.setRange(5, 600)
         self._timeout_spin.setSuffix(" 秒")
         self._timeout_spin.setFixedWidth(140)
         timeout_layout.addWidget(self._timeout_spin)
         timeout_layout.addStretch()
         self._timeout_row = timeout_row
-        self._timeout_row.hide()
-        api_form.addWidget(self._timeout_row)
+        api_form.addLayout(_form_row("请求超时", self._timeout_row))
 
         test_row = QHBoxLayout()
         test_row.setContentsMargins(0, 4, 0, 0)
@@ -547,6 +546,7 @@ class ApiSettingsDialog(QDialog):
             "服务根地址会按角色自动补全 /layout-parsing 与 /ocr。",
             "如果粘贴完整端点，保存时会自动剥离为基础地址。",
             "Token 只保存在本机配置中，项目文件不写入 Token。",
+            "版面分析会上传整页图片；若网络较慢可适当提高请求超时。",
         ):
             hint = QLabel(f"• {text}")
             hint.setObjectName("summaryDesc")
