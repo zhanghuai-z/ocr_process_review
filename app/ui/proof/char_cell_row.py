@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from app.core.page_image_cache import PageImageCache
 from app.models import Line, Page
+from app.ui.proof.confidence_utils import char_confidence, normalize_confidence
 
 CELL_W = 32
 IMG_H  = 36
@@ -102,8 +103,13 @@ class _CharCellLineEdit(QLineEdit):
         self._base_border = "#ddd"
         self._apply_style()
 
-    def set_confidence_hint(self, conf: float) -> None:
+    def set_confidence_hint(self, conf: float | None) -> None:
         """根据 OCR confidence 着色边框：低 → 红，中 → 黄，高 → 灰。"""
+        conf = normalize_confidence(conf)
+        if conf is None:
+            self._base_border = "#ddd"
+            self._apply_style()
+            return
         if conf < 0.6:
             self._base_border = "#d93025"   # 红
         elif conf < 0.85:
@@ -251,8 +257,9 @@ class CharCellRow(QFrame):
         self._trailing_overflow = trailing_overflow
         for idx, char in enumerate(self._line.chars):
             init_text, kind = cell_inits[idx]
+            conf = char_confidence(self._line, idx)
             cell = self._build_cell(idx, init_text, char.bbox, image,
-                                    char.confidence, align_kind=kind)
+                                    conf, align_kind=kind)
             root.addLayout(cell)
         if trailing_overflow:
             tip = QLabel(f"+{len(trailing_overflow)} 字未对上图（{trailing_overflow!r}）")
@@ -308,7 +315,7 @@ class CharCellRow(QFrame):
         # 收尾：剩余 pending_prefix 没人接，作为 trailing_overflow
         return cell_inits, pending_prefix
 
-    def _build_cell(self, idx: int, ch: str, bbox, image, conf: float = 1.0,
+    def _build_cell(self, idx: int, ch: str, bbox, image, conf: float | None = None,
                     align_kind: str = "equal") -> QVBoxLayout:
         col = QVBoxLayout()
         col.setContentsMargins(0, 0, 0, 0)
@@ -403,7 +410,8 @@ class CharCellRow(QFrame):
         for k in range(1, n + 1):
             i = (from_idx + k) % n
             ch = self._line.chars[i]
-            if ch.confidence < threshold and i < len(self._cells):
+            conf = char_confidence(self._line, i)
+            if conf is not None and conf < threshold and i < len(self._cells):
                 self.focus_cell(i)
                 return True
         return False

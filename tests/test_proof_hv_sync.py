@@ -526,6 +526,25 @@ def test_char_cell_row_focus_next_low_conf_skips_high():
     row.deleteLater()
 
 
+def test_char_cell_row_does_not_treat_missing_zero_conf_as_low():
+    from app.ui.proof.char_cell_row import CharCellRow
+    from app.core.page_image_cache import PageImageCache
+    from app.models import Char
+
+    line = Line(text="abc", confidence=0.9, bbox=BBox(0, 0, 60, 20))
+    line.chars = [
+        Char(char="a", confidence=0.0, bbox=BBox(0, 0, 20, 20)),
+        Char(char="b", confidence=0.0, bbox=BBox(20, 0, 20, 20)),
+        Char(char="c", confidence=0.0, bbox=BBox(40, 0, 20, 20)),
+    ]
+    page = Page(page_number=1, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 60, 20), lines=[line])
+    ], image_path="/tmp/none.png", width=60, height=20)
+    row = CharCellRow(line, page, PageImageCache.instance())
+    assert row.focus_next_low_conf(from_idx=-1, threshold=0.85) is False
+    row.deleteLater()
+
+
 def test_align_text_to_chars_returns_trailing_overflow():
     """text 末尾比 chars 长 → 多余字符进 trailing_overflow。"""
     from app.ui.proof.char_cell_row import CharCellRow
@@ -1064,6 +1083,74 @@ def test_phase25_low_conf_chars_get_extra_selection():
     # 至少包含 1 条低置信度高亮（"低" 字 conf=0.3 < LOW_CONF）
     assert len(sels) >= 1
     h.deleteLater()
+
+
+def test_hproof_confidence_verdict_falls_back_from_zero_char_to_line_score():
+    from app.models import Char
+    from app.ui.proof import char_verdict as cv
+    from app.ui.proof.h_proof import HProofPanel
+
+    line = Line(text="甲", confidence=92, bbox=BBox(0, 0, 20, 20), chars=[
+        Char(char="甲", confidence=0.0, bbox=BBox(0, 0, 20, 20)),
+    ])
+    page = Page(page_number=1, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 20, 20), lines=[line])
+    ], image_path="/tmp/hproof-conf.png", width=20, height=20)
+    h = HProofPanel()
+    h.load_pages([page])
+    verdict = h._pairs[0]._classify_char_verdict(0)
+    assert verdict is not None
+    assert verdict.severity == cv.SEVERITY_UNVERIFIED
+    assert "0.92" in verdict.evidence
+    h.deleteLater()
+
+
+def test_vproof_page_badge_uses_char_confidence_when_line_score_is_zero():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project_with_char_crops("甲乙丙")
+    line = proj.pages[0].blocks[0].lines[0]
+    line.confidence = 0.0
+    for ch in line.chars:
+        ch.confidence = 87
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    assert v._conf_badge.text() == "87%"
+    v.deleteLater()
+
+
+def test_vproof_page_badge_marks_missing_confidence_unavailable():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project_with_char_crops("甲乙丙")
+    line = proj.pages[0].blocks[0].lines[0]
+    line.confidence = 0.0
+    for ch in line.chars:
+        ch.confidence = 0.0
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    assert v._conf_badge.text() == "无置信度"
+    v.deleteLater()
+
+
+def test_vproof_entry_diagnostics_do_not_report_fake_zero_confidence():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project_with_char_crops("甲乙丙")
+    line = proj.pages[0].blocks[0].lines[0]
+    line.confidence = 91
+    for ch in line.chars:
+        ch.confidence = 0.0
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    entry = v._char_svc.query("甲")[0]
+    assert v._format_entry_confidence(entry) == "0.91"
+    line.confidence = 0.0
+    assert v._format_entry_confidence(entry) == "缺失"
+    v.deleteLater()
 
 
 def test_phase25_horizontal_scroll_as_needed():

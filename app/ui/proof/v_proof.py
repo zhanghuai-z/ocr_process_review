@@ -53,13 +53,18 @@ from app.services.proof_probe_text_service import (
 from app.services.proof_image_service import (
     verified_char_crop as _shared_verified_char_crop,
 )
+from app.ui.proof.confidence_utils import line_confidence, normalize_confidence
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
 
 CHAR_LIST_THUMB = 18
-GALLERY_THUMB   = 27
+# proof-bbox-boxedit 第 4 任务：same-char gallery 上一轮还有"压字 / 半字"
+# 主要原因是 source crop = 27px 上采到 31×31，宽度比例 < 1 的 token (CJK 单字)
+# 还行，但宽 token（formula / 多字）会被严重压扁。把 thumb 抬到 34，delegate
+# 框抬到 44 (34+10)，里圈 padding 也加，让 token 不再被压。
+GALLERY_THUMB   = 34
 GALLERY_ITEMS_PER_ROW = 8
 GALLERY_MAX_ROWS = 4
 LOW_CONF        = 0.80
@@ -302,7 +307,8 @@ class _GalleryModel(QAbstractListModel):
 
 
 class _GalleryDelegate(QStyledItemDelegate):
-    SIZE = GALLERY_THUMB + 8
+    # proof-bbox-boxedit 第 4 任务：从 +8 抬到 +10，避免压字；里圈 padding 维持 2
+    SIZE = GALLERY_THUMB + 10
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
         r = option.rect
@@ -388,6 +394,57 @@ def _vproof_save_displayed_line(
     page: Page, block: Block, line: Line, displayed_new_text: str
 ) -> bool:
     return _proof_save_displayed_edit(line, page, block, displayed_new_text)
+
+
+# ─────────────────────────────────────────────────────────────
+# proof-bbox-boxedit (round 9)：槽位心智的 OCR 文本编辑器
+# ─────────────────────────────────────────────────────────────
+
+
+class _SlotAwareTextEdit(QPlainTextEdit):
+    """OCR 文本框的轻包装：把 Backspace / Delete / Cut 改成"槽位填空白"。
+
+    设计原则：
+    - OCR 文本只是参照；正常工作流应该走右侧 gallery 槽位编辑器。
+    - 但用户偶尔在文本框里直接删字时，"位置不能因为删字而被吞掉"，
+      所以对应到任何"行内字符槽位（_text_map 中有记录的位置）"的删除请求，
+      都改成用 ASCII 空格 (U+0020) 填这个槽，槽边界不动。
+    - 跨行换行符 / block 间分隔符 不在 _text_map 内，仍允许真删除。
+
+    通过 ``set_slot_owner`` 注入 VProofPanel 作回调宿主，避免循环 import。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._slot_owner: Optional["VProofPanel"] = None
+
+    def set_slot_owner(self, owner: "VProofPanel") -> None:
+        self._slot_owner = owner
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        owner = self._slot_owner
+        if owner is None:
+            super().keyPressEvent(event)
+            return
+        key = event.key()
+        mods = event.modifiers()
+        # 只在"裸 Backspace / Delete"时拦截；Ctrl+Backspace（删词）保留原生行为。
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        cursor = self.textCursor()
+        if key == Qt.Key.Key_Backspace and not ctrl:
+            if owner._slot_aware_backspace(cursor):
+                return
+        elif key == Qt.Key.Key_Delete and not ctrl:
+            if owner._slot_aware_delete_forward(cursor):
+                return
+        # Ctrl+X：剪切覆盖到槽位 → 改填空白
+        elif key == Qt.Key.Key_X and ctrl and cursor.hasSelection():
+            if owner._slot_aware_fill_selection_with_blanks(cursor):
+                # 仍把内容拷到剪贴板
+                from PySide6.QtGui import QGuiApplication
+                QGuiApplication.clipboard().setText(cursor.selectedText())
+                return
+        super().keyPressEvent(event)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -634,6 +691,30 @@ class VProofPanel(QWidget):
         hdr.addStretch()
         layout.addLayout(hdr)
 
+        # proof-bbox-boxedit round 9 第 1 任务：让"靠近 gallery 的编辑入口"
+        # 真存在 —— 在 batch_row 上再加一条"单槽位编辑器"：
+        #   [当前槽位: P? idx? "x"]  [改为: ____ Enter]  [清空(填空白)]
+        # 用户注意力不离开 gallery 就能改/清空当前选中的那个槽。
+        slot_row = QHBoxLayout()
+        slot_row.setSpacing(4)
+        self._slot_info_lbl = QLabel("当前槽位：—")
+        self._slot_info_lbl.setStyleSheet("color:#555;font-size:11px;")
+        self._slot_edit_input = QLineEdit()
+        self._slot_edit_input.setPlaceholderText("改当前槽位为…（Enter 应用）")
+        self._slot_edit_input.setMaxLength(8)
+        self._slot_edit_input.setClearButtonEnabled(True)
+        self._slot_edit_input.returnPressed.connect(self._apply_slot_edit_input)
+        self._slot_apply_btn = QPushButton("应用")
+        self._slot_apply_btn.clicked.connect(self._apply_slot_edit_input)
+        self._slot_blank_btn = QPushButton("清空(填空白)")
+        self._slot_blank_btn.setToolTip("把当前槽位填成 ASCII 空格，保留槽位边界")
+        self._slot_blank_btn.clicked.connect(self._apply_slot_blank_to_current)
+        slot_row.addWidget(self._slot_info_lbl)
+        slot_row.addWidget(self._slot_edit_input, 1)
+        slot_row.addWidget(self._slot_apply_btn)
+        slot_row.addWidget(self._slot_blank_btn)
+        layout.addLayout(slot_row)
+
         # proof-slot-residual 第 2 任务：批量改字输入条。
         # 上一轮 (interaction-slots) 只让"候选按钮"在多选时批量；本轮再加
         #   - 行内输入框：键入任意字符 + Enter / 按"应用"立即批量替换。
@@ -699,6 +780,25 @@ class VProofPanel(QWidget):
         sc_esc = QShortcut(QKeySequence("Escape"), self._gallery_view)
         sc_esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_esc.activated.connect(self._clear_gallery_selection)
+        # proof-bbox-boxedit round 9 第 3 任务：modifier + 方向键真协同。
+        # 这些都是 widget-scoped，不抢全局；Qt 原生方向键在 gallery 上已经
+        # 移动 currentIndex，但下面这些是"真新增"的语义：
+        #   Ctrl+Alt+Right / Ctrl+Alt+Left = 强制按 entry 编号 ±1 步进（不论
+        #       grid 行布局如何，跨 wrap 也保证顺序），并把单选切到那里。
+        #   Shift+Alt+Right / Shift+Alt+Left = 在不动 current 的前提下，把
+        #       ±1 邻居加入/移出 selection（扩展选择）。
+        #   Alt+Up / Alt+Down = 跨 wrap 行步进（按当前实际 ITEMS_PER_ROW）。
+        for keystr, fn in (
+            ("Ctrl+Alt+Right", lambda: self._step_gallery_singleton(+1)),
+            ("Ctrl+Alt+Left",  lambda: self._step_gallery_singleton(-1)),
+            ("Shift+Alt+Right", lambda: self._extend_gallery_selection(+1)),
+            ("Shift+Alt+Left",  lambda: self._extend_gallery_selection(-1)),
+            ("Alt+Up",   lambda: self._step_gallery_row(-1)),
+            ("Alt+Down", lambda: self._step_gallery_row(+1)),
+        ):
+            sc = QShortcut(QKeySequence(keystr), self._gallery_view)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(fn)
         layout.addWidget(self._gallery_view)
         # 初始按钮态
         self._on_gallery_selection_changed()
@@ -770,10 +870,18 @@ class VProofPanel(QWidget):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
-        layout.addWidget(QLabel("OCR 文本（直接编辑）"))
+        # proof-bbox-boxedit round 9 第 6 任务：明示"只是参照、不要光标心智"。
+        hint = QLabel("OCR 文本（仅参照；编辑请用 gallery 旁的槽位输入或方向键导航。"
+                      "在此删字会自动填空白以保留槽位）")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#888;font-size:11px;")
+        layout.addWidget(hint)
 
-        self._text_edit = QPlainTextEdit()
-        self._text_edit.setStyleSheet("font-size:16px; padding:8px;")
+        # proof-bbox-boxedit round 9 第 2 任务：用 _SlotAwareTextEdit
+        # 让 Backspace / Delete / Ctrl+X 对槽位填空白而不是真删除。
+        self._text_edit = _SlotAwareTextEdit()
+        self._text_edit.set_slot_owner(self)
+        self._text_edit.setStyleSheet("font-size:16px; padding:8px; background:#fafafa;")
         self._text_edit.document().contentsChanged.connect(self._on_text_changed)
         layout.addWidget(self._text_edit)
 
@@ -900,9 +1008,12 @@ class VProofPanel(QWidget):
         self._page_label.setText(f"页 {idx + 1} / {len(self._pages)}")
 
         lines = [line for _block, line, _line_idx in iter_unique_page_text_lines(page)]
-        if lines:
-            avg_conf = sum(ln.confidence for ln in lines) / len(lines)
+        scores = [score for ln in lines if (score := line_confidence(ln)) is not None]
+        if scores:
+            avg_conf = sum(scores) / len(scores)
             self._conf_badge.set_score(avg_conf)
+        else:
+            self._conf_badge.set_unavailable("无置信度")
 
         self._viewer.set_image(page.display_image_path)
         # 纵校视图仅供参考，不显示版面标注框（show_blocks 不调用）
@@ -1031,6 +1142,92 @@ class VProofPanel(QWidget):
     def _entry_text_pos(self, entry: CharEntry) -> Optional[int]:
         """查找 CharEntry 在当前 _text_map 中的起始光标位置。"""
         return self._entry_pos_by_key.get((id(entry.line), entry.char_idx))
+
+    # ───── proof-bbox-boxedit round 9：槽位心智 —— 删除不丢位 ─────
+
+    def _slot_at_pos(self, pos: int) -> Optional[Tuple[Line, int, int, int]]:
+        """位置 ``pos`` 是否落在某个 _text_map 槽位内。
+
+        _text_map 每条 entry 都是 (line, char_idx, start, start+1) 单字范围。
+        线性扫描；页内字符数有限（典型 < 几千），开销忽略。
+        """
+        for entry in self._text_map:
+            _line, _ci, start, end = entry
+            if start <= pos < end:
+                return entry
+        return None
+
+    def _fill_slot_with_blank(self, start: int, end: int) -> None:
+        """把文本框 [start, end) 区间替换成等长 ASCII 空格。
+
+        长度严格保持，所以 _text_map 索引不会失效。
+        """
+        cur = QTextCursor(self._text_edit.document())
+        cur.setPosition(start)
+        cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        cur.insertText(" " * (end - start))
+
+    def _slot_aware_backspace(self, cursor: QTextCursor) -> bool:
+        """Backspace 拦截：若覆盖到槽位，改成填空白。
+
+        - 有选区：选区内每个槽位都填空白，选区两端的非槽字符（换行/分隔）
+          被保留——因为它们不在 _text_map 内，本来也不能 backspace 一次性删。
+        - 无选区：看 cursor.position-1 是不是某个槽位的字符，是则填空白。
+        返回 True 表示已消化按键、调用者不要再走原生。
+        """
+        if cursor.hasSelection():
+            return self._slot_aware_fill_selection_with_blanks(cursor)
+        pos = cursor.position()
+        if pos <= 0:
+            return False
+        target = self._slot_at_pos(pos - 1)
+        if target is None:
+            return False
+        _line, _ci, start, end = target
+        self._fill_slot_with_blank(start, end)
+        new_cur = self._text_edit.textCursor()
+        new_cur.setPosition(start)  # 光标落到槽位起点：保持位置感
+        self._text_edit.setTextCursor(new_cur)
+        return True
+
+    def _slot_aware_delete_forward(self, cursor: QTextCursor) -> bool:
+        """Delete 拦截：与 backspace 对称，但定位 cursor.position 当前槽。"""
+        if cursor.hasSelection():
+            return self._slot_aware_fill_selection_with_blanks(cursor)
+        pos = cursor.position()
+        target = self._slot_at_pos(pos)
+        if target is None:
+            return False
+        _line, _ci, start, end = target
+        self._fill_slot_with_blank(start, end)
+        new_cur = self._text_edit.textCursor()
+        new_cur.setPosition(end)  # 跳过被填空白的槽
+        self._text_edit.setTextCursor(new_cur)
+        return True
+
+    def _slot_aware_fill_selection_with_blanks(self, cursor: QTextCursor) -> bool:
+        """选区跨多个字符 / 槽位时：每个被覆盖到的槽位都填空白。"""
+        sel_start = cursor.selectionStart()
+        sel_end = cursor.selectionEnd()
+        if sel_end <= sel_start:
+            return False
+        targets = [
+            e for e in self._text_map
+            if not (e[3] <= sel_start or e[2] >= sel_end)
+        ]
+        if not targets:
+            return False
+        # 从后向前替换，避免前面替换改变后面 offset（虽然等长，但稳一点）
+        targets.sort(key=lambda e: e[2], reverse=True)
+        for _line, _ci, start, end in targets:
+            s = max(start, sel_start)
+            e = min(end, sel_end)
+            if e > s:
+                self._fill_slot_with_blank(s, e)
+        final = self._text_edit.textCursor()
+        final.setPosition(sel_start)
+        self._text_edit.setTextCursor(final)
+        return True
 
     def _highlight_char_in_text(
         self, char: str, focus_entry: Optional[CharEntry] = None,
@@ -1318,11 +1515,89 @@ class VProofPanel(QWidget):
         if applied == 0:
             self._status_lbl.setText("批量改字：当前页没有可替换的目标")
             return
-        self._text_edit.setFocus()
+        # proof-bbox-boxedit round 9：批量后焦点回 batch 输入框，方便连续操作；
+        # 不再抢 _text_edit 焦点，注意力仍在 gallery 旁。
+        self._batch_input.selectAll()
+        self._batch_input.setFocus()
         if applied > 1:
             self._status_lbl.setText(f"● 已批量应用 \"{new_text}\" 到 {applied} 处，待保存")
         else:
             self._status_lbl.setText(f"● 已应用 \"{new_text}\"，待保存")
+        self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+
+    # ─────────── proof-bbox-boxedit round 9：单槽位编辑器 ───────────
+
+    def _refresh_slot_info(self, entry: Optional[CharEntry]) -> None:
+        """更新 _slot_info_lbl + 预填 _slot_edit_input 当前槽位文本。
+
+        预填方便用户"轻改一下"再 Enter；如果用户不想动当前文本，删掉重输即可。
+        """
+        if not hasattr(self, "_slot_info_lbl"):
+            return
+        if entry is None:
+            self._slot_info_lbl.setText("当前槽位：—")
+            self._slot_edit_input.clear()
+            self._slot_apply_btn.setEnabled(False)
+            self._slot_blank_btn.setEnabled(False)
+            return
+        tok = entry.token_text or entry.char
+        self._slot_info_lbl.setText(
+            f'当前槽位：P{entry.page_number}·#{entry.char_idx + 1} "{tok}"'
+        )
+        # 预填但不 selectAll —— 让用户点输入框时不会立即覆盖
+        if not self._slot_edit_input.hasFocus():
+            self._slot_edit_input.setText(tok)
+        self._slot_apply_btn.setEnabled(True)
+        self._slot_blank_btn.setEnabled(True)
+
+    def _apply_slot_edit_input(self) -> None:
+        """把 _slot_edit_input 的当前值应用到当前 entry（单槽位）。
+
+        与批量路径区别：忽略 gallery 多选，直接对 _current_candidate_entry 改。
+        如果当前 entry 是跨页的，按 _apply_replacement_to_selected 的旧逻辑兜底。
+        """
+        entry = self._current_candidate_entry
+        if entry is None:
+            self._status_lbl.setText("槽位编辑：先在 gallery 选一个槽位")
+            return
+        new_text = self._slot_edit_input.text()
+        if new_text == "":
+            self._status_lbl.setText('槽位编辑：空文本请用 "清空(填空白)" 按钮')
+            return
+        # 临时清掉 gallery 多选，让 _apply_replacement_to_selected 走 fallback 路径
+        sel = self._gallery_view.selectionModel()
+        saved = list(sel.selectedIndexes())
+        sel.clearSelection()
+        try:
+            applied = self._apply_replacement_to_selected(new_text, fallback_entry=entry)
+        finally:
+            # 还原多选
+            for idx in saved:
+                sel.select(idx, sel.SelectionFlag.Select)
+        if applied:
+            self._status_lbl.setText(
+                f'● 槽位 P{entry.page_number}·#{entry.char_idx + 1} → "{new_text}"，待保存'
+            )
+            self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
+        else:
+            self._status_lbl.setText("槽位编辑：当前槽不在当前页，已跳过")
+
+    def _apply_slot_blank_to_current(self) -> None:
+        """proof-bbox-boxedit round 9 第 2 任务：把当前槽位填成 ASCII 空格，
+        位置不丢失。直接走 _fill_slot_with_blank。"""
+        entry = self._current_candidate_entry
+        if entry is None:
+            self._status_lbl.setText("清空槽位：先在 gallery 选一个槽位")
+            return
+        pos = self._entry_text_pos(entry)
+        if pos is None:
+            self._status_lbl.setText("清空槽位：当前槽不在当前页，已跳过")
+            return
+        tok = entry.token_text or entry.char
+        self._fill_slot_with_blank(pos, pos + max(1, len(tok)))
+        self._status_lbl.setText(
+            f'● 槽位 P{entry.page_number}·#{entry.char_idx + 1} 已清空为空白，待保存'
+        )
         self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
 
     def _select_all_gallery(self) -> None:
@@ -1348,6 +1623,56 @@ class VProofPanel(QWidget):
         if cur.isValid():
             sel.select(cur, sel.SelectionFlag.Select)
             sel.setCurrentIndex(cur, sel.SelectionFlag.NoUpdate)
+
+    # ─────── proof-bbox-boxedit round 9 第 3 任务：modifier + 方向键 ────
+    def _gallery_items_per_row(self) -> int:
+        """估算当前 IconMode 一行可放多少 item。view 太窄时回退到 1。"""
+        view = self._gallery_view
+        try:
+            vw = view.viewport().width()
+            gx = view.gridSize().width() or (GALLERY_THUMB + 10)
+            n = max(1, vw // max(1, gx))
+            return int(n)
+        except Exception:
+            return 1
+
+    def _step_gallery_singleton(self, delta: int) -> None:
+        """Ctrl+Alt+←/→：按 entry 编号 ±1 单选切换。"""
+        count = self._gallery_model.rowCount()
+        if count <= 0:
+            return
+        sel = self._gallery_view.selectionModel()
+        cur = sel.currentIndex()
+        row = cur.row() if cur.isValid() else 0
+        new_row = max(0, min(count - 1, row + delta))
+        new_idx = self._gallery_model.index(new_row, 0)
+        sel.select(new_idx, sel.SelectionFlag.ClearAndSelect)
+        sel.setCurrentIndex(new_idx, sel.SelectionFlag.Current)
+        self._sync_gallery_entry(new_idx)
+
+    def _extend_gallery_selection(self, delta: int) -> None:
+        """Shift+Alt+←/→：不动 current，把相邻 ±1 加入 selection。"""
+        count = self._gallery_model.rowCount()
+        if count <= 0:
+            return
+        sel = self._gallery_view.selectionModel()
+        cur = sel.currentIndex()
+        if not cur.isValid():
+            return
+        target_row = cur.row() + delta
+        if not (0 <= target_row < count):
+            return
+        target = self._gallery_model.index(target_row, 0)
+        # 若目标已选中 → 收回；否则添加。
+        if sel.isSelected(target):
+            sel.select(target, sel.SelectionFlag.Deselect)
+        else:
+            sel.select(target, sel.SelectionFlag.Select)
+
+    def _step_gallery_row(self, delta: int) -> None:
+        """Alt+↑/↓：跨 wrap 行步进。"""
+        per_row = self._gallery_items_per_row()
+        self._step_gallery_singleton(delta * per_row)
 
     def _on_gallery_selection_changed(self, *_args) -> None:
         """选区数量变化 → 刷新批量按钮可用态、刷新标题里的"已选 N 个"。"""
@@ -1395,12 +1720,22 @@ class VProofPanel(QWidget):
         parts = [
             f"bbox={entry.bbox_source}/{entry.bbox_granularity}",
             f"collection={entry.collection_kind}",
-            f"conf={entry.confidence:.2f}",
+            f"conf={self._format_entry_confidence(entry)}",
             f"layout={block_info}",
         ]
         if note:
             parts.append(f"vl_note={note[:24]}")
         return "；".join(parts)
+
+    def _confidence_for_entry(self, entry: CharEntry) -> Optional[float]:
+        score = normalize_confidence(getattr(entry, "confidence", None))
+        if score is not None:
+            return score
+        return line_confidence(entry.line)
+
+    def _format_entry_confidence(self, entry: CharEntry) -> str:
+        score = self._confidence_for_entry(entry)
+        return "缺失" if score is None else f"{score:.2f}"
 
     def _block_for_entry(self, entry: CharEntry) -> Optional[Block]:
         for page in self._pages:
@@ -1426,17 +1761,18 @@ class VProofPanel(QWidget):
         self._current_candidate_entry = entry
         self._highlight_char_in_viewer(entry)  # 可能触发翻页
         self._update_candidate_panel(entry)
+        # proof-bbox-boxedit round 9 第 1 任务：刷新"当前槽位"提示+输入框预填
+        self._refresh_slot_info(entry)
         # 更新标题：让用户清楚当前看的是哪页
         if self._selected_char:
             sel_count = len(self._gallery_view.selectionModel().selectedIndexes())
             self._refresh_gallery_header(index, sel_count)
             # 传入 entry 以精准定位到该出现，而非首次出现
             self._highlight_char_in_text(entry.token_text or entry.char, focus_entry=entry)
-            # proof-interaction-slots 第 6 任务：点 gallery 切图 = 直接进入该字
-            # 编辑态。_highlight_char_in_text 已把该字选中，这里另外把焦点转到
-            # _text_edit，用户可以直接键入替代。不抢击键快捷：Alt+←/→ 仍
-            # 可在 gallery 里跳下一个字（见 _go_prev_gallery / _go_next_gallery）。
-            self._text_edit.setFocus()
+            # proof-bbox-boxedit round 9 第 5 任务：用户主要注意力在 gallery，
+            # 上一轮把焦点转到 _text_edit 反而让注意力大幅跳走。改成把焦点放到
+            # 紧贴 gallery 的"当前槽位"输入框；想编辑这一槽直接打字即可。
+            self._slot_edit_input.setFocus()
 
     # ─────────────────── 原图 block 点击 ────────────────────
 

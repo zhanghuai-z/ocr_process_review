@@ -50,6 +50,7 @@ from app.services.proof_probe_text_service import (
     resolve_block_line_index as _resolve_block_line_index,
 )
 from app.services.proof_image_service import clamp_line_box_pixels
+from app.ui.proof.confidence_utils import char_confidence
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.proof import char_verdict as _cv
 # NOTE: AlignmentRibbon 已从布局中移除（proof-layout-collections 第 1 任务）。
@@ -623,11 +624,7 @@ class _LinePair(QFrame):
         text = self._editor.toPlainText()
         if i >= len(text):
             return None
-        conf_raw = getattr(chars[i], "confidence", None)
-        try:
-            conf = float(conf_raw) if conf_raw is not None else None
-        except (TypeError, ValueError):
-            conf = None
+        conf = char_confidence(self._line, i)
         ocr = self._line.ocr_text or self._line.original_text or ""
         llm = self._line.llm_suggestion or ""
         # 只在等长时取同下标字符；长度不一致时退回 None，避免错位比对
