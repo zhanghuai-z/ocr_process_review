@@ -438,7 +438,12 @@ class CharIndexService:
     def _is_fallback_unit(self, bbox_source: str, bbox_granularity: str) -> bool:
         source = (bbox_source or "fallback").strip().lower()
         granularity = (bbox_granularity or "fallback").strip().lower()
-        if source != "ocr":
+        # Accept both Paddle ("ocr") and Hanwang ("hanwang:*") as genuine OCR
+        # bbox sources.  Without this, all Hanwang char bboxes —including
+        # char_fallback recoveries— are misclassified as fallback and filtered
+        # out of the char index, leaving VProof with an empty character list
+        # when ocr_mode="hanwang".
+        if source != "ocr" and not source.startswith("hanwang:"):
             return True
         return granularity in {"", "fallback", "unavailable", "line"}
 

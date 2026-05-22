@@ -14,6 +14,28 @@ MISSING_LINE_BBOX_FLAG = "missing_line_bbox"
 BBOX_SOURCE_UNAVAILABLE = "unavailable"
 BBOX_GRANULARITY_UNAVAILABLE = "unavailable"
 
+# Sources whose char-granularity bboxes are inherently trustworthy and must NOT
+# be subject to the neighbor-repair heuristic in ensure_line_char_bboxes.
+# Paddle OCR ("ocr") delivers per-character boxes derived from its own word-box
+# splitting; Hanwang ("hanwang:*") delivers CharRcg boxes from its native
+# per-character recognition pass — both are first-party char-level evidence.
+_TRUSTED_OCR_CHAR_SOURCES = ("ocr",)
+_TRUSTED_OCR_CHAR_SOURCE_PREFIXES = ("hanwang:",)
+
+
+def _is_trusted_char_bbox_source(bbox_source: str) -> bool:
+    """Return True when the bbox source should be trusted at char granularity.
+
+    Trusted sources are exempt from the neighbor-repair heuristic that replaces
+    an explicit char bbox with a split-line estimate when the bbox centre appears
+    to land on an adjacent slot.  Applying that repair to Hanwang CharRcg boxes
+    would silently overwrite valid, high-quality per-character coordinates.
+    """
+    s = (bbox_source or "").strip().lower()
+    if s in _TRUSTED_OCR_CHAR_SOURCES:
+        return True
+    return any(s.startswith(pfx) for pfx in _TRUSTED_OCR_CHAR_SOURCE_PREFIXES)
+
 
 def infer_line_direction(line_bbox: BBox, text_length: int) -> str:
     """根据行框长宽比推断字符分布方向。"""
@@ -488,7 +510,7 @@ def ensure_line_char_bboxes(
             if (
                 existing is not None
                 and existing.bbox_granularity == "char"
-                and existing.bbox_source != "ocr"
+                and not _is_trusted_char_bbox_source(existing.bbox_source)
                 and explicit_char_bbox_points_to_neighbor(bbox, split_bboxes, idx)
             ):
                 bbox = split_bboxes[idx]
