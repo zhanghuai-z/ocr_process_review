@@ -80,7 +80,10 @@ class _PageRow(QWidget):
         fname = Path(src).name if src else ""
         fname_lbl = QLabel(fname)
         fname_lbl.setObjectName("pageRowFile")
-        fname_lbl.setToolTip(fname)
+        # hproof-yaxis-quiet-load 本轮任务 2：加载页面时 directory 列表上
+        # 这条 setToolTip 会让每个行都有 hover 弹窗，鼠标扫过即冒一串小框。
+        # 改成静默：文件名本身已在行内显示（下方 elidedText），鼠标停留不再
+        # 弹气泡。需要全名时可用状态栏 / 复制路径菜单。
         # 文件名过长省略
         fm = fname_lbl.fontMetrics()
         elided = fm.elidedText(fname, Qt.ElideMiddle, 130)

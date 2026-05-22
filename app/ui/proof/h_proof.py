@@ -28,9 +28,9 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 import cv2
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QRect, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QImage, QKeySequence, QPixmap, QShortcut,
+    QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
@@ -179,6 +179,105 @@ class _RowEditor(QPlainTextEdit):
         self._last_hover_idx: int = -1
         # 启用鼠标跟踪：无需按下也能收到 mouseMoveEvent，用于图字 hover 联动
         self.setMouseTracking(True)
+        # hproof-yaxis-quiet-load 本轮任务 1：图字 y 轴对应。
+        # 每个字的 x 坐标改为由 line.chars[i].bbox 映射到 editor 像素空间；
+        # _line_pair 在每次 _render_line_image 后调 set_slot_geometry()
+        # 把 x_centers / widths 推进来。set 为 None / 空列表 → 走原生
+        # QPlainTextEdit 渲染（降级，例如 chars 缺失 / 未对齐时）。
+        self._slot_x_centers: Optional[List[Optional[float]]] = None
+        self._slot_widths: Optional[List[float]] = None
+
+    def set_slot_geometry(
+        self,
+        x_centers: Optional[List[Optional[float]]],
+        widths: Optional[List[float]],
+    ) -> None:
+        """由 _LinePair 在行图缩放就绪后推入；每字在 editor 视口内的 x 中心。
+
+        x_centers / widths 为 None 或空 → 自动降级到 Qt 原生文本渲染。
+        """
+        if not x_centers:
+            self._slot_x_centers = None
+            self._slot_widths = None
+        else:
+            self._slot_x_centers = list(x_centers)
+            self._slot_widths = list(widths) if widths else [12.0] * len(x_centers)
+        try:
+            self.viewport().update()
+        except Exception:
+            self.update()
+
+    def has_slot_geometry(self) -> bool:
+        return bool(self._slot_x_centers)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """图字 y 轴对应核心：当 _slot_x_centers 已就绪，**完全自绘文本**
+        到 image bbox 决定的 x 位置；否则走 super 原生渲染。
+
+        自绘路径里还要把 _refresh_extra_selections 生成的 verdict 前景色 /
+        当前字背景体现出来；为此读 self.extraSelections() 的 ExtraSelection
+        列表自己绘。原生 cursor 不再画（外部已 setCursorWidth(0)）。
+        """
+        if not self._slot_x_centers:
+            super().paintEvent(event)
+            return
+        vp = self.viewport()
+        p = QPainter(vp)
+        try:
+            p.fillRect(vp.rect(), self.palette().base())
+            text = self.toPlainText()
+            n = min(len(text), len(self._slot_x_centers))
+
+            # 收集 per-index 的 verdict fg / bg（从 extraSelections）。
+            fg_color: dict[int, QColor] = {}
+            bg_color: dict[int, QColor] = {}
+            try:
+                for sel in self.extraSelections():
+                    cur = sel.cursor
+                    start = cur.selectionStart()
+                    end = cur.selectionEnd()
+                    fmt = sel.format
+                    if fmt.foreground().style() != Qt.BrushStyle.NoBrush:
+                        c = fmt.foreground().color()
+                        for i in range(start, end):
+                            fg_color[i] = c
+                    if fmt.background().style() != Qt.BrushStyle.NoBrush:
+                        c = fmt.background().color()
+                        for i in range(start, end):
+                            bg_color[i] = c
+            except Exception:
+                pass
+
+            p.setFont(self.font())
+            fm = p.fontMetrics()
+            y_baseline = (vp.height() + fm.ascent() - fm.descent()) // 2
+
+            for i in range(n):
+                xc = self._slot_x_centers[i]
+                if xc is None:
+                    continue
+                ch = text[i]
+                slot_w = self._slot_widths[i] if i < len(self._slot_widths or []) else 12.0
+                slot_w = max(8.0, float(slot_w))
+                left = int(round(xc - slot_w / 2.0))
+                right = int(round(xc + slot_w / 2.0))
+                cell = QRect(left, 0, max(1, right - left), vp.height())
+
+                # 1) 背景（当前字 / 错字底色）
+                bg = bg_color.get(i)
+                if bg is not None and bg.alpha() > 0:
+                    p.fillRect(cell, bg)
+
+                # 2) 文本
+                col = fg_color.get(i)
+                if col is None:
+                    col = self.palette().text().color()
+                p.setPen(QPen(col, 1))
+                char_w = fm.horizontalAdvance(ch)
+                tx = int(round(xc - char_w / 2.0))
+                p.drawText(tx, y_baseline, ch)
+        finally:
+            p.end()
 
     def set_fixed_length(self, n: Optional[int]) -> None:
         """启用/关闭固定长度模式。n=None 表示自由编辑。"""
@@ -883,6 +982,41 @@ class _LinePair(QFrame):
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
+        # hproof-yaxis-quiet-load 本轮任务 1：把图像里每个字的 x 中心
+        # （editor 像素坐标系）推给 editor。editor.paintEvent 用这套坐标
+        # 自绘每字 —— 用户向正下方看，落到的文本字就是同一个字。
+        # editor 与 _img_lbl 同为 content_v 的 full-width 子控件，且 _img_lbl
+        # 内 pixmap 左对齐 → editor x=0 == _img_lbl x=0 == 行图左边缘。
+        self._sync_editor_slot_geometry()
+
+    def _sync_editor_slot_geometry(self) -> None:
+        """按 line.chars[i].bbox + _render_scale + _line_crop_origin 推算
+        每字在 editor 视口内的 x 中心 & 宽度；交给 editor 自绘文本。
+
+        chars 未对齐 / 缺 bbox → 清空 → editor 走原生渲染（降级）。
+        """
+        editor = getattr(self, "_editor", None)
+        if editor is None:
+            return
+        if not self._chars_aligned():
+            editor.set_slot_geometry(None, None)
+            return
+        ox, _oy = self._line_crop_origin
+        scale = float(self._render_scale or 0.0)
+        if scale <= 0:
+            editor.set_slot_geometry(None, None)
+            return
+        x_centers: list = []
+        widths: list = []
+        for ch in self._line.chars:
+            if ch.bbox is None:
+                x_centers.append(None)
+                widths.append(0.0)
+                continue
+            cx_src = (ch.bbox.x + ch.bbox.x2) / 2.0 - float(ox)
+            x_centers.append(cx_src * scale)
+            widths.append(max(8.0, float(ch.bbox.w) * scale))
+        editor.set_slot_geometry(x_centers, widths)
 
     def refresh_text(self) -> None:
         """外部（VProof / probe 切换）更新 line.text 后同步 editor 文本。
@@ -905,6 +1039,9 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
+        # hproof-yaxis-quiet-load 本轮任务 1：文本/对齐状态变化 → 重算
+        # 图字 x 映射；当 _render_scale 还未就绪时 _sync 会自动清空进入降级。
+        self._sync_editor_slot_geometry()
 
     def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
@@ -922,6 +1059,8 @@ class _LinePair(QFrame):
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
+        # 切到新行 → 旧的 slot geometry 立即失效；先清空避免短暂错位
+        self._editor.set_slot_geometry(None, None)
 
     @property
     def line(self) -> Line:

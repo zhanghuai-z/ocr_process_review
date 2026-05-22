@@ -43,7 +43,8 @@ class ConfidenceBadge(QLabel):
             f"background:{color}; color:#fff; border-radius:4px;"
             f"padding:1px 5px; font-size:11px; font-weight:bold;"
         )
-        self.setToolTip(f"置信度: {self._score:.4f}")
+        # hproof-yaxis-quiet-load 本轮任务 2：badge 的百分比文字已可视，
+        # 不再用 hover tooltip 重复展示；扫过列表时不会冒一串小气泡。
 
     def set_unavailable(self, text: str = "未OCR") -> None:
         self._score = 0.0
@@ -52,4 +53,4 @@ class ConfidenceBadge(QLabel):
             "background:#607D8B; color:#fff; border-radius:4px;"
             "padding:1px 5px; font-size:11px; font-weight:bold;"
         )
-        self.setToolTip("版面分析阶段尚未产生 OCR 置信度")
+        # hproof-yaxis-quiet-load 本轮任务 2：静默化（理由同上）。
