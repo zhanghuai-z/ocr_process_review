@@ -1,0 +1,13 @@
+{
+  "image_path": "D:\\project\\ocr_process\\worktrees\\coord\\resources\\hanwang_native\\bin\\_test.png",
+  "init": 1,
+  "width": 2360,
+  "height": 3425,
+  "region_ptr": "0x00000000",
+  "charrcg_init": -1,
+  "charrcg_ran": false,
+  "charrcg_error": "",
+  "lines": [
+
+  ]
+}

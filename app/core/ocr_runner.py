@@ -17,8 +17,12 @@ class OcrRunner:
 
     def _get_engine(self):
         if self._engine is None:
-            if get_config()["mode"] == "api":
+            mode = get_config()["mode"]
+            if mode == "api":
                 self._engine = ApiOcrEngine()
+            elif mode == "hanwang":
+                from app.engines.hanwang_ocr_engine import HanwangOcrEngine
+                self._engine = HanwangOcrEngine()
             else:
                 self._engine = LocalOcrEngine()
         return self._engine

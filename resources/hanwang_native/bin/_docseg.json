@@ -1,0 +1,12 @@
+{
+  "image_path": "D:\\project\\ocr_process\\worktrees\\coord\\resources\\hanwang_native\\bin\\_test.png",
+  "width": 2360,
+  "height": 3425,
+  "aligned_width": 2368,
+  "area_ptr": "0x06f20190",
+  "areas": [
+    {"index": 0, "left": 289, "top": 259, "right": 1242, "bottom": 320, "width": 954, "height": 62, "type": 2},
+    {"index": 1, "left": 284, "top": 403, "right": 2124, "bottom": 2990, "width": 1841, "height": 2588, "type": 2},
+    {"index": 2, "left": 333, "top": 3064, "right": 1352, "bottom": 3223, "width": 1020, "height": 160, "type": 2}
+  ]
+}

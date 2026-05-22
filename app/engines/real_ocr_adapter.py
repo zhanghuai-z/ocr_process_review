@@ -46,6 +46,8 @@ def get_engine_description(mode: str = "") -> str:
         return f"API OCR / Proof（PP-OCRv5：{endpoint or '未配置 URL'}）"
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
+    if mode == "hanwang":
+        return "汉王原生 OCR（linecut + IntegratRcg CharRcg，32-bit subprocess）"
     return (
         "PaddleOCR 本地默认中文模型组合"
         "（lang=ch, use_angle_cls=True, layout=False, table=False；"
@@ -268,5 +270,8 @@ def create_engine(mode: str = ""):
     elif mode == "mock":
         from app.engines.fake_ocr_engine import FakeOcrEngine
         return FakeOcrEngine()
+    elif mode == "hanwang":
+        from app.engines.hanwang_ocr_engine import HanwangOcrEngine
+        return HanwangOcrEngine()
     else:
         return LocalOcrEngine()

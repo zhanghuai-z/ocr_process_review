@@ -85,6 +85,7 @@ class LayoutAnalyzer:
 
     def __init__(self) -> None:
         self._engine = None
+        self._hanwang_layout_engine = None
 
     # ── local mode ─────────────────────────────────────────────
 
@@ -656,11 +657,36 @@ class LayoutAnalyzer:
         )
         return page
 
-    # ── common interface ───────────────────────────────────────
+    def _hanwang_analyze(self, page: Page) -> Page:
+        """调汉王 doc_seg.dll 跳过 PaddleOCR。
+
+        bbox 以 page 坐标返回，与 _local_analyze 一致。
+        """
+        import cv2
+
+        from app.engines.hanwang_layout_engine import HanwangLayoutEngine
+
+        img = cv2.imread(page.display_image_path)
+        if img is None:
+            raise RuntimeError(f"Cannot read image: {page.display_image_path}")
+        page.height, page.width = img.shape[:2]
+        if self._hanwang_layout_engine is None:
+            self._hanwang_layout_engine = HanwangLayoutEngine()
+        blocks = self._hanwang_layout_engine.analyze(page.display_image_path)
+        for i, b in enumerate(blocks):
+            b.order = i
+        page.blocks = blocks
+        self._rescale_blocks_if_suspicious(page)
+        return page
+
+    # ── common interface ─────────────────────────────
 
     def analyze(self, page: Page) -> Page:
         from app.core.ocr_config import get_config
-        if get_config()["mode"] == "api":
+        mode = get_config()["mode"]
+        if mode == "hanwang":
+            return self._hanwang_analyze(page)
+        if mode == "api":
             return self._api_analyze(page)
         return self._local_analyze(page)
 
