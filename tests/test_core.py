@@ -5994,13 +5994,14 @@ def test_hproof_visual_size_is_compact():
     assert h_proof.IMAGE_ROW_H <= 32
     # proof-layout-collections 第 3 任务：字号贴近行图字号。
     assert h_proof.TEXT_FONT_PX == 24
-    assert h_proof.TEXT_EDITOR_MAX_H <= 42
-    # proof-layout-collections 第 1 任务：第三行文本去掉，pair 高度
-    # 回到「图 + editor」的紧凑值（image_row 32 + editor 36 + spacing/padding ≈ 76）。
-    assert h_proof.LINE_PAIR_H == 76
+    assert h_proof.TEXT_LINE_HEIGHT_PX <= 28
+    assert h_proof.TEXT_EDITOR_MAX_H <= 30
+    # hproof-yaxis-residual：第三行文本仍然去掉，pair 高度继续收紧到
+    # 「图 + inline editor」两层（image_row 32 + editor 30 + padding ≈ 64）。
+    assert h_proof.LINE_PAIR_H == 64
     assert (
         h_proof.LINE_PAIR_H
-        >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H
+        >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H + 2
     )
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
 

@@ -159,6 +159,30 @@ def test_line_pair_no_ribbon_widget():
     pair.deleteLater()
 
 
+def test_line_pair_uses_inline_y_axis_text_metrics():
+    """HProof y 轴推进只改 image/editor 两层，不恢复第三行元素。"""
+    from PySide6.QtGui import QTextBlockFormat
+    from app.ui.proof import h_proof
+
+    pair = _make_simple_pair("ab", chars_with_bbox=True)
+    layout = pair._content.layout()
+
+    assert layout.count() == 2
+    assert layout.itemAt(0).widget() is pair._img_lbl
+    assert layout.itemAt(1).widget() is pair._editor
+    assert layout.spacing() == 0
+    assert pair._editor.document().documentMargin() == 0
+    assert pair._editor.minimumHeight() == h_proof.TEXT_EDITOR_MAX_H
+    assert pair._editor.maximumHeight() == h_proof.TEXT_EDITOR_MAX_H
+
+    block_fmt = pair._editor.document().firstBlock().blockFormat()
+    assert block_fmt.lineHeightType() == QTextBlockFormat.LineHeightTypes.FixedHeight.value
+    assert block_fmt.lineHeight() == h_proof.TEXT_LINE_HEIGHT_PX
+    assert h_proof.LINE_PAIR_H == 64
+    assert not hasattr(pair, "_ribbon")
+    pair.deleteLater()
+
+
 def test_chars_aligned_rejects_multi_glyph_token():
     """proof-layout-collections 第 2 任务：char.char 多于 1 个字符
     （word/token 粒度）时，_chars_aligned 必须返回 False，避免

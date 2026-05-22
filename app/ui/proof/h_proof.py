@@ -31,7 +31,7 @@ import cv2
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QImage, QKeySequence, QPixmap, QShortcut,
-    QTextCharFormat, QTextCursor,
+    QTextBlockFormat, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
@@ -67,11 +67,11 @@ IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 # 与行图字体在视觉重心上接近（行图实际字高 ≈ 24-28 px）。editor 高度同步
 # 调大让光标不挤压。
 TEXT_FONT_PX = 24
-TEXT_EDITOR_MAX_H = 36
-# proof-layout-collections 第 1 任务：去掉 AlignmentRibbon 后，每行只剩
-# image_row(32) + editor(36) + spacing(2) + 上下 padding(4) ≈ 76 px。回到
-# 加 ribbon 之前的紧凑高度。
-LINE_PAIR_H = 76
+TEXT_LINE_HEIGHT_PX = 28
+TEXT_EDITOR_MAX_H = 30
+# hproof-yaxis-residual：行内 text editor 不再保留文本框式文档边距，
+# image_row(32) + editor(30) + 上下 padding(2) = 64 px，图/字 y 轴贴得更紧。
+LINE_PAIR_H = 64
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
 # CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
 # Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
@@ -186,6 +186,19 @@ class _RowEditor(QPlainTextEdit):
 
     def fixed_length(self) -> Optional[int]:
         return self._fixed_length
+
+    def apply_inline_y_axis_metrics(self) -> None:
+        """把 QPlainTextEdit 压成单行文本承载层，而不是默认文本框。"""
+        doc = self.document()
+        doc.setDocumentMargin(0)
+        cursor = QTextCursor(doc)
+        cursor.select(QTextCursor.SelectionType.Document)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setLineHeight(
+            float(TEXT_LINE_HEIGHT_PX),
+            QTextBlockFormat.LineHeightTypes.FixedHeight.value,
+        )
+        cursor.mergeBlockFormat(block_fmt)
 
     # ── 编辑约束 ──────────────────────────────────────────────
 
@@ -410,7 +423,7 @@ class _LinePair(QFrame):
         # 始终可见。布局保留 Phase 24 的"上图下字"骨架：
         #   root QHBoxLayout = [active_bar | content_v(img_row, editor) | status]
         root = QHBoxLayout(self)
-        root.setContentsMargins(0, 2, 8, 2)
+        root.setContentsMargins(0, 1, 8, 1)
         root.setSpacing(4)
 
         # 蓝色激活条（左边框）
@@ -424,7 +437,7 @@ class _LinePair(QFrame):
         self._content = QWidget()
         content_v = QVBoxLayout(self._content)
         content_v.setContentsMargins(0, 0, 0, 0)
-        content_v.setSpacing(2)
+        content_v.setSpacing(0)
 
         # ── 上：行图像（去掉左侧"图像 N"hdr，直接占满宽度）──────
         self._img_lbl = QLabel()
@@ -455,7 +468,7 @@ class _LinePair(QFrame):
         )
         self._editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
-        self._editor.document().setDocumentMargin(2)
+        self._editor.document().setDocumentMargin(0)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._editor.setSizePolicy(
@@ -470,6 +483,7 @@ class _LinePair(QFrame):
         _initial_disp = _displayed_text(self._line, self._page, self._block)
         _canon, _ = _canonicalize_text_to_slots(_initial_disp, self._line.chars or [])
         self._editor.setPlainText(_canon)
+        self._editor.apply_inline_y_axis_metrics()
         # 信号转发
         self._editor.confirm_requested.connect(lambda: self.confirmed.emit(self._idx))
         self._editor.prev_requested.connect(self.prev_req)
@@ -885,6 +899,7 @@ class _LinePair(QFrame):
         if self._editor.toPlainText() != new_disp:
             self._editor.blockSignals(True)
             self._editor.setPlainText(new_disp)
+            self._editor.apply_inline_y_axis_metrics()
             self._editor.blockSignals(False)
         # 显示文本变了 → 字数可能变 → 重新评估 fixed_length
         self._apply_fixed_length_to_editor()
@@ -943,6 +958,7 @@ class _LinePair(QFrame):
             original_true, self._line.chars or []
         )
         self._editor.setPlainText(_rev_canon)
+        self._editor.apply_inline_y_axis_metrics()
         self._editor.blockSignals(False)
 
     def _highlight_low_conf(self) -> None:
