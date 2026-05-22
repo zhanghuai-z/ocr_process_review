@@ -12,7 +12,7 @@ from PySide6.QtCore import QSettings
 # 默认配置
 _DEFAULT_CONFIG: dict[str, Any] = {
     # OCR 引擎
-    "ocr_mode": "api",             # 当前主程序固定使用 API 双模型链
+    "ocr_mode": "local",           # 默认保留本地 Paddle；API/汉王作为可选引擎
     "api_url": "",
     "api_timeout": 30,
     "api_token": "",
@@ -108,7 +108,7 @@ def get_config() -> dict[str, Any]:
 
     cfg = AppConfig.instance()
     return {
-        "mode": cfg.get("ocr_mode", "api"),
+        "mode": cfg.get("ocr_mode", "local"),
         "api_url": normalize_api_base_url(cfg.get("api_url", "")),
         "api_timeout": int(cfg.get("api_timeout", 30)),
         "api_token": cfg.get("api_token", ""),

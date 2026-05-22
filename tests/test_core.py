@@ -3742,7 +3742,7 @@ def test_app_config_tracks_api_model_profile():
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
     defaults = get_config()
-    assert defaults["mode"] == "api"
+    assert defaults["mode"] == "local"
     assert defaults["api_model_profile"] == ""
 
     update_config(
@@ -3778,11 +3778,14 @@ def test_api_settings_dialog_syncs_model_and_url():
     update_config(mode="local", api_model_profile="pp-structurev3", api_url="https://example.com/root", api_token="old")
 
     dialog = ApiSettingsDialog()
-    assert dialog._radio_api.isChecked()
+    assert dialog._radio_local.isChecked()
+    assert dialog._mode_card.isHidden() is False
     assert dialog._api_model_row.isHidden()
     assert dialog._api_model_combo.currentIndex() == -1
     assert dialog._url_edit.text() == "https://example.com/root"
-    assert "固定双模型" in dialog._summary_model.text()
+    assert "本地 PaddleOCR" in dialog._summary_model.text()
+    assert "本地 PaddleOCR" in dialog._summary_mode.text()
+    assert dialog._api_form_panel.isEnabled() is False
     assert not dialog._timeout_row.isHidden()
     assert dialog._timeout_spin.maximum() >= 600
 
@@ -3822,8 +3825,8 @@ def test_api_settings_dialog_keeps_model_preset_sync():
 
         assert dialog._api_model_row.isHidden()
         assert dialog._model_note.isHidden()
-        assert dialog._api_form_panel.isEnabled()
-        assert "API 双模型链" in dialog._summary_mode.text()
+        assert dialog._api_form_panel.isEnabled() is False
+        assert "本地 PaddleOCR" in dialog._summary_mode.text()
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -3842,11 +3845,12 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     with tempfile.TemporaryDirectory() as tmpdir:
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
+        dialog._radio_api.setChecked(True)
         dialog._url_edit.setText("https://example.com/custom")
         dialog._token_edit.setText("secret")
         dialog._sync_model_from_url()
         assert dialog._api_model_combo.currentIndex() == -1
-        assert "固定双模型" in dialog._summary_model.text()
+        assert "API 双模型" in dialog._summary_model.text()
 
         dialog._save_and_accept()
 
@@ -3884,6 +3888,34 @@ def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
         AppConfig._instance = None
 
     print("test_api_settings_dialog_saves_base_url_from_endpoint_suffix PASSED")
+
+
+def test_api_settings_dialog_preserves_local_mode_when_saving():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._radio_local.setChecked(True)
+        dialog._url_edit.setText("https://example.com/custom")
+        dialog._token_edit.setText("secret")
+
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["mode"] == "local"
+        assert cfg["api_url"] == "https://example.com/custom"
+        assert cfg["api_token"] == "secret"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_preserves_local_mode_when_saving PASSED")
 
 
 def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
@@ -6182,6 +6214,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
+    test_api_settings_dialog_preserves_local_mode_when_saving()
     test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
     test_api_settings_dialog_persists_llm_candidate_settings()
     test_llm_rules_loads_default_rules_file()

@@ -1,4 +1,4 @@
-"""OCR API connection settings dialog."""
+"""OCR 引擎设置对话框。"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
@@ -372,13 +372,14 @@ class ApiSettingsDialog(QDialog):
         hero_eyebrow.setObjectName("heroEyebrow")
         hero_layout.addWidget(hero_eyebrow)
 
-        hero_title = QLabel("OCR API 连接")
+        hero_title = QLabel("OCR 引擎设置")
         hero_title.setObjectName("heroTitle")
         hero_layout.addWidget(hero_title)
 
         hero_desc = QLabel(
-            "当前主链固定使用 Structure 负责版面、PP-OCRv5 负责 proof OCR；"
-            "这里只维护服务地址和访问 Token，避免把模型选择暴露给普通操作流程。"
+            "这里决定当前主流程走哪条 OCR 引擎链。"
+            "本地 Paddle 保持可用，API 作为新增可选引擎；"
+            "若选择 API，版面固定走 PaddleOCR-VL-1.5，proof OCR 固定走 PP-OCRv5。"
         )
         hero_desc.setObjectName("heroDesc")
         hero_desc.setWordWrap(True)
@@ -387,8 +388,8 @@ class ApiSettingsDialog(QDialog):
         hero_pills = QHBoxLayout()
         hero_pills.setContentsMargins(0, 0, 0, 0)
         hero_pills.setSpacing(8)
-        hero_pills.addWidget(_pill("双模型自动分工"))
-        hero_pills.addWidget(_pill("只填 API 地址"))
+        hero_pills.addWidget(_pill("本地 Paddle 保留"))
+        hero_pills.addWidget(_pill("API 作为可选引擎"))
         hero_pills.addWidget(_pill("Token 本机保存"))
         hero_pills.addStretch()
         hero_layout.addLayout(hero_pills)
@@ -398,12 +399,11 @@ class ApiSettingsDialog(QDialog):
             "工作模式",
             "优先先选运行方式，再决定是否填写 API 参数，避免操作顺序混乱。",
         )
-        mode_card.hide()
         mode_row = QHBoxLayout()
         mode_row.setSpacing(12)
         self._radio_local = QRadioButton("本地模型")
         self._radio_api = QRadioButton("云端 API")
-        self._radio_api.setChecked(True)
+        self._radio_hanwang = QRadioButton("汉王原生")
         self._local_mode_card = _ModeCard(
             self._radio_local,
             "本地 PaddleOCR",
@@ -413,13 +413,21 @@ class ApiSettingsDialog(QDialog):
         self._api_mode_card = _ModeCard(
             self._radio_api,
             "AiStudio / 自部署 API",
-            "适合快速切换官方模型或连接自有服务端点。",
-            "支持预设",
+            "作为新增可选引擎接入；内部固定走 VL-1.5 + PP-OCRv5 双模型链。",
+            "需地址/Token",
+        )
+        self._hanwang_mode_card = _ModeCard(
+            self._radio_hanwang,
+            "汉王原生",
+            "使用汉王原生版面/识别链路；API 地址与 Token 不参与当前运行。",
+            "本地资产",
         )
         mode_row.addWidget(self._local_mode_card, 1)
         mode_row.addWidget(self._api_mode_card, 1)
+        mode_row.addWidget(self._hanwang_mode_card, 1)
         mode_layout.addLayout(mode_row)
         root.addWidget(mode_card)
+        self._mode_card = mode_card
 
         self._api_card, api_layout = _section_card(
             "API 连接",
@@ -608,7 +616,7 @@ class ApiSettingsDialog(QDialog):
         root.addStretch()
 
         self._footer_note = QLabel(
-            "保存后主程序固定走 API 双模型链：PaddleOCR-VL-1.5 做版面，PP-OCRv5 做 proof OCR。"
+            "保存后会记住当前引擎模式；若选择 API，主程序按固定双模型链调用。"
         )
         self._footer_note.setObjectName("footerNote")
         self._footer_note.setWordWrap(True)
@@ -626,6 +634,7 @@ class ApiSettingsDialog(QDialog):
 
         self._radio_local.toggled.connect(self._on_mode_changed)
         self._radio_api.toggled.connect(self._on_mode_changed)
+        self._radio_hanwang.toggled.connect(self._on_mode_changed)
         self._api_model_combo.currentIndexChanged.connect(self._on_api_model_changed)
         self._url_edit.editingFinished.connect(self._sync_model_from_url)
 
@@ -633,7 +642,13 @@ class ApiSettingsDialog(QDialog):
 
     def _load_config(self) -> None:
         cfg = get_config()
-        self._radio_api.setChecked(True)
+        mode = str(cfg.get("mode", "local") or "local").lower()
+        if mode == "api":
+            self._radio_api.setChecked(True)
+        elif mode == "hanwang":
+            self._radio_hanwang.setChecked(True)
+        else:
+            self._radio_local.setChecked(True)
         self._api_model_combo.blockSignals(True)
         self._api_model_combo.setCurrentIndex(-1)
         self._api_model_combo.blockSignals(False)
@@ -650,11 +665,19 @@ class ApiSettingsDialog(QDialog):
         self._btn_show_llm_key.setChecked(False)
         self._on_mode_changed()
 
+    def _selected_mode(self) -> str:
+        if self._radio_api.isChecked():
+            return "api"
+        if self._radio_hanwang.isChecked():
+            return "hanwang"
+        return "local"
+
     def _set_mode_card_selected(self, card: QFrame, selected: bool) -> None:
         card.setProperty("selected", selected)
         _refresh_widget_style(card)
 
     def _refresh_api_preview(self) -> None:
+        selected_mode = self._selected_mode()
         url = self._url_edit.text().strip()
         base_url = normalize_api_base_url(url)
         layout_endpoint = resolve_api_endpoint_for_role(
@@ -669,8 +692,21 @@ class ApiSettingsDialog(QDialog):
         ) if url else ""
 
         self._model_note.setText("")
-        self._summary_model.setText("固定双模型：PaddleOCR-VL-1.5 + PP-OCRv5")
-        self._summary_desc.setText("版面分析固定走 PaddleOCR-VL-1.5；横校/纵校 proof OCR 固定走 PP-OCRv5。")
+        if selected_mode == "api":
+            self._summary_model.setText("API 双模型：PaddleOCR-VL-1.5 + PP-OCRv5")
+            self._summary_desc.setText(
+                "版面分析固定走 PaddleOCR-VL-1.5；横校/纵校 proof OCR 固定走 PP-OCRv5。"
+            )
+        elif selected_mode == "hanwang":
+            self._summary_model.setText("汉王原生链路")
+            self._summary_desc.setText(
+                "当前主流程使用汉王原生版面与 OCR；下方 API 地址与 Token 仅作为备用配置保留。"
+            )
+        else:
+            self._summary_model.setText("本地 PaddleOCR")
+            self._summary_desc.setText(
+                "当前主流程使用本地 PaddleOCR；下方 API 地址与 Token 仅作为备用配置保留。"
+            )
 
         if not url:
             self._url_note.setText("请填写不带端点后缀的服务根地址。")
@@ -686,14 +722,29 @@ class ApiSettingsDialog(QDialog):
             self._summary_endpoint_kind.setText("固定链端点")
             self._summary_endpoint.setText(f"layout: {layout_endpoint}\nocr: {ocr_endpoint}")
 
-        self._summary_mode.setText("当前模式：API 双模型链")
-        self._api_mode_notice.setText("只需维护 API 地址和 Token；模型分工由程序固定处理。")
+        if selected_mode == "api":
+            self._summary_mode.setText("当前模式：云端 API")
+            self._api_mode_notice.setText(
+                "当前主流程走 API 可选引擎；只需维护基础地址和 Token，角色分工由程序固定处理。"
+            )
+        elif selected_mode == "hanwang":
+            self._summary_mode.setText("当前模式：汉王原生")
+            self._api_mode_notice.setText(
+                "当前主流程不使用 API；这里的地址与 Token 仅作备用保存，不参与本次运行。"
+            )
+        else:
+            self._summary_mode.setText("当前模式：本地 PaddleOCR")
+            self._api_mode_notice.setText(
+                "当前主流程不使用 API；这里的地址与 Token 仅作备用保存，不参与本次运行。"
+            )
 
     def _on_mode_changed(self) -> None:
-        self._radio_api.setChecked(True)
-        self._api_form_panel.setEnabled(True)
+        selected_mode = self._selected_mode()
+        self._api_form_panel.setEnabled(selected_mode == "api")
+        self._btn_test.setEnabled(selected_mode == "api")
         self._set_mode_card_selected(self._local_mode_card, self._radio_local.isChecked())
         self._set_mode_card_selected(self._api_mode_card, self._radio_api.isChecked())
+        self._set_mode_card_selected(self._hanwang_mode_card, self._radio_hanwang.isChecked())
         self._refresh_api_preview()
 
     def _on_api_model_changed(self) -> None:
@@ -726,8 +777,9 @@ class ApiSettingsDialog(QDialog):
 
     def _save_and_accept(self) -> None:
         api_url = normalize_api_base_url(self._url_edit.text())
+        mode = self._selected_mode()
         update_config(
-            mode="api",
+            mode=mode,
             api_model_profile="",
             api_url=api_url,
             api_token=self._token_edit.text().strip(),
