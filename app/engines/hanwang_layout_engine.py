@@ -22,13 +22,12 @@ class HanwangLayoutEngine:
     def analyze(self, image_path: str) -> List[Block]:
         image = cv2.imread(image_path)
         if image is None:
-            logger.warning("Hanwang layout: cannot read image %s", image_path)
-            return []
+            raise RuntimeError(f"Cannot read image: {image_path}")
         try:
             raw = run_docseg(image, timeout=self._timeout)
         except HanwangNativeError as e:
             logger.warning("Hanwang layout failed on %s: %s", image_path, e)
-            return []
+            raise RuntimeError(f"Hanwang layout failed: {e}") from e
         blocks = translate_docseg(raw)
         logger.info("Hanwang layout %s → %d blocks", image_path, len(blocks))
         return blocks

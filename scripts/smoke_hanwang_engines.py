@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from app.engines import OcrContext
 from app.engines.hanwang import verify_hanwang_assets, get_hanwang_bin_dir
 from app.engines.hanwang_layout_engine import HanwangLayoutEngine
 from app.engines.hanwang_ocr_engine import HanwangOcrEngine
+from app.engines.real_ocr_adapter import create_engine
+from app.core.layout_analyzer import LayoutAnalyzer
+from app.models import OcrProject, Page
+from app.services.ocr_pipeline import OcrPipeline
 
 
 def main(img_path: str) -> int:
@@ -48,6 +53,29 @@ def main(img_path: str) -> int:
             preview = " | ".join(ln.text for ln in lines[:3])
             print(f"  block {i}: {len(lines)} lines, preview={preview[:80]!r}")
     print(f"[ok] total lines={total_lines} chars={total_chars}")
+
+    os.environ["OCR_OCR_MODE"] = "hanwang"
+    shared_page = Page(
+        image_path=img_path,
+        cache_image_path=img_path,
+        width=page.shape[1],
+        height=page.shape[0],
+        page_number=1,
+    )
+    shared_page = LayoutAnalyzer().analyze(shared_page)
+    project = OcrProject(name="hanwang-smoke", pages=[shared_page])
+    shared_result = OcrPipeline(engine=create_engine("hanwang")).process_project(project)
+    shared_page = shared_result.pages[0]
+    shared_blocks = len(shared_page.blocks)
+    shared_lines = sum(len(block.lines) for block in shared_page.blocks)
+    shared_chars = sum(len(line.chars) for block in shared_page.blocks for line in block.lines)
+    print(f"[ok] shared pipeline: {shared_blocks} blocks / {shared_lines} lines / {shared_chars} chars")
+    if shared_page.error_message:
+        print(f"[err] shared pipeline page error: {shared_page.error_message}")
+        return 2
+    if shared_blocks == 0 or shared_lines == 0:
+        print("[err] shared pipeline produced no layout/OCR output")
+        return 2
     return 0
 
 

@@ -47,7 +47,7 @@ def get_engine_description(mode: str = "") -> str:
     if mode == "mock":
         return "Mock OCR（FakeOcrEngine）"
     if mode == "hanwang":
-        return "汉王原生 OCR（linecut + IntegratRcg CharRcg，32-bit subprocess）"
+        return "汉王原生版面 + OCR（doc_seg + linecut + IntegratRcg CharRcg，32-bit subprocess）"
     return (
         "PaddleOCR 本地默认中文模型组合"
         "（lang=ch, use_angle_cls=True, layout=False, table=False；"

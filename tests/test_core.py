@@ -1028,7 +1028,7 @@ def test_workflow_controller_layout_progress_signal():
     controller._on_layout_progress(1, 3)
 
     assert events == [(1, 3)]
-    assert statuses[-1] == "版面分析中… 第 2/3 页"
+    assert statuses[-1] == "Paddle 版面分析中… 第 2/3 页"
 
     print("test_workflow_controller_layout_progress_signal PASSED")
 
@@ -2351,6 +2351,89 @@ def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class HanwangLikeCropEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            assert context.expected_bbox_space == "crop"
+            assert context.crop_bbox == BBox(40, 50, 120, 60)
+            return [
+                Line(
+                    text="汉王",
+                    confidence=0.91,
+                    bbox=BBox(6, 8, 42, 16),
+                    chars=[
+                        Char(char="汉", confidence=0.93, bbox=BBox(6, 8, 18, 16), bbox_source="hanwang:CharRcg"),
+                        Char(char="王", confidence=0.89, bbox=BBox(30, 8, 18, 16), bbox_source="hanwang:CharRcg"),
+                    ],
+                    ocr_text="汉王",
+                )
+            ]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((180, 240, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(40, 50, 120, 60), order=0)
+        page = Page(image_path=img_path, width=240, height=180, blocks=[block])
+        result = OcrPipeline(engine=HanwangLikeCropEngine()).process_project(
+            OcrProject(name="HanwangSharedPipeline", pages=[page])
+        )
+
+        line = result.pages[0].blocks[0].lines[0]
+        assert line.text == "汉王"
+        assert line.bbox == BBox(46, 58, 42, 16)
+        assert [char.char for char in line.chars] == ["汉", "王"]
+        assert line.chars[0].bbox == BBox(46, 58, 18, 16)
+        assert line.chars[1].bbox == BBox(70, 58, 18, 16)
+        assert all(char.bbox_source.startswith("hanwang:") for char in line.chars)
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars PASSED")
+
+
+def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class FailingEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            raise RuntimeError("hanwang boom")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.ones((160, 240, 3), dtype=np.uint8) * 255
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(20, 30, 100, 40), order=0)
+        page = Page(image_path=img_path, width=240, height=160, blocks=[block])
+        result = OcrPipeline(engine=FailingEngine()).process_project(
+            OcrProject(name="FailingBlockOCR", pages=[page])
+        )
+
+        assert result.failed_blocks == [(0, 0, "hanwang boom")]
+        assert result.pages[0].error_message == "OCR 失败：块 0: hanwang boom"
+        assert "OCR failed: hanwang boom" in result.pages[0].blocks[0].note
+    finally:
+        os.unlink(img_path)
+
+
 def test_workflow_controller_auto_chains_ocr_after_layout():
     from app.controllers.workflow_controller import WorkflowController
     from app.models import BBox, Block, BlockType, OcrProject, Page
@@ -2370,6 +2453,70 @@ def test_workflow_controller_auto_chains_ocr_after_layout():
     assert chained[0][0] == [page]
 
     print("test_workflow_controller_auto_chains_ocr_after_layout PASSED")
+
+
+def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
+    import app.controllers.workflow_controller as workflow_module
+    import app.core.layout_analyzer as layout_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeLayoutWorker:
+        def __init__(self, pages):
+            self.page_done = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self._pages = pages
+            self._running = False
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            for page in self._pages:
+                page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, page.width, page.height), order=0)]
+            self.all_done.emit(self._pages)
+            self._running = False
+
+    original_get_config = workflow_module.get_config
+    original_create_engine = workflow_module.create_engine
+    original_layout_worker = layout_module.LayoutWorker
+
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    workflow_module.create_engine = lambda: object()
+    layout_module.LayoutWorker = FakeLayoutWorker
+
+    try:
+        controller = workflow_module.WorkflowController()
+        page = Page(image_path="/tmp/hanwang-layout.png", width=120, height=90)
+        controller._project = OcrProject(name="HanwangFlow", pages=[page])
+        started = []
+        messages = []
+        controller.start_ocr = lambda pages, notify_page_callback=None: started.append(pages) or True
+        controller.status_message.connect(messages.append)
+
+        ok = controller.start_layout_analysis([page])
+
+        assert ok is True
+        assert controller._proof_ocr_worker is None
+        assert started == [[page]]
+        assert any("汉王版面分析中" in message for message in messages)
+        assert not any("PP-OCRv5" in message for message in messages)
+    finally:
+        workflow_module.get_config = original_get_config
+        workflow_module.create_engine = original_create_engine
+        layout_module.LayoutWorker = original_layout_worker
 
 
 def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
@@ -3918,6 +4065,40 @@ def test_api_settings_dialog_preserves_local_mode_when_saving():
     print("test_api_settings_dialog_preserves_local_mode_when_saving PASSED")
 
 
+def test_api_settings_dialog_persists_hanwang_mode_without_api_runtime():
+    from app.core.app_config import AppConfig
+    from app.core.ocr_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._radio_hanwang.setChecked(True)
+        dialog._url_edit.setText("https://example.com/custom/ocr")
+        dialog._token_edit.setText("kept-for-api")
+
+        assert dialog._selected_mode() == "hanwang"
+        assert dialog._api_form_panel.isEnabled() is False
+        assert dialog._btn_test.isEnabled() is False
+        assert "汉王原生链路" in dialog._summary_model.text()
+        assert "不使用 API" in dialog._api_mode_notice.text()
+
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["mode"] == "hanwang"
+        assert cfg["api_url"] == "https://example.com/custom"
+        assert cfg["api_token"] == "kept-for-api"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_persists_hanwang_mode_without_api_runtime PASSED")
+
+
 def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
     from app.core.app_config import AppConfig
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
@@ -5451,6 +5632,76 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
+def test_layout_analyzer_routes_hanwang_mode():
+    import tempfile
+    import cv2
+    import numpy as np
+    import app.core.ocr_config as config_module
+    import app.engines.hanwang_layout_engine as hanwang_layout_module
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BBox, Block, BlockType, Page
+
+    class FakeHanwangLayoutEngine:
+        def analyze(self, image_path):
+            return [Block(block_type=BlockType.TEXT, bbox=BBox(12, 18, 80, 40), order=0)]
+
+    original_get_config = config_module.get_config
+    original_engine = hanwang_layout_module.HanwangLayoutEngine
+    config_module.get_config = lambda: {"mode": "hanwang"}
+    hanwang_layout_module.HanwangLayoutEngine = FakeHanwangLayoutEngine
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+
+    try:
+        cv2.imwrite(page_path, np.full((200, 300, 3), 255, dtype=np.uint8))
+        page = Page(image_path=page_path, width=0, height=0, page_number=1)
+        result = LayoutAnalyzer().analyze(page)
+
+        assert len(result.blocks) == 1
+        assert result.blocks[0].bbox == BBox(12, 18, 80, 40)
+        assert result.width == 300
+        assert result.height == 200
+    finally:
+        config_module.get_config = original_get_config
+        hanwang_layout_module.HanwangLayoutEngine = original_engine
+        os.unlink(page_path)
+
+
+def test_hanwang_assets_env_accepts_bin_dir():
+    from app.engines.hanwang.paths import get_hanwang_bin_dir, verify_hanwang_assets
+
+    required = [
+        "linecut_segimg_probe.exe",
+        "linecut_recogimg_probe.exe",
+        "docseg_probe.exe",
+        "linecut.dll",
+        "IntegratRcg.dll",
+        "doc_seg.dll",
+        "mp30.dll",
+        "mp60.dll",
+    ]
+
+    old_env = os.environ.get("HANWANG_NATIVE_DIR")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir) / "hanwang_native"
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True)
+        for name in required:
+            (bin_dir / name).write_bytes(b"stub")
+        os.environ["HANWANG_NATIVE_DIR"] = str(bin_dir)
+        try:
+            assert get_hanwang_bin_dir() == bin_dir
+            verify_hanwang_assets()
+        finally:
+            if old_env is None:
+                os.environ.pop("HANWANG_NATIVE_DIR", None)
+            else:
+                os.environ["HANWANG_NATIVE_DIR"] = old_env
+
+    print("test_hanwang_assets_env_accepts_bin_dir PASSED")
+
+
 def test_layout_worker_continues_after_single_page_failure():
     from unittest.mock import patch
 
@@ -6198,7 +6449,10 @@ if __name__ == "__main__":
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
     test_page_ocr_refills_caption_and_equation_blocks()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
+    test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
+    test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
+    test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()
     test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
     test_workflow_controller_keeps_qthreads_until_finished_after_error()
@@ -6215,6 +6469,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
     test_api_settings_dialog_preserves_local_mode_when_saving()
+    test_api_settings_dialog_persists_hanwang_mode_without_api_runtime()
     test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
     test_api_settings_dialog_persists_llm_candidate_settings()
     test_llm_rules_loads_default_rules_file()
@@ -6233,6 +6488,8 @@ if __name__ == "__main__":
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
+    test_layout_analyzer_routes_hanwang_mode()
+    test_hanwang_assets_env_accepts_bin_dir()
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()

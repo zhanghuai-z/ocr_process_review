@@ -90,6 +90,7 @@ class OcrPipeline:
                 img = cv2.imread(page.display_image_path)
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)
+                    page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
                     for block in page.blocks:
                         if block.recognizable:
                             result.failed_blocks.append(
@@ -116,6 +117,7 @@ class OcrPipeline:
                             "Page OCR failed: page=%d: %s",
                             page_idx, e,
                         )
+                        page.error_message = f"OCR 失败：{e}"
                         result.failed_blocks.append((page_idx, -1, str(e)))
                     if progress_callback:
                         progress_callback(OcrProgress(
@@ -131,6 +133,7 @@ class OcrPipeline:
                     continue
 
                 block_idx = 0
+                page_failures: list[str] = []
 
                 for block in page.blocks:
                     if not block.recognizable:
@@ -144,6 +147,8 @@ class OcrPipeline:
                             "OCR failed: page=%d block=%d: %s",
                             page_idx, block.order, e,
                         )
+                        self._append_block_failure_note(block, str(e))
+                        page_failures.append(f"块 {block.order}: {e}")
                         result.failed_blocks.append(
                             (page_idx, block.order, str(e))
                         )
@@ -168,6 +173,11 @@ class OcrPipeline:
                         completed_pages=page_idx + 1,
                             message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
                     ))
+                elif page.total_lines == 0 and page_failures and not page.error_message:
+                    summary = "；".join(page_failures[:3])
+                    if len(page_failures) > 3:
+                        summary += "；…"
+                    page.error_message = f"OCR 失败：{summary}"
 
                 self._proof_crop_service.normalize_pages([page])
                 result.pages.append(page)
@@ -178,6 +188,14 @@ class OcrPipeline:
 
     def _prefers_page_ocr(self) -> bool:
         return bool(getattr(self._engine, "prefer_page_ocr", False))
+
+    def _append_block_failure_note(self, block: Block, message: str) -> None:
+        note = f"OCR failed: {message}"
+        if not block.note:
+            block.note = note
+            return
+        if note not in block.note:
+            block.note = f"{block.note}\n{note}"
 
     def _process_page_with_page_ocr(
         self,

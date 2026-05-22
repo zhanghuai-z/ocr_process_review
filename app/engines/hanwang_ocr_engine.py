@@ -85,7 +85,7 @@ class HanwangOcrEngine:
                 context.block_id,
                 e,
             )
-            return []
+            raise RuntimeError(f"Hanwang segimg failed: {e}") from e
 
         all_lines: List[Line] = []
         fallback_chars_recovered = 0

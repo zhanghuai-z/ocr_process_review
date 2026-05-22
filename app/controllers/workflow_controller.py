@@ -14,6 +14,7 @@ from typing import Callable, List, Optional
 from PySide6.QtCore import QObject, QThread, Signal
 
 from app.core.logging import get_logger
+from app.core.ocr_config import get_config
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
 from app.core import quality_probe as qp
@@ -451,6 +452,30 @@ class WorkflowController(QObject):
         self._max_step = self._compute_max_step()
         self.step_enabled_changed.emit(self._max_step)
 
+    def _current_ocr_mode(self) -> str:
+        try:
+            mode = str(get_config().get("mode", "local") or "local").lower()
+        except Exception:
+            mode = "local"
+        return mode
+
+    def _layout_status_label(self) -> str:
+        return {
+            "api": "API 版面分析",
+            "hanwang": "汉王版面分析",
+        }.get(self._current_ocr_mode(), "Paddle 版面分析")
+
+    def _ocr_status_label(self) -> str:
+        return {
+            "api": "API OCR",
+            "hanwang": "汉王 OCR",
+        }.get(self._current_ocr_mode(), "Paddle OCR")
+
+    def _proof_ocr_status_label(self, engine: object | None = None) -> str:
+        if engine is not None and not bool(getattr(engine, "prefer_page_ocr", False)):
+            return self._ocr_status_label()
+        return "PP-OCRv5 proof OCR"
+
     # ------------------------------------------------------------------ workflow actions
 
     def on_images_ready(self, pages: List[Page]) -> None:
@@ -486,7 +511,7 @@ class WorkflowController(QObject):
             self.status_message.emit(
                 f"版面分析完成：{success_count}/{len(pages)} 页成功"
                 + (f"，{len(failed_pages)} 页失败" if failed_pages else "")
-                + "，正在启动 OCR…"
+                + f"，正在启动 {self._ocr_status_label()}…"
             )
         else:
             self.status_message.emit(
@@ -504,9 +529,13 @@ class WorkflowController(QObject):
             queued_callback = self._queued_ocr_progress_callback
             self._queued_ocr_progress_callback = None
             if self.get_recognizable_block_count() == 0:
-                self.status_message.emit("版面分析完成，但 proof OCR 失败且没有可识别文字块")
+                self.status_message.emit(
+                    f"版面分析完成，但 {self._proof_ocr_status_label()} 失败且没有可识别文字块"
+                )
                 return
-            self.status_message.emit("PP-OCRv5 proof OCR 失败，改用版面块 OCR 继续")
+            self.status_message.emit(
+                f"{self._proof_ocr_status_label()} 失败，改用版面块 OCR 继续"
+            )
             self.start_ocr(pages, notify_page_callback=queued_callback)
             return
 
@@ -515,7 +544,9 @@ class WorkflowController(QObject):
             if self._pending_proof_pages is not None:
                 self._finish_parallel_proof_ocr()
             else:
-                self.status_message.emit(f"版面分析完成：{len(pages)} 页，等待 PP-OCRv5 proof OCR…")
+                self.status_message.emit(
+                    f"版面分析完成：{len(pages)} 页，等待 {self._proof_ocr_status_label()}…"
+                )
             return
 
         if self._auto_start_ocr_after_layout:
@@ -536,7 +567,10 @@ class WorkflowController(QObject):
         self._project.pages = pages
 
         for page in pages:
-            page.status = PageStatus.OCR_DONE
+            if page.error_message and page.total_lines == 0:
+                page.status = PageStatus.ERROR
+            else:
+                page.status = PageStatus.OCR_DONE
 
         self._proof_crop_service.normalize_pages(pages)
 
@@ -545,8 +579,14 @@ class WorkflowController(QObject):
 
         self._update_max_step()
         self.ocr_finished.emit(pages)
+        failed_pages = [
+            page for page in pages
+            if page.error_message and page.total_lines == 0
+        ]
         self.status_message.emit(
-            f"识别完成，自动标记 {flagged} 行低置信度内容；横向/纵向校对已可进入"
+            f"{self._ocr_status_label()}完成，自动标记 {flagged} 行低置信度内容；"
+            f"横向/纵向校对已可进入"
+            + (f"（{len(failed_pages)} 页失败）" if failed_pages else "")
         )
 
         if self._store:
@@ -582,15 +622,17 @@ class WorkflowController(QObject):
         self._layout_worker.error.connect(self._on_worker_error)
         self._layout_worker.start()
         if parallel_started:
-            self.status_message.emit("版面分析与 PP-OCRv5 proof OCR 同步执行中…")
+            self.status_message.emit(
+                f"{self._layout_status_label()}与 {self._proof_ocr_status_label()} 同步执行中…"
+            )
         else:
-            self.status_message.emit("版面分析中…")
+            self.status_message.emit(f"{self._layout_status_label()}中…")
         return True
 
     def _on_layout_progress(self, current: int, total: int) -> None:
         """版面分析进度更新。"""
         self.layout_progress.emit(current, total)
-        self.status_message.emit(f"版面分析中… 第 {current + 1}/{total} 页")
+        self.status_message.emit(f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页")
 
     def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> bool:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""
@@ -598,7 +640,7 @@ class WorkflowController(QObject):
             self.status_message.emit("OCR 识别仍在进行中…")
             return False
         if self._proof_ocr_worker and self._proof_ocr_worker.isRunning():
-            self.status_message.emit("PP-OCRv5 proof OCR 仍在进行中…")
+            self.status_message.emit(f"{self._proof_ocr_status_label()} 仍在进行中…")
             return False
 
         recognizable_blocks = sum(len(page.recognizable_blocks) for page in pages)
@@ -620,7 +662,7 @@ class WorkflowController(QObject):
         self._ocr_worker.error.connect(self._on_worker_error)
         self._ocr_worker.start()
         self.step_requested.emit(STEP_OCR)
-        self.status_message.emit("OCR 识别中…")
+        self.status_message.emit(f"{self._ocr_status_label()} 识别中…")
         return True
 
     def _start_parallel_proof_ocr(self, pages: List[Page]) -> bool:
@@ -649,7 +691,7 @@ class WorkflowController(QObject):
                     block_type=BlockType.TEXT,
                     bbox=BBox(0, 0, max(1, int(page.width)), max(1, int(page.height))),
                     order=0,
-                    note="Parallel PP-OCRv5 proof OCR container",
+                    note=f"Parallel {self._proof_ocr_status_label()} container",
                 )
             ]
         return proof_pages
