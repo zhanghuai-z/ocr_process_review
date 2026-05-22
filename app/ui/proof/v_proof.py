@@ -888,16 +888,12 @@ class VProofPanel(QWidget):
         self._batch_select_all_btn.clicked.connect(self._select_all_gallery)
         self._batch_clear_btn = QPushButton("清选 (Esc)")
         self._batch_clear_btn.clicked.connect(self._clear_gallery_selection)
-        # 质量探针：无损识别按钮 — 用户标记"我已注意到这格不属于本集合"，
-        # 不需要真的改字（不动 line.text），直接把命中的 probe 标为 corrected。
-        self._mark_observed_btn = QPushButton("标记已识别")
-        self._mark_observed_btn.setToolTip(
-            "对选中的格子标记为'已识别为掺沙'：不修改正文，仅作为校对质量观察信号。"
-        )
-        self._mark_observed_btn.clicked.connect(self._mark_selected_observed)
+        # Round 18：移除"标记已识别"无损路径。新机制以"文本即锚点"——
+        # displayed_text 把 fake_char 注入到 OCR 文本窗口；用户在文本窗口里
+        # 真正改字才算 corrected（save_displayed_edit 反向写回 line.text 时
+        # 自动报点；_apply_replacement_to_selected 等批改路径走 detect_corrections）。
         batch_row.addWidget(self._batch_input, 1)
         batch_row.addWidget(self._batch_btn)
-        batch_row.addWidget(self._mark_observed_btn)
         batch_row.addWidget(self._batch_select_all_btn)
         batch_row.addWidget(self._batch_clear_btn)
         layout.addLayout(batch_row)
@@ -1119,64 +1115,13 @@ class VProofPanel(QWidget):
 
     # ───── quality_probe 装饰者：把探针补成顺手在同字 gallery 上多出现 ─────
     def _extras_for_tokens(self, tokens: list[str]) -> list[CharEntry]:
-        """对指定 token 集，从 active probe store 里拼出额外的
-        CharEntry。这些 entry 指向“文中真实存在的近形字”的 crop，
-        但挂在 token 的 gallery 下面。未启用 / 无 store 时返回 [] 。
+        """Round 18：废弃。
+
+        新机制把 fake_char 注入到 OCR 文本窗口的 displayed_text；line.text
+        始终持有 true_char，所以 ``_char_svc.query(true_char)`` 已经包含
+        probe 位置，gallery 不再需要任何 extras。保留方法签名仅为不动调用方。
         """
-        store = qp.get_active_store()
-        if store is None or not tokens or not self._pages:
-            return []
-        out: list[CharEntry] = []
-        for tok in tokens:
-            probes = qp.extras_for_gallery_char(store, tok)
-            for probe in probes:
-                # Round 17：已 corrected 的 probe 不再作为"假象"展示。
-                # · 真实改字路径：line.text 已写为 true_char，自动出现在
-                #   _char_svc.query(tok) 里 —— 跳过避免重复。
-                # · 无损识别路径：用户已宣告识别完成，extras 也不再展示。
-                if probe.observation == "corrected":
-                    continue
-                key = probe.key
-                # 查找 page / block / line
-                page_idx = None
-                page = None
-                for pi, p in enumerate(self._pages):
-                    if p.page_number == key.page_number:
-                        page_idx = pi
-                        page = p
-                        break
-                if page is None:
-                    continue
-                if key.block_index >= len(page.blocks):
-                    continue
-                block = page.blocks[key.block_index]
-                if key.line_index >= len(block.lines):
-                    continue
-                line = block.lines[key.line_index]
-                chars = getattr(line, "chars", None) or []
-                if key.char_index >= len(chars):
-                    continue
-                ch = chars[key.char_index]
-                bbox = getattr(ch, "bbox", None)
-                if bbox is None:
-                    continue
-                out.append(CharEntry(
-                    char=tok,
-                    page_path=page.display_image_path,
-                    page_number=page.page_number,
-                    line=line,
-                    char_idx=key.char_index,
-                    bbox=bbox,
-                    page_idx=page_idx or 0,
-                    block_order=getattr(block, "order", 0) or 0,
-                    line_idx=key.line_index,
-                    confidence=getattr(ch, "confidence", 0.0) or 0.0,
-                    bbox_source=getattr(ch, "bbox_source", "") or "",
-                    bbox_granularity=getattr(ch, "bbox_granularity", "") or "",
-                    token_text=tok,  # 隐藏 probe 身份：贴上集合主字符标签
-                    collection_kind="char",
-                ))
-        return out
+        return []
 
     def _find_page_index(self, target: Page) -> int:
         for idx, page in enumerate(self._pages):
@@ -1749,57 +1694,17 @@ class VProofPanel(QWidget):
                         store, e.page_number, bi, e.line_idx, e.char_idx,
                     ):
                         any_probe_hit = True
-        if any_probe_hit:
-            # Round 17：corrected probe 立刻进入正确集合 —— gallery 原地刷新。
+        # Round 18：批改路径也走文本锚点兜底——可能改到了 probe 位置
+        # 但 observe_slot_edit 因为 char_idx 不在 probe key 上而漏报。
+        try:
+            
+            extra_hits = qp.detect_corrections(qp.get_active_store(), self._pages)
+        except Exception:
+            extra_hits = 0
+        if any_probe_hit or extra_hits:
+            # corrected probe 立刻进入正确集合 —— gallery 原地刷新。
             self._refresh_current_char_gallery()
         return applied
-
-    def _mark_selected_observed(self) -> None:
-        """非破坏性识别路径：把当前 gallery 选区里命中 probe 的位置标 corrected。
-
-        - 不修改 line.text，不走 save_displayed_edit。
-        - 若无选区，则尝试以 current entry 兜底。
-        - status 反馈命中数；命中 0 时也写出"未命中 probe"，便于用户区分。
-        """
-        sel_model = self._gallery_view.selectionModel() if hasattr(self, "_gallery_view") else None
-        indexes = list(sel_model.selectedIndexes()) if sel_model else []
-        entries: list[CharEntry] = []
-        for idx in indexes:
-            e = idx.data(Qt.ItemDataRole.UserRole)
-            if e is not None:
-                entries.append(e)
-        if not entries and sel_model is not None:
-            cur = sel_model.currentIndex()
-            if cur.isValid():
-                e = cur.data(Qt.ItemDataRole.UserRole)
-                if e is not None:
-                    entries = [e]
-        if not entries:
-            self._status_lbl.setText("标记已识别：当前没有选中的格子")
-            return
-        store = qp.get_active_store()
-        if store is None:
-            self._status_lbl.setText("标记已识别：质量探针未启用")
-            return
-        hit = 0
-        for e in entries:
-            bi = _line_block_index(self._pages, e.page_number, e.line)
-            if bi is None:
-                continue
-            if qp.observe_slot_edit(store, e.page_number, bi, e.line_idx, e.char_idx):
-                hit += 1
-        if hit:
-            self._status_lbl.setText(
-                f"标记已识别：{hit}/{len(entries)} 处命中 probe（已记为 corrected，未改正文）"
-            )
-            self._status_lbl.setStyleSheet("color: #1a73e8; font-size: 12px;")
-            # Round 17：corrected probe 立刻从 extras 中消失（"进入正确集合"语义）
-            self._refresh_current_char_gallery()
-        else:
-            self._status_lbl.setText(
-                f"标记已识别：所选 {len(entries)} 处均非 probe（不计分）"
-            )
-            self._status_lbl.setStyleSheet("color: #666; font-size: 12px;")
 
     def _refresh_current_char_gallery(self) -> None:
         """Round 17：原地重建当前 selected_char 的 gallery（保持 _selected_char 不变）。
@@ -2137,8 +2042,6 @@ class VProofPanel(QWidget):
             self._batch_btn.setEnabled(n >= 1)
             self._batch_input.setEnabled(n >= 1)
             self._batch_clear_btn.setEnabled(multi)
-        if hasattr(self, "_mark_observed_btn"):
-            self._mark_observed_btn.setEnabled(n >= 1)
         # 标题刷新：复用 _sync_gallery_entry 末尾的格式化，但只在有 current 时
         cur = sel.currentIndex() if sel else None
         if cur is not None and cur.isValid():
@@ -2303,6 +2206,13 @@ class VProofPanel(QWidget):
         if changed:
             self._char_svc.build(self._pages)
             self._rebuild_char_list()
+        # Round 18：以文本为锚的最终兜底——保存之后扫一遍所有 probe，
+        # 任何"line.text 不再持有 true_char"的位置都标 corrected 并广播。
+        try:
+            
+            qp.detect_corrections(qp.get_active_store(), self._pages)
+        except Exception:
+            pass
 
     # Round 17：页级 OK 标记已删除（不属于纵校语义）。
 

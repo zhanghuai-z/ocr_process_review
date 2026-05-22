@@ -19,8 +19,11 @@
 
 ``Probe``：
 - ``key`` → 文档中一个真实位置，该位置 line.text[char_index] 上的字就是
-  ``fake_char``（已存在的、视觉近形字）。
-- ``true_char`` → 被掺沙的 gallery 字头；与 fake_char 在 ``CONFUSION_MAP``
+  ``true_char``（OCR 原字 / 用户视为"对"的字）。
+- ``fake_char`` → 该 true_char 的视觉近形字（且在文档别处出现过）；它只在
+  VProof "显示空间" 被注入到该位置，line.text 本身**永不改动**——这样
+  CharIndexService 重建时该位置仍归属于 true_char 的正确集合。
+- ``CONFUSION_MAP``
   中互为混淆字；同时文档里也至少有 1 处真实出现，否则用户根本不会进 gallery。
 - ``observation`` → ``pending`` / ``corrected``。当用户在 VProof 槽位编辑
   框对 ``key`` 位置做出任何修改时，置 ``corrected``；其余保持 ``pending``。
@@ -268,7 +271,8 @@ class Probe:
       对 ``key`` 这个位置做出任何修改时，置 ``corrected``。
 
     **重要不变量**：本模块**不会**修改 line.text 中任何字符；line.text[key.char_index]
-    在投放前后始终等于 ``fake_char``。
+    在投放前后始终等于 ``true_char``。fake_char 只通过
+    ``app.services.proof_probe_text_service.displayed_text`` 注入到显示空间。
     """
     key: ProbeKey
     true_char: str
@@ -391,7 +395,7 @@ class SamplerConfig:
 @dataclass
 class _Candidate:
     key: ProbeKey
-    char: str                     # 该位置的真实字符（= 未来 probe.fake_char）
+    char: str                     # 该位置的真实字符（= 未来 probe.true_char）
 
 
 class ProbeSampler:
@@ -400,12 +404,13 @@ class ProbeSampler:
     1. 扫全文，收集所有 "在 CONFUSION_MAP 中、有 crop 的可探测位置"。这些
        位置就是未来沙子的**来源**（fake_char 真实出现的位置）。
     2. 把候选按字符聚合得到 ``pool_by_char``。
-    3. 对每个候选 (key, fake_char)，确定 ``true_char`` 候选 =
-       ``CONFUSION_MAP[fake_char]`` 与 pool_by_char.keys() 的交集（保证
-       true_char 也确实在文档里出现过；并且 ``true_char != fake_char``）。
+    3. 对每个候选 (key, true_char=cand.char)，确定 ``fake_char`` 候选 =
+       ``CONFUSION_MAP[true_char]`` 与 chars_in_doc 的交集（保证
+       fake_char 也确实在文档里出现过；并且 ``fake_char != true_char``）。
        若交集为空，跳过该候选 —— 这就是"宁可不投，不硬造错配"。
-    4. 随机选 ``target`` 个 (key, fake_char) → 给每个分配 true_char，构造 Probe。
-       同时遵守 ``max_per_page`` / ``max_per_line`` / ``max_per_true_char``。
+    4. 随机选 ``target`` 个 (key, true_char) → 给每个分配 fake_char，构造 Probe。
+       同时遵守 ``max_per_page`` / ``max_per_line`` / ``max_per_true_char``
+       （max_per_true_char 现在按 cand.char = true_char 计上限）。
     """
 
     def __init__(self, config: Optional[SamplerConfig] = None) -> None:
@@ -415,7 +420,7 @@ class ProbeSampler:
         rng = random.Random(self.cfg.seed)
         store = ProbeStore()
 
-        # 1. 扫整文档收集候选（既是 "可探测位置"，也将被当作沙子来源位置）
+        # 1. 扫整文档收集候选（每个位置即是未来 probe 的 true_char 位置）
         pool: list[_Candidate] = []
         total_cut_cjk = 0
         for page in project.pages:
@@ -464,21 +469,24 @@ class ProbeSampler:
                 continue
             if per_line_count.get(line_key, 0) >= self.cfg.max_per_line:
                 continue
-            # 找出 fake_char=cand.char 的 true_char 候选 = 文档中真实存在的近形字
-            confusables = CONFUSION_MAP.get(cand.char, ())
-            true_options = [c for c in confusables if c in chars_in_doc and c != cand.char]
-            # 过滤掉已经达到 max_per_true_char 的 true_char
-            true_options = [c for c in true_options
-                            if per_true_char_count.get(c, 0) < self.cfg.max_per_true_char]
-            if not true_options:
-                # 关键产品口径：找不到"文中已存在的近形字"做 true_char，则跳过此候选
+            # Round 18 起重定义：
+            #   probe.true_char = cand.char = 该位置 line.text 上的原字符（"正确字"）
+            #   probe.fake_char = CONFUSION_MAP[cand.char] ∩ chars_in_doc \ {cand.char}
+            #                      （即"显示空间里要注入的假象字"，且文档中实际存在）
+            # line.text 永远保持 true_char；displayed_text 才把该位置渲染成 fake_char。
+            if per_true_char_count.get(cand.char, 0) >= self.cfg.max_per_true_char:
                 continue
-            true_ch = rng.choice(true_options)
-            probe = Probe(key=cand.key, true_char=true_ch, fake_char=cand.char)
+            confusables = CONFUSION_MAP.get(cand.char, ())
+            fake_options = [c for c in confusables if c in chars_in_doc and c != cand.char]
+            if not fake_options:
+                # 关键产品口径：找不到"文中已存在的近形字"做 fake_char，则跳过此候选
+                continue
+            fake_ch = rng.choice(fake_options)
+            probe = Probe(key=cand.key, true_char=cand.char, fake_char=fake_ch)
             store.add(probe)
             per_page_count[cand.key.page_number] = per_page_count.get(cand.key.page_number, 0) + 1
             per_line_count[line_key] = per_line_count.get(line_key, 0) + 1
-            per_true_char_count[true_ch] = per_true_char_count.get(true_ch, 0) + 1
+            per_true_char_count[cand.char] = per_true_char_count.get(cand.char, 0) + 1
             placed += 1
 
         return store
@@ -784,3 +792,76 @@ def set_active_store(store: Optional[ProbeStore]) -> None:
 
 def reset_active_store() -> None:
     set_active_store(None)
+
+
+# ──────────────────────────────────────────────────────────────────
+# Round 18：基于文本锚点的批量校验
+# ──────────────────────────────────────────────────────────────────
+
+def detect_corrections(
+    store: Optional[ProbeStore],
+    project_or_pages,
+) -> int:
+    """以 line.text 为锚扫一遍 store 内所有 pending probe：
+
+    若 ``line.text[probe.key.char_index]`` 已不再是 ``probe.fake_char``（
+    或更严格地说，已不再是 probe 当初投放时的位置内容），即认为该位置发生过
+    "用户真实编辑"。把该 probe 标 corrected 并广播 ``probe.observed``。
+
+    返回新被标 corrected 的 probe 数量。无 store / 无 project 时返回 0。
+
+    用途：
+    - VProof 保存当前页之后做一次主动校验，避免 displayed↔true 桥外的路径
+      （比如 _apply_replacement_to_selected）漏报；
+    - QualityStatsDialog 的"立刻刷新"按钮调一次，做最可靠的兜底刷新触发。
+    """
+    if store is None or project_or_pages is None:
+        return 0
+    pages = getattr(project_or_pages, "pages", project_or_pages)
+    # 先把 page_number → page 缓存好
+    pages_by_no: dict[int, "Page"] = {pg.page_number: pg for pg in pages}
+    newly = 0
+    for probe in store.all():
+        if probe.observation == "corrected":
+            continue
+        page = pages_by_no.get(probe.key.page_number)
+        if page is None:
+            continue
+        if not (0 <= probe.key.block_index < len(page.blocks)):
+            continue
+        block = page.blocks[probe.key.block_index]
+        if not (0 <= probe.key.line_index < len(block.lines)):
+            continue
+        line = block.lines[probe.key.line_index]
+        text = line.text or ""
+        ci = probe.key.char_index
+        if ci < 0 or ci >= len(text):
+            # 行被截短 → 位置已被破坏，视为"用户改过"
+            _mark_and_broadcast(probe)
+            newly += 1
+            continue
+        # 正确性判定：line.text 上该位置不再是 fake_char ⇒ 用户改过
+        # （probe 投放后 displayed_text 给出 fake_char，line.text 始终为 true_char；
+        #  用户在显示空间里改成任何非 fake_char 的字符，反向写回都会让 line.text
+        #  脱离原 true_char——这正是"以文本为锚点回正确集合"的信号。）
+        if text[ci] != probe.true_char:
+            _mark_and_broadcast(probe)
+            newly += 1
+    return newly
+
+
+def _mark_and_broadcast(probe: Probe) -> None:
+    probe.observation = "corrected"
+    try:
+        from app.core.proof_state_bus import ProofStateBus
+        ProofStateBus.instance().publish(
+            TOPIC_PROBE_OBSERVED,
+            page_number=probe.key.page_number,
+            block_index=probe.key.block_index,
+            line_index=probe.key.line_index,
+            char_index=probe.key.char_index,
+            true_char=probe.true_char,
+            fake_char=probe.fake_char,
+        )
+    except Exception:
+        pass

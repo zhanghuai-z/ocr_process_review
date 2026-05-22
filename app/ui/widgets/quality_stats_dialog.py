@@ -282,6 +282,14 @@ class QualityStatsDialog(QDialog):
         self._btn_detail.setToolTip("查看每个假象字位置的修正情况")
         self._btn_detail.clicked.connect(self._open_detail)
         bottom.addWidget(self._btn_detail)
+        # Round 18：可靠、明确、可触发的刷新入口（不依赖任何 bus / signal 路径）。
+        self._btn_refresh = QPushButton("立刻刷新")
+        self._btn_refresh.setMinimumHeight(28)
+        self._btn_refresh.setToolTip(
+            "以 line.text 为锚扫一遍所有 probe，重算更正数并刷新本窗。"
+        )
+        self._btn_refresh.clicked.connect(self._on_manual_refresh)
+        bottom.addWidget(self._btn_refresh)
         bottom.addStretch()
         btn_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         btn_box.rejected.connect(self.reject)
@@ -408,6 +416,29 @@ class QualityStatsDialog(QDialog):
             self._refresh_view()
         except Exception:
             pass
+
+    def _on_manual_refresh(self) -> None:
+        """Round 18：用户主动点"立刻刷新"——可靠刷新触发点。
+
+        1. 调 ``qp.detect_corrections`` 以 line.text 为锚扫一遍所有 pending probe，
+           漏报的位置在这里补标 corrected 并广播。
+        2. 重新拉一遍 panels 与本窗的 view（圆环 / 详情表）。
+        """
+        try:
+            project = self._project_provider()
+            qp.detect_corrections(qp.get_active_store(), project)
+        except Exception:
+            pass
+        try:
+            self._refresh_panels()
+        except Exception:
+            pass
+        self._refresh_view()
+        if self._detail_dialog is not None:
+            try:
+                self._detail_dialog.populate()
+            except Exception:
+                pass
 
     def closeEvent(self, event):  # type: ignore[override]
         unsub = getattr(self, "_unsub_probe", None)

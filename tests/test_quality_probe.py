@@ -151,18 +151,18 @@ def test_sampler_only_plants_pairs_both_in_doc():
     store = ProbeSampler(cfg).sample(project)
     assert len(store) > 0
     for probe in store.all():
-        # fake_char 是 line.text 中 key 位置的真实字
+        # Round 18：true_char 是 line.text 中 key 位置的原字符；
+        # fake_char 是要注入"显示空间"的近形字，也必须在文档别处出现过。
         page = project.pages[0]
         block = page.blocks[probe.key.block_index]
         line = block.lines[probe.key.line_index]
-        assert line.text[probe.key.char_index] == probe.fake_char
-        # true_char 也在文档中出现过
+        assert line.text[probe.key.char_index] == probe.true_char
         all_text = "".join(
             l.text for b in page.blocks for l in b.lines
         )
-        assert probe.true_char in all_text
+        assert probe.fake_char in all_text
         assert probe.true_char != probe.fake_char
-        assert probe.true_char in CONFUSION_MAP.get(probe.fake_char, ())
+        assert probe.fake_char in CONFUSION_MAP.get(probe.true_char, ())
 
 
 def test_sampler_skips_when_no_in_doc_confusable_exists():

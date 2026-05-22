@@ -128,14 +128,11 @@ def test_round17_corrected_probe_drops_from_gallery_extras():
     panel = VProofPanel()
     panel.load_pages([page])
 
-    extras_before = panel._extras_for_tokens(["己"])
-    assert len(extras_before) == 1
-
+    # Round 18：extras 永远为空。corrected 通过 line.text 锚点反映；
+    # gallery 集合归位由 CharIndexService.query(line.text[i]) 自然完成。
+    assert panel._extras_for_tokens(["己"]) == []
     probe.observation = "corrected"
-    extras_after = panel._extras_for_tokens(["己"])
-    assert extras_after == [], (
-        f"corrected probe 不应再在 extras 中；得到 {extras_after!r}"
-    )
+    assert panel._extras_for_tokens(["己"]) == []
     panel.close()
 
 
