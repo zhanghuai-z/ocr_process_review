@@ -8,11 +8,14 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import List
 
 import numpy as np
 
 from app.core.logging import get_logger
+from app.core.ocr_ir import OcrIrLine
+from app.core.token_char_mapper import build_line_from_ir
 from app.engines import OCR_BBOX_SPACE_CROP, OcrContext
 from app.engines.hanwang.native_bridge import (
     HanwangNativeError,
@@ -21,8 +24,8 @@ from app.engines.hanwang.native_bridge import (
     run_linecut_recog,
     run_linecut_segimg,
 )
-from app.engines.hanwang.translator import translate_linecut
-from app.models import BBox, Line
+from app.engines.hanwang.translator import AUTO_FLAG_THRESHOLD, translate_linecut_ir
+from app.models import BBox, Line, ProofStatus
 
 logger = get_logger(__name__)
 
@@ -50,6 +53,43 @@ def _union_line_bbox(group: dict, image_w: int, image_h: int) -> tuple[int, int,
     r = min(image_w - 1, r + _LINE_MARGIN)
     b = min(image_h - 1, b + _LINE_MARGIN)
     return l, t, r, b
+
+
+def _offset_ir_line(ir_line: OcrIrLine, dx: int, dy: int) -> OcrIrLine:
+    tokens = []
+    for token in ir_line.tokens:
+        bbox = token.bbox
+        tokens.append(
+            replace(
+                token,
+                bbox=(
+                    BBox(x=bbox.x + dx, y=bbox.y + dy, w=bbox.w, h=bbox.h)
+                    if bbox is not None
+                    else None
+                ),
+            )
+        )
+    return OcrIrLine(
+        text=ir_line.text,
+        confidence=ir_line.confidence,
+        bbox=BBox(
+            x=ir_line.bbox.x + dx,
+            y=ir_line.bbox.y + dy,
+            w=ir_line.bbox.w,
+            h=ir_line.bbox.h,
+        ),
+        source_text=ir_line.source_text,
+        tokens=tokens,
+        review_flags=list(ir_line.review_flags),
+    )
+
+
+def _line_status(ir_line: OcrIrLine) -> ProofStatus:
+    return (
+        ProofStatus.AUTO_FLAGGED
+        if ir_line.confidence < AUTO_FLAG_THRESHOLD
+        else ProofStatus.UNCHECKED
+    )
 
 
 class HanwangOcrEngine:
@@ -122,22 +162,9 @@ class HanwangOcrEngine:
                     if recovered == 0:
                         fallback_lines_failed += 1
                     continue
-                for line in translate_linecut(raw):
-                    line.bbox = BBox(
-                        x=line.bbox.x + l,
-                        y=line.bbox.y + t,
-                        w=line.bbox.w,
-                        h=line.bbox.h,
-                    )
-                    for ch in line.chars:
-                        if ch.bbox is not None:
-                            ch.bbox = BBox(
-                                x=ch.bbox.x + l,
-                                y=ch.bbox.y + t,
-                                w=ch.bbox.w,
-                                h=ch.bbox.h,
-                            )
-                    all_lines.append(line)
+                for ir_line in translate_linecut_ir(raw):
+                    shifted = _offset_ir_line(ir_line, l, t)
+                    all_lines.append(build_line_from_ir(shifted, proof_status=_line_status(shifted)))
 
         logger.info(
             "Hanwang OCR page=%s block=%s lines=%d "
@@ -198,24 +225,13 @@ class HanwangOcrEngine:
                     context.page_number, context.block_id, ch_idx, cl, ct, cr, cb, e,
                 )
                 continue
-            for line in translate_linecut(raw):
-                line.bbox = BBox(
-                    x=line.bbox.x + cl,
-                    y=line.bbox.y + ct,
-                    w=line.bbox.w,
-                    h=line.bbox.h,
-                )
-                for c in line.chars:
-                    if c.bbox is not None:
-                        c.bbox = BBox(
-                            x=c.bbox.x + cl,
-                            y=c.bbox.y + ct,
-                            w=c.bbox.w,
-                            h=c.bbox.h,
-                        )
-                # 标记来源便于上层审计
-                for c in line.chars:
-                    c.bbox_source = "hanwang:CharRcg:char_fallback"
+            for ir_line in translate_linecut_ir(
+                raw,
+                bbox_source="hanwang:CharRcg:char_fallback",
+                review_flags=["hanwang_char_fallback"],
+            ):
+                shifted = _offset_ir_line(ir_line, cl, ct)
+                line = build_line_from_ir(shifted, proof_status=_line_status(shifted))
                 all_lines.append(line)
                 recovered += sum(1 for c in line.chars if c.char)
         return recovered

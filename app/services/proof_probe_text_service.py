@@ -2,19 +2,19 @@
 
 设计（Round 18）：
 
-- ``line.text`` 永远保存"真实"文本（未被掺沙），CharIndexService 等正常集合
+- ``line.final_text`` 永远保存"真实"文本（未被掺沙），CharIndexService 等正常集合
   视图始终基于真实文本。
 - ``displayed_text(line, page, block)`` 返回"显示空间"文本：若该 line 有处于
-  ``observation == "pending"`` 的 probe，则把 ``line.text[probe.char_index]``
+  ``observation == "pending"`` 的 probe，则把 ``line.final_text[probe.char_index]``
   替换成 ``probe.fake_char``，得到与"真实 OCR 错字"在文本窗口中表现一致的
   视图。**长度不变、位置一一对应**（apply_probes_to_display 是位置等长替换）。
 - ``save_displayed_edit(line, page, block, displayed_new)`` 把"用户在显示空
-  间里编辑后的整行"反向映射回 ``line.text``：
+  间里编辑后的整行"反向映射回 ``line.final_text``：
     - 若 displayed_new[i] == 旧 displayed_old[i]：该位置用户没动 → 保持
-      line.text[i] 不变（probe 仍 pending）；
+      line.final_text[i] 不变（probe 仍 pending）；
     - 若 displayed_new[i] != displayed_old[i]：该位置发生了真实编辑 →
-      line.text[i] = displayed_new[i]；若 i 命中某个 pending probe，则把该
-      probe 标 ``corrected``（即"以文本为锚点回正确集合"——line.text 上的
+      line.final_text[i] = displayed_new[i]；若 i 命中某个 pending probe，则把该
+      probe 标 ``corrected``（即"以文本为锚点回正确集合"——line.final_text 上的
       字符变了，CharIndexService 重建后该位置自动归到新字符的 gallery）。
     - 若 displayed_new 与 displayed_old 长度不同：按整行差异处理 ——
       调用 ``line.update_text``、对齐 ``line.chars``，整行的 probe（若有）
@@ -47,10 +47,10 @@ def displayed_text(line: Line, page: Page, block: Block) -> str:
     """显示给用户的文本 —— Round 18 起恢复"显示空间"语义：
 
     若该 line 上有 ``observation == "pending"`` 的 probe，则把对应位置替换成
-    ``fake_char``；其余位置原样输出 ``line.text``。无 active store / 无 probe
-    时返回 ``line.text``。
+    ``fake_char``；其余位置原样输出 ``line.final_text``。无 active store / 无 probe
+    时返回 ``line.final_text``。
     """
-    base = line.text or ""
+    base = line.final_text or line.text or ""
     store = qp.get_active_store()
     if store is None or not base:
         return base
@@ -74,11 +74,11 @@ def displayed_text(line: Line, page: Page, block: Block) -> str:
 def save_displayed_edit(
     line: Line, page: Page, block: Block, displayed_new_text: str
 ) -> bool:
-    """把编辑结果落盘到 ``line.text``。返回 ``True`` 表示发生变化。
+    """把编辑结果落盘到 ``line.final_text``。返回 ``True`` 表示发生变化。
 
     若 (page, block, line) 上挂有 probes，则按"显示空间 → 真实空间"逐位反向
-    映射：原显示位置若是 fake_char 且用户没动它，line.text 保持原 true_char；
-    用户动过的位置直接写回 line.text，并把命中的 pending probe 标 corrected。
+    映射：原显示位置若是 fake_char 且用户没动它，line.final_text 保持原 true_char；
+    用户动过的位置直接写回 line.final_text，并把命中的 pending probe 标 corrected。
     """
     displayed_old = displayed_text(line, page, block)
     if displayed_new_text == displayed_old:
@@ -94,7 +94,7 @@ def save_displayed_edit(
         probes_pending = [p for p in store.for_line(page.page_number, bi, li)
                           if p.observation == "pending"]
 
-    base_true = line.text or ""
+    base_true = line.final_text or line.text or ""
     if probes_pending and len(displayed_new_text) == len(displayed_old) == len(base_true):
         # 等长路径：精确按位反向映射
         new_true_chars = list(base_true)
@@ -110,7 +110,7 @@ def save_displayed_edit(
                 _mark_probe_corrected(probe, page.page_number, idx[0], idx[1], ci)
         new_true = "".join(new_true_chars)
     else:
-        # 长度变化 / 无 probe：直接以 displayed_new 作为新 line.text
+        # 长度变化 / 无 probe：直接以 displayed_new 作为新 line.final_text
         new_true = displayed_new_text
         # 整行已被破坏：所有 pending probe 都按"位置不再持有 fake_char"判定
         if probes_pending and idx is not None:
@@ -120,7 +120,7 @@ def save_displayed_edit(
                 if ci >= len(new_true) or new_true[ci] != p.fake_char:
                     _mark_probe_corrected(p, page.page_number, bi, li, ci)
 
-    if new_true == (line.text or ""):
+    if new_true == (line.final_text or line.text or ""):
         return False
     line.update_text(new_true)
     _sync_chars_glyphs(line, new_true)

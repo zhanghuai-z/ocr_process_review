@@ -79,6 +79,7 @@ class OcrIrToken:
     row_index: int
     token_index: int
     raw_region: Any = None
+    confidence: Optional[float] = None
     kind: OcrIrKind = "other"
     bbox_source: str = "ocr"
     bbox_granularity: str = "char"
@@ -92,4 +93,3 @@ class OcrIrLine:
     source_text: str
     tokens: list[OcrIrToken] = field(default_factory=list)
     review_flags: list[str] = field(default_factory=list)
-

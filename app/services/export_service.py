@@ -2,7 +2,7 @@
 
 结构化导出初版口径：
 - XML / HTML / Markdown / TXT 都按项目 -> 页 -> 块 -> 行读取；
-- 行文本统一读取人工最终文本 line.text；
+- 行文本统一读取人工最终文本 line.final_text；
 - 块按 order 优先、坐标兜底排序，尽量贴近原稿阅读顺序；
 - XML / HTML 保留空块结构，TXT / Markdown 默认只输出有文本的块。
 """
@@ -68,11 +68,11 @@ def get_export_text(line: Line) -> str:
     """获取导出的最终文本。
 
     统一规则：
-    - 永远读取人工最终文本 (line.text)
+    - 永远读取人工最终文本 (line.final_text)
     - 不读取 llm_suggestion（除非人工已接受）
     - 不读取 ocr_text（除非人工未修改且没有原始文本）
     """
-    return line.text
+    return line.final_text or line.text
 
 
 def get_block_label(block: Block) -> str:

@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS line (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
     text              TEXT    NOT NULL DEFAULT '',
+    final_text        TEXT    NOT NULL DEFAULT '',
     original_text     TEXT    NOT NULL DEFAULT '',
     confidence        REAL    NOT NULL DEFAULT 0.0,
     proof_status      TEXT    NOT NULL DEFAULT 'unchecked',
@@ -152,6 +153,10 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE char_ ADD COLUMN bbox_source TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE char_ ADD COLUMN bbox_granularity TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE char_ ADD COLUMN token_text TEXT NOT NULL DEFAULT '';",
+    ],
+    4: [
+        "ALTER TABLE line ADD COLUMN final_text TEXT NOT NULL DEFAULT '';",
+        "UPDATE line SET final_text = text WHERE final_text = '';",
     ],
 }
 
@@ -368,12 +373,15 @@ class ProjectStore:
 
     def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
         bb = line.bbox
+        final_text = line.final_text or line.text
+        line.final_text = final_text
+        line.text = final_text
         cur.execute(
-            "INSERT INTO line (block_id, text, original_text, confidence, proof_status, "
+            "INSERT INTO line (block_id, text, final_text, original_text, confidence, proof_status, "
             "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
             "review_flags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (block_id, line.text, line.original_text, line.confidence,
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (block_id, line.text, line.final_text, line.original_text, line.confidence,
              line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
              line.ocr_text, line.llm_suggestion, line.llm_reason,
              line.llm_review_status.value,
@@ -412,11 +420,14 @@ class ProjectStore:
     def update_line(self, line: Line) -> None:
         """只更新单行文字（校对时使用）。"""
         bb = line.bbox
+        final_text = line.final_text or line.text
+        line.final_text = final_text
+        line.text = final_text
         self.conn.execute(
-            "UPDATE line SET text=?, original_text=?, proof_status=?, "
+            "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
             "review_flags_json=? WHERE id=?",
-            (line.text, line.original_text, line.proof_status.value,
+            (line.text, line.final_text, line.original_text, line.proof_status.value,
              line.ocr_text, line.llm_suggestion, line.llm_reason,
              line.llm_review_status.value,
              _review_flags_to_json(line.review_flags), line.id),
@@ -505,7 +516,8 @@ class ProjectStore:
         lines = []
         for r in rows:
             line = Line(
-                text=r["text"],
+                text=r["final_text"] or r["text"],
+                final_text=r["final_text"] or r["text"],
                 original_text=r["original_text"],
                 confidence=r["confidence"],
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),

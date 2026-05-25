@@ -4,12 +4,12 @@ from __future__ import annotations
 import numpy as np
 
 from app.core.char_bbox_utils import is_meaningful_text_bbox
-from app.core.ocr_ir import OcrIrToken
+from app.core.ocr_ir import OcrIrLine, OcrIrToken
 from app.core.ocr_ir_builder import (
     CHAR_BBOX_GRANULARITY_FALLBACK,
     CHAR_BBOX_SOURCE_FALLBACK,
 )
-from app.models import Char
+from app.models import Char, Line
 
 
 def find_token_span(
@@ -59,7 +59,6 @@ def build_line_chars(
     ]
     if not line_text:
         return chars
-
     occupied = [False] * len(line_text)
     cursor = 0
     for token in tokens:
@@ -75,10 +74,15 @@ def build_line_chars(
         if span is None:
             continue
         start, end = span
+        confidence = (
+            float(token.confidence)
+            if token.confidence is not None
+            else float(line_confidence)
+        )
         for idx in range(start, end):
             chars[idx] = Char(
                 char=line_text[idx],
-                confidence=float(line_confidence),
+                confidence=confidence,
                 bbox=bbox,
                 bbox_source=token.bbox_source,
                 bbox_granularity=token.bbox_granularity,
@@ -87,3 +91,29 @@ def build_line_chars(
             occupied[idx] = True
         cursor = end
     return chars
+
+
+def build_line_from_ir(
+    ir_line: OcrIrLine,
+    *,
+    page_image: np.ndarray | None = None,
+    proof_status=None,
+) -> Line:
+    """Convert one OCR_IR line into the proof-facing Line/Char model."""
+    line = Line(
+        text=ir_line.text,
+        final_text=ir_line.text,
+        confidence=float(ir_line.confidence),
+        bbox=ir_line.bbox,
+        chars=build_line_chars(
+            page_image=page_image,
+            line_text=ir_line.text,
+            line_confidence=float(ir_line.confidence),
+            tokens=ir_line.tokens,
+        ),
+        ocr_text=ir_line.source_text or ir_line.text,
+        review_flags=list(ir_line.review_flags),
+    )
+    if proof_status is not None:
+        line.proof_status = proof_status
+    return line

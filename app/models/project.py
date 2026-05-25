@@ -107,21 +107,38 @@ class Line:
     id: Optional[int] = None
 
     # --- Phase 1 新增字段 ---
+    final_text: str = ""                  # 人工最终文本；text 仅作兼容镜像
     ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
     llm_suggestion: str = ""              # LLM 预审建议文本
     llm_reason: str = ""                  # LLM 修改原因
     llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
 
+    def __setattr__(self, name: str, value) -> None:
+        object.__setattr__(self, name, value)
+        if name == "text":
+            object.__setattr__(self, "final_text", value)
+        elif name == "final_text" and (value or getattr(self, "_line_initialized", False)):
+            object.__setattr__(self, "text", value)
+
+    def __post_init__(self) -> None:
+        if not self.final_text:
+            self.final_text = self.text
+        elif not self.text:
+            self.text = self.final_text
+        object.__setattr__(self, "_line_initialized", True)
+
     def update_text(self, new_text: str) -> None:
         if self.original_text == "":
-            self.original_text = self.text
+            self.original_text = self.final_text
+        self.final_text = new_text
         self.text = new_text
         self.proof_status = ProofStatus.MODIFIED
 
     def to_dict(self) -> dict:
         return {
             "text": self.text,
+            "final_text": self.final_text,
             "confidence": self.confidence,
             "bbox": self.bbox.to_dict(),
             "proof_status": self.proof_status.value,
@@ -150,7 +167,7 @@ class Block:
 
     @property
     def full_text(self) -> str:
-        return "\n".join(line.text for line in self.lines)
+        return "\n".join(line.final_text for line in self.lines)
 
     @property
     def avg_confidence(self) -> float:

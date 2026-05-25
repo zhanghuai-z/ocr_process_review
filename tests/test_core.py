@@ -417,6 +417,42 @@ def test_project_store():
         os.unlink(db_path)
 
 
+def test_line_final_text_alias_and_project_store_roundtrip():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line = Line(text="OCR text", final_text="人工终稿", confidence=0.9, bbox=bb)
+        assert line.text == "人工终稿"
+        line.text = "直接兼容写入"
+        assert line.final_text == "直接兼容写入"
+        line.final_text = "最终真值"
+        assert line.text == "最终真值"
+        line.final_text = ""
+        assert line.text == ""
+        line.final_text = "最终真值"
+
+        project = OcrProject(
+            name="final_text",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
+                        blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
+        )
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            assert loaded_line.final_text == "最终真值"
+            assert loaded_line.text == "最终真值"
+
+        print("test_line_final_text_alias_and_project_store_roundtrip PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_clean_on_resave():
     """重新保存时旧 block 不残留。"""
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -517,6 +553,7 @@ def test_project_store_schema_migration():
             assert loaded is not None
             assert loaded.name == "legacy"
             assert loaded.pages[0].blocks[0].lines[0].text == "legacy text"
+            assert loaded.pages[0].blocks[0].lines[0].final_text == "legacy text"
 
         # 验证 schema 版本已更新
         conn2 = sqlite3.connect(db_path)
@@ -524,7 +561,9 @@ def test_project_store_schema_migration():
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         assert ver is not None
-        assert int(ver[0]) >= 3
+        assert int(ver[0]) >= 4
+        final_text_col = conn2.execute("PRAGMA table_info(line)").fetchall()
+        assert any(col[1] == "final_text" for col in final_text_col)
         conn2.close()
 
         print("test_project_store_schema_migration PASSED")
@@ -2996,6 +3035,9 @@ def test_export_service():
     # 测试 get_export_text
     line = Line(text="最终文本", confidence=0.9, bbox=bb)
     assert get_export_text(line) == "最终文本"
+    object.__setattr__(line, "text", "兼容旧镜像")
+    object.__setattr__(line, "final_text", "人工最终真值")
+    assert get_export_text(line) == "人工最终真值"
 
     # 测试空项目
     empty_project = OcrProject(name="empty", pages=[])
@@ -3015,6 +3057,23 @@ def test_export_service():
     assert has_unproofed
 
     print("test_export_service PASSED")
+
+
+def test_proof_display_edit_writes_final_text():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.proof_probe_text_service import displayed_text, save_displayed_edit
+
+    bb = BBox(0, 0, 100, 20)
+    line = Line(text="OCR原文", confidence=0.9, bbox=bb)
+    block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
+    page = Page(image_path="/tmp/x.jpg", width=800, height=600, blocks=[block])
+
+    assert displayed_text(line, page, block) == "OCR原文"
+    assert save_displayed_edit(line, page, block, "人工终稿") is True
+    assert line.final_text == "人工终稿"
+    assert line.text == "人工终稿"
+
+    print("test_proof_display_edit_writes_final_text PASSED")
 
 
 # =====================================================================
@@ -6402,6 +6461,7 @@ if __name__ == "__main__":
     test_bbox_tools()
     test_block_type_mapping()
     test_project_store()
+    test_line_final_text_alias_and_project_store_roundtrip()
     test_project_store_clean_on_resave()
     test_project_store_schema_migration()
     test_proof_engine()

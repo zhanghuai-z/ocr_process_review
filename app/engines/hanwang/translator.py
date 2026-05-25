@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-from app.models import BBox, Block, BlockSource, BlockType, Char, Line, ProofStatus
+from app.core.ocr_ir import OcrIrLine, OcrIrToken, classify_ir_text
+from app.core.token_char_mapper import build_line_from_ir
+from app.models import BBox, Block, BlockSource, BlockType, Line, ProofStatus
 
 
 # 与 real_ocr_adapter.AUTO_FLAG_THRESHOLD 保持一致
@@ -57,7 +59,7 @@ def _bbox_from_raw(raw: dict) -> BBox:
     return BBox(x=left, y=top, w=max(0, width), h=max(0, height))
 
 
-def _translate_char(raw: dict) -> Char:
+def _translate_char_token(raw: dict, *, row_index: int, token_index: int, bbox_source: str) -> OcrIrToken:
     codes: list = raw.get("codes") or []
     scores: list = raw.get("scores") or []
     top_code = codes[0] if codes else 0
@@ -67,11 +69,16 @@ def _translate_char(raw: dict) -> Char:
         top_code_int = int(top_code, 0) if top_code.startswith(("0x", "0X")) else int(top_code, 16)
     else:
         top_code_int = int(top_code)
-    return Char(
-        char=decode_gbk_word(top_code_int),
-        confidence=_score_to_confidence(top_score),
+    text = decode_gbk_word(top_code_int)
+    return OcrIrToken(
+        text=text,
         bbox=_bbox_from_raw(raw.get("bbox") or {}),
-        bbox_source="hanwang:CharRcg",
+        row_index=row_index,
+        token_index=token_index,
+        raw_region=raw,
+        confidence=_score_to_confidence(top_score),
+        kind=classify_ir_text(text),
+        bbox_source=bbox_source,
         bbox_granularity="char",
     )
 
@@ -83,35 +90,61 @@ def _iter_groups(raw_lines: Iterable[dict]) -> Iterable[dict]:
             yield g
 
 
-def translate_linecut(raw: dict) -> List[Line]:
-    """linecut_recog raw JSON → List[Line]（坐标系：crop-local）。
+def translate_linecut_ir(
+    raw: dict,
+    *,
+    bbox_source: str = "hanwang:CharRcg",
+    review_flags: list[str] | None = None,
+) -> List[OcrIrLine]:
+    """linecut_recog raw JSON → List[OcrIrLine]（坐标系：crop-local）。
 
     每个 group 翻译成一个 Line：
     - text 拼接所有字符 top-1
     - confidence 取所有字符 top-1 置信度的均值
-    - chars 保留字符级 bbox + 候选 top-1
+    - tokens 保留字符级 bbox + 候选 top-1
     """
-    out: List[Line] = []
-    for g in _iter_groups(raw.get("lines", [])):
-        chars = [_translate_char(c) for c in g.get("chars") or []]
-        text = "".join(c.char for c in chars)
-        if chars:
-            avg_conf = sum(c.confidence for c in chars) / len(chars)
+    out: List[OcrIrLine] = []
+    for row_index, g in enumerate(_iter_groups(raw.get("lines", []))):
+        raw_chars = g.get("chars") or []
+        tokens = [
+            _translate_char_token(c, row_index=row_index, token_index=token_index, bbox_source=bbox_source)
+            for token_index, c in enumerate(raw_chars)
+        ]
+        text = "".join(token.text for token in tokens)
+        if raw_chars:
+            confidences = [
+                _score_to_confidence((c.get("scores") or [100])[0])
+                for c in raw_chars
+            ]
+            avg_conf = sum(confidences) / len(confidences)
         else:
             avg_conf = 0.0
         bbox = _bbox_from_raw(g.get("bbox") or {})
         if bbox.w <= 0 or bbox.h <= 0:
             continue
         out.append(
-            Line(
+            OcrIrLine(
                 text=text,
                 confidence=avg_conf,
                 bbox=bbox,
-                chars=chars,
-                ocr_text=text,
+                source_text=text,
+                tokens=tokens,
+                review_flags=list(review_flags or []),
+            )
+        )
+    return out
+
+
+def translate_linecut(raw: dict) -> List[Line]:
+    """Compatibility adapter: linecut_recog raw JSON → List[Line] via OCR_IR."""
+    out = []
+    for ir_line in translate_linecut_ir(raw):
+        out.append(
+            build_line_from_ir(
+                ir_line,
                 proof_status=(
                     ProofStatus.AUTO_FLAGGED
-                    if avg_conf < AUTO_FLAG_THRESHOLD
+                    if ir_line.confidence < AUTO_FLAG_THRESHOLD
                     else ProofStatus.UNCHECKED
                 ),
             )
@@ -147,5 +180,6 @@ __all__ = [
     "AUTO_FLAG_THRESHOLD",
     "decode_gbk_word",
     "translate_docseg",
+    "translate_linecut_ir",
     "translate_linecut",
 ]

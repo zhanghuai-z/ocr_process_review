@@ -87,6 +87,69 @@ def _dummy_image(h: int = 400, w: int = 300) -> np.ndarray:
     return img
 
 
+def _gbk_code(glyph: str) -> int:
+    return int.from_bytes(glyph.encode("gbk"), "little")
+
+
+def _raw_hanwang_line(text: str = "国家", *, source_x: int = 10) -> dict:
+    chars = []
+    for idx, glyph in enumerate(text):
+        x = source_x + idx * 24
+        chars.append({
+            "codes": [_gbk_code(glyph)],
+            "scores": [8 + idx],
+            "bbox": {"left": x, "top": 5, "right": x + 20, "bottom": 30, "width": 21, "height": 26},
+        })
+    return {
+        "lines": [{
+            "groups": [{
+                "bbox": {"left": source_x, "top": 5, "right": source_x + len(text) * 24, "bottom": 30},
+                "chars": chars,
+            }]
+        }]
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# 0. Hanwang translator emits OCR_IR first
+# ════════════════════════════════════════════════════════════════
+
+
+def test_hanwang_translate_linecut_ir_preserves_char_semantics():
+    from app.engines.hanwang.translator import translate_linecut_ir
+
+    ir_lines = translate_linecut_ir(_raw_hanwang_line("国家"))
+
+    assert len(ir_lines) == 1
+    ir_line = ir_lines[0]
+    assert ir_line.text == "国家"
+    assert ir_line.source_text == "国家"
+    assert len(ir_line.tokens) == 2
+    assert ir_line.tokens[0].bbox_source == "hanwang:CharRcg"
+    assert ir_line.tokens[0].bbox_granularity == "char"
+    assert ir_line.tokens[0].kind == "text"
+
+
+def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
+    from app.core.token_char_mapper import build_line_from_ir
+    from app.engines.hanwang.translator import translate_linecut_ir
+
+    ir_line = translate_linecut_ir(
+        _raw_hanwang_line("已"),
+        bbox_source="hanwang:CharRcg:char_fallback",
+        review_flags=["hanwang_char_fallback"],
+    )[0]
+    line = build_line_from_ir(ir_line)
+
+    assert line.text == "已"
+    assert line.final_text == "已"
+    assert line.ocr_text == "已"
+    assert line.review_flags == ["hanwang_char_fallback"]
+    assert len(line.chars) == 1
+    assert line.chars[0].bbox_source == "hanwang:CharRcg:char_fallback"
+    assert line.chars[0].bbox_granularity == "char"
+
+
 # ════════════════════════════════════════════════════════════════
 # 1. _is_trusted_char_bbox_source
 # ════════════════════════════════════════════════════════════════
