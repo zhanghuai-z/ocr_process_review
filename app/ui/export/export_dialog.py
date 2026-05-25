@@ -104,16 +104,18 @@ class ExportDialog(QDialog):
         self._checkboxes: dict[str, QCheckBox] = {}
         formats = [
             ("txt",  "纯文本 (.txt)"),
+            ("json", "Export IR JSON (.json)"),
             ("md",   "Markdown (.md)"),
             ("rtf",  "富文本 (.rtf)"),
-            ("pdf",  "PDF (.pdf)"),
+            ("pdf-single", "PDF 单层文本 (.pdf)"),
+            ("pdf-dual", "PDF 双层图文 (.pdf)"),
             ("xml",  "XML (.xml)"),
             ("html", "HTML (.html)"),
             ("docx", "Word 文档 (.docx)"),
         ]
         for fmt, label in formats:
             cb = QCheckBox(label)
-            cb.setChecked(fmt in ("txt", "md", "xml"))
+            cb.setChecked(fmt in ("txt", "json", "md", "xml"))
             self._checkboxes[fmt] = cb
             fmt_layout.addWidget(cb)
         layout.addWidget(fmt_group)

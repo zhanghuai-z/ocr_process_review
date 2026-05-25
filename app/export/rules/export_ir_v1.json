@@ -1,0 +1,124 @@
+{
+  "version": "export_ir.v1",
+  "formats": {
+    "json": {
+      "mode": "page-faithful",
+      "include_assets": true,
+      "include_diagnostics": true
+    },
+    "xml": {
+      "mode": "page-faithful",
+      "include_assets": true,
+      "include_diagnostics": true
+    },
+    "html": {
+      "mode": "reflow",
+      "include_assets": true,
+      "include_diagnostics": true
+    },
+    "md": {
+      "mode": "reflow",
+      "include_assets": false,
+      "include_diagnostics": false
+    },
+    "docx": {
+      "mode": "reflow",
+      "include_assets": false,
+      "include_diagnostics": false
+    },
+    "txt": {
+      "mode": "reflow",
+      "include_assets": false,
+      "include_diagnostics": false
+    },
+    "rtf": {
+      "mode": "reflow",
+      "include_assets": false,
+      "include_diagnostics": false
+    },
+    "pdf-single": {
+      "mode": "reflow",
+      "include_assets": false,
+      "include_diagnostics": false,
+      "pdf_layer": "text"
+    },
+    "pdf-dual": {
+      "mode": "page-faithful",
+      "include_assets": true,
+      "include_diagnostics": true,
+      "pdf_layer": "image-plus-text"
+    }
+  },
+  "block_type_to_kind": {
+    "title": "title",
+    "text": "paragraph",
+    "reference": "reference",
+    "figure": "figure",
+    "figure_caption": "figure_caption",
+    "table": "table",
+    "table_caption": "table_caption",
+    "equation": "equation",
+    "unknown": "unknown"
+  },
+  "kind_rules": {
+    "title": {
+      "payload": "text",
+      "inline_role": "title",
+      "fallback": "plain_paragraph"
+    },
+    "paragraph": {
+      "payload": "text",
+      "inline_role": "body",
+      "fallback": "plain_paragraph"
+    },
+    "reference": {
+      "payload": "text",
+      "inline_role": "reference",
+      "fallback": "plain_paragraph"
+    },
+    "figure": {
+      "payload": "asset",
+      "fallback": "image_fallback",
+      "asset_kind": "figure_crop"
+    },
+    "figure_caption": {
+      "payload": "text",
+      "inline_role": "caption",
+      "fallback": "plain_paragraph"
+    },
+    "table": {
+      "payload": "table",
+      "fallback": "image_fallback",
+      "asset_kind": "table_crop"
+    },
+    "table_caption": {
+      "payload": "text",
+      "inline_role": "caption",
+      "fallback": "plain_paragraph"
+    },
+    "equation": {
+      "payload": "equation",
+      "fallback": "image_fallback",
+      "asset_kind": "equation_crop"
+    },
+    "unknown": {
+      "payload": "asset",
+      "fallback": "image_fallback",
+      "asset_kind": "page_region"
+    }
+  },
+  "fallback_strategies": {
+    "plain_paragraph": {
+      "reason": "empty_or_unsupported_text",
+      "mode": "plain_paragraph"
+    },
+    "text_fallback": {
+      "reason": "format_lacks_structured_payload",
+      "mode": "text_fallback"
+    },
+    "image_fallback": {
+      "reason": "missing_structure",
+      "mode": "image_fallback"
+    }
+  }
+}

@@ -1,13 +1,8 @@
 """RTF 导出：手写 RTF，无需第三方库。支持 UTF-16 转义。"""
 from app.export.base import ExporterBase
+from app.export.ir_builder import build_export_ir
+from app.export.rendering import element_lines
 from app.models import OcrProject
-from app.services.export_service import (
-    get_block_style,
-    get_export_text,
-    iter_export_blocks,
-    iter_export_lines,
-    iter_export_pages,
-)
 
 
 def _rtf_escape(text: str) -> str:
@@ -30,6 +25,7 @@ def _rtf_escape(text: str) -> str:
 class RtfExporter(ExporterBase):
 
     def export(self, project: OcrProject, out_path: str) -> None:
+        document = build_export_ir(project, "rtf")
         parts = [
             r"{\rtf1\ansi\ansicpg936\deff0"
             r"{\fonttbl{\f0\fnil\fcharset134 SimSun;}}"
@@ -37,23 +33,22 @@ class RtfExporter(ExporterBase):
             r"\widowctrl\wpaper12240\wpapr15840\margl1800\margr1800\margt1440\margb1440"
             r"\f0\fs24\cf1 "
         ]
-        for page in iter_export_pages(project):
+        for page in document.pages:
             parts.append(r"\pard\sb200\b " + _rtf_escape(f"第 {page.page_number} 页") + r"\b0\par")
-            for block in iter_export_blocks(page):
-                style = get_block_style(block)
+            for element in page.elements:
                 prefix = r"\pard "
                 suffix = r"\par"
-                if style.html_class == "block-title":
+                if element.kind == "title":
                     prefix = r"\pard\sb120\b\fs32 "
                     suffix = r"\b0\fs24\par"
-                elif style.italic:
+                elif element.kind in {"figure_caption", "table_caption"}:
                     prefix = r"\pard\i\fs20 "
                     suffix = r"\i0\fs24\par"
-                elif style.html_class == "block-equation":
+                elif element.kind == "equation":
                     prefix = r"\pard\qc "
                     suffix = r"\par"
-                for line in iter_export_lines(block):
-                    parts.append(prefix + _rtf_escape(get_export_text(line)) + suffix)
+                for text in element_lines(element):
+                    parts.append(prefix + _rtf_escape(text) + suffix)
                 parts.append(r"\pard\par")
         parts.append("}")
 

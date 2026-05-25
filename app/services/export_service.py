@@ -100,8 +100,16 @@ def build_export_path(out_dir: str | Path, project_name: str, fmt: str) -> Path:
     """根据项目名和格式生成安全落盘路径，并确保输出目录存在。"""
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    suffix = fmt.lower().lstrip(".")
-    return directory / f"{sanitize_export_filename(project_name)}.{suffix}"
+    normalized = fmt.lower().strip().lstrip(".")
+    base = sanitize_export_filename(project_name)
+    if normalized in {"pdf-single", "pdf-dual"}:
+        return directory / f"{base}.{normalized}.pdf"
+    suffix = {
+        "markdown": "md",
+        "json": "json",
+        "pdf": "pdf",
+    }.get(normalized, normalized)
+    return directory / f"{base}.{suffix}"
 
 
 def iter_export_pages(project: OcrProject) -> Iterable[Page]:

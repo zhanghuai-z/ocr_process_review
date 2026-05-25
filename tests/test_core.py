@@ -747,6 +747,136 @@ def test_export_formats_share_structured_blocks():
     print("test_export_formats_share_structured_blocks PASSED")
 
 
+def test_export_ir_rules_load_and_validate():
+    from app.export.rules import load_export_rules
+
+    rules = load_export_rules()
+    assert rules.version == "export_ir.v1"
+    assert rules.profile_for("json").format == "json"
+    assert rules.profile_for("pdf").format == "pdf-single"
+    assert rules.profile_for("markdown").format == "md"
+    assert rules.profile_for("md").format == "md"
+    assert rules.profile_for("pdf-dual").mode == "page-faithful"
+    assert rules.kind_for_block_type("text") == "paragraph"
+    assert rules.rule_for_kind("table")["asset_kind"] == "table_crop"
+    for kind in (
+        "title", "paragraph", "reference", "figure", "figure_caption",
+        "table", "table_caption", "equation", "unknown",
+    ):
+        assert kind in rules.kind_rules
+
+    print("test_export_ir_rules_load_and_validate PASSED")
+
+
+def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
+    from app.export.ir_builder import build_export_ir
+    from app.export.rules import load_export_rules
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    bb = BBox(1, 2, 30, 40)
+    edited = Line(text="OCR原文", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED)
+    edited.ocr_text = "OCR原文"
+    edited.update_text("人工终审")
+    table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
+    page = Page(
+        image_path="/tmp/page.png",
+        cache_image_path="/tmp/cache.png",
+        width=100,
+        height=200,
+        blocks=[
+            Block(block_type=BlockType.TITLE, bbox=bb, order=0, lines=[Line(text="标题", confidence=0.95, bbox=bb)]),
+            Block(block_type=BlockType.TEXT, bbox=bb, order=1, lines=[edited]),
+            Block(block_type=BlockType.REFERENCE, bbox=bb, order=2, lines=[Line(text="参考", confidence=0.9, bbox=bb)]),
+            Block(block_type=BlockType.FIGURE, bbox=bb, order=3),
+            Block(block_type=BlockType.FIGURE_CAPTION, bbox=bb, order=4, lines=[Line(text="图注", confidence=0.9, bbox=bb)]),
+            Block(block_type=BlockType.TABLE, bbox=bb, order=5, lines=[table_line]),
+            Block(block_type=BlockType.TABLE_CAPTION, bbox=bb, order=6, lines=[Line(text="表注", confidence=0.9, bbox=bb)]),
+            Block(block_type=BlockType.EQUATION, bbox=bb, order=7, lines=[Line(text="E=mc^2", confidence=0.9, bbox=bb)]),
+            Block(block_type=BlockType.UNKNOWN, bbox=bb, order=8),
+        ],
+    )
+    project = OcrProject(name="IRProject", pages=[page])
+    rules = load_export_rules()
+    rules.kind_rules["table"]["asset_kind"] = "json_controlled_table_crop"
+    rules.fallback_strategies["image_fallback"]["reason"] = "json_controlled_missing_structure"
+    document = build_export_ir(project, "json", rules=rules)
+    data = document.to_dict()
+    kinds = [element["kind"] for element in data["pages"][0]["elements"]]
+    assert kinds == [
+        "title", "paragraph", "reference", "figure", "figure_caption",
+        "table", "table_caption", "equation", "unknown",
+    ]
+    paragraph = data["pages"][0]["elements"][1]
+    assert paragraph["payload"]["text"] == "人工终审"
+    assert paragraph["payload"]["lines"][0]["ocr_text"] == "OCR原文"
+    assert paragraph["proof"]["corrected"] is True
+    table = data["pages"][0]["elements"][5]
+    assert table["payload"]["mode"] == "image_fallback"
+    assert table["fallback"]["mode"] == "image_fallback"
+    assert table["fallback"]["reason"] == "json_controlled_missing_structure"
+    assert any(d["code"] == "table_fallback_to_image" for d in data["diagnostics"])
+    assert any(asset["kind"] == "json_controlled_table_crop" for asset in data["assets"])
+    assert data["pages"][0]["source_image"] == "/tmp/cache.png"
+
+    print("test_project_to_export_ir_builder_maps_final_text_and_fallbacks PASSED")
+
+
+def test_ir_based_exporters_and_pdf_profiles():
+    import json
+    import os
+    import tempfile
+
+    from app.export import get_exporter
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.export_service import build_export_path
+
+    bb = BBox(0, 0, 100, 20)
+    project = OcrProject(name="IRExport", pages=[
+        Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+            Block(block_type=BlockType.TEXT, bbox=bb, order=0, lines=[
+                Line(text="正文", confidence=0.9, bbox=bb),
+            ]),
+            Block(block_type=BlockType.TABLE, bbox=bb, order=1, lines=[
+                Line(text="表格", confidence=0.8, bbox=bb),
+            ]),
+        ])
+    ])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_path = build_export_path(tmpdir, project.name, "json")
+        txt_path = build_export_path(tmpdir, project.name, "txt")
+        xml_path = build_export_path(tmpdir, project.name, "xml")
+        pdf_single_path = build_export_path(tmpdir, project.name, "pdf-single")
+        pdf_dual_path = build_export_path(tmpdir, project.name, "pdf-dual")
+
+        get_exporter("json").export(project, str(json_path))
+        get_exporter("txt").export(project, str(txt_path))
+        get_exporter("xml").export(project, str(xml_path))
+        get_exporter("pdf-single").export(project, str(pdf_single_path))
+        get_exporter("pdf-dual").export(project, str(pdf_dual_path))
+
+        data = json.loads(open(json_path, encoding="utf-8").read())
+        txt = open(txt_path, encoding="utf-8").read()
+        assert data["version"] == "export_ir.v1"
+        assert data["profile"]["format"] == "json"
+        assert data["pages"][0]["elements"][1]["fallback"]["mode"] == "image_fallback"
+        assert "正文" in txt
+        assert "bbox=" not in txt
+        assert "===" not in txt
+        assert "[正文" not in txt
+        assert "<Element" in open(xml_path, encoding="utf-8").read()
+        assert os.path.getsize(pdf_single_path) > 0
+        assert os.path.getsize(pdf_dual_path) > 0
+        assert pdf_single_path.name == "IRExport.pdf-single.pdf"
+        assert pdf_dual_path.name == "IRExport.pdf-dual.pdf"
+
+    assert isinstance(get_exporter("pdf"), PdfExporter)
+    assert get_exporter("pdf").profile == "pdf-single"
+    assert get_exporter("pdf-dual").profile == "pdf-dual"
+
+    print("test_ir_based_exporters_and_pdf_profiles PASSED")
+
+
 def test_export_dialog_offers_markdown():
     from app.models import OcrProject
     from app.ui.export.export_dialog import ExportDialog
@@ -755,7 +885,12 @@ def test_export_dialog_offers_markdown():
     dialog = ExportDialog(OcrProject(name="DialogExport"))
     try:
         assert "md" in dialog._checkboxes
+        assert "json" in dialog._checkboxes
+        assert "pdf-single" in dialog._checkboxes
+        assert "pdf-dual" in dialog._checkboxes
+        assert "pdf" not in dialog._checkboxes
         assert dialog._checkboxes["md"].isChecked()
+        assert dialog._checkboxes["json"].isChecked()
     finally:
         dialog.close()
 
@@ -862,7 +997,7 @@ def test_export_filename_sanitizes_invalid_project_name():
 
 def test_export_worker_sanitizes_project_name_for_all_formats():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.services.export_service import sanitize_export_filename
+    from app.services.export_service import build_export_path
     from app.ui.export.export_dialog import ExportWorker
 
     _get_qapp()
@@ -878,14 +1013,13 @@ def test_export_worker_sanitizes_project_name_for_all_formats():
         ]),
     ])
     completed = []
-    formats = ["txt", "md", "rtf", "pdf", "xml", "html", "docx"]
+    formats = ["txt", "json", "md", "rtf", "pdf", "pdf-single", "pdf-dual", "xml", "html", "docx"]
     with tempfile.TemporaryDirectory() as tmpdir:
         worker = ExportWorker(project, formats, tmpdir)
         worker.completed.connect(completed.append)
         worker.run()
-        base = sanitize_export_filename(project.name)
         for fmt in formats:
-            assert os.path.exists(os.path.join(tmpdir, f"{base}.{fmt}"))
+            assert os.path.exists(build_export_path(tmpdir, project.name, fmt))
 
     assert len(completed) == 1
     assert completed[0].all_ok is True
@@ -6549,6 +6683,9 @@ if __name__ == "__main__":
     test_export_html()
     test_export_markdown_structure()
     test_export_formats_share_structured_blocks()
+    test_export_ir_rules_load_and_validate()
+    test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
+    test_ir_based_exporters_and_pdf_profiles()
     test_export_dialog_offers_markdown()
     test_export_default_styles_map_to_html_docx_and_pdf()
     test_export_worker_reports_completion_progress()

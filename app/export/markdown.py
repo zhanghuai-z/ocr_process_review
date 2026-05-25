@@ -2,15 +2,10 @@
 from __future__ import annotations
 
 from app.export.base import ExporterBase
-from app.models import Block, BlockType, OcrProject
-from app.services.export_service import (
-    format_bbox,
-    get_block_label,
-    get_export_text,
-    iter_export_blocks,
-    iter_export_lines,
-    iter_export_pages,
-)
+from app.export.ir import ExportElement
+from app.export.ir_builder import build_export_ir
+from app.export.rendering import bbox_attr, element_label, element_lines
+from app.models import OcrProject
 
 
 def _one_line(text: str) -> str:
@@ -24,17 +19,18 @@ def _heading_text(text: str) -> str:
     return text.replace("#", r"\#")
 
 
-def _block_comment(block: Block) -> str:
+def _block_comment(element: ExportElement) -> str:
     return (
-        f'<!-- block type="{block.block_type.value}" label="{get_block_label(block)}" '
-        f'order="{block.order}" bbox="{format_bbox(block.bbox)}" -->'
+        f'<!-- block type="{element.kind}" label="{element_label(element)}" '
+        f'order="{element.order}" bbox="{bbox_attr(element.bbox)}" -->'
     )
 
 
-def _line_comment(line) -> str:
+def _line_comment(item: dict) -> str:
+    bbox = item.get("bbox") or {}
     return (
-        f'<!-- line bbox="{format_bbox(line.bbox)}" '
-        f'confidence="{line.confidence:.4f}" status="{line.proof_status.value}" -->'
+        f'<!-- line bbox="{bbox_attr(bbox)}" '
+        f'confidence="{float(item.get("confidence") or 0):.4f}" status="{item.get("status") or ""}" -->'
     )
 
 
@@ -42,65 +38,65 @@ class MarkdownExporter(ExporterBase):
     """Markdown 初版规则：页为二级标题，块用注释保留元数据，行保持原顺序。"""
 
     def export(self, project: OcrProject, out_path: str) -> None:
+        document = build_export_ir(project, "md")
         parts: list[str] = [
-            f"# {_heading_text(project.name)}",
+            f"# {_heading_text(document.project.name)}",
             "",
-            f"<!-- pages={project.page_count} lines={project.total_lines} -->",
+            f"<!-- pages={document.project.page_count} lines={document.project.summary.get('total_lines', 0)} -->",
             "",
         ]
 
-        for page in iter_export_pages(project):
+        for page in document.pages:
             parts.extend([
                 f"## 第 {page.page_number} 页",
                 "",
-                f'<!-- image="{page.image_path}" size="{page.width}x{page.height}" -->',
+                f'<!-- image="{page.source_image}" size="{page.size["w"]}x{page.size["h"]}" -->',
                 "",
             ])
-            for block in iter_export_blocks(page):
-                parts.append(_block_comment(block))
-                parts.extend(self._render_block(block))
+            for element in page.elements:
+                parts.append(_block_comment(element))
+                parts.extend(self._render_element(element))
                 parts.append("")
 
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(parts).rstrip() + "\n")
 
-    def _render_block(self, block: Block) -> list[str]:
-        line_texts = [
-            get_export_text(line)
-            for line in iter_export_lines(block)
-            if get_export_text(line).strip()
-        ]
+    def _render_element(self, element: ExportElement) -> list[str]:
+        line_texts = [text for text in element_lines(element) if text.strip()]
         if not line_texts:
-            if block.note:
-                return [f"> [{get_block_label(block)}] {_one_line(block.note)}"]
             return []
 
-        if block.block_type == BlockType.TITLE:
+        if element.kind == "title":
             return [f"### {_heading_text(text)}" for text in line_texts]
 
-        if block.block_type in (BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION):
-            label = get_block_label(block)
+        if element.kind in {"figure_caption", "table_caption"}:
+            label = element_label(element)
             return [f"*{label}：{_one_line(text)}*" for text in line_texts]
 
-        if block.block_type == BlockType.EQUATION:
+        if element.kind == "equation":
             body = "\n".join(_one_line(text) for text in line_texts)
             return ["$$", body, "$$"]
 
-        if block.block_type in (BlockType.FIGURE, BlockType.TABLE):
-            label = get_block_label(block)
-            return [f"**[{label}]**", *self._render_lines(block)]
+        if element.kind in {"figure", "table"}:
+            label = element_label(element)
+            return [f"**[{label}]**", *self._render_lines(element)]
 
-        if block.block_type == BlockType.REFERENCE:
-            return ["### 参考文献", *self._render_lines(block)]
+        if element.kind == "reference":
+            return ["### 参考文献", *self._render_lines(element)]
 
-        return self._render_lines(block)
+        return self._render_lines(element)
 
-    def _render_lines(self, block: Block) -> list[str]:
+    def _render_lines(self, element: ExportElement) -> list[str]:
         rendered: list[str] = []
-        for line in iter_export_lines(block):
-            text = get_export_text(line).strip()
+        payload_lines = element.payload.get("lines") or []
+        if payload_lines:
+            source = [(str(item.get("text") or ""), item) for item in payload_lines]
+        else:
+            source = [(text, {}) for text in element_lines(element)]
+        for text, item in source:
+            text = text.strip()
             if not text:
                 continue
-            rendered.append(_line_comment(line))
+            rendered.append(_line_comment(item))
             rendered.append(text)
         return rendered

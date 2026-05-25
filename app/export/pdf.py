@@ -3,14 +3,10 @@ from pathlib import Path
 
 from app.export.base import ExporterBase
 from app.core.logging import get_logger
+from app.export.ir import ExportDocument, ExportElement
+from app.export.ir_builder import build_export_ir
+from app.export.rendering import element_lines
 from app.models import OcrProject
-from app.services.export_service import (
-    get_block_style,
-    get_export_text,
-    iter_export_blocks,
-    iter_export_lines,
-    iter_export_pages,
-)
 
 _RESOURCES_FONTS = Path(__file__).parent.parent.parent / "resources" / "fonts"
 logger = get_logger(__name__)
@@ -82,6 +78,8 @@ def _write_multicell(pdf, text: str, height: int, align: str = "L") -> None:
 
 
 class PdfExporter(ExporterBase):
+    def __init__(self, profile: str = "pdf-single"):
+        self.profile = "pdf-single" if profile == "pdf" else profile
 
     def export(self, project: OcrProject, out_path: str) -> None:
         from fpdf import FPDF
@@ -94,22 +92,71 @@ class PdfExporter(ExporterBase):
                 "或在 Windows 系统上运行（使用系统 msyh.ttc）。"
             )
 
+        document = build_export_ir(project, self.profile)
         pdf = FPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         _add_font(pdf, font_path)
         _add_latin_fallback_font(pdf)
+        if document.profile.format == "pdf-dual":
+            self._write_dual_pdf(pdf, document)
+        else:
+            self._write_single_pdf(pdf, document)
 
-        for page in iter_export_pages(project):
+        pdf.output(out_path)
+
+    def _write_single_pdf(self, pdf, document: ExportDocument) -> None:
+        for page in document.pages:
             pdf.add_page()
             pdf.set_font("CJK", size=14)
             _write_cell(pdf, f"第 {page.page_number} 页", 10)
             pdf.ln(4)
-            for block in iter_export_blocks(page):
-                style = get_block_style(block)
-                pdf.set_font("CJK", size=style.font_size_pt)
-                align = "C" if block.block_type.value == "equation" else "L"
-                for line in iter_export_lines(block):
-                    _write_multicell(pdf, get_export_text(line), style.line_height_mm, align=align)
+            for element in page.elements:
+                pdf.set_font("CJK", size=_font_size(element))
+                align = "C" if element.kind == "equation" else "L"
+                for text in element_lines(element):
+                    _write_multicell(pdf, text, _line_height(element), align=align)
                 pdf.ln(4)
 
-        pdf.output(out_path)
+    def _write_dual_pdf(self, pdf, document: ExportDocument) -> None:
+        for page in document.pages:
+            pdf.add_page()
+            image_path = Path(page.source_image)
+            if image_path.exists():
+                try:
+                    pdf.image(str(image_path), x=10, y=10, w=_page_image_width(pdf))
+                except Exception as e:
+                    logger.warning("PDF dual image layer failed for %s: %s", image_path, e)
+            pdf.set_font("CJK", size=6)
+            pdf.set_text_color(180, 180, 180)
+            pdf.set_y(12)
+            _write_cell(pdf, f"第 {page.page_number} 页 OCR text layer", 4)
+            for element in page.elements:
+                self._write_dual_text_element(pdf, element)
+            pdf.set_text_color(0, 0, 0)
+
+    def _write_dual_text_element(self, pdf, element: ExportElement) -> None:
+        for text in element_lines(element):
+            if not text.strip():
+                continue
+            pdf.set_x(10)
+            _write_cell(pdf, text[:80], 4)
+
+
+def _font_size(element: ExportElement) -> int:
+    if element.kind == "title":
+        return 16
+    if element.kind in {"figure_caption", "table_caption", "reference"}:
+        return 10
+    return 12
+
+
+def _line_height(element: ExportElement) -> int:
+    if element.kind in {"figure_caption", "table_caption", "reference"}:
+        return 6
+    return 8
+
+
+def _page_image_width(pdf) -> float:
+    if hasattr(pdf, "epw"):
+        return float(pdf.epw)
+    return 190.0

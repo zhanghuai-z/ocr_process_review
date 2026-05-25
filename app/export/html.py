@@ -1,26 +1,18 @@
-"""HTML 导出：Jinja2 模板，嵌入原图路径，支持 bbox 标注。"""
-from pathlib import Path
+"""HTML 导出：Jinja2 模板，嵌入 Export IR 元数据。"""
 
 from jinja2 import Environment, BaseLoader
 
 from app.export.base import ExporterBase
+from app.export.ir_builder import build_export_ir
+from app.export.rendering import bbox_attr, element_label, element_lines, KIND_HTML_CLASS
 from app.models import OcrProject
-from app.services.export_service import (
-    format_bbox,
-    get_block_label,
-    get_block_style,
-    get_export_text,
-    iter_export_blocks,
-    iter_export_lines,
-    iter_export_pages,
-)
 
 _TEMPLATE = """\
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>{{ project.name }}</title>
+<title>{{ document.project.name }}</title>
 <style>
   body { font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
          background:#1e1e1e; color:#d4d4d4; margin:40px; }
@@ -42,25 +34,27 @@ _TEMPLATE = """\
 </style>
 </head>
 <body>
-<h1>{{ project.name }}</h1>
-<p class="meta">共 {{ project.page_count }} 页，{{ project.total_lines }} 行</p>
-{% for page in iter_pages(project) %}
+<h1>{{ document.project.name }}</h1>
+<p class="meta">共 {{ document.project.page_count }} 页，{{ document.project.summary.total_lines }} 行</p>
+{% for page in document.pages %}
 <div class="page-header">第 {{ page.page_number }} 页
-  <span class="meta">{{ page.image_path }}</span></div>
-{% for block in iter_blocks(page, include_empty=True) %}
-<div class="block {{ block_style(block).html_class }}" data-type="{{ block.block_type.value }}"
-     data-bbox="{{ format_bbox(block.bbox) }}">
-  <div class="block-label">{{ block_label(block) }} #{{ block.order }}</div>
-{% for line in iter_lines(block) %}
-  <div class="line {% if line.proof_status.value == 'auto_flagged' %}flagged
-    {% elif line.proof_status.value == 'modified' %}modified
-    {% elif line.proof_status.value == 'ok' %}ok{% endif %}"
-       data-conf="{{ '%.2f'|format(line.confidence) }}"
-       data-bbox="{{ format_bbox(line.bbox) }}">
-    {{ line_text(line) }}
-    <span class="meta">{{ '%.0f'|format(line.confidence*100) }}%</span>
+  <span class="meta">{{ page.source_image }}</span></div>
+{% for element in page.elements %}
+<div class="block {{ html_class(element.kind) }}" data-type="{{ element.kind }}"
+    data-bbox="{{ bbox_attr(element.bbox) }}">
+  <div class="block-label">{{ element_label(element) }} #{{ element.order }}</div>
+{% for text in element_lines(element) %}
+  <div class="line {% if element.proof.status == 'auto_flagged' %}flagged
+    {% elif element.proof.status == 'modified' %}modified
+    {% elif element.proof.status == 'ok' %}ok{% endif %}"
+      data-conf="{{ '%.2f'|format(element.proof.confidence or 0) }}">
+    {{ text }}
+    <span class="meta">{{ '%.0f'|format((element.proof.confidence or 0)*100) }}%</span>
   </div>
 {% endfor %}
+{% if element.fallback and element.fallback.used %}
+  <div class="meta">fallback={{ element.fallback.mode }} reason={{ element.fallback.reason }}</div>
+{% endif %}
 </div>
 {% endfor %}
 {% endfor %}
@@ -72,17 +66,15 @@ _TEMPLATE = """\
 class HtmlExporter(ExporterBase):
 
     def export(self, project: OcrProject, out_path: str) -> None:
+        document = build_export_ir(project, "html")
         env = Environment(loader=BaseLoader(), autoescape=True)
         tmpl = env.from_string(_TEMPLATE)
         html = tmpl.render(
-            project=project,
-            iter_pages=iter_export_pages,
-            iter_blocks=iter_export_blocks,
-            iter_lines=iter_export_lines,
-            line_text=get_export_text,
-            block_label=get_block_label,
-            block_style=get_block_style,
-            format_bbox=format_bbox,
+            document=document,
+            element_label=element_label,
+            element_lines=element_lines,
+            bbox_attr=bbox_attr,
+            html_class=lambda kind: KIND_HTML_CLASS.get(kind, "block-unknown"),
         )
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(html)
