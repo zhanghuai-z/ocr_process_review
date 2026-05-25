@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core import quality_probe as qp
+from app.core.proof_state import TOPIC_PROBE_OBSERVED, QualityStatsState
 from app.models import OcrProject
 
 
@@ -213,6 +214,7 @@ class QualityStatsDialog(QDialog):
         self._project_provider = project_provider
         self._refresh_panels_cb = refresh_panels_cb
         self._detail_dialog: Optional[QualityStatsDetailDialog] = None
+        self._quality_state = QualityStatsState(enabled=False)
         self._density_feedback = ""
         self._build_ui()
         self._refresh_view()
@@ -220,7 +222,7 @@ class QualityStatsDialog(QDialog):
         try:
             from app.core.proof_state_bus import ProofStateBus
             self._unsub_probe = ProofStateBus.instance().subscribe(
-                qp.TOPIC_PROBE_OBSERVED, self._on_probe_observed,
+                TOPIC_PROBE_OBSERVED, self._on_probe_observed,
             )
         except Exception:
             self._unsub_probe = None
@@ -406,7 +408,7 @@ class QualityStatsDialog(QDialog):
         dlg.raise_()
         dlg.activateWindow()
 
-    def _on_probe_observed(self, **_payload) -> None:
+    def _on_probe_observed(self, _payload=None, **_kwargs) -> None:
         """Round 17：probe.observed 事件回调 — 实时刷新评测窗 + 通知 panel 刷新 gallery。"""
         try:
             self._refresh_panels()
@@ -453,6 +455,10 @@ class QualityStatsDialog(QDialog):
     def _refresh_view(self) -> None:
         store = qp.get_active_store()
         if store is None or len(store) == 0:
+            self._quality_state = QualityStatsState(
+                enabled=False,
+                density_text=self._density_feedback or f"当前密度：{self._density_text()}",
+            )
             self._btn_toggle.setChecked(False)
             self._btn_toggle.setText("开始统计")
             self._switch_status.setText("当前：未启用")
@@ -482,6 +488,18 @@ class QualityStatsDialog(QDialog):
         )
 
         rep = qp.score(store)
+        self._quality_state = QualityStatsState(
+            enabled=True,
+            total_probes=rep.total_probes,
+            corrected=rep.corrected,
+            pending=rep.pending,
+            detect_ratio=rep.detect_ratio,
+            grade=rep.grade,
+            grade_label=rep.grade_label,
+            sampled_from_chars=int(getattr(store, "sampled_from_chars", 0)),
+            target_probes=int(getattr(store, "target_probes", 0)),
+            density_text=density_text,
+        )
         # 新设计：probe 只有两种观测状态 — pending / corrected
         total = rep.total_probes
         corrected = rep.corrected

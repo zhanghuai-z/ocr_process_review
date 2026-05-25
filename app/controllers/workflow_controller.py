@@ -17,6 +17,7 @@ from app.core.logging import get_logger
 from app.core.ocr_config import get_config
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
+from app.core.workflow_state import WorkflowProgressState, WorkflowViewState
 from app.core import quality_probe as qp
 from app.engines.real_ocr_adapter import create_engine
 from app.models import (
@@ -53,6 +54,8 @@ class WorkflowController(QObject):
     current_step_changed = Signal(int)     # 当前激活的 step
     current_page_number_changed = Signal(int)  # 当前激活的 page_number
     layout_run_enabled_changed = Signal(bool)  # 顶部"运行版面"按钮可用性
+    view_state_changed = Signal(object)    # WorkflowViewState
+    progress_state_changed = Signal(object)  # WorkflowProgressState
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -252,12 +255,27 @@ class WorkflowController(QObject):
     def current_step(self) -> int:
         return self._current_step
 
+    def workflow_view_state(self) -> WorkflowViewState:
+        return WorkflowViewState(
+            max_step=self._max_step,
+            current_step=self._current_step,
+            current_page_number=self._current_page_number,
+            layout_run_enabled=self._layout_run_enabled,
+            has_project=self._project is not None,
+            total_pages=len(self._project.pages) if self._project else 0,
+            total_lines=self.total_line_count,
+        )
+
+    def _emit_view_state(self) -> None:
+        self.view_state_changed.emit(self.workflow_view_state())
+
     def set_current_step(self, step: int) -> None:
         """更新当前 step；变化时 emit signal。MainWindow 侧通过 signal 同步 UI。"""
         if step == self._current_step:
             return
         self._current_step = step
         self.current_step_changed.emit(step)
+        self._emit_view_state()
 
     @property
     def current_page_number(self) -> int:
@@ -269,6 +287,7 @@ class WorkflowController(QObject):
             return
         self._current_page_number = page_number
         self.current_page_number_changed.emit(page_number)
+        self._emit_view_state()
 
     @property
     def layout_run_enabled(self) -> bool:
@@ -280,6 +299,7 @@ class WorkflowController(QObject):
             return
         self._layout_run_enabled = enabled
         self.layout_run_enabled_changed.emit(enabled)
+        self._emit_view_state()
 
     def new_project(self, name: str, db_path: str) -> bool:
         """创建新项目。"""
@@ -295,6 +315,7 @@ class WorkflowController(QObject):
             qp.reset_active_store()
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
+            self._emit_view_state()
             self.status_message.emit(f"新建项目：{db_path}")
             return True
         except Exception as e:
@@ -327,6 +348,7 @@ class WorkflowController(QObject):
             self._max_step = self._compute_max_step()
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
+            self._emit_view_state()
             self.status_message.emit(f"已打开：{db_path}")
             return True
         except Exception as e:
@@ -451,6 +473,7 @@ class WorkflowController(QObject):
         """更新最大可进入步骤并通知 UI。"""
         self._max_step = self._compute_max_step()
         self.step_enabled_changed.emit(self._max_step)
+        self._emit_view_state()
 
     def _current_ocr_mode(self) -> str:
         try:
@@ -631,6 +654,12 @@ class WorkflowController(QObject):
 
     def _on_layout_progress(self, current: int, total: int) -> None:
         """版面分析进度更新。"""
+        self.progress_state_changed.emit(WorkflowProgressState(
+            phase="layout",
+            current=current,
+            total=total,
+            message=f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页",
+        ))
         self.layout_progress.emit(current, total)
         self.status_message.emit(f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页")
 
@@ -771,6 +800,12 @@ class WorkflowController(QObject):
         if self._project and any(page.total_lines > 0 for page in self._project.pages):
             if self._max_step < STEP_VPROOF:
                 self._update_max_step()
+        self.progress_state_changed.emit(WorkflowProgressState(
+            phase="ocr",
+            completed_pages=int(progress.completed_pages),
+            total_pages=int(progress.total_pages),
+            message=progress.message or "",
+        ))
         self.ocr_progress.emit(progress)
         if progress.message:
             self.status_message.emit(progress.message)

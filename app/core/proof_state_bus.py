@@ -20,13 +20,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from app.core.proof_state import (
+    TOPIC_LINE_PROOF_CHANGED,
+    TOPIC_PROBE_OBSERVED,
+    ProbeObservation,
+    ProofUpdateRequest,
+)
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Topic constants
-# ---------------------------------------------------------------------------
-TOPIC_LINE_PROOF_CHANGED = "line.proof_changed"
-
 
 # ---------------------------------------------------------------------------
 # Bus
@@ -97,8 +98,25 @@ class ProofStateBus:
                     handler(**kwargs)
                 else:
                     handler()
+            except TypeError as exc:
+                if payload is not None and hasattr(payload, "to_legacy_payload"):
+                    try:
+                        handler(**payload.to_legacy_payload())
+                        continue
+                    except Exception as legacy_exc:  # noqa: BLE001
+                        logger.warning("ProofStateBus legacy handler error [%s]: %s", event, legacy_exc)
+                        continue
+                logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
+
+    def publish_line_update(self, request: ProofUpdateRequest) -> None:
+        """Publish a typed proof line update."""
+        self.publish(TOPIC_LINE_PROOF_CHANGED, request)
+
+    def publish_probe_observed(self, observation: ProbeObservation) -> None:
+        """Publish a typed quality-probe observation."""
+        self.publish(TOPIC_PROBE_OBSERVED, observation)
 
     def subscriber_count(self, event: str) -> int:
         """返回指定事件的当前订阅者数量。"""

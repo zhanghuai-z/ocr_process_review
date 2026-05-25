@@ -22,6 +22,7 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_LAYOUT, STEP_OCR,
     STEP_HPROOF, STEP_VPROOF,
 )
+from app.core.workflow_state import WorkflowViewState
 from app.core.logging import get_logger
 from app.models import OcrProject, Page
 from app.services import ImportService
@@ -184,7 +185,8 @@ class MainWindow(QMainWindow):
         self._controller = WorkflowController()
         # 注意：_current_step / _current_page_number 的 ownership 已收到
         # WorkflowController；此处不再持有镜像。MainWindow 通过 controller 的
-        # current_step_changed / current_page_number_changed signal 同步 UI。
+        # WorkflowViewState typed signal 同步 UI。
+        self._last_workflow_view_state: Optional[WorkflowViewState] = None
 
         self.setWindowTitle("OCR 后处理")
         _screen = QApplication.primaryScreen().availableGeometry()
@@ -265,11 +267,8 @@ class MainWindow(QMainWindow):
         # 让 controller 拥有 proof 同步 ownership（merge vs load 决策 + line_count 跟踪）
         self._controller.register_proof_panels(self._hproof_panel, self._vproof_panel)
         self._controller.project_changed.connect(self._on_project_changed)
-        self._controller.step_enabled_changed.connect(self._nav_rail.set_enabled_up_to)
-        # view-state signals: controller 是 ownership 持有者，MainWindow 只订阅
-        self._controller.current_step_changed.connect(self._on_current_step_changed)
-        self._controller.current_page_number_changed.connect(self._on_current_page_number_changed)
-        self._controller.layout_run_enabled_changed.connect(self._top_bar.set_layout_run_enabled)
+        # typed view-state signal: controller 是 ownership 持有者，MainWindow 只消费 WorkflowViewState
+        self._controller.view_state_changed.connect(self._on_workflow_view_state_changed)
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
@@ -380,6 +379,19 @@ class MainWindow(QMainWindow):
         # h_proof / layout 都需要知道当前页（v_proof 用自己的 gallery 选择）
         self._hproof_panel.set_current_page_number(page_number)
         self._layout_panel.set_current_page_number(page_number)
+
+    def _on_workflow_view_state_changed(self, state: WorkflowViewState) -> None:
+        """controller WorkflowViewState → 同步 workflow 相关 UI。"""
+        prev = self._last_workflow_view_state
+        if prev is None or prev.max_step != state.max_step:
+            self._nav_rail.set_enabled_up_to(state.max_step)
+        if prev is None or prev.current_step != state.current_step:
+            self._on_current_step_changed(state.current_step)
+        if prev is None or prev.current_page_number != state.current_page_number:
+            self._on_current_page_number_changed(state.current_page_number)
+        if prev is None or prev.layout_run_enabled != state.layout_run_enabled:
+            self._top_bar.set_layout_run_enabled(state.layout_run_enabled)
+        self._last_workflow_view_state = state
 
     def _on_step_clicked(self, step: int) -> None:
         """用户点击步骤栏按钮 → 让 controller 判断是否允许跳转。"""

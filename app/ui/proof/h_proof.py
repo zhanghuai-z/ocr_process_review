@@ -42,6 +42,12 @@ from app.models import Block, Line, OcrProject, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.ui.widgets.page_directory import PageDirectoryList
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
+from app.core.proof_state import (
+    TOPIC_LINE_PROOF_CHANGED,
+    ProofLineViewModel,
+    ProofSelection,
+    ProofUpdateRequest,
+)
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
 from app.services.proof_probe_text_service import (
@@ -1129,7 +1135,6 @@ class _LinePair(QFrame):
         )
         # proof-interaction-slots 第 1 任务：彻底不给 status_lbl 设 tooltip（连空串都不设）
         # 避免 Qt 某些环境下“空白 hover 框”。是否未对齐已经用 warn 图标表达。
-        self._status_lbl.setToolTip("")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1147,6 +1152,7 @@ class HProofPanel(QWidget):
         self._pages: List[Page] = []
         self._items: List[Tuple[Block, Line, Page, int]] = []
         self._pairs: List[_LinePair] = []
+        self._line_view_models: List[ProofLineViewModel] = []
         self._current_idx: int = 0
         self._filter_updating = False
         self._selected_page_number: int | None = None  # Phase 25：左侧目录唯一过滤源
@@ -1155,7 +1161,7 @@ class HProofPanel(QWidget):
         # H/V 校对联动：订阅其他 panel 编辑事件；origin == id(self) 的事件忽略。
         # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
         self._bus_unsub = self._bus.subscribe(
-            "line.proof_changed", self._on_external_line_changed,
+            TOPIC_LINE_PROOF_CHANGED, self._on_external_line_changed,
         )
         self.destroyed.connect(lambda *_: self._teardown_bus())
         self._build_ui()
@@ -1327,6 +1333,14 @@ class HProofPanel(QWidget):
                 existing_index = loaded_keys.get(key)
                 if existing_index is not None:
                     self._items[existing_index] = (block, line, page, li)
+                    self._line_view_models[existing_index] = ProofLineViewModel.from_model(
+                        page=page,
+                        block=block,
+                        line=line,
+                        line_index=li,
+                        display_text=_displayed_text(line, page, block),
+                        source="hproof.merge",
+                    )
                     self._pairs[existing_index].rebind(block, line, page, page_line_num)
                     page_line_num += 1
                     continue
@@ -1405,6 +1419,7 @@ class HProofPanel(QWidget):
     def _render_pages(self, pages: List[Page]) -> None:
         self._items.clear()
         self._pairs.clear()
+        self._line_view_models.clear()
 
         # 清空旧 _LinePair。从后往前递删；skip _empty_lbl 和布局末尾的 stretch。
         # 为什么要 skip ：之前代码会 delete _empty_lbl ，导致二次 load 时
@@ -1450,6 +1465,14 @@ class HProofPanel(QWidget):
 
     def _append_pair(self, block: Block, line: Line, page: Page, li: int, page_line_num: int) -> None:
         self._items.append((block, line, page, li))
+        self._line_view_models.append(ProofLineViewModel.from_model(
+            page=page,
+            block=block,
+            line=line,
+            line_index=li,
+            display_text=_displayed_text(line, page, block),
+            source="hproof",
+        ))
         pair = _LinePair(
             len(self._pairs), block, line, page, page_line_num,
             self._cache,
@@ -1517,16 +1540,13 @@ class HProofPanel(QWidget):
         """Enter 键确认当前行。"""
         if not self._items:
             return
-        _, line, page, _ = self._items[idx]
+        block, line, page, li = self._items[idx]
         # 先保存文本
         self._save_current(silent=True)
         line.proof_status = ProofStatus.OK
-        self._bus.publish(
-            "line.proof_changed",
-            page_id=page.id,
-            line_id=line.id,
-            status=ProofStatus.OK.value,
-            origin=id(self),
+        self._publish_line_update(
+            page=page, block=block, line=line, line_index=li,
+            status=ProofStatus.OK.value, source="hproof.confirm",
         )
         self.proof_saved.emit()
         self._pairs[idx].refresh_text()
@@ -1546,12 +1566,9 @@ class HProofPanel(QWidget):
             return
         block, line, page, _ = self._items[idx]
         if _save_displayed_edit(line, page, block, new_text):
-            self._bus.publish(
-                "line.proof_changed",
-                page_id=page.id,
-                line_id=line.id,
-                status=line.proof_status.value,
-                origin=id(self),
+            self._publish_line_update(
+                page=page, block=block, line=line, line_index=self._items[idx][3],
+                status=line.proof_status.value, source="hproof.text_saved",
             )
             self.proof_saved.emit()
             self._update_stats()
@@ -1568,12 +1585,9 @@ class HProofPanel(QWidget):
         new_text = pair._editor.toPlainText()
         block, line, page, _ = self._items[self._current_idx]
         if _save_displayed_edit(line, page, block, new_text):
-            self._bus.publish(
-                "line.proof_changed",
-                page_id=page.id,
-                line_id=line.id,
-                status=line.proof_status.value,
-                origin=id(self),
+            self._publish_line_update(
+                page=page, block=block, line=line, line_index=self._items[self._current_idx][3],
+                status=line.proof_status.value, source="hproof.save_current",
             )
             self.proof_saved.emit()
             pair.refresh_text()
@@ -1586,34 +1600,54 @@ class HProofPanel(QWidget):
     def _toggle_flag(self) -> None:
         if not self._items or self._current_idx >= len(self._items):
             return
-        _, line, page, _ = self._items[self._current_idx]
+        block, line, page, li = self._items[self._current_idx]
         new_status = (
             ProofStatus.UNCHECKED
             if line.proof_status == ProofStatus.AUTO_FLAGGED
             else ProofStatus.AUTO_FLAGGED
         )
         line.proof_status = new_status
-        self._bus.publish(
-            "line.proof_changed",
-            page_id=page.id,
-            line_id=line.id,
-            status=new_status.value,
-            origin=id(self),
+        self._publish_line_update(
+            page=page, block=block, line=line, line_index=li,
+            status=new_status.value, source="hproof.flag",
         )
         self._pairs[self._current_idx].refresh_text()
         self._update_stats()
 
     # ── 统计 ───────────────────────────────────────────────────
 
-    def _on_external_line_changed(self, **kwargs) -> None:
+    def _publish_line_update(
+        self,
+        *,
+        page: Page,
+        block: Block,
+        line: Line,
+        line_index: int,
+        status: str,
+        source: str,
+    ) -> None:
+        request = ProofUpdateRequest(
+            page_id=page.id,
+            line_id=line.id,
+            status=status,
+            origin=id(self),
+            selection=ProofSelection.for_line(
+                page=page, block=block, line=line, line_index=line_index, source=source,
+            ),
+            source=source,
+        )
+        self._bus.publish_line_update(request)
+
+    def _on_external_line_changed(self, event=None, **kwargs) -> None:
         """收到外部（纵校）发来的 line.proof_changed → 找到本 panel 中
         line.id 匹配的行，刷新该行显示并重算统计。
 
         回路保护：origin == id(self) 时直接跳过（自己 publish 的事件）。
         """
-        if kwargs.get("origin") == id(self):
+        request = ProofUpdateRequest.from_legacy(event, **kwargs)
+        if request.origin == id(self):
             return
-        line_id = kwargs.get("line_id")
+        line_id = request.line_id
         if line_id is None:
             return
         touched = False

@@ -3156,6 +3156,85 @@ def test_proof_state_bus():
     print("test_proof_state_bus PASSED")
 
 
+def test_proof_state_bus_typed_contracts():
+    from app.core import quality_probe as qp
+    from app.core.proof_state import (
+        TOPIC_LINE_PROOF_CHANGED,
+        TOPIC_PROBE_OBSERVED,
+        CandidateSet,
+        ProbeObservation,
+        ProofSelection,
+        ProofUpdateRequest,
+    )
+    from app.core.proof_state_bus import get_proof_state_bus
+
+    bus = get_proof_state_bus()
+    bus.clear()
+    assert qp.TOPIC_PROBE_OBSERVED == TOPIC_PROBE_OBSERVED
+    line_events = []
+    legacy_line_events = []
+    probe_events = []
+
+    bus.subscribe(TOPIC_LINE_PROOF_CHANGED, line_events.append)
+    bus.subscribe(TOPIC_LINE_PROOF_CHANGED, lambda **payload: legacy_line_events.append(payload))
+    bus.subscribe(TOPIC_PROBE_OBSERVED, probe_events.append)
+
+    selection = ProofSelection(page_number=3, line_id=11, line_index=2, char_index=1, source="test")
+    request = ProofUpdateRequest(
+        page_id=5,
+        line_id=11,
+        status="modified",
+        origin=123,
+        selection=selection,
+        source="unit",
+    )
+    bus.publish_line_update(request)
+    observation = ProbeObservation(
+        page_number=3,
+        block_index=1,
+        line_index=2,
+        char_index=4,
+        true_char="真",
+        fake_char="假",
+    )
+    bus.publish_probe_observed(observation)
+
+    assert line_events == [request]
+    assert legacy_line_events[0]["line_id"] == 11
+    assert legacy_line_events[0]["status"] == "modified"
+    assert ProofUpdateRequest.from_legacy(request) == request
+    assert ProofUpdateRequest.from_legacy(request.to_legacy_payload()).line_id == 11
+    assert probe_events == [observation]
+    assert ProbeObservation.from_legacy(observation.to_legacy_payload()) == observation
+
+    candidates = CandidateSet.from_values(selection=selection, values=["甲", "乙"], source="unit")
+    assert candidates.texts == ["甲", "乙"]
+    assert candidates.options[0].rank == 0
+
+    bus.clear()
+    print("test_proof_state_bus_typed_contracts PASSED")
+
+
+def test_workflow_controller_emits_typed_view_state():
+    from app.controllers.workflow_controller import WorkflowController, STEP_LAYOUT
+    from app.core.workflow_state import WorkflowViewState
+
+    controller = WorkflowController()
+    states = []
+    controller.view_state_changed.connect(states.append)
+
+    controller.set_layout_run_enabled(True)
+    controller.set_current_page_number(7)
+    controller.set_current_step(STEP_LAYOUT)
+
+    assert isinstance(states[-1], WorkflowViewState)
+    assert states[-1].layout_run_enabled is True
+    assert states[-1].current_page_number == 7
+    assert states[-1].current_step == STEP_LAYOUT
+
+    print("test_workflow_controller_emits_typed_view_state PASSED")
+
+
 def test_char_index_service():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharEntry, CharIndexEntry, CharIndexService
@@ -6525,6 +6604,9 @@ if __name__ == "__main__":
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()
+    test_proof_state_bus()
+    test_proof_state_bus_typed_contracts()
+    test_workflow_controller_emits_typed_view_state()
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()

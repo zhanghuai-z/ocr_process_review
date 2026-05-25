@@ -46,6 +46,7 @@ import random
 from dataclasses import dataclass, field, asdict
 from typing import Iterable, Optional
 
+from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
 
@@ -513,10 +514,8 @@ def extras_for_gallery_char(store: Optional[ProbeStore], char: str) -> list[Prob
 # 观测接口（供 VProof 槽位编辑流程调用）
 # ──────────────────────────────────────────────────────────────────
 
-#: 通过事件总线广播：每当一个 probe 被标 corrected 时发布，载荷里带
-#: page/block/line/char_index/true_char/fake_char。QualityStatsDialog 订阅
-#: 此事件以做实时统计刷新。
-TOPIC_PROBE_OBSERVED = "probe.observed"
+# TOPIC_PROBE_OBSERVED is imported from app.core.proof_state and re-exported
+# here as a compatibility alias; do not redefine the literal in this module.
 
 
 def observe_slot_edit(
@@ -542,16 +541,16 @@ def observe_slot_edit(
     probe.observation = "corrected"
     if was_pending:
         try:
+            from app.core.proof_state import ProbeObservation
             from app.core.proof_state_bus import ProofStateBus
-            ProofStateBus.instance().publish(
-                TOPIC_PROBE_OBSERVED,
+            ProofStateBus.instance().publish_probe_observed(ProbeObservation(
                 page_number=page_number,
                 block_index=block_index,
                 line_index=line_index,
                 char_index=char_index,
                 true_char=probe.true_char,
                 fake_char=probe.fake_char,
-            )
+            ))
         except Exception:
             pass
     return True
@@ -853,15 +852,15 @@ def detect_corrections(
 def _mark_and_broadcast(probe: Probe) -> None:
     probe.observation = "corrected"
     try:
+        from app.core.proof_state import ProbeObservation
         from app.core.proof_state_bus import ProofStateBus
-        ProofStateBus.instance().publish(
-            TOPIC_PROBE_OBSERVED,
+        ProofStateBus.instance().publish_probe_observed(ProbeObservation(
             page_number=probe.key.page_number,
             block_index=probe.key.block_index,
             line_index=probe.key.line_index,
             char_index=probe.key.char_index,
             true_char=probe.true_char,
             fake_char=probe.fake_char,
-        )
+        ))
     except Exception:
         pass

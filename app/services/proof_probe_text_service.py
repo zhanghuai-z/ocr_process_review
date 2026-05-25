@@ -153,16 +153,16 @@ def _mark_probe_corrected(
         return
     probe.observation = "corrected"
     try:
+        from app.core.proof_state import ProbeObservation
         from app.core.proof_state_bus import ProofStateBus
-        ProofStateBus.instance().publish(
-            qp.TOPIC_PROBE_OBSERVED,
+        ProofStateBus.instance().publish_probe_observed(ProbeObservation(
             page_number=page_number,
             block_index=block_index,
             line_index=line_index,
             char_index=char_index,
             true_char=probe.true_char,
             fake_char=probe.fake_char,
-        )
+        ))
     except Exception:
         pass
 

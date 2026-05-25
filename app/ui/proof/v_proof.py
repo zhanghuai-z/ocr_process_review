@@ -42,6 +42,12 @@ from PySide6.QtWidgets import (
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_state import (
+    TOPIC_LINE_PROOF_CHANGED,
+    CandidateSet,
+    ProofSelection,
+    ProofUpdateRequest,
+)
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
 from app.services.char_index_service import CharEntry, CharIndexService
@@ -590,6 +596,7 @@ class VProofPanel(QWidget):
         self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
         self._selected_char: str = ""
+        self._current_selection: Optional[ProofSelection] = None
         self._current_candidate_entry: Optional[CharEntry] = None
         self._candidate_buttons: List[QPushButton] = []
         self._candidate_provider: Optional[LlmCandidateProvider] = None
@@ -616,7 +623,7 @@ class VProofPanel(QWidget):
         # 通过 origin == id(self) 过滤掉以避免回路。
         # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
         self._bus_unsub = self._bus.subscribe(
-            "line.proof_changed", self._on_external_line_changed,
+            TOPIC_LINE_PROOF_CHANGED, self._on_external_line_changed,
         )
         self.destroyed.connect(lambda *_: self._teardown_bus())
 
@@ -1142,6 +1149,7 @@ class VProofPanel(QWidget):
         self._text_edit.clear()
         self._gallery_model.set_entries([])
         self._resize_gallery_for_entries(0)
+        self._current_selection = None
         self._current_candidate_entry = None
         self._clear_candidate_buttons()
         self._candidate_box.setToolTip("")
@@ -1237,6 +1245,7 @@ class VProofPanel(QWidget):
             self._sync_gallery_entry(first_idx)
         else:
             self._current_candidate_entry = None
+            self._current_selection = None
             self._clear_candidate_buttons()
             self._candidate_box.setToolTip("无候选")
             self._highlight_char_in_text(tok, focus_entry=None)
@@ -1471,7 +1480,13 @@ class VProofPanel(QWidget):
         # 第一候选由 _ranked_candidates 决定（最高可信来源优先）。
         request = self._candidate_request_for_entry(entry)
         candidates = self._ranked_candidates(entry, request)[:5]
-        self._set_candidate_buttons(candidates)
+        self._current_selection = ProofSelection.for_char_entry(entry, source="vproof.gallery")
+        candidate_set = CandidateSet.from_values(
+            selection=self._current_selection,
+            values=candidates,
+            source="vproof.ranked",
+        )
+        self._set_candidate_buttons(candidate_set)
         # proof-layout-collections 第 4 任务：原本在面板底部画一段 “仅 1 候选，
         # 不代表此字正确…原因…” 的解释文本。用户要求拿掉。诊断现在只作为
         # 整个候选面板的 toolTip（鼠标悬停才看到），不侵占任何可见布局。
@@ -1580,9 +1595,13 @@ class VProofPanel(QWidget):
                 widget.deleteLater()
         self._candidate_buttons = []
 
-    def _set_candidate_buttons(self, candidates: List[str]) -> None:
+    def _set_candidate_buttons(self, candidate_set: CandidateSet | List[str]) -> None:
         # 极简版：第一候选用 primaryBtn 样式强调，其余 candidateButton。
         # 不再附带 LLM/来源标签到按钮可见文本上。
+        if isinstance(candidate_set, CandidateSet):
+            candidates = candidate_set.texts
+        else:
+            candidates = candidate_set
         self._clear_candidate_buttons()
         for idx, candidate in enumerate(candidates):
             button = QPushButton(candidate)
@@ -2182,12 +2201,13 @@ class VProofPanel(QWidget):
                 # 走 quality_probe 桥：如有 probe，显示空间 → 真实空间转换 + observation 落地
                 if _vproof_save_displayed_line(page, block, line, new_displayed):
                     changed = True
-                    self._bus.publish(
-                        "line.proof_changed",
-                        page_id=page.id,
-                        line_id=line.id,
+                    self._publish_line_update(
+                        page=page,
+                        block=block,
+                        line=line,
+                        line_index=_line_idx,
                         status=line.proof_status.value,
-                        origin=id(self),
+                        source="vproof.page_text",
                     )
             idx += 1
         self.proof_saved.emit()
@@ -2224,7 +2244,29 @@ class VProofPanel(QWidget):
     def _next_page(self) -> None:
         self._load_page(self._current_page_idx + 1)
 
-    def _on_external_line_changed(self, **kwargs) -> None:
+    def _publish_line_update(
+        self,
+        *,
+        page: Page,
+        block: Block,
+        line: Line,
+        line_index: int,
+        status: str,
+        source: str,
+    ) -> None:
+        request = ProofUpdateRequest(
+            page_id=page.id,
+            line_id=line.id,
+            status=status,
+            origin=id(self),
+            selection=ProofSelection.for_line(
+                page=page, block=block, line=line, line_index=line_index, source=source,
+            ),
+            source=source,
+        )
+        self._bus.publish_line_update(request)
+
+    def _on_external_line_changed(self, event=None, **kwargs) -> None:
         """收到外部（横校）发来的 line.proof_changed。
 
         vproof-direct-overwrite-residual round 11 任务 2 —— 卡死链路诚实排查：
@@ -2249,12 +2291,13 @@ class VProofPanel(QWidget):
         增量；如果工程很大，单次重建本身仍会卡 ~几百毫秒，但不会再被 N 倍放
         大。
         """
-        if kwargs.get("origin") == id(self):
+        request = ProofUpdateRequest.from_legacy(event, **kwargs)
+        if request.origin == id(self):
             return
         if not self._pages:
             return
-        line_id = kwargs.get("line_id")
-        page_id = kwargs.get("page_id")
+        line_id = request.line_id
+        page_id = request.page_id
         if line_id is None:
             return
         cur_page = self._pages[self._current_page_idx]
