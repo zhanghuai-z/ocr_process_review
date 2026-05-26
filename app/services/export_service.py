@@ -102,6 +102,8 @@ def build_export_path(out_dir: str | Path, project_name: str, fmt: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     normalized = fmt.lower().strip().lstrip(".")
     base = sanitize_export_filename(project_name)
+    if normalized == "txt":
+        return directory / f"{base}.utf8.txt"
     if normalized in {"pdf-single", "pdf-dual"}:
         return directory / f"{base}.{normalized}.pdf"
     suffix = {

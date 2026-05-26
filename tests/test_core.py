@@ -601,7 +601,7 @@ def test_proof_engine():
 
 def test_export_txt():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.export.txt import TxtExporter
+    from app.export.txt import TxtExporter, txt_output_paths
     bb = BBox(0, 0, 100, 20)
     line = Line(text="导出测试行", confidence=0.9, bbox=bb)
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
@@ -611,10 +611,70 @@ def test_export_txt():
         out_path = f.name
     try:
         TxtExporter().export(project, out_path)
-        assert "导出测试行" in open(out_path, encoding="utf-8").read()
+        utf8_path, gbk_path = txt_output_paths(out_path)
+        assert "=== 第 1 页 ===" in open(utf8_path, encoding="utf-8").read()
+        assert "导出测试行" in open(utf8_path, encoding="utf-8").read()
+        assert "导出测试行" in open(gbk_path, encoding="gbk").read()
         print("test_export_txt PASSED")
     finally:
-        os.unlink(out_path)
+        for path in set((out_path, *txt_output_paths(out_path))):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_txt_dual_encoding_outputs_and_layout_contract():
+    from app.export.txt import TxtExporter, txt_output_paths
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/img.jpg", width=800, height=600, page_number=1, blocks=[
+        Block(block_type=BlockType.TITLE, bbox=BBox(0, 0, 100, 20), order=0, lines=[
+            Line(text="标题", confidence=0.95, bbox=BBox(0, 0, 100, 20)),
+        ]),
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 100, 40), order=1, lines=[
+            Line(text="Hello", confidence=0.9, bbox=BBox(0, 30, 100, 20)),
+            Line(text="world", confidence=0.9, bbox=BBox(0, 50, 100, 20)),
+        ]),
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 80, 100, 40), order=2, lines=[
+            Line(text="中文", confidence=0.9, bbox=BBox(0, 80, 100, 20)),
+            Line(text="正文", confidence=0.9, bbox=BBox(0, 100, 100, 20)),
+        ]),
+        Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 130, 100, 20), order=3, lines=[
+            Line(text="图注", confidence=0.9, bbox=BBox(0, 130, 100, 20)),
+        ]),
+        Block(block_type=BlockType.REFERENCE, bbox=BBox(0, 160, 100, 40), order=4, lines=[
+            Line(text="参考一", confidence=0.9, bbox=BBox(0, 160, 100, 20)),
+            Line(text="参考二", confidence=0.9, bbox=BBox(0, 180, 100, 20)),
+        ]),
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 210, 100, 20), order=5, lines=[
+            Line(text="E=mc^2", confidence=0.9, bbox=BBox(0, 210, 100, 20)),
+        ]),
+    ])
+    project = OcrProject(name="TxtDual", pages=[page])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, "TxtDual.txt")
+        utf8_path, gbk_path = txt_output_paths(out_path)
+        TxtExporter().export(project, out_path)
+        assert os.path.exists(utf8_path)
+        assert os.path.exists(gbk_path)
+        utf8_bytes = open(utf8_path, "rb").read()
+        gbk_bytes = open(gbk_path, "rb").read()
+        assert not utf8_bytes.startswith(b"\xef\xbb\xbf")
+        content = utf8_bytes.decode("utf-8")
+        assert gbk_bytes.decode("gbk") == content
+        assert content == (
+            "=== 第 1 页 ===\n"
+            "标题\n\n"
+            "Hello world\n\n"
+            "中文正文\n\n"
+            "图注\n\n"
+            "参考一\n参考二\n\n"
+            "E=mc^2\n"
+        )
+        assert "图注：" not in content
+        assert "参考文献" not in content
+        assert "公式：" not in content
+
+    print("test_txt_dual_encoding_outputs_and_layout_contract PASSED")
 
 
 def test_export_xml():
@@ -741,11 +801,17 @@ def test_export_formats_share_structured_blocks():
         try:
             exporter = get_exporter(fmt)
             exporter.export(project, out_path)
-            content = open(out_path, encoding="utf-8").read()
+            read_path = out_path[:-len(".txt")] + ".utf8.txt" if fmt == "txt" else out_path
+            content = open(read_path, encoding="utf-8").read()
             assert "表注文字" in content
             assert content.index("表注文字") < content.index("正文")
         finally:
-            os.unlink(out_path)
+            cleanup_paths = {out_path}
+            if fmt == "txt":
+                cleanup_paths.update({out_path[:-len(".txt")] + ".utf8.txt", out_path[:-len(".txt")] + ".gbk.txt"})
+            for path in cleanup_paths:
+                if os.path.exists(path):
+                    os.unlink(path)
 
     print("test_export_formats_share_structured_blocks PASSED")
 
@@ -1123,8 +1189,9 @@ def test_ir_based_exporters_and_pdf_profiles():
         assert data["pages"][0]["elements"][1]["fallback"]["mode"] == "image_fallback"
         assert "正文" in txt
         assert "bbox=" not in txt
-        assert "===" not in txt
+        assert "=== 第 1 页 ===" in txt
         assert "[正文" not in txt
+        assert os.path.exists(os.path.join(tmpdir, "IRExport.gbk.txt"))
         assert "<Element" in open(xml_path, encoding="utf-8").read()
         assert os.path.getsize(pdf_single_path) > 0
         assert os.path.getsize(pdf_dual_path) > 0
@@ -1335,7 +1402,8 @@ def test_export_worker_reports_completion_progress():
         worker.progress.connect(lambda msg, current, total: events.append((msg, current, total)))
         worker.completed.connect(completed.append)
         worker.run()
-        assert os.path.exists(os.path.join(tmpdir, "WorkerExport.txt"))
+        assert os.path.exists(os.path.join(tmpdir, "WorkerExport.utf8.txt"))
+        assert os.path.exists(os.path.join(tmpdir, "WorkerExport.gbk.txt"))
     assert events[-1] == ("TXT 导出完成", 1, 1)
     assert len(completed) == 1
     assert completed[0].all_ok is True
@@ -1354,7 +1422,7 @@ def test_export_filename_sanitizes_invalid_project_name():
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = build_export_path(tmpdir, '卷/一:测试*?', "txt")
         assert out_path.parent.exists()
-        assert out_path.name == "卷_一_测试.txt"
+        assert out_path.name == "卷_一_测试.utf8.txt"
 
     print("test_export_filename_sanitizes_invalid_project_name PASSED")
 
@@ -1384,6 +1452,7 @@ def test_export_worker_sanitizes_project_name_for_all_formats():
         worker.run()
         for fmt in formats:
             assert os.path.exists(build_export_path(tmpdir, project.name, fmt))
+        assert os.path.exists(os.path.join(tmpdir, "卷_一_测试.gbk.txt"))
 
     assert len(completed) == 1
     assert completed[0].all_ok is True
@@ -1396,7 +1465,7 @@ def test_export_worker_keeps_formats_independent_when_one_fails():
     import app.export as export_module
     from app.export.base import ExporterBase
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.services.export_service import sanitize_export_filename
+    from app.services.export_service import build_export_path, sanitize_export_filename
     from app.ui.export.export_dialog import ExportWorker
 
     class WritingExporter(ExporterBase):
@@ -1428,7 +1497,7 @@ def test_export_worker_keeps_formats_independent_when_one_fails():
             worker.completed.connect(completed.append)
             worker.run()
             base = sanitize_export_filename(project.name)
-            assert open(os.path.join(tmpdir, f"{base}.txt"), encoding="utf-8").read() == "txt"
+            assert open(build_export_path(tmpdir, project.name, "txt"), encoding="utf-8").read() == "txt"
             assert open(os.path.join(tmpdir, f"{base}.md"), encoding="utf-8").read() == "md"
             assert not os.path.exists(os.path.join(tmpdir, f"{base}.pdf"))
 
@@ -7043,15 +7112,21 @@ if __name__ == "__main__":
     test_project_store_schema_migration()
     test_proof_engine()
     test_export_txt()
+    test_txt_dual_encoding_outputs_and_layout_contract()
     test_export_xml()
     test_export_html()
     test_export_markdown_structure()
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
+    test_pdf_page_faithful_plans_use_image_and_char_layer()
+    test_pdf_dual_textless_page_degrades_without_text_font()
+    test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
+    test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error()
     test_ir_based_exporters_and_pdf_profiles()
     test_export_dialog_offers_markdown()
     test_export_default_styles_map_to_html_docx_and_pdf()
+    test_rich_reflow_contract_shared_by_html_docx_and_rtf()
     test_export_worker_reports_completion_progress()
     test_export_filename_sanitizes_invalid_project_name()
     test_export_worker_sanitizes_project_name_for_all_formats()
