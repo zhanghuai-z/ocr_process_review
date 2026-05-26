@@ -485,13 +485,13 @@ class WorkflowController(QObject):
     def _layout_status_label(self) -> str:
         return {
             "api": "API 版面分析",
-            "hanwang": "汉王版面分析",
+            "hanwang": "PP-VL 版面分析（汉王混合）",
         }.get(self._current_ocr_mode(), "Paddle 版面分析")
 
     def _ocr_status_label(self) -> str:
         return {
             "api": "API OCR",
-            "hanwang": "汉王 OCR",
+            "hanwang": "汉王 micro-recblock OCR",
         }.get(self._current_ocr_mode(), "Paddle OCR")
 
     def _proof_ocr_status_label(self, engine: object | None = None) -> str:

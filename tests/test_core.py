@@ -417,6 +417,49 @@ def test_project_store():
         os.unlink(db_path)
 
 
+def test_project_store_persists_ppvl_parsing_res_list():
+    from app.core.project_store import ProjectStore
+    from app.models import OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        parsing_res_list = [
+            {
+                "block_label": "text",
+                "block_bbox": [10, 20, 110, 60],
+                "block_content": "天地玄黄",
+            },
+            {
+                "block_label": "display_formula",
+                "block_bbox": [20, 80, 180, 120],
+                "block_content": "$$x+y$$",
+            },
+        ]
+        project = OcrProject(
+            name="ppvl-raw",
+            pages=[
+                Page(
+                    image_path="/tmp/img.jpg",
+                    width=800,
+                    height=600,
+                    ppvl_parsing_res_list=parsing_res_list,
+                )
+            ],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+
+        assert loaded.pages[0].ppvl_parsing_res_list == parsing_res_list
+
+        print("test_project_store_persists_ppvl_parsing_res_list PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_line_final_text_alias_and_project_store_roundtrip():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
@@ -3032,6 +3075,164 @@ def test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars():
     print("test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars PASSED")
 
 
+def test_hanwang_micro_recblock_routes_and_fallbacks():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        assert recblocks_xyxy == [(10, 20, 110, 60), (20, 140, 160, 180)]
+        return {
+            "lines": [
+                {"groups": [{"bbox": {"left": 12, "top": 22, "right": 108, "bottom": 58}}]},
+                {"groups": [{"bbox": {"left": 22, "top": 142, "right": 158, "bottom": 178}}]},
+            ]
+        }
+
+    def fake_recog(image_bgr, *, recblock_xyxy=None, with_charrcg=True, timeout=0):
+        if recblock_xyxy[1] < 100:
+            chars = [
+                {"codes": [code("天")], "scores": [5], "bbox": {"left": 12, "top": 22, "right": 35, "bottom": 58}},
+                {"codes": [code("地")], "scores": [6], "bbox": {"left": 40, "top": 22, "right": 63, "bottom": 58}},
+            ]
+        else:
+            chars = [
+                {"codes": [code("短")], "scores": [12], "bbox": {"left": 22, "top": 142, "right": 50, "bottom": 178}},
+            ]
+        return {"lines": [{"groups": [{"bbox": {"left": recblock_xyxy[0], "top": recblock_xyxy[1], "right": recblock_xyxy[2], "bottom": recblock_xyxy[3]}, "chars": chars}]}]}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        blocks = [
+            {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "天地"},
+            {"block_label": "display_formula", "block_bbox": [10, 80, 180, 120], "block_content": "$$x+y$$"},
+            {"block_label": "reference", "block_bbox": [20, 140, 160, 180], "block_content": "参考文献很长"},
+        ]
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((220, 240, 3), dtype=np.uint8),
+            blocks,
+            include_chars=True,
+        )
+
+        assert [row.source for row in rows] == ["hanwang", "ppvl", "ppvl_fallback"]
+        assert rows[0].text == "天地"
+        assert rows[0].lines[0].chars[0].text == "天"
+        assert rows[1].text == "$$x+y$$"
+        assert rows[2].text == "参考文献很长"
+        assert rows[2].fallback_reason.startswith("short_hanwang_text")
+        assert stats.n_blocks_hanwang == 2
+        assert stats.n_blocks_ppvl == 1
+        assert stats.n_blocks_fallback == 1
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
+
+
+def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.engines.hanwang.micro_recblock import (
+        BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
+    )
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    calls = []
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        calls.append((ppvl_blocks, kwargs))
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(10, 20, 110, 60),
+                source="hanwang",
+                text="汉王",
+                ppvl_text="PPVL文本",
+                group_count=1,
+                lines=[
+                    LineResult(
+                        text="汉王",
+                        bbox=(12, 24, 90, 58),
+                        confidence=0.93,
+                        chars=[
+                            CharResult(text="汉", confidence=0.95, bbox=(12, 24, 38, 58)),
+                            CharResult(text="王", confidence=0.91, bbox=(42, 24, 68, 58)),
+                        ],
+                    )
+                ],
+            ),
+            BlockResult(
+                block_idx=1,
+                block_label="display_formula",
+                block_bbox=(20, 80, 180, 120),
+                source="ppvl",
+                text="$$x+y$$",
+                ppvl_text="$$x+y$$",
+                lines=[LineResult(text="$$x+y$$", bbox=(20, 80, 180, 120), source="ppvl")],
+            ),
+            BlockResult(
+                block_idx=2,
+                block_label="reference",
+                block_bbox=(20, 140, 180, 180),
+                source="ppvl_fallback",
+                text="参考文献",
+                ppvl_text="参考文献",
+                fallback_reason="empty_hanwang_text",
+                lines=[LineResult(text="参考文献", bbox=(20, 140, 180, 180), source="ppvl_fallback")],
+            ),
+        ], RunStats(n_blocks_total=3, n_blocks_hanwang=2, n_blocks_ppvl=1, n_blocks_fallback=1)
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        cv2.imwrite(img_path, np.ones((220, 240, 3), dtype=np.uint8) * 255)
+
+    try:
+        page = Page(
+            image_path=img_path,
+            width=240,
+            height=220,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 30))],
+            ppvl_parsing_res_list=[
+                {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"},
+                {"block_label": "display_formula", "block_bbox": [20, 80, 180, 120], "block_content": "$$x+y$$"},
+                {"block_label": "reference", "block_bbox": [20, 140, 180, 180], "block_content": "参考文献"},
+            ],
+        )
+        result = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner)
+        ).process_project(OcrProject(name="hybrid", pages=[page]))
+
+        assert len(calls) == 1
+        assert calls[0][0] == page.ppvl_parsing_res_list
+        assert calls[0][1]["include_chars"] is True
+        out_page = result.pages[0]
+        assert [block.block_type for block in out_page.blocks] == [
+            BlockType.TEXT,
+            BlockType.EQUATION,
+            BlockType.REFERENCE,
+        ]
+        assert out_page.blocks[0].lines[0].text == "汉王"
+        assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
+        assert out_page.blocks[1].lines[0].text == "$$x+y$$"
+        assert out_page.blocks[1].recognizable is False
+        assert "fallback_reason=empty_hanwang_text" in out_page.blocks[2].note
+        assert out_page.blocks[2].lines[0].review_flags == ["hanwang_micro_recblock_fallback"]
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
+
+
 def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
     import tempfile
     import cv2
@@ -3141,7 +3342,7 @@ def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
         assert ok is True
         assert controller._proof_ocr_worker is None
         assert started == [[page]]
-        assert any("汉王版面分析中" in message for message in messages)
+        assert any("PP-VL 版面分析（汉王混合）中" in message for message in messages)
         assert not any("PP-OCRv5" in message for message in messages)
     finally:
         workflow_module.get_config = original_get_config
@@ -4654,14 +4855,15 @@ def test_api_settings_dialog_syncs_model_and_url():
     update_config(mode="local", api_model_profile="pp-structurev3", api_url="https://example.com/root", api_token="old")
 
     dialog = ApiSettingsDialog()
-    assert dialog._radio_local.isChecked()
-    assert dialog._mode_card.isHidden() is False
+    assert dialog._radio_hanwang.isChecked()
+    assert dialog._selected_mode() == "hanwang"
+    assert dialog._mode_card.isHidden() is True
     assert dialog._api_model_row.isHidden()
     assert dialog._api_model_combo.currentIndex() == -1
     assert dialog._url_edit.text() == "https://example.com/root"
-    assert "本地 PaddleOCR" in dialog._summary_model.text()
-    assert "本地 PaddleOCR" in dialog._summary_mode.text()
-    assert dialog._api_form_panel.isEnabled() is False
+    assert "汉王混合链路" in dialog._summary_model.text()
+    assert "汉王混合" in dialog._summary_mode.text()
+    assert dialog._api_form_panel.isEnabled() is True
     assert not dialog._timeout_row.isHidden()
     assert dialog._timeout_spin.maximum() >= 600
 
@@ -4701,8 +4903,10 @@ def test_api_settings_dialog_keeps_model_preset_sync():
 
         assert dialog._api_model_row.isHidden()
         assert dialog._model_note.isHidden()
-        assert dialog._api_form_panel.isEnabled() is False
-        assert "本地 PaddleOCR" in dialog._summary_mode.text()
+        assert dialog._api_form_panel.isEnabled() is True
+        assert dialog._btn_test.isEnabled() is True
+        assert dialog._mode_card.isHidden() is True
+        assert "汉王混合" in dialog._summary_mode.text()
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -4721,17 +4925,16 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     with tempfile.TemporaryDirectory() as tmpdir:
         _reset_app_config_for_test(tmpdir)
         dialog = ApiSettingsDialog()
-        dialog._radio_api.setChecked(True)
         dialog._url_edit.setText("https://example.com/custom")
         dialog._token_edit.setText("secret")
         dialog._sync_model_from_url()
         assert dialog._api_model_combo.currentIndex() == -1
-        assert "API 双模型" in dialog._summary_model.text()
+        assert "汉王混合链路" in dialog._summary_model.text()
 
         dialog._save_and_accept()
 
         cfg = get_config()
-        assert cfg["mode"] == "api"
+        assert cfg["mode"] == "hanwang"
         assert cfg["api_model_profile"] == ""
         assert cfg["api_url"] == "https://example.com/custom"
         assert cfg["api_token"] == "secret"
@@ -4766,7 +4969,7 @@ def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
     print("test_api_settings_dialog_saves_base_url_from_endpoint_suffix PASSED")
 
 
-def test_api_settings_dialog_preserves_local_mode_when_saving():
+def test_api_settings_dialog_collapses_mode_to_hanwang_when_saving():
     from app.core.app_config import AppConfig
     from app.core.ocr_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
@@ -4783,7 +4986,7 @@ def test_api_settings_dialog_preserves_local_mode_when_saving():
         dialog._save_and_accept()
 
         cfg = get_config()
-        assert cfg["mode"] == "local"
+        assert cfg["mode"] == "hanwang"
         assert cfg["api_url"] == "https://example.com/custom"
         assert cfg["api_token"] == "secret"
 
@@ -4791,10 +4994,10 @@ def test_api_settings_dialog_preserves_local_mode_when_saving():
         AppConfig.instance().reset_to_defaults()
         AppConfig._instance = None
 
-    print("test_api_settings_dialog_preserves_local_mode_when_saving PASSED")
+    print("test_api_settings_dialog_collapses_mode_to_hanwang_when_saving PASSED")
 
 
-def test_api_settings_dialog_persists_hanwang_mode_without_api_runtime():
+def test_api_settings_dialog_persists_hanwang_mode_with_api_runtime():
     from app.core.app_config import AppConfig
     from app.core.ocr_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
@@ -4809,10 +5012,11 @@ def test_api_settings_dialog_persists_hanwang_mode_without_api_runtime():
         dialog._token_edit.setText("kept-for-api")
 
         assert dialog._selected_mode() == "hanwang"
-        assert dialog._api_form_panel.isEnabled() is False
-        assert dialog._btn_test.isEnabled() is False
-        assert "汉王原生链路" in dialog._summary_model.text()
-        assert "不使用 API" in dialog._api_mode_notice.text()
+        assert dialog._api_form_panel.isEnabled() is True
+        assert dialog._btn_test.isEnabled() is True
+        assert "汉王混合链路" in dialog._summary_model.text()
+        assert "PP-VL" in dialog._summary_desc.text()
+        assert "需要 API 地址与 Token" in dialog._api_mode_notice.text()
 
         dialog._save_and_accept()
 
@@ -4825,7 +5029,7 @@ def test_api_settings_dialog_persists_hanwang_mode_without_api_runtime():
         AppConfig.instance().reset_to_defaults()
         AppConfig._instance = None
 
-    print("test_api_settings_dialog_persists_hanwang_mode_without_api_runtime PASSED")
+    print("test_api_settings_dialog_persists_hanwang_mode_with_api_runtime PASSED")
 
 
 def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
@@ -5000,6 +5204,37 @@ def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
     assert len(overlays) == 4
 
     print("test_layout_analyzer_extracts_api_blocks_from_varied_schema PASSED")
+
+
+def test_layout_analyzer_persists_raw_parsing_res_list():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test.png", width=1000, height=2000)
+    parsing_res_list = [
+        {
+            "block_label": "text",
+            "block_bbox": [100, 200, 300, 260],
+            "block_content": "PP-VL raw text",
+            "custom_raw": {"keep": True},
+        }
+    ]
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {"prunedResult": {"parsing_res_list": parsing_res_list}}
+            ]
+        }
+    }
+
+    blocks, _ = analyzer._extract_api_blocks(page, data)
+
+    assert len(blocks) == 1
+    assert page.ppvl_parsing_res_list == parsing_res_list
+    assert page.ppvl_parsing_res_list[0]["custom_raw"]["keep"] is True
+
+    print("test_layout_analyzer_persists_raw_parsing_res_list PASSED")
 
 
 def test_layout_analyzer_falls_back_to_ocr_results():
@@ -6361,40 +6596,37 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
-def test_layout_analyzer_routes_hanwang_mode():
-    import tempfile
-    import cv2
-    import numpy as np
+def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
     import app.core.ocr_config as config_module
-    import app.engines.hanwang_layout_engine as hanwang_layout_module
-    from app.core.layout_analyzer import LayoutAnalyzer
+    import app.core.layout_analyzer as layout_module
     from app.models import BBox, Block, BlockType, Page
 
-    class FakeHanwangLayoutEngine:
-        def analyze(self, image_path):
-            return [Block(block_type=BlockType.TEXT, bbox=BBox(12, 18, 80, 40), order=0)]
+    def fake_api_analyze(self, page):
+        page.width = 300
+        page.height = 200
+        page.ppvl_parsing_res_list = [
+            {"block_label": "text", "block_bbox": [12, 18, 92, 58], "block_content": "PPVL"}
+        ]
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(12, 18, 80, 40), order=0)]
+        return page
 
     original_get_config = config_module.get_config
-    original_engine = hanwang_layout_module.HanwangLayoutEngine
+    original_api_analyze = layout_module.LayoutAnalyzer._api_analyze
     config_module.get_config = lambda: {"mode": "hanwang"}
-    hanwang_layout_module.HanwangLayoutEngine = FakeHanwangLayoutEngine
-
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        page_path = f.name
+    layout_module.LayoutAnalyzer._api_analyze = fake_api_analyze
 
     try:
-        cv2.imwrite(page_path, np.full((200, 300, 3), 255, dtype=np.uint8))
-        page = Page(image_path=page_path, width=0, height=0, page_number=1)
-        result = LayoutAnalyzer().analyze(page)
+        page = Page(image_path="/tmp/hanwang-hybrid-layout.png", width=0, height=0, page_number=1)
+        result = layout_module.LayoutAnalyzer().analyze(page)
 
         assert len(result.blocks) == 1
         assert result.blocks[0].bbox == BBox(12, 18, 80, 40)
         assert result.width == 300
         assert result.height == 200
+        assert result.ppvl_parsing_res_list[0]["block_content"] == "PPVL"
     finally:
         config_module.get_config = original_get_config
-        hanwang_layout_module.HanwangLayoutEngine = original_engine
-        os.unlink(page_path)
+        layout_module.LayoutAnalyzer._api_analyze = original_api_analyze
 
 
 def test_hanwang_assets_env_accepts_bin_dir():
@@ -7131,6 +7363,7 @@ if __name__ == "__main__":
     test_bbox_tools()
     test_block_type_mapping()
     test_project_store()
+    test_project_store_persists_ppvl_parsing_res_list()
     test_line_final_text_alias_and_project_store_roundtrip()
     test_project_store_clean_on_resave()
     test_project_store_schema_migration()
@@ -7189,6 +7422,8 @@ if __name__ == "__main__":
     test_page_ocr_refills_caption_and_equation_blocks()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
+    test_hanwang_micro_recblock_routes_and_fallbacks()
+    test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
@@ -7210,8 +7445,8 @@ if __name__ == "__main__":
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
-    test_api_settings_dialog_preserves_local_mode_when_saving()
-    test_api_settings_dialog_persists_hanwang_mode_without_api_runtime()
+    test_api_settings_dialog_collapses_mode_to_hanwang_when_saving()
+    test_api_settings_dialog_persists_hanwang_mode_with_api_runtime()
     test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
     test_api_settings_dialog_persists_llm_candidate_settings()
     test_llm_rules_loads_default_rules_file()
@@ -7225,12 +7460,13 @@ if __name__ == "__main__":
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
+    test_layout_analyzer_persists_raw_parsing_res_list()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_uses_datainfo_canvas_scale()
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
-    test_layout_analyzer_routes_hanwang_mode()
+    test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout()
     test_hanwang_assets_env_accepts_bin_dir()
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()

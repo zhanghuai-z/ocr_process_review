@@ -263,8 +263,15 @@ class LayoutAnalyzer:
         raw_overlay_items: List[tuple[str, object]] = []
         seen: set[tuple] = set()
         order = 0
+        page.ppvl_parsing_res_list = []
 
         for item in layout_results:
+            pruned = pruned_result(item)
+            parsing_res_list = pruned.get("parsing_res_list")
+            if isinstance(parsing_res_list, list):
+                page.ppvl_parsing_res_list.extend(
+                    record for record in parsing_res_list if isinstance(record, dict)
+                )
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
@@ -685,7 +692,7 @@ class LayoutAnalyzer:
         from app.core.ocr_config import get_config
         mode = get_config()["mode"]
         if mode == "hanwang":
-            return self._hanwang_analyze(page)
+            return self._api_analyze(page)
         if mode == "api":
             return self._api_analyze(page)
         return self._local_analyze(page)

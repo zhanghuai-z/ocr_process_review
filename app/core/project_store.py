@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS page (
     cache_image_path TEXT   NOT NULL DEFAULT '',
     thumbnail_path  TEXT    NOT NULL DEFAULT '',
     status          TEXT    NOT NULL DEFAULT 'imported',
-    error_message   TEXT    NOT NULL DEFAULT ''
+    error_message   TEXT    NOT NULL DEFAULT '',
+    ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS block (
@@ -158,6 +159,9 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE line ADD COLUMN final_text TEXT NOT NULL DEFAULT '';",
         "UPDATE line SET final_text = text WHERE final_text = '';",
     ],
+    5: [
+        "ALTER TABLE page ADD COLUMN ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]';",
+    ],
 }
 
 
@@ -178,6 +182,16 @@ def _json_to_review_flags(s: str) -> list[str]:
         return json.loads(s)
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+def _json_to_list(s: str) -> list:
+    if not s:
+        return []
+    try:
+        value = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 # ---------------------------------------------------------------- store class
@@ -329,24 +343,29 @@ class ProjectStore:
             cur.execute(
                 "INSERT INTO page (project_id, image_path, width, height, "
                 "page_number, source_path, source_type, source_page_index, "
-                "cache_image_path, thumbnail_path, status, error_message) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "cache_image_path, thumbnail_path, status, error_message, "
+                "ppvl_parsing_res_list_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (project_id, page.image_path, page.width, page.height,
                  page.page_number, page.source_path, page.source_type,
                  page.source_page_index, page.cache_image_path,
-                 page.thumbnail_path, page.status.value, page.error_message),
+                 page.thumbnail_path, page.status.value, page.error_message,
+                 json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False)),
             )
             page.id = cur.lastrowid
         else:
             cur.execute(
                 "UPDATE page SET image_path=?, width=?, height=?, page_number=?, "
                 "source_path=?, source_type=?, source_page_index=?, "
-                "cache_image_path=?, thumbnail_path=?, status=?, error_message=? "
+                "cache_image_path=?, thumbnail_path=?, status=?, error_message=?, "
+                "ppvl_parsing_res_list_json=? "
                 "WHERE id=?",
                 (page.image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
                  page.cache_image_path, page.thumbnail_path, page.status.value,
-                 page.error_message, page.id),
+                 page.error_message,
+                 json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False),
+                 page.id),
             )
 
         # 删除旧 block（级联删除 line/char）
@@ -483,6 +502,7 @@ class ProjectStore:
                 thumbnail_path=pr["thumbnail_path"],
                 status=PageStatus(pr["status"]),
                 error_message=pr["error_message"],
+                ppvl_parsing_res_list=_json_to_list(pr["ppvl_parsing_res_list_json"]),
             )
             page.blocks = self._load_blocks(page.id)
             project.pages.append(page)

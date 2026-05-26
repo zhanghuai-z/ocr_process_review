@@ -109,6 +109,29 @@ class OcrPipeline:
 
                 total_blocks = len([b for b in page.blocks if b.recognizable])
 
+                if self._prefers_page_hybrid_blocks():
+                    try:
+                        self._process_page_with_hybrid_blocks(img, page)
+                    except Exception as e:
+                        logger.error(
+                            "Page hybrid OCR failed: page=%d: %s",
+                            page_idx, e,
+                        )
+                        page.error_message = f"OCR 失败：{e}"
+                        result.failed_blocks.append((page_idx, -1, str(e)))
+                    if progress_callback:
+                        progress_callback(OcrProgress(
+                            current_page=page_idx + 1,
+                            total_pages=total_pages,
+                            current_block=max(1, total_blocks),
+                            total_blocks=max(1, total_blocks),
+                            completed_pages=page_idx + 1,
+                            message=f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，Hanwang micro-recblock 已写回版面块",
+                        ))
+                    self._proof_crop_service.normalize_pages([page])
+                    result.pages.append(page)
+                    continue
+
                 if self._prefers_page_ocr():
                     try:
                         self._process_page_with_page_ocr(img, page, page_idx)
@@ -189,6 +212,12 @@ class OcrPipeline:
     def _prefers_page_ocr(self) -> bool:
         return bool(getattr(self._engine, "prefer_page_ocr", False))
 
+    def _prefers_page_hybrid_blocks(self) -> bool:
+        return bool(
+            getattr(self._engine, "prefer_page_hybrid_blocks", False)
+            and hasattr(self._engine, "recognize_page_blocks")
+        )
+
     def _append_block_failure_note(self, block: Block, message: str) -> None:
         note = f"OCR failed: {message}"
         if not block.note:
@@ -228,6 +257,9 @@ class OcrPipeline:
         lines = self._engine.recognize(img, context)
         self._normalize_engine_lines(lines, seam, bbox_space)
         self._assign_page_ocr_lines_to_blocks(page, lines)
+
+    def _process_page_with_hybrid_blocks(self, img: np.ndarray, page: Page) -> None:
+        self._engine.recognize_page_blocks(img, page)
 
     def _normalize_engine_lines(
         self,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 import time
 
 from .enums import (
@@ -194,6 +194,7 @@ class Page:
     thumbnail_path: str = ""                # 缩略图路径
     status: PageStatus = PageStatus.IMPORTED
     error_message: str = ""                 # 当前页失败原因
+    ppvl_parsing_res_list: List[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_analyzed(self) -> bool:
