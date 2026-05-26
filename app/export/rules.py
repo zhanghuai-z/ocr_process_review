@@ -45,11 +45,13 @@ class ExportRules:
     def profile_for(self, fmt: str) -> ExportProfile:
         normalized = normalize_export_format(fmt)
         data = self.formats[normalized]
+        option_keys = set(data) - {"mode", "include_assets", "include_diagnostics"}
         return ExportProfile(
             format=normalized,
             mode=str(data["mode"]),
             include_assets=bool(data.get("include_assets", True)),
             include_diagnostics=bool(data.get("include_diagnostics", True)),
+            options={key: data[key] for key in sorted(option_keys)},
         )
 
     def kind_for_block_type(self, block_type: str) -> str:

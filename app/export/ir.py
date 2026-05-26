@@ -41,6 +41,7 @@ class ExportProfile:
     mode: str
     include_assets: bool = True
     include_diagnostics: bool = True
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

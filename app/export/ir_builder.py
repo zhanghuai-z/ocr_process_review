@@ -228,8 +228,21 @@ def _line_payload(line: Line, index: int) -> dict[str, Any]:
         "text": get_export_text(line),
         "ocr_text": line.ocr_text,
         "bbox": _bbox_to_dict(line.bbox),
+        "chars": [_char_payload(char, idx) for idx, char in enumerate(line.chars)],
         "confidence": float(line.confidence),
         "status": line.proof_status.value if hasattr(line.proof_status, "value") else str(line.proof_status),
+    }
+
+
+def _char_payload(char, index: int) -> dict[str, Any]:
+    return {
+        "char_id": char.id if char.id is not None else index,
+        "char": char.char,
+        "bbox": _bbox_to_dict(char.bbox),
+        "confidence": float(char.confidence),
+        "bbox_source": char.bbox_source,
+        "bbox_granularity": char.bbox_granularity,
+        "token_text": char.token_text,
     }
 
 

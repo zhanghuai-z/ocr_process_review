@@ -754,9 +754,16 @@ def test_export_ir_rules_load_and_validate():
     assert rules.version == "export_ir.v1"
     assert rules.profile_for("json").format == "json"
     assert rules.profile_for("pdf").format == "pdf-single"
+    assert rules.profile_for("pdf-single").mode == "page-faithful"
+    assert rules.profile_for("pdf-single").options["pdf_layer"] == "image-only"
     assert rules.profile_for("markdown").format == "md"
     assert rules.profile_for("md").format == "md"
     assert rules.profile_for("pdf-dual").mode == "page-faithful"
+    assert rules.profile_for("pdf-dual").options["text_layer"] == "invisible-char"
+    assert rules.formats["pdf-single"]["pdf_layer"] == "image-only"
+    assert rules.formats["pdf-single"]["text_layer"] == "none"
+    assert rules.formats["pdf-dual"]["text_layer"] == "invisible-char"
+    assert rules.formats["pdf-dual"]["dpi"] == 300
     assert rules.kind_for_block_type("text") == "paragraph"
     assert rules.rule_for_kind("table")["asset_kind"] == "table_crop"
     for kind in (
@@ -819,6 +826,136 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     assert data["pages"][0]["source_image"] == "/tmp/cache.png"
 
     print("test_project_to_export_ir_builder_maps_final_text_and_fallbacks PASSED")
+
+
+def test_pdf_page_faithful_plans_use_image_and_char_layer():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans, pixel_bbox_to_pdf_rect
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    title_char = Char(char="题", confidence=0.99, bbox=BBox(10, 20, 5, 10), bbox_source="ocr", bbox_granularity="char")
+    table_char = Char(char="表", confidence=0.98, bbox=BBox(30, 50, 8, 12), bbox_source="ocr", bbox_granularity="char")
+    equation_char = Char(char="E", confidence=0.97, bbox=BBox(60, 80, 6, 9), bbox_source="ocr", bbox_granularity="char")
+    project = OcrProject(name="PdfPlan", pages=[
+        Page(image_path="/tmp/page1.png", width=100, height=200, blocks=[
+            Block(block_type=BlockType.TITLE, bbox=BBox(10, 20, 20, 10), order=0, lines=[
+                Line(text="题", confidence=0.99, bbox=BBox(10, 20, 5, 10), chars=[title_char]),
+            ]),
+            Block(block_type=BlockType.TEXT, bbox=BBox(10, 35, 20, 10), order=1, lines=[
+                Line(text="正", confidence=0.96, bbox=BBox(10, 35, 10, 10)),
+            ]),
+            Block(block_type=BlockType.TABLE, bbox=BBox(30, 50, 20, 12), order=2, lines=[
+                Line(text="表", confidence=0.98, bbox=BBox(30, 50, 8, 12), chars=[table_char]),
+            ]),
+            Block(block_type=BlockType.EQUATION, bbox=BBox(60, 80, 20, 9), order=3, lines=[
+                Line(text="E", confidence=0.97, bbox=BBox(60, 80, 6, 9), chars=[equation_char]),
+            ]),
+        ]),
+        Page(image_path="/tmp/page2.png", width=100, height=200, blocks=[
+            Block(block_type=BlockType.FIGURE, bbox=BBox(5, 5, 50, 50), order=0),
+        ]),
+    ])
+
+    document = build_export_ir(project, "pdf-dual")
+    assert document.profile.options["dpi"] == 300
+    assert document.profile.options["text_layer"] == "invisible-char"
+    assert document.pages[0].elements[0].payload["lines"][0]["chars"][0]["bbox"] == {"x": 10, "y": 20, "w": 5, "h": 10}
+
+    single_plans = build_pdf_page_plans(document, include_text=False, dpi=100)
+    dual_plans = build_pdf_page_plans(document, include_text=True, dpi=100)
+    assert len(single_plans) == 2
+    assert single_plans[0].image_path == "/tmp/page1.png"
+    assert single_plans[0].text_items == []
+    assert [item.text for item in dual_plans[0].text_items] == ["题", "正", "表", "E"]
+    assert dual_plans[1].image_path == "/tmp/page2.png"
+    assert dual_plans[1].text_items == []
+
+    x, y, w, h = pixel_bbox_to_pdf_rect({"x": 10, "y": 20, "w": 5, "h": 10}, 200, dpi=100)
+    assert (round(x, 2), round(y, 2), round(w, 2), round(h, 2)) == (7.2, 122.4, 3.6, 7.2)
+    first = dual_plans[0].text_items[0]
+    assert (round(first.x, 2), round(first.y, 2), round(first.w, 2), round(first.h, 2)) == (7.2, 122.4, 3.6, 7.2)
+
+    print("test_pdf_page_faithful_plans_use_image_and_char_layer PASSED")
+
+
+def test_pdf_dual_textless_page_degrades_without_text_font():
+    import app.export.pdf as pdf_module
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    original_find_font = pdf_module._find_font
+    pdf_module._find_font = lambda: None
+    try:
+        project = OcrProject(name="PdfTextless", pages=[
+            Page(image_path="/tmp/textless-page.png", width=100, height=200, blocks=[
+                Block(block_type=BlockType.FIGURE, bbox=BBox(5, 5, 50, 50), order=0),
+            ]),
+        ])
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            out_path = f.name
+        try:
+            PdfExporter("pdf-dual").export(project, out_path)
+            assert os.path.getsize(out_path) > 0
+        finally:
+            if os.path.exists(out_path):
+                os.unlink(out_path)
+    finally:
+        pdf_module._find_font = original_find_font
+
+    print("test_pdf_dual_textless_page_degrades_without_text_font PASSED")
+
+
+def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (120, 160), "white").save(image_path)
+        project = OcrProject(name="PdfSearch", pages=[
+            Page(image_path=image_path, width=120, height=160, blocks=[
+                Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 40, 20), order=0, lines=[
+                    Line(text="大小", confidence=0.99, bbox=BBox(10, 20, 40, 20), chars=[
+                        Char(char="大", confidence=0.99, bbox=BBox(10, 20, 20, 20), bbox_source="ocr", bbox_granularity="char"),
+                        Char(char="小", confidence=0.99, bbox=BBox(30, 20, 20, 20), bbox_source="ocr", bbox_granularity="char"),
+                    ]),
+                ]),
+                Block(block_type=BlockType.EQUATION, bbox=BBox(10, 60, 40, 10), order=1, lines=[
+                    Line(text="多少", confidence=0.99, bbox=BBox(10, 60, 40, 10), chars=[
+                        Char(char="多", confidence=0.99, bbox=BBox(10, 60, 20, 10), bbox_source="ocr", bbox_granularity="char"),
+                        Char(char="少", confidence=0.99, bbox=BBox(30, 60, 20, 10), bbox_source="ocr", bbox_granularity="char"),
+                    ]),
+                ]),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            assert len(page.search_for("大")) == 1
+            assert len(page.search_for("小")) == 1
+            assert len(page.search_for("大小")) == 1
+            assert len(page.search_for("多少")) == 1
+            first_rect = page.search_for("大小")[0]
+            second_rect = page.search_for("多少")[0]
+            assert abs(first_rect.y0 - (20 * 72 / 300)) < 0.3
+            assert abs(second_rect.y0 - (60 * 72 / 300)) < 0.3
+            sizes = set()
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("text", "").strip():
+                            sizes.add(round(float(span["size"]), 2))
+            assert len(sizes) == 1
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font PASSED")
 
 
 def test_ir_based_exporters_and_pdf_profiles():

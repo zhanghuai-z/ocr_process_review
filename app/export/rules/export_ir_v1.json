@@ -37,16 +37,20 @@
       "include_diagnostics": false
     },
     "pdf-single": {
-      "mode": "reflow",
-      "include_assets": false,
+      "mode": "page-faithful",
+      "include_assets": true,
       "include_diagnostics": false,
-      "pdf_layer": "text"
+      "pdf_layer": "image-only",
+      "text_layer": "none",
+      "dpi": 300
     },
     "pdf-dual": {
       "mode": "page-faithful",
       "include_assets": true,
       "include_diagnostics": true,
-      "pdf_layer": "image-plus-text"
+      "pdf_layer": "image-plus-text",
+      "text_layer": "invisible-char",
+      "dpi": 300
     }
   },
   "block_type_to_kind": {
