@@ -24,7 +24,7 @@
     },
     "md": {
       "mode": "reflow",
-      "include_assets": false,
+      "include_assets": true,
       "include_diagnostics": false
     },
     "docx": {

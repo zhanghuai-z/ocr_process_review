@@ -728,45 +728,69 @@ def test_export_markdown_structure():
     from app.export.markdown import MarkdownExporter
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
 
-    bb = BBox(10, 20, 200, 30)
-    page = Page(
-        image_path="/tmp/img.jpg",
-        width=800,
-        height=600,
-        page_number=1,
-        blocks=[
-            Block(block_type=BlockType.TITLE, bbox=bb, order=0, lines=[
-                Line(text="章节标题", confidence=0.95, bbox=bb),
-            ]),
-            Block(block_type=BlockType.TEXT, bbox=BBox(10, 80, 200, 80), order=1, lines=[
-                Line(text="正文第一行", confidence=0.90, bbox=BBox(10, 80, 200, 24)),
-                Line(text="正文第二行", confidence=0.91, bbox=BBox(10, 110, 200, 24)),
-            ]),
-            Block(block_type=BlockType.EQUATION, bbox=BBox(10, 180, 200, 30), order=2, lines=[
-                Line(text="E = mc^2", confidence=0.88, bbox=BBox(10, 180, 200, 30)),
-            ]),
-            Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(10, 230, 200, 30), order=3, lines=[
-                Line(text="图一 示例", confidence=0.93, bbox=BBox(10, 230, 200, 30)),
-            ]),
-        ],
-    )
-    project = OcrProject(name="MdTest", pages=[page])
-    with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as f:
-        out_path = f.name
-    try:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "assets", "figure.png")
+        os.makedirs(os.path.dirname(image_path), exist_ok=True)
+        open(image_path, "wb").write(b"not-a-real-image")
+        out_path = os.path.join(tmpdir, "out.md")
+        bb = BBox(10, 20, 200, 30)
+        page = Page(
+            image_path=image_path,
+            width=800,
+            height=600,
+            page_number=1,
+            blocks=[
+                Block(block_type=BlockType.TITLE, bbox=bb, order=0, lines=[
+                    Line(text="章节标题", confidence=0.95, bbox=bb),
+                ]),
+                Block(block_type=BlockType.TEXT, bbox=BBox(10, 80, 200, 80), order=1, lines=[
+                    Line(text="1. 这不是列表", confidence=0.90, bbox=BBox(10, 80, 200, 24)),
+                    Line(text="again", confidence=0.91, bbox=BBox(10, 110, 200, 24)),
+                ]),
+                Block(block_type=BlockType.REFERENCE, bbox=BBox(10, 150, 200, 30), order=2, lines=[
+                    Line(text="1) Ref not list", confidence=0.93, bbox=BBox(10, 150, 200, 30)),
+                ]),
+                Block(block_type=BlockType.FIGURE, bbox=BBox(10, 180, 200, 30), order=3, note="Figure Alt"),
+                Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(10, 230, 200, 30), order=4, lines=[
+                    Line(text="1. 图一 *示例*", confidence=0.93, bbox=BBox(10, 230, 200, 30)),
+                ]),
+                Block(block_type=BlockType.TABLE, bbox=BBox(10, 260, 200, 30), order=5, lines=[
+                    Line(text="Cell <1>", confidence=0.93, bbox=BBox(10, 260, 200, 30)),
+                ]),
+                Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(10, 290, 200, 30), order=6, lines=[
+                    Line(text="表一", confidence=0.93, bbox=BBox(10, 290, 200, 30)),
+                ]),
+                Block(block_type=BlockType.EQUATION, bbox=BBox(10, 320, 200, 30), order=7, lines=[
+                    Line(text="E = mc^2", confidence=0.88, bbox=BBox(10, 320, 200, 30)),
+                ]),
+                Block(block_type=BlockType.EQUATION, bbox=BBox(10, 350, 200, 30), order=8),
+                Block(block_type=BlockType.UNKNOWN, bbox=BBox(10, 380, 200, 30), order=9, lines=[
+                    Line(text="Unknown <block>", confidence=0.88, bbox=BBox(10, 380, 200, 30)),
+                ]),
+            ],
+        )
+        project = OcrProject(name="MdTest", pages=[page])
         MarkdownExporter().export(project, out_path)
+        raw = open(out_path, "rb").read()
+        assert not raw.startswith(b"\xef\xbb\xbf")
         content = open(out_path, encoding="utf-8").read()
-        assert content.startswith("# MdTest")
-        assert "## 第 1 页" in content
-        assert '<!-- block type="title"' in content
-        assert "### 章节标题" in content
-        assert "正文第一行" in content
-        assert '<!-- line bbox="10,80,200,24"' in content
+        assert "## 第 1 页" not in content
+        assert "<!--" not in content
+        assert content.startswith("# 章节标题")
+        assert "1\\. 这不是列表 again" in content
+        assert "### 参考文献" not in content
+        assert "1\\) Ref not list" in content
+        assert "![Figure Alt](assets/figure.png)" in content
+        assert "*1\\. 图一 \\*示例\\**" in content
+        assert "<table>" in content
+        assert "<td>Cell &lt;1&gt;</td>" in content
+        assert "*表一*" in content
         assert "$$\nE = mc^2\n$$" in content
-        assert "*图注：图一 示例*" in content
+        assert "![equation](assets/figure.png)" in content
+        assert "background-color:#fff3cd" in content
+        assert "Unknown &lt;block&gt;" in content
+        assert content.index("# 章节标题") < content.index("1\\. 这不是列表") < content.index("1\\) Ref not list")
         print("test_export_markdown_structure PASSED")
-    finally:
-        os.unlink(out_path)
 
 
 def test_export_formats_share_structured_blocks():
