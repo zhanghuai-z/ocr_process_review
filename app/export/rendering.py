@@ -117,7 +117,9 @@ def _needs_reflow_space(left: str, right: str) -> bool:
         return False
     if not right.isascii() or not _is_reflow_word_start(right):
         return False
-    return left.isascii() and (_is_reflow_word_end(left) or left in ",.;:!?)]}")
+    if left.isascii():
+        return _is_reflow_word_end(left) or left in ",.;:!?)]}"
+    return True
 
 
 def _is_reflow_word_start(ch: str) -> bool:

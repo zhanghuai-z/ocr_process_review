@@ -1235,14 +1235,18 @@ def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
             Line(text="中文", confidence=0.90, bbox=BBox(0, 75, 100, 20)),
             Line(text="正文", confidence=0.90, bbox=BBox(0, 95, 100, 20)),
         ]),
-        Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 125, 100, 20), order=3, lines=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 125, 100, 40), order=3, lines=[
+            Line(text="Mixed中文", confidence=0.90, bbox=BBox(0, 125, 100, 20)),
+            Line(text="and English", confidence=0.90, bbox=BBox(0, 145, 100, 20)),
+        ]),
+        Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 175, 100, 20), order=4, lines=[
             Line(text="Figure cap", confidence=0.90, bbox=BBox(0, 80, 100, 20)),
         ]),
-        Block(block_type=BlockType.REFERENCE, bbox=BBox(0, 155, 100, 40), order=4, lines=[
+        Block(block_type=BlockType.REFERENCE, bbox=BBox(0, 205, 100, 40), order=5, lines=[
             Line(text="Ref one", confidence=0.90, bbox=BBox(0, 110, 100, 20)),
             Line(text="Ref two", confidence=0.90, bbox=BBox(0, 130, 100, 20)),
         ]),
-        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 205, 100, 20), order=5, lines=[
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 255, 100, 20), order=6, lines=[
             Line(text="E=mc^2", confidence=0.90, bbox=BBox(0, 160, 100, 20)),
         ]),
     ])
@@ -1253,6 +1257,7 @@ def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
         ("heading", ["Chapter"]),
         ("body", ["Hello world"]),
         ("body", ["中文正文"]),
+        ("body", ["Mixed中文 and English"]),
         ("caption", ["Figure cap"]),
         ("reference", ["Ref one", "Ref two"]),
         ("equation", ["E=mc^2"]),
@@ -1276,7 +1281,9 @@ def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
         assert "Hello world" in html
         assert "中文 正文" not in html
         assert "中文正文" in html
-        assert html.index("Chapter") < html.index("Hello world") < html.index("中文正文") < html.index("Figure cap")
+        assert "Mixed中文and English" not in html
+        assert "Mixed中文 and English" in html
+        assert html.index("Chapter") < html.index("Hello world") < html.index("中文正文") < html.index("Mixed中文 and English") < html.index("Figure cap")
         assert html.index("Ref one") < html.index("Ref two") < html.index("E=mc^2")
 
         doc = Document(docx_path)
@@ -1284,8 +1291,10 @@ def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
         texts = [p.text.strip() for p in paragraphs]
         assert "Hello world" in texts
         assert "中文正文" in texts
+        assert "Mixed中文 and English" in texts
         assert "Helloworld" not in texts
-        assert texts.index("Chapter") < texts.index("Hello world") < texts.index("中文正文") < texts.index("Figure cap")
+        assert "Mixed中文and English" not in texts
+        assert texts.index("Chapter") < texts.index("Hello world") < texts.index("中文正文") < texts.index("Mixed中文 and English") < texts.index("Figure cap")
         assert paragraphs[texts.index("Chapter")].style.name.startswith("Heading")
         assert paragraphs[texts.index("Figure cap")].style.name == "Caption"
         assert paragraphs[texts.index("E=mc^2")].alignment == WD_ALIGN_PARAGRAPH.CENTER
@@ -1294,6 +1303,7 @@ def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
         assert r"\pard\sb120\b\fs32 Chapter\b0\fs24\par" in rtf
         assert r"\pard Hello world\par" in rtf
         assert r"\pard Helloworld\par" not in rtf
+        assert r"\pard Mixed\u20013?\u25991? and English\par" in rtf
         assert r"\pard\i\fs20 Figure cap\i0\fs24\par" in rtf
         assert r"\pard\fs22 Ref one\fs24\par" in rtf
         assert r"\pard\qc E=mc^2\par" in rtf
