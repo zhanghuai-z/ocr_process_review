@@ -958,6 +958,50 @@ def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
     print("test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font PASSED")
 
 
+def test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error():
+    import app.export.pdf as pdf_module
+    from app.export.pdf import PdfPagePlan, PdfTextItem, PdfTextSpan, _write_invisible_text_layer
+
+    class _FakePdf:
+        def __init__(self):
+            self.ops = []
+
+        def set_text_color(self, *args):
+            pass
+
+        def _out(self, command):
+            self.ops.append(command)
+
+        def set_font(self, *args, **kwargs):
+            raise AssertionError("set_font should not run after font-size failure")
+
+    plan = PdfPagePlan(
+        page_number=1,
+        image_path="/tmp/page.png",
+        page_width_px=100,
+        page_height_px=100,
+        width_pt=24.0,
+        height_pt=24.0,
+        text_items=[PdfTextItem(text="字", x=1.0, y=1.0, w=2.0, h=2.0, source="probe")],
+        text_spans=[PdfTextSpan(text="字", x=1.0, y=1.0, w=2.0, h=2.0, source="probe")],
+    )
+    pdf = _FakePdf()
+    original = pdf_module._page_text_font_size
+    pdf_module._page_text_font_size = lambda plan: (_ for _ in ()).throw(RuntimeError("boom"))
+    try:
+        try:
+            _write_invisible_text_layer(pdf, plan)
+            raise AssertionError("expected RuntimeError from _page_text_font_size")
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+    finally:
+        pdf_module._page_text_font_size = original
+
+    assert pdf.ops == ["3 Tr", "0 Tr"]
+
+    print("test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error PASSED")
+
+
 def test_ir_based_exporters_and_pdf_profiles():
     import json
     import os

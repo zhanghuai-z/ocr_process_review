@@ -346,9 +346,9 @@ def _write_page_image(pdf, plan: PdfPagePlan) -> None:
 
 def _write_invisible_text_layer(pdf, plan: PdfPagePlan) -> None:
     pdf.set_text_color(0, 0, 0)
-    _set_text_rendering_mode(pdf, 3)
-    font_size = _page_text_font_size(plan)
     try:
+        _set_text_rendering_mode(pdf, 3)
+        font_size = _page_text_font_size(plan)
         pdf.set_font("CJK", size=font_size)
         for span in plan.text_spans:
             try:
