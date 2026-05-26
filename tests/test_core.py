@@ -1212,6 +1212,99 @@ def test_export_default_styles_map_to_html_docx_and_pdf():
                 os.unlink(path)
 
 
+def test_rich_reflow_contract_shared_by_html_docx_and_rtf():
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    from app.export.docx_exporter import DocxExporter
+    from app.export.html import HtmlExporter
+    from app.export.ir_builder import build_export_ir
+    from app.export.rendering import iter_rich_reflow_blocks
+    from app.export.rtf import RtfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[
+        Block(block_type=BlockType.TITLE, bbox=BBox(0, 0, 100, 20), order=0, lines=[
+            Line(text="Chapter", confidence=0.95, bbox=BBox(0, 0, 100, 20)),
+        ]),
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 100, 40), order=1, lines=[
+            Line(text="Hello", confidence=0.90, bbox=BBox(0, 30, 100, 20)),
+            Line(text="world", confidence=0.90, bbox=BBox(0, 50, 100, 20)),
+        ]),
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 75, 100, 40), order=2, lines=[
+            Line(text="中文", confidence=0.90, bbox=BBox(0, 75, 100, 20)),
+            Line(text="正文", confidence=0.90, bbox=BBox(0, 95, 100, 20)),
+        ]),
+        Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 125, 100, 20), order=3, lines=[
+            Line(text="Figure cap", confidence=0.90, bbox=BBox(0, 80, 100, 20)),
+        ]),
+        Block(block_type=BlockType.REFERENCE, bbox=BBox(0, 155, 100, 40), order=4, lines=[
+            Line(text="Ref one", confidence=0.90, bbox=BBox(0, 110, 100, 20)),
+            Line(text="Ref two", confidence=0.90, bbox=BBox(0, 130, 100, 20)),
+        ]),
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 205, 100, 20), order=5, lines=[
+            Line(text="E=mc^2", confidence=0.90, bbox=BBox(0, 160, 100, 20)),
+        ]),
+    ])
+    project = OcrProject(name="RichReflow", pages=[page])
+    document = build_export_ir(project, "html")
+    blocks = list(iter_rich_reflow_blocks(document))
+    assert [(block.role, block.lines) for block in blocks] == [
+        ("heading", ["Chapter"]),
+        ("body", ["Hello world"]),
+        ("body", ["中文正文"]),
+        ("caption", ["Figure cap"]),
+        ("reference", ["Ref one", "Ref two"]),
+        ("equation", ["E=mc^2"]),
+    ]
+
+    paths = []
+    try:
+        for suffix in (".html", ".docx", ".rtf"):
+            f = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            paths.append(f.name)
+            f.close()
+        html_path, docx_path, rtf_path = paths
+        HtmlExporter().export(project, html_path)
+        DocxExporter().export(project, docx_path)
+        RtfExporter().export(project, rtf_path)
+
+        html = open(html_path, encoding="utf-8").read()
+        assert 'data-role="body"' in html
+        assert 'class="block block-title"' in html
+        assert "Helloworld" not in html
+        assert "Hello world" in html
+        assert "中文 正文" not in html
+        assert "中文正文" in html
+        assert html.index("Chapter") < html.index("Hello world") < html.index("中文正文") < html.index("Figure cap")
+        assert html.index("Ref one") < html.index("Ref two") < html.index("E=mc^2")
+
+        doc = Document(docx_path)
+        paragraphs = [p for p in doc.paragraphs if p.text.strip()]
+        texts = [p.text.strip() for p in paragraphs]
+        assert "Hello world" in texts
+        assert "中文正文" in texts
+        assert "Helloworld" not in texts
+        assert texts.index("Chapter") < texts.index("Hello world") < texts.index("中文正文") < texts.index("Figure cap")
+        assert paragraphs[texts.index("Chapter")].style.name.startswith("Heading")
+        assert paragraphs[texts.index("Figure cap")].style.name == "Caption"
+        assert paragraphs[texts.index("E=mc^2")].alignment == WD_ALIGN_PARAGRAPH.CENTER
+
+        rtf = open(rtf_path, encoding="ascii").read()
+        assert r"\pard\sb120\b\fs32 Chapter\b0\fs24\par" in rtf
+        assert r"\pard Hello world\par" in rtf
+        assert r"\pard Helloworld\par" not in rtf
+        assert r"\pard\i\fs20 Figure cap\i0\fs24\par" in rtf
+        assert r"\pard\fs22 Ref one\fs24\par" in rtf
+        assert r"\pard\qc E=mc^2\par" in rtf
+    finally:
+        for path in paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    print("test_rich_reflow_contract_shared_by_html_docx_and_rtf PASSED")
+
+
 def test_export_worker_reports_completion_progress():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.ui.export.export_dialog import ExportWorker

@@ -1,11 +1,11 @@
 """DOCX 导出：python-docx，按块段落输出。"""
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, RGBColor
 
 from app.export.base import ExporterBase
-from app.export.ir import ExportElement
+from app.export.rendering import RichReflowBlock, rich_reflow_pages
 from app.export.ir_builder import build_export_ir
-from app.export.rendering import element_lines
 from app.models import OcrProject
 
 
@@ -17,32 +17,32 @@ class DocxExporter(ExporterBase):
         doc.core_properties.title = project.name
         doc.core_properties.author = "OCR Process"
 
-        for page in document.pages:
+        for page, blocks in rich_reflow_pages(document):
             doc.add_heading(f"第 {page.page_number} 页", level=1)
 
-            for element in page.elements:
-                self._add_element(doc, element)
-                doc.add_paragraph()
+            for block in blocks:
+                self._add_block(doc, block)
 
             doc.add_page_break()
 
         doc.save(out_path)
 
-    def _add_element(self, doc: Document, element: ExportElement) -> None:
-        texts = element_lines(element)
-        if element.kind == "title":
-            for text in texts:
+    def _add_block(self, doc: Document, block: RichReflowBlock) -> None:
+        if block.role == "heading":
+            for text in block.lines:
                 doc.add_heading(text, level=2)
             return
 
-        para = _safe_add_paragraph(doc, _docx_style(element.kind))
-        for text in texts:
-            run = para.add_run(text + "\n")
-            run.font.size = Pt(_font_size(element.kind))
-            run.italic = element.kind in {"figure_caption", "table_caption"}
-            if element.proof and element.proof.status == "auto_flagged":
+        for text in block.lines:
+            para = _safe_add_paragraph(doc, _docx_style(block))
+            if block.role == "equation":
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = para.add_run(text)
+            run.font.size = Pt(_font_size(block))
+            run.italic = block.role == "caption"
+            if block.proof_status == "auto_flagged":
                 run.font.color.rgb = RGBColor(0xF4, 0x43, 0x36)
-            elif element.proof and element.proof.status == "modified":
+            elif block.proof_status == "modified":
                 run.font.color.rgb = RGBColor(0xFF, 0xA7, 0x26)
 
 
@@ -53,15 +53,15 @@ def _safe_add_paragraph(doc: Document, style_name: str):
         return doc.add_paragraph()
 
 
-def _docx_style(kind: str) -> str:
-    if kind in {"figure_caption", "table_caption"}:
+def _docx_style(block: RichReflowBlock) -> str:
+    if block.role == "caption":
         return "Caption"
     return "Normal"
 
 
-def _font_size(kind: str) -> int:
-    if kind in {"figure_caption", "table_caption"}:
+def _font_size(block: RichReflowBlock) -> int:
+    if block.role == "caption":
         return 10
-    if kind == "reference":
+    if block.role == "reference":
         return 11
     return 12
