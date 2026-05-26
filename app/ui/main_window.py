@@ -47,46 +47,48 @@ class StepButton(QPushButton):
         self.setMinimumHeight(32)
 
 
-# ── OCR 进度占位面板 ────────────────────────────────────────────
+# ── OCR 状态栏进度 ──────────────────────────────────────────────
 class _OcrProgressWidget(QWidget):
-    """OCR 进行中占位面板：显示进度条和页面计数。"""
+    """状态栏边缘进度：不覆盖版面工作区。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(12)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 0, 6, 0)
+        layout.setSpacing(6)
 
-        self._title = QLabel("正在 OCR 识别，请稍候…")
-        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._title.setStyleSheet("font-size:18px; color:#555;")
+        self._title = QLabel("OCR")
+        self._title.setStyleSheet("font-size:12px; color:#555;")
 
         self._bar = QProgressBar()
-        self._bar.setFixedWidth(320)
-        self._bar.setFixedHeight(8)
+        self._bar.setFixedWidth(140)
+        self._bar.setFixedHeight(6)
         self._bar.setTextVisible(False)
         self._bar.setRange(0, 0)  # 默认不确定模式
 
         self._count = QLabel("")
-        self._count.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._count.setStyleSheet("font-size:13px; color:#888;")
+        self._count.setStyleSheet("font-size:12px; color:#888;")
 
-        layout.addStretch()
         layout.addWidget(self._title)
-        layout.addWidget(self._bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._bar)
         layout.addWidget(self._count)
-        layout.addStretch()
+        self.hide()
 
     def reset(self) -> None:
         self._bar.setRange(0, 0)
-        self._count.setText("")
+        self._count.setText("准备中")
+        self.show()
+
+    def finish(self) -> None:
+        self.hide()
 
     @Slot(int, int)
     def update_progress(self, current: int, total: int) -> None:
         if total > 0:
             self._bar.setRange(0, total)
             self._bar.setValue(current + 1)
-            self._count.setText(f"{current + 1} / {total} 页")
+            self._count.setText(f"{current + 1}/{total}")
+            self.show()
 
 
 # (label, target_step, active_on_steps)  — 导入页不在导航栏内
@@ -236,10 +238,17 @@ class MainWindow(QMainWindow):
         self._vproof_panel  = VProofPanel()
 
         for w in (
-            self._import_panel, self._layout_panel, self._ocr_placeholder,
+            self._import_panel, self._layout_panel,
             self._hproof_panel, self._vproof_panel,
         ):
             self._stack.addWidget(w)
+        self._stack_widget_by_step = {
+            STEP_IMPORT: self._import_panel,
+            STEP_LAYOUT: self._layout_panel,
+            STEP_OCR: self._layout_panel,
+            STEP_HPROOF: self._hproof_panel,
+            STEP_VPROOF: self._vproof_panel,
+        }
 
         right_v.addWidget(self._stack, 1)
 
@@ -248,6 +257,7 @@ class MainWindow(QMainWindow):
         # 状态栏
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
+        self._status_bar.addWidget(self._ocr_placeholder)
         self._status_bar.showMessage("就绪")
 
     def _connect_signals(self) -> None:
@@ -370,7 +380,8 @@ class MainWindow(QMainWindow):
 
     def _on_current_step_changed(self, step: int) -> None:
         """controller.current_step_changed → 同步 stack 和顶部栏激活态。"""
-        self._stack.setCurrentIndex(step)
+        widget = self._stack_widget_by_step.get(step, self._layout_panel)
+        self._stack.setCurrentWidget(widget)
         self._nav_rail.set_active(step)
         self._top_bar.set_step_name(_STEP_BREADCRUMB.get(step, ""))
 
@@ -444,10 +455,14 @@ class MainWindow(QMainWindow):
 
         proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
         controller 内部。OCR 完成只开放校对入口，不再强制把用户带到横校。"""
+        self._ocr_placeholder.finish()
         self._controller.sync_proof_panels()
 
     def _on_ocr_progress(self, progress) -> None:
-        if progress.total_pages > 0:
+        if progress.total_blocks > 0:
+            current = max(0, min(progress.current_block - 1, progress.total_blocks - 1))
+            self._ocr_placeholder.update_progress(current, progress.total_blocks)
+        elif progress.total_pages > 0:
             current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
             self._ocr_placeholder.update_progress(current, progress.total_pages)
         # proof 同步 ownership 在 controller；这里只发触发
@@ -460,6 +475,7 @@ class MainWindow(QMainWindow):
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
         if self._controller.current_step in (STEP_LAYOUT, STEP_OCR) or "版面分析" in msg:
+            self._ocr_placeholder.finish()
             self._layout_panel.finish_analysis_progress(msg)
             self._top_bar.set_status("warn", "失败")
             self._status_bar.showMessage(f"处理失败：{msg}")
@@ -571,7 +587,7 @@ class MainWindow(QMainWindow):
             self._top_bar.set_status("idle", "未运行")
 
     def _start_ocr(self) -> None:
-        """OCR 启动（版面分析完成后自动触发）：跳转到 OCR 进度页并显示进度。"""
+        """OCR 启动（版面分析完成后自动触发）：保留版面工作区，仅在状态栏显示进度。"""
         if not self._controller.has_pages:
             return
         pages = self._controller.pages

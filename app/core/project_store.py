@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS block (
     source          TEXT    NOT NULL DEFAULT 'auto_layout',
     is_locked       INTEGER NOT NULL DEFAULT 0,
     recognizable    INTEGER NOT NULL DEFAULT 1,
-    note            TEXT    NOT NULL DEFAULT ''
+    note            TEXT    NOT NULL DEFAULT '',
+    source_label    TEXT    NOT NULL DEFAULT '',
+    raw_payload_json TEXT   NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS line (
@@ -162,6 +164,10 @@ MIGRATIONS: dict[int, list[str]] = {
     5: [
         "ALTER TABLE page ADD COLUMN ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]';",
     ],
+    6: [
+        "ALTER TABLE block ADD COLUMN source_label TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE block ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT '{}';",
+    ],
 }
 
 
@@ -192,6 +198,16 @@ def _json_to_list(s: str) -> list:
     except (json.JSONDecodeError, TypeError):
         return []
     return value if isinstance(value, list) else []
+
+
+def _json_to_dict(s: str) -> dict:
+    if not s:
+        return {}
+    try:
+        value = json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 # ---------------------------------------------------------------- store class
@@ -378,11 +394,12 @@ class ProjectStore:
         bb = block.bbox
         cur.execute(
             "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
-            "source, is_locked, recognizable, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source, is_locked, recognizable, note, source_label, raw_payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
              block.source.value, int(block.is_locked), int(block.recognizable),
-             block.note),
+             block.note, block.source_label,
+             json.dumps(block.raw_payload, ensure_ascii=False)),
         )
         block.id = cur.lastrowid
 
@@ -524,6 +541,8 @@ class ProjectStore:
                 is_locked=bool(r["is_locked"]),
                 recognizable=bool(r["recognizable"]),
                 note=r["note"],
+                source_label=r["source_label"],
+                raw_payload=_json_to_dict(r["raw_payload_json"]),
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)

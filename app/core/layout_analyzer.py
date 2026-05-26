@@ -252,6 +252,8 @@ class LayoutAnalyzer:
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
+            source_label=raw_type,
+            raw_payload=dict(record),
         ))
         return order + 1
 
@@ -582,6 +584,8 @@ class LayoutAnalyzer:
                 block_type=BlockType.from_paddle(raw_type),
                 bbox=bbox,
                 order=i,
+                source_label=raw_type,
+                raw_payload=dict(item),
             ))
         self._rescale_blocks_if_suspicious(page)
         return page
@@ -682,6 +686,8 @@ class LayoutAnalyzer:
         blocks = self._hanwang_layout_engine.analyze(page.display_image_path)
         for i, b in enumerate(blocks):
             b.order = i
+            if not b.source_label:
+                b.source_label = b.block_type.value
         page.blocks = blocks
         self._rescale_blocks_if_suspicious(page)
         return page

@@ -164,6 +164,8 @@ class Block:
     is_locked: bool = False                         # 锁定后自动分析不覆盖
     recognizable: bool = True                       # 是否送 OCR
     note: str = ""                                  # 用户备注或系统说明
+    source_label: str = ""                          # 原始 PP-VL/Paddle label
+    raw_payload: dict[str, Any] = field(default_factory=dict)  # 原始块属性
 
     @property
     def full_text(self) -> str:

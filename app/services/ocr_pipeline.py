@@ -110,8 +110,22 @@ class OcrPipeline:
                 total_blocks = len([b for b in page.blocks if b.recognizable])
 
                 if self._prefers_page_hybrid_blocks():
+                    def emit_hybrid_progress(current: int, total: int, message: str) -> None:
+                        if progress_callback:
+                            progress_callback(OcrProgress(
+                                current_page=page_idx + 1,
+                                total_pages=total_pages,
+                                current_block=current,
+                                total_blocks=total,
+                                completed_pages=page_idx,
+                                message=message,
+                            ))
                     try:
-                        self._process_page_with_hybrid_blocks(img, page)
+                        self._process_page_with_hybrid_blocks(
+                            img,
+                            page,
+                            progress_callback=emit_hybrid_progress,
+                        )
                     except Exception as e:
                         logger.error(
                             "Page hybrid OCR failed: page=%d: %s",
@@ -258,8 +272,17 @@ class OcrPipeline:
         self._normalize_engine_lines(lines, seam, bbox_space)
         self._assign_page_ocr_lines_to_blocks(page, lines)
 
-    def _process_page_with_hybrid_blocks(self, img: np.ndarray, page: Page) -> None:
-        self._engine.recognize_page_blocks(img, page)
+    def _process_page_with_hybrid_blocks(
+        self,
+        img: np.ndarray,
+        page: Page,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> None:
+        self._engine.recognize_page_blocks(
+            img,
+            page,
+            progress_callback=progress_callback,
+        )
 
     def _normalize_engine_lines(
         self,

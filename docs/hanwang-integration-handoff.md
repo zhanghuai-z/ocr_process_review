@@ -6,6 +6,22 @@
 
 ---
 
+## 0. 当前主线状态（2026-05 mainline closure）
+
+当前主程序里的 `"hanwang"` 已经不是旧的“汉王 docseg 版面 + 汉王 OCR”全原生链路。现行主链是：
+
+1. 设置页固定为 **PP-VL / API layout + Hanwang micro-recblock OCR**，用户只维护 API URL 与 Token。
+2. 版面分析阶段由 `LayoutAnalyzer` 调 PP-VL/API，保留 `Page.ppvl_parsing_res_list` 与每个活跃 `Block.source_label/raw_payload`。
+3. OCR 阶段由 `HanwangMicroRecBlockEngine` 以页级方式消费 PP-VL `parsing_res_list`：
+   - `TEXT/TITLE/REFERENCE/公式说明/图表说明` 等文字类块走 Hanwang SegImg + Recog；
+   - 公式、表格、图片等非正文块保留 PP-VL 文本/属性；
+   - Hanwang 为空或长度低于 PP-VL 文本 85% 时 fallback 到 PP-VL `block_content` 并写入 review flag。
+4. UI 不再切到全页 OCR 占位页；OCR step 保留版面工作区，进度只显示在左下/状态栏边缘。
+
+因此，后续 agent 不要再把 `"hanwang"` 理解为“禁用 API”或“只用汉王原生 docseg”。如果要改配置/UI，必须保持这一语义。
+
+---
+
 ## 1. 关于实现语言
 
 **没有写任何 C#。** 32 位的 `*.exe` 探针是 [hanwang-gpt-review/](../../hanwang-gpt-review/) 早期已经编译好的 .NET Framework 4.0 x86 工件（`docseg_probe.exe`、`linecut_segimg_probe.exe`、`linecut_recogimg_probe.exe`），直接从那里拷过来用。本次新增的全部是 Python：
@@ -41,9 +57,13 @@
 | [app/engines/hanwang/paths.py](../app/engines/hanwang/paths.py) | 资产路径解析 + 启动期完整性校验 |
 | [app/engines/hanwang/native_bridge.py](../app/engines/hanwang/native_bridge.py) | subprocess 桥；`run_docseg / run_linecut_segimg / run_linecut_recog` |
 | [app/engines/hanwang/translator.py](../app/engines/hanwang/translator.py) | probe JSON → `Block / Line / Char` |
+| [app/engines/hanwang/micro_recblock.py](../app/engines/hanwang/micro_recblock.py) | 当前主线页级混合引擎：PP-VL block routing + Hanwang text OCR + fallback + group progress |
 | [app/engines/hanwang_ocr_engine.py](../app/engines/hanwang_ocr_engine.py) | `HanwangOcrEngine`：两阶段 segimg→逐行 recog；`bbox_space = "crop"` |
 | [app/engines/hanwang_layout_engine.py](../app/engines/hanwang_layout_engine.py) | `HanwangLayoutEngine`：doc_seg → blocks |
 | [app/engines/real_ocr_adapter.py](../app/engines/real_ocr_adapter.py) | `create_engine` / `get_engine_description` 增 `"hanwang"` 分支 |
+| [app/services/ocr_pipeline.py](../app/services/ocr_pipeline.py) | 页级 hybrid seam：`prefer_page_hybrid_blocks` 引擎可直接写回 `page.blocks` |
+| [app/core/project_store.py](../app/core/project_store.py) | schema v6：持久化 `Page.ppvl_parsing_res_list` 与 `Block.source_label/raw_payload` |
+| [app/ui/main_window.py](../app/ui/main_window.py) | OCR 进度改为状态栏小组件，OCR step 不覆盖版面工作区 |
 | [app/core/ocr_runner.py](../app/core/ocr_runner.py) | legacy runner 也认 `"hanwang"` |
 | [build_spec_common.py](../build_spec_common.py) | PyInstaller datas 加 `resources/hanwang_native/**` |
 | [scripts/smoke_hanwang_engines.py](../scripts/smoke_hanwang_engines.py) | E2E 冒烟脚本 |
@@ -52,23 +72,23 @@
 
 ## 4. 启用方式（最小改动）
 
-### 4.1 仅切换 OCR 引擎
-配置里把 `ocr_mode` 改成 `"hanwang"` 即可。`create_engine()` 工厂会自动返回 `HanwangOcrEngine`。
+### 4.1 启用当前主线 Hanwang hybrid
+配置里把 `ocr_mode` 改成 `"hanwang"` 即可。`create_engine()` 工厂会自动返回 `HanwangMicroRecBlockEngine`，并声明 `prefer_page_hybrid_blocks=True`。
 
 ```python
 # app/core/app_config.py 已经支持任意字符串 mode，无需改 schema
 # 用户态：把保存的配置中 "ocr_mode" 设为 "hanwang"
 ```
 
-### 4.2 接版面分析（**已接好**）
-[app/core/layout_analyzer.py](../app/core/layout_analyzer.py) 的 `LayoutAnalyzer.analyze()` 已经加了 `mode == "hanwang"` 分支，调用 `_hanwang_analyze` → `HanwangLayoutEngine().analyze(page.display_image_path)`，blocks 直接塞回 `Page.blocks`（page 坐标）。
+### 4.2 版面分析（当前主线）
+[app/core/layout_analyzer.py](../app/core/layout_analyzer.py) 的 `mode == "hanwang"` 分支当前应走 PP-VL/API layout，而不是旧 docseg。关键原因是 micro-recblock 需要消费 PP-VL 的 `parsing_res_list`，并依赖其 `block_label/block_bbox/block_content` 做 block routing 与 fallback。
 
-切到 `ocr_mode="hanwang"` 之后，**版面分析也会自动走汉王**，跟 OCR 一起替换 PaddleOCR。
+切到 `ocr_mode="hanwang"` 之后，版面分析应显示为“PP-VL 版面分析（汉王混合）”，OCR 显示为“汉王 micro-recblock OCR”。
 
-> 注：当前 layout 的 mode 复用了同一个 `ocr_mode` 配置项。如果以后要支持「OCR 用汉王、版面用 paddle」这种交叉组合，需要拆出 `layout_mode` 独立配置项；现在没拆。
+> 注：不要拆出用户可见的 `layout_mode` / `ocr_mode` 双开关。当前产品语义是“选择 hanwang 就按 PP-VL + Hanwang 的固定步骤运行”。
 
-### 4.3 UI 入口（可选）
-现在切换需要手改 config。如果要在设置面板加选项，参考已有 `mode=local/api/mock` 的下拉，多加一个 `"hanwang"` 选项即可。
+### 4.3 UI 入口
+设置页已经收敛为固定 API scheme：隐藏 local/api/hanwang 多模式并列选择，只维护 API URL 和 Token，保存时固定 `mode=hanwang`。Hanwang 模式必须允许填写和测试 API 连接，因为 layout 依赖 PP-VL/API。
 
 ---
 
@@ -78,28 +98,28 @@
 Page (整页 page 坐标)
    │
    ▼
-HanwangLayoutEngine.analyze(image_path)
-   │   ┌─ docseg_probe.exe page.png → docseg.json
-   │   └─ translator.translate_docseg → List[Block]  (page 坐标, BlockType.TEXT)
+LayoutAnalyzer._api_analyze(image_path, role=layout)
+   │   ├─ PP-VL /layout-parsing → parsing_res_list
+   │   ├─ Page.ppvl_parsing_res_list = raw parsing_res_list
+   │   └─ active Block.source_label/raw_payload 保留 PP-VL 原始属性
    ▼
-For each block:
-   crop = page[block.bbox]               ← 调用方负责裁
+HanwangMicroRecBlockEngine.recognize_page_blocks(page, image_path)
+   │   ├─ text-like block → Hanwang run_micro_recblock()
+   │   ├─ formula/table/figure-like block → keep PP-VL content
+   │   └─ fallback: Hanwang 文本过短/为空 → keep PP-VL block_content + review flag
    ▼
-HanwangOcrEngine.recognize(crop, ctx)   ← bbox_space = "crop"
+run_micro_recblock(image_bgr, ppvl_blocks=parsing_res_list)
    │   ┌─ linecut_segimg_probe.exe   crop.png → segimg.json
-   │   │       └→ lines[area].groups[line].chars[].bbox  (crop 坐标)
+   │   ├─ emit progress: SegImg / group n/m
    │   ├─ For each group:
-   │   │     line_bbox = chars union + margin=12  (clamp 到 crop 内)
-   │   │     line_crop = crop[line_bbox]
-   │   │     ┌─ linecut_recogimg_probe.exe line_crop.png recblock=full → linecut.json
-   │   │     │     └→ lines[].groups[].chars[{codes:int[10], scores:int[10], bbox}]
-   │   │     └─ translator.translate_linecut → Line
-   │   └─ 把 Line.bbox / Char.bbox 平移 +line_bbox.left/top 回 crop 坐标
+   │   │     line_crop = group bbox union + margin, clamp 到 recblock_xyxy
+   │   │     └─ linecut_recogimg_probe.exe → LineResult / CharResult
+   │   └─ Line.bbox / Char.bbox 最终写回 page 坐标
    ▼
-List[Line]   (crop 坐标, 由调用方再 +block.bbox 平移回 page)
+page.blocks = hybrid Block 列表，保留 raw_block/source_label/raw_payload
 ```
 
-OCR runner [app/core/ocr_runner.py](../app/core/ocr_runner.py) 已经会做最后一次平移；如果你走新 pipeline，注意 `bbox_space="crop"` 这个语义。
+legacy OCR runner 仍保留旧 `HanwangOcrEngine` crop-space 语义；主程序新 pipeline 应优先走 `prefer_page_hybrid_blocks` 页级 seam。
 
 ---
 
@@ -124,6 +144,9 @@ OCR runner [app/core/ocr_runner.py](../app/core/ocr_runner.py) 已经会做最�
 
 ## 7. 已知问题 / 容忍策略
 
+0. **属性保真很容易被写回 OCR 时丢掉**：PP-VL 的 `parsing_res_list` 不只是文本，还含有 block label、bbox、分数、公式/表格等结构属性。
+   - **当前策略**：`Block.source_label/raw_payload` 在 layout 阶段写入并由 schema v6 持久化；micro-recblock 写回 `page.blocks` 时必须继续带上 `raw_block`，不能只创建裸 `Block(type,bbox,lines)`。
+
 1. **少数 line crop 触发 `System.AccessViolationException`**：跟 hanwang_native_workflow 上观察到的现象一致（probe 内部 mp30 偶发崩溃）。
    - **当前策略**：[hanwang_ocr_engine.py::_char_fallback](../app/engines/hanwang_ocr_engine.py) 已实现字符级 fallback——line 崩了自动迭代 `group.chars` 逐字 crop+recog，每个救回的字生成一个单字 Line，`bbox_source="hanwang:CharRcg:char_fallback"`。120168.tif 实测把回收率从 35 lines 提到 70 lines / 948→1042 字。
 
@@ -131,6 +154,12 @@ OCR runner [app/core/ocr_runner.py](../app/core/ocr_runner.py) 已经会做最�
    - **优化方向**：把 3 个 probe.exe 改成 daemon 模式（while-loop + stdin/stdout JSON RPC），主程序生命周期内只 spawn 一次，DLL 装载一次。预计单页降到 0.5-1s。改造工作量 1-2 天，需要 .NET Framework SDK 编译环境。**当前未做**。
 
 3. **不能跨平台**：probe.exe 是 Win32 PE 文件。Linux 端跑要靠 WSL 的 binfmt_misc Windows interop 或 wine。生产环境就是 Windows，所以没问题。
+
+4. **进度看起来卡住**：micro-recblock 单页内 Recog group 很慢，页级进度不足以反馈“正在工作”。
+   - **当前策略**：`run_micro_recblock(progress_callback=...)` 在 SegImg 和每个 Recog group 前后发事件；`OcrPipeline` 转成 `OcrProgress(current_block,total_blocks,message)`；UI 状态栏小进度条消费该信号。
+
+5. **OCR step 不应覆盖整个工作区**：旧 UI 会跳到全页“正在 OCR”占位页，用户无法继续看版面。
+   - **当前策略**：`STEP_OCR` 的 stack widget 映射到 `LayoutPanel`，OCR 进度小组件放在 status bar；OCR 完成后只隐藏进度，不强制跳 HProof。
 
 ---
 
@@ -141,8 +170,13 @@ OCR runner [app/core/ocr_runner.py](../app/core/ocr_runner.py) 已经会做最�
 cd worktrees/coord
 PYTHONPATH=. python -c "from app.engines.hanwang import verify_hanwang_assets; verify_hanwang_assets(); print('ok')"
 
-# 2) E2E 冒烟（任意 tif/png 均可）
+# 2) E2E 冒烟（旧原生引擎，任意 tif/png 均可）
 PYTHONPATH=. python scripts/smoke_hanwang_engines.py /path/to/page.tif
+
+# 3) 主线回归
+QT_QPA_PLATFORM=offscreen python -m pytest tests/test_core.py -q -k "micro_recblock or ppvl_parsing_res_list or raw_parsing_res_list or ocr_finished_preserves_current_step"
+QT_QPA_PLATFORM=offscreen python -m pytest tests/test_core.py -q
+QT_QPA_PLATFORM=offscreen python tests/test_core.py
 ```
 
 参考结果（120168.tif，3425×2360）：

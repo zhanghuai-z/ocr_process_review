@@ -419,7 +419,7 @@ def test_project_store():
 
 def test_project_store_persists_ppvl_parsing_res_list():
     from app.core.project_store import ProjectStore
-    from app.models import OcrProject, Page
+    from app.models import BBox, Block, BlockType, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -445,6 +445,18 @@ def test_project_store_persists_ppvl_parsing_res_list():
                     width=800,
                     height=600,
                     ppvl_parsing_res_list=parsing_res_list,
+                    blocks=[
+                        Block(
+                            block_type=BlockType.TEXT,
+                            bbox=BBox(10, 20, 100, 40),
+                            source_label="paragraph_title",
+                            raw_payload={
+                                "block_label": "paragraph_title",
+                                "block_content": "属性保真",
+                                "attributes": {"level": 2},
+                            },
+                        )
+                    ],
                 )
             ],
         )
@@ -454,6 +466,9 @@ def test_project_store_persists_ppvl_parsing_res_list():
             loaded = store.load_project(project_id=1)
 
         assert loaded.pages[0].ppvl_parsing_res_list == parsing_res_list
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.source_label == "paragraph_title"
+        assert loaded_block.raw_payload["attributes"]["level"] == 2
 
         print("test_project_store_persists_ppvl_parsing_res_list PASSED")
     finally:
@@ -3150,6 +3165,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append((ppvl_blocks, kwargs))
+        kwargs["progress_callback"](1, 3, "Hanwang group 1/3")
         return [
             BlockResult(
                 block_idx=0,
@@ -3159,6 +3175,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 text="汉王",
                 ppvl_text="PPVL文本",
                 group_count=1,
+                raw_block={"block_label": "text", "block_content": "PPVL文本", "extra": {"role": "body"}},
                 lines=[
                     LineResult(
                         text="汉王",
@@ -3178,6 +3195,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 source="ppvl",
                 text="$$x+y$$",
                 ppvl_text="$$x+y$$",
+                raw_block={"block_label": "display_formula", "block_content": "$$x+y$$", "formula_format": "latex"},
                 lines=[LineResult(text="$$x+y$$", bbox=(20, 80, 180, 120), source="ppvl")],
             ),
             BlockResult(
@@ -3188,6 +3206,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 text="参考文献",
                 ppvl_text="参考文献",
                 fallback_reason="empty_hanwang_text",
+                raw_block={"block_label": "reference", "block_content": "参考文献", "ref_level": 1},
                 lines=[LineResult(text="参考文献", bbox=(20, 140, 180, 180), source="ppvl_fallback")],
             ),
         ], RunStats(n_blocks_total=3, n_blocks_hanwang=2, n_blocks_ppvl=1, n_blocks_fallback=1)
@@ -3208,13 +3227,24 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 {"block_label": "reference", "block_bbox": [20, 140, 180, 180], "block_content": "参考文献"},
             ],
         )
+        progress_events = []
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner)
-        ).process_project(OcrProject(name="hybrid", pages=[page]))
+        ).process_project(
+            OcrProject(name="hybrid", pages=[page]),
+            progress_callback=progress_events.append,
+        )
 
         assert len(calls) == 1
         assert calls[0][0] == page.ppvl_parsing_res_list
         assert calls[0][1]["include_chars"] is True
+        assert any(
+            event.current_block == 1
+            and event.total_blocks == 3
+            and event.completed_pages == 0
+            and event.message == "Hanwang group 1/3"
+            for event in progress_events
+        )
         out_page = result.pages[0]
         assert [block.block_type for block in out_page.blocks] == [
             BlockType.TEXT,
@@ -3222,15 +3252,54 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
             BlockType.REFERENCE,
         ]
         assert out_page.blocks[0].lines[0].text == "汉王"
+        assert out_page.blocks[0].source_label == "text"
+        assert out_page.blocks[0].raw_payload["extra"]["role"] == "body"
         assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
         assert out_page.blocks[1].lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].recognizable is False
+        assert out_page.blocks[1].raw_payload["formula_format"] == "latex"
         assert "fallback_reason=empty_hanwang_text" in out_page.blocks[2].note
         assert out_page.blocks[2].lines[0].review_flags == ["hanwang_micro_recblock_fallback"]
+        assert out_page.blocks[2].raw_payload["ref_level"] == 1
     finally:
         os.unlink(img_path)
 
     print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
+
+
+def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockType, Page
+
+    page = Page(
+        image_path="/tmp/raw-label.png",
+        width=200,
+        height=100,
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(11, 22, 133, 88),
+                note="active text",
+                source_label="paragraph_title",
+                raw_payload={
+                    "block_label": "paragraph_title",
+                    "block_bbox": [1, 2, 3, 4],
+                    "block_content": "raw text",
+                    "custom_attr": {"level": 2},
+                },
+            )
+        ],
+    )
+
+    blocks = _page_blocks_from_layout(page)
+
+    assert blocks[0]["block_label"] == "paragraph_title"
+    assert blocks[0]["source_label"] == "paragraph_title"
+    assert blocks[0]["block_bbox"] == [11, 22, 133, 88]
+    assert blocks[0]["block_content"] == "active text"
+    assert blocks[0]["custom_attr"]["level"] == 2
+
+    print("test_hanwang_page_blocks_from_layout_preserves_raw_source_label PASSED")
 
 
 def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
@@ -3707,7 +3776,8 @@ def test_workflow_controller_ocr_done_does_not_force_hproof_step():
 
 
 def test_main_window_ocr_finished_preserves_current_step():
-    from app.controllers.workflow_controller import STEP_HPROOF, STEP_OCR
+    from app.controllers.workflow_controller import STEP_HPROOF, STEP_LAYOUT, STEP_OCR
+    from app.services.ocr_pipeline import OcrProgress
     from app.models import Page
     from app.ui.main_window import MainWindow
 
@@ -3717,12 +3787,26 @@ def test_main_window_ocr_finished_preserves_current_step():
         window._controller.set_current_step(STEP_OCR)
         synced = []
         window._controller.sync_proof_panels = lambda *args, **kwargs: synced.append(True)  # type: ignore[method-assign]
+        assert window._stack.currentIndex() == STEP_LAYOUT
+        assert window._stack.currentWidget() is window._layout_panel
+
+        window._on_ocr_progress(OcrProgress(
+            current_page=1,
+            total_pages=1,
+            current_block=2,
+            total_blocks=4,
+            completed_pages=0,
+            message="Hanwang micro-recblock 已完成 group 2/4",
+        ))
+        assert not window._ocr_placeholder.isHidden()
 
         window._on_ocr_finished([Page(image_path="/tmp/ocr-finished.png", width=10, height=10)])
 
-        assert synced == [True]
+        assert synced == [True, True]
         assert window._controller.current_step == STEP_OCR
-        assert window._stack.currentIndex() == STEP_OCR
+        assert window._stack.currentIndex() == STEP_LAYOUT
+        assert window._stack.currentWidget() is window._layout_panel
+        assert window._ocr_placeholder.isHidden()
         assert window._controller.current_step != STEP_HPROOF
     finally:
         window.close()
@@ -5233,6 +5317,8 @@ def test_layout_analyzer_persists_raw_parsing_res_list():
     assert len(blocks) == 1
     assert page.ppvl_parsing_res_list == parsing_res_list
     assert page.ppvl_parsing_res_list[0]["custom_raw"]["keep"] is True
+    assert blocks[0].source_label == "text"
+    assert blocks[0].raw_payload["custom_raw"]["keep"] is True
 
     print("test_layout_analyzer_persists_raw_parsing_res_list PASSED")
 
@@ -7424,6 +7510,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
+    test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()

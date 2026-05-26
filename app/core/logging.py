@@ -76,5 +76,5 @@ USER_ERROR_MAP: dict[str, str] = {
 }
 
 # Schema 版本
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 APP_VERSION = "0.2.0"

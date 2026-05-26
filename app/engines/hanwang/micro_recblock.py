@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -95,6 +95,7 @@ class BlockResult:
     group_count: int = 0
     lines: list[LineResult] = field(default_factory=list)
     fallback_reason: str = ""
+    raw_block: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +107,7 @@ class BlockResult:
             "ppvl_text": self.ppvl_text,
             "group_count": self.group_count,
             "fallback_reason": self.fallback_reason,
+            "raw_block": dict(self.raw_block),
             "lines": [
                 {
                     "text": line.text,
@@ -316,6 +318,7 @@ def run_micro_recblock(
     seg_timeout: float = 120.0,
     recog_timeout: float = 60.0,
     include_chars: bool = True,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
     """Run Hanwang Recog for text-like PP-VL blocks and keep PP-VL for others."""
     height, width = image_bgr.shape[:2]
@@ -346,6 +349,7 @@ def run_micro_recblock(
             text=ppvl_text,
             ppvl_text=ppvl_text,
             lines=[_fallback_line(ppvl_text, bbox, source="ppvl")],
+            raw_block=dict(block),
         )
 
     if text_indices:
@@ -353,6 +357,12 @@ def run_micro_recblock(
             _clamp_xyxy(_block_bbox(ppvl_blocks[idx], width, height), width, height)
             for idx in text_indices
         ]
+        if progress_callback:
+            progress_callback(
+                0,
+                max(1, len(text_indices)),
+                "Hanwang micro-recblock SegImg 分块中…",
+            )
         started = time.time()
         seg = native_bridge.run_linecut_segimg(
             image_bgr,
@@ -367,13 +377,26 @@ def run_micro_recblock(
                 group["_area_idx"] = area_idx
                 groups.append(group)
         stats.n_groups = len(groups)
+        if progress_callback:
+            progress_callback(
+                0,
+                max(1, len(groups)),
+                f"Hanwang micro-recblock Recog 准备中：{len(groups)} 个 group",
+            )
 
         started = time.time()
         grouped_lines: dict[int, list[LineResult]] = {idx: [] for idx in range(len(text_indices))}
-        for group in groups:
+        total_groups = max(1, len(groups))
+        for group_index, group in enumerate(groups):
             bbox = _bbox_tuple(group.get("bbox"), recblocks[group["_area_idx"]])
             if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 continue
+            if progress_callback:
+                progress_callback(
+                    group_index,
+                    total_groups,
+                    f"Hanwang micro-recblock 识别中… group {group_index + 1}/{total_groups}",
+                )
             try:
                 raw = native_bridge.run_linecut_recog(
                     image_bgr,
@@ -387,6 +410,12 @@ def run_micro_recblock(
             grouped_lines[group["_area_idx"]].extend(
                 _line_results_from_recog(raw, fallback_bbox=bbox, include_chars=include_chars)
             )
+            if progress_callback:
+                progress_callback(
+                    group_index + 1,
+                    total_groups,
+                    f"Hanwang micro-recblock 已完成 group {group_index + 1}/{total_groups}",
+                )
         stats.recog_seconds = time.time() - started
 
         for area_idx, block_idx in enumerate(text_indices):
@@ -415,6 +444,7 @@ def run_micro_recblock(
                 group_count=len(lines),
                 lines=lines,
                 fallback_reason=fallback_reason,
+                raw_block=dict(block),
             )
 
     return [row for row in rows if row is not None], stats
@@ -456,11 +486,19 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
 def _page_blocks_from_layout(page: Page) -> list[dict]:
     blocks: list[dict] = []
     for block in page.blocks:
+        raw_payload = dict(block.raw_payload)
+        source_label = (
+            str(raw_payload.get("block_label") or "")
+            or block.source_label
+            or block.block_type.value
+        )
         blocks.append(
             {
-                "block_label": block.block_type.value,
+                **raw_payload,
+                "block_label": source_label,
                 "block_bbox": list(block.bbox.to_xyxy()),
                 "block_content": block.full_text or block.note,
+                "source_label": block.source_label or source_label,
             }
         )
     return blocks
@@ -483,7 +521,12 @@ class HanwangMicroRecBlockEngine:
         self._recog_timeout = recog_timeout
         self._runner = runner
 
-    def recognize_page_blocks(self, image_bgr: np.ndarray, page: Page) -> RunStats:
+    def recognize_page_blocks(
+        self,
+        image_bgr: np.ndarray,
+        page: Page,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> RunStats:
         ppvl_blocks = page.ppvl_parsing_res_list or _page_blocks_from_layout(page)
         if not ppvl_blocks:
             raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
@@ -494,6 +537,7 @@ class HanwangMicroRecBlockEngine:
             seg_timeout=self._seg_timeout,
             recog_timeout=self._recog_timeout,
             include_chars=True,
+            progress_callback=progress_callback,
         )
 
         new_blocks: list[Block] = []
@@ -522,6 +566,8 @@ class HanwangMicroRecBlockEngine:
                     source=BlockSource.AUTO_LAYOUT,
                     recognizable=row.source == "hanwang",
                     note=" | ".join(note_parts),
+                    source_label=row.block_label,
+                    raw_payload=dict(row.raw_block),
                 )
             )
 
