@@ -4,12 +4,18 @@
     "json": {
       "mode": "page-faithful",
       "include_assets": true,
-      "include_diagnostics": true
+      "include_diagnostics": true,
+      "archive_role": "semantic_mirror",
+      "authority": "xml",
+      "parity_group": "xml-json-archive-v1"
     },
     "xml": {
       "mode": "page-faithful",
       "include_assets": true,
-      "include_diagnostics": true
+      "include_diagnostics": true,
+      "archive_role": "primary_authority",
+      "authority": "xml",
+      "parity_group": "xml-json-archive-v1"
     },
     "html": {
       "mode": "reflow",
@@ -51,6 +57,34 @@
       "pdf_layer": "image-plus-text",
       "text_layer": "invisible-char",
       "dpi": 300
+    }
+  },
+  "archive": {
+    "authority_format": "xml",
+    "mirror_format": "json",
+    "mandatory_parity": [
+      "version",
+      "project",
+      "pages.page_number",
+      "pages.source_image",
+      "pages.source_meta",
+      "pages.size",
+      "pages.status",
+      "elements.id",
+      "elements.kind",
+      "elements.page",
+      "elements.order",
+      "elements.bbox",
+      "elements.source",
+      "elements.proof",
+      "elements.payload",
+      "elements.fallback",
+      "assets",
+      "diagnostics"
+    ],
+    "allowed_profile_differences": {
+      "xml": ["XML element/attribute representation", "primary authority marker"],
+      "json": ["native object/array representation", "semantic mirror marker"]
     }
   },
   "block_type_to_kind": {

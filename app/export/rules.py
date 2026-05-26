@@ -38,6 +38,7 @@ _REQUIRED_FORMATS = {
 class ExportRules:
     version: str
     formats: dict[str, dict[str, Any]]
+    archive: dict[str, Any]
     block_type_to_kind: dict[str, str]
     kind_rules: dict[str, dict[str, Any]]
     fallback_strategies: dict[str, dict[str, Any]]
@@ -45,12 +46,22 @@ class ExportRules:
     def profile_for(self, fmt: str) -> ExportProfile:
         normalized = normalize_export_format(fmt)
         data = self.formats[normalized]
-        option_keys = set(data) - {"mode", "include_assets", "include_diagnostics"}
+        option_keys = set(data) - {
+            "mode",
+            "include_assets",
+            "include_diagnostics",
+            "archive_role",
+            "authority",
+            "parity_group",
+        }
         return ExportProfile(
             format=normalized,
             mode=str(data["mode"]),
             include_assets=bool(data.get("include_assets", True)),
             include_diagnostics=bool(data.get("include_diagnostics", True)),
+            archive_role=str(data.get("archive_role") or ""),
+            authority=str(data.get("authority") or ""),
+            parity_group=str(data.get("parity_group") or ""),
             options={key: data[key] for key in sorted(option_keys)},
         )
 
@@ -89,6 +100,7 @@ def validate_export_rules(raw: dict[str, Any]) -> ExportRules:
         raise ValueError(f"unsupported export rule version: {version!r}")
 
     formats = raw.get("formats")
+    archive = raw.get("archive")
     block_type_to_kind = raw.get("block_type_to_kind")
     kind_rules = raw.get("kind_rules")
     fallback_strategies = raw.get("fallback_strategies")
@@ -96,6 +108,8 @@ def validate_export_rules(raw: dict[str, Any]) -> ExportRules:
         raise ValueError("export rules must contain object fields: formats, kind_rules")
     if not isinstance(block_type_to_kind, dict):
         raise ValueError("export rules must contain block_type_to_kind")
+    if not isinstance(archive, dict):
+        raise ValueError("export rules must contain archive")
     if not isinstance(fallback_strategies, dict):
         raise ValueError("export rules must contain fallback_strategies")
 
@@ -113,6 +127,10 @@ def validate_export_rules(raw: dict[str, Any]) -> ExportRules:
     for fmt, profile in formats.items():
         if "mode" not in profile:
             raise ValueError(f"export profile {fmt!r} missing mode")
+    if archive.get("authority_format") != "xml" or archive.get("mirror_format") != "json":
+        raise ValueError("archive authority/mirror must be xml/json for v1")
+    if not archive.get("mandatory_parity"):
+        raise ValueError("export rules must declare mandatory_parity")
 
     for kind, rule in kind_rules.items():
         fallback_name = rule.get("fallback")
@@ -122,6 +140,7 @@ def validate_export_rules(raw: dict[str, Any]) -> ExportRules:
     return ExportRules(
         version=version,
         formats=formats,
+        archive=archive,
         block_type_to_kind=block_type_to_kind,
         kind_rules=kind_rules,
         fallback_strategies=fallback_strategies,

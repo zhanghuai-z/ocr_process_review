@@ -16,6 +16,7 @@ ExportFormat = Literal[
     "rtf",
     "docx",
     "html",
+    "md",
     "xml",
     "json",
     "pdf-single",
@@ -41,6 +42,9 @@ class ExportProfile:
     mode: str
     include_assets: bool = True
     include_diagnostics: bool = True
+    archive_role: str = ""
+    authority: str = ""
+    parity_group: str = ""
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -66,7 +70,7 @@ class ExportSource:
 @dataclass(frozen=True)
 class ExportProof:
     status: str = "unchecked"
-    confidence: float | None = None
+    confidence: float = 0.0
     flags: list[str] = field(default_factory=list)
     corrected: bool = False
 

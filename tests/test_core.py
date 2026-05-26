@@ -632,10 +632,13 @@ def test_export_xml():
     try:
         XmlExporter().export(project, out_path)
         root = etree.parse(out_path).getroot()
-        assert root.tag == "OcrDocument"
+        assert root.tag == "OcrArchive"
+        assert root.get("archive_role") == "primary_authority"
+        assert root.get("authority") == "xml"
         ln = root.findall(".//Line")[0]
         assert ln.text == "XML测试"
-        assert ln.get("x") == "10"
+        assert ln.get("x") is None
+        assert ln.find("BBox").get("x") == "10"
         print("test_export_xml PASSED")
     finally:
         os.unlink(out_path)
@@ -753,6 +756,8 @@ def test_export_ir_rules_load_and_validate():
     rules = load_export_rules()
     assert rules.version == "export_ir.v1"
     assert rules.profile_for("json").format == "json"
+    assert rules.profile_for("json").archive_role == "semantic_mirror"
+    assert rules.profile_for("xml").archive_role == "primary_authority"
     assert rules.profile_for("pdf").format == "pdf-single"
     assert rules.profile_for("pdf-single").mode == "page-faithful"
     assert rules.profile_for("pdf-single").options["pdf_layer"] == "image-only"
@@ -766,6 +771,9 @@ def test_export_ir_rules_load_and_validate():
     assert rules.formats["pdf-dual"]["dpi"] == 300
     assert rules.kind_for_block_type("text") == "paragraph"
     assert rules.rule_for_kind("table")["asset_kind"] == "table_crop"
+    assert rules.archive["authority_format"] == "xml"
+    assert rules.archive["mirror_format"] == "json"
+    assert "elements.source" in rules.archive["mandatory_parity"]
     for kind in (
         "title", "paragraph", "reference", "figure", "figure_caption",
         "table", "table_caption", "equation", "unknown",
@@ -1000,6 +1008,78 @@ def test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error():
     assert pdf.ops == ["3 Tr", "0 Tr"]
 
     print("test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error PASSED")
+
+
+def test_xml_authority_and_json_mirror_archive_parity():
+    import json
+    import tempfile
+
+    from lxml import etree
+
+    from app.export import get_exporter
+    from app.export.archive import json_archive_projection, xml_archive_projection
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    bb = BBox(5, 6, 70, 30)
+    edited = Line(
+        text="OCR旧文",
+        confidence=0.7,
+        bbox=bb,
+        proof_status=ProofStatus.AUTO_FLAGGED,
+        review_flags=["low_confidence"],
+    )
+    edited.ocr_text = "OCR旧文"
+    edited.update_text("人工终文")
+    table_line = Line(text="表格文本", confidence=0.8, bbox=bb)
+    page = Page(
+        image_path="/tmp/archive.png",
+        cache_image_path="/tmp/archive-cache.png",
+        width=800,
+        height=600,
+        page_number=2,
+        source_path="/tmp/source.pdf",
+        source_type="pdf",
+        source_page_index=2,
+        error_message="page warning",
+        blocks=[
+            Block(block_type=BlockType.TEXT, bbox=bb, order=1, id=10, lines=[edited]),
+            Block(block_type=BlockType.TABLE, bbox=bb, order=2, id=11, lines=[table_line]),
+            Block(block_type=BlockType.FIGURE, bbox=bb, order=3, id=12),
+        ],
+    )
+    project = OcrProject(name="ArchiveProject", pages=[page])
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        xml_path = f"{tmpdir}/archive.xml"
+        json_path = f"{tmpdir}/archive.json"
+        get_exporter("xml").export(project, xml_path)
+        get_exporter("json").export(project, json_path)
+
+        root = etree.parse(xml_path).getroot()
+        assert root.get("archive_role") == "primary_authority"
+        assert root.get("authority") == "xml"
+        data = json.loads(open(json_path, encoding="utf-8").read())
+        assert data["profile"]["archive_role"] == "semantic_mirror"
+        assert data["profile"]["authority"] == "xml"
+
+        xml_projection = xml_archive_projection(root)
+        json_projection = json_archive_projection(data)
+        assert xml_projection == json_projection
+
+        first_element = xml_projection["pages"][0]["elements"][0]
+        assert first_element["source"]["block_ids"] == [10]
+        assert first_element["proof"]["status"] == "modified"
+        assert first_element["proof"]["flags"] == ["low_confidence"]
+        assert first_element["payload"]["lines"][0]["ocr_text"] == "OCR旧文"
+        table_element = xml_projection["pages"][0]["elements"][1]
+        assert table_element["fallback"]["mode"] == "image_fallback"
+        figure_element = xml_projection["pages"][0]["elements"][2]
+        assert figure_element["proof"]["confidence"] == 0.0
+        assert xml_projection["assets"][0]["kind"] == "table_crop"
+        assert any(item["code"] == "page_error" for item in xml_projection["diagnostics"])
+        assert any(item["code"] == "table_fallback_to_image" for item in xml_projection["diagnostics"])
+
+    print("test_xml_authority_and_json_mirror_archive_parity PASSED")
 
 
 def test_ir_based_exporters_and_pdf_profiles():
