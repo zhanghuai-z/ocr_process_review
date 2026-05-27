@@ -34,7 +34,11 @@ from app.core.api_profiles import FIXED_LAYOUT_PROFILE, get_api_request_options,
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
-from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
+from app.core.paddle_labels import (
+    authoritative_paddle_label,
+    is_hanwang_skip_label,
+    normalize_paddle_label,
+)
 from app.core.paddle_response import (
     iter_layout_records_from_item,
     iter_ocr_records_from_item,
@@ -271,6 +275,68 @@ class LayoutAnalyzer:
                 return
         raw_overlay_items.append((self._extract_label_from_record(record), bbox))
 
+    def _record_bbox_in_page_space(
+        self,
+        record: dict,
+        page: Page,
+        scale_x: float,
+        scale_y: float,
+    ):
+        bbox = self._extract_bbox_from_record(record, page)
+        if not bbox or bbox.area <= 0:
+            return None
+        if scale_x != 1.0 or scale_y != 1.0:
+            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
+        return bbox if bbox.area > 0 else None
+
+    def _attach_route_subblocks(
+        self,
+        *,
+        page: Page,
+        parsing_records: list[dict],
+        geometry_records: list[dict],
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        route_records: list[tuple[str, object, dict]] = []
+        for record in geometry_records:
+            label = self._extract_label_from_record(record)
+            if not is_hanwang_skip_label(label):
+                continue
+            bbox = self._record_bbox_in_page_space(record, page, scale_x, scale_y)
+            if bbox is None:
+                continue
+            route_records.append((label, bbox, record))
+        if not route_records:
+            return
+
+        for parent in parsing_records:
+            parent_bbox = self._record_bbox_in_page_space(parent, page, scale_x, scale_y)
+            if parent_bbox is None:
+                continue
+            subblocks = []
+            for label, bbox, raw in route_records:
+                x1 = max(parent_bbox.x1, bbox.x1)
+                y1 = max(parent_bbox.y1, bbox.y1)
+                x2 = min(parent_bbox.x2, bbox.x2)
+                y2 = min(parent_bbox.y2, bbox.y2)
+                if x2 <= x1 or y2 <= y1:
+                    continue
+                inter_area = (x2 - x1) * (y2 - y1)
+                center_inside = (
+                    parent_bbox.x1 <= (bbox.x1 + bbox.x2) / 2 <= parent_bbox.x2
+                    and parent_bbox.y1 <= (bbox.y1 + bbox.y2) / 2 <= parent_bbox.y2
+                )
+                if not center_inside and inter_area < bbox.area * 0.5:
+                    continue
+                subblocks.append({
+                    "block_label": label,
+                    "block_bbox": list(bbox.to_xyxy()),
+                    "raw_payload": dict(raw),
+                })
+            if subblocks:
+                parent["_route_subblocks"] = subblocks
+
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = result_dict(data)
         layout_results = result_items(data, "layoutParsingResults")
@@ -283,13 +349,23 @@ class LayoutAnalyzer:
 
         for item in layout_results:
             parsing_records = parsing_records_from_item(item)
-            page.ppvl_parsing_res_list.extend(parsing_records)
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
                     "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
                     scale_x, scale_y, page.display_image_path,
                 )
+
+            geometry_records = layout_geometry_records_from_item(item)
+            if parsing_records:
+                self._attach_route_subblocks(
+                    page=page,
+                    parsing_records=parsing_records,
+                    geometry_records=geometry_records,
+                    scale_x=scale_x,
+                    scale_y=scale_y,
+                )
+            page.ppvl_parsing_res_list.extend(parsing_records)
 
             records_for_blocks = parsing_records or self._iter_layout_records_from_item(item)
             for record in records_for_blocks:
@@ -304,7 +380,7 @@ class LayoutAnalyzer:
                     raw_overlay_items=raw_overlay_items,
                 )
             if parsing_records:
-                for record in layout_geometry_records_from_item(item):
+                for record in geometry_records:
                     self._append_overlay_record(
                         page=page,
                         record=record,

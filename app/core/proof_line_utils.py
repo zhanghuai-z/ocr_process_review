@@ -21,6 +21,10 @@ HPROOF_LINE_BLOCK_TYPES = {
     BlockType.REFERENCE,
 }
 
+PROOF_SKIP_LINE_FLAGS = {
+    "hanwang_route_table",
+}
+
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
     text = line.text or ""
     bbox = line.bbox.normalize()
@@ -43,6 +47,8 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
         if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
             continue
         for line_idx, line in enumerate(block.lines):
+            if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line.review_flags):
+                continue
             if _is_duplicate_line(line, seen):
                 continue
             yield block, line, line_idx
@@ -57,6 +63,8 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
         if is_position_only_block(block):
             continue
         for line_idx, line in enumerate(block.lines):
+            if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line.review_flags):
+                continue
             if _is_duplicate_line(line, seen):
                 continue
             yield block, line, line_idx

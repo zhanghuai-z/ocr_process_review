@@ -338,6 +338,9 @@ class ImageViewer(QGraphicsView):
             self._block_items.remove((item, block))
             self.block_deleted.emit(block)
 
+    def selected_blocks(self) -> List[Block]:
+        return [block for item, block in self._block_items if item.isSelected()]
+
     def highlight_bbox(self, bbox: BBox, *, zoom: bool = False) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
         # 清除旧的高亮

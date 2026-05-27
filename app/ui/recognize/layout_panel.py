@@ -105,6 +105,12 @@ class LayoutPanel(QWidget):
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         vtl.addWidget(self._type_combo)
 
+        self._btn_merge = QPushButton("合并框")
+        self._btn_merge.setObjectName("secondaryBtn")
+        self._btn_merge.setToolTip("合并当前多选框；合并后清空旧 OCR 文本，提交时重新识别")
+        self._btn_merge.clicked.connect(self._merge_selected_blocks)
+        vtl.addWidget(self._btn_merge)
+
         # bbox / conf 标签随选中状态填充
         self._prop_bbox = QLabel("")
         self._prop_bbox.setObjectName("muted")
@@ -334,6 +340,53 @@ class LayoutPanel(QWidget):
     def _delete_selected(self) -> None:
         """底部栏 ✕ 删除框 按钮。"""
         self._viewer.delete_selected()
+
+    def _merge_selected_blocks(self) -> None:
+        if not self._pages:
+            return
+        selected = [block for block in self._viewer.selected_blocks() if block in self._pages[self._current_page_idx].blocks]
+        if len(selected) < 2:
+            self._status_lbl.setText("请先在画布中多选至少两个框再合并")
+            return
+
+        page = self._pages[self._current_page_idx]
+        selected.sort(key=lambda block: (block.order, block.bbox.y, block.bbox.x))
+        primary = selected[0]
+        x1 = min(block.bbox.x1 for block in selected)
+        y1 = min(block.bbox.y1 for block in selected)
+        x2 = max(block.bbox.x2 for block in selected)
+        y2 = max(block.bbox.y2 for block in selected)
+        primary.bbox = BBox.from_xyxy(x1, y1, x2, y2)
+        primary.lines = []
+        primary.source = BlockSource.USER_EDITED
+        primary.recognizable = primary.block_type not in (BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN)
+        primary.note = "manual_merge_requires_ocr_rerun"
+        primary.raw_payload = {
+            **dict(primary.raw_payload),
+            "manual_merge_from": [
+                {
+                    "block_type": block.block_type.value,
+                    "bbox": list(block.bbox.to_xyxy()),
+                    "source_label": block.source_label,
+                }
+                for block in selected
+            ],
+            "ocr_text_invalidated": True,
+        }
+
+        remove_ids = {id(block) for block in selected[1:]}
+        page.blocks = [block for block in page.blocks if id(block) not in remove_ids]
+        for order, block in enumerate(page.blocks):
+            block.order = order
+
+        self._selected_block = primary
+        self._viewer.show_blocks(page.blocks)
+        if self._btn_char_boxes.isChecked():
+            self._viewer.show_char_boxes(self._collect_page_chars(page))
+        self._inspector.set_block(primary)
+        self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
+        self._status_lbl.setText("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
+        self.geometry_changed.emit()
 
     def _on_type_changed(self, _index: int) -> None:
         if self._selected_block is None:
