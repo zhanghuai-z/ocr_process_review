@@ -1,7 +1,6 @@
 """Page-level PP-VL block -> Hanwang linecut micro-recblock integration."""
 from __future__ import annotations
 
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -10,12 +9,26 @@ import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.logging import get_logger
+from app.core.paddle_line_routing import (
+    ROUTE_INLINE_FORMULA_FLAG,
+    ROUTE_TABLE_FLAG,
+    block_bbox_xyxy,
+    block_text as paddle_block_text,
+    has_layout_line_routes,
+    is_formula_style_position_block,
+    is_table_label,
+    line_routes_for_block,
+    route_authority_label,
+    route_subblocks_for_block,
+    text_slice_routes_for_block,
+    union_xyxy,
+    vertical_overlap_ratio,
+)
 from app.core.paddle_labels import (
     PADDLE_HANWANG_SKIP_LABELS,
     PADDLE_HANWANG_TEXT_LABELS,
     authoritative_paddle_label,
     is_hanwang_skip_label,
-    normalize_paddle_label,
 )
 from app.core.proof_status import proof_status_for
 from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
@@ -134,21 +147,18 @@ class _GroupPlacement:
 @dataclass
 class _TextRoute:
     block_idx: int
+    line_idx: int
+    segment_idx: int
     bbox: tuple[int, int, int, int]
     carved: bool = False
 
-
-@dataclass(frozen=True)
-class _ParentFormulaSpan:
-    text: str
-
-
-ROUTE_INLINE_FORMULA_FLAG = "hanwang_route_inline_formula"
-ROUTE_TABLE_FLAG = "hanwang_route_table"
+    @property
+    def key(self) -> tuple[int, int, int]:
+        return self.block_idx, self.line_idx, self.segment_idx
 
 
 def _label_from_block(block: dict[str, Any], default: str = "unknown") -> str:
-    return normalize_paddle_label(authoritative_paddle_label(block, default))
+    return route_authority_label(block, default)
 
 
 def _is_skip_label(label: str) -> bool:
@@ -160,47 +170,16 @@ def _is_text_label(label: str) -> bool:
 
 
 def _block_text(block: dict[str, Any]) -> str:
-    return str(
-        block.get("block_content")
-        or block.get("text")
-        or block.get("content")
-        or ""
-    ).strip()
-
-
-def _is_formula_only_text(text: str) -> bool:
-    compact = "".join(ch for ch in text if not ch.isspace())
-    if not compact:
-        return False
-    cjk_count = sum(1 for ch in compact if "\u4e00" <= ch <= "\u9fff")
-    formula_markers = ("$", "\\", "_", "^", "{", "}", "=", "+", "-", "×", "÷", "/", "\\frac")
-    return cjk_count == 0 and any(marker in compact for marker in formula_markers)
+    return paddle_block_text(block)
 
 
 def _effective_label_for_block(block: dict[str, Any]) -> str:
     label = _label_from_block(block)
-    if _is_text_label(label) and _is_formula_only_text(_block_text(block)):
+    if BlockType.from_paddle(label) == BlockType.EQUATION:
+        return label
+    if is_formula_style_position_block(block):
         return "formula"
     return label
-
-
-def _is_formula_label(label: str) -> bool:
-    return BlockType.from_paddle(label) == BlockType.EQUATION
-
-
-def _is_table_label(label: str) -> bool:
-    return BlockType.from_paddle(label) == BlockType.TABLE
-
-
-def _union_xyxy(
-    boxes: list[tuple[int, int, int, int]],
-) -> tuple[int, int, int, int]:
-    return (
-        min(box[0] for box in boxes),
-        min(box[1] for box in boxes),
-        max(box[2] for box in boxes),
-        max(box[3] for box in boxes),
-    )
 
 
 def _intersect_xyxy(
@@ -216,43 +195,8 @@ def _intersect_xyxy(
     return x1, y1, x2, y2
 
 
-def _subtract_xyxy(
-    rect: tuple[int, int, int, int],
-    cut: tuple[int, int, int, int],
-) -> list[tuple[int, int, int, int]]:
-    overlap = _intersect_xyxy(rect, cut)
-    if overlap is None:
-        return [rect]
-    x1, y1, x2, y2 = rect
-    ox1, oy1, ox2, oy2 = overlap
-    pieces = [
-        (x1, y1, x2, oy1),
-        (x1, oy2, x2, y2),
-        (x1, oy1, ox1, oy2),
-        (ox2, oy1, x2, oy2),
-    ]
-    return [piece for piece in pieces if piece[2] - piece[0] >= 4 and piece[3] - piece[1] >= 4]
-
-
 def _route_subblocks(block: dict[str, Any], width: int, height: int) -> list[dict[str, Any]]:
-    values = block.get("_route_subblocks")
-    if not isinstance(values, list):
-        return []
-    parent_bbox = _clamp_xyxy(_block_bbox(block, width, height), width, height)
-    subblocks: list[dict[str, Any]] = []
-    for value in values:
-        if not isinstance(value, dict):
-            continue
-        label = _label_from_block(value)
-        if not _is_skip_label(label):
-            continue
-        bbox = _clamp_xyxy(_block_bbox(value, width, height), width, height)
-        bbox = _intersect_xyxy(parent_bbox, bbox)
-        if bbox is None:
-            continue
-        subblocks.append({"label": label, "bbox": bbox, "raw": dict(value)})
-    subblocks.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
-    return subblocks
+    return route_subblocks_for_block(block, width, height)
 
 
 def _text_route_bboxes_for_block(
@@ -261,119 +205,35 @@ def _text_route_bboxes_for_block(
     width: int,
     height: int,
 ) -> list[_TextRoute]:
-    parent_bbox = _clamp_xyxy(_block_bbox(block, width, height), width, height)
-    subblocks = _route_subblocks(block, width, height)
-    if not subblocks:
-        return [_TextRoute(block_idx=block_idx, bbox=parent_bbox)]
-
-    text_rects = [parent_bbox]
-    for subblock in subblocks:
-        next_rects: list[tuple[int, int, int, int]] = []
-        for rect in text_rects:
-            next_rects.extend(_subtract_xyxy(rect, subblock["bbox"]))
-        text_rects = next_rects
-
+    routes = text_slice_routes_for_block(block, width, height)
     return [
-        _TextRoute(block_idx=block_idx, bbox=rect, carved=True)
-        for rect in sorted(text_rects, key=lambda item: (item[1], item[0]))
-        if rect[2] > rect[0] and rect[3] > rect[1]
+        _TextRoute(
+            block_idx=block_idx,
+            line_idx=int(route.get("line_idx", -1)),
+            segment_idx=int(route.get("segment_idx", 0)),
+            bbox=tuple(route["bbox"]),
+            carved=bool(route.get("carved", False)),
+        )
+        for route in routes
     ]
 
 
 def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:
-    return bool(_route_subblocks(block, width, height))
+    return has_layout_line_routes(block, width, height)
 
 
-def _route_subblock_text(subblock: dict[str, Any]) -> str:
-    raw = subblock.get("raw") or {}
-    raw_payload = raw.get("raw_payload") if isinstance(raw, dict) else None
-    if isinstance(raw_payload, dict):
-        text = _block_text(raw_payload)
-        if text:
-            return text
-    if isinstance(raw, dict):
-        text = _block_text(raw)
-        if text:
-            return text
-    return ""
-
-
-def _parent_formula_spans(text: str) -> list[_ParentFormulaSpan]:
-    matches = list(re.finditer(r"\$.*?\$", text, re.DOTALL))
-    if not matches:
-        return []
-    spans: list[_ParentFormulaSpan] = []
-    for match in matches:
-        spans.append(_ParentFormulaSpan(text=match.group(0)))
-    return spans
-
-
-def _vertical_overlap_ratio(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> float:
-    overlap = max(0, min(a[3], b[3]) - max(a[1], b[1]))
-    denom = max(1, min(a[3] - a[1], b[3] - b[1]))
-    return overlap / denom
-
-
-def _horizontal_gap(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> int:
-    if a[2] <= b[0]:
-        return b[0] - a[2]
-    if b[2] <= a[0]:
-        return a[0] - b[2]
-    return 0
-
-
-def _nearest_line_index(lines: list[LineResult], bbox: tuple[int, int, int, int]) -> int:
-    if not lines:
-        return -1
-    center_x = (bbox[0] + bbox[2]) / 2
-    center_y = (bbox[1] + bbox[3]) / 2
-    best_idx = 0
-    best_score = -1.0
-    for idx, line in enumerate(lines):
-        overlap = _vertical_overlap_ratio(line.bbox, bbox)
-        horizontal_gap = _horizontal_gap(line.bbox, bbox)
-        line_center_x = (line.bbox[0] + line.bbox[2]) / 2
-        line_center_y = (line.bbox[1] + line.bbox[3]) / 2
-        distance = abs(center_y - line_center_y)
-        x_distance = abs(center_x - line_center_x)
-        score = overlap * 1_000_000 - distance * 1000 - horizontal_gap * 10 - x_distance
-        if score > best_score:
-            best_score = score
-            best_idx = idx
-    return best_idx
-
-
-def _merge_formula_segments_into_line(
-    line: LineResult,
-    formulas: list[LineResult],
-) -> LineResult:
-    segments = [line, *formulas]
-    segments.sort(key=lambda item: (item.bbox[0], item.bbox[1]))
-    text = "".join(segment.text for segment in segments if segment.text)
-    chars: list[CharResult] = []
-    for segment in segments:
-        chars.extend(segment.chars)
-    confidence_values = [segment.confidence for segment in segments if segment.confidence > 0]
-    confidence = (
-        sum(confidence_values) / len(confidence_values)
-        if confidence_values
-        else line.confidence
-    )
-    flags = sorted({flag for segment in segments for flag in segment.review_flags})
-    return LineResult(
-        text=text,
-        bbox=_union_xyxy([segment.bbox for segment in segments]),
-        confidence=confidence,
-        chars=chars,
-        source="hanwang+ppvl_route_inline_formula",
-        review_flags=flags,
-    )
+def _semantic_text_routes(
+    ppvl_blocks: list[dict],
+    width: int,
+    height: int,
+) -> list[_TextRoute]:
+    routes: list[_TextRoute] = []
+    for block_idx, block in enumerate(ppvl_blocks):
+        label = _effective_label_for_block(block)
+        if not _is_text_label(label):
+            continue
+        routes.extend(_text_route_bboxes_for_block(block, block_idx, width, height))
+    return routes
 
 
 def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
@@ -386,7 +246,7 @@ def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
             head = bucket[0]
             if ROUTE_TABLE_FLAG in head.review_flags:
                 continue
-            if _vertical_overlap_ratio(head.bbox, line.bbox) >= 0.5:
+            if vertical_overlap_ratio(head.bbox, line.bbox) >= 0.5:
                 bucket.append(line)
                 break
         else:
@@ -405,7 +265,7 @@ def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
         flags = sorted({flag for line in bucket for flag in line.review_flags})
         merged.append(LineResult(
             text="".join(line.text for line in bucket if line.text),
-            bbox=_union_xyxy([line.bbox for line in bucket]),
+            bbox=union_xyxy([line.bbox for line in bucket]),
             confidence=sum(confidence_values) / len(confidence_values) if confidence_values else 0.0,
             chars=chars,
             source="hanwang+ppvl_route_merged",
@@ -415,103 +275,152 @@ def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
     return merged
 
 
-def _recovered_inline_formula_texts(
-    lines: list[LineResult],
-    block: dict[str, Any],
-    subblocks: list[dict[str, Any]],
-) -> dict[int, str]:
-    spans = _parent_formula_spans(_block_text(block))
-    if not spans:
-        return {}
-    line_hints = _merge_peer_text_lines([line for line in lines if _text_length(line.text) > 0])
-    formula_entries: list[tuple[int, int, int, int]] = []
-    for sub_idx, subblock in enumerate(subblocks):
-        if not _is_formula_label(subblock["label"]):
+def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
+    buckets: list[list[LineResult]] = []
+    for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
+        for bucket in buckets:
+            if vertical_overlap_ratio(bucket[0].bbox, line.bbox) >= 0.5:
+                bucket.append(line)
+                break
+        else:
+            buckets.append([line])
+    return buckets
+
+
+def _assemble_layout_route_line(
+    *,
+    block_idx: int,
+    line_idx: int,
+    route: dict[str, Any],
+    grouped_lines: dict[tuple[int, int, int], list[LineResult]],
+) -> list[LineResult]:
+    segments = route.get("segments") or []
+    if not segments:
+        return []
+
+    if all(segment.get("kind") == "skip" for segment in segments):
+        segment = segments[0]
+        text = str(segment.get("text") or "")
+        if not text:
+            return []
+        flags = [ROUTE_TABLE_FLAG] if is_table_label(str(segment.get("label") or "")) else []
+        return [
+            LineResult(
+                text=text,
+                bbox=tuple(segment["bbox"]),
+                confidence=0.0,
+                chars=[],
+                source=f"ppvl_route:{segment.get('label') or 'skip'}",
+                review_flags=flags,
+            )
+        ]
+
+    slice_lines_by_segment: dict[int, list[LineResult]] = {}
+    all_text_lines: list[LineResult] = []
+    has_formula = any(segment.get("kind") == "formula" for segment in segments)
+    for segment_idx, segment in enumerate(segments):
+        if segment.get("kind") != "text":
             continue
-        line_idx = _nearest_line_index(line_hints, subblock["bbox"]) if line_hints else -1
-        formula_entries.append((sub_idx, line_idx, subblock["bbox"][0], subblock["bbox"][1]))
-    if line_hints:
-        formula_entries.sort(
-            key=lambda item: (
-                item[1] if item[1] >= 0 else len(line_hints),
-                item[2],
-                item[3],
+        key = (block_idx, line_idx, segment_idx)
+        current_lines = [
+            line
+            for line in grouped_lines.get(key, [])
+            if _text_length(line.text) > 0 or line.chars
+        ]
+        current_lines.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
+        slice_lines_by_segment[segment_idx] = current_lines
+        all_text_lines.extend(current_lines)
+
+    if not has_formula:
+        merged_text_lines: list[LineResult] = []
+        for segment_idx in range(len(segments)):
+            merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
+        return _merge_peer_text_lines(merged_text_lines)
+
+    clusters = _cluster_lines_by_shape(all_text_lines)
+    if not clusters:
+        return []
+
+    assembled: list[LineResult] = []
+    for cluster in clusters:
+        cluster_bbox = union_xyxy([line.bbox for line in cluster])
+        text_parts: list[str] = []
+        chars: list[CharResult] = []
+        component_boxes: list[tuple[int, int, int, int]] = []
+        confidence_values: list[float] = []
+        flags: set[str] = set()
+        for segment_idx, segment in enumerate(segments):
+            segment_bbox = tuple(segment["bbox"])
+            kind = segment.get("kind")
+            if kind == "text":
+                segment_lines = [
+                    line
+                    for line in slice_lines_by_segment.get(segment_idx, [])
+                    if vertical_overlap_ratio(line.bbox, cluster_bbox) >= 0.5
+                ]
+                if not segment_lines and len(clusters) == 1:
+                    segment_lines = slice_lines_by_segment.get(segment_idx, [])
+                if not segment_lines:
+                    continue
+                text_parts.append("".join(line.text for line in segment_lines if line.text))
+                for line in segment_lines:
+                    chars.extend(line.chars)
+                    component_boxes.append(line.bbox)
+                    flags.update(line.review_flags)
+                    if line.confidence > 0:
+                        confidence_values.append(line.confidence)
+            elif kind == "formula":
+                if len(clusters) > 1 and vertical_overlap_ratio(segment_bbox, cluster_bbox) < 0.5:
+                    continue
+                formula_text = str(segment.get("text") or "")
+                if not formula_text:
+                    continue
+                text_parts.append(formula_text)
+                component_boxes.append(segment_bbox)
+                flags.add(ROUTE_INLINE_FORMULA_FLAG)
+        merged_text = "".join(text_parts)
+        if not merged_text:
+            continue
+        assembled.append(
+            LineResult(
+                text=merged_text,
+                bbox=union_xyxy(component_boxes) if component_boxes else tuple(route["bbox"]),
+                confidence=(
+                    sum(confidence_values) / len(confidence_values)
+                    if confidence_values
+                    else 0.0
+                ),
+                chars=chars,
+                source="layout_route+hanwang",
+                review_flags=sorted(flags),
             )
         )
-    recovered: dict[int, str] = {}
-    for cursor, (sub_idx, _line_idx, _x, _y) in enumerate(formula_entries):
-        if cursor >= len(spans):
-            break
-        recovered[sub_idx] = spans[cursor].text
-    return recovered
+    return assembled
 
 
-def _merge_route_subblocks_into_lines(
-    lines: list[LineResult],
+def _assemble_layout_route_lines(
+    *,
+    block_idx: int,
     block: dict[str, Any],
+    grouped_lines: dict[tuple[int, int, int], list[LineResult]],
     width: int,
     height: int,
 ) -> list[LineResult]:
-    subblocks = _route_subblocks(block, width, height)
-    if not subblocks:
-        return lines
-
-    merged = list(lines)
-    recovered_formula_texts = _recovered_inline_formula_texts(merged, block, subblocks)
-    formula_by_line: dict[int, list[LineResult]] = {}
-    extra_lines: list[LineResult] = []
-    for sub_idx, subblock in enumerate(subblocks):
-        label = subblock["label"]
-        text = (
-            recovered_formula_texts.get(sub_idx, "")
-            if _is_formula_label(label)
-            else _route_subblock_text(subblock)
+    line_routes = line_routes_for_block(block, width, height)
+    if not line_routes:
+        return []
+    assembled: list[LineResult] = []
+    for line_idx, route in enumerate(line_routes):
+        assembled.extend(
+            _assemble_layout_route_line(
+                block_idx=block_idx,
+                line_idx=line_idx,
+                route=route,
+                grouped_lines=grouped_lines,
+            )
         )
-        if not text:
-            continue
-        route_line = LineResult(
-            text=text,
-            bbox=subblock["bbox"],
-            confidence=0.0,
-            chars=[],
-            source=f"ppvl_route:{label}",
-            review_flags=[],
-        )
-        if _is_formula_label(label):
-            route_line.review_flags.append(ROUTE_INLINE_FORMULA_FLAG)
-            line_idx = _nearest_line_index(merged, route_line.bbox)
-            if line_idx >= 0:
-                formula_by_line.setdefault(line_idx, []).append(route_line)
-            else:
-                extra_lines.append(route_line)
-        elif _is_table_label(label):
-            route_line.review_flags.append(ROUTE_TABLE_FLAG)
-            extra_lines.append(route_line)
-        else:
-            extra_lines.append(route_line)
-
-    if formula_by_line:
-        next_lines: list[LineResult] = []
-        for idx, line in enumerate(merged):
-            formulas = formula_by_line.get(idx)
-            if formulas:
-                next_lines.append(_merge_formula_segments_into_line(line, formulas))
-            else:
-                next_lines.append(line)
-        merged = next_lines
-    if extra_lines:
-        merged.extend(extra_lines)
-    return _merge_peer_text_lines(merged)
-
-
-def _semantic_text_routes(ppvl_blocks: list[dict], width: int, height: int) -> list[_TextRoute]:
-    routes: list[_TextRoute] = []
-    for parent_idx, block in enumerate(ppvl_blocks):
-        label = _effective_label_for_block(block)
-        if _is_skip_label(label) or not _is_text_label(label):
-            continue
-        routes.extend(_text_route_bboxes_for_block(block, parent_idx, width, height))
-    return routes
+    assembled.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
+    return assembled
 
 
 def decode_gbk(code: int) -> str:
@@ -573,14 +482,10 @@ def _clamp_xyxy(
 
 
 def _block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, int, int]:
-    bbox = bbox_from_variant(
-        raw.get("block_bbox") or raw.get("bbox") or raw.get("coordinate"),
-        max_w=width,
-        max_h=height,
-    )
-    if bbox is None or bbox.area <= 0:
-        return 0, 0, width, height
-    return bbox.to_xyxy()
+    line_routes = line_routes_for_block(raw, width, height)
+    if line_routes:
+        return union_xyxy([tuple(route["bbox"]) for route in line_routes])
+    return block_bbox_xyxy(raw, width, height)
 
 
 def _char_result(raw: dict, fallback_bbox: tuple[int, int, int, int]) -> CharResult:
@@ -843,8 +748,6 @@ def _fallback_needed_for_block(
     width: int,
     height: int,
 ) -> str:
-    if _has_route_subblocks(block, width, height) and _text_length(surrounding_hw_text) > 0:
-        return ""
     return _fallback_needed(merged_text, ppvl_text)
 
 
@@ -873,9 +776,14 @@ def run_micro_recblock(
     stats.n_blocks_hanwang = len(text_indices)
     stats.n_blocks_ppvl = len(skip_indices)
     rows: list[BlockResult | None] = [None] * len(ppvl_blocks)
-    text_routes = _semantic_text_routes(ppvl_blocks, width, height)
+    text_routes: list[_TextRoute] = []
+    block_text_routes: dict[int, list[_TextRoute]] = {}
+    for block_idx in text_indices:
+        routes = _text_route_bboxes_for_block(ppvl_blocks[block_idx], block_idx, width, height)
+        block_text_routes[block_idx] = routes
+        text_routes.extend(routes)
     text_route_recblocks = [route.bbox for route in text_routes]
-    has_route_subblocks = any(_has_route_subblocks(ppvl_blocks[idx], width, height) for idx in text_indices)
+    has_layout_routes = any(_has_route_subblocks(ppvl_blocks[idx], width, height) for idx in text_indices)
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
@@ -923,7 +831,10 @@ def run_micro_recblock(
             )
 
         started = time.time()
-        grouped_lines: dict[int, list[LineResult]] = {idx: [] for idx in text_indices}
+        grouped_lines: dict[tuple[int, int, int], list[LineResult]] = {
+            route.key: []
+            for route in text_routes
+        }
         total_groups = max(1, len(groups))
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []
@@ -940,7 +851,7 @@ def run_micro_recblock(
             if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 continue
             group_bboxes.append(bbox)
-            group_area_indices.append(text_routes[group["_area_idx"]].block_idx)
+            group_area_indices.append(group["_area_idx"])
 
         def recognize_individually(placements: list[_GroupPlacement]) -> None:
             for placement in placements:
@@ -963,12 +874,12 @@ def run_micro_recblock(
                     fallback_bbox=(0, 0, crop_w, crop_h),
                     include_chars=include_chars,
                 )
-                grouped_lines[placement.area_idx].extend(
+                grouped_lines[text_routes[placement.area_idx].key].extend(
                     _offset_line_results(local_lines, dx=left, dy=top)
                 )
 
-        batch_enabled = not _BATCH_DISABLED_FOR_SESSION and not has_route_subblocks
-        stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION or has_route_subblocks
+        batch_enabled = not _BATCH_DISABLED_FOR_SESSION and not has_layout_routes
+        stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION or has_layout_routes
         completed_groups = 0
         chunks = _chunk_group_bboxes(group_bboxes, group_area_indices)
         for chunk_index, (chunk_bboxes, chunk_area_indices) in enumerate(chunks):
@@ -1048,7 +959,7 @@ def run_micro_recblock(
                             continue
                         dx = placement.page_bbox[0] - placement.collage_bbox[0]
                         dy = placement.page_bbox[1] - placement.collage_bbox[1]
-                        grouped_lines[placement.area_idx].extend(
+                        grouped_lines[text_routes[placement.area_idx].key].extend(
                             _offset_line_results([local_line], dx=dx, dy=dy)
                         )
             else:
@@ -1068,13 +979,23 @@ def run_micro_recblock(
             label = _effective_label_for_block(block)
             bbox = _block_bbox(block, width, height)
             ppvl_text = _block_text(block)
+            raw_text_lines: list[LineResult] = []
+            for route in block_text_routes.get(block_idx, []):
+                raw_text_lines.extend(grouped_lines.get(route.key, []))
             lines = [
-                line for line in grouped_lines.get(block_idx, [])
+                line for line in raw_text_lines
                 if _text_length(line.text) > 0 or line.chars
             ]
             lines.sort(key=lambda line: (line.bbox[1], line.bbox[0]))
             surrounding_hw_text = "".join(line.text for line in lines).strip()
-            lines = _merge_route_subblocks_into_lines(lines, block, width, height)
+            if _has_route_subblocks(block, width, height):
+                lines = _assemble_layout_route_lines(
+                    block_idx=block_idx,
+                    block=block,
+                    grouped_lines=grouped_lines,
+                    width=width,
+                    height=height,
+                )
             hw_text = "".join(line.text for line in lines).strip()
             fallback_reason = _fallback_needed_for_block(
                 block,

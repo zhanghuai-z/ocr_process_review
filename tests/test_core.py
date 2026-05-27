@@ -3384,7 +3384,35 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
     print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
 
 
-def test_hanwang_inline_formula_only_text_does_not_suppress_fallback():
+def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
+    from app.core.paddle_line_routing import (
+        LAYOUT_LINE_ROUTES_FIELD,
+        build_layout_line_routes,
+    )
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 210, 80],
+        "block_content": "甲甲 $ A $ 乙乙。丙 $ B $ 丁 $ C $ 戊",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [70, 0, 110, 30]},
+            {"block_label": "inline_formula", "block_bbox": [40, 40, 90, 70]},
+            {"block_label": "inline_formula", "block_bbox": [140, 40, 180, 70]},
+        ],
+    }
+    routes = build_layout_line_routes(block, 220, 100)
+
+    assert len(routes) >= 2
+    assert [segment["text"] for segment in routes[0]["segments"] if segment["kind"] == "formula"] == ["$ A $"]
+    assert [segment["text"] for segment in routes[1]["segments"] if segment["kind"] == "formula"] == ["$ B $", "$ C $"]
+    assert sum(1 for segment in routes[1]["segments"] if segment["kind"] == "text") >= 3
+    block[LAYOUT_LINE_ROUTES_FIELD] = routes
+    assert block[LAYOUT_LINE_ROUTES_FIELD][0]["segments"][1]["text"] == "$ A $"
+
+    print("test_paddle_line_routing_builds_layout_line_routes_from_reading_order PASSED")
+
+
+def test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -3417,12 +3445,12 @@ def test_hanwang_inline_formula_only_text_does_not_suppress_fallback():
         assert rows[0].source == "ppvl_fallback"
         assert rows[0].text == parent_text
         assert rows[0].lines[0].text == parent_text
-        assert rows[0].fallback_reason.startswith("short_hanwang_text")
+        assert rows[0].fallback_reason == "empty_hanwang_text"
         assert stats.n_blocks_fallback == 1
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
-    print("test_hanwang_inline_formula_only_text_does_not_suppress_fallback PASSED")
+    print("test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl PASSED")
 
 
 def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
@@ -3504,7 +3532,7 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
     print("test_hanwang_group_chunk_cannot_readmit_skipped_subregions PASSED")
 
 
-def test_hanwang_formula_like_footer_bypasses_before_hanwang():
+def test_hanwang_formula_style_footer_and_footnote_bypass_hanwang():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -3521,25 +3549,32 @@ def test_hanwang_formula_like_footer_bypasses_before_hanwang():
     try:
         rows, stats = micro_module.run_micro_recblock(
             np.zeros((60, 120, 3), dtype=np.uint8),
-            [{
-                "block_label": "footer",
-                "block_bbox": [10, 40, 90, 58],
-                "block_content": " $  \\frac{1}{2}  $",
-            }],
+            [
+                {
+                    "block_label": "footer",
+                    "block_bbox": [10, 20, 90, 38],
+                    "block_content": " $  \\frac{1}{2}  $",
+                },
+                {
+                    "block_label": "footnote",
+                    "block_bbox": [10, 40, 90, 58],
+                    "block_content": " $$ x = y $$ ",
+                },
+            ],
         )
 
         assert called_segimg is False
-        assert len(rows) == 1
-        assert rows[0].source == "ppvl"
-        assert rows[0].block_label == "formula"
-        assert rows[0].lines[0].text == "$  \\frac{1}{2}  $"
+        assert len(rows) == 2
+        assert [row.source for row in rows] == ["ppvl", "ppvl"]
+        assert [row.block_label for row in rows] == ["formula", "formula"]
+        assert [row.lines[0].text for row in rows] == ["$  \\frac{1}{2}  $", "$$ x = y $$"]
         assert stats.n_blocks_hanwang == 0
-        assert stats.n_blocks_ppvl == 1
+        assert stats.n_blocks_ppvl == 2
         assert stats.n_blocks_fallback == 0
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
-    print("test_hanwang_formula_like_footer_bypasses_before_hanwang PASSED")
+    print("test_hanwang_formula_style_footer_and_footnote_bypass_hanwang PASSED")
 
 
 def test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path():
@@ -6005,12 +6040,16 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
     subblocks = page.ppvl_parsing_res_list[0]["_route_subblocks"]
+    line_routes = page.ppvl_parsing_res_list[0]["_layout_line_routes"]
 
     assert blocks[0].block_type == BlockType.TEXT
     assert blocks[0].raw_payload["_route_subblocks"] == subblocks
+    assert blocks[0].raw_payload["_layout_line_routes"] == line_routes
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
     assert subblocks[0]["raw_payload"]["label"] == "inline_formula"
+    assert any(segment["kind"] == "formula" for route in line_routes for segment in route["segments"])
+    assert any(segment["kind"] == "skip" for route in line_routes for segment in route["segments"])
     assert [label for label, _bbox in overlays] == ["text", "inline_formula", "table_region", "figure_caption"]
 
     print("test_layout_analyzer_forwards_route_subblocks_from_layout_det_res PASSED")
@@ -8392,9 +8431,10 @@ if __name__ == "__main__":
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
     test_hanwang_inline_formula_text_slices_keep_chars()
-    test_hanwang_inline_formula_only_text_does_not_suppress_fallback()
+    test_paddle_line_routing_builds_layout_line_routes_from_reading_order()
+    test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl()
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
-    test_hanwang_formula_like_footer_bypasses_before_hanwang()
+    test_hanwang_formula_style_footer_and_footnote_bypass_hanwang()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()

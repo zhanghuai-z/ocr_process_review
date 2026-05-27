@@ -34,6 +34,11 @@ from app.core.api_profiles import FIXED_LAYOUT_PROFILE, get_api_request_options,
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
+from app.core.paddle_line_routing import (
+    LAYOUT_LINE_ROUTES_FIELD,
+    ROUTE_SUBBLOCKS_FIELD,
+    build_layout_line_routes,
+)
 from app.core.paddle_labels import (
     authoritative_paddle_label,
     is_hanwang_skip_label,
@@ -335,7 +340,17 @@ class LayoutAnalyzer:
                     "raw_payload": dict(raw),
                 })
             if subblocks:
-                parent["_route_subblocks"] = subblocks
+                parent[ROUTE_SUBBLOCKS_FIELD] = subblocks
+                line_routes = build_layout_line_routes(
+                    {
+                        **parent,
+                        "block_bbox": list(parent_bbox.to_xyxy()),
+                    },
+                    page.width,
+                    page.height,
+                )
+                if line_routes:
+                    parent[LAYOUT_LINE_ROUTES_FIELD] = line_routes
 
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = result_dict(data)
