@@ -3210,6 +3210,16 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
     print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
 
 
+def test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    for label in ("figure_caption", "figure_title", "table_caption", "table_title", "table_note"):
+        assert micro_module._is_skip_label(label) is False
+        assert micro_module._is_text_label(label) is True
+
+    print("test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path PASSED")
+
+
 def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -3513,6 +3523,58 @@ def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     assert blocks[0]["custom_attr"]["level"] == 2
 
     print("test_hanwang_page_blocks_from_layout_preserves_raw_source_label PASSED")
+
+
+def test_hanwang_empty_ppvl_fallback_uses_layout_authority_label():
+    import numpy as np
+
+    from app.engines.hanwang.micro_recblock import BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats
+    from app.models import BBox, Block, BlockType, Page
+
+    calls = []
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        calls.append(ppvl_blocks)
+        assert ppvl_blocks[0]["block_label"] == "figure"
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="figure",
+                block_bbox=(10, 10, 80, 40),
+                source="ppvl",
+                text="图",
+                ppvl_text="图",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[LineResult(text="图", bbox=(10, 10, 80, 40), source="ppvl")],
+            )
+        ], RunStats(n_blocks_total=1, n_blocks_ppvl=1)
+
+    page = Page(
+        image_path="/tmp/empty-ppvl-fallback.png",
+        width=100,
+        height=100,
+        ppvl_parsing_res_list=[],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(10, 10, 80, 40),
+                source_label="text",
+                raw_payload={"block_label": "figure", "label": "text", "block_content": "图"},
+            )
+        ],
+    )
+
+    HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        page,
+    )
+
+    assert len(calls) == 1
+    assert page.blocks[0].block_type == BlockType.FIGURE
+    assert page.blocks[0].source_label == "figure"
+    assert page.blocks[0].recognizable is False
+
+    print("test_hanwang_empty_ppvl_fallback_uses_layout_authority_label PASSED")
 
 
 def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
@@ -5489,18 +5551,97 @@ def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
     blocks, overlays = analyzer._extract_api_blocks(page, data)
 
     assert [block.block_type for block in blocks] == [
-        BlockType.TITLE,
-        BlockType.TABLE_CAPTION,
-        BlockType.FIGURE,
         BlockType.REFERENCE,
     ]
-    assert blocks[0].bbox.x == 10 and blocks[0].bbox.y == 20
-    assert blocks[1].bbox.w == 160 and blocks[1].bbox.h == 60
-    assert "score=0.910" in blocks[0].note
-    assert "参考文献" in blocks[3].note
+    assert blocks[0].bbox.x == 600 and blocks[0].bbox.y == 80
+    assert "参考文献" in blocks[0].note
     assert len(overlays) == 4
 
     print("test_layout_analyzer_extracts_api_blocks_from_varied_schema PASSED")
+
+
+def test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere():
+    import numpy as np
+
+    from app.core.block_attributes import block_attributes
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.engines.hanwang.micro_recblock import run_micro_recblock
+    from app.models import BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/authority-conflict.png", width=100, height=100)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "parsing_res_list": [
+                            {
+                                "block_label": "equation",
+                                "label": "text",
+                                "block_bbox": [10, 10, 80, 30],
+                                "block_content": "E=mc^2",
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+
+    blocks, _overlays = analyzer._extract_api_blocks(page, data)
+    attrs = block_attributes(blocks[0])
+    rows, stats = run_micro_recblock(
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        [{"block_label": "equation", "label": "text", "block_bbox": [10, 10, 80, 30], "block_content": "E=mc^2"}],
+    )
+
+    assert blocks[0].block_type == BlockType.EQUATION
+    assert attrs.semantic_label == "equation"
+    assert attrs.semantic_block_type == BlockType.EQUATION
+    assert rows[0].source == "ppvl"
+    assert rows[0].block_label == "equation"
+    assert stats.n_blocks_hanwang == 0
+    assert stats.n_blocks_ppvl == 1
+
+    print("test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere PASSED")
+
+
+def test_layout_parsing_semantics_override_layout_det_when_both_exist():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/layout-semantic-mismatch.png", width=100, height=100)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {"label": "text", "coordinate": [5, 5, 90, 25]},
+                            ],
+                        },
+                        "parsing_res_list": [
+                            {"block_label": "equation", "block_bbox": [10, 10, 80, 30], "block_content": "x+y"},
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    blocks, overlays = analyzer._extract_api_blocks(page, data)
+
+    assert page.ppvl_parsing_res_list[0]["block_label"] == "equation"
+    assert [block.block_type for block in blocks] == [BlockType.EQUATION]
+    assert blocks[0].source_label == "equation"
+    assert len(overlays) == 2
+    assert overlays[0][0] == "equation"
+    assert overlays[1][0] == "text"
+
+    print("test_layout_parsing_semantics_override_layout_det_when_both_exist PASSED")
 
 
 def test_layout_analyzer_persists_raw_parsing_res_list():
@@ -7858,6 +7999,7 @@ if __name__ == "__main__":
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
+    test_hanwang_empty_ppvl_fallback_uses_layout_authority_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
@@ -7894,6 +8036,8 @@ if __name__ == "__main__":
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
+    test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere()
+    test_layout_parsing_semantics_override_layout_det_when_both_exist()
     test_layout_analyzer_persists_raw_parsing_res_list()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_uses_datainfo_canvas_scale()

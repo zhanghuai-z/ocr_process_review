@@ -9,6 +9,7 @@ import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.logging import get_logger
+from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
 from app.core.proof_status import proof_status_for
 from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
 
@@ -165,14 +166,25 @@ class _GroupPlacement:
     collage_bbox: tuple[int, int, int, int]
 
 
-def _normalize_label(label: object) -> str:
-    return str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
+def _label_from_block(block: dict[str, Any], default: str = "unknown") -> str:
+    return normalize_paddle_label(authoritative_paddle_label(block, default))
 
 
 def _is_skip_label(label: str) -> bool:
+    if label in TEXT_LABELS:
+        return False
     if label in SKIP_LABELS:
         return True
-    return any(token in label for token in ("formula", "equation")) and "caption" not in label
+    return label.startswith((
+        "equation",
+        "formula",
+        "table",
+        "figure",
+        "image",
+        "chart",
+        "seal",
+        "stamp",
+    ))
 
 
 def _is_text_label(label: str) -> bool:
@@ -516,7 +528,7 @@ def run_micro_recblock(
     text_indices: list[int] = []
     skip_indices: list[int] = []
     for idx, block in enumerate(ppvl_blocks):
-        label = _normalize_label(block.get("block_label") or block.get("label"))
+        label = _label_from_block(block)
         if _is_skip_label(label):
             skip_indices.append(idx)
         elif _is_text_label(label):
@@ -528,7 +540,7 @@ def run_micro_recblock(
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
-        label = _normalize_label(block.get("block_label") or block.get("label"))
+        label = _label_from_block(block)
         bbox = _block_bbox(block, width, height)
         ppvl_text = str(block.get("block_content") or block.get("text") or "").strip()
         rows[idx] = BlockResult(
@@ -713,7 +725,7 @@ def run_micro_recblock(
 
         for area_idx, block_idx in enumerate(text_indices):
             block = ppvl_blocks[block_idx]
-            label = _normalize_label(block.get("block_label") or block.get("label"))
+            label = _label_from_block(block)
             bbox = _block_bbox(block, width, height)
             ppvl_text = str(block.get("block_content") or block.get("text") or "").strip()
             lines = grouped_lines.get(area_idx, [])
@@ -781,7 +793,7 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
     for block in page.blocks:
         raw_payload = dict(block.raw_payload)
         source_label = (
-            str(raw_payload.get("block_label") or "")
+            authoritative_paddle_label(raw_payload)
             or block.source_label
             or block.block_type.value
         )

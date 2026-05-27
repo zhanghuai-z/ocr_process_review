@@ -63,10 +63,19 @@ def word_box_rows(item: dict) -> tuple[list, list]:
     return token_rows, region_rows
 
 
-def iter_layout_records_from_item(item: dict) -> list[dict]:
+def parsing_records_from_item(item: dict) -> list[dict]:
+    pruned = pruned_result(item)
+    records: list[dict] = []
+    for container in (pruned, item):
+        values = container.get("parsing_res_list", {}) if isinstance(container, dict) else {}
+        if isinstance(values, list):
+            records.extend(value for value in values if isinstance(value, dict))
+    return records
+
+
+def layout_geometry_records_from_item(item: dict) -> list[dict]:
     pruned = pruned_result(item)
     candidates: list[dict] = []
-
     for container in (
         item,
         pruned,
@@ -79,13 +88,14 @@ def iter_layout_records_from_item(item: dict) -> list[dict]:
             values = container.get(key)
             if isinstance(values, list):
                 candidates.extend(value for value in values if isinstance(value, dict))
-
-    for container in (pruned, item):
-        values = container.get("parsing_res_list", {}) if isinstance(container, dict) else {}
-        if isinstance(values, list):
-            candidates.extend(value for value in values if isinstance(value, dict))
-
     return candidates
+
+
+def iter_layout_records_from_item(item: dict) -> list[dict]:
+    parsing_records = parsing_records_from_item(item)
+    if parsing_records:
+        return parsing_records
+    return layout_geometry_records_from_item(item)
 
 
 def _as_sequence(value: Any) -> list:

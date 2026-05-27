@@ -9,30 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
 from app.models import Block, BlockType
 
 
-RAW_LABEL_KEYS = (
-    "block_label",
-    "label",
-    "type",
-    "category",
-    "category_name",
-    "cls_name",
-    "layout_label",
-)
-
-
 def normalize_source_label(label: object) -> str:
-    return str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
-
-
-def _first_raw_label(raw_payload: dict[str, Any]) -> str:
-    for key in RAW_LABEL_KEYS:
-        value = raw_payload.get(key)
-        if value:
-            return str(value)
-    return ""
+    return normalize_paddle_label(label)
 
 
 @dataclass(frozen=True)
@@ -88,7 +70,7 @@ class BlockAttributes:
 
 def block_attributes(block: Block) -> BlockAttributes:
     raw_payload = dict(block.raw_payload)
-    raw_label = _first_raw_label(raw_payload)
+    raw_label = authoritative_paddle_label(raw_payload)
     source_label = block.source_label or raw_label
     semantic_label = raw_label or source_label or block.block_type.value
     semantic_block_type = BlockType.from_paddle(semantic_label)

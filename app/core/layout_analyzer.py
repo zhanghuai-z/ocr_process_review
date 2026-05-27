@@ -34,9 +34,12 @@ from app.core.api_profiles import FIXED_LAYOUT_PROFILE, get_api_request_options,
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
+from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
 from app.core.paddle_response import (
     iter_layout_records_from_item,
     iter_ocr_records_from_item,
+    layout_geometry_records_from_item,
+    parsing_records_from_item,
     pruned_result,
     result_dict,
     result_items,
@@ -132,14 +135,7 @@ class LayoutAnalyzer:
         return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
 
     def _extract_label_from_record(self, record: dict, default: str = "unknown") -> str:
-        for key in (
-            "label", "type", "category", "category_name", "cls_name",
-            "class_name", "block_label", "block_type", "layout_label",
-        ):
-            value = record.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return default
+        return authoritative_paddle_label(record, default)
 
     def _extract_score_from_record(self, record: dict) -> float | None:
         for key in (
@@ -234,7 +230,7 @@ class LayoutAnalyzer:
             note_parts.append(preview[:120])
         if score is not None:
             note_parts.append(f"score={score:.3f}")
-        normalized_type = raw_type.strip().lower().replace("-", "_").replace(" ", "_") if raw_type else ""
+        normalized_type = normalize_paddle_label(raw_type)
         if normalized_type in {
             "page_number",
             "number",
@@ -257,6 +253,24 @@ class LayoutAnalyzer:
         ))
         return order + 1
 
+    def _append_overlay_record(
+        self,
+        *,
+        page: Page,
+        record: dict,
+        scale_x: float,
+        scale_y: float,
+        raw_overlay_items: List[tuple[str, object]],
+    ) -> None:
+        bbox = self._extract_bbox_from_record(record, page)
+        if not bbox or bbox.area <= 0:
+            return
+        if scale_x != 1.0 or scale_y != 1.0:
+            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
+            if bbox.area <= 0:
+                return
+        raw_overlay_items.append((self._extract_label_from_record(record), bbox))
+
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = result_dict(data)
         layout_results = result_items(data, "layoutParsingResults")
@@ -268,12 +282,8 @@ class LayoutAnalyzer:
         page.ppvl_parsing_res_list = []
 
         for item in layout_results:
-            pruned = pruned_result(item)
-            parsing_res_list = pruned.get("parsing_res_list")
-            if isinstance(parsing_res_list, list):
-                page.ppvl_parsing_res_list.extend(
-                    record for record in parsing_res_list if isinstance(record, dict)
-                )
+            parsing_records = parsing_records_from_item(item)
+            page.ppvl_parsing_res_list.extend(parsing_records)
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
@@ -281,7 +291,8 @@ class LayoutAnalyzer:
                     scale_x, scale_y, page.display_image_path,
                 )
 
-            for record in self._iter_layout_records_from_item(item):
+            records_for_blocks = parsing_records or self._iter_layout_records_from_item(item)
+            for record in records_for_blocks:
                 order = self._append_api_block(
                     page=page,
                     record=record,
@@ -292,6 +303,15 @@ class LayoutAnalyzer:
                     page_blocks=page_blocks,
                     raw_overlay_items=raw_overlay_items,
                 )
+            if parsing_records:
+                for record in layout_geometry_records_from_item(item):
+                    self._append_overlay_record(
+                        page=page,
+                        record=record,
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                        raw_overlay_items=raw_overlay_items,
+                    )
 
         if page_blocks:
             return page_blocks, raw_overlay_items
