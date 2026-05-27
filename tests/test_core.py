@@ -3227,9 +3227,13 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
     original_max_groups = micro_module.MAX_RECOG_BATCH_GROUPS
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    original_batch_reason = micro_module._BATCH_DISABLE_REASON
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
     micro_module.MAX_RECOG_BATCH_GROUPS = 2
+    micro_module._BATCH_DISABLED_FOR_SESSION = False
+    micro_module._BATCH_DISABLE_REASON = ""
 
     try:
         rows, stats = micro_module.run_micro_recblock(
@@ -3245,12 +3249,92 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
         assert stats.recog_batch_failures == 1
         assert stats.recog_batch_disabled is True
         assert stats.recog_probe_calls == 6
+        assert micro_module._BATCH_DISABLED_FOR_SESSION is True
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
         micro_module.MAX_RECOG_BATCH_GROUPS = original_max_groups
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+        micro_module._BATCH_DISABLE_REASON = original_batch_reason
 
     print("test_hanwang_micro_recblock_circuit_breaks_after_batch_failure PASSED")
+
+
+def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {
+            "lines": [{
+                "groups": [
+                    {"bbox": {"left": 0, "top": 10, "right": 1850, "bottom": 40}},
+                    {"bbox": {"left": 0, "top": 50, "right": 1850, "bottom": 80}},
+                ]
+            }]
+        }
+
+    calls = {"batch": 0, "single": 0}
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        h, w = image_bgr.shape[:2]
+        if recblocks_xyxy is not None:
+            calls["batch"] += 1
+            raise AssertionError("wide collage should not use batch")
+        calls["single"] += 1
+        return {"lines": [{"groups": [{
+            "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+            "chars": [{
+                "codes": [code("乙")],
+                "scores": [5],
+                "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+            }],
+        }]}]}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_width = micro_module.MAX_RECOG_COLLAGE_WIDTH
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    original_batch_reason = micro_module._BATCH_DISABLE_REASON
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module.MAX_RECOG_COLLAGE_WIDTH = 1600
+    micro_module._BATCH_DISABLED_FOR_SESSION = False
+    micro_module._BATCH_DISABLE_REASON = ""
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((120, 2000, 3), dtype=np.uint8),
+            [{"block_label": "text", "block_bbox": [0, 0, 2000, 120], "block_content": "乙乙"}],
+            include_chars=True,
+        )
+
+        assert rows[0].source == "hanwang"
+        assert calls == {"batch": 0, "single": 2}
+        assert stats.recog_batch_chunks == 2
+        assert stats.recog_batch_guarded_chunks == 2
+        assert stats.recog_batch_failures == 0
+        assert stats.recog_batch_disabled is False
+        assert stats.recog_probe_calls == 2
+        assert stats.recog_max_collage_width == 1850
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module.MAX_RECOG_COLLAGE_WIDTH = original_width
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+        micro_module._BATCH_DISABLE_REASON = original_batch_reason
+
+    print("test_hanwang_micro_recblock_width_guard_skips_risky_batch PASSED")
 
 
 def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
@@ -7662,6 +7746,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
+    test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()

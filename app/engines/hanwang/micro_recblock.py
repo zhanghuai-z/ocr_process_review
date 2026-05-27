@@ -65,8 +65,12 @@ SKIP_LABELS: set[str] = {
 
 FALLBACK_RATIO_THRESHOLD = 0.85
 MAX_RECOG_BATCH_GROUPS = 6
+MAX_RECOG_COLLAGE_WIDTH = 1600
 MAX_RECOG_COLLAGE_HEIGHT = 1600
 MAX_RECOG_COLLAGE_PIXELS = 2_000_000
+MAX_RECOG_COLLAGE_ASPECT = 4.5
+_BATCH_DISABLED_FOR_SESSION = False
+_BATCH_DISABLE_REASON = ""
 
 
 @dataclass
@@ -148,6 +152,7 @@ class RunStats:
     recog_batch_chunks: int = 0
     recog_batch_failures: int = 0
     recog_batch_disabled: bool = False
+    recog_batch_guarded_chunks: int = 0
     recog_max_collage_width: int = 0
     recog_max_collage_height: int = 0
     recog_max_collage_pixels: int = 0
@@ -438,25 +443,34 @@ def _chunk_group_bboxes(
     area_indices: list[int],
     *,
     max_groups: int | None = None,
+    max_width: int | None = None,
     max_height: int | None = None,
     max_pixels: int | None = None,
+    max_aspect: float | None = None,
 ) -> list[tuple[list[tuple[int, int, int, int]], list[int]]]:
     if max_groups is None:
         max_groups = MAX_RECOG_BATCH_GROUPS
+    if max_width is None:
+        max_width = MAX_RECOG_COLLAGE_WIDTH
     if max_height is None:
         max_height = MAX_RECOG_COLLAGE_HEIGHT
     if max_pixels is None:
         max_pixels = MAX_RECOG_COLLAGE_PIXELS
+    if max_aspect is None:
+        max_aspect = MAX_RECOG_COLLAGE_ASPECT
     chunks: list[tuple[list[tuple[int, int, int, int]], list[int]]] = []
     current_bboxes: list[tuple[int, int, int, int]] = []
     current_areas: list[int] = []
     for bbox, area_idx in zip(group_bboxes, area_indices):
         candidate_bboxes = [*current_bboxes, bbox]
-        _width, height, pixels = _estimate_collage_shape(candidate_bboxes)
+        width, height, pixels = _estimate_collage_shape(candidate_bboxes)
+        aspect = (width / height) if height > 0 else 0.0
         over_limit = (
             len(candidate_bboxes) > max_groups
+            or width > max_width
             or height > max_height
             or pixels > max_pixels
+            or aspect > max_aspect
         )
         if current_bboxes and over_limit:
             chunks.append((current_bboxes, current_areas))
@@ -496,6 +510,7 @@ def run_micro_recblock(
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
     """Run Hanwang Recog for text-like PP-VL blocks and keep PP-VL for others."""
+    global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
@@ -600,7 +615,8 @@ def run_micro_recblock(
                     _offset_line_results(local_lines, dx=left, dy=top)
                 )
 
-        batch_enabled = True
+        batch_enabled = not _BATCH_DISABLED_FOR_SESSION
+        stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION
         completed_groups = 0
         chunks = _chunk_group_bboxes(group_bboxes, group_area_indices)
         for chunk_index, (chunk_bboxes, chunk_area_indices) in enumerate(chunks):
@@ -619,7 +635,16 @@ def run_micro_recblock(
                 * (placement.page_bbox[3] - placement.page_bbox[1])
                 for placement in placements
             )
-            use_batch = batch_enabled and len(placements) > 1
+            collage_aspect = (collage_w / collage_h) if collage_h > 0 else 0.0
+            shape_guarded = (
+                collage_w > MAX_RECOG_COLLAGE_WIDTH
+                or collage_h > MAX_RECOG_COLLAGE_HEIGHT
+                or collage_pixels > MAX_RECOG_COLLAGE_PIXELS
+                or collage_aspect > MAX_RECOG_COLLAGE_ASPECT
+            )
+            if shape_guarded:
+                stats.recog_batch_guarded_chunks += 1
+            use_batch = batch_enabled and len(placements) > 1 and not shape_guarded
             if progress_callback:
                 progress_callback(
                     completed_groups,
@@ -643,8 +668,14 @@ def run_micro_recblock(
                     stats.recog_batch_failures += 1
                     stats.recog_batch_disabled = True
                     batch_enabled = False
+                    _BATCH_DISABLED_FOR_SESSION = True
+                    _BATCH_DISABLE_REASON = (
+                        f"chunk={chunk_index + 1} groups={len(placements)} "
+                        f"collage={collage_w}x{collage_h}: {exc}"
+                    )
                     logger.warning(
-                        "Hanwang micro_recblock batch failed chunk=%d groups=%d collage=%dx%d: %s",
+                        "Hanwang micro_recblock batch failed; disabling batch for this process "
+                        "chunk=%d groups=%d collage=%dx%d: %s",
                         chunk_index + 1,
                         len(placements),
                         collage_w,
@@ -836,8 +867,8 @@ class HanwangMicroRecBlockEngine:
         page.blocks = new_blocks
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
-            "groups=%d chunks=%d batch_failures=%d batch_disabled=%s max_collage=%dx%d "
-            "probe_calls=%d recog_pixels=%d/%d",
+            "groups=%d chunks=%d guarded_chunks=%d batch_failures=%d batch_disabled=%s "
+            "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
@@ -845,6 +876,7 @@ class HanwangMicroRecBlockEngine:
             stats.n_blocks_fallback,
             stats.n_groups,
             stats.recog_batch_chunks,
+            stats.recog_batch_guarded_chunks,
             stats.recog_batch_failures,
             stats.recog_batch_disabled,
             stats.recog_max_collage_width,

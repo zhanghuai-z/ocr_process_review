@@ -25,8 +25,10 @@ if str(ROOT) not in sys.path:
 
 from app.engines.hanwang.micro_recblock import (
     MAX_RECOG_BATCH_GROUPS,
+    MAX_RECOG_COLLAGE_ASPECT,
     MAX_RECOG_COLLAGE_HEIGHT,
     MAX_RECOG_COLLAGE_PIXELS,
+    MAX_RECOG_COLLAGE_WIDTH,
     run_micro_recblock,
 )
 
@@ -84,8 +86,10 @@ def main() -> int:
         "elapsed_seconds": elapsed,
         "batch_limits": {
             "max_groups": MAX_RECOG_BATCH_GROUPS,
+            "max_collage_width": MAX_RECOG_COLLAGE_WIDTH,
             "max_collage_height": MAX_RECOG_COLLAGE_HEIGHT,
             "max_collage_pixels": MAX_RECOG_COLLAGE_PIXELS,
+            "max_collage_aspect": MAX_RECOG_COLLAGE_ASPECT,
         },
         "stats": {
             "n_blocks_total": stats.n_blocks_total,
@@ -99,6 +103,7 @@ def main() -> int:
             "recog_batch_chunks": stats.recog_batch_chunks,
             "recog_batch_failures": stats.recog_batch_failures,
             "recog_batch_disabled": stats.recog_batch_disabled,
+            "recog_batch_guarded_chunks": stats.recog_batch_guarded_chunks,
             "recog_max_collage_width": stats.recog_max_collage_width,
             "recog_max_collage_height": stats.recog_max_collage_height,
             "recog_max_collage_pixels": stats.recog_max_collage_pixels,
