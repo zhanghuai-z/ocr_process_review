@@ -64,6 +64,9 @@ SKIP_LABELS: set[str] = {
 }
 
 FALLBACK_RATIO_THRESHOLD = 0.85
+MAX_RECOG_BATCH_GROUPS = 6
+MAX_RECOG_COLLAGE_HEIGHT = 1600
+MAX_RECOG_COLLAGE_PIXELS = 2_000_000
 
 
 @dataclass
@@ -142,6 +145,12 @@ class RunStats:
     recog_full_page_pixels: int = 0
     recog_crop_pixels: int = 0
     recog_probe_calls: int = 0
+    recog_batch_chunks: int = 0
+    recog_batch_failures: int = 0
+    recog_batch_disabled: bool = False
+    recog_max_collage_width: int = 0
+    recog_max_collage_height: int = 0
+    recog_max_collage_pixels: int = 0
 
 
 @dataclass
@@ -411,6 +420,56 @@ def _build_group_collage(
     return collage, placements
 
 
+def _estimate_collage_shape(
+    group_bboxes: list[tuple[int, int, int, int]],
+    *,
+    gap: int = 2,
+) -> tuple[int, int, int]:
+    if not group_bboxes:
+        return 0, 0, 0
+    width = max(max(0, right - left) for left, _top, right, _bottom in group_bboxes)
+    height = sum(max(0, bottom - top) for _left, top, _right, bottom in group_bboxes)
+    height += gap * max(0, len(group_bboxes) - 1)
+    return width, height, width * height
+
+
+def _chunk_group_bboxes(
+    group_bboxes: list[tuple[int, int, int, int]],
+    area_indices: list[int],
+    *,
+    max_groups: int | None = None,
+    max_height: int | None = None,
+    max_pixels: int | None = None,
+) -> list[tuple[list[tuple[int, int, int, int]], list[int]]]:
+    if max_groups is None:
+        max_groups = MAX_RECOG_BATCH_GROUPS
+    if max_height is None:
+        max_height = MAX_RECOG_COLLAGE_HEIGHT
+    if max_pixels is None:
+        max_pixels = MAX_RECOG_COLLAGE_PIXELS
+    chunks: list[tuple[list[tuple[int, int, int, int]], list[int]]] = []
+    current_bboxes: list[tuple[int, int, int, int]] = []
+    current_areas: list[int] = []
+    for bbox, area_idx in zip(group_bboxes, area_indices):
+        candidate_bboxes = [*current_bboxes, bbox]
+        _width, height, pixels = _estimate_collage_shape(candidate_bboxes)
+        over_limit = (
+            len(candidate_bboxes) > max_groups
+            or height > max_height
+            or pixels > max_pixels
+        )
+        if current_bboxes and over_limit:
+            chunks.append((current_bboxes, current_areas))
+            current_bboxes = [bbox]
+            current_areas = [area_idx]
+        else:
+            current_bboxes = candidate_bboxes
+            current_areas = [*current_areas, area_idx]
+    if current_bboxes:
+        chunks.append((current_bboxes, current_areas))
+    return chunks
+
+
 def _text_length(text: str) -> int:
     return len("".join(ch for ch in text if not ch.isspace()))
 
@@ -516,80 +575,108 @@ def run_micro_recblock(
             group_bboxes.append(bbox)
             group_area_indices.append(group["_area_idx"])
 
-        collage, placements = _build_group_collage(image_bgr, group_bboxes, group_area_indices)
-        stats.recog_full_page_pixels = width * height * len(placements)
-        stats.recog_crop_pixels = sum(
-            (placement.page_bbox[2] - placement.page_bbox[0])
-            * (placement.page_bbox[3] - placement.page_bbox[1])
-            for placement in placements
-        )
-        if placements:
-            if progress_callback:
-                progress_callback(
-                    0,
-                    total_groups,
-                    f"Hanwang micro-recblock 批量识别中… {len(placements)} 个 group",
-                )
-            batch_failed = False
-            try:
-                stats.recog_probe_calls += 1
-                raw = native_bridge.run_linecut_recog(
-                    collage,
-                    recblocks_xyxy=[placement.collage_bbox for placement in placements],
-                    with_charrcg=True,
-                    timeout=recog_timeout,
-                )
-            except Exception as exc:
-                logger.warning("Hanwang micro_recblock batch failed groups=%d: %s", len(placements), exc)
-                batch_failed = True
-                raw = {}
-            if batch_failed:
-                for placement in placements:
-                    left, top, right, bottom = placement.page_bbox
-                    crop = image_bgr[top:bottom, left:right].copy()
-                    crop_h, crop_w = crop.shape[:2]
-                    try:
-                        stats.recog_probe_calls += 1
-                        raw = native_bridge.run_linecut_recog(
-                            crop,
-                            recblock_xyxy=None,
-                            with_charrcg=True,
-                            timeout=recog_timeout,
-                        )
-                    except Exception as exc:
-                        logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
-                        raw = {}
-                    local_lines = _line_results_from_recog(
-                        raw,
-                        fallback_bbox=(0, 0, crop_w, crop_h),
-                        include_chars=include_chars,
+        def recognize_individually(placements: list[_GroupPlacement]) -> None:
+            for placement in placements:
+                left, top, right, bottom = placement.page_bbox
+                crop = image_bgr[top:bottom, left:right].copy()
+                crop_h, crop_w = crop.shape[:2]
+                try:
+                    stats.recog_probe_calls += 1
+                    raw = native_bridge.run_linecut_recog(
+                        crop,
+                        recblock_xyxy=None,
+                        with_charrcg=True,
+                        timeout=recog_timeout,
                     )
-                    grouped_lines[placement.area_idx].extend(
-                        _offset_line_results(local_lines, dx=left, dy=top)
-                    )
-            else:
+                except Exception as exc:
+                    logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
+                    raw = {}
                 local_lines = _line_results_from_recog(
                     raw,
-                    fallback_bbox=(0, 0, collage.shape[1], collage.shape[0]),
+                    fallback_bbox=(0, 0, crop_w, crop_h),
                     include_chars=include_chars,
-                    fallback_empty=False,
                 )
-                for local_line in local_lines:
-                    placement = _placement_for_line(local_line, placements)
-                    if placement is None:
-                        continue
-                    dx = placement.page_bbox[0] - placement.collage_bbox[0]
-                    dy = placement.page_bbox[1] - placement.collage_bbox[1]
-                    grouped_lines[placement.area_idx].extend(
-                        _offset_line_results([local_line], dx=dx, dy=dy)
-                    )
+                grouped_lines[placement.area_idx].extend(
+                    _offset_line_results(local_lines, dx=left, dy=top)
+                )
 
-        for group_index, _placement in enumerate(placements):
+        batch_enabled = True
+        completed_groups = 0
+        chunks = _chunk_group_bboxes(group_bboxes, group_area_indices)
+        for chunk_index, (chunk_bboxes, chunk_area_indices) in enumerate(chunks):
+            collage, placements = _build_group_collage(image_bgr, chunk_bboxes, chunk_area_indices)
+            if not placements:
+                continue
+            stats.recog_batch_chunks += 1
+            collage_h, collage_w = collage.shape[:2]
+            collage_pixels = collage_w * collage_h
+            stats.recog_max_collage_width = max(stats.recog_max_collage_width, collage_w)
+            stats.recog_max_collage_height = max(stats.recog_max_collage_height, collage_h)
+            stats.recog_max_collage_pixels = max(stats.recog_max_collage_pixels, collage_pixels)
+            stats.recog_full_page_pixels += width * height * len(placements)
+            stats.recog_crop_pixels += sum(
+                (placement.page_bbox[2] - placement.page_bbox[0])
+                * (placement.page_bbox[3] - placement.page_bbox[1])
+                for placement in placements
+            )
+            use_batch = batch_enabled and len(placements) > 1
             if progress_callback:
                 progress_callback(
-                    group_index + 1,
+                    completed_groups,
                     total_groups,
-                    f"Hanwang micro-recblock 已完成 group {group_index + 1}/{total_groups}",
+                    (
+                        "Hanwang micro-recblock 分块批量识别中… "
+                        f"chunk {chunk_index + 1}/{len(chunks)}, groups={len(placements)}, "
+                        f"collage={collage_w}x{collage_h}"
+                    ),
+                )
+            if use_batch:
+                try:
+                    stats.recog_probe_calls += 1
+                    raw = native_bridge.run_linecut_recog(
+                        collage,
+                        recblocks_xyxy=[placement.collage_bbox for placement in placements],
+                        with_charrcg=True,
+                        timeout=recog_timeout,
+                    )
+                except Exception as exc:
+                    stats.recog_batch_failures += 1
+                    stats.recog_batch_disabled = True
+                    batch_enabled = False
+                    logger.warning(
+                        "Hanwang micro_recblock batch failed chunk=%d groups=%d collage=%dx%d: %s",
+                        chunk_index + 1,
+                        len(placements),
+                        collage_w,
+                        collage_h,
+                        exc,
+                    )
+                    recognize_individually(placements)
+                else:
+                    local_lines = _line_results_from_recog(
+                        raw,
+                        fallback_bbox=(0, 0, collage_w, collage_h),
+                        include_chars=include_chars,
+                        fallback_empty=False,
+                    )
+                    for local_line in local_lines:
+                        placement = _placement_for_line(local_line, placements)
+                        if placement is None:
+                            continue
+                        dx = placement.page_bbox[0] - placement.collage_bbox[0]
+                        dy = placement.page_bbox[1] - placement.collage_bbox[1]
+                        grouped_lines[placement.area_idx].extend(
+                            _offset_line_results([local_line], dx=dx, dy=dy)
+                        )
+            else:
+                recognize_individually(placements)
+
+            completed_groups += len(placements)
+            if progress_callback:
+                progress_callback(
+                    completed_groups,
+                    total_groups,
+                    f"Hanwang micro-recblock 已完成 {completed_groups}/{total_groups} groups",
                 )
         stats.recog_seconds = time.time() - started
 
@@ -748,13 +835,21 @@ class HanwangMicroRecBlockEngine:
 
         page.blocks = new_blocks
         logger.info(
-            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d groups=%d recog_pixels=%d/%d",
+            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
+            "groups=%d chunks=%d batch_failures=%d batch_disabled=%s max_collage=%dx%d "
+            "probe_calls=%d recog_pixels=%d/%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
             stats.n_blocks_ppvl,
             stats.n_blocks_fallback,
             stats.n_groups,
+            stats.recog_batch_chunks,
+            stats.recog_batch_failures,
+            stats.recog_batch_disabled,
+            stats.recog_max_collage_width,
+            stats.recog_max_collage_height,
+            stats.recog_probe_calls,
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
         )

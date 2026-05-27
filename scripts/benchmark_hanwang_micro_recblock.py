@@ -23,7 +23,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.engines.hanwang.micro_recblock import run_micro_recblock
+from app.engines.hanwang.micro_recblock import (
+    MAX_RECOG_BATCH_GROUPS,
+    MAX_RECOG_COLLAGE_HEIGHT,
+    MAX_RECOG_COLLAGE_PIXELS,
+    run_micro_recblock,
+)
 
 
 def _load_ppvl_blocks(path: Path | None, width: int, height: int) -> list[dict[str, Any]]:
@@ -77,6 +82,11 @@ def main() -> int:
         "image": str(args.image),
         "ppvl_json": str(args.ppvl_json) if args.ppvl_json else None,
         "elapsed_seconds": elapsed,
+        "batch_limits": {
+            "max_groups": MAX_RECOG_BATCH_GROUPS,
+            "max_collage_height": MAX_RECOG_COLLAGE_HEIGHT,
+            "max_collage_pixels": MAX_RECOG_COLLAGE_PIXELS,
+        },
         "stats": {
             "n_blocks_total": stats.n_blocks_total,
             "n_blocks_hanwang": stats.n_blocks_hanwang,
@@ -86,6 +96,12 @@ def main() -> int:
             "seg_seconds": stats.seg_seconds,
             "recog_seconds": stats.recog_seconds,
             "recog_probe_calls": stats.recog_probe_calls,
+            "recog_batch_chunks": stats.recog_batch_chunks,
+            "recog_batch_failures": stats.recog_batch_failures,
+            "recog_batch_disabled": stats.recog_batch_disabled,
+            "recog_max_collage_width": stats.recog_max_collage_width,
+            "recog_max_collage_height": stats.recog_max_collage_height,
+            "recog_max_collage_pixels": stats.recog_max_collage_pixels,
             "recog_full_page_pixels": stats.recog_full_page_pixels,
             "recog_crop_pixels": stats.recog_crop_pixels,
         },

@@ -3171,11 +3171,86 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert stats.recog_full_page_pixels == 220 * 240 * 2
         assert stats.recog_crop_pixels == 36 * 96 + 36 * 136
         assert stats.recog_probe_calls == 1
+        assert stats.recog_batch_chunks == 1
+        assert stats.recog_batch_failures == 0
+        assert stats.recog_batch_disabled is False
+        assert stats.recog_max_collage_width == 136
+        assert stats.recog_max_collage_height == 74
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
 
     print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
+
+
+def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {
+            "lines": [{
+                "groups": [
+                    {"bbox": {"left": 10 + i * 20, "top": 10, "right": 25 + i * 20, "bottom": 30}}
+                    for i in range(5)
+                ]
+            }]
+        }
+
+    calls = {"batch": 0, "single": 0}
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        h, w = image_bgr.shape[:2]
+        if recblocks_xyxy is not None:
+            calls["batch"] += 1
+            raise RuntimeError("AccessViolationException")
+        calls["single"] += 1
+        return {"lines": [{"groups": [{
+            "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+            "chars": [{
+                "codes": [code("甲")],
+                "scores": [5],
+                "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+            }],
+        }]}]}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_max_groups = micro_module.MAX_RECOG_BATCH_GROUPS
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module.MAX_RECOG_BATCH_GROUPS = 2
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((80, 140, 3), dtype=np.uint8),
+            [{"block_label": "text", "block_bbox": [0, 0, 140, 80], "block_content": "甲甲甲甲甲"}],
+            include_chars=True,
+        )
+
+        assert rows[0].source == "hanwang"
+        assert rows[0].text == "甲甲甲甲甲"
+        assert calls == {"batch": 1, "single": 5}
+        assert stats.recog_batch_chunks == 3
+        assert stats.recog_batch_failures == 1
+        assert stats.recog_batch_disabled is True
+        assert stats.recog_probe_calls == 6
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module.MAX_RECOG_BATCH_GROUPS = original_max_groups
+
+    print("test_hanwang_micro_recblock_circuit_breaks_after_batch_failure PASSED")
 
 
 def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
@@ -7586,6 +7661,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
+    test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
