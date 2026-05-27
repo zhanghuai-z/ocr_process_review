@@ -3107,21 +3107,37 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         }
 
     recog_shapes = []
+    recog_recblocks = []
 
-    def fake_recog(image_bgr, *, recblock_xyxy=None, with_charrcg=True, timeout=0):
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
         recog_shapes.append(tuple(image_bgr.shape[:2]))
+        recog_recblocks.append(recblocks_xyxy)
         assert recblock_xyxy is None
         h, w = image_bgr.shape[:2]
-        if w == 96:
-            chars = [
-                {"codes": [code("天")], "scores": [5], "bbox": {"left": 0, "top": 0, "right": 23, "bottom": h}},
-                {"codes": [code("地")], "scores": [6], "bbox": {"left": 28, "top": 0, "right": 51, "bottom": h}},
-            ]
-        else:
-            chars = [
-                {"codes": [code("短")], "scores": [12], "bbox": {"left": 0, "top": 0, "right": 28, "bottom": h}},
-            ]
-        return {"lines": [{"groups": [{"bbox": {"left": 0, "top": 0, "right": w, "bottom": h}, "chars": chars}]}]}
+        assert (h, w) == (74, 136)
+        assert recblocks_xyxy == [(0, 0, 96, 36), (0, 38, 136, 74)]
+        return {"lines": [
+            {"groups": [{
+                "bbox": {"left": 0, "top": 0, "right": 96, "bottom": 36},
+                "chars": [
+                    {"codes": [code("天")], "scores": [5], "bbox": {"left": 0, "top": 0, "right": 23, "bottom": 36}},
+                    {"codes": [code("地")], "scores": [6], "bbox": {"left": 28, "top": 0, "right": 51, "bottom": 36}},
+                ],
+            }]},
+            {"groups": [{
+                "bbox": {"left": 0, "top": 38, "right": 136, "bottom": 74},
+                "chars": [
+                    {"codes": [code("短")], "scores": [12], "bbox": {"left": 0, "top": 38, "right": 28, "bottom": 74}},
+                ],
+            }]},
+        ]}
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
@@ -3150,9 +3166,11 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 1
-        assert recog_shapes == [(36, 96), (36, 136)]
+        assert recog_shapes == [(74, 136)]
+        assert recog_recblocks == [[(0, 0, 96, 36), (0, 38, 136, 74)]]
         assert stats.recog_full_page_pixels == 220 * 240 * 2
         assert stats.recog_crop_pixels == 36 * 96 + 36 * 136
+        assert stats.recog_probe_calls == 1
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -6758,6 +6776,56 @@ def test_hanwang_assets_env_accepts_bin_dir():
     print("test_hanwang_assets_env_accepts_bin_dir PASSED")
 
 
+def test_hanwang_native_bridge_writes_multi_recblocks():
+    import numpy as np
+    from app.engines.hanwang import native_bridge
+
+    captured = {}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bin_dir = Path(tmpdir)
+        (bin_dir / "linecut_recogimg_probe.exe").write_bytes(b"stub")
+
+        def fake_get_bin_dir():
+            return bin_dir
+
+        def fake_save_temp_image(image_bgr, work_dir):
+            path = work_dir / "_fake.png"
+            path.write_bytes(b"png")
+            return path
+
+        def fake_run_exe(exe, args, *, cwd, timeout):
+            rb_path = Path(cwd) / args[2]
+            captured["rb_text"] = rb_path.read_text(encoding="utf-8")
+            captured["args"] = list(args)
+            (Path(cwd) / args[1]).write_text('{"lines":[]}', encoding="utf-8")
+            return native_bridge._ProbeRun(stdout="", stderr="", returncode=0)
+
+        original_get_bin_dir = native_bridge.get_hanwang_bin_dir
+        original_save = native_bridge._save_temp_image
+        original_run = native_bridge._run_exe
+        native_bridge.get_hanwang_bin_dir = fake_get_bin_dir
+        native_bridge._save_temp_image = fake_save_temp_image
+        native_bridge._run_exe = fake_run_exe
+        try:
+            out = native_bridge.run_linecut_recog(
+                np.zeros((20, 30, 3), dtype=np.uint8),
+                recblocks_xyxy=[(1, 2, 3, 4), (5, 6, 7, 8)],
+                with_charrcg=True,
+            )
+        finally:
+            native_bridge.get_hanwang_bin_dir = original_get_bin_dir
+            native_bridge._save_temp_image = original_save
+            native_bridge._run_exe = original_run
+
+    assert out == {"lines": []}
+    assert captured["rb_text"] == "1\t2\t3\t4\n5\t6\t7\t8\n"
+    assert captured["args"][6] == "via-seg"
+    assert captured["args"][7] == "with-charrcg"
+
+    print("test_hanwang_native_bridge_writes_multi_recblocks PASSED")
+
+
 def test_layout_worker_continues_after_single_page_failure():
     from unittest.mock import patch
 
@@ -7564,6 +7632,7 @@ if __name__ == "__main__":
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
     test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout()
     test_hanwang_assets_env_accepts_bin_dir()
+    test_hanwang_native_bridge_writes_multi_recblocks()
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()

@@ -158,6 +158,7 @@ def run_linecut_recog(
     image_bgr: np.ndarray,
     *,
     recblock_xyxy: Optional[tuple[int, int, int, int]] = None,
+    recblocks_xyxy: Optional[list[tuple[int, int, int, int]]] = None,
     with_charrcg: bool = True,
     mode: int = RECOG_MODE_SIMPLIFIED,
     postprocess: int = RECOG_POSTPROCESS_DEFAULT,
@@ -168,22 +169,32 @@ def run_linecut_recog(
 
     Args:
         image_bgr: BGR 图像（应当是单个 area 的 crop）
-        recblock_xyxy: 识别区域 (l, t, r, b)，None = 全图
+        recblock_xyxy: 单个识别区域 (l, t, r, b)，None = 全图
+        recblocks_xyxy: 多个识别区域；用于一次 probe 处理多个 group，避免 per-group 冷启动
         with_charrcg: 是否启用字符级 CharRcg（候选 top-10 + 字框）
 
     返回原始 JSON dict（schema 见 linecut_recogimg_probe.cs.BuildJson）。
     """
+    if recblock_xyxy is not None and recblocks_xyxy is not None:
+        raise ValueError("recblock_xyxy and recblocks_xyxy are mutually exclusive")
     bin_dir = get_hanwang_bin_dir()
     exe = bin_dir / "linecut_recogimg_probe.exe"
     img_path = _save_temp_image(image_bgr, bin_dir)
     out_path = bin_dir / f"{img_path.stem}.linecut.json"
     rb_path = bin_dir / f"{img_path.stem}.rb.tsv"
     h, w = image_bgr.shape[:2]
-    if recblock_xyxy is None:
+    if recblocks_xyxy:
+        rb_lines = [
+            f"{int(l)}\t{int(t)}\t{int(r)}\t{int(b)}"
+            for (l, t, r, b) in recblocks_xyxy
+        ]
+        rb_path.write_text("\n".join(rb_lines) + "\n", encoding="utf-8")
+    elif recblock_xyxy is None:
         rb_l, rb_t, rb_r, rb_b = 0, 0, w, h
+        rb_path.write_text(f"{rb_l}\t{rb_t}\t{rb_r}\t{rb_b}\n", encoding="utf-8")
     else:
         rb_l, rb_t, rb_r, rb_b = recblock_xyxy
-    rb_path.write_text(f"{rb_l}\t{rb_t}\t{rb_r}\t{rb_b}\n", encoding="utf-8")
+        rb_path.write_text(f"{rb_l}\t{rb_t}\t{rb_r}\t{rb_b}\n", encoding="utf-8")
 
     args = [
         img_path.name,

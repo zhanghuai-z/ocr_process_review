@@ -141,6 +141,14 @@ class RunStats:
     recog_seconds: float = 0.0
     recog_full_page_pixels: int = 0
     recog_crop_pixels: int = 0
+    recog_probe_calls: int = 0
+
+
+@dataclass
+class _GroupPlacement:
+    area_idx: int
+    page_bbox: tuple[int, int, int, int]
+    collage_bbox: tuple[int, int, int, int]
 
 
 def _normalize_label(label: object) -> str:
@@ -270,6 +278,7 @@ def _line_results_from_recog(
     *,
     fallback_bbox: tuple[int, int, int, int],
     include_chars: bool,
+    fallback_empty: bool = True,
 ) -> list[LineResult]:
     lines: list[LineResult] = []
     for area in raw.get("lines", []) or []:
@@ -292,7 +301,7 @@ def _line_results_from_recog(
                     chars=chars if include_chars else [],
                 )
             )
-    if not lines:
+    if not lines and fallback_empty:
         lines.append(_fallback_line("", fallback_bbox, source="hanwang_empty"))
     return lines
 
@@ -331,6 +340,75 @@ def _offset_line_results(
             )
         )
     return shifted
+
+
+def _intersection_area(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> int:
+    left = max(a[0], b[0])
+    top = max(a[1], b[1])
+    right = min(a[2], b[2])
+    bottom = min(a[3], b[3])
+    return max(0, right - left) * max(0, bottom - top)
+
+
+def _placement_for_line(
+    line: LineResult,
+    placements: list[_GroupPlacement],
+) -> _GroupPlacement | None:
+    if not placements:
+        return None
+    x1, y1, x2, y2 = line.bbox
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+    for placement in placements:
+        left, top, right, bottom = placement.collage_bbox
+        if left <= cx <= right and top <= cy <= bottom:
+            return placement
+    return max(
+        placements,
+        key=lambda placement: _intersection_area(line.bbox, placement.collage_bbox),
+    )
+
+
+def _build_group_collage(
+    image_bgr: np.ndarray,
+    group_bboxes: list[tuple[int, int, int, int]],
+    area_indices: list[int],
+) -> tuple[np.ndarray, list[_GroupPlacement]]:
+    if not group_bboxes:
+        return image_bgr[:0, :0].copy(), []
+    gap = 2
+    crops: list[np.ndarray] = []
+    max_width = 1
+    total_height = 0
+    for bbox in group_bboxes:
+        left, top, right, bottom = bbox
+        crop = image_bgr[top:bottom, left:right].copy()
+        crops.append(crop)
+        crop_h, crop_w = crop.shape[:2]
+        max_width = max(max_width, crop_w)
+        total_height += crop_h
+    total_height += gap * max(0, len(crops) - 1)
+    if image_bgr.ndim == 2:
+        collage = np.full((total_height, max_width), 255, dtype=image_bgr.dtype)
+    else:
+        collage = np.full((total_height, max_width, image_bgr.shape[2]), 255, dtype=image_bgr.dtype)
+    placements: list[_GroupPlacement] = []
+    y = 0
+    for crop, page_bbox, area_idx in zip(crops, group_bboxes, area_indices):
+        crop_h, crop_w = crop.shape[:2]
+        collage[y:y + crop_h, 0:crop_w] = crop
+        placements.append(
+            _GroupPlacement(
+                area_idx=area_idx,
+                page_bbox=page_bbox,
+                collage_bbox=(0, y, crop_w, y + crop_h),
+            )
+        )
+        y += crop_h + gap
+    return collage, placements
 
 
 def _text_length(text: str) -> int:
@@ -425,7 +503,9 @@ def run_micro_recblock(
         started = time.time()
         grouped_lines: dict[int, list[LineResult]] = {idx: [] for idx in range(len(text_indices))}
         total_groups = max(1, len(groups))
-        for group_index, group in enumerate(groups):
+        group_bboxes: list[tuple[int, int, int, int]] = []
+        group_area_indices: list[int] = []
+        for group in groups:
             bbox = _clamp_xyxy(
                 _bbox_tuple(group.get("bbox"), recblocks[group["_area_idx"]]),
                 width,
@@ -433,37 +513,78 @@ def run_micro_recblock(
             )
             if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 continue
-            left, top, right, bottom = bbox
-            crop = image_bgr[top:bottom, left:right].copy()
-            crop_h, crop_w = crop.shape[:2]
-            if crop_w <= 0 or crop_h <= 0:
-                continue
-            stats.recog_full_page_pixels += width * height
-            stats.recog_crop_pixels += crop_w * crop_h
+            group_bboxes.append(bbox)
+            group_area_indices.append(group["_area_idx"])
+
+        collage, placements = _build_group_collage(image_bgr, group_bboxes, group_area_indices)
+        stats.recog_full_page_pixels = width * height * len(placements)
+        stats.recog_crop_pixels = sum(
+            (placement.page_bbox[2] - placement.page_bbox[0])
+            * (placement.page_bbox[3] - placement.page_bbox[1])
+            for placement in placements
+        )
+        if placements:
             if progress_callback:
                 progress_callback(
-                    group_index,
+                    0,
                     total_groups,
-                    f"Hanwang micro-recblock 识别中… group {group_index + 1}/{total_groups}",
+                    f"Hanwang micro-recblock 批量识别中… {len(placements)} 个 group",
                 )
+            batch_failed = False
             try:
+                stats.recog_probe_calls += 1
                 raw = native_bridge.run_linecut_recog(
-                    crop,
-                    recblock_xyxy=None,
+                    collage,
+                    recblocks_xyxy=[placement.collage_bbox for placement in placements],
                     with_charrcg=True,
                     timeout=recog_timeout,
                 )
             except Exception as exc:
-                logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", bbox, exc)
+                logger.warning("Hanwang micro_recblock batch failed groups=%d: %s", len(placements), exc)
+                batch_failed = True
                 raw = {}
-            local_lines = _line_results_from_recog(
-                raw,
-                fallback_bbox=(0, 0, crop_w, crop_h),
-                include_chars=include_chars,
-            )
-            grouped_lines[group["_area_idx"]].extend(
-                _offset_line_results(local_lines, dx=left, dy=top)
-            )
+            if batch_failed:
+                for placement in placements:
+                    left, top, right, bottom = placement.page_bbox
+                    crop = image_bgr[top:bottom, left:right].copy()
+                    crop_h, crop_w = crop.shape[:2]
+                    try:
+                        stats.recog_probe_calls += 1
+                        raw = native_bridge.run_linecut_recog(
+                            crop,
+                            recblock_xyxy=None,
+                            with_charrcg=True,
+                            timeout=recog_timeout,
+                        )
+                    except Exception as exc:
+                        logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
+                        raw = {}
+                    local_lines = _line_results_from_recog(
+                        raw,
+                        fallback_bbox=(0, 0, crop_w, crop_h),
+                        include_chars=include_chars,
+                    )
+                    grouped_lines[placement.area_idx].extend(
+                        _offset_line_results(local_lines, dx=left, dy=top)
+                    )
+            else:
+                local_lines = _line_results_from_recog(
+                    raw,
+                    fallback_bbox=(0, 0, collage.shape[1], collage.shape[0]),
+                    include_chars=include_chars,
+                    fallback_empty=False,
+                )
+                for local_line in local_lines:
+                    placement = _placement_for_line(local_line, placements)
+                    if placement is None:
+                        continue
+                    dx = placement.page_bbox[0] - placement.collage_bbox[0]
+                    dy = placement.page_bbox[1] - placement.collage_bbox[1]
+                    grouped_lines[placement.area_idx].extend(
+                        _offset_line_results([local_line], dx=dx, dy=dy)
+                    )
+
+        for group_index, _placement in enumerate(placements):
             if progress_callback:
                 progress_callback(
                     group_index + 1,
