@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from app.core.block_attributes import block_attributes
 from app.export.ir import (
     EXPORT_IR_VERSION,
     ExportAsset,
@@ -101,7 +102,8 @@ def _build_element(
     assets: list[ExportAsset],
     diagnostics: list[ExportDiagnostic],
 ) -> ExportElement:
-    kind = rules.kind_for_block_type(block.block_type.value)
+    attrs = block_attributes(block)
+    kind = rules.kind_for_block_type(attrs.semantic_block_type.value)
     rule = rules.rule_for_kind(kind)
     payload_type = str(rule.get("payload") or "text")
     fallback_rule = rules.fallback_for_kind(kind)
@@ -136,7 +138,7 @@ def _build_element(
                 "unknown_block_fallback",
                 "未知版面块已保留为图片/区域兜底元素。",
                 element_id,
-                {"block_type": block.block_type.value},
+                {"block_attributes": attrs.to_export_dict()},
             ))
         if not asset_ref and kind == "figure":
             fallback = _fallback_from_rule(fallback_rule, reason="missing_asset")
@@ -154,7 +156,7 @@ def _build_element(
             "table_fallback_to_image",
             "表格结构化网格不可用，已使用图片兜底导出。",
             element_id,
-            {"block_type": block.block_type.value},
+            {"block_attributes": attrs.to_export_dict()},
         ))
     elif payload_type == "equation":
         if text:
@@ -172,7 +174,7 @@ def _build_element(
                 "equation_fallback_to_image",
                 "公式结构化表达不可用，已使用图片兜底导出。",
                 element_id,
-                {"block_type": block.block_type.value},
+                {"block_attributes": attrs.to_export_dict()},
             ))
     else:
         asset_ref = _append_region_asset(profile, assets, page, block, element_id, asset_kind)
@@ -187,7 +189,7 @@ def _build_element(
             "unknown_block_fallback",
             "未知版面块已保留为图片/区域兜底元素。",
             element_id,
-            {"block_type": block.block_type.value},
+            {"block_attributes": attrs.to_export_dict()},
         ))
 
     if not lines and payload_type == "text":
@@ -197,7 +199,7 @@ def _build_element(
             "empty_text_element",
             "文本元素没有可导出的行文本。",
             element_id,
-            {"block_type": block.block_type.value},
+            {"block_attributes": attrs.to_export_dict()},
         ))
 
     if not block.recognizable:
@@ -206,7 +208,7 @@ def _build_element(
             "block_not_recognizable",
             "该块标记为不可 OCR，导出仅保留现有内容/兜底。",
             element_id,
-            {"block_type": block.block_type.value},
+            {"block_attributes": attrs.to_export_dict()},
         ))
 
     return ExportElement(
@@ -218,6 +220,7 @@ def _build_element(
         source=_source(page, block, lines),
         proof=_proof(lines),
         payload=payload,
+        layout_attributes=attrs.to_export_dict(),
         fallback=fallback,
     )
 
@@ -247,6 +250,7 @@ def _char_payload(char, index: int) -> dict[str, Any]:
 
 
 def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
+    attrs = block_attributes(block)
     return ExportSource(
         page_number=page.page_number,
         block_ids=[block.id if block.id is not None else f"p{page.page_number}-block-{block.order}"],
@@ -258,6 +262,10 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
             if char.id is not None
         ],
         block_type=block.block_type.value,
+        source_label=attrs.source_label,
+        semantic_label=attrs.semantic_label,
+        semantic_block_type=attrs.semantic_block_type.value,
+        raw_payload=dict(attrs.raw_payload),
         origin=_origin(block.source),
     )
 

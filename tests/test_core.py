@@ -984,6 +984,33 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     print("test_project_to_export_ir_builder_maps_final_text_and_fallbacks PASSED")
 
 
+def test_export_ir_preserves_structured_block_attributes():
+    from app.export.ir_builder import build_export_ir
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(1, 2, 30, 40),
+        order=0,
+        lines=[Line(text="标题文本", confidence=0.95, bbox=BBox(1, 2, 30, 10))],
+        source_label="text",
+        raw_payload={"block_label": "paragraph_title", "block_bbox": [1, 2, 31, 42]},
+    )
+    page = Page(image_path="/tmp/attrs-page.png", width=100, height=100, blocks=[block])
+    document = build_export_ir(OcrProject(name="AttrIR", pages=[page]), "json")
+    element = document.to_dict()["pages"][0]["elements"][0]
+
+    assert element["kind"] == "title"
+    assert element["source"]["block_type"] == "text"
+    assert element["source"]["source_label"] == "text"
+    assert element["source"]["semantic_label"] == "paragraph_title"
+    assert element["source"]["semantic_block_type"] == "title"
+    assert element["source"]["raw_payload"]["block_label"] == "paragraph_title"
+    assert element["layout_attributes"]["semantic_block_type"] == "title"
+
+    print("test_export_ir_preserves_structured_block_attributes PASSED")
+
+
 def test_pdf_page_faithful_plans_use_image_and_char_layer():
     from app.export.ir_builder import build_export_ir
     from app.export.pdf import build_pdf_page_plans, pixel_bbox_to_pdf_rect
@@ -7143,13 +7170,17 @@ def test_hproof_line_iterator_excludes_position_source_labels():
             block_type=BlockType.TEXT,
             bbox=BBox(1, 1, 20, 10),
             lines=[Line(text="12", confidence=0.9, bbox=BBox(1, 1, 20, 10))],
-            note="score=0.99 | source_label=page_number",
+            note="score=0.99 | source_label=text",
+            source_label="page_number",
+            raw_payload={"block_label": "page_number"},
         ),
         Block(
             block_type=BlockType.TEXT,
             bbox=BBox(1, 20, 60, 12),
             lines=[Line(text="正文", confidence=0.9, bbox=BBox(1, 20, 60, 12))],
-            note="source_label=text",
+            note="source_label=page_number",
+            source_label="text",
+            raw_payload={"block_label": "text"},
         ),
     ]
 
@@ -7158,6 +7189,34 @@ def test_hproof_line_iterator_excludes_position_source_labels():
     assert texts == ["正文"]
 
     print("test_hproof_line_iterator_excludes_position_source_labels PASSED")
+
+
+def test_block_attributes_reads_raw_payload_without_note():
+    from app.core.block_attributes import block_attributes, block_display_label, is_position_only_block
+    from app.models import BBox, Block, BlockType
+
+    title_like = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(1, 1, 20, 10),
+        note="source_label=text",
+        raw_payload={"block_label": "paragraph_title", "score": 0.99},
+    )
+    attrs = block_attributes(title_like)
+
+    assert attrs.source_label == "paragraph_title"
+    assert attrs.semantic_label == "paragraph_title"
+    assert attrs.semantic_block_type == BlockType.TITLE
+    assert block_display_label(title_like) == "text · paragraph_title"
+
+    position = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(1, 1, 20, 10),
+        note="source_label=text",
+        raw_payload={"block_label": "page_number"},
+    )
+    assert is_position_only_block(position)
+
+    print("test_block_attributes_reads_raw_payload_without_note PASSED")
 
 
 def test_hproof_page_filter_keeps_pages_separate():
@@ -7596,6 +7655,55 @@ def test_image_viewer_char_boxes_update_char_bbox():
     print("test_image_viewer_char_boxes_update_char_bbox PASSED")
 
 
+def test_ui_block_labels_use_structured_semantic_label():
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.ocr_panel import OcrPanel
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(5, 6, 30, 20),
+        lines=[Line(text="标题", confidence=0.9, bbox=BBox(5, 6, 30, 10))],
+        raw_payload={"block_label": "paragraph_title"},
+    )
+
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(80, 60, QImage.Format.Format_RGB888))
+    viewer.show_blocks([block])
+    assert "paragraph_title" in viewer._block_items[0][0].toolTip()
+    viewer.close()
+
+    panel = OcrPanel()
+    panel.on_recognition_complete([Page(image_path="/tmp/ui-label.png", width=80, height=60, blocks=[block])])
+    page_item = panel._tree.topLevelItem(0)
+    assert page_item.child(0).text(0) == "[text · paragraph_title]"
+    panel.close()
+
+    print("test_ui_block_labels_use_structured_semantic_label PASSED")
+
+
+def test_hanwang_concurrency_evaluation_script_help():
+    import subprocess
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "evaluate_hanwang_page_concurrency.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "bounded page-level concurrency" in result.stdout
+    assert "--workers" in result.stdout
+
+    print("test_hanwang_concurrency_evaluation_script_help PASSED")
+
+
 def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
     from tools.ocr_inspector.adapters.paddle import PaddleAdapter
 
@@ -7698,6 +7806,7 @@ if __name__ == "__main__":
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
+    test_export_ir_preserves_structured_block_attributes()
     test_pdf_page_faithful_plans_use_image_and_char_layer()
     test_pdf_dual_textless_page_degrades_without_text_font()
     test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
@@ -7800,6 +7909,7 @@ if __name__ == "__main__":
     test_proof_line_iterator_includes_caption_and_equation_lines()
     test_hproof_line_iterator_excludes_non_text_elements()
     test_hproof_line_iterator_excludes_position_source_labels()
+    test_block_attributes_reads_raw_payload_without_note()
     test_hproof_page_filter_keeps_pages_separate()
     test_hproof_merge_pages_preserves_active_editor_text()
     test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans()
@@ -7814,6 +7924,8 @@ if __name__ == "__main__":
     test_vproof_candidate_button_applies_to_ocr_text()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
+    test_ui_block_labels_use_structured_semantic_label()
+    test_hanwang_concurrency_evaluation_script_help()
     test_layout_analyzer_builds_api_payload()
     test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
     test_inspector_flattens_api_layout_parsing_result()

@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
 )
 
+from app.core.block_attributes import block_attributes
 from app.models import BBox, Block, BlockType, Char
 
 
@@ -292,10 +293,11 @@ class ImageViewer(QGraphicsView):
     def show_blocks(self, blocks: List[Block]) -> None:
         self._clear_overlays()
         for block in blocks:
-            color = BLOCK_COLORS.get(block.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+            attrs = block_attributes(block)
+            color = BLOCK_COLORS.get(attrs.semantic_block_type, BLOCK_COLORS[BlockType.UNKNOWN])
             bb = block.bbox
             rect = QRectF(0, 0, bb.w, bb.h)
-            label = f"[{block.block_type.value}] 置信度: {block.avg_confidence:.2f}"
+            label = f"[{attrs.display_label}] 置信度: {block.avg_confidence:.2f}"
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)

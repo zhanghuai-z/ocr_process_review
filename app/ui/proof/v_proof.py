@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
+from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_line_utils import iter_unique_page_text_lines
@@ -2094,7 +2095,7 @@ class VProofPanel(QWidget):
 
     def _candidate_signals_for_entry(self, entry: CharEntry) -> str:
         block = self._block_for_entry(entry)
-        block_info = block.block_type.value if block else "unknown"
+        block_info = block_display_label(block) if block else "unknown"
         note = (block.note or "").split("|", 1)[0].strip() if block and block.note else ""
         parts = [
             f"bbox={entry.bbox_source}/{entry.bbox_granularity}",

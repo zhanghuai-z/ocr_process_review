@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 from typing import Iterable, List
 
+from app.core.block_attributes import block_attributes, semantic_block_type
 from app.models import Block, BlockType, Line, OcrProject, Page
 
 
@@ -61,7 +62,8 @@ DEFAULT_STYLE_PRESET: dict[BlockType, ExportBlockStyle] = {
 
 def get_block_style(block: Block) -> ExportBlockStyle:
     """返回当前块在 HTML/DOCX/PDF/RTF 中共享的默认样式。"""
-    return DEFAULT_STYLE_PRESET.get(block.block_type, DEFAULT_STYLE_PRESET[BlockType.UNKNOWN])
+    block_type = semantic_block_type(block)
+    return DEFAULT_STYLE_PRESET.get(block_type, DEFAULT_STYLE_PRESET[BlockType.UNKNOWN])
 
 
 def get_export_text(line: Line) -> str:
@@ -77,7 +79,12 @@ def get_export_text(line: Line) -> str:
 
 def get_block_label(block: Block) -> str:
     """返回导出时使用的人类可读块类型。"""
-    return BLOCK_LABELS.get(block.block_type, block.block_type.value)
+    attrs = block_attributes(block)
+    base = BLOCK_LABELS.get(attrs.semantic_block_type, attrs.semantic_block_type.value)
+    semantic = attrs.normalized_semantic_label
+    if semantic and semantic != attrs.semantic_block_type.value:
+        return f"{base}（{semantic}）"
+    return base
 
 
 def format_bbox(bbox) -> str:

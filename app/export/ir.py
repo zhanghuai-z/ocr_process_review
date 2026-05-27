@@ -65,6 +65,10 @@ class ExportSource:
     line_ids: list[int | str] = field(default_factory=list)
     char_ids: list[int | str] = field(default_factory=list)
     block_type: str = ""
+    source_label: str = ""
+    semantic_label: str = ""
+    semantic_block_type: str = ""
+    raw_payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -92,6 +96,7 @@ class ExportElement:
     source: ExportSource
     payload: dict[str, Any]
     bbox: dict[str, int] | None = None
+    layout_attributes: dict[str, Any] = field(default_factory=dict)
     proof: ExportProof | None = None
     fallback: ExportFallback | None = None
 

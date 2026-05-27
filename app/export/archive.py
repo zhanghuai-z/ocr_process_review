@@ -130,14 +130,21 @@ def _xml_element_projection(element_el) -> dict[str, Any]:
 def _xml_source(source_el) -> dict[str, Any]:
     if source_el is None:
         return {}
-    return {
+    source = {
         "page_number": _int(source_el.get("page_number")),
         "block_ids": _id_list(source_el, "BlockIds", "BlockId"),
         "origin": source_el.get("origin", ""),
         "line_ids": _id_list(source_el, "LineIds", "LineId"),
         "char_ids": _id_list(source_el, "CharIds", "CharId"),
         "block_type": source_el.get("block_type", ""),
+        "source_label": source_el.get("source_label", ""),
+        "semantic_label": source_el.get("semantic_label", ""),
+        "semantic_block_type": source_el.get("semantic_block_type", ""),
     }
+    raw_payload = _fields(source_el.find("RawPayload"))
+    if raw_payload:
+        source["raw_payload"] = raw_payload
+    return source
 
 
 def _xml_proof(proof_el) -> dict[str, Any]:
