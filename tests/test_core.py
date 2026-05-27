@@ -3106,17 +3106,22 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
             ]
         }
 
+    recog_shapes = []
+
     def fake_recog(image_bgr, *, recblock_xyxy=None, with_charrcg=True, timeout=0):
-        if recblock_xyxy[1] < 100:
+        recog_shapes.append(tuple(image_bgr.shape[:2]))
+        assert recblock_xyxy is None
+        h, w = image_bgr.shape[:2]
+        if w == 96:
             chars = [
-                {"codes": [code("天")], "scores": [5], "bbox": {"left": 12, "top": 22, "right": 35, "bottom": 58}},
-                {"codes": [code("地")], "scores": [6], "bbox": {"left": 40, "top": 22, "right": 63, "bottom": 58}},
+                {"codes": [code("天")], "scores": [5], "bbox": {"left": 0, "top": 0, "right": 23, "bottom": h}},
+                {"codes": [code("地")], "scores": [6], "bbox": {"left": 28, "top": 0, "right": 51, "bottom": h}},
             ]
         else:
             chars = [
-                {"codes": [code("短")], "scores": [12], "bbox": {"left": 22, "top": 142, "right": 50, "bottom": 178}},
+                {"codes": [code("短")], "scores": [12], "bbox": {"left": 0, "top": 0, "right": 28, "bottom": h}},
             ]
-        return {"lines": [{"groups": [{"bbox": {"left": recblock_xyxy[0], "top": recblock_xyxy[1], "right": recblock_xyxy[2], "bottom": recblock_xyxy[3]}, "chars": chars}]}]}
+        return {"lines": [{"groups": [{"bbox": {"left": 0, "top": 0, "right": w, "bottom": h}, "chars": chars}]}]}
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
@@ -3138,12 +3143,16 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert [row.source for row in rows] == ["hanwang", "ppvl", "ppvl_fallback"]
         assert rows[0].text == "天地"
         assert rows[0].lines[0].chars[0].text == "天"
+        assert rows[0].lines[0].chars[0].bbox == (12, 22, 35, 58)
         assert rows[1].text == "$$x+y$$"
         assert rows[2].text == "参考文献很长"
         assert rows[2].fallback_reason.startswith("short_hanwang_text")
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 1
+        assert recog_shapes == [(36, 96), (36, 136)]
+        assert stats.recog_full_page_pixels == 220 * 240 * 2
+        assert stats.recog_crop_pixels == 36 * 96 + 36 * 136
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog

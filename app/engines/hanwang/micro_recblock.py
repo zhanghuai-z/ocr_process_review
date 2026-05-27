@@ -139,6 +139,8 @@ class RunStats:
     n_groups: int = 0
     seg_seconds: float = 0.0
     recog_seconds: float = 0.0
+    recog_full_page_pixels: int = 0
+    recog_crop_pixels: int = 0
 
 
 def _normalize_label(label: object) -> str:
@@ -295,6 +297,42 @@ def _line_results_from_recog(
     return lines
 
 
+def _offset_line_results(
+    lines: list[LineResult],
+    *,
+    dx: int,
+    dy: int,
+) -> list[LineResult]:
+    shifted: list[LineResult] = []
+    for line in lines:
+        lx1, ly1, lx2, ly2 = line.bbox
+        chars: list[CharResult] = []
+        for char in line.chars:
+            bbox = None
+            if char.bbox is not None:
+                cx1, cy1, cx2, cy2 = char.bbox
+                bbox = (cx1 + dx, cy1 + dy, cx2 + dx, cy2 + dy)
+            chars.append(
+                CharResult(
+                    text=char.text,
+                    confidence=char.confidence,
+                    bbox=bbox,
+                    candidates=list(char.candidates),
+                    source=char.source,
+                )
+            )
+        shifted.append(
+            LineResult(
+                text=line.text,
+                bbox=(lx1 + dx, ly1 + dy, lx2 + dx, ly2 + dy),
+                confidence=line.confidence,
+                chars=chars,
+                source=line.source,
+            )
+        )
+    return shifted
+
+
 def _text_length(text: str) -> int:
     return len("".join(ch for ch in text if not ch.isspace()))
 
@@ -388,9 +426,20 @@ def run_micro_recblock(
         grouped_lines: dict[int, list[LineResult]] = {idx: [] for idx in range(len(text_indices))}
         total_groups = max(1, len(groups))
         for group_index, group in enumerate(groups):
-            bbox = _bbox_tuple(group.get("bbox"), recblocks[group["_area_idx"]])
+            bbox = _clamp_xyxy(
+                _bbox_tuple(group.get("bbox"), recblocks[group["_area_idx"]]),
+                width,
+                height,
+            )
             if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 continue
+            left, top, right, bottom = bbox
+            crop = image_bgr[top:bottom, left:right].copy()
+            crop_h, crop_w = crop.shape[:2]
+            if crop_w <= 0 or crop_h <= 0:
+                continue
+            stats.recog_full_page_pixels += width * height
+            stats.recog_crop_pixels += crop_w * crop_h
             if progress_callback:
                 progress_callback(
                     group_index,
@@ -399,16 +448,21 @@ def run_micro_recblock(
                 )
             try:
                 raw = native_bridge.run_linecut_recog(
-                    image_bgr,
-                    recblock_xyxy=bbox,
+                    crop,
+                    recblock_xyxy=None,
                     with_charrcg=True,
                     timeout=recog_timeout,
                 )
             except Exception as exc:
                 logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", bbox, exc)
                 raw = {}
+            local_lines = _line_results_from_recog(
+                raw,
+                fallback_bbox=(0, 0, crop_w, crop_h),
+                include_chars=include_chars,
+            )
             grouped_lines[group["_area_idx"]].extend(
-                _line_results_from_recog(raw, fallback_bbox=bbox, include_chars=include_chars)
+                _offset_line_results(local_lines, dx=left, dy=top)
             )
             if progress_callback:
                 progress_callback(
@@ -573,13 +627,15 @@ class HanwangMicroRecBlockEngine:
 
         page.blocks = new_blocks
         logger.info(
-            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d groups=%d",
+            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d groups=%d recog_pixels=%d/%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
             stats.n_blocks_ppvl,
             stats.n_blocks_fallback,
             stats.n_groups,
+            stats.recog_crop_pixels,
+            stats.recog_full_page_pixels,
         )
         return stats
 
