@@ -1731,6 +1731,51 @@ def test_layout_panel_analysis_progress_lifecycle():
     print("test_layout_panel_analysis_progress_lifecycle PASSED")
 
 
+def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=120, height=80)
+        page.blocks = [
+            Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 10), lines=[
+                Line(text="x", confidence=0.9, bbox=BBox(10, 10, 20, 10)),
+            ], order=0),
+            Block(block_type=BlockType.EQUATION, bbox=BBox(40, 10, 20, 10), lines=[
+                Line(text="(1)", confidence=0.9, bbox=BBox(40, 10, 20, 10)),
+            ], order=1),
+        ]
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            for item, _block in panel._viewer._block_items:
+                item.setSelected(True)
+
+            changed = []
+            panel.geometry_changed.connect(lambda: changed.append(True))
+            panel._merge_selected_blocks()
+
+            assert len(page.blocks) == 1
+            assert page.blocks[0].bbox == BBox(10, 10, 50, 10)
+            assert page.blocks[0].lines == []
+            assert page.blocks[0].source == BlockSource.USER_EDITED
+            assert page.blocks[0].raw_payload["ocr_text_invalidated"] is True
+            assert changed
+        finally:
+            panel.close()
+
+    print("test_layout_panel_merges_selected_blocks_for_ocr_rerun PASSED")
+
+
 def test_workflow_controller_layout_progress_signal():
     from app.controllers.workflow_controller import WorkflowController
 
@@ -3208,6 +3253,293 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         micro_module.native_bridge.run_linecut_recog = original_recog
 
     print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
+
+
+def test_hanwang_inline_formula_text_slices_keep_chars():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {
+                    "groups": (
+                        [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]
+                        if y2 - y1 >= 20 else []
+                    )
+                }
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        text_by_shape = {
+            (70, 30): "甲甲",
+            (100, 30): "乙乙。",
+            (40, 30): "丙",
+            (50, 30): "丁",
+            (30, 30): "戊",
+        }
+        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        lines = []
+        for x1, y1, x2, y2 in blocks:
+            text = text_by_shape.get((x2 - x1, y2 - y1), "")
+            if not text:
+                continue
+            char_width = max(1, (x2 - x1) // max(1, len(text)))
+            chars = []
+            for idx, ch in enumerate(text):
+                left = x1 + idx * char_width
+                right = x2 if idx == len(text) - 1 else min(x2, left + char_width)
+                chars.append({
+                    "codes": [code(ch)],
+                    "scores": [5],
+                    "bbox": {"left": left, "top": y1, "right": right, "bottom": y2},
+                })
+            lines.append({"groups": [{
+                "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                "chars": chars,
+            }]})
+        return {
+            "lines": lines
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        blocks = [{
+            "block_label": "text",
+            "block_bbox": [0, 0, 210, 80],
+            "block_content": "甲甲 $ Y_{ct} $乙乙。丙 $ Incentive_{c} $ 丁 $ Post_{t} $戊",
+            "_route_subblocks": [
+                {
+                    "block_label": "inline_formula",
+                    "block_bbox": [70, 0, 110, 30],
+                    "raw_payload": {"block_label": "inline_formula"},
+                },
+                {
+                    "block_label": "inline_formula",
+                    "block_bbox": [40, 40, 90, 70],
+                    "raw_payload": {"block_label": "inline_formula"},
+                },
+                {
+                    "block_label": "inline_formula",
+                    "block_bbox": [140, 40, 180, 70],
+                    "raw_payload": {"block_label": "inline_formula"},
+                },
+            ],
+        }]
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((100, 220, 3), dtype=np.uint8),
+            blocks,
+            include_chars=True,
+        )
+
+        assert seen_recblocks == [
+            (0, 0, 70, 30),
+            (110, 0, 210, 30),
+            (0, 30, 210, 40),
+            (0, 40, 40, 70),
+            (90, 40, 140, 70),
+            (180, 40, 210, 70),
+            (0, 70, 210, 80),
+        ]
+        assert len(rows) == len(blocks)
+        assert [row.source for row in rows] == ["hanwang"]
+        assert rows[0].block_label == "text"
+        assert rows[0].raw_block["_route_subblocks"][0]["block_label"] == "inline_formula"
+        assert [line.text for line in rows[0].lines] == [
+            "甲甲$ Y_{ct} $乙乙。",
+            "丙$ Incentive_{c} $丁$ Post_{t} $戊",
+        ]
+        assert [char.text for char in rows[0].lines[0].chars] == ["甲", "甲", "乙", "乙", "。"]
+        assert [char.text for char in rows[0].lines[1].chars] == ["丙", "丁", "戊"]
+        assert all(
+            micro_module.ROUTE_INLINE_FORMULA_FLAG in line.review_flags
+            for line in rows[0].lines
+        )
+        assert stats.n_blocks_total == 1
+        assert stats.n_blocks_hanwang == 1
+        assert stats.n_blocks_ppvl == 0
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
+
+
+def test_hanwang_inline_formula_only_text_does_not_suppress_fallback():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {"lines": []}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+
+    try:
+        parent_text = "前文正文 $ x+y $ 后文正文"
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((40, 140, 3), dtype=np.uint8),
+            [{
+                "block_label": "text",
+                "block_bbox": [0, 0, 120, 20],
+                "block_content": parent_text,
+                "_route_subblocks": [
+                    {
+                        "block_label": "inline_formula",
+                        "block_bbox": [40, 0, 70, 20],
+                        "raw_payload": {"block_label": "inline_formula"},
+                    }
+                ],
+            }],
+            include_chars=True,
+        )
+
+        assert len(rows) == 1
+        assert rows[0].source == "ppvl_fallback"
+        assert rows[0].text == parent_text
+        assert rows[0].lines[0].text == parent_text
+        assert rows[0].fallback_reason.startswith("short_hanwang_text")
+        assert stats.n_blocks_fallback == 1
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+
+    print("test_hanwang_inline_formula_only_text_does_not_suppress_fallback PASSED")
+
+
+def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {
+            "lines": [
+                {"groups": [
+                    {"bbox": {"left": 40, "top": 0, "right": 60, "bottom": 20}},
+                    {"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}},
+                ]}
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    recognized_recblocks = []
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        recognized_recblocks.extend(blocks)
+        for x1, y1, x2, y2 in blocks:
+            assert not (x1 == 40 and x2 == 60), "skipped formula region reached Recog"
+        return {
+            "lines": [
+                {"groups": [{
+                    "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                    "chars": [{
+                        "codes": [code("字")],
+                        "scores": [5],
+                        "bbox": {"left": x1, "top": y1, "right": min(x2, x1 + 10), "bottom": y2},
+                    }],
+                }]}
+                for x1, y1, x2, y2 in blocks
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        blocks = [{
+            "block_label": "text",
+            "block_bbox": [0, 0, 100, 20],
+            "_route_subblocks": [
+                {"block_label": "inline_formula", "block_bbox": [40, 0, 60, 20]},
+            ],
+        }]
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((40, 120, 3), dtype=np.uint8),
+            blocks,
+            include_chars=True,
+        )
+
+        assert recognized_recblocks
+        assert len(rows) == len(blocks)
+        assert [row.source for row in rows] == ["hanwang"]
+        assert rows[0].block_bbox == (0, 0, 100, 20)
+        assert stats.n_groups == 4
+        assert stats.recog_probe_calls == 2
+        assert stats.recog_batch_disabled is True
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_group_chunk_cannot_readmit_skipped_subregions PASSED")
+
+
+def test_hanwang_formula_like_footer_bypasses_before_hanwang():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    called_segimg = False
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        nonlocal called_segimg
+        called_segimg = True
+        return {"lines": []}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((60, 120, 3), dtype=np.uint8),
+            [{
+                "block_label": "footer",
+                "block_bbox": [10, 40, 90, 58],
+                "block_content": " $  \\frac{1}{2}  $",
+            }],
+        )
+
+        assert called_segimg is False
+        assert len(rows) == 1
+        assert rows[0].source == "ppvl"
+        assert rows[0].block_label == "formula"
+        assert rows[0].lines[0].text == "$  \\frac{1}{2}  $"
+        assert stats.n_blocks_hanwang == 0
+        assert stats.n_blocks_ppvl == 1
+        assert stats.n_blocks_fallback == 0
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+
+    print("test_hanwang_formula_like_footer_bypasses_before_hanwang PASSED")
 
 
 def test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path():
@@ -5644,6 +5976,46 @@ def test_layout_parsing_semantics_override_layout_det_when_both_exist():
     print("test_layout_parsing_semantics_override_layout_det_when_both_exist PASSED")
 
 
+def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/route-subblocks.png", width=240, height=120)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "boxes": [
+                                {"label": "inline_formula", "coordinate": [60, 20, 90, 42]},
+                                {"label": "table_region", "coordinate": [130, 10, 200, 70]},
+                                {"label": "figure_caption", "coordinate": [10, 80, 90, 100]},
+                            ],
+                        },
+                        "parsing_res_list": [
+                            {"block_label": "text", "block_bbox": [10, 5, 220, 75], "block_content": "正文x+y表格"},
+                        ],
+                    }
+                }
+            ]
+        }
+    }
+
+    blocks, overlays = analyzer._extract_api_blocks(page, data)
+    subblocks = page.ppvl_parsing_res_list[0]["_route_subblocks"]
+
+    assert blocks[0].block_type == BlockType.TEXT
+    assert blocks[0].raw_payload["_route_subblocks"] == subblocks
+    assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
+    assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
+    assert subblocks[0]["raw_payload"]["label"] == "inline_formula"
+    assert [label for label, _bbox in overlays] == ["text", "inline_formula", "table_region", "figure_caption"]
+
+    print("test_layout_analyzer_forwards_route_subblocks_from_layout_det_res PASSED")
+
+
 def test_layout_analyzer_persists_raw_parsing_res_list():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import Page
@@ -7301,6 +7673,29 @@ def test_hproof_line_iterator_excludes_non_text_elements():
     print("test_hproof_line_iterator_excludes_non_text_elements PASSED")
 
 
+def test_proof_line_iterators_exclude_route_table_lines():
+    from app.core.proof_line_utils import iter_unique_page_hproof_lines, iter_unique_page_text_lines
+    from app.models import BBox, Block, BlockType, Line, Page
+
+    page = Page(image_path="/tmp/proof-route-table.png", width=100, height=100)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[
+            Line(text="正文", confidence=0.9, bbox=BBox(1, 1, 20, 10)),
+            Line(
+                text="表格子区",
+                confidence=0.0,
+                bbox=BBox(1, 20, 30, 10),
+                review_flags=["hanwang_route_table"],
+            ),
+        ]),
+    ]
+
+    assert [line.text for _block, line, _idx in iter_unique_page_text_lines(page)] == ["正文"]
+    assert [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)] == ["正文"]
+
+    print("test_proof_line_iterators_exclude_route_table_lines PASSED")
+
+
 def test_hproof_line_iterator_excludes_position_source_labels():
     from app.core.proof_line_utils import iter_unique_page_hproof_lines
     from app.models import BBox, Block, BlockType, Line, Page
@@ -7963,6 +8358,7 @@ if __name__ == "__main__":
     test_export_dialog_reports_partial_success_without_critical_error()
     test_export_dialog_surfaces_output_path_failure_from_real_worker()
     test_layout_panel_analysis_progress_lifecycle()
+    test_layout_panel_merges_selected_blocks_for_ocr_rerun()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()
     test_fake_ocr_engine()
@@ -7995,6 +8391,10 @@ if __name__ == "__main__":
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
+    test_hanwang_inline_formula_text_slices_keep_chars()
+    test_hanwang_inline_formula_only_text_does_not_suppress_fallback()
+    test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
+    test_hanwang_formula_like_footer_bypasses_before_hanwang()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
@@ -8038,6 +8438,7 @@ if __name__ == "__main__":
     test_layout_analyzer_extracts_api_blocks_from_varied_schema()
     test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere()
     test_layout_parsing_semantics_override_layout_det_when_both_exist()
+    test_layout_analyzer_forwards_route_subblocks_from_layout_det_res()
     test_layout_analyzer_persists_raw_parsing_res_list()
     test_layout_analyzer_falls_back_to_ocr_results()
     test_layout_analyzer_uses_datainfo_canvas_scale()
@@ -8052,6 +8453,7 @@ if __name__ == "__main__":
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()
     test_proof_line_iterator_includes_caption_and_equation_lines()
     test_hproof_line_iterator_excludes_non_text_elements()
+    test_proof_line_iterators_exclude_route_table_lines()
     test_hproof_line_iterator_excludes_position_source_labels()
     test_block_attributes_reads_raw_payload_without_note()
     test_hproof_page_filter_keeps_pages_separate()
