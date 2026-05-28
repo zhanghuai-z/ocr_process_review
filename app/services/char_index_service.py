@@ -256,8 +256,8 @@ class CharIndexService:
                 end = idx + 1
                 while (
                     end < len(chars)
-                    and is_formula_char(chars[end].char or "")
                     and chars[end].bbox_granularity != "word"
+                    and is_formula_char(chars[end].char or "")
                 ):
                     end += 1
                 units.append(self._build_formula_unit(chars[idx:end], idx, line))

@@ -5611,6 +5611,54 @@ def test_char_index_groups_formula_runs_below_digits():
     print("test_char_index_groups_formula_runs_below_digits PASSED")
 
 
+def test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_carrier():
+    from app.core.paddle_line_routing import ROUTE_INLINE_FORMULA_FLAG
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    carrier = "$ Incentive_{c} \\times Post_{t} $"
+    line = Line(
+        text=f"A+{carrier}税",
+        confidence=0.9,
+        bbox=BBox(10, 20, 220, 24),
+        review_flags=[ROUTE_INLINE_FORMULA_FLAG],
+        chars=[
+            Char(char="A", confidence=0.9, bbox=BBox(10, 20, 12, 24), bbox_source="ocr", bbox_granularity="char", token_text="A"),
+            Char(char="+", confidence=0.9, bbox=BBox(22, 20, 10, 24), bbox_source="ocr", bbox_granularity="char", token_text="+"),
+            Char(
+                char=carrier,
+                confidence=0.9,
+                bbox=BBox(40, 20, 140, 24),
+                bbox_source="paddle_inline_formula",
+                bbox_granularity="word",
+                token_text=carrier,
+            ),
+            Char(char="税", confidence=0.9, bbox=BBox(188, 20, 18, 24), bbox_source="ocr", bbox_granularity="char", token_text="税"),
+        ],
+    )
+    page = Page(
+        image_path="p1.png",
+        width=240,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 220, 40), lines=[line])],
+    )
+
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="formula-carrier-guard", pages=[page]))
+
+    formula = svc.first_entry("A+")
+    assert formula is not None
+    assert formula.collection_kind == "token"
+    assert formula.bbox == BBox(10, 20, 22, 24)
+
+    carrier_entry = svc.first_entry(carrier)
+    assert carrier_entry is not None
+    assert carrier_entry.bbox_source == "paddle_inline_formula"
+    assert carrier_entry.bbox_granularity == "word"
+    assert line.chars[2].char == carrier
+
+    print("test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_carrier PASSED")
+
+
 def test_char_index_suppresses_punctuation_topic_for_shared_word_box():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
