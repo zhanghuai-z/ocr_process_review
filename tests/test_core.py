@@ -3368,8 +3368,37 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
             "甲甲$ Y_{ct} $乙乙。",
             "丙$ Incentive_{c} $丁$ Post_{t} $戊",
         ]
-        assert [char.text for char in rows[0].lines[0].chars] == ["甲", "甲", "乙", "乙", "。"]
-        assert [char.text for char in rows[0].lines[1].chars] == ["丙", "丁", "戊"]
+        assert [char.text for char in rows[0].lines[0].chars] == ["甲", "甲", "$ Y_{ct} $", "乙", "乙", "。"]
+        assert [char.text for char in rows[0].lines[1].chars] == [
+            "丙",
+            "$ Incentive_{c} $",
+            "丁",
+            "$ Post_{t} $",
+            "戊",
+        ]
+        formula_chars = [
+            char
+            for line in rows[0].lines
+            for char in line.chars
+            if char.source == "paddle_inline_formula"
+        ]
+        assert [char.text for char in formula_chars] == [
+            "$ Y_{ct} $",
+            "$ Incentive_{c} $",
+            "$ Post_{t} $",
+        ]
+        assert [char.bbox for char in formula_chars] == [
+            (70, 0, 110, 30),
+            (40, 40, 90, 70),
+            (140, 40, 180, 70),
+        ]
+        assert all(char.bbox_granularity == "word" for char in formula_chars)
+        assert all(char.token_text == char.text for char in formula_chars)
+        assert not any(
+            char.text.startswith("$") and char.source.startswith("hanwang:")
+            for line in rows[0].lines
+            for char in line.chars
+        )
         assert all(
             micro_module.ROUTE_INLINE_FORMULA_FLAG in line.review_flags
             for line in rows[0].lines
@@ -3382,6 +3411,76 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
         micro_module.native_bridge.run_linecut_recog = original_recog
 
     print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
+
+
+def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
+    import os
+    import tempfile
+
+    import cv2
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    from app.models import BBox, Block, BlockType, Page
+    from app.services.char_index_service import CharIndexService
+    from app.services.proof_crop_service import ProofCropService
+
+    image = np.full((40, 120, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (2, 5), (18, 25), (0, 0, 0), -1)
+    cv2.rectangle(image, (42, 5), (68, 25), (0, 0, 0), -1)
+    cv2.rectangle(image, (92, 5), (108, 25), (0, 0, 0), -1)
+    handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    handle.close()
+    cv2.imwrite(handle.name, image)
+
+    try:
+        line_result = micro_module.LineResult(
+            text="甲$ A $乙",
+            bbox=(0, 0, 110, 30),
+            confidence=0.9,
+            chars=[
+                micro_module.CharResult(text="甲", confidence=0.9, bbox=(0, 0, 20, 30)),
+                micro_module.CharResult(
+                    text="$ A $",
+                    confidence=0.0,
+                    bbox=(40, 0, 70, 30),
+                    candidates=["$ A $"],
+                    source="paddle_inline_formula",
+                    bbox_granularity="word",
+                    token_text="$ A $",
+                ),
+                micro_module.CharResult(text="乙", confidence=0.9, bbox=(90, 0, 110, 30)),
+            ],
+            review_flags=[micro_module.ROUTE_INLINE_FORMULA_FLAG],
+        )
+        line = micro_module._line_to_model(line_result, 120, 40, [])
+        formula_char = line.chars[1]
+        assert formula_char.char == "$ A $"
+        assert formula_char.token_text == "$ A $"
+        assert formula_char.bbox == BBox(40, 0, 30, 30)
+        assert formula_char.bbox_source == "paddle_inline_formula"
+        assert formula_char.bbox_granularity == "word"
+
+        page = Page(image_path=handle.name, width=120, height=40)
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 110, 30), lines=[line])]
+        before = [
+            (char.char, char.token_text, char.bbox, char.bbox_source, char.bbox_granularity)
+            for char in line.chars
+        ]
+
+        ProofCropService().normalize_pages([page])
+        CharIndexService().build([page])
+
+        after = [
+            (char.char, char.token_text, char.bbox, char.bbox_source, char.bbox_granularity)
+            for char in line.chars
+        ]
+        assert after == before
+        assert CharIndexService().build([page]).query("$ A $") == []
+    finally:
+        os.unlink(handle.name)
+
+    print("test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers PASSED")
 
 
 def test_hanwang_pre_page_ocr_lines_split_before_recog():
@@ -3462,7 +3561,16 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
             (110, 50, 180, 70),
         ]
         assert [line.text for line in rows[0].lines] == ["甲$ A $乙", "丙$ B $丁"]
-        assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "乙", "丙", "丁"]
+        assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "$ A $", "乙", "丙", "$ B $", "丁"]
+        assert [
+            (char.text, char.bbox, char.source, char.bbox_granularity)
+            for line in rows[0].lines
+            for char in line.chars
+            if char.source == "paddle_inline_formula"
+        ] == [
+            ("$ A $", (60, 10, 90, 30), "paddle_inline_formula", "word"),
+            ("$ B $", (80, 50, 110, 70), "paddle_inline_formula", "word"),
+        ]
         assert stats.n_blocks_hanwang == 1
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
@@ -3560,7 +3668,9 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
 
         assert seen_recblocks == [(0, 10, 60, 30), (90, 10, 180, 30)]
         assert result.pages[0].blocks[0].lines[0].text == "甲$ A $乙"
-        assert [char.char for char in result.pages[0].blocks[0].lines[0].chars] == ["甲", "乙"]
+        assert [char.char for char in result.pages[0].blocks[0].lines[0].chars] == ["甲", "$ A $", "乙"]
+        assert result.pages[0].blocks[0].lines[0].chars[1].bbox_source == "paddle_inline_formula"
+        assert result.pages[0].blocks[0].lines[0].chars[1].bbox_granularity == "word"
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -8864,6 +8974,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
     test_hanwang_inline_formula_text_slices_keep_chars()
+    test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers()
     test_hanwang_pre_page_ocr_lines_split_before_recog()
     test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter()
     test_paddle_line_routing_builds_layout_line_routes_from_reading_order()

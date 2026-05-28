@@ -58,6 +58,8 @@ class CharResult:
     bbox: tuple[int, int, int, int] | None = None
     candidates: list[str] = field(default_factory=list)
     source: str = "hanwang:micro_recblock"
+    bbox_granularity: str = ""
+    token_text: str = ""
 
 
 @dataclass
@@ -108,6 +110,8 @@ class BlockResult:
                             "bbox": list(char.bbox) if char.bbox else None,
                             "candidates": list(char.candidates),
                             "source": char.source,
+                            "bbox_granularity": char.bbox_granularity,
+                            "token_text": char.token_text,
                         }
                         for char in line.chars
                     ],
@@ -378,6 +382,17 @@ def _assemble_layout_route_line(
                     continue
                 text_parts.append(formula_text)
                 component_boxes.append(segment_bbox)
+                chars.append(
+                    CharResult(
+                        text=formula_text,
+                        confidence=0.0,
+                        bbox=segment_bbox,
+                        candidates=[formula_text],
+                        source="paddle_inline_formula",
+                        bbox_granularity="word",
+                        token_text=formula_text,
+                    )
+                )
                 flags.add(ROUTE_INLINE_FORMULA_FLAG)
         merged_text = "".join(text_parts)
         if not merged_text:
@@ -588,6 +603,8 @@ def _offset_line_results(
                     bbox=bbox,
                     candidates=list(char.candidates),
                     source=char.source,
+                    bbox_granularity=char.bbox_granularity,
+                    token_text=char.token_text,
                 )
             )
         shifted.append(
@@ -597,6 +614,7 @@ def _offset_line_results(
                 confidence=line.confidence,
                 chars=chars,
                 source=line.source,
+                review_flags=list(line.review_flags),
             )
         )
     return shifted
@@ -1071,8 +1089,8 @@ def _char_to_model(char: CharResult) -> Char:
         confidence=char.confidence,
         bbox=bbox,
         bbox_source=char.source,
-        bbox_granularity="char" if bbox is not None else "fallback",
-        token_text=char.text,
+        bbox_granularity=char.bbox_granularity or ("char" if bbox is not None else "fallback"),
+        token_text=char.token_text or char.text,
     )
 
 

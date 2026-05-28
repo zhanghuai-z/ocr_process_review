@@ -14,6 +14,7 @@ from app.core.char_bbox_utils import (
     is_meaningful_text_bbox,
 )
 from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
+from app.core.paddle_line_routing import ROUTE_INLINE_FORMULA_FLAG
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 
@@ -179,7 +180,8 @@ class CharIndexService:
         line: Line,
         seen: Set[Tuple[int, int, str]],
     ) -> None:
-        ensure_line_char_bboxes(line, page_image=page_image)
+        if ROUTE_INLINE_FORMULA_FLAG not in line.review_flags:
+            ensure_line_char_bboxes(line, page_image=page_image)
         if MISSING_LINE_BBOX_FLAG in line.review_flags:
             return
 
@@ -443,7 +445,11 @@ class CharIndexService:
         # char_fallback recoveries— are misclassified as fallback and filtered
         # out of the char index, leaving VProof with an empty character list
         # when ocr_mode="hanwang".
-        if source != "ocr" and not source.startswith("hanwang:"):
+        if (
+            source != "ocr"
+            and source != "paddle_inline_formula"
+            and not source.startswith("hanwang:")
+        ):
             return True
         return granularity in {"", "fallback", "unavailable", "line"}
 
