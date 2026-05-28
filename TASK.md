@@ -85,3 +85,16 @@
      - row 8 `formula_number`: one line, no char split
      - row 9 `text`: pre-Hanwang split text sub-lines
      - row 14 `formula`: one line, no char split
+
+## Post-merge residual fix
+
+- issue:
+  - equation/formula blocks could regain char boxes after proof-index build
+- cause:
+  - `CharIndexService` consumed `iter_unique_page_text_lines(page)`
+  - that iterator still admitted some equation blocks through semantic labels such as `footer`
+  - `ensure_line_char_bboxes()` then rebuilt per-char boxes on the formula line
+- fix:
+  1. proof line iterators now hard-exclude `block.block_type == EQUATION`
+  2. char index no longer re-populates standalone formula chars
+  3. real `120166.tif` check confirms row 7/8/14 stay `chars=[]` even after `CharIndexService().build([page])`

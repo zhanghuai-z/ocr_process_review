@@ -7858,7 +7858,7 @@ def test_workflow_controller_enables_proof_steps_after_first_ocr_page():
     print("test_workflow_controller_enables_proof_steps_after_first_ocr_page PASSED")
 
 
-def test_proof_line_iterator_includes_caption_and_equation_lines():
+def test_proof_line_iterator_excludes_equation_lines():
     from app.core.proof_line_utils import iter_unique_page_text_lines
     from app.models import BBox, Block, BlockType, Line, Page
 
@@ -7880,9 +7880,40 @@ def test_proof_line_iterator_includes_caption_and_equation_lines():
 
     texts = [line.text for _block, line, _idx in iter_unique_page_text_lines(page)]
 
-    assert texts == ["正文", "图注", "E=mc2"]
+    assert texts == ["正文", "图注"]
 
-    print("test_proof_line_iterator_includes_caption_and_equation_lines PASSED")
+    print("test_proof_line_iterator_excludes_equation_lines PASSED")
+
+
+def test_char_index_service_does_not_repopulate_equation_chars():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    eq_line = Line(text="$  \\frac{1}{2}  $", confidence=0.9, bbox=BBox(1, 41, 60, 10), chars=[])
+    page = Page(image_path="/tmp/equation-index.png", width=100, height=100)
+    page.blocks = [
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 40, 80, 20),
+            lines=[eq_line],
+            order=0,
+            source_label="formula",
+            raw_payload={"block_label": "footer", "block_content": "$  \\frac{1}{2}  $"},
+        ),
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 0, 80, 20),
+            lines=[Line(text="正文", confidence=0.9, bbox=BBox(1, 1, 20, 10))],
+            order=1,
+        ),
+    ]
+
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="equation-skip", pages=[page]))
+
+    assert eq_line.chars == []
+    assert svc.query("$") == []
+
+    print("test_char_index_service_does_not_repopulate_equation_chars PASSED")
 
 
 def test_hproof_line_iterator_excludes_non_text_elements():

@@ -12,7 +12,6 @@ PROOF_LINE_BLOCK_TYPES = {
     BlockType.FIGURE_CAPTION,
     BlockType.TABLE_CAPTION,
     BlockType.REFERENCE,
-    BlockType.EQUATION,
 }
 
 HPROOF_LINE_BLOCK_TYPES = {
@@ -44,6 +43,8 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
     """
     seen: list[tuple[str, BBox]] = []
     for block in page.blocks:
+        if block.block_type == BlockType.EQUATION:
+            continue
         if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
             continue
         for line_idx, line in enumerate(block.lines):
@@ -58,6 +59,8 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
     """Yield only text-like lines for HProof, excluding captions/equations."""
     seen: list[tuple[str, BBox]] = []
     for block in page.blocks:
+        if block.block_type == BlockType.EQUATION:
+            continue
         if semantic_block_type(block) not in HPROOF_LINE_BLOCK_TYPES:
             continue
         if is_position_only_block(block):
