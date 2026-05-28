@@ -62,13 +62,14 @@ class OcrResult:
 class OcrPipeline:
     """OCR 管线。"""
 
-    def __init__(self, engine: Optional[object] = None):
+    def __init__(self, engine: Optional[object] = None, hybrid_prepass_engine: Optional[object] = None):
         """初始化 OCR 管线。
 
         Args:
             engine: OcrEngine 实现。如果为 None，使用 FakeOcrEngine。
         """
         self._engine = engine or FakeOcrEngine()
+        self._hybrid_prepass_engine = hybrid_prepass_engine
         self._proof_crop_service = ProofCropService()
 
     def close(self) -> None:
@@ -124,6 +125,7 @@ class OcrPipeline:
                         self._process_page_with_hybrid_blocks(
                             img,
                             page,
+                            page_idx=page_idx,
                             progress_callback=emit_hybrid_progress,
                         )
                     except Exception as e:
@@ -245,6 +247,7 @@ class OcrPipeline:
         img: np.ndarray,
         page: Page,
         page_idx: int,
+        engine: object | None = None,
     ) -> None:
         """Run PP-OCRv5 once on the page, then assign each line to one layout block.
 
@@ -258,7 +261,8 @@ class OcrPipeline:
             page_w=img.shape[1],
             page_h=img.shape[0],
         )
-        bbox_space = get_engine_bbox_space(self._engine)
+        ocr_engine = engine or self._engine
+        bbox_space = get_engine_bbox_space(ocr_engine)
         context = OcrContext(
             page_image_path=page.display_image_path,
             page_number=page.page_number,
@@ -268,16 +272,35 @@ class OcrPipeline:
             crop_bbox=seam.crop_bbox,
             expected_bbox_space=bbox_space,
         )
-        lines = self._engine.recognize(img, context)
+        lines = ocr_engine.recognize(img, context)
         self._normalize_engine_lines(lines, seam, bbox_space)
         self._assign_page_ocr_lines_to_blocks(page, lines)
+
+    def _hybrid_page_ocr_prepass_engine(self) -> object:
+        if self._hybrid_prepass_engine is not None:
+            return self._hybrid_prepass_engine
+        from app.engines.real_ocr_adapter import ApiOcrEngine
+        return ApiOcrEngine()
 
     def _process_page_with_hybrid_blocks(
         self,
         img: np.ndarray,
         page: Page,
+        page_idx: int = 0,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> None:
+        prepass_engine = self._hybrid_page_ocr_prepass_engine()
+        if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
+            raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
+        self._process_page_with_page_ocr(
+            img,
+            page,
+            page_idx,
+            engine=prepass_engine,
+        )
+        if progress_callback:
+            line_count = sum(len(block.lines) for block in page.blocks)
+            progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         self._engine.recognize_page_blocks(
             img,
             page,

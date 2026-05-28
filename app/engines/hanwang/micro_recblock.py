@@ -12,6 +12,7 @@ from app.core.logging import get_logger
 from app.core.paddle_line_routing import (
     ROUTE_INLINE_FORMULA_FLAG,
     ROUTE_TABLE_FLAG,
+    attach_page_ocr_line_routes,
     block_bbox_xyxy,
     block_text as paddle_block_text,
     has_layout_line_routes,
@@ -514,16 +515,21 @@ def _fallback_line(
     bbox: tuple[int, int, int, int],
     *,
     source: str,
+    synthesize_chars: bool = True,
 ) -> LineResult:
     return LineResult(
         text=text,
         bbox=bbox,
         confidence=0.0,
         source=source,
-        chars=[
-            CharResult(text=ch, confidence=0.0, bbox=None, candidates=[ch], source=source)
-            for ch in text
-        ],
+        chars=(
+            [
+                CharResult(text=ch, confidence=0.0, bbox=None, candidates=[ch], source=source)
+                for ch in text
+            ]
+            if synthesize_chars
+            else []
+        ),
     )
 
 
@@ -758,11 +764,14 @@ def run_micro_recblock(
     seg_timeout: float = 120.0,
     recog_timeout: float = 60.0,
     include_chars: bool = True,
+    page_ocr_lines: list[Any] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
     """Run Hanwang Recog for text-like PP-VL blocks and keep PP-VL for others."""
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
+    if page_ocr_lines:
+        attach_page_ocr_line_routes(ppvl_blocks, page_ocr_lines, width, height)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
     skip_indices: list[int] = []
@@ -790,6 +799,7 @@ def run_micro_recblock(
         label = _effective_label_for_block(block)
         bbox = _block_bbox(block, width, height)
         ppvl_text = _block_text(block)
+        synthesize_chars = BlockType.from_paddle(label) != BlockType.EQUATION
         rows[idx] = BlockResult(
             block_idx=idx,
             block_label=label,
@@ -797,7 +807,7 @@ def run_micro_recblock(
             source="ppvl",
             text=ppvl_text,
             ppvl_text=ppvl_text,
-            lines=[_fallback_line(ppvl_text, bbox, source="ppvl")],
+            lines=[_fallback_line(ppvl_text, bbox, source="ppvl", synthesize_chars=synthesize_chars)],
             raw_block=dict(block),
         )
 
@@ -1104,6 +1114,15 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
     return blocks
 
 
+def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
+    return [
+        line
+        for block in page.blocks
+        for line in block.lines
+        if line.bbox is not None and line.bbox.area > 0
+    ]
+
+
 class HanwangMicroRecBlockEngine:
     """OcrPipeline page-level engine for PP-VL layout + Hanwang text OCR."""
 
@@ -1137,6 +1156,7 @@ class HanwangMicroRecBlockEngine:
             seg_timeout=self._seg_timeout,
             recog_timeout=self._recog_timeout,
             include_chars=True,
+            page_ocr_lines=_page_ocr_lines_from_layout(page),
             progress_callback=progress_callback,
         )
 

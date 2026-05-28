@@ -8,6 +8,8 @@ import cv2
 from app.core.char_bbox_utils import ensure_line_char_bboxes, refine_line_bbox
 from app.models import OcrProject, Page
 
+INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
+
 
 @dataclass
 class ProofCropStats:
@@ -48,7 +50,8 @@ class ProofCropService:
                 ]
 
                 line.bbox = refine_line_bbox(line.bbox, image)
-                ensure_line_char_bboxes(line, page_image=image)
+                if INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
+                    ensure_line_char_bboxes(line, page_image=image)
 
                 if line.bbox != old_line_bbox:
                     page_line_updates += 1

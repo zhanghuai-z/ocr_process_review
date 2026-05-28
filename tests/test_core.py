@@ -3384,6 +3384,191 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
     print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
 
 
+def test_hanwang_pre_page_ocr_lines_split_before_recog():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        text_by_shape = {
+            (60, 20): "甲",
+            (90, 20): "乙",
+            (80, 20): "丙",
+            (70, 20): "丁",
+        }
+        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        return {
+            "lines": [
+                {"groups": [{
+                    "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                    "chars": [{
+                        "codes": [code(text_by_shape[(x2 - x1, y2 - y1)])],
+                        "scores": [5],
+                        "bbox": {"left": x1, "top": y1, "right": min(x2, x1 + 20), "bottom": y2},
+                    }],
+                }]}
+                for x1, y1, x2, y2 in blocks
+                if (x2 - x1, y2 - y1) in text_by_shape
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((100, 200, 3), dtype=np.uint8),
+            [{
+                "block_label": "text",
+                "block_bbox": [0, 0, 190, 90],
+                "block_content": "甲 $ A $ 乙丙 $ B $ 丁",
+                "_route_subblocks": [
+                    {"block_label": "inline_formula", "block_bbox": [60, 0, 90, 40]},
+                    {"block_label": "inline_formula", "block_bbox": [80, 40, 110, 80]},
+                ],
+            }],
+            page_ocr_lines=[
+                {"text": "甲乙", "bbox": [0, 10, 180, 30]},
+                {"text": "丙丁", "bbox": [0, 50, 180, 70]},
+            ],
+        )
+
+        assert seen_recblocks == [
+            (0, 10, 60, 30),
+            (90, 10, 180, 30),
+            (0, 50, 80, 70),
+            (110, 50, 180, 70),
+        ]
+        assert [line.text for line in rows[0].lines] == ["甲$ A $乙", "丙$ B $丁"]
+        assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "乙", "丙", "丁"]
+        assert stats.n_blocks_hanwang == 1
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_pre_page_ocr_lines_split_before_recog PASSED")
+
+
+def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
+    import os
+    import tempfile
+
+    import cv2
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    from app.engines.hanwang.micro_recblock import HanwangMicroRecBlockEngine
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        text_by_shape = {(60, 20): "甲", (90, 20): "乙"}
+        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        return {
+            "lines": [
+                {"groups": [{
+                    "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                    "chars": [{
+                        "codes": [code(text_by_shape[(x2 - x1, y2 - y1)])],
+                        "scores": [5],
+                        "bbox": {"left": x1, "top": y1, "right": min(x2, x1 + 20), "bottom": y2},
+                    }],
+                }]}
+                for x1, y1, x2, y2 in blocks
+                if (x2 - x1, y2 - y1) in text_by_shape
+            ]
+        }
+
+    class FakePrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="甲乙", bbox=BBox.from_xyxy(0, 10, 180, 30), confidence=0.9)]
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        cv2.imwrite(img_path, np.ones((80, 200, 3), dtype=np.uint8) * 255)
+
+    try:
+        page = Page(
+            image_path=img_path,
+            width=200,
+            height=80,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 190, 50))],
+            ppvl_parsing_res_list=[{
+                "block_label": "text",
+                "block_bbox": [0, 0, 190, 50],
+                "block_content": "甲 $ A $ 乙",
+                "_route_subblocks": [
+                    {"block_label": "inline_formula", "block_bbox": [60, 0, 90, 40]},
+                ],
+            }],
+        )
+        result = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(),
+            hybrid_prepass_engine=FakePrepassEngine(),
+        ).process_project(OcrProject(name="hybrid-prepass", pages=[page]))
+
+        assert seen_recblocks == [(0, 10, 60, 30), (90, 10, 180, 30)]
+        assert result.pages[0].blocks[0].lines[0].text == "甲$ A $乙"
+        assert [char.char for char in result.pages[0].blocks[0].lines[0].chars] == ["甲", "乙"]
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter PASSED")
+
+
 def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
     from app.core.paddle_line_routing import (
         LAYOUT_LINE_ROUTES_FIELD,
@@ -3568,6 +3753,7 @@ def test_hanwang_formula_style_footer_and_footnote_bypass_hanwang():
         assert [row.source for row in rows] == ["ppvl", "ppvl"]
         assert [row.block_label for row in rows] == ["formula", "formula"]
         assert [row.lines[0].text for row in rows] == ["$  \\frac{1}{2}  $", "$$ x = y $$"]
+        assert [row.lines[0].chars for row in rows] == [[], []]
         assert stats.n_blocks_hanwang == 0
         assert stats.n_blocks_ppvl == 2
         assert stats.n_blocks_fallback == 0
@@ -3748,7 +3934,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     from app.engines.hanwang.micro_recblock import (
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
-    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
     calls = []
@@ -3805,6 +3991,13 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         img_path = f.name
         cv2.imwrite(img_path, np.ones((220, 240, 3), dtype=np.uint8) * 255)
 
+    class FakePrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="预识别", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)]
+
     try:
         page = Page(
             image_path=img_path,
@@ -3819,7 +4012,8 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         )
         progress_events = []
         result = OcrPipeline(
-            engine=HanwangMicroRecBlockEngine(runner=fake_runner)
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            hybrid_prepass_engine=FakePrepassEngine(),
         ).process_project(
             OcrProject(name="hybrid", pages=[page]),
             progress_callback=progress_events.append,
@@ -3828,6 +4022,9 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert len(calls) == 1
         assert calls[0][0] == page.ppvl_parsing_res_list
         assert calls[0][1]["include_chars"] is True
+        assert len(calls[0][1]["page_ocr_lines"]) == 1
+        assert calls[0][1]["page_ocr_lines"][0].text == "预识别"
+        assert any("PP-OCRv5 page-line prepass complete: 1 lines" in event.message for event in progress_events)
         assert any(
             event.current_block == 1
             and event.total_blocks == 3
@@ -8431,6 +8628,8 @@ if __name__ == "__main__":
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
     test_hanwang_inline_formula_text_slices_keep_chars()
+    test_hanwang_pre_page_ocr_lines_split_before_recog()
+    test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter()
     test_paddle_line_routing_builds_layout_line_routes_from_reading_order()
     test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl()
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
