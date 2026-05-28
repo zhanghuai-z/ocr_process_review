@@ -4249,13 +4249,138 @@ def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
 
         assert ok is True
         assert controller._proof_ocr_worker is None
-        assert started == [[page]]
+        assert started == []
+        assert controller._auto_start_ocr_after_layout is False
         assert any("PP-VL 版面分析（汉王混合）中" in message for message in messages)
         assert not any("PP-OCRv5" in message for message in messages)
     finally:
         workflow_module.get_config = original_get_config
         workflow_module.create_engine = original_create_engine
         layout_module.LayoutWorker = original_layout_worker
+
+
+def test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page():
+    import app.controllers.workflow_controller as workflow_module
+    from app.controllers.workflow_controller import STEP_LAYOUT
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page_done = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
+        page_done.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
+            Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
+        ])]
+        page_pending = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
+        page_pending.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page_done, page_pending])
+        controller._current_page_number = 1
+        started = []
+        focused = []
+        steps = []
+        controller.start_ocr = lambda pages, notify_page_callback=None: started.append(pages) or True
+        controller.focus_page.connect(focused.append)
+        controller.step_requested.connect(steps.append)
+
+        controller.handle_ocr_entry_requested("main_window", 1)
+
+        assert started == []
+        assert focused == [2]
+        assert steps == [STEP_LAYOUT]
+        assert controller.current_page_number == 2
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page PASSED")
+
+
+def test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page = Page(image_path="/tmp/ready.png", width=100, height=100, page_number=1)
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page])
+        started = []
+        controller.start_ocr = lambda pages, notify_page_callback=None: started.append(pages) or True
+
+        controller.handle_ocr_entry_requested("layout_submit", 1)
+
+        assert started == [[page]]
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready PASSED")
+
+
+def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page1 = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
+        page1.status = PageStatus.OCR_DONE
+        page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
+            Line(text="第一页", bbox=BBox(0, 0, 50, 20), confidence=0.9)
+        ])]
+        page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
+        page2.status = PageStatus.OCR_DONE
+        page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20), lines=[
+            Line(text="第二页", bbox=BBox(0, 30, 50, 20), confidence=0.9)
+        ])]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page1, page2])
+
+        controller.handle_block_contract_changed(1, "block_moved")
+
+        assert page1.total_lines == 0
+        assert page1.status == PageStatus.LAYOUT_DONE
+        assert getattr(page1, "_ocr_invalidated_after_edit") is True
+        assert page2.total_lines == 1
+        assert page2.status == PageStatus.OCR_DONE
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_block_edit_invalidates_only_that_page PASSED")
+
+
+def test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page = Page(image_path="/tmp/done.png", width=100, height=100, page_number=1)
+        page.status = PageStatus.OCR_DONE
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
+            Line(text="完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
+        ])]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page])
+        messages = []
+        steps = []
+        gate_events = []
+        controller.status_message.connect(messages.append)
+        controller.step_requested.connect(steps.append)
+        controller.page_gate_state.connect(lambda *args: gate_events.append(args))
+
+        controller.handle_ocr_entry_requested("main_window", 1)
+
+        assert steps == []
+        assert messages[-1] == "全部已完成 OCR"
+        assert gate_events[-1][3:] == ("all_pages_done", "全部已完成 OCR")
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect PASSED")
 
 
 def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
@@ -8673,6 +8798,10 @@ if __name__ == "__main__":
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
+    test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
+    test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready()
+    test_workflow_controller_hanwang_block_edit_invalidates_only_that_page()
+    test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect()
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()
     test_workflow_controller_parallel_proof_skips_missing_page_without_misalignment()
     test_workflow_controller_keeps_qthreads_until_finished_after_error()

@@ -287,7 +287,12 @@ class MainWindow(QMainWindow):
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._status_bar.showMessage)
         self._layout_panel.geometry_changed.connect(self._controller.save_project)
+        self._layout_panel.block_contract_changed.connect(self._controller.handle_block_contract_changed)
+        self._layout_panel.ocr_entry_requested.connect(self._controller.handle_ocr_entry_requested)
         self._layout_panel.page_selected.connect(self._on_layout_page_selected)
+        self._controller.focus_page.connect(self._layout_panel.set_current_page_number)
+        self._controller.page_gate_state.connect(self._layout_panel.set_page_gate_state)
+        self._controller.primary_action.connect(self._layout_panel.set_primary_action)
         self._hproof_panel.page_selected.connect(self._on_hproof_page_selected)
 
     def _build_menu(self) -> None:
@@ -416,12 +421,10 @@ class MainWindow(QMainWindow):
     def _next_step(self) -> None:
         self._controller.request_step(self._controller.current_step + 1)
 
-    def _on_layout_page_selected(self, idx: int) -> None:
-        page_number = self._controller.page_number_at(idx)
-        if page_number is not None:
-            # ownership 在 controller，set_current_page_number 会 emit signal
-            # 由 _on_current_page_number_changed 同步两个面板。
-            self._controller.set_current_page_number(page_number)
+    def _on_layout_page_selected(self, page_number: int) -> None:
+        # ownership 在 controller，set_current_page_number 会 emit signal
+        # 由 _on_current_page_number_changed 同步两个面板。
+        self._controller.set_current_page_number(page_number)
 
     def _on_hproof_page_selected(self, page_number: int) -> None:
         # controller 持有 ownership；signal 会回到 _on_current_page_number_changed
@@ -589,6 +592,9 @@ class MainWindow(QMainWindow):
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：保留版面工作区，仅在状态栏显示进度。"""
         if not self._controller.has_pages:
+            return
+        if self._controller.is_hanwang_mode():
+            self._controller.handle_ocr_entry_requested("main_window", self._controller.current_page_number)
             return
         pages = self._controller.pages
         if self._controller.get_recognizable_block_count() == 0:

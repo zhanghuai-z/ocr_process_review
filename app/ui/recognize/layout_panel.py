@@ -22,8 +22,10 @@ class LayoutPanel(QWidget):
     analysis_confirmed 信号由 show_analysis_result() 自动发出，触发 OCR 识别。
     """
     analysis_confirmed = Signal()
-    page_selected = Signal(int)   # payload: page index
+    page_selected = Signal(int)   # payload: page_number
     geometry_changed = Signal()
+    block_contract_changed = Signal(int, str)  # page_number, change_kind
+    ocr_entry_requested = Signal(str, int)  # source, page_number
     page_completed = Signal(int)  # 用户点「完成」时（payload: page idx）
     edits_cancelled = Signal(int) # 用户点「取消」时（payload: page idx）
 
@@ -32,6 +34,8 @@ class LayoutPanel(QWidget):
         self._pages: List[Page] = []
         self._current_page_idx: int = 0
         self._selected_block: Optional[Block] = None
+        self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
+        self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -254,6 +258,24 @@ class LayoutPanel(QWidget):
                 self._update_page_nav()
                 return
 
+    def set_page_gate_state(
+        self,
+        page_number: int,
+        page_state: str,
+        is_pending: bool,
+        reason_code: str,
+        reason_text: str,
+    ) -> None:
+        self._page_gate_states[page_number] = (page_state, is_pending, reason_code, reason_text)
+        if self._pages and self._pages[self._current_page_idx].page_number == page_number:
+            self._status_lbl.setText(reason_text)
+
+    def set_primary_action(self, page_number: int, action_key: str, label: str, enabled: bool) -> None:
+        self._primary_actions[page_number] = (action_key, label, enabled)
+        if self._pages and self._pages[self._current_page_idx].page_number == page_number:
+            self._btn_submit.setText(label)
+            self._btn_submit.setEnabled(enabled)
+
     # ------------------------------------------------------------------ private
 
     def _request_analysis(self) -> None:
@@ -265,7 +287,7 @@ class LayoutPanel(QWidget):
             self._current_page_idx = idx
             self._update_viewer(idx)
             self._update_page_nav()
-            self.page_selected.emit(idx)
+            self.page_selected.emit(self._pages[idx].page_number)
 
     def _update_viewer(self, idx: int) -> None:
         if not self._pages:
@@ -284,6 +306,13 @@ class LayoutPanel(QWidget):
         self._prop_conf.hide()
         self._inspector.clear()
         self._inspector.set_page_stats(page)
+        gate = self._page_gate_states.get(page.page_number)
+        if gate is not None:
+            self._status_lbl.setText(gate[3])
+        action = self._primary_actions.get(page.page_number)
+        if action is not None:
+            self._btn_submit.setText(action[1])
+            self._btn_submit.setEnabled(action[2])
 
     def _on_block_clicked(self, block: Block) -> None:
         self._selected_block = block
@@ -306,6 +335,7 @@ class LayoutPanel(QWidget):
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._inspector.set_block(block)
         self.geometry_changed.emit()
+        self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
 
     def _on_block_created(self, bbox: BBox) -> None:
         if not self._pages:
@@ -322,6 +352,7 @@ class LayoutPanel(QWidget):
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page))
         self.geometry_changed.emit()
+        self.block_contract_changed.emit(page.page_number, "block_created")
 
     def _on_block_deleted(self, block: Block) -> None:
         """viewer 键盘 Delete 已删除框 → 从 page 数据中移除。"""
@@ -336,6 +367,7 @@ class LayoutPanel(QWidget):
             self._prop_conf.hide()
             self._inspector.clear()
         self.geometry_changed.emit()
+        self.block_contract_changed.emit(page.page_number, "block_deleted")
 
     def _delete_selected(self) -> None:
         """底部栏 ✕ 删除框 按钮。"""
@@ -387,6 +419,7 @@ class LayoutPanel(QWidget):
         self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
         self._status_lbl.setText("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
         self.geometry_changed.emit()
+        self.block_contract_changed.emit(page.page_number, "blocks_merged")
 
     def _on_type_changed(self, _index: int) -> None:
         if self._selected_block is None:
@@ -395,6 +428,7 @@ class LayoutPanel(QWidget):
         if new_type:
             self._selected_block.block_type = new_type
             self.geometry_changed.emit()
+            self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
 
     def _on_char_bbox_moved(self, char) -> None:
         bb = char.bbox
@@ -420,7 +454,18 @@ class LayoutPanel(QWidget):
         has_pages = n > 0
         self._btn_done.setEnabled(has_pages)
         self._btn_cancel.setEnabled(has_pages)
-        self._btn_submit.setEnabled(has_pages)
+        if has_pages:
+            page_number = self._pages[self._current_page_idx].page_number
+            action = self._primary_actions.get(page_number)
+            if action is not None:
+                self._btn_submit.setText(action[1])
+                self._btn_submit.setEnabled(action[2])
+            else:
+                self._btn_submit.setText("提交并进入 OCR")
+                self._btn_submit.setEnabled(True)
+        else:
+            self._btn_submit.setText("提交并进入 OCR")
+            self._btn_submit.setEnabled(False)
 
     def _goto_relative(self, delta: int) -> None:
         if not self._pages:
@@ -432,7 +477,7 @@ class LayoutPanel(QWidget):
             self._current_page_idx = new_idx
             self._update_viewer(new_idx)
             self._update_page_nav()
-            self.page_selected.emit(new_idx)
+            self.page_selected.emit(self._pages[new_idx].page_number)
 
     def _on_done_clicked(self) -> None:
         """完成本页编辑（占位：发出信号供控制器处理；当前仅状态提示）。"""
@@ -452,6 +497,8 @@ class LayoutPanel(QWidget):
         """提交版面分析结果，进入 OCR 阶段。"""
         if not self._pages:
             return
+        page_number = self._pages[self._current_page_idx].page_number
+        self.ocr_entry_requested.emit("layout_submit", page_number)
         self.analysis_confirmed.emit()
 
     @property

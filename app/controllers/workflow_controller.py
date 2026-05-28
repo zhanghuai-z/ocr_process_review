@@ -56,6 +56,9 @@ class WorkflowController(QObject):
     layout_run_enabled_changed = Signal(bool)  # 顶部"运行版面"按钮可用性
     view_state_changed = Signal(object)    # WorkflowViewState
     progress_state_changed = Signal(object)  # WorkflowProgressState
+    focus_page = Signal(int)               # page_number
+    page_gate_state = Signal(int, str, bool, str, str)  # page_number, page_state, is_pending, reason_code, reason_text
+    primary_action = Signal(int, str, str, bool)  # page_number, action_key, label, enabled
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -173,6 +176,17 @@ class WorkflowController(QObject):
         if not self._project or not (0 <= idx < len(self._project.pages)):
             return None
         return self._project.pages[idx].page_number
+
+    def page_by_number(self, page_number: int) -> Page | None:
+        if not self._project:
+            return None
+        for page in self._project.pages:
+            if page.page_number == page_number:
+                return page
+        return None
+
+    def is_hanwang_mode(self) -> bool:
+        return self._current_ocr_mode() == "hanwang"
 
     # ── proof 面板同步：把"merge vs load"判定从 MainWindow 收回 ──────
     # 之前 MainWindow 自己 sum(total_lines) 决定 load 还是 merge，并维护
@@ -449,6 +463,9 @@ class WorkflowController(QObject):
 
     def request_step(self, step: int) -> None:
         """请求跳转到某步骤（由 UI 触发）。"""
+        if self.is_hanwang_mode() and step == STEP_OCR:
+            self.handle_ocr_entry_requested("step_nav", self._current_page_number)
+            return
         if not self.can_enter_step(step):
             self.status_message.emit("当前状态不允许进入该步骤")
             return
@@ -481,6 +498,132 @@ class WorkflowController(QObject):
         except Exception:
             mode = "local"
         return mode
+
+    def _page_gate_info(self, page: Page) -> tuple[str, bool, str, str, str, str, bool]:
+        if not page.is_analyzed:
+            return (
+                "layout_pending",
+                True,
+                "layout_not_done",
+                "请先完成版面分析",
+                "enter_ocr",
+                "提交并进入 OCR",
+                False,
+            )
+        if bool(getattr(page, "_ocr_invalidated_after_edit", False)):
+            return (
+                "ocr_invalidated",
+                True,
+                "invalidated_after_edit",
+                "当前页版面已变更，需要重新进入 OCR",
+                "rerun_ocr",
+                "重新进入 OCR",
+                True,
+            )
+        if page.total_lines > 0 or page.status == PageStatus.OCR_DONE:
+            return (
+                "ocr_complete",
+                False,
+                "ocr_complete",
+                "当前页 OCR 已完成",
+                "enter_ocr",
+                "提交并进入 OCR",
+                False,
+            )
+        return (
+            "ocr_ready",
+            True,
+            "ready_for_ocr",
+            "当前页版面已确认，可进入 OCR",
+            "enter_ocr",
+            "提交并进入 OCR",
+            True,
+        )
+
+    def _pending_hanwang_pages(self) -> list[Page]:
+        if not self._project:
+            return []
+        return [
+            page for page in self._project.pages
+            if self._page_gate_info(page)[1]
+        ]
+
+    def _first_pending_hanwang_page(self) -> Page | None:
+        pending = self._pending_hanwang_pages()
+        return pending[0] if pending else None
+
+    def _emit_page_gate_state(self, page: Page) -> None:
+        page_state, is_pending, reason_code, reason_text, action_key, label, enabled = self._page_gate_info(page)
+        if not self._pending_hanwang_pages() and page_state == "ocr_complete":
+            reason_code = "all_pages_done"
+            reason_text = "全部已完成 OCR"
+        self.page_gate_state.emit(page.page_number, page_state, is_pending, reason_code, reason_text)
+        self.primary_action.emit(page.page_number, action_key, label, enabled)
+
+    def refresh_page_gate_states(self) -> None:
+        if not self._project:
+            return
+        for page in self._project.pages:
+            self._emit_page_gate_state(page)
+
+    def handle_block_contract_changed(self, page_number: int, change_kind: str) -> None:
+        page = self.page_by_number(page_number)
+        if page is None:
+            return
+        had_ocr = page.total_lines > 0 or page.status == PageStatus.OCR_DONE
+        for block in page.blocks:
+            block.lines = []
+            block.raw_payload = {
+                **dict(block.raw_payload),
+                "ocr_text_invalidated": True,
+                "ocr_invalidation_kind": change_kind,
+            }
+        if had_ocr:
+            setattr(page, "_ocr_invalidated_after_edit", True)
+        page.status = PageStatus.LAYOUT_DONE
+        self.set_current_page_number(page_number)
+        self._update_max_step()
+        self._emit_page_gate_state(page)
+        if self._store:
+            self.save_project()
+
+    def handle_ocr_entry_requested(self, source: str, page_number: int) -> None:
+        if not self.is_hanwang_mode():
+            return
+        if not self._project or not self._project.pages:
+            self.status_message.emit("当前没有可 OCR 的页面")
+            return
+        pending_page = self._first_pending_hanwang_page()
+        if source != "layout_submit":
+            if pending_page is None:
+                current = self.page_by_number(page_number) or self._project.pages[0]
+                self._emit_page_gate_state(current)
+                self.status_message.emit("全部已完成 OCR")
+                return
+            self.set_current_page_number(pending_page.page_number)
+            self.focus_page.emit(pending_page.page_number)
+            self.step_requested.emit(STEP_LAYOUT)
+            self._emit_page_gate_state(pending_page)
+            self.status_message.emit(self._page_gate_info(pending_page)[3])
+            return
+
+        target = self.page_by_number(page_number) or pending_page
+        if target is None:
+            self.status_message.emit("全部已完成 OCR")
+            return
+        page_state, _is_pending, reason_code, reason_text, _action_key, _label, enabled = self._page_gate_info(target)
+        if not enabled:
+            self._emit_page_gate_state(target)
+            self.status_message.emit("全部已完成 OCR" if reason_code == "ocr_complete" else reason_text)
+            return
+        if page_state == "layout_pending":
+            self.focus_page.emit(target.page_number)
+            self.step_requested.emit(STEP_LAYOUT)
+            self._emit_page_gate_state(target)
+            self.status_message.emit(reason_text)
+            return
+        setattr(target, "_ocr_invalidated_after_edit", False)
+        self.start_ocr(self.pages)
 
     def _layout_status_label(self) -> str:
         return {
@@ -545,6 +688,13 @@ class WorkflowController(QObject):
         if self._store:
             self.save_project()
 
+        if self.is_hanwang_mode():
+            self._auto_start_ocr_after_layout = False
+            self._pending_layout_pages = None
+            self._pending_proof_pages = None
+            self.refresh_page_gate_states()
+            return
+
         if self._discard_parallel_proof_result:
             self._pending_layout_pages = None
             self._pending_proof_pages = None
@@ -594,6 +744,7 @@ class WorkflowController(QObject):
                 page.status = PageStatus.ERROR
             else:
                 page.status = PageStatus.OCR_DONE
+                setattr(page, "_ocr_invalidated_after_edit", False)
 
         self._proof_crop_service.normalize_pages(pages)
 
@@ -614,6 +765,8 @@ class WorkflowController(QObject):
 
         if self._store:
             self.save_project()
+        if self.is_hanwang_mode():
+            self.refresh_page_gate_states()
 
     # ------------------------------------------------------------------ worker management
 
@@ -635,8 +788,8 @@ class WorkflowController(QObject):
         self._pending_layout_pages = None
         self._pending_proof_pages = None
         self._discard_parallel_proof_result = False
-        parallel_started = self._start_parallel_proof_ocr(pages)
-        self._auto_start_ocr_after_layout = not parallel_started
+        parallel_started = False if self.is_hanwang_mode() else self._start_parallel_proof_ocr(pages)
+        self._auto_start_ocr_after_layout = False if self.is_hanwang_mode() else not parallel_started
         self._queued_ocr_progress_callback = None
         self._layout_worker = LayoutWorker(pages)
         self._connect_worker_cleanup("_layout_worker", self._layout_worker)
@@ -695,6 +848,8 @@ class WorkflowController(QObject):
         return True
 
     def _start_parallel_proof_ocr(self, pages: List[Page]) -> bool:
+        if self.is_hanwang_mode():
+            return False
         engine = create_engine()
         if not bool(getattr(engine, "prefer_page_ocr", False)):
             return False
