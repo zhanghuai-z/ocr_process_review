@@ -1776,6 +1776,56 @@ def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
     print("test_layout_panel_merges_selected_blocks_for_ocr_rerun PASSED")
 
 
+def test_layout_panel_exposes_real_inline_formula_overlays_readonly():
+    import json
+    from pathlib import Path
+
+    from PySide6.QtWidgets import QGraphicsItem
+
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    sample = Path("/mnt/d/project/ocr_process/file/244771纵校/120166.tif")
+    layout_json = Path("/mnt/d/project/ocr_process/file/244771纵校/120166.layout-api.json")
+    raw = json.loads(layout_json.read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    page = Page(
+        image_path=str(sample),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=1,
+    )
+    blocks, _raw_overlays = LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+    page.blocks = blocks
+
+    top_level_labels = [block.source_label for block in page.blocks]
+    assert "display_formula" in top_level_labels
+    assert "formula_number" in top_level_labels
+
+    panel = LayoutPanel()
+    try:
+        overlays = panel._collect_readonly_layout_overlays(page)
+        assert len(overlays) == 7
+        assert all(label == "inline_formula" for label, _bbox in overlays)
+
+        panel.show_analysis_result([page])
+        app.processEvents()
+
+        assert len(panel._viewer._readonly_overlay_items) == 7
+        assert len(panel._viewer._block_items) == len(page.blocks)
+        assert all(
+            not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            for item in panel._viewer._readonly_overlay_items
+        )
+        assert all("inline_formula" in item.toolTip() for item in panel._viewer._readonly_overlay_items)
+    finally:
+        panel.close()
+
+    print("test_layout_panel_exposes_real_inline_formula_overlays_readonly PASSED")
+
+
 def test_workflow_controller_layout_progress_signal():
     from app.controllers.workflow_controller import WorkflowController
 
@@ -8941,6 +8991,7 @@ if __name__ == "__main__":
     test_export_dialog_surfaces_output_path_failure_from_real_worker()
     test_layout_panel_analysis_progress_lifecycle()
     test_layout_panel_merges_selected_blocks_for_ocr_rerun()
+    test_layout_panel_exposes_real_inline_formula_overlays_readonly()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()
     test_fake_ocr_engine()

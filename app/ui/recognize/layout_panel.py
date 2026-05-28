@@ -8,6 +8,9 @@ from PySide6.QtWidgets import (
     QProgressBar, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
+from app.core.bbox_extraction import bbox_from_variant
+from app.core.paddle_labels import normalize_paddle_label
+from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.block_inspector import BlockInspector
@@ -295,9 +298,7 @@ class LayoutPanel(QWidget):
         page = self._pages[idx]
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
-            self._viewer.show_blocks(page.blocks)
-            if self._btn_char_boxes.isChecked():
-                self._viewer.show_char_boxes(self._collect_page_chars(page))
+            self._show_page_layers(page)
         elif page.error_message:
             self._status_lbl.setText(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
@@ -348,9 +349,7 @@ class LayoutPanel(QWidget):
             source=BlockSource.MANUAL_DRAW,
         )
         page.blocks.append(new_block)
-        self._viewer.show_blocks(page.blocks)
-        if self._btn_char_boxes.isChecked():
-            self._viewer.show_char_boxes(self._collect_page_chars(page))
+        self._show_page_layers(page)
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_created")
 
@@ -412,9 +411,7 @@ class LayoutPanel(QWidget):
             block.order = order
 
         self._selected_block = primary
-        self._viewer.show_blocks(page.blocks)
-        if self._btn_char_boxes.isChecked():
-            self._viewer.show_char_boxes(self._collect_page_chars(page))
+        self._show_page_layers(page)
         self._inspector.set_block(primary)
         self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
         self._status_lbl.setText("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
@@ -442,6 +439,45 @@ class LayoutPanel(QWidget):
             for line in block.lines:
                 chars.extend([char for char in line.chars if char.bbox is not None])
         return chars
+
+    def _show_page_layers(self, page: Page) -> None:
+        self._viewer.show_blocks(page.blocks)
+        self._viewer.show_readonly_overlays(self._collect_readonly_layout_overlays(page))
+        if self._btn_char_boxes.isChecked():
+            self._viewer.show_char_boxes(self._collect_page_chars(page))
+
+    def _collect_readonly_layout_overlays(self, page: Page) -> List[tuple[str, BBox]]:
+        overlays: List[tuple[str, BBox]] = []
+        seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+        for parent in page.ppvl_parsing_res_list:
+            subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
+            if not isinstance(subblocks, list):
+                continue
+            for subblock in subblocks:
+                if not isinstance(subblock, dict):
+                    continue
+                label = str(
+                    subblock.get("block_label")
+                    or subblock.get("label")
+                    or subblock.get("type")
+                    or ""
+                )
+                if normalize_paddle_label(label) != "inline_formula":
+                    continue
+                bbox = bbox_from_variant(
+                    subblock.get("block_bbox") or subblock.get("bbox") or subblock.get("coordinate"),
+                    max_w=page.width,
+                    max_h=page.height,
+                )
+                if bbox is None or bbox.area <= 0:
+                    continue
+                bbox = bbox.clamp(page.width, page.height)
+                key = (label, bbox.to_xyxy())
+                if key in seen:
+                    continue
+                seen.add(key)
+                overlays.append((label or "inline_formula", bbox))
+        return overlays
 
     # ── 底栏：翻页 / 完成 / 取消 / 提交 ─────────────────────────
 

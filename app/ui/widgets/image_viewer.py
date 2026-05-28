@@ -251,6 +251,7 @@ class ImageViewer(QGraphicsView):
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
         self._block_items: List[Tuple[BBoxItem, Block]] = []
         self._char_items: List[Tuple[BBoxItem, Char]] = []
+        self._readonly_overlay_items: List[QGraphicsRectItem] = []
         self._highlight_item = None  # highlight_bbox 使用
 
         # 右键拖拽画框状态
@@ -273,6 +274,7 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
+        self._readonly_overlay_items.clear()
         pixmap = _pixmap_from_path(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -284,6 +286,7 @@ class ImageViewer(QGraphicsView):
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
+        self._readonly_overlay_items.clear()
         pixmap = QPixmap.fromImage(qimage)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -306,6 +309,28 @@ class ImageViewer(QGraphicsView):
             item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
+
+    def show_readonly_overlays(self, overlays: List[Tuple[str, BBox]]) -> None:
+        """Show read-only layout geometry that should not become editable blocks."""
+        for item in self._readonly_overlay_items:
+            if item.scene() is self._scene:
+                self._scene.removeItem(item)
+        self._readonly_overlay_items.clear()
+        color = QColor("#d93025")
+        for label, bbox in overlays:
+            if bbox.w <= 0 or bbox.h <= 0:
+                continue
+            rect = QGraphicsRectItem(QRectF(0, 0, bbox.w, bbox.h))
+            pen = QPen(color, 2, Qt.PenStyle.DashLine)
+            rect.setPen(pen)
+            rect.setBrush(QColor(217, 48, 37, 28))
+            rect.setPos(bbox.x, bbox.y)
+            rect.setZValue(6)
+            rect.setToolTip(f"[{label}] read-only overlay\nx={bbox.x} y={bbox.y} w={bbox.w} h={bbox.h}")
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+            self._scene.addItem(rect)
+            self._readonly_overlay_items.append(rect)
 
     def show_char_boxes(self, chars: List[Char]) -> None:
         """Overlay editable OCR char/token boxes on top of layout blocks."""
@@ -474,3 +499,6 @@ class ImageViewer(QGraphicsView):
         for item, _ in self._char_items:
             self._scene.removeItem(item)
         self._char_items.clear()
+        for item in self._readonly_overlay_items:
+            self._scene.removeItem(item)
+        self._readonly_overlay_items.clear()
