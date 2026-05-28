@@ -4307,15 +4307,95 @@ def test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready():
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page])
         started = []
-        controller.start_ocr = lambda pages, notify_page_callback=None: started.append(pages) or True
+        controller.start_ocr = (
+            lambda pages, notify_page_callback=None, target_page_numbers=None:
+            started.append((pages, target_page_numbers)) or True
+        )
 
         controller.handle_ocr_entry_requested("layout_submit", 1)
 
-        assert started == [[page]]
+        assert started == [([page], {1})]
     finally:
         workflow_module.get_config = original_get_config
 
     print("test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready PASSED")
+
+
+def test_workflow_controller_hanwang_layout_submit_merges_only_target_page():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    class DummySignal:
+        def __init__(self):
+            self._callbacks = []
+
+        def connect(self, callback):
+            self._callbacks.append(callback)
+
+        def emit(self, *args):
+            for callback in list(self._callbacks):
+                callback(*args)
+
+    class FakeOcrWorker:
+        created_pages = []
+        result_pages = []
+
+        def __init__(self, pipeline, pages):
+            self.progress_state = DummySignal()
+            self.progress_update = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+            self.finished = DummySignal()
+            self._running = False
+            FakeOcrWorker.created_pages.append(list(pages))
+
+        def isRunning(self):
+            return self._running
+
+        def start(self):
+            self._running = True
+            self.all_done.emit(FakeOcrWorker.result_pages)
+            self._running = False
+            self.finished.emit()
+
+    original_get_config = workflow_module.get_config
+    original_create_engine = workflow_module.create_engine
+    original_worker = workflow_module.OcrPipelineWorker
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    workflow_module.create_engine = lambda: object()
+    workflow_module.OcrPipelineWorker = FakeOcrWorker
+    try:
+        page1 = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
+        page1.status = PageStatus.LAYOUT_DONE
+        page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
+        page2.status = PageStatus.LAYOUT_DONE
+        page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        processed_page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
+        processed_page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20), lines=[
+            Line(text="第二页完成", bbox=BBox(0, 30, 50, 20), confidence=0.99)
+        ])]
+        FakeOcrWorker.created_pages = []
+        FakeOcrWorker.result_pages = [processed_page2]
+
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page1, page2])
+
+        controller.handle_ocr_entry_requested("layout_submit", 2)
+
+        assert FakeOcrWorker.created_pages == [[page2]]
+        assert len(controller._project.pages) == 2
+        assert controller._project.pages[0] is page1
+        assert controller._project.pages[0].status == PageStatus.LAYOUT_DONE
+        assert controller._project.pages[1] is processed_page2
+        assert controller._project.pages[1].status == PageStatus.OCR_DONE
+        assert controller._project.pages[1].blocks[0].lines[0].text == "第二页完成"
+    finally:
+        workflow_module.get_config = original_get_config
+        workflow_module.create_engine = original_create_engine
+        workflow_module.OcrPipelineWorker = original_worker
+
+    print("test_workflow_controller_hanwang_layout_submit_merges_only_target_page PASSED")
 
 
 def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
@@ -8800,6 +8880,7 @@ if __name__ == "__main__":
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
     test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
     test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready()
+    test_workflow_controller_hanwang_layout_submit_merges_only_target_page()
     test_workflow_controller_hanwang_block_edit_invalidates_only_that_page()
     test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect()
     test_workflow_controller_starts_parallel_proof_ocr_with_layout()

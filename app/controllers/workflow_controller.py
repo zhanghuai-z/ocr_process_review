@@ -73,6 +73,7 @@ class WorkflowController(QObject):
         self._pending_layout_pages: Optional[List[Page]] = None
         self._pending_proof_pages: Optional[List[Page]] = None
         self._discard_parallel_proof_result: bool = False
+        self._ocr_target_page_numbers: set[int] | None = None
         self._auto_start_ocr_after_layout = True
         self._queued_ocr_progress_callback: Optional[Callable] = None
         # proof 面板同步状态（供 sync_proof_panels 使用）
@@ -623,7 +624,7 @@ class WorkflowController(QObject):
             self.status_message.emit(reason_text)
             return
         setattr(target, "_ocr_invalidated_after_edit", False)
-        self.start_ocr(self.pages)
+        self.start_ocr([target], target_page_numbers={target.page_number})
 
     def _layout_status_label(self) -> str:
         return {
@@ -737,19 +738,32 @@ class WorkflowController(QObject):
         这是业务完成事件，由 Worker 触发。
         与用户点击"进入校对"按钮的导航意图严格分离。
         """
+        target_page_numbers = self._ocr_target_page_numbers
+        self._ocr_target_page_numbers = None
+        if target_page_numbers is not None and self._project is not None:
+            updated_by_number = {page.page_number: page for page in pages}
+            pages = [
+                updated_by_number.get(page.page_number, page)
+                for page in self._project.pages
+            ]
         self._project.pages = pages
 
-        for page in pages:
+        processed_pages = (
+            pages
+            if target_page_numbers is None
+            else [page for page in pages if page.page_number in target_page_numbers]
+        )
+        for page in processed_pages:
             if page.error_message and page.total_lines == 0:
                 page.status = PageStatus.ERROR
             else:
                 page.status = PageStatus.OCR_DONE
                 setattr(page, "_ocr_invalidated_after_edit", False)
 
-        self._proof_crop_service.normalize_pages(pages)
+        self._proof_crop_service.normalize_pages(processed_pages)
 
         # 自动标记低置信行
-        flagged = self._proof_engine.auto_flag(pages)
+        flagged = self._proof_engine.auto_flag(processed_pages)
 
         self._update_max_step()
         self.ocr_finished.emit(pages)
@@ -816,7 +830,12 @@ class WorkflowController(QObject):
         self.layout_progress.emit(current, total)
         self.status_message.emit(f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页")
 
-    def start_ocr(self, pages: List[Page], notify_page_callback: Callable = None) -> bool:
+    def start_ocr(
+        self,
+        pages: List[Page],
+        notify_page_callback: Callable = None,
+        target_page_numbers: set[int] | None = None,
+    ) -> bool:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""
         if self._ocr_worker and self._ocr_worker.isRunning():
             self.status_message.emit("OCR 识别仍在进行中…")
@@ -835,6 +854,7 @@ class WorkflowController(QObject):
         engine = create_engine()
         pipeline = OcrPipeline(engine=engine)
 
+        self._ocr_target_page_numbers = target_page_numbers
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
         self._connect_worker_cleanup("_ocr_worker", self._ocr_worker)
         self._ocr_worker.progress_state.connect(self._on_ocr_progress)
@@ -969,6 +989,7 @@ class WorkflowController(QObject):
         self._discard_parallel_proof_result = True
         self._pending_layout_pages = None
         self._pending_proof_pages = None
+        self._ocr_target_page_numbers = None
         logger.error("Worker error: %s", msg)
         self.worker_error.emit(msg)
         self.status_message.emit("处理失败")
