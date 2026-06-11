@@ -18,6 +18,10 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
+from app.core.ocr_dispatch_policy import (
+    should_block_page_ocr_line,
+    should_dispatch_to_text_ocr,
+)
 from app.core.proof_status import apply_auto_flag
 from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space
@@ -29,17 +33,6 @@ from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
-
-# 非文字块类型默认不送 OCR
-NON_OCR_BLOCK_TYPES = {BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN}
-OCR_LINE_CONTAINER_BLOCK_TYPES = {
-    BlockType.TEXT,
-    BlockType.TITLE,
-    BlockType.FIGURE_CAPTION,
-    BlockType.TABLE_CAPTION,
-    BlockType.REFERENCE,
-    BlockType.EQUATION,
-}
 
 @dataclass
 class OcrProgress:
@@ -93,7 +86,7 @@ class OcrPipeline:
                     logger.warning("Cannot read image: %s", page.display_image_path)
                     page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
                     for block in page.blocks:
-                        if block.recognizable:
+                        if should_dispatch_to_text_ocr(block):
                             result.failed_blocks.append(
                                 (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
                             )
@@ -108,7 +101,7 @@ class OcrPipeline:
                         ))
                     continue
 
-                total_blocks = len([b for b in page.blocks if b.recognizable])
+                total_blocks = len([b for b in page.blocks if should_dispatch_to_text_ocr(b)])
 
                 if self._prefers_page_hybrid_blocks():
                     def emit_hybrid_progress(current: int, total: int, message: str) -> None:
@@ -175,7 +168,7 @@ class OcrPipeline:
                 page_failures: list[str] = []
 
                 for block in page.blocks:
-                    if not block.recognizable:
+                    if not should_dispatch_to_text_ocr(block):
                         continue
 
                     try:
@@ -337,18 +330,24 @@ class OcrPipeline:
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:
-            if block.recognizable and block.block_type not in NON_OCR_BLOCK_TYPES:
+            if should_dispatch_to_text_ocr(block):
                 block.lines = []
 
         containers = [
             block for block in page.blocks
-            if block.recognizable and block.block_type in OCR_LINE_CONTAINER_BLOCK_TYPES
+            if should_dispatch_to_text_ocr(block)
+        ]
+        blockers = [
+            block for block in page.blocks
+            if should_block_page_ocr_line(block)
         ]
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
             block = select_container_block_for_line(line, containers)
             if block is None:
-                unmatched.append(line)
+                blocker = select_container_block_for_line(line, blockers)
+                if blocker is None:
+                    unmatched.append(line)
             else:
                 block.lines.append(line)
 
@@ -379,6 +378,9 @@ class OcrPipeline:
         page_image_path: str,
     ) -> Block:
         """处理单个块（用于块级重跑）。"""
+        if not should_dispatch_to_text_ocr(block):
+            return block
+
         img = cv2.imread(page_image_path)
         if img is None:
             logger.warning("Cannot read image: %s", page_image_path)
@@ -398,7 +400,7 @@ class OcrPipeline:
         page_idx: int,
     ) -> List[Line]:
         """处理单个块的 OCR。"""
-        if block.block_type in NON_OCR_BLOCK_TYPES:
+        if not should_dispatch_to_text_ocr(block):
             return []
 
         bb = block.bbox.normalize().clamp(img.shape[1], img.shape[0])

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.bbox_extraction import bbox_from_variant
+from app.core.ocr_dispatch_policy import is_text_ocr_candidate
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -562,7 +563,7 @@ class LayoutPanel(QWidget):
         primary.bbox = BBox.from_xyxy(x1, y1, x2, y2)
         primary.lines = []
         primary.source = BlockSource.USER_EDITED
-        primary.recognizable = primary.block_type not in (BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN)
+        primary.recognizable = is_text_ocr_candidate(primary)
         primary.note = "manual_merge_requires_ocr_rerun"
         primary.raw_payload = {
             **dict(primary.raw_payload),
@@ -1027,7 +1028,7 @@ class LayoutPanel(QWidget):
         primary.lines = []
         primary.source = BlockSource.USER_EDITED
         primary.is_locked = False
-        primary.recognizable = block_type not in (BlockType.FIGURE, BlockType.TABLE, BlockType.UNKNOWN)
+        primary.recognizable = is_text_ocr_candidate(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
         primary.raw_payload = {
             **dict(primary.raw_payload),

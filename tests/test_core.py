@@ -3507,7 +3507,36 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
     print("test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once PASSED")
 
 
-def test_page_ocr_refills_caption_and_equation_blocks():
+def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
+    from app.core.ocr_dispatch_policy import (
+        is_text_ocr_candidate,
+        should_dispatch_to_text_ocr,
+    )
+    from app.models import BBox, Block, BlockType
+
+    bb = BBox(0, 0, 100, 20)
+    footnote = Block(block_type=BlockType.TEXT, bbox=bb, source_label="vision_footnote")
+    formula_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="inline_formula")
+    equation = Block(block_type=BlockType.EQUATION, bbox=bb, recognizable=True)
+    table_binding = Block(
+        block_type=BlockType.TEXT,
+        bbox=bb,
+        raw_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
+    )
+    disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, recognizable=False)
+
+    assert is_text_ocr_candidate(footnote) is True
+    assert should_dispatch_to_text_ocr(footnote) is True
+    assert should_dispatch_to_text_ocr(formula_label) is False
+    assert should_dispatch_to_text_ocr(equation) is False
+    assert should_dispatch_to_text_ocr(table_binding) is False
+    assert is_text_ocr_candidate(disabled_text) is True
+    assert should_dispatch_to_text_ocr(disabled_text) is False
+
+    print("test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels PASSED")
+
+
+def test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks():
     import tempfile
     import cv2
     import numpy as np
@@ -3550,7 +3579,7 @@ def test_page_ocr_refills_caption_and_equation_blocks():
         cv2.imwrite(img_path, img)
 
     try:
-        equation = Block(block_type=BlockType.EQUATION, bbox=BBox(0, 0, 120, 60), lines=[make_line("旧", 5, 5)], order=0)
+        equation = Block(block_type=BlockType.EQUATION, bbox=BBox(0, 0, 120, 60), lines=[make_line("旧公式", 5, 5)], order=0)
         figure_caption = Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 60, 120, 60), lines=[make_line("旧", 5, 65)], order=1)
         table_caption = Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(0, 120, 120, 60), lines=[make_line("旧", 5, 125)], order=2)
         page = Page(
@@ -3565,14 +3594,51 @@ def test_page_ocr_refills_caption_and_equation_blocks():
         )
         blocks = result.pages[0].blocks
 
-        assert [line.text for line in blocks[0].lines] == ["式"]
+        assert [line.text for line in blocks[0].lines] == ["旧公式"]
         assert [line.text for line in blocks[1].lines] == ["图"]
         assert [line.text for line in blocks[2].lines] == ["表"]
-        assert "旧" not in [line.text for block in blocks for line in block.lines]
+        all_texts = [line.text for block in blocks for line in block.lines]
+        assert "式" not in all_texts
+        assert "旧" not in all_texts
     finally:
         os.unlink(img_path)
 
-    print("test_page_ocr_refills_caption_and_equation_blocks PASSED")
+    print("test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks PASSED")
+
+
+def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class RaisingTextEngine:
+        def recognize(self, image_bgr, context):
+            raise AssertionError("equation blocks must not enter text OCR")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        cv2.imwrite(img_path, np.full((80, 160, 3), 255, dtype=np.uint8))
+
+    try:
+        formula_line = Line(text="E=mc^2", confidence=0.0, bbox=BBox(10, 10, 80, 20))
+        equation = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 0, 120, 40),
+            lines=[formula_line],
+            recognizable=True,
+        )
+        page = Page(image_path=img_path, width=160, height=80, blocks=[equation])
+        result = OcrPipeline(engine=RaisingTextEngine()).process_project(
+            OcrProject(name="EquationSkip", pages=[page])
+        )
+
+        assert [line.text for line in result.pages[0].blocks[0].lines] == ["E=mc^2"]
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable PASSED")
 
 
 def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
@@ -10061,7 +10127,9 @@ if __name__ == "__main__":
     test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
-    test_page_ocr_refills_caption_and_equation_blocks()
+    test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels()
+    test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks()
+    test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
