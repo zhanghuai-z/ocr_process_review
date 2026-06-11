@@ -603,7 +603,7 @@ class MainWindow(QMainWindow):
                 self._controller.set_layout_run_enabled(True)
                 if self._controller.is_fully_analyzed:
                     self._layout_panel.show_analysis_result(pages)
-                if self._controller.ocr_completed:
+                if self._controller.has_any_ocr_result:
                     # 全量初始化 proof 面板（force_load=True 跳过 merge 路径）
                     self._controller.sync_proof_panels(force_load=True)
             self._go_to_step(self._controller.get_open_step())

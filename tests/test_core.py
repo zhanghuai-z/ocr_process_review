@@ -103,7 +103,6 @@ def test_models():
     assert page.status == PageStatus.IMPORTED
     assert page.source_type == "image"
     assert page.text_ocr_blocks == [block]
-    assert page.recognizable_blocks == [block]
 
     # Page new fields
     page2 = Page(
@@ -120,7 +119,6 @@ def test_models():
     project = OcrProject(name="测试项目", pages=[page])
     assert project.page_count == 1
     assert project.total_lines == 2
-    assert project.ocr_completed is True
     assert project.has_any_ocr_result is True
     assert project.all_pages_ocr_done is False
     page.status = PageStatus.OCR_DONE

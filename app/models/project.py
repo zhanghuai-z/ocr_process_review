@@ -218,11 +218,6 @@ class Page:
         )]
 
     @property
-    def recognizable_blocks(self) -> List[Block]:
-        """兼容旧调用：返回当前应送文字 OCR 的块。"""
-        return self.text_ocr_blocks
-
-    @property
     def text_ocr_blocks(self) -> List[Block]:
         """返回按统一 dispatch 策略应送文字 OCR 的块。"""
         from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
@@ -297,15 +292,6 @@ class OcrProject:
     @property
     def total_unproofed_lines(self) -> int:
         return self.total_lines - sum(p.proofed_lines for p in self.pages)
-
-    @property
-    def ocr_completed(self) -> bool:
-        """兼容旧调用：项目是否已有任意 OCR 结果。
-
-        不再把它作为“项目所有页面 OCR 完成”的权威语义；新代码应使用
-        has_any_ocr_result / all_pages_ocr_done。
-        """
-        return self.has_any_ocr_result
 
     @property
     def has_any_ocr_result(self) -> bool:

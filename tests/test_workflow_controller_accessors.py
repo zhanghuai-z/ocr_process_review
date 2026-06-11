@@ -59,8 +59,8 @@ def test_is_fully_analyzed_false_when_no_project(ctrl):
     assert ctrl.is_fully_analyzed is False
 
 
-def test_ocr_completed_false_when_no_project(ctrl):
-    assert ctrl.ocr_completed is False
+def test_has_any_ocr_result_false_when_no_project(ctrl):
+    assert ctrl.has_any_ocr_result is False
 
 
 def test_cache_dir_falls_back_to_dot_when_no_project(ctrl):
@@ -107,14 +107,13 @@ def test_cache_dir_uses_db_path_parent(ctrl, tmp_path):
     assert ctrl.cache_dir == tmp_path / ".cache"
 
 
-def test_ocr_completed_matches_project_property(ctrl):
-    p1 = _page(1, [_block([_line()])])   # 有 line → ocr_completed True
+def test_has_any_ocr_result_matches_project_property(ctrl):
+    p1 = _page(1, [_block([_line()])])
     ctrl._project = OcrProject(name="t", pages=[p1])
-    assert ctrl.ocr_completed is True
-    # 反向：空 page
+    assert ctrl.has_any_ocr_result is True
     ctrl._project = OcrProject(name="t2",
                                pages=[_page(1, [_block([], )])])
-    assert ctrl.ocr_completed is False
+    assert ctrl.has_any_ocr_result is False
 
 
 # ── proof-sync ownership ────────────────────────────────────────

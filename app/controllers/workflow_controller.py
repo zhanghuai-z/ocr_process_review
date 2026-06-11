@@ -127,7 +127,7 @@ class WorkflowController(QObject):
     def get_recognizable_block_count(self) -> int:
         if not self._project:
             return 0
-        return sum(len(page.recognizable_blocks) for page in self._project.pages)
+        return sum(len(page.text_ocr_blocks) for page in self._project.pages)
 
     # ── 收口给 MainWindow 的窄 accessor ──────────────────────────────
     # 这些 property 是为了让 MainWindow 不必直接读 ``self._controller.project.*``
@@ -160,7 +160,7 @@ class WorkflowController(QObject):
         return all(p.is_analyzed for p in self._project.pages)
 
     @property
-    def ocr_completed(self) -> bool:
+    def has_any_ocr_result(self) -> bool:
         """项目是否已有任意 OCR 结果；无项目时 False。"""
         if self._project is None:
             return False
@@ -841,8 +841,8 @@ class WorkflowController(QObject):
             self.status_message.emit(f"{self._proof_ocr_status_label()} 仍在进行中…")
             return False
 
-        recognizable_blocks = sum(len(page.recognizable_blocks) for page in pages)
-        if recognizable_blocks == 0:
+        text_ocr_block_count = sum(len(page.text_ocr_blocks) for page in pages)
+        if text_ocr_block_count == 0:
             self.worker_error.emit("当前没有可识别的文字块，请先完成版面分析或补充文字区域。")
             self.status_message.emit("没有可识别的文字块")
             return False

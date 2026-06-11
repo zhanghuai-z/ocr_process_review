@@ -31,15 +31,13 @@ from app.core.api_profiles import (
     resolve_api_endpoint_for_role,
 )
 from app.core.api_image_codec import encode_image_b64_for_paddle
-from app.core.bbox_extraction import bbox_from_variant, raw_bbox_max_from_variant
+from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.core.ocr_dispatch_policy import is_text_ocr_candidate
 from app.core.paddle_layout_schema import (
     normalize_paddle_layout_record,
-    paddle_record_bbox,
     paddle_record_label,
-    paddle_record_score,
     raw_bbox_max_from_record,
     route_subblock_payload,
 )
@@ -155,28 +153,12 @@ class LayoutAnalyzer:
         """兼容 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
         return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
 
-    def _extract_label_from_record(self, record: dict, default: str = "unknown") -> str:
-        return paddle_record_label(record, default)
-
-    def _extract_score_from_record(self, record: dict) -> float | None:
-        return paddle_record_score(record)
-
-    def _extract_bbox_from_record(self, record: dict, page: Page):
-        return paddle_record_bbox(record, page.width, page.height)
-
-    def _raw_bbox_max_from_record(self, record: dict) -> tuple[float, float] | None:
-        return raw_bbox_max_from_record(record)
-
-    def _raw_bbox_max_from_coordinate(self, coord: object) -> tuple[float, float] | None:
-        """Extract raw max x/y before scaling or clamping."""
-        return raw_bbox_max_from_variant(coord)
-
     def _raw_bbox_max_from_item(self, item: dict) -> tuple[float, float] | None:
         max_x = 0.0
         max_y = 0.0
         found = False
         for record in self._iter_layout_records_from_item(item) + self._iter_ocr_records_from_item(item):
-            max_xy = self._raw_bbox_max_from_record(record)
+            max_xy = raw_bbox_max_from_record(record)
             if max_xy is None:
                 continue
             max_x = max(max_x, max_xy[0])
@@ -315,7 +297,7 @@ class LayoutAnalyzer:
         parent_entries: list[tuple[dict, object]] = []
         subblocks_by_parent: dict[int, list[dict]] = {}
         for parent in parsing_records:
-            parent_label = self._extract_label_from_record(parent)
+            parent_label = paddle_record_label(parent)
             if is_hanwang_skip_label(parent_label):
                 continue
             parent_bbox = self._record_bbox_in_page_space(parent, page, scale_x, scale_y)

@@ -14,13 +14,19 @@
 | 兼容点 | 当前作用 | 目标新入口 | 退出条件 | 风险 |
 | --- | --- | --- | --- | --- |
 | `Line.text <-> final_text` 镜像 | 兼容旧 UI / 存储 / 导出调用 `line.text` | proof 层统一读写 `line.final_text`，OCR 原文进入 `line.ocr_text` | UI、导出、proof、存储全部不再直接把 `text` 当最终真值；只保留加载旧库迁移测试 | 文本真值漂移，OCR 原文和人工终稿混淆 |
-| `OcrProject.ocr_completed` | 旧调用把“任意 OCR 结果”当完成状态 | `has_any_ocr_result` / `all_pages_ocr_done` | controller/UI 全部改用显式字段；旧 accessor 测试删除或改为迁移兼容测试 | 部分页 OCR 被误判为项目完成 |
-| `Page.recognizable_blocks` | 旧调用读取可 OCR block | `Page.text_ocr_blocks` + `should_dispatch_to_text_ocr()` | controller、pipeline、summary 不再直接调用旧名 | 公式/表格/图片 dispatch 策略分裂 |
 | `Block.raw_payload` app-owned keys | 过渡保存 Paddle 原始数据、binding、UI flags、OCR invalidation | `block_payload.py` 常量/helper，后续拆 `PaddleArtifact / AnnotationBinding / LayoutSnapshot` | 所有 app-owned key 都只通过 helper；再迁入正式模型表或 dataclass | Paddle 原始真值和应用状态混在同一 dict |
-| `LayoutAnalyzer._extract_*_from_record()` | 保持旧私有调用和测试入口 | `paddle_layout_schema.py` | 内部调用全部走 schema adapter；测试改为直接测 schema 后可删除私有 shim | Paddle 字段优先级在多处漂移 |
 | `WorkflowController._page_gate_info()` | 保持 controller 内部入口 | `workflow_state.page_gate_info()` | UI / controller 逻辑直接依赖 typed `PageGateInfo` 后可降级为私有转发或删除 | 页面 gate 状态再次散落在 controller |
 | `app.core.ocr_config` | 兼容旧 OCR 配置访问方式 | `AppConfig` typed/default config | API 设置、引擎创建、测试全部不再通过旧模块读写 | 配置源分裂，UI 显示和真实调用不一致 |
 | UI/test compatibility fields, e.g. hidden labels/signals | 保旧测试或旧 UI 调用不崩 | 显式 view model / signal contract | 对应旧测试改为测试新 contract；旧 UI 调用点删除 | UI 文件继续膨胀，测试锁死旧结构 |
+
+## 已清理
+
+| 已清理入口 | 替代入口 | 清理说明 |
+| --- | --- | --- |
+| `OcrProject.ocr_completed` | `has_any_ocr_result` / `all_pages_ocr_done` | 删除兼容 property；controller/UI/tests 改用显式语义。 |
+| `WorkflowController.ocr_completed` | `WorkflowController.has_any_ocr_result` | 删除旧 accessor，避免打开项目时继续传播模糊命名。 |
+| `Page.recognizable_blocks` | `Page.text_ocr_blocks` | 删除兼容 property；OCR 入口统计改用统一 dispatch 结果。 |
+| `LayoutAnalyzer._extract_*_from_record()` | `paddle_layout_schema.py` | 删除旧私有 shim；字段解析直接走 schema adapter。 |
 
 ## 删除顺序
 
@@ -31,12 +37,12 @@
 - Paddle 返回字段必须先经过 `paddle_layout_schema.py`。
 - OCR dispatch 必须先经过 `ocr_dispatch_policy.py`。
 
-完成状态：部分完成。
+完成状态：部分完成；`recognizable_blocks` / `ocr_completed` / layout record shim 已删除。
 
 ### Phase 2: 调用方迁移
 
-- `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。
-- `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。
+- `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
+- `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
 - `Line.text` 写入点收口到 proof/OCR 组装层，普通 UI 不直接写。
 - controller 中业务 gate 继续下沉到 `workflow_state.py` 或后续 `WorkflowStateMachine`。
 
