@@ -33,6 +33,7 @@ from app.core.api_profiles import (
 from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
+from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger
 from app.core.ocr_dispatch_policy import is_text_ocr_candidate
 from app.core.paddle_layout_schema import (
@@ -222,13 +223,15 @@ class LayoutAnalyzer:
             note_parts.append(f"source_label={raw_type}")
 
         raw_overlay_items.append((raw_type, bbox))
+        raw_payload, app_payload = split_legacy_raw_payload(normalized.raw)
         block = Block(
             block_type=BlockType.from_paddle(raw_type),
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
             source_label=raw_type,
-            raw_payload=dict(normalized.raw),
+            raw_payload=raw_payload,
+            app_payload=app_payload,
         )
         block.recognizable = is_text_ocr_candidate(block)
         page_blocks.append(block)
@@ -685,12 +688,14 @@ class LayoutAnalyzer:
                 continue
             if bbox.area <= 0:
                 continue
+            raw_payload, app_payload = split_legacy_raw_payload(item)
             page.blocks.append(Block(
                 block_type=BlockType.from_paddle(raw_type),
                 bbox=bbox,
                 order=i,
                 source_label=raw_type,
-                raw_payload=dict(item),
+                raw_payload=raw_payload,
+                app_payload=app_payload,
             ))
         self._rescale_blocks_if_suspicious(page)
         return page
@@ -701,7 +706,7 @@ class LayoutAnalyzer:
         """Call the configured AiStudio model endpoint; raises on network/auth errors."""
         import cv2
         from app.core.api_http import post_json_without_env_proxy
-        from app.core.ocr_config import get_config
+        from app.core.app_config import get_config
 
         cfg = get_config()
         url = resolve_api_endpoint_for_role(
@@ -807,7 +812,7 @@ class LayoutAnalyzer:
     # ── common interface ─────────────────────────────
 
     def analyze(self, page: Page) -> Page:
-        from app.core.ocr_config import get_config
+        from app.core.app_config import get_config
         mode = get_config()["mode"]
         if mode == "hanwang":
             return self._api_analyze(page)

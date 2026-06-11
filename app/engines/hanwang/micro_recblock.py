@@ -8,7 +8,7 @@ from typing import Any, Callable
 import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY
+from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY, split_legacy_raw_payload
 from app.core.logging import get_logger
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
@@ -1313,9 +1313,23 @@ def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> in
 
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     raw_payload = dict(block.raw_payload)
+    app_payload = dict(block.app_payload)
     parent_index = _parent_index_for_raw_payload(page, raw_payload)
+    if parent_index < 0:
+        parent_index = _int_value(
+            app_payload.get("_layout_paddle_parent_index", app_payload.get("paddle_parent_index")),
+        )
+    binding = app_payload.get(PADDLE_BINDING_KEY)
+    if parent_index < 0 and isinstance(binding, dict):
+        parent_index = _int_value(binding.get("parent_index"))
     source_label = (
         authoritative_paddle_label(raw_payload)
+        or str(app_payload.get("block_label") or "")
+        or (
+            str(binding.get("source_label") or binding.get("block_type") or "")
+            if isinstance(binding, dict)
+            else ""
+        )
         or block.source_label
         or block.block_type.value
     )
@@ -1328,6 +1342,11 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_block_recognizable": bool(block.recognizable),
     }
+    if isinstance(binding, dict) and binding:
+        row[PADDLE_BINDING_KEY] = dict(binding)
+    for key in (ROUTE_SUBBLOCKS_FIELD, LAYOUT_LINE_ROUTES_FIELD):
+        if key in app_payload:
+            row[key] = app_payload[key]
     if parent_index >= 0:
         row["_layout_paddle_parent_index"] = parent_index
     return row
@@ -1344,7 +1363,7 @@ def _layout_block_content(block: Block) -> str:
 
 
 def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
-    binding = dict(block.raw_payload.get(PADDLE_BINDING_KEY) or {})
+    binding = dict(block.app_payload.get(PADDLE_BINDING_KEY) or {})
     if not binding:
         return None
     status = str(binding.get("status") or "")
@@ -1664,6 +1683,7 @@ class HanwangMicroRecBlockEngine:
             ]
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
+            raw_payload, app_payload = split_legacy_raw_payload(row.raw_block)
             new_blocks.append(
                 Block(
                     block_type=block_type,
@@ -1674,7 +1694,8 @@ class HanwangMicroRecBlockEngine:
                     recognizable=row.source == "hanwang",
                     note=" | ".join(note_parts),
                     source_label=row.block_label,
-                    raw_payload=dict(row.raw_block),
+                    raw_payload=raw_payload,
+                    app_payload=app_payload,
                 )
             )
 

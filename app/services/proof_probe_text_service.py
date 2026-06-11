@@ -50,7 +50,7 @@ def displayed_text(line: Line, page: Page, block: Block) -> str:
     ``fake_char``；其余位置原样输出 ``line.final_text``。无 active store / 无 probe
     时返回 ``line.final_text``。
     """
-    base = line.final_text or line.text or ""
+    base = line.display_text
     store = qp.get_active_store()
     if store is None or not base:
         return base
@@ -94,7 +94,7 @@ def save_displayed_edit(
         probes_pending = [p for p in store.for_line(page.page_number, bi, li)
                           if p.observation == "pending"]
 
-    base_true = line.final_text or line.text or ""
+    base_true = line.display_text
     if probes_pending and len(displayed_new_text) == len(displayed_old) == len(base_true):
         # 等长路径：精确按位反向映射
         new_true_chars = list(base_true)
@@ -120,7 +120,7 @@ def save_displayed_edit(
                 if ci >= len(new_true) or new_true[ci] != p.fake_char:
                     _mark_probe_corrected(p, page.page_number, bi, li, ci)
 
-    if new_true == (line.final_text or line.text or ""):
+    if new_true == line.display_text:
         return False
     line.update_text(new_true)
     _sync_chars_glyphs(line, new_true)

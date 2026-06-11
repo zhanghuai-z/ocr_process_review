@@ -11,7 +11,12 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget,
 )
 
-from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, OCR_TEXT_INVALIDATED_KEY
+from app.core.block_payload import (
+    HANWANG_BBOX_AUDIT_KEY,
+    OCR_TEXT_INVALIDATED_KEY,
+    payload_bool,
+    payload_get,
+)
 from app.core.block_attributes import block_attributes, block_display_label
 from app.models import Block, Page
 from app.models.enums import BlockType
@@ -250,11 +255,10 @@ class BlockInspector(QWidget):
 
     @staticmethod
     def _hanwang_audit_summary(block: Block) -> str:
-        payload = dict(getattr(block, "raw_payload", {}) or {})
-        audit = payload.get(HANWANG_BBOX_AUDIT_KEY)
+        audit = payload_get(block, HANWANG_BBOX_AUDIT_KEY)
         if not isinstance(audit, dict):
             return "\u65e0"
-        if bool(payload.get(OCR_TEXT_INVALIDATED_KEY)):
+        if payload_bool(block, OCR_TEXT_INVALIDATED_KEY):
             return "\u5df2\u5931\u6548\uff0c\u9700\u8981\u91cd\u65b0\u8fdb\u5165 OCR"
         route_count = int(audit.get("route_text_slice_count") or 0)
         recog_count = int(audit.get("hanwang_recog_group_count") or 0)

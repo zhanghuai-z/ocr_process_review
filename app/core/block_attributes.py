@@ -1,9 +1,4 @@
-"""Structured accessors for Paddle/PP-VL block attributes.
-
-The active model keeps normalized ``Block.block_type`` for broad workflow
-routing, while ``source_label`` and ``raw_payload`` preserve original Paddle
-semantics. Consumers should use this module instead of parsing ``Block.note``.
-"""
+"""Structured accessors for Paddle/PP-VL block attributes."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -27,6 +22,7 @@ class BlockAttributes:
     semantic_label: str = ""
     semantic_block_type: BlockType = BlockType.UNKNOWN
     raw_payload: dict[str, Any] = field(default_factory=dict)
+    app_payload: dict[str, Any] = field(default_factory=dict)
 
     @property
     def normalized_source_label(self) -> str:
@@ -69,8 +65,13 @@ class BlockAttributes:
 
 def block_attributes(block: Block) -> BlockAttributes:
     raw_payload = dict(block.raw_payload)
+    app_payload = dict(block.app_payload)
     raw_label = authoritative_paddle_label(raw_payload)
-    source_label = block.source_label or raw_label
+    binding = app_payload.get("paddle_binding")
+    binding_label = ""
+    if isinstance(binding, dict):
+        binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
+    source_label = block.source_label or binding_label or raw_label
     semantic_label = raw_label or source_label or block.block_type.value
     semantic_block_type = BlockType.from_paddle(semantic_label)
     if semantic_block_type == BlockType.UNKNOWN:
@@ -82,6 +83,7 @@ def block_attributes(block: Block) -> BlockAttributes:
         semantic_label=semantic_label,
         semantic_block_type=semantic_block_type,
         raw_payload=raw_payload,
+        app_payload=app_payload,
     )
 
 

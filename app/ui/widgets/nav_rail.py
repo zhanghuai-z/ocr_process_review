@@ -4,8 +4,6 @@
 - 底部：设置齿轮（仅此一个）
 
 「▶ 运行版面分析」「⤓ 导出」「项目名」迁移到 TopBar（见 top_bar.py），不在本控件。
-
-signals 命名跟旧 TopNavBar 保持一致，便于复用 main_window 的连线。
 """
 from __future__ import annotations
 from typing import List
@@ -46,7 +44,6 @@ class NavRail(QWidget):
     """左侧竖向导航栏。"""
     step_clicked = Signal(int)
     settings_clicked = Signal()
-    account_clicked = Signal()  # 保留信号但不再有按钮触发它（向后兼容）
 
     WIDTH = 56
 

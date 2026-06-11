@@ -324,7 +324,13 @@ def attach_page_ocr_line_routes(
             )
         ]
         formula_subblocks = [subblock for subblock in routed_subblocks if _is_route_formula_label(subblock["label"])]
-        line_hints_for_formula = [PaddleRouteLineHint(text=line.text, bbox=line.bbox) for line in lines]
+        line_hints_for_formula = [
+            PaddleRouteLineHint(
+                text=getattr(line, "display_text", getattr(line, "text", "")),
+                bbox=line.bbox,
+            )
+            for line in lines
+        ]
         recovered = recover_inline_formula_segments(
             parent_text=block_text(block),
             line_hints=line_hints_for_formula,

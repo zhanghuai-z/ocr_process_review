@@ -177,8 +177,9 @@ def test_round17_dialog_realtime_refresh_on_probe_observed(monkeypatch):
     QApplication.processEvents()
 
     assert refresh_calls, "probe.observed 后应至少触发一次 refresh_panels_cb"
-    # rate label 应反映 1 已 corrected
-    assert "1/1" in dlg._rate_lbl.text() or "corrected" in dlg._rate_lbl.text().lower() or "1" in dlg._rate_lbl.text()
+    state = dlg.quality_state
+    assert state.corrected == 1
+    assert state.total_probes == 1
     dlg.deleteLater()
 
 

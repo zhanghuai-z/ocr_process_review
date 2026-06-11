@@ -321,11 +321,9 @@ class OcrPipeline:
             if not line.ocr_text:
                 line.ocr_text = line.text
             if not line.original_text:
-                line.original_text = line.text
+                line.original_text = line.ocr_text or line.text
             if not line.final_text:
-                line.final_text = line.text
-            else:
-                line.text = line.final_text
+                line.final_text = line.ocr_text or line.text
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:

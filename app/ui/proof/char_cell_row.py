@@ -7,7 +7,7 @@
   无需额外代码）；
 - Enter 在任意 cell 上提交本行（emit commit_requested），让 panel 跳到
   下一处 AUTO_FLAGGED；
-- 任意 cell 编辑后：收集所有 cell 文本拼成新 line.text，emit text_saved；
+- 任意 cell 编辑后：收集所有 cell 文本拼成新 final_text，emit text_saved；
 - line.chars 为空（OCR 没产生 per-char bbox）时，回退展示一条提示，避免
   让用户以为字格模式坏了。
 
@@ -75,7 +75,7 @@ def classify_char_kind(ch: str) -> str:
 def line_looks_like_formula(text: str) -> bool:
     """Phase 14b：粗略判断本行是否公式行 → 字格模式 fallback 不构建 cell。
 
-    边界：line.text 含 \begin{ 或 包裹 $$ 或 整行 ≥40% 字符是公式 kind 时视为公式。
+    边界：final_text 含 \begin{ 或 包裹 $$ 或 整行 ≥40% 字符是公式 kind 时视为公式。
     """
     if not text:
         return False
@@ -201,8 +201,8 @@ class CharCellRow(QFrame):
         # 否则用户在字格模式编辑会静默丢掉行末未对上图的字。默认空串。
         self._trailing_overflow: str = ""
         # Phase 18 blocker 2：显式接收"显示空间"文本（quality-probe 开启时含 fake_char）。
-        # 默认 fall back 到 line.text，保持纯单元测试 / 无 probe 场景行为不变。
-        self._display_text: str = display_text if display_text is not None else (line.text or "")
+        # 默认 fall back 到 display_text，保持纯单元测试 / 无 probe 场景行为不变。
+        self._display_text: str = display_text if display_text is not None else line.display_text
         self.setObjectName("charCellRow")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(IMG_H + EDIT_H + 6)
@@ -243,7 +243,7 @@ class CharCellRow(QFrame):
             ref_h = IMG_H
         self._row_scale = (IMG_H - 4) / max(1, ref_h)  # 留 2px 上下空隙
         # Phase 14a：sequence-aware reseat
-        # 用 SequenceMatcher 把 line.text 字符序列对齐到 chars 字符序列，
+        # 用 SequenceMatcher 把显示文本字符序列对齐到 chars 字符序列，
         # 得到每个 cell 的 (init_text, kind) 元组：
         #   kind="equal"   text 与 OCR 字符一致 → 普通边框
         #   kind="replace" text 与 OCR 不同     → 红边警示

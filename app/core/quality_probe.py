@@ -7,21 +7,21 @@
 1. **少量、隐蔽** — 单次评测全文最多十几个 probe，单个同字 gallery 最多 1 个
    假象 crop，绝不能"整集合都变成假象"。
 2. **假象字来源 = 文中真实存在的字** — 不许凭空生成假字，不许从字典里乱挑。
-3. **混淆发生在切图 / 字形层** — line.text **绝不被修改**。混淆的是 VProof
+3. **混淆发生在切图 / 字形层** — line.final_text **绝不被污染**。混淆的是 VProof
    同字 gallery 里的 crop：在 "体" 的 gallery 中混入一个真实来自文档另一处
    "休" 的 crop（视觉接近）。
 4. **若无合适的"文中已存在近形字"来源，则跳过** — 宁可不投放，也不硬造
    荒谬错配。
-5. **不许图文错配** — 旧机制把 line.text[i] 替换成 fake_char、crop 仍然是
+5. **不许图文错配** — 旧机制把 final_text[i] 替换成 fake_char、crop 仍然是
    true_char 的图，肉眼一比就穿帮。新机制只动 gallery 来源、不动文本。
 
 ## 数据模型
 
 ``Probe``：
-- ``key`` → 文档中一个真实位置，该位置 line.text[char_index] 上的字就是
+- ``key`` → 文档中一个真实位置，该位置 line.final_text[char_index] 上的字就是
   ``true_char``（OCR 原字 / 用户视为"对"的字）。
 - ``fake_char`` → 该 true_char 的视觉近形字（且在文档别处出现过）；它只在
-  VProof "显示空间" 被注入到该位置，line.text 本身**永不改动**——这样
+  VProof "显示空间" 被注入到该位置，line.final_text 本身**永不被 fake_char 改写**——这样
   CharIndexService 重建时该位置仍归属于 true_char 的正确集合。
 - ``CONFUSION_MAP``
   中互为混淆字；同时文档里也至少有 1 处真实出现，否则用户根本不会进 gallery。
@@ -196,7 +196,7 @@ def is_block_eligible(block: Block) -> bool:
 
 
 def is_line_eligible(line: Line) -> bool:
-    text = line.text or ""
+    text = line.display_text
     if len(text) < MIN_LINE_LEN:
         return False
     if _digit_ratio(text) >= MAX_DIGIT_RATIO_IN_LINE:
@@ -207,13 +207,13 @@ def is_line_eligible(line: Line) -> bool:
 
 
 def candidate_indices_in_line(line: Line) -> list[int]:
-    """返回行内"足以充当假象字来源"的字符 index 列表（按 line.text 空间）。
+    """返回行内"足以充当假象字来源"的字符 index 列表（按 final_text 空间）。
 
     新口径下，候选的语义是：**这个字本身就在 CONFUSION_MAP 中**（即它至少
     有一个视觉近形字），未来若需要 plant 它的近形字到对方 gallery 时，就
     从这些位置里选一个真实坐标。
     """
-    text = line.text or ""
+    text = line.display_text
     if not is_line_eligible(line):
         return []
     n = len(text)
@@ -265,13 +265,13 @@ class ProbeKey:
 class Probe:
     """掺沙记录。
 
-    - ``key`` 指向**文档真实位置**，该位置 line.text 上的字符就是 ``fake_char``。
+    - ``key`` 指向**文档真实位置**，该位置 line.final_text 上的字符就是 true_char。
     - ``true_char`` 是该 fake_char 的视觉近形字，且它本身在文档里也至少出现过
       一次（否则用户不会进它的 gallery）。
     - ``observation`` = ``pending`` / ``corrected``；当用户在 VProof 槽位编辑
       对 ``key`` 这个位置做出任何修改时，置 ``corrected``。
 
-    **重要不变量**：本模块**不会**修改 line.text 中任何字符；line.text[key.char_index]
+    **重要不变量**：本模块**不会**把 fake_char 写入 final_text；final_text[key.char_index]
     在投放前后始终等于 ``true_char``。fake_char 只通过
     ``app.services.proof_probe_text_service.displayed_text`` 注入到显示空间。
     """
@@ -341,7 +341,7 @@ class ProbeStore:
 # ──────────────────────────────────────────────────────────────────
 
 def _has_existing_cut_char(line: Line, idx: int) -> bool:
-    text = line.text or ""
+    text = line.display_text
     if not (0 <= idx < len(text) and 0 <= idx < len(line.chars)):
         return False
     ch = line.chars[idx]
@@ -359,7 +359,7 @@ def candidate_indices_with_existing_crops(line: Line) -> list[int]:
 def count_existing_cjk_crop_chars(line: Line) -> int:
     return sum(
         1
-        for idx, ch in enumerate(line.text or "")
+        for idx, ch in enumerate(line.display_text)
         if _is_cjk(ch) and _has_existing_cut_char(line, idx)
     )
 
@@ -430,7 +430,7 @@ class ProbeSampler:
                     continue
                 for li, line in enumerate(block.lines):
                     total_cut_cjk += count_existing_cjk_crop_chars(line)
-                    text = line.text or ""
+                    text = line.display_text
                     for idx in candidate_indices_with_existing_crops(line):
                         pool.append(_Candidate(
                             key=ProbeKey(page.page_number, bi, li, idx),
@@ -471,10 +471,10 @@ class ProbeSampler:
             if per_line_count.get(line_key, 0) >= self.cfg.max_per_line:
                 continue
             # Round 18 起重定义：
-            #   probe.true_char = cand.char = 该位置 line.text 上的原字符（"正确字"）
+            #   probe.true_char = cand.char = 该位置 line.final_text 上的原字符（"正确字"）
             #   probe.fake_char = CONFUSION_MAP[cand.char] ∩ chars_in_doc \ {cand.char}
             #                      （即"显示空间里要注入的假象字"，且文档中实际存在）
-            # line.text 永远保持 true_char；displayed_text 才把该位置渲染成 fake_char。
+            # line.final_text 永远保持 true_char；displayed_text 才把该位置渲染成 fake_char。
             if per_true_char_count.get(cand.char, 0) >= self.cfg.max_per_true_char:
                 continue
             confusables = CONFUSION_MAP.get(cand.char, ())
@@ -801,9 +801,9 @@ def detect_corrections(
     store: Optional[ProbeStore],
     project_or_pages,
 ) -> int:
-    """以 line.text 为锚扫一遍 store 内所有 pending probe：
+    """以 line.final_text 为锚扫一遍 store 内所有 pending probe：
 
-    若 ``line.text[probe.key.char_index]`` 已不再是 ``probe.fake_char``（
+    若 ``line.final_text[probe.key.char_index]`` 已不再是投放时的 true_char（
     或更严格地说，已不再是 probe 当初投放时的位置内容），即认为该位置发生过
     "用户真实编辑"。把该 probe 标 corrected 并广播 ``probe.observed``。
 
@@ -832,16 +832,16 @@ def detect_corrections(
         if not (0 <= probe.key.line_index < len(block.lines)):
             continue
         line = block.lines[probe.key.line_index]
-        text = line.text or ""
+        text = line.display_text
         ci = probe.key.char_index
         if ci < 0 or ci >= len(text):
             # 行被截短 → 位置已被破坏，视为"用户改过"
             _mark_and_broadcast(probe)
             newly += 1
             continue
-        # 正确性判定：line.text 上该位置不再是 fake_char ⇒ 用户改过
-        # （probe 投放后 displayed_text 给出 fake_char，line.text 始终为 true_char；
-        #  用户在显示空间里改成任何非 fake_char 的字符，反向写回都会让 line.text
+        # 正确性判定：final_text 上该位置不再是 true_char ⇒ 用户改过
+        # （probe 投放后 displayed_text 给出 fake_char，final_text 始终为 true_char；
+        #  用户在显示空间里改成任何非 fake_char 的字符，反向写回都会让 final_text
         #  脱离原 true_char——这正是"以文本为锚点回正确集合"的信号。）
         if text[ci] != probe.true_char:
             _mark_and_broadcast(probe)

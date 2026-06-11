@@ -160,12 +160,12 @@ def test_overwrite_persists_after_char_switch():
     assert _select_char(v, "草")
     assert _select_char(v, "也")
     # 当前"也"只剩 1 个 entry（第二处仍是"也"），第一处已经变"好"
-    txt = v._pages[0].blocks[0].lines[0].text
+    txt = v._pages[0].blocks[0].lines[0].display_text
     assert txt == "好草也", f"模型未落盘：{txt!r}"
 
 
 def test_char_index_migrates_after_overwrite():
-    """改完字后 _char_svc 必须按新 text 重建：'也' 频次降，'好' 出现。"""
+    """改完字后 _char_svc 必须按新 final_text 重建：'也' 频次降，'好' 出现。"""
     v, _ = _load_vproof("也也也草")
     assert _select_char(v, "也")
     idx = v._gallery_model.index(0, 0)
@@ -198,7 +198,7 @@ def test_blank_via_backspace_also_persists():
     assert v._gallery_direct_blank()
     v._commit_local_edits_and_refresh()
 
-    txt = v._pages[0].blocks[0].lines[0].text
+    txt = v._pages[0].blocks[0].lines[0].display_text
     # 首字被替成空白；保留长度
     assert txt.startswith(" ") or txt[0] != "也", f"未清空：{txt!r}"
     # _char_svc 重建后"也"少一个

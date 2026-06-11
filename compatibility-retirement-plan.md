@@ -11,13 +11,7 @@
 
 ## 当前兼容点
 
-| 兼容点 | 当前作用 | 目标新入口 | 退出条件 | 风险 |
-| --- | --- | --- | --- | --- |
-| `Line.text <-> final_text` 镜像 | 兼容旧 UI / 存储 / 导出调用 `line.text` | proof 层统一读写 `line.final_text`，OCR 原文进入 `line.ocr_text` | UI、导出、proof、存储全部不再直接把 `text` 当最终真值；只保留加载旧库迁移测试 | 文本真值漂移，OCR 原文和人工终稿混淆 |
-| `Block.raw_payload` app-owned keys | 过渡保存 Paddle 原始数据、binding、UI flags、OCR invalidation | `block_payload.py` 常量/helper，后续拆 `PaddleArtifact / AnnotationBinding / LayoutSnapshot` | 所有 app-owned key 都只通过 helper；再迁入正式模型表或 dataclass | Paddle 原始真值和应用状态混在同一 dict |
-| `WorkflowController._page_gate_info()` | 保持 controller 内部入口 | `workflow_state.page_gate_info()` | UI / controller 逻辑直接依赖 typed `PageGateInfo` 后可降级为私有转发或删除 | 页面 gate 状态再次散落在 controller |
-| `app.core.ocr_config` | 兼容旧 OCR 配置访问方式 | `AppConfig` typed/default config | API 设置、引擎创建、测试全部不再通过旧模块读写 | 配置源分裂，UI 显示和真实调用不一致 |
-| UI/test compatibility fields, e.g. hidden labels/signals | 保旧测试或旧 UI 调用不崩 | 显式 view model / signal contract | 对应旧测试改为测试新 contract；旧 UI 调用点删除 | UI 文件继续膨胀，测试锁死旧结构 |
+当前没有登记中的兼容入口。新兼容入口必须先补充到本节，再进入实现。
 
 ## 已清理
 
@@ -27,6 +21,11 @@
 | `WorkflowController.ocr_completed` | `WorkflowController.has_any_ocr_result` | 删除旧 accessor，避免打开项目时继续传播模糊命名。 |
 | `Page.recognizable_blocks` | `Page.text_ocr_blocks` | 删除兼容 property；OCR 入口统计改用统一 dispatch 结果。 |
 | `LayoutAnalyzer._extract_*_from_record()` | `paddle_layout_schema.py` | 删除旧私有 shim；字段解析直接走 schema adapter。 |
+| `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
+| `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
+| `Line.text <-> final_text` 双向镜像 | `Line.final_text` / `Line.display_text` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 final/display，`text` 保留为 OCR/legacy 源字段。 |
+| `Block.raw_payload` app-owned keys | `Block.app_payload` + `block_payload.py` | schema v8 新增 `app_payload_json`；旧库加载时拆出 app-owned keys，vendor raw 与程序状态分离。 |
+| UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 
 ## 删除顺序
 
@@ -37,33 +36,33 @@
 - Paddle 返回字段必须先经过 `paddle_layout_schema.py`。
 - OCR dispatch 必须先经过 `ocr_dispatch_policy.py`。
 
-完成状态：部分完成；`recognizable_blocks` / `ocr_completed` / layout record shim 已删除。
+完成状态：已完成；已登记兼容入口均已删除或收口为正式模型字段。
 
 ### Phase 2: 调用方迁移
 
 - `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
 - `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
-- `Line.text` 写入点收口到 proof/OCR 组装层，普通 UI 不直接写。
-- controller 中业务 gate 继续下沉到 `workflow_state.py` 或后续 `WorkflowStateMachine`。
+- `Line.text` 写入点收口到 OCR/legacy 源字段，普通 UI 写入 `final_text`。已完成。
+- controller 中业务 gate 直接调用 `workflow_state.page_gate_info()`。已完成。
 
-完成状态：未完成。
+完成状态：已完成。
 
 ### Phase 3: 数据模型替换
 
-- 把 `paddle_binding` 升为 `AnnotationBinding`。
-- 把 `_route_subblocks` / `_layout_line_routes` 升为 `RoutingPlan` 或 `LayoutSnapshot` 字段。
-- 把 `ocr_text_invalidated` 升为 block/page revision 或正式 invalidation 字段。
-- 把 `raw_payload` 降级为只保存 vendor 原始 payload，不再保存 app 状态。
+- `paddle_binding` 已迁入 `Block.app_payload`，后续如需强类型可再升为 `AnnotationBinding` dataclass。
+- `_route_subblocks` / `_layout_line_routes` 已从 `Block.raw_payload` 拆入 `Block.app_payload`；page 级 PPVL 原始列表仍待后续 `LayoutSnapshot` 独立建模。
+- `ocr_text_invalidated` 已迁入 `Block.app_payload`；page 级 invalidation 已有 `Page.ocr_invalidated_reason`。
+- `raw_payload` 已降级为 vendor 原始 payload。
 
-完成状态：未开始。
+完成状态：第一阶段完成；page 级 `LayoutSnapshot` 是后续增强，不再作为当前兼容入口。
 
 ### Phase 4: 删除兼容入口
 
-- 删除已无生产调用的兼容 property / private shim。
-- 删除只服务旧 UI 结构的隐藏字段和信号。
-- 测试从“旧入口仍可用”改为“旧入口已不被主链依赖”。
+- 删除已无生产调用的兼容 property / private shim。已完成。
+- 删除只服务旧 UI 结构的隐藏字段和信号。已完成。
+- 测试从“旧入口仍可用”改为“旧入口已不被主链依赖”。已完成。
 
-完成状态：未开始。
+完成状态：已完成。
 
 ## 后续执行规则
 

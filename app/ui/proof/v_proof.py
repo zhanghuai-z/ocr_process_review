@@ -613,7 +613,7 @@ class VProofPanel(QWidget):
         self._external_refresh_timer.timeout.connect(self._do_external_refresh)
         self._pending_external_lines: set[int] = set()
         # vproof-ime-persist-visibility round 12 任务 3+4：本地直输/槽位编辑
-        # 之后需要把 _text_edit 落盘到 page.line.text 并重建 _char_svc，
+        # 之后需要把 _text_edit 落盘到 line.final_text 并重建 _char_svc，
         # 否则切走再回来 / 字索引计数都是旧的。debounce 120ms 合并连续按键。
         self._local_commit_timer = QTimer(self)
         self._local_commit_timer.setSingleShot(True)
@@ -898,7 +898,7 @@ class VProofPanel(QWidget):
         self._batch_clear_btn.clicked.connect(self._clear_gallery_selection)
         # Round 18：移除"标记已识别"无损路径。新机制以"文本即锚点"——
         # displayed_text 把 fake_char 注入到 OCR 文本窗口；用户在文本窗口里
-        # 真正改字才算 corrected（save_displayed_edit 反向写回 line.text 时
+        # 真正改字才算 corrected（save_displayed_edit 反向写回 final_text 时
         # 自动报点；_apply_replacement_to_selected 等批改路径走 detect_corrections）。
         batch_row.addWidget(self._batch_input, 1)
         batch_row.addWidget(self._batch_btn)
@@ -1125,7 +1125,7 @@ class VProofPanel(QWidget):
     def _extras_for_tokens(self, tokens: list[str]) -> list[CharEntry]:
         """Round 18：废弃。
 
-        新机制把 fake_char 注入到 OCR 文本窗口的 displayed_text；line.text
+        新机制把 fake_char 注入到 OCR 文本窗口的 displayed_text；final_text
         始终持有 true_char，所以 ``_char_svc.query(true_char)`` 已经包含
         probe 位置，gallery 不再需要任何 extras。保留方法签名仅为不动调用方。
         """
@@ -1463,7 +1463,7 @@ class VProofPanel(QWidget):
                     break
 
     def _candidate_request_for_entry(self, entry: CharEntry) -> LlmCandidateRequest:
-        line_text = entry.line.text or ""
+        line_text = entry.line.display_text
         return LlmCandidateRequest(
             token=entry.token_text or entry.char,
             page_number=entry.page_number,
@@ -1582,11 +1582,6 @@ class VProofPanel(QWidget):
                 _push(second)
 
         return ranked
-
-    def _explainable_candidates_for_entry(self, entry: CharEntry) -> List[str]:
-        # 保留以兼容旧调用点；内部委托给 _ranked_candidates。
-        request = self._candidate_request_for_entry(entry)
-        return self._ranked_candidates(entry, request)[:5]
 
     def _clear_candidate_buttons(self) -> None:
         while self._candidate_buttons_row.count():
@@ -1871,7 +1866,7 @@ class VProofPanel(QWidget):
             # 同步预填 slot 输入框（不抢焦点）
             if hasattr(self, "_slot_edit_input") and not self._slot_edit_input.hasFocus():
                 self._slot_edit_input.setText(text)
-            # round 12 任务 3+4：debounce 120ms 把编辑落到 page.line.text + 重建索引
+            # round 12 任务 3+4：debounce 120ms 把编辑落到 line.final_text + 重建索引
             self._local_commit_timer.start()
             return True
         return False
@@ -1899,12 +1894,12 @@ class VProofPanel(QWidget):
 
     # ───── vproof-ime-persist-visibility round 12 任务 3+4：本地编辑落盘 ─────
     def _commit_local_edits_and_refresh(self) -> None:
-        """把 _text_edit 当前内容保存到 page.line.text，并重建字索引/字列表。
+        """把 _text_edit 当前内容保存到 line.final_text，并重建字索引/字列表。
 
         本轮硬验收项 3 + 4 的核心：
           - 任务 3：把"也"改成"好"切走再回来不应回退 —— 之前
             _gallery_direct_overwrite 只动 _text_edit 的 QTextDocument，没回写
-            到 page.line.text，所以 _on_char_clicked 再次从 _char_svc.query 取
+            到 line.final_text，所以 _on_char_clicked 再次从 _char_svc.query 取
             出来还是旧"也"。
           - 任务 4：改"也"→"好"以后"也"的计数不变 —— 同样因为 _char_svc 没
             重建，频次是冻结的。
@@ -1974,7 +1969,7 @@ class VProofPanel(QWidget):
                 if not (0 <= entry.line_idx < len(block.lines)):
                     continue
                 line = block.lines[entry.line_idx]
-                txt = line.text or ""
+                txt = line.display_text
                 if 0 <= entry.char_idx < len(txt):
                     return txt[entry.char_idx]
         return None
@@ -2228,7 +2223,7 @@ class VProofPanel(QWidget):
             self._char_svc.build(self._pages)
             self._rebuild_char_list()
         # Round 18：以文本为锚的最终兜底——保存之后扫一遍所有 probe，
-        # 任何"line.text 不再持有 true_char"的位置都标 corrected 并广播。
+        # 任何"final_text 不再持有 true_char"的位置都标 corrected 并广播。
         try:
             
             qp.detect_corrections(qp.get_active_store(), self._pages)
@@ -2325,7 +2320,7 @@ class VProofPanel(QWidget):
         self._pending_external_lines.clear()
         # Phase 22 blocker 1：先把用户在 _text_edit 里尚未保存的输入落盘（走
         # _save_page_text 同样的 quality_probe 桥），否则紧接着的 _load_page
-        # 会用 page 当前 line.text 重新渲染，把用户在编辑的文本静默覆盖掉。
+        # 会用 page 当前 final_text 重新渲染，把用户在编辑的文本静默覆盖掉。
         if self._text_edit.toPlainText() != self._loaded_text:
             self._save_page_text()
         self._load_page(self._current_page_idx)

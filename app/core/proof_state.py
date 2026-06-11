@@ -79,7 +79,7 @@ class ProofLineViewModel:
         display_text: Optional[str] = None,
         source: str = "",
     ) -> "ProofLineViewModel":
-        text = display_text if display_text is not None else (line.final_text or line.text or "")
+        text = display_text if display_text is not None else line.display_text
         return cls(
             selection=ProofSelection.for_line(
                 page=page,
@@ -226,4 +226,3 @@ class QualityStatsState:
     sampled_from_chars: int = 0
     target_probes: int = 0
     density_text: str = ""
-

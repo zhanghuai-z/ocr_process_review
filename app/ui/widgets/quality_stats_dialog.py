@@ -7,13 +7,11 @@
 
 行为契约（保持与 Phase 11+ / Phase 24 一致）：
 - 开 → ``qp.set_active_store(store)``；关 → ``qp.reset_active_store()``
-- 任何路径**不会**改写 ``line.text``，导出文本永远不含假象字
+- 任何路径**不会**把假象字写入 ``line.final_text``，导出文本永远不含假象字
 
-测试兼容性：
-- 保留 ``_btn_toggle`` / ``_switch_status`` / ``_table`` / ``_rate_lbl`` /
-  ``_on_toggle`` 字段名。``_table`` 现在指向详情子窗内的 QTableWidget（懒创建）。
+测试契约：
+- 主窗只暴露状态控件；明细表通过 ``detail_table()`` 访问。
 - ``_switch_status`` 文案前缀 ``当前：未启用`` / ``当前：已启用`` 不变。
-- ``_rate_lbl.text()`` 初始值 ``rate = 待计算`` 不变（控件 hidden，仅供测试断言）。
 """
 from __future__ import annotations
 
@@ -288,7 +286,7 @@ class QualityStatsDialog(QDialog):
         self._btn_refresh = QPushButton("立刻刷新")
         self._btn_refresh.setMinimumHeight(28)
         self._btn_refresh.setToolTip(
-            "以 line.text 为锚扫一遍所有 probe，重算更正数并刷新本窗。"
+            "以 line.final_text 为锚扫一遍所有 probe，重算更正数并刷新本窗。"
         )
         self._btn_refresh.clicked.connect(self._on_manual_refresh)
         bottom.addWidget(self._btn_refresh)
@@ -299,19 +297,18 @@ class QualityStatsDialog(QDialog):
         bottom.addWidget(btn_box)
         root.addLayout(bottom)
 
-        # 隐藏的兼容字段：保留旧测试断言用的 _rate_lbl 文本接口
-        self._rate_lbl = QLabel("rate = 待计算", self)
-        self._rate_lbl.hide()
         self._load_sampler_controls()
         self._sand_count_spin.valueChanged.connect(self._on_sampler_controls_changed)
         self._sand_unit_combo.currentIndexChanged.connect(self._on_sampler_controls_changed)
 
-    # ── 兼容外部测试：暴露详情表格 ──────────────────────────────
+    def detail_table(self) -> QTableWidget:
+        """Return the detail table hosted by the lazy detail dialog."""
+        return self._ensure_detail_dialog()._table
 
     @property
-    def _table(self) -> QTableWidget:
-        """旧测试访问主窗 _table；现在指向详情子窗的表格（懒创建）。"""
-        return self._ensure_detail_dialog()._table
+    def quality_state(self) -> QualityStatsState:
+        """Typed quality-probe state consumed by tests and status panels."""
+        return self._quality_state
 
     def _ensure_detail_dialog(self) -> QualityStatsDetailDialog:
         if self._detail_dialog is None:
@@ -422,7 +419,7 @@ class QualityStatsDialog(QDialog):
     def _on_manual_refresh(self) -> None:
         """Round 18：用户主动点"立刻刷新"——可靠刷新触发点。
 
-        1. 调 ``qp.detect_corrections`` 以 line.text 为锚扫一遍所有 pending probe，
+        1. 调 ``qp.detect_corrections`` 以 line.final_text 为锚扫一遍所有 pending probe，
            漏报的位置在这里补标 corrected 并广播。
         2. 重新拉一遍 panels 与本窗的 view（圆环 / 详情表）。
         """
@@ -466,7 +463,6 @@ class QualityStatsDialog(QDialog):
             self._density_status.setText(self._density_feedback or f"当前密度：{self._density_text()}")
             self._scope_note.setText("状态：未启用；修改密度会自动保存。")
             self._ring.set_ratio(None, "")
-            self._rate_lbl.setText("rate = 待计算")
             self._ensure_detail_dialog().populate()
             return
 
@@ -511,11 +507,5 @@ class QualityStatsDialog(QDialog):
             f"{density_text} · 已观察 {observed}/{n}",
             main_text,
         )
-        self._rate_lbl.setText(
-            f"sample_char_detection = {corrected}/{total} "
-            f"(observed={observed}/{n}; pool={getattr(store, 'sampled_from_chars', 0)}; "
-            f"{density_text})"
-        )
-
-        # 始终把最新明细同步到详情子窗（隐藏即可，便于测试/外部直接读 _table）
+        # 始终把最新明细同步到详情子窗（隐藏也保持可查看的 detail_table 数据）
         self._ensure_detail_dialog().populate()

@@ -25,7 +25,7 @@ PROOF_SKIP_LINE_FLAGS = {
 }
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
-    text = line.text or ""
+    text = line.display_text
     bbox = line.bbox.normalize()
     for seen_text, seen_bbox in seen:
         if text == seen_text and bbox.iou(seen_bbox) >= 0.85:

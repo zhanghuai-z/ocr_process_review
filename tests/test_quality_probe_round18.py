@@ -113,8 +113,8 @@ def test_round18_save_displayed_edit_user_types_other_char_still_marks_corrected
     # 用户把 displayed[1] 从 "己" 改成 "巳"（不是 true_char 也不是 fake_char）
     save_displayed_edit(line, page, block, "己巳")
     assert probe.observation == "corrected"
-    # line.text 反映用户实际输入
-    assert line.text == "己巳"
+    # final_text 反映用户实际输入
+    assert line.final_text == "己巳"
 
 
 def test_round18_corrected_probe_position_appears_in_true_char_gallery():

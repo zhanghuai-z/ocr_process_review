@@ -65,8 +65,7 @@ from app.ui.proof import char_verdict as _cv
 # NOTE: AlignmentRibbon 已从布局中移除（proof-layout-collections 第 1 任务）。
 # 用户原话：“既然已经做图字对应，就不要第三行文本行”。图字 y 轴对应
 # 现在改回只走 hover/click 联动（图像悬停 → editor 高亮当前字；editor
-# 光标变 → 图像画当前字 bbox），不再用 ribbon 重复绘制一行文本。模块文
-# 件保留以兼容历史测试，但不再实例化。
+# 光标变 → 图像画当前字 bbox），不再用 ribbon 重复绘制一行文本。
 
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
@@ -119,6 +118,9 @@ def _debug_block_labels(block: Block) -> set[str]:
         value = attrs.raw_payload.get(key)
         if value:
             labels.add(normalize_source_label(value))
+        value = attrs.app_payload.get(key)
+        if value:
+            labels.add(normalize_source_label(value))
     return {label for label in labels if label}
 
 
@@ -132,12 +134,12 @@ def _line_has_formula_source(line: Line) -> bool:
     if formula_texts:
         return any(not is_formula_marker_token(text) for text in formula_texts)
     if has_formula_route:
-        return not is_formula_marker_token(line.text or line.final_text)
+        return not is_formula_marker_token(line.display_text)
     return False
 
 
 def _line_is_formula_marker_only(line: Line) -> bool:
-    text = line.text or line.final_text
+    text = line.display_text
     if text and is_formula_marker_token(text):
         return True
     formula_texts = [
@@ -185,7 +187,7 @@ def _debug_line_kind(block: Block, line: Line) -> str:
 
 
 def _is_duplicate_debug_line(line: Line, seen: list[tuple[str, object]]) -> bool:
-    text = line.text or ""
+    text = line.display_text
     bbox = line.bbox.normalize()
     for seen_text, seen_bbox in seen:
         if text == seen_text and bbox.iou(seen_bbox) >= 0.85:
@@ -456,7 +458,7 @@ class _RowEditor(QPlainTextEdit):
             #   - 普通字符输入：仍按"自动选下一字 + 覆写"路径。
             #   - 输入长度 > 选区长度：自动裁断到选区长度（不再拒绝，不再弹 tooltip）。
             #   - Ctrl+X 剪切：把选区填空，而非拒绝。
-            #   注：blank 用 ASCII 空格 ' '；保存后 line.text 的相应字位置即为空。
+            #   注：blank 用 ASCII 空格 ' '；保存后 final_text 的相应字位置即为空。
             blank = " "
             if key == Qt.Key.Key_Backspace:
                 cur = self.textCursor()
@@ -911,13 +913,6 @@ class _LinePair(QFrame):
             llm_char=llm_ch,
         )
 
-    def _classify_char_color(self, i: int) -> Optional[str]:
-        """兼容旧调用点：返回颜色 hex；None = 默认（不上前景色）。"""
-        v = self._classify_char_verdict(i)
-        if v is None or v.color == _cv.COLOR_UNVERIFIED:
-            return None
-        return v.color
-
     def _refresh_extra_selections(self) -> None:
         """生成 editor 的 extraSelections：
         - 按 verdict 给每个字上前景色（绿/橙/红/灰）。
@@ -1160,7 +1155,7 @@ class _LinePair(QFrame):
         editor.set_slot_geometry(x_centers, widths)
 
     def refresh_text(self) -> None:
-        """外部（VProof / probe 切换）更新 line.text 后同步 editor 文本。
+        """外部（VProof / probe 切换）更新 final_text 后同步 editor 文本。
 
         Phase 25：editor 始终可见 → 直接 blockSignals + setPlainText 重写当前
         文本，避免触发 dirty flush。active 行上若用户正在编辑，会被覆盖
@@ -1248,11 +1243,6 @@ class _LinePair(QFrame):
         self._editor.setPlainText(_rev_canon)
         self._editor.apply_inline_y_axis_metrics()
         self._editor.blockSignals(False)
-
-    def _highlight_low_conf(self) -> None:
-        # Phase 25：低置信度高亮已经通过 _refresh_extra_selections 实现
-        # （per-char ExtraSelection 背景色），这里保留方法仅为兼容旧调用点。
-        self._refresh_extra_selections()
 
     def _refresh_status(self) -> None:
         status = self._line.proof_status
@@ -1978,7 +1968,7 @@ class HProofPanel(QWidget):
             self._update_stats()
 
     def _update_stats(self) -> None:
-        total_chars = sum(len(ln.text or "") for _, ln, _, _ in self._items)
+        total_chars = sum(len(ln.display_text) for _, ln, _, _ in self._items)
         diff_count  = sum(
             1 for _, ln, _, _ in self._items
             if ln.proof_status in (ProofStatus.MODIFIED, ProofStatus.AUTO_FLAGGED)

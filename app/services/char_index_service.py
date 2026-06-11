@@ -92,7 +92,7 @@ def _is_vertical_line(bbox: BBox) -> bool:
 
 
 def _estimate_char_bbox(line: Line, idx: int, total: int) -> Optional[BBox]:
-    """兼容旧测试与旧纵校路径的字符框估算。"""
+    """Fallback character bbox estimate when OCR did not provide char boxes."""
     if total <= 0:
         return None
     bbox = line.bbox
@@ -105,7 +105,7 @@ def _estimate_char_bbox(line: Line, idx: int, total: int) -> Optional[BBox]:
 
 @dataclass
 class CharEntry:
-    """单个字符索引记录，兼容旧纵校 UI 与新 proof 链路。"""
+    """Single character index record shared by vertical proof and proof state."""
 
     char: str
     page_path: str
@@ -186,7 +186,7 @@ class CharIndexService:
             return
 
         if not line.chars:
-            text = line.text or ""
+            text = line.display_text
             for char_idx, glyph in enumerate(text):
                 self._maybe_add(
                     glyph,

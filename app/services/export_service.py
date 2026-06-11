@@ -74,7 +74,7 @@ def get_export_text(line: Line) -> str:
     - 不读取 llm_suggestion（除非人工已接受）
     - 不读取 ocr_text（除非人工未修改且没有原始文本）
     """
-    return line.final_text or line.text
+    return line.display_text
 
 
 def get_block_label(block: Block) -> str:

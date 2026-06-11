@@ -6,7 +6,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.engines import OcrContext
 from app.engines.real_ocr_adapter import ApiOcrEngine, LocalOcrEngine
-from app.core.ocr_config import get_config
+from app.core.app_config import get_config
 from app.models import BBox, Block, BlockType, Line, Page
 
 

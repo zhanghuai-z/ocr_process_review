@@ -24,6 +24,7 @@ from app.core.block_payload import (
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,
     UI_LOCK_OVERRIDDEN_KEY,
     payload_bool,
+    payload_get,
     set_payload_entries,
 )
 from app.core.ocr_dispatch_policy import is_text_ocr_candidate
@@ -922,6 +923,8 @@ class LayoutPanel(QWidget):
                 source_label="inline_formula",
                 raw_payload={
                     **dict(subblock.get("raw_payload") if isinstance(subblock.get("raw_payload"), dict) else {}),
+                },
+                app_payload={
                     PADDLE_BLOCK_LABEL_KEY: "inline_formula",
                     PADDLE_BLOCK_BBOX_KEY: origin,
                     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
@@ -996,8 +999,7 @@ class LayoutPanel(QWidget):
     def _has_inline_formula_origin_block(page: Page, origin_bbox: list[int]) -> bool:
         origin_tuple = tuple(origin_bbox)
         for block in page.blocks:
-            payload = dict(getattr(block, "raw_payload", {}) or {})
-            if tuple(payload.get(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY) or ()) == origin_tuple:
+            if tuple(payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY) or ()) == origin_tuple:
                 return True
             if normalize_paddle_label(getattr(block, "source_label", "")) != "inline_formula":
                 continue
@@ -1006,8 +1008,7 @@ class LayoutPanel(QWidget):
         return False
 
     def _mark_generated_inline_formula_handled(self, page: Page, block: Block) -> None:
-        payload = dict(getattr(block, "raw_payload", {}) or {})
-        origin = payload.get(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
+        origin = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
         if not origin:
             return
         origin_tuple = tuple(origin)

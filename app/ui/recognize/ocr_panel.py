@@ -127,7 +127,8 @@ class OcrPanel(QWidget):
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
                 for line in block.lines:
-                    preview = line.text[:40] + ("…" if len(line.text) > 40 else "")
+                    line_text = line.display_text
+                    preview = line_text[:40] + ("…" if len(line_text) > 40 else "")
                     status_str = {
                         ProofStatus.UNCHECKED: "",
                         ProofStatus.AUTO_FLAGGED: "⚠ 低置信",

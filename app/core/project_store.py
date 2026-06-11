@@ -19,6 +19,7 @@ from app.models import (
     LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
 )
 
+from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 
 logger = get_logger(__name__)
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS block (
     recognizable    INTEGER NOT NULL DEFAULT 1,
     note            TEXT    NOT NULL DEFAULT '',
     source_label    TEXT    NOT NULL DEFAULT '',
-    raw_payload_json TEXT   NOT NULL DEFAULT '{}'
+    raw_payload_json TEXT   NOT NULL DEFAULT '{}',
+    app_payload_json TEXT   NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS line (
@@ -171,6 +173,9 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     7: [
         "ALTER TABLE page ADD COLUMN ocr_invalidated_reason TEXT NOT NULL DEFAULT '';",
+    ],
+    8: [
+        "ALTER TABLE block ADD COLUMN app_payload_json TEXT NOT NULL DEFAULT '{}';",
     ],
 }
 
@@ -415,12 +420,14 @@ class ProjectStore:
             block.source.value, int(block.is_locked), int(block.recognizable),
             block.note, block.source_label,
             json.dumps(block.raw_payload, ensure_ascii=False),
+            json.dumps(block.app_payload, ensure_ascii=False),
         )
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
-                "source, is_locked, recognizable, note, source_label, raw_payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "source, is_locked, recognizable, note, source_label, raw_payload_json, "
+                "app_payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 values,
             )
             block.id = cur.lastrowid
@@ -428,7 +435,8 @@ class ProjectStore:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, is_locked=?, recognizable=?, note=?, "
-                "source_label=?, raw_payload_json=? WHERE id=? AND page_id=?",
+                "source_label=?, raw_payload_json=?, app_payload_json=? "
+                "WHERE id=? AND page_id=?",
                 (*values, block.id, page_id),
             )
             if cur.rowcount != 1:
@@ -453,8 +461,11 @@ class ProjectStore:
     def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
         bb = line.bbox
         final_text = line.final_text or line.text
+        ocr_text = line.ocr_text or line.text or final_text
+        if not line.text:
+            line.text = ocr_text
         line.final_text = final_text
-        line.text = final_text
+        line.ocr_text = ocr_text
         values = (
             block_id, line.text, line.final_text, line.original_text, line.confidence,
             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
@@ -541,8 +552,11 @@ class ProjectStore:
     def _update_line_no_commit(self, line: Line) -> None:
         bb = line.bbox
         final_text = line.final_text or line.text
+        ocr_text = line.ocr_text or line.text or final_text
+        if not line.text:
+            line.text = ocr_text
         line.final_text = final_text
-        line.text = final_text
+        line.ocr_text = ocr_text
         cur = self.conn.execute(
             "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
@@ -618,6 +632,10 @@ class ProjectStore:
         ).fetchall()
         blocks = []
         for r in rows:
+            raw_payload, app_payload = split_legacy_raw_payload(
+                _json_to_dict(r["raw_payload_json"]),
+                _json_to_dict(r["app_payload_json"]) if "app_payload_json" in r.keys() else {},
+            )
             block = Block(
                 block_type=BlockType(r["block_type"]),
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
@@ -628,7 +646,8 @@ class ProjectStore:
                 recognizable=bool(r["recognizable"]),
                 note=r["note"],
                 source_label=r["source_label"],
-                raw_payload=_json_to_dict(r["raw_payload_json"]),
+                raw_payload=raw_payload,
+                app_payload=app_payload,
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)
@@ -641,14 +660,14 @@ class ProjectStore:
         lines = []
         for r in rows:
             line = Line(
-                text=r["final_text"] or r["text"],
+                text=r["text"],
                 final_text=r["final_text"] or r["text"],
                 original_text=r["original_text"],
                 confidence=r["confidence"],
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 proof_status=ProofStatus(r["proof_status"]),
                 id=r["id"],
-                ocr_text=r["ocr_text"],
+                ocr_text=r["ocr_text"] or r["text"],
                 llm_suggestion=r["llm_suggestion"],
                 llm_reason=r["llm_reason"],
                 llm_review_status=LlmReviewStatus(r["llm_review_status"]),

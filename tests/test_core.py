@@ -439,13 +439,13 @@ def test_block_payload_helpers_preserve_existing_entries():
     )
 
     set_payload_entries(block, {"custom": 1})
-    assert payload_get(block, "vendor") == {"keep": True}
+    assert payload_get(block, "vendor") is None
     assert payload_get(block, "custom") == 1
     assert payload_bool(block, "custom") is True
 
     mark_ocr_text_invalidated(block, "block_moved")
-    assert block.raw_payload[OCR_TEXT_INVALIDATED_KEY] is True
-    assert block.raw_payload[OCR_INVALIDATION_KIND_KEY] == "block_moved"
+    assert block.app_payload[OCR_TEXT_INVALIDATED_KEY] is True
+    assert block.app_payload[OCR_INVALIDATION_KIND_KEY] == "block_moved"
     assert block.raw_payload["vendor"] == {"keep": True}
 
     print("test_block_payload_helpers_preserve_existing_entries PASSED")
@@ -613,7 +613,7 @@ def test_project_store_persists_ppvl_parsing_res_list():
         os.unlink(db_path)
 
 
-def test_line_final_text_alias_and_project_store_roundtrip():
+def test_line_final_text_contract_and_project_store_roundtrip():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
@@ -623,14 +623,16 @@ def test_line_final_text_alias_and_project_store_roundtrip():
     try:
         bb = BBox(0, 0, 100, 20)
         line = Line(text="OCR text", final_text="人工终稿", confidence=0.9, bbox=bb)
-        assert line.text == "人工终稿"
+        assert line.text == "OCR text"
+        assert line.final_text == "人工终稿"
+        assert line.display_text == "人工终稿"
         line.text = "直接兼容写入"
-        assert line.final_text == "直接兼容写入"
+        assert line.final_text == "人工终稿"
         line.final_text = "最终真值"
-        assert line.text == "最终真值"
+        assert line.text == "直接兼容写入"
         line.final_text = ""
-        assert line.text == ""
-        line.final_text = "最终真值"
+        assert line.display_text == "直接兼容写入"
+        line.update_final_text("最终真值")
 
         project = OcrProject(
             name="final_text",
@@ -642,9 +644,9 @@ def test_line_final_text_alias_and_project_store_roundtrip():
             loaded = store.load_project(project_id=1)
             loaded_line = loaded.pages[0].blocks[0].lines[0]
             assert loaded_line.final_text == "最终真值"
-            assert loaded_line.text == "最终真值"
+            assert loaded_line.text == "直接兼容写入"
 
-        print("test_line_final_text_alias_and_project_store_roundtrip PASSED")
+        print("test_line_final_text_contract_and_project_store_roundtrip PASSED")
     finally:
         os.unlink(db_path)
 
@@ -831,7 +833,8 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
         assert reloaded2.pages[0].blocks[0].id != p1_block.id
         assert reloaded2.pages[0].blocks[0].lines[0].id != p1_line.id
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id != p1_char.id
-        assert reloaded2.pages[0].blocks[0].lines[0].text == "乙已改"
+        assert reloaded2.pages[0].blocks[0].lines[0].final_text == "乙已改"
+        assert reloaded2.pages[0].blocks[0].lines[0].display_text == "乙已改"
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].char == "乙"
         assert reloaded2.pages[0].id != original_p2_ids[0]
         assert reloaded2.pages[0].blocks[0].id != original_p2_ids[1]
@@ -2208,7 +2211,7 @@ def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
             assert page.blocks[0].bbox == BBox(10, 10, 50, 10)
             assert page.blocks[0].lines == []
             assert page.blocks[0].source == BlockSource.USER_EDITED
-            assert page.blocks[0].raw_payload["ocr_text_invalidated"] is True
+            assert page.blocks[0].app_payload["ocr_text_invalidated"] is True
             assert changed
         finally:
             panel.close()
@@ -2261,7 +2264,7 @@ def test_layout_panel_defaults_auto_text_blocks_locked():
             assert "锁定" in panel._status_lbl.text()
             panel._unlock_page_blocks()
             assert text_block.is_locked is False
-            assert text_block.raw_payload["ui_lock_overridden"] is True
+            assert text_block.app_payload["ui_lock_overridden"] is True
         finally:
             panel.close()
 
@@ -2288,6 +2291,8 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             lines=[Line(text="甲$ A $乙", confidence=0.9, bbox=BBox.from_xyxy(0, 0, 120, 40))],
             raw_payload={
                 "block_label": "text",
+            },
+            app_payload={
                 "_hanwang_bbox_audit": {
                     "schema": "hanwang_bbox_audit.v1",
                     "layout_block_bbox": [0, 0, 120, 40],
@@ -2308,7 +2313,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             block_type=BlockType.TABLE,
             bbox=BBox.from_xyxy(10, 50, 80, 70),
             source=BlockSource.AUTO_LAYOUT,
-            raw_payload={
+            app_payload={
                 "_hanwang_bbox_audit": {
                     "schema": "hanwang_bbox_audit.v1",
                     "layout_block_bbox": [10, 50, 80, 70],
@@ -2338,7 +2343,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             panel._inspector.set_block(skip_block)
             assert "未进入 Hanwang text-slice 路由" in panel._inspector._lbl_hanwang_audit.text()
 
-            text_block.raw_payload["ocr_text_invalidated"] = True
+            text_block.app_payload["ocr_text_invalidated"] = True
             page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
@@ -2389,7 +2394,7 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
             assert page.blocks[0].block_type == BlockType.EQUATION
             assert page.blocks[0].lines == []
             assert page.blocks[0].source == BlockSource.USER_EDITED
-            assert page.blocks[0].raw_payload["ocr_text_invalidated"] is True
+            assert page.blocks[0].app_payload["ocr_text_invalidated"] is True
         finally:
             panel.close()
 
@@ -2699,11 +2704,11 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
             panel.set_pages([page])
             assert len(panel._viewer._char_items) == 1
 
-            block.raw_payload["ocr_text_invalidated"] = True
+            block.app_payload["ocr_text_invalidated"] = True
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
 
-            block.raw_payload.clear()
+            block.app_payload.clear()
             page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
@@ -3847,7 +3852,7 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     table_binding = Block(
         block_type=BlockType.TEXT,
         bbox=bb,
-        raw_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
+        app_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
     )
     disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, recognizable=False)
 
@@ -4264,14 +4269,22 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 200, 40),
                 lines=[Line(text="bad active ocr", confidence=0.0, bbox=BBox.from_xyxy(0, 0, 200, 40))],
-                raw_payload=dict(parent_record),
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 200, 40],
+                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                },
+                app_payload={
+                    ROUTE_SUBBLOCKS_FIELD: list(parent_record[ROUTE_SUBBLOCKS_FIELD]),
+                    "_layout_line_routes": list(parent_record["_layout_line_routes"]),
+                },
             ),
             Block(
                 block_type=BlockType.EQUATION,
                 bbox=BBox.from_xyxy(110, 0, 140, 30),
                 source=BlockSource.MANUAL_DRAW,
                 source_label="inline_formula",
-                raw_payload={
+                app_payload={
                     "paddle_binding": {
                         "status": BINDING_PARENT_FORMULA_INFERRED,
                         "block_type": "equation",
@@ -5661,7 +5674,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
         try:
             panel._bind_manual_block_to_paddle(page, block)
 
-            binding = block.raw_payload["paddle_binding"]
+            binding = block.app_payload["paddle_binding"]
             assert binding["status"] == BINDING_PARENT_FORMULA_INFERRED
             assert binding["text"] == "$ B $"
             assert block.source_label == "inline_formula"
@@ -5702,7 +5715,7 @@ def test_layout_analyzer_reads_formula_geometry_records_for_routes():
     blocks, overlays = LayoutAnalyzer()._extract_api_blocks(page, data)
     subblocks = page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD]
 
-    assert blocks[0].raw_payload[ROUTE_SUBBLOCKS_FIELD] == subblocks
+    assert blocks[0].app_payload[ROUTE_SUBBLOCKS_FIELD] == subblocks
     assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
         ("inline_formula", [50, 10, 80, 32]),
     ]
@@ -7181,8 +7194,7 @@ def test_export_service():
     # 测试 get_export_text
     line = Line(text="最终文本", confidence=0.9, bbox=bb)
     assert get_export_text(line) == "最终文本"
-    object.__setattr__(line, "text", "兼容旧镜像")
-    object.__setattr__(line, "final_text", "人工最终真值")
+    line.update_final_text("人工最终真值")
     assert get_export_text(line) == "人工最终真值"
 
     # 测试空项目
@@ -7217,7 +7229,8 @@ def test_proof_display_edit_writes_final_text():
     assert displayed_text(line, page, block) == "OCR原文"
     assert save_displayed_edit(line, page, block, "人工终稿") is True
     assert line.final_text == "人工终稿"
-    assert line.text == "人工终稿"
+    assert line.text == "OCR原文"
+    assert line.display_text == "人工终稿"
 
     print("test_proof_display_edit_writes_final_text PASSED")
 
@@ -8322,7 +8335,7 @@ def test_api_settings_dialog_keeps_model_preset_sync():
 
 def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
+    from app.core.app_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
@@ -8353,7 +8366,7 @@ def test_api_settings_dialog_reverse_matches_url_and_persists_profile():
 
 def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
+    from app.core.app_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
@@ -8376,7 +8389,7 @@ def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
 
 def test_api_settings_dialog_collapses_mode_to_hanwang_when_saving():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
+    from app.core.app_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
@@ -8404,7 +8417,7 @@ def test_api_settings_dialog_collapses_mode_to_hanwang_when_saving():
 
 def test_api_settings_dialog_persists_hanwang_mode_with_api_runtime():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
+    from app.core.app_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
@@ -8478,7 +8491,7 @@ def test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5():
 
 def test_api_settings_dialog_persists_llm_candidate_settings():
     from app.core.app_config import AppConfig
-    from app.core.ocr_config import get_config
+    from app.core.app_config import get_config
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
     _get_qapp()
@@ -8722,8 +8735,8 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     line_routes = page.ppvl_parsing_res_list[0]["_layout_line_routes"]
 
     assert blocks[0].block_type == BlockType.TEXT
-    assert blocks[0].raw_payload["_route_subblocks"] == subblocks
-    assert blocks[0].raw_payload["_layout_line_routes"] == line_routes
+    assert blocks[0].app_payload["_route_subblocks"] == subblocks
+    assert blocks[0].app_payload["_layout_line_routes"] == line_routes
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
     assert subblocks[0]["raw_payload"]["label"] == "inline_formula"
@@ -9349,7 +9362,7 @@ def test_layout_analyzer_legacy_json_request_helper_preserves_png_payload():
 
 
 def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
-    import app.core.ocr_config as config_module
+    import app.core.app_config as config_module
     import app.core.layout_analyzer as layout_module
     from app.models import BBox, Block, BlockType, Page
 
@@ -9832,8 +9845,8 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
     assert len(panel._pairs) == 1
     assert panel._items[0][1] is new_line
     assert panel._pairs[0].line is new_line
-    assert new_line.text == "用户未保存"
-    assert old_line.text == "旧对象"
+    assert new_line.final_text == "用户未保存"
+    assert old_line.display_text == "旧对象"
     panel.close()
 
     print("test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans PASSED")

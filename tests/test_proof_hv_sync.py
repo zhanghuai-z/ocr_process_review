@@ -195,8 +195,8 @@ def test_quality_stats_dialog_opens_and_shows_no_active_store():
     )
     # 默认 store 未启用
     assert dlg._switch_status.text().startswith("当前：未启用")
-    assert dlg._table.rowCount() == 0
-    assert dlg._rate_lbl.text() == "rate = 待计算"
+    assert dlg.detail_table().rowCount() == 0
+    assert dlg.quality_state.enabled is False
     dlg.deleteLater()
 
 
@@ -236,7 +236,7 @@ def test_quality_stats_dialog_toggle_on_then_off(monkeypatch):
         assert qp_mod.get_active_store() is None or len(qp_mod.get_active_store()) == 0
     else:
         assert dlg._switch_status.text().startswith("当前：已启用")
-        assert dlg._table.rowCount() == len(store)
+        assert dlg.detail_table().rowCount() == len(store)
         # 关闭
         dlg._on_toggle(False)
         assert qp_mod.get_active_store() is None
@@ -350,13 +350,13 @@ def test_char_cell_row_focus_cell_method_moves_focus():
     row.deleteLater()
 
 
-def test_char_cell_row_reseat_uses_line_text_when_differs_from_chars():
-    """line.text 已被普通模式改过，进入字格模式时 cells 应反映 line.text。"""
+def test_char_cell_row_reseat_uses_final_text_when_differs_from_chars():
+    """final_text 已被普通模式改过，进入字格模式时 cells 应反映 final_text。"""
     from app.ui.proof.char_cell_row import CharCellRow
     from app.core.page_image_cache import PageImageCache
     proj = _make_project_with_chars("abc")
     line = proj.pages[0].blocks[0].lines[0]
-    line.text = "aXc"   # 普通模式编辑过
+    line.update_text("aXc")   # 普通模式编辑过
     row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
     assert [c.text() for c in row._cells] == ["a", "X", "c"]
     row.deleteLater()
@@ -428,12 +428,12 @@ def test_align_text_to_chars_text_shorter_leaves_insert():
 
 
 def test_char_cell_row_replace_kind_uses_red_border():
-    """line.text 与 chars 不一致的位置 → cell 加红边。"""
+    """final_text 与 chars 不一致的位置 → cell 加红边。"""
     from app.ui.proof.char_cell_row import CharCellRow
     from app.core.page_image_cache import PageImageCache
     proj = _make_project_with_chars("abc")
     line = proj.pages[0].blocks[0].lines[0]
-    line.text = "aXc"     # 普通模式改过：第二位被替换
+    line.update_text("aXc")     # 普通模式改过：第二位被替换
     row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
     assert "#d93025" in row._cells[1].styleSheet()    # replace → 红
     assert "#d93025" not in row._cells[0].styleSheet()
@@ -490,7 +490,7 @@ def test_char_cell_row_formula_line_falls_back_to_tip():
     from app.core.page_image_cache import PageImageCache
     proj = _make_project_with_chars("ab")
     line = proj.pages[0].blocks[0].lines[0]
-    line.text = r"\begin{aligned} a = b \end{aligned}"
+    line.update_text(r"\begin{aligned} a = b \end{aligned}")
     row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
     assert not row.has_cells
     row.deleteLater()
@@ -566,7 +566,7 @@ def test_char_cell_row_commit_preserves_trailing_overflow():
     from app.core.page_image_cache import PageImageCache
     proj = _make_project_with_chars("abc")  # chars=a,b,c
     line = proj.pages[0].blocks[0].lines[0]
-    line.text = "abcDE"  # 末尾 DE 是 trailing_overflow
+    line.update_text("abcDE")  # 末尾 DE 是 trailing_overflow
     row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
     assert row._trailing_overflow == "DE"
     captured = []
@@ -711,7 +711,7 @@ def test_v_proof_bus_unsubscribes_on_teardown():
 
 def test_save_button_in_normal_mode_still_persists():
     """Phase 21：普通模式（editor 可见）原有保存语义不能回退 ——
-    点"保存"仍然走 _save_displayed_edit 把 editor 文本落到 line.text。"""
+    点"保存"仍然走 _save_displayed_edit 把 editor 文本落到 final_text。"""
     from app.ui.proof.h_proof import HProofPanel
     proj = _make_project_with_chars("ab")
     h = HProofPanel()
@@ -721,8 +721,8 @@ def test_save_button_in_normal_mode_still_persists():
     assert not pair0._editor.isHidden()
     pair0._editor.setPlainText("WW")
     h._btn_save.click()
-    assert pair0._line.text == "WW", \
-        f"普通模式按钮保存失败：line.text={pair0._line.text!r}"
+    assert pair0._line.final_text == "WW", \
+        f"普通模式按钮保存失败：final_text={pair0._line.final_text!r}"
     h.deleteLater()
 
 
@@ -749,9 +749,9 @@ def test_v_proof_flushes_in_flight_text_before_external_sync():
     # vproof-direct-overwrite-residual round 11: external refresh is debounced
     # via QTimer now; flush it synchronously so flush-on-external-sync still runs.
     v._do_external_refresh()
-    # 用户的 in-flight 内容应已被持久化到 line.text
-    assert line0.text == "HELLO_EDITED", \
-        f"in-flight 文本未保住，line.text={line0.text!r}"
+    # 用户的 in-flight 内容应已被持久化到 final_text
+    assert line0.final_text == "HELLO_EDITED", \
+        f"in-flight 文本未保住，final_text={line0.final_text!r}"
     v.deleteLater()
 
 
@@ -834,9 +834,9 @@ def test_v_proof_h_change_other_line_not_overwritten_by_stale_baseline():
     new_flat = flat.replace("L0_orig", "L0_VEDIT")
     v._text_edit.setPlainText(new_flat)
     v._save_page_text()
-    assert page.blocks[0].lines[0].text == "L0_VEDIT"
-    # 模拟 HProof 改 line1 真实 line.text，并 publish
-    page.blocks[0].lines[1].text = "L1_HEDIT"
+    assert page.blocks[0].lines[0].final_text == "L0_VEDIT"
+    # 模拟 HProof 改 line1 真实 final_text，并 publish
+    page.blocks[0].lines[1].update_text("L1_HEDIT")
     v._bus.publish(
         "line.proof_changed",
         page_id=page.id, line_id=line2.id,
@@ -844,8 +844,8 @@ def test_v_proof_h_change_other_line_not_overwritten_by_stale_baseline():
         origin="h_proof_fake",
     )
     # line1 仍然是 HProof 的新值 —— 没有被 VProof 用 stale 整页文本回写
-    assert page.blocks[0].lines[1].text == "L1_HEDIT", \
-        f"VProof stale baseline 把 HProof 新内容覆盖了：{page.blocks[0].lines[1].text!r}"
+    assert page.blocks[0].lines[1].final_text == "L1_HEDIT", \
+        f"VProof stale baseline 把 HProof 新内容覆盖了：{page.blocks[0].lines[1].final_text!r}"
     v.deleteLater()
 
 
@@ -901,8 +901,8 @@ def test_phase24_quality_stats_dialog_table_has_corrected_column():
         refresh_panels_cb=lambda: None,
     )
     headers = [
-        dlg._table.horizontalHeaderItem(i).text()
-        for i in range(dlg._table.columnCount())
+        dlg.detail_table().horizontalHeaderItem(i).text()
+        for i in range(dlg.detail_table().columnCount())
     ]
     assert "真字" in headers, f"缺失真字列：{headers}"
     assert "假字" in headers, f"缺失假字列：{headers}"
@@ -916,16 +916,16 @@ def test_phase24_quality_stats_dialog_table_has_corrected_column():
     dlg.deleteLater()
 
 
-def test_phase24_quality_stats_dialog_rate_label_uses_percent_format():
-    """Phase 24 兼容：未启用时保留隐藏 rate label 初始值。"""
+def test_phase24_quality_stats_dialog_exposes_typed_disabled_state():
+    """未启用时通过 quality_state 暴露 typed 状态。"""
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
     proj = _make_project("hi")
     dlg = QualityStatsDialog(
         project_provider=lambda: proj,
         refresh_panels_cb=lambda: None,
     )
-    # 默认未启用，仍显示 "rate = 待计算"（兼容 Phase 11 测试）
-    assert dlg._rate_lbl.text() == "rate = 待计算"
+    assert dlg.quality_state.enabled is False
+    assert dlg.quality_state.density_text.startswith("当前密度：")
     dlg.deleteLater()
 
 

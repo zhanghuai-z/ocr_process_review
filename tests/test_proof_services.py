@@ -120,7 +120,8 @@ def test_save_displayed_edit_no_store_propagates_change():
     block = _block([line])
     page = _page(1, [block])
     assert save_displayed_edit(line, page, block, "abd") is True
-    assert line.text == "abd"
+    assert line.final_text == "abd"
+    assert line.display_text == "abd"
 
 
 def test_save_displayed_edit_no_store_no_change_returns_false():
@@ -133,7 +134,7 @@ def test_save_displayed_edit_no_store_no_change_returns_false():
 
 def test_save_displayed_edit_with_probe_does_not_touch_unrelated_text():
     """Round 15 后：save_displayed_edit 不再反向剥离 fake_char，
-    只有调用者传进来的文本才会被写入 line.text。"""
+    只有调用者传进来的文本才会被写入 final_text。"""
     line = _line("今天我们来学习己经发生过的历史")
     block = _block([line])
     page = _page(1, [block])
@@ -147,14 +148,14 @@ def test_save_displayed_edit_with_probe_does_not_touch_unrelated_text():
 
 
 def test_save_displayed_edit_block_not_in_page_falls_back_to_direct_write():
-    """resolve 失败时退化为直接写 line.text（和原 inline 实现一致）。"""
+    """resolve 失败时退化为直接写 final_text。"""
     line = _line("abc")
     block = _block([line])
     other_block = _block([_line("xyz")])
     page = _page(1, [block])
     set_active_store(ProbeStore())
     assert save_displayed_edit(line, page, other_block, "abd") is True
-    assert line.text == "abd"
+    assert line.final_text == "abd"
 
 
 # ════════════════════════════════════════════════════════════════

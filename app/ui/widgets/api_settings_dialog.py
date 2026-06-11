@@ -23,7 +23,7 @@ from app.core.api_profiles import (
 )
 from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.llm_rules import get_default_llm_rules_path
-from app.core.ocr_config import get_config, update_config
+from app.core.app_config import get_config, update_config
 from app.core.paddle_v16_client import (
     PaddleV16LayoutClient,
     build_paddle_v16_optional_payload,

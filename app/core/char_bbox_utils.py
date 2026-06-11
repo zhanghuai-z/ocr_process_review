@@ -467,7 +467,8 @@ def ensure_line_char_bboxes(
     page_image: Optional[np.ndarray] = None,
 ) -> List[Char]:
     """确保 line.chars 至少拥有与文本长度一致的 page-space bbox。"""
-    if not line.text:
+    text = line.display_text
+    if not text:
         line.chars = []
         return []
 
@@ -481,7 +482,7 @@ def ensure_line_char_bboxes(
                 bbox_granularity=BBOX_GRANULARITY_UNAVAILABLE,
                 token_text=glyph,
             )
-            for glyph in line.text
+            for glyph in text
         ]
         return line.chars
 
@@ -492,12 +493,12 @@ def ensure_line_char_bboxes(
     )
     line.bbox = refined_line_bbox
     split_bboxes = (
-        refine_line_char_bboxes(refined_line_bbox, line.text, page_image)
+        refine_line_char_bboxes(refined_line_bbox, text, page_image)
         if page_image is not None
-        else split_line_bbox_into_char_bboxes(refined_line_bbox, line.text)
+        else split_line_bbox_into_char_bboxes(refined_line_bbox, text)
     )
     chars: List[Char] = []
-    for idx, glyph in enumerate(line.text):
+    for idx, glyph in enumerate(text):
         existing = line.chars[idx] if idx < len(line.chars) else None
         has_explicit_bbox = (
             existing is not None

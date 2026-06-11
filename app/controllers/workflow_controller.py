@@ -15,7 +15,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from app.core.block_payload import mark_ocr_text_invalidated
 from app.core.logging import get_logger
-from app.core.ocr_config import get_config
+from app.core.app_config import get_config
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
 from app.core.workflow_state import (
@@ -24,7 +24,6 @@ from app.core.workflow_state import (
     STEP_LAYOUT,
     STEP_OCR,
     STEP_VPROOF,
-    PageGateInfo,
     WorkflowProgressState,
     WorkflowViewState,
     compute_max_step,
@@ -543,9 +542,6 @@ class WorkflowController(QObject):
             mode = "local"
         return mode
 
-    def _page_gate_info(self, page: Page) -> PageGateInfo:
-        return page_gate_info(page)
-
     def _pending_hanwang_pages(self) -> list[Page]:
         return pending_ocr_pages(self._project)
 
@@ -554,7 +550,7 @@ class WorkflowController(QObject):
         return pending[0] if pending else None
 
     def _emit_page_gate_state(self, page: Page) -> None:
-        gate = self._page_gate_info(page)
+        gate = page_gate_info(page)
         reason_code = gate.reason_code
         reason_text = gate.reason_text
         if not self._pending_hanwang_pages() and gate.page_state == "ocr_complete":
@@ -603,14 +599,14 @@ class WorkflowController(QObject):
             self.focus_page.emit(pending_page.page_number)
             self.step_requested.emit(STEP_LAYOUT)
             self._emit_page_gate_state(pending_page)
-            self.status_message.emit(self._page_gate_info(pending_page).reason_text)
+            self.status_message.emit(page_gate_info(pending_page).reason_text)
             return
 
         target = self.page_by_number(page_number) or pending_page
         if target is None:
             self.status_message.emit("全部已完成 OCR")
             return
-        gate = self._page_gate_info(target)
+        gate = page_gate_info(target)
         if not gate.action_enabled:
             self._emit_page_gate_state(target)
             self.status_message.emit("全部已完成 OCR" if gate.reason_code == "ocr_complete" else gate.reason_text)

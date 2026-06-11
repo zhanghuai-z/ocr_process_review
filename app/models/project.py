@@ -107,33 +107,33 @@ class Line:
     id: Optional[int] = None
 
     # --- Phase 1 新增字段 ---
-    final_text: str = ""                  # 人工最终文本；text 仅作兼容镜像
+    final_text: str = ""                  # 人工最终文本
     ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
     llm_suggestion: str = ""              # LLM 预审建议文本
     llm_reason: str = ""                  # LLM 修改原因
     llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
 
-    def __setattr__(self, name: str, value) -> None:
-        object.__setattr__(self, name, value)
-        if name == "text":
-            object.__setattr__(self, "final_text", value)
-        elif name == "final_text" and (value or getattr(self, "_line_initialized", False)):
-            object.__setattr__(self, "text", value)
-
     def __post_init__(self) -> None:
         if not self.final_text:
             self.final_text = self.text
-        elif not self.text:
-            self.text = self.final_text
-        object.__setattr__(self, "_line_initialized", True)
+        if not self.ocr_text:
+            self.ocr_text = self.text
+        if not self.original_text:
+            self.original_text = self.ocr_text or self.text
 
     def update_text(self, new_text: str) -> None:
+        self.update_final_text(new_text)
+
+    def update_final_text(self, new_text: str) -> None:
         if self.original_text == "":
-            self.original_text = self.final_text
+            self.original_text = self.ocr_text or self.text or self.final_text
         self.final_text = new_text
-        self.text = new_text
         self.proof_status = ProofStatus.MODIFIED
+
+    @property
+    def display_text(self) -> str:
+        return self.final_text or self.text or ""
 
     def to_dict(self) -> dict:
         return {
@@ -165,11 +165,12 @@ class Block:
     recognizable: bool = True                       # 是否送 OCR
     note: str = ""                                  # 用户备注或系统说明
     source_label: str = ""                          # 原始 PP-VL/Paddle label
-    raw_payload: dict[str, Any] = field(default_factory=dict)  # 原始块属性
+    raw_payload: dict[str, Any] = field(default_factory=dict)  # 外部引擎原始块属性
+    app_payload: dict[str, Any] = field(default_factory=dict)  # 应用派生状态/人工绑定
 
     @property
     def full_text(self) -> str:
-        return "\n".join(line.final_text for line in self.lines)
+        return "\n".join(line.display_text for line in self.lines)
 
     @property
     def avg_confidence(self) -> float:

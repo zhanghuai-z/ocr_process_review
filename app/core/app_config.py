@@ -17,7 +17,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "api_timeout": 30,
     "api_token": "",
     "api_layout_model_name": "",
-    "api_model_profile": "",       # UI 不再暴露模型选择；保留字段仅兼容旧配置
+    "api_model_profile": "",       # 历史配置字段；固定链路会按 endpoint 推断
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -101,9 +101,8 @@ class AppConfig:
         self._settings.clear()
 
 
-# 兼容旧代码的快速访问
 def get_config() -> dict[str, Any]:
-    """兼容旧 OCR 配置接口，返回 dict。"""
+    """Return the runtime OCR/LLM config snapshot used by engines and UI."""
     from app.core.api_profiles import normalize_api_base_url
 
     cfg = AppConfig.instance()
@@ -121,7 +120,7 @@ def get_config() -> dict[str, Any]:
 
 
 def update_config(**kwargs: Any) -> None:
-    """兼容旧 OCR 配置更新接口。"""
+    """Update runtime OCR/LLM settings through AppConfig keys."""
     cfg = AppConfig.instance()
     mapping = {
         "mode": "ocr_mode",

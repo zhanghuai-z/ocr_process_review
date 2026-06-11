@@ -12,6 +12,7 @@ class OcrDispatchBlock(Protocol):
     block_type: BlockType
     source_label: str
     raw_payload: dict[str, Any]
+    app_payload: dict[str, Any]
     recognizable: bool
 
 
@@ -44,8 +45,12 @@ def authoritative_block_label(block: OcrDispatchBlock) -> str:
     """Return the best available vendor/source label for routing decisions."""
     if block.source_label:
         return str(block.source_label)
+    if isinstance(getattr(block, "app_payload", None), dict):
+        label = _payload_label(block.app_payload)
+        if label:
+            return label
     if isinstance(block.raw_payload, dict):
-        label = _payload_label(block.raw_payload)
+        label = authoritative_paddle_label(block.raw_payload, default="")
         if label:
             return label
     return block.block_type.value
