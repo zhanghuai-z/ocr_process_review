@@ -303,16 +303,10 @@ class ProjectStore:
             raise RuntimeError("ProjectStore is not open. Call open() first.")
         return self._conn
 
-    # ------------------------------------------------------------------ save (transactional with delete-then-rebuild)
+    # ------------------------------------------------------------------ save (transactional upsert)
 
     def save_project(self, project: OcrProject) -> OcrProject:
-        """保存或更新整个项目（事务化全量写入）。
-
-        使用"删除后重建"策略避免脏数据残留：
-        1. 事务内删除旧 page/block/line/char
-        2. 重新插入当前数据
-        3. 回写新 id 到内存对象
-        """
+        """保存或更新整个项目（事务化全量写入）。"""
         now = time.time()
         project.updated_at = now
 
@@ -391,72 +385,142 @@ class ProjectStore:
                  page.id),
             )
 
-        # 删除旧 block（级联删除 line/char）
-        cur.execute("DELETE FROM block WHERE page_id=?", (page.id,))
+        old_block_ids = {
+            r["id"] for r in cur.execute(
+                "SELECT id FROM block WHERE page_id=?", (page.id,)
+            ).fetchall()
+        }
+        saved_block_ids: set[int] = set()
         for block in page.blocks:
-            block.id = None  # 重置 id 以便重新插入
             self._save_block(cur, block, page.id)
+            if block.id is not None:
+                saved_block_ids.add(block.id)
+
+        for old_id in old_block_ids - saved_block_ids:
+            cur.execute("DELETE FROM block WHERE id=?", (old_id,))
 
     def _save_block(self, cur: sqlite3.Cursor, block: Block, page_id: int) -> None:
         bb = block.bbox
-        cur.execute(
-            "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
-            "source, is_locked, recognizable, note, source_label, raw_payload_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
-             block.source.value, int(block.is_locked), int(block.recognizable),
-             block.note, block.source_label,
-             json.dumps(block.raw_payload, ensure_ascii=False)),
+        values = (
+            page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
+            block.source.value, int(block.is_locked), int(block.recognizable),
+            block.note, block.source_label,
+            json.dumps(block.raw_payload, ensure_ascii=False),
         )
-        block.id = cur.lastrowid
+        if block.id is None:
+            cur.execute(
+                "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
+                "source, is_locked, recognizable, note, source_label, raw_payload_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            block.id = cur.lastrowid
+        else:
+            cur.execute(
+                "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
+                "block_order=?, source=?, is_locked=?, recognizable=?, note=?, "
+                "source_label=?, raw_payload_json=? WHERE id=?",
+                (*values, block.id),
+            )
+            if cur.rowcount != 1:
+                block.id = None
+                self._save_block(cur, block, page_id)
+                return
 
+        old_line_ids = {
+            r["id"] for r in cur.execute(
+                "SELECT id FROM line WHERE block_id=?", (block.id,)
+            ).fetchall()
+        }
+        saved_line_ids: set[int] = set()
         for line in block.lines:
-            line.id = None  # 重置 id
             self._save_line(cur, line, block.id)
+            if line.id is not None:
+                saved_line_ids.add(line.id)
+
+        for old_id in old_line_ids - saved_line_ids:
+            cur.execute("DELETE FROM line WHERE id=?", (old_id,))
 
     def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
         bb = line.bbox
         final_text = line.final_text or line.text
         line.final_text = final_text
         line.text = final_text
-        cur.execute(
-            "INSERT INTO line (block_id, text, final_text, original_text, confidence, proof_status, "
-            "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
-            "review_flags_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (block_id, line.text, line.final_text, line.original_text, line.confidence,
-             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
-             line.ocr_text, line.llm_suggestion, line.llm_reason,
-             line.llm_review_status.value,
-             _review_flags_to_json(line.review_flags)),
+        values = (
+            block_id, line.text, line.final_text, line.original_text, line.confidence,
+            line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
+            line.ocr_text, line.llm_suggestion, line.llm_reason,
+            line.llm_review_status.value,
+            _review_flags_to_json(line.review_flags),
         )
-        line.id = cur.lastrowid
+        if line.id is None:
+            cur.execute(
+                "INSERT INTO line (block_id, text, final_text, original_text, confidence, proof_status, "
+                "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
+                "review_flags_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            line.id = cur.lastrowid
+        else:
+            cur.execute(
+                "UPDATE line SET block_id=?, text=?, final_text=?, original_text=?, "
+                "confidence=?, proof_status=?, x=?, y=?, w=?, h=?, ocr_text=?, "
+                "llm_suggestion=?, llm_reason=?, llm_review_status=?, review_flags_json=? "
+                "WHERE id=?",
+                (*values, line.id),
+            )
+            if cur.rowcount != 1:
+                line.id = None
+                self._save_line(cur, line, block_id)
+                return
 
+        old_char_ids = {
+            r["id"] for r in cur.execute(
+                "SELECT id FROM char_ WHERE line_id=?", (line.id,)
+            ).fetchall()
+        }
+        saved_char_ids: set[int] = set()
         for char in line.chars:
-            char.id = None
             self._save_char(cur, char, line.id)
+            if char.id is not None:
+                saved_char_ids.add(char.id)
+
+        for old_id in old_char_ids - saved_char_ids:
+            cur.execute("DELETE FROM char_ WHERE id=?", (old_id,))
 
     def _save_char(self, cur: sqlite3.Cursor, char: Char, line_id: int) -> None:
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
-        cur.execute(
-            "INSERT INTO char_ (line_id, char, confidence, x, y, w, h, "
-            "bbox_source, bbox_granularity, token_text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                line_id,
-                char.char,
-                char.confidence,
-                x,
-                y,
-                w,
-                h,
-                char.bbox_source,
-                char.bbox_granularity,
-                char.token_text,
-            ),
+        values = (
+            line_id,
+            char.char,
+            char.confidence,
+            x,
+            y,
+            w,
+            h,
+            char.bbox_source,
+            char.bbox_granularity,
+            char.token_text,
         )
-        char.id = cur.lastrowid
+        if char.id is None:
+            cur.execute(
+                "INSERT INTO char_ (line_id, char, confidence, x, y, w, h, "
+                "bbox_source, bbox_granularity, token_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            char.id = cur.lastrowid
+        else:
+            cur.execute(
+                "UPDATE char_ SET line_id=?, char=?, confidence=?, x=?, y=?, w=?, h=?, "
+                "bbox_source=?, bbox_granularity=?, token_text=? WHERE id=?",
+                (*values, char.id),
+            )
+            if cur.rowcount != 1:
+                char.id = None
+                self._save_char(cur, char, line_id)
 
     # ------------------------------------------------------------------ update single line
 

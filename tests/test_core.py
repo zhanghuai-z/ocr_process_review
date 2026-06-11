@@ -568,6 +568,80 @@ def test_project_store_clean_on_resave():
         os.unlink(db_path)
 
 
+def test_project_store_save_project_preserves_child_rowids():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line1 = Line(
+            text="第一行",
+            confidence=0.9,
+            bbox=bb,
+            chars=[Char(char="第", confidence=0.9, bbox=BBox(0, 0, 10, 10))],
+        )
+        line2 = Line(
+            text="第二行",
+            confidence=0.8,
+            bbox=BBox(0, 30, 100, 20),
+            chars=[Char(char="第", confidence=0.8, bbox=BBox(0, 30, 10, 10))],
+        )
+        block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
+        project = OcrProject(
+            name="stable ids",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            ids = {
+                "page": project.pages[0].id,
+                "block": block.id,
+                "line": line1.id,
+                "char": line1.chars[0].id,
+                "removed_line": line2.id,
+                "removed_char": line2.chars[0].id,
+            }
+
+            line1.update_text("第一行已校对")
+            line1.chars[0].char = "一"
+            block.note = "updated without id churn"
+            block.lines = [line1]
+            store.save_project(project)
+            loaded = store.load_project(project_id=project.id)
+
+        loaded_page = loaded.pages[0]
+        loaded_block = loaded_page.blocks[0]
+        loaded_line = loaded_block.lines[0]
+        loaded_char = loaded_line.chars[0]
+
+        assert loaded_page.id == ids["page"]
+        assert loaded_block.id == ids["block"]
+        assert loaded_line.id == ids["line"]
+        assert loaded_char.id == ids["char"]
+        assert loaded_line.final_text == "第一行已校对"
+        assert loaded_char.char == "一"
+        assert loaded_block.note == "updated without id churn"
+        assert len(loaded_block.lines) == 1
+
+        with ProjectStore(db_path) as store:
+            assert store.conn.execute(
+                "SELECT COUNT(*) FROM line WHERE id=?",
+                (ids["removed_line"],),
+            ).fetchone()[0] == 0
+            assert store.conn.execute(
+                "SELECT COUNT(*) FROM char_ WHERE id=?",
+                (ids["removed_char"],),
+            ).fetchone()[0] == 0
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_save_project_preserves_child_rowids PASSED")
+
+
 def test_project_store_persists_page_ocr_invalidation_reason():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
     from app.core.project_store import ProjectStore
@@ -10110,6 +10184,7 @@ if __name__ == "__main__":
     test_project_store_persists_ppvl_parsing_res_list()
     test_line_final_text_alias_and_project_store_roundtrip()
     test_project_store_clean_on_resave()
+    test_project_store_save_project_preserves_child_rowids()
     test_project_store_persists_page_ocr_invalidation_reason()
     test_project_store_update_lines_rolls_back_as_single_transaction()
     test_project_store_schema_migration()
