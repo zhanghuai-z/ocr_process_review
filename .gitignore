@@ -23,6 +23,17 @@ Thumbs.db
 
 # Project cache (created at runtime)
 *.ocrproj
+.cache/
+_view/
+debug/
+*.layout-api.json
+*.layout-api-raw.png
+*.layout-app-overlay.png
+.state/
+
+# Local archive/quarantine. Files here are intentionally kept recoverable
+# but are not part of the active project surface.
+null/
 
 # Archives (large sample files)
 *.rar
