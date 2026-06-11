@@ -377,6 +377,36 @@ def test_block_type_mapping():
     print("test_block_type_mapping PASSED")
 
 
+def test_block_payload_helpers_preserve_existing_entries():
+    from app.core.block_payload import (
+        OCR_INVALIDATION_KIND_KEY,
+        OCR_TEXT_INVALIDATED_KEY,
+        mark_ocr_text_invalidated,
+        payload_bool,
+        payload_get,
+        set_payload_entries,
+    )
+    from app.models import BBox, Block, BlockType
+
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 10, 10),
+        raw_payload={"vendor": {"keep": True}},
+    )
+
+    set_payload_entries(block, {"custom": 1})
+    assert payload_get(block, "vendor") == {"keep": True}
+    assert payload_get(block, "custom") == 1
+    assert payload_bool(block, "custom") is True
+
+    mark_ocr_text_invalidated(block, "block_moved")
+    assert block.raw_payload[OCR_TEXT_INVALIDATED_KEY] is True
+    assert block.raw_payload[OCR_INVALIDATION_KIND_KEY] == "block_moved"
+    assert block.raw_payload["vendor"] == {"keep": True}
+
+    print("test_block_payload_helpers_preserve_existing_entries PASSED")
+
+
 # =====================================================================
 # ProjectStore 测试
 # =====================================================================
@@ -10261,6 +10291,7 @@ if __name__ == "__main__":
     test_models()
     test_bbox_tools()
     test_block_type_mapping()
+    test_block_payload_helpers_preserve_existing_entries()
     test_project_store()
     test_project_store_persists_ppvl_parsing_res_list()
     test_line_final_text_alias_and_project_store_roundtrip()

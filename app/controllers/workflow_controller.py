@@ -13,6 +13,7 @@ from typing import Callable, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from app.core.block_payload import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.ocr_config import get_config
 from app.core.project_store import ProjectStore
@@ -622,11 +623,7 @@ class WorkflowController(QObject):
         had_ocr = page.has_ocr_result or page.is_ocr_done
         for block in page.blocks:
             block.lines = []
-            block.raw_payload = {
-                **dict(block.raw_payload),
-                "ocr_text_invalidated": True,
-                "ocr_invalidation_kind": change_kind,
-            }
+            mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:
             page.invalidate_ocr(change_kind)
         page.status = PageStatus.LAYOUT_DONE

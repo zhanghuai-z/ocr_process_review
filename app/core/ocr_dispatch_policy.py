@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from app.core.block_payload import PADDLE_BINDING_KEY
 from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label
 from app.models.enums import BlockType
 
@@ -31,7 +32,7 @@ PRESERVE_BLOCK_TYPES = {
 
 
 def _payload_label(payload: dict[str, Any]) -> str:
-    binding = payload.get("paddle_binding")
+    binding = payload.get(PADDLE_BINDING_KEY)
     if isinstance(binding, dict):
         label = binding.get("source_label") or binding.get("block_type")
         if label:

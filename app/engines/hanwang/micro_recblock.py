@@ -8,6 +8,7 @@ from typing import Any, Callable
 import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
+from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY
 from app.core.logging import get_logger
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
@@ -596,7 +597,7 @@ def _raw_block_with_bbox_audit(
     segimg_group_audits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     value = dict(raw)
-    value["_hanwang_bbox_audit"] = _hanwang_bbox_audit(
+    value[HANWANG_BBOX_AUDIT_KEY] = _hanwang_bbox_audit(
         raw,
         width,
         height,
@@ -1343,7 +1344,7 @@ def _layout_block_content(block: Block) -> str:
 
 
 def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
-    binding = dict(block.raw_payload.get("paddle_binding") or {})
+    binding = dict(block.raw_payload.get(PADDLE_BINDING_KEY) or {})
     if not binding:
         return None
     status = str(binding.get("status") or "")
@@ -1387,7 +1388,7 @@ def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dic
         "block_label": label,
         "block_bbox": list(manual_bbox),
         "block_content": text,
-        "paddle_binding": dict(binding),
+        PADDLE_BINDING_KEY: dict(binding),
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_manual_route_subblock": True,
     }

@@ -11,6 +11,21 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.bbox_extraction import bbox_from_variant
+from app.core.block_payload import (
+    MANUAL_MERGE_FROM_KEY,
+    MANUAL_DRAW_BBOX_KEY,
+    OCR_TEXT_INVALIDATED_KEY,
+    PADDLE_BLOCK_BBOX_KEY,
+    PADDLE_BLOCK_LABEL_KEY,
+    UI_DEFAULT_LOCKED_KEY,
+    UI_DELETED_INLINE_FORMULA_KEY,
+    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
+    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
+    UI_INLINE_FORMULA_PARENT_LABEL_KEY,
+    UI_LOCK_OVERRIDDEN_KEY,
+    payload_bool,
+    set_payload_entries,
+)
 from app.core.ocr_dispatch_policy import is_text_ocr_candidate
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
@@ -565,9 +580,8 @@ class LayoutPanel(QWidget):
         primary.source = BlockSource.USER_EDITED
         primary.recognizable = is_text_ocr_candidate(primary)
         primary.note = "manual_merge_requires_ocr_rerun"
-        primary.raw_payload = {
-            **dict(primary.raw_payload),
-            "manual_merge_from": [
+        set_payload_entries(primary, {
+            MANUAL_MERGE_FROM_KEY: [
                 {
                     "block_type": getattr(block.block_type, "value", str(block.block_type)),
                     "bbox": list(block.bbox.to_xyxy()),
@@ -575,8 +589,8 @@ class LayoutPanel(QWidget):
                 }
                 for block in selected
             ],
-            "ocr_text_invalidated": True,
-        }
+            OCR_TEXT_INVALIDATED_KEY: True,
+        })
 
         for block in selected[1:]:
             self._mark_generated_inline_formula_handled(page, block)
@@ -628,7 +642,7 @@ class LayoutPanel(QWidget):
             return []
         chars = []
         for block in page.blocks:
-            if bool(dict(getattr(block, "raw_payload", {}) or {}).get("ocr_text_invalidated")):
+            if payload_bool(block, OCR_TEXT_INVALIDATED_KEY):
                 continue
             for line in block.lines:
                 chars.extend([
@@ -661,11 +675,11 @@ class LayoutPanel(QWidget):
         for block in page.blocks:
             if block.block_type != BlockType.TEXT:
                 continue
-            if block.raw_payload.get("ui_lock_overridden"):
+            if payload_bool(block, UI_LOCK_OVERRIDDEN_KEY):
                 continue
             if block.source == BlockSource.AUTO_LAYOUT:
                 block.is_locked = True
-                block.raw_payload["ui_default_locked"] = True
+                set_payload_entries(block, {UI_DEFAULT_LOCKED_KEY: True})
 
     def _bind_manual_block_to_paddle(self, page: Page, block: Block) -> None:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
@@ -700,9 +714,9 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         block.is_locked = not block.is_locked
-        block.raw_payload["ui_lock_overridden"] = True
+        set_payload_entries(block, {UI_LOCK_OVERRIDDEN_KEY: True})
         if block.is_locked:
-            block.raw_payload["ui_default_locked"] = block.block_type == BlockType.TEXT
+            set_payload_entries(block, {UI_DEFAULT_LOCKED_KEY: block.block_type == BlockType.TEXT})
         block.source = BlockSource.USER_EDITED
         self._sync_lock_button(block)
         self._show_page_layers(self._pages[self._current_page_idx])
@@ -728,7 +742,7 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         for block in locked:
             block.is_locked = False
-            block.raw_payload["ui_lock_overridden"] = True
+            set_payload_entries(block, {UI_LOCK_OVERRIDDEN_KEY: True})
         self._show_page_layers(page)
         self._sync_lock_button(None)
         self._selected_block = None
@@ -895,7 +909,7 @@ class LayoutPanel(QWidget):
     def _ensure_inline_formula_blocks(self, page: Page) -> None:
         """Promote Paddle inline_formula subblocks to editable equation blocks."""
         for parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
-            if subblock.get("_ui_deleted"):
+            if subblock.get(UI_DELETED_INLINE_FORMULA_KEY):
                 continue
             origin = list(bbox.to_xyxy())
             if self._has_inline_formula_origin_block(page, origin):
@@ -908,11 +922,11 @@ class LayoutPanel(QWidget):
                 source_label="inline_formula",
                 raw_payload={
                     **dict(subblock.get("raw_payload") if isinstance(subblock.get("raw_payload"), dict) else {}),
-                    "block_label": "inline_formula",
-                    "block_bbox": origin,
-                    "ui_generated_inline_formula_block": True,
-                    "ui_inline_formula_origin_bbox": origin,
-                    "ui_inline_formula_parent_label": str(parent.get("block_label") or parent.get("label") or ""),
+                    PADDLE_BLOCK_LABEL_KEY: "inline_formula",
+                    PADDLE_BLOCK_BBOX_KEY: origin,
+                    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
+                    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY: origin,
+                    UI_INLINE_FORMULA_PARENT_LABEL_KEY: str(parent.get("block_label") or parent.get("label") or ""),
                 },
             ))
 
@@ -983,7 +997,7 @@ class LayoutPanel(QWidget):
         origin_tuple = tuple(origin_bbox)
         for block in page.blocks:
             payload = dict(getattr(block, "raw_payload", {}) or {})
-            if tuple(payload.get("ui_inline_formula_origin_bbox") or ()) == origin_tuple:
+            if tuple(payload.get(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY) or ()) == origin_tuple:
                 return True
             if normalize_paddle_label(getattr(block, "source_label", "")) != "inline_formula":
                 continue
@@ -993,13 +1007,13 @@ class LayoutPanel(QWidget):
 
     def _mark_generated_inline_formula_handled(self, page: Page, block: Block) -> None:
         payload = dict(getattr(block, "raw_payload", {}) or {})
-        origin = payload.get("ui_inline_formula_origin_bbox")
+        origin = payload.get(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
         if not origin:
             return
         origin_tuple = tuple(origin)
         for _parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
             if bbox.to_xyxy() == origin_tuple:
-                subblock["_ui_deleted"] = True
+                subblock[UI_DELETED_INLINE_FORMULA_KEY] = True
 
     @staticmethod
     def _coerce_block_type(value: object, default: BlockType) -> BlockType:
@@ -1030,9 +1044,8 @@ class LayoutPanel(QWidget):
         primary.is_locked = False
         primary.recognizable = is_text_ocr_candidate(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
-        primary.raw_payload = {
-            **dict(primary.raw_payload),
-            "manual_merge_from": [
+        set_payload_entries(primary, {
+            MANUAL_MERGE_FROM_KEY: [
                 {
                     "block_type": getattr(block.block_type, "value", str(block.block_type)),
                     "bbox": list(block.bbox.to_xyxy()),
@@ -1041,9 +1054,9 @@ class LayoutPanel(QWidget):
                 }
                 for block in blocks
             ],
-            "manual_draw_bbox": list(bbox.to_xyxy()),
-            "ocr_text_invalidated": True,
-        }
+            MANUAL_DRAW_BBOX_KEY: list(bbox.to_xyxy()),
+            OCR_TEXT_INVALIDATED_KEY: True,
+        })
         self._bind_manual_block_to_paddle(page, primary)
         for block in blocks[1:]:
             self._mark_generated_inline_formula_handled(page, block)

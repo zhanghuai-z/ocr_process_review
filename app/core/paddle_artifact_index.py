@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
+from app.core.block_payload import (
+    PADDLE_BINDING_KEY,
+    PADDLE_BLOCK_BBOX_KEY,
+    PADDLE_BLOCK_LABEL_KEY,
+    set_payload_entries,
+)
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,
@@ -532,12 +538,11 @@ class PaddleArtifactIndex:
 
 def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) -> None:
     """Persist a binding on a layout block without changing its geometry."""
-    block.raw_payload = {
-        **dict(block.raw_payload),
-        "paddle_binding": binding.to_payload(),
-        "block_label": binding.source_label or block.block_type.value,
-        "block_bbox": list(block.bbox.to_xyxy()),
-    }
+    set_payload_entries(block, {
+        PADDLE_BINDING_KEY: binding.to_payload(),
+        PADDLE_BLOCK_LABEL_KEY: binding.source_label or block.block_type.value,
+        PADDLE_BLOCK_BBOX_KEY: list(block.bbox.to_xyxy()),
+    })
     block.source_label = binding.source_label or block.source_label or block.block_type.value
     block.recognizable = binding.recognizable
     if binding.text:
