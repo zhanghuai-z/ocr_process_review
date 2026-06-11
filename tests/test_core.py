@@ -355,6 +355,7 @@ def test_block_type_mapping():
     assert BlockType.from_paddle("graphic") == BlockType.FIGURE
     assert BlockType.from_paddle("isolated_formula") == BlockType.EQUATION
     assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
+    assert BlockType.from_paddle("vision_footnote") == BlockType.TEXT
 
     print("test_block_type_mapping PASSED")
 
@@ -1731,6 +1732,38 @@ def test_layout_panel_analysis_progress_lifecycle():
     print("test_layout_panel_analysis_progress_lifecycle PASSED")
 
 
+def test_layout_panel_workbench_height_is_not_forced_by_sidebar():
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    panel = LayoutPanel()
+    try:
+        assert panel.minimumSizeHint().height() <= 360
+    finally:
+        panel.close()
+
+    print("test_layout_panel_workbench_height_is_not_forced_by_sidebar PASSED")
+
+
+def test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench():
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    panel = LayoutPanel()
+    try:
+        panel.resize(1536, 864)
+        panel.show()
+        app.processEvents()
+
+        sizes = panel._splitter.sizes()
+        assert sizes[2] >= 280
+        assert sizes[1] > sizes[2]
+    finally:
+        panel.close()
+
+    print("test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench PASSED")
+
+
 def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
     from pathlib import Path
     import tempfile
@@ -1776,21 +1809,669 @@ def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
     print("test_layout_panel_merges_selected_blocks_for_ocr_rerun PASSED")
 
 
-def test_layout_panel_exposes_real_inline_formula_overlays_readonly():
+def test_layout_panel_defaults_auto_text_blocks_locked():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QGraphicsItem
+
+    from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        text_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 40, 10),
+            source=BlockSource.AUTO_LAYOUT,
+        )
+        formula_block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(60, 10, 20, 10),
+            source=BlockSource.AUTO_LAYOUT,
+        )
+        page = Page(image_path=str(image_path), width=120, height=80, blocks=[text_block, formula_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            assert text_block.is_locked is True
+            assert formula_block.is_locked is False
+            text_item = next(item for item, block in panel._viewer._block_items if block is text_block)
+            formula_item = next(item for item, block in panel._viewer._block_items if block is formula_block)
+            assert not bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            assert not bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+            assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+
+            panel._on_block_clicked(text_block)
+            assert panel._selected_block is None
+            assert "锁定" in panel._status_lbl.text()
+            panel._unlock_page_blocks()
+            assert text_block.is_locked is False
+            assert text_block.raw_payload["ui_lock_overridden"] is True
+        finally:
+            panel.close()
+
+    print("test_layout_panel_defaults_auto_text_blocks_locked PASSED")
+
+
+def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        text_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 120, 40),
+            source=BlockSource.AUTO_LAYOUT,
+            lines=[Line(text="甲$ A $乙", confidence=0.9, bbox=BBox.from_xyxy(0, 0, 120, 40))],
+            raw_payload={
+                "block_label": "text",
+                "_hanwang_bbox_audit": {
+                    "schema": "hanwang_bbox_audit.v1",
+                    "layout_block_bbox": [0, 0, 120, 40],
+                    "effective_block_bbox": [0, 0, 120, 40],
+                    "effective_block_bbox_source": "layout_line_routes_union",
+                    "layout_line_route_bboxes": [[0, 0, 120, 40]],
+                    "route_text_slice_bboxes": [[0, 0, 40, 40], [70, 0, 120, 40]],
+                    "hanwang_recog_group_bboxes": [[0, 2, 40, 38], [70, 2, 120, 38]],
+                    "hanwang_segimg_group_clipped_count": 1,
+                    "hanwang_segimg_group_dropped_count": 0,
+                    "route_text_slice_count": 2,
+                    "hanwang_recog_group_count": 2,
+                },
+            },
+        )
+        page = Page(image_path=str(image_path), width=160, height=80, blocks=[text_block])
+        skip_block = Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox.from_xyxy(10, 50, 80, 70),
+            source=BlockSource.AUTO_LAYOUT,
+            raw_payload={
+                "_hanwang_bbox_audit": {
+                    "schema": "hanwang_bbox_audit.v1",
+                    "layout_block_bbox": [10, 50, 80, 70],
+                    "effective_block_bbox": [10, 50, 80, 70],
+                    "effective_block_bbox_source": "layout_block_bbox",
+                    "route_text_slice_count": 0,
+                    "hanwang_recog_group_count": 0,
+                }
+            },
+        )
+        page.blocks.append(skip_block)
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            assert not hasattr(panel, "_btn_hanwang_audit")
+            assert len(panel._viewer._readonly_overlay_items) == 0
+            panel._refresh_current_page_layers()
+            assert len(panel._viewer._readonly_overlay_items) == 0
+
+            panel._inspector.set_block(text_block)
+            summary = panel._inspector._lbl_hanwang_audit.text()
+            assert "route=2" in summary
+            assert "recog=2" in summary
+            assert "clipped=1" in summary
+            panel._inspector.set_block(skip_block)
+            assert "未进入 Hanwang text-slice 路由" in panel._inspector._lbl_hanwang_audit.text()
+
+            text_block.raw_payload["ocr_text_invalidated"] = True
+            setattr(page, "_ocr_invalidated_after_edit", True)
+            panel._refresh_current_page_layers()
+            assert len(panel._viewer._readonly_overlay_items) == 0
+            panel._inspector.set_block(text_block)
+            assert "已失效，需要重新进入 OCR" in panel._inspector._lbl_hanwang_audit.text()
+        finally:
+            panel.close()
+
+    print("test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle PASSED")
+
+
+def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(140, 90, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=140, height=90)
+        page.blocks = [
+            Block(block_type=BlockType.EQUATION, bbox=BBox(20, 20, 20, 10), lines=[
+                Line(text="x", confidence=0.9, bbox=BBox(20, 20, 20, 10)),
+            ], order=0),
+            Block(block_type=BlockType.EQUATION, bbox=BBox(60, 20, 20, 10), lines=[
+                Line(text="(1)", confidence=0.9, bbox=BBox(60, 20, 20, 10)),
+            ], order=1),
+        ]
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            for i in range(panel._new_type_combo.count()):
+                if panel._new_type_combo.itemData(i) == BlockType.EQUATION:
+                    panel._new_type_combo.setCurrentIndex(i)
+                    break
+
+            panel._on_block_created(BBox(10, 10, 90, 30))
+
+            assert len(page.blocks) == 1
+            assert page.blocks[0].bbox == BBox(10, 10, 90, 30)
+            assert page.blocks[0].block_type == BlockType.EQUATION
+            assert page.blocks[0].lines == []
+            assert page.blocks[0].source == BlockSource.USER_EDITED
+            assert page.blocks[0].raw_payload["ocr_text_invalidated"] is True
+        finally:
+            panel.close()
+
+    print("test_layout_panel_draw_merge_uses_large_box_and_removes_overlap PASSED")
+
+
+def test_layout_panel_draw_ignores_locked_text_targets():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(140, 90, QImage.Format.Format_RGB888).save(str(image_path))
+        text_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(20, 20, 80, 20),
+            lines=[Line(
+                text="abc",
+                confidence=0.9,
+                bbox=BBox(20, 20, 80, 20),
+                chars=[Char(char="a", confidence=0.9, bbox=BBox(20, 20, 18, 10))],
+            )],
+            source=BlockSource.AUTO_LAYOUT,
+            order=0,
+        )
+        page = Page(image_path=str(image_path), width=140, height=90, blocks=[text_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            for i in range(panel._new_type_combo.count()):
+                if panel._coerce_block_type(panel._new_type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.EQUATION:
+                    panel._new_type_combo.setCurrentIndex(i)
+                    break
+
+            panel._on_block_created(BBox(25, 22, 20, 12))
+
+            assert text_block.is_locked is True
+            assert len(page.blocks) == 2
+            assert page.blocks[0] is text_block
+            assert page.blocks[1].block_type == BlockType.EQUATION
+            assert page.blocks[1].bbox == BBox(25, 22, 20, 12)
+        finally:
+            panel.close()
+
+    print("test_layout_panel_draw_ignores_locked_text_targets PASSED")
+
+
+def test_layout_panel_drawn_block_is_selected_and_type_editable():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(140, 90, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=140, height=90)
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            panel._on_block_created(BBox(25, 20, 30, 18))
+
+            assert len(page.blocks) == 1
+            block = page.blocks[0]
+            assert panel._selected_block is block
+            assert panel._type_combo.isEnabled()
+            assert any(item.isSelected() and item_block is block for item, item_block in panel._viewer._block_items)
+
+            for i in range(panel._type_combo.count()):
+                if panel._coerce_block_type(panel._type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.TABLE:
+                    panel._type_combo.setCurrentIndex(i)
+                    break
+
+            assert block.block_type == BlockType.TABLE
+        finally:
+            panel.close()
+
+    print("test_layout_panel_drawn_block_is_selected_and_type_editable PASSED")
+
+
+def test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from app.models import BBox, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(140, 90, QImage.Format.Format_RGB888)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        painter.fillRect(20, 20, 20, 10, QColor("black"))
+        painter.fillRect(44, 20, 8, 10, QColor("black"))
+        painter.end()
+        image.save(str(image_path))
+        page = Page(image_path=str(image_path), width=140, height=90)
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            for i in range(panel._new_type_combo.count()):
+                if panel._coerce_block_type(panel._new_type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.EQUATION:
+                    panel._new_type_combo.setCurrentIndex(i)
+                    break
+
+            panel._on_block_created(BBox(17, 19, 25, 13))
+
+            assert len(page.blocks) == 1
+            assert page.blocks[0].bbox == BBox(20, 20, 20, 10)
+            assert page.blocks[0].block_type == BlockType.EQUATION
+            assert panel._selected_block is page.blocks[0]
+            assert any(item.isSelected() and item_block is page.blocks[0] for item, item_block in panel._viewer._block_items)
+        finally:
+            panel.close()
+
+    print("test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks PASSED")
+
+
+def test_layout_panel_ink_snap_reuses_cached_image_mask():
+    from pathlib import Path
+    import tempfile
+
+    import cv2
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    from app.models import BBox, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(140, 90, QImage.Format.Format_RGB888)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        painter.fillRect(20, 20, 20, 10, QColor("black"))
+        painter.end()
+        image.save(str(image_path))
+        page = Page(image_path=str(image_path), width=140, height=90)
+        panel = LayoutPanel()
+        calls = []
+        original_imread = cv2.imread
+
+        def fake_imread(path, flags):
+            calls.append((path, flags))
+            return original_imread(path, flags)
+
+        cv2.imread = fake_imread
+        try:
+            first = panel._snap_drawn_bbox(page, BBox(17, 19, 25, 13))
+            second = panel._snap_drawn_bbox(page, BBox(18, 18, 25, 13))
+        finally:
+            cv2.imread = original_imread
+            panel.close()
+
+        assert first == BBox(20, 20, 20, 10)
+        assert second == BBox(20, 20, 20, 10)
+        assert len(calls) == 1
+
+    print("test_layout_panel_ink_snap_reuses_cached_image_mask PASSED")
+
+
+def test_layout_panel_delete_selected_removes_unlocked_box():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        formula_block = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))
+        page = Page(image_path=str(image_path), width=120, height=80, blocks=[formula_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            item, block = panel._viewer._block_items[0]
+            assert block is formula_block
+            item.setSelected(True)
+
+            panel._delete_selected()
+
+            assert page.blocks == []
+            assert panel._btn_undo.isEnabled()
+        finally:
+            panel.close()
+
+    print("test_layout_panel_delete_selected_removes_unlocked_box PASSED")
+
+
+def test_layout_panel_readonly_char_boxes_do_not_block_formula_delete():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+    from PySide6.QtWidgets import QGraphicsItem
+
+    from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
+        line = Line(
+            text="A $x$ B",
+            confidence=0.9,
+            bbox=BBox(10, 10, 100, 20),
+            chars=[
+                Char(char="x", confidence=0.9, bbox=BBox(45, 12, 10, 12)),
+            ],
+        )
+        text_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 100, 20),
+            lines=[line],
+            source=BlockSource.AUTO_LAYOUT,
+            order=0,
+        )
+        formula_block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(42, 10, 18, 18),
+            source=BlockSource.MANUAL_DRAW,
+            order=1,
+        )
+        page = Page(image_path=str(image_path), width=160, height=100, blocks=[text_block, formula_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            assert text_block.is_locked is True
+            assert len(panel._viewer._char_items) == 1
+            char_item, _ = panel._viewer._char_items[0]
+            formula_item = next(item for item, block in panel._viewer._block_items if block is formula_block)
+            assert not bool(char_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+            assert not bool(char_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            assert formula_item.zValue() > char_item.zValue()
+
+            formula_item.setSelected(True)
+            panel._delete_selected()
+
+            assert page.blocks == [text_block]
+            assert text_block.is_locked is True
+        finally:
+            panel.close()
+
+    print("test_layout_panel_readonly_char_boxes_do_not_block_formula_delete PASSED")
+
+
+def test_layout_panel_hides_empty_and_invalidated_char_boxes():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
+        line = Line(
+            text="甲",
+            confidence=0.9,
+            bbox=BBox(10, 10, 60, 20),
+            chars=[
+                Char(char="甲", confidence=0.9, bbox=BBox(10, 10, 20, 20)),
+                Char(char="", confidence=0.0, bbox=BBox(40, 10, 20, 20)),
+            ],
+        )
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 60, 20),
+            lines=[line],
+        )
+        page = Page(image_path=str(image_path), width=160, height=100, blocks=[block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            assert len(panel._viewer._char_items) == 1
+
+            block.raw_payload["ocr_text_invalidated"] = True
+            panel._refresh_current_page_layers()
+            assert panel._viewer._char_items == []
+
+            block.raw_payload.clear()
+            setattr(page, "_ocr_invalidated_after_edit", True)
+            panel._refresh_current_page_layers()
+            assert panel._viewer._char_items == []
+        finally:
+            panel.close()
+
+    print("test_layout_panel_hides_empty_and_invalidated_char_boxes PASSED")
+
+
+def test_layout_panel_excludes_inline_formula_carriers_from_char_boxes():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    line = Line(
+        text="甲$ A $乙",
+        confidence=0.9,
+        bbox=BBox.from_xyxy(0, 0, 120, 30),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox.from_xyxy(0, 0, 20, 30), bbox_source="hanwang:micro_recblock"),
+            Char(
+                char="$ A $",
+                confidence=0.0,
+                bbox=BBox.from_xyxy(30, 0, 70, 30),
+                bbox_source="paddle_inline_formula",
+                bbox_granularity="word",
+                token_text="$ A $",
+            ),
+            Char(char="乙", confidence=0.9, bbox=BBox.from_xyxy(80, 0, 100, 30), bbox_source="hanwang:micro_recblock"),
+        ],
+    )
+    page = Page(
+        image_path="",
+        width=120,
+        height=30,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 120, 30), lines=[line])],
+    )
+
+    chars = LayoutPanel._collect_page_chars(page)
+
+    assert [char.char for char in chars] == ["甲", "乙"]
+    assert all(char.bbox_source != "paddle_inline_formula" for char in chars)
+
+    print("test_layout_panel_excludes_inline_formula_carriers_from_char_boxes PASSED")
+
+
+def test_layout_panel_type_combo_changes_unlocked_block_type():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        formula_block = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))
+        page = Page(image_path=str(image_path), width=120, height=80, blocks=[formula_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._on_block_clicked(formula_block)
+            for i in range(panel._type_combo.count()):
+                if panel._coerce_block_type(panel._type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.TABLE:
+                    panel._type_combo.setCurrentIndex(i)
+                    break
+
+            assert formula_block.block_type == BlockType.TABLE
+            assert formula_block.source == BlockSource.USER_EDITED
+        finally:
+            panel.close()
+
+    print("test_layout_panel_type_combo_changes_unlocked_block_type PASSED")
+
+
+def test_layout_panel_undo_restores_block_edits():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=120, height=80)
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            assert len(page.blocks) == 0
+
+            panel._on_block_created(BBox(10, 10, 20, 20))
+            assert len(page.blocks) == 1
+            assert page.blocks[0].block_type == BlockType.TEXT
+
+            panel._undo_last_edit()
+            assert len(page.blocks) == 0
+            assert not panel._btn_undo.isEnabled()
+        finally:
+            panel.close()
+
+    print("test_layout_panel_undo_restores_block_edits PASSED")
+
+
+def test_layout_panel_undo_preserves_view_transform():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(240, 160, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(
+            image_path=str(image_path),
+            width=240,
+            height=160,
+            blocks=[Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))],
+        )
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._viewer.scale(1.8, 1.8)
+            before = panel._viewer.transform()
+
+            panel._on_block_created(BBox(80, 40, 20, 20))
+            assert len(page.blocks) == 2
+
+            panel._undo_last_edit()
+            after = panel._viewer.transform()
+
+            assert len(page.blocks) == 1
+            assert abs(after.m11() - before.m11()) < 0.000001
+            assert abs(after.m22() - before.m22()) < 0.000001
+        finally:
+            panel.close()
+
+    print("test_layout_panel_undo_preserves_view_transform PASSED")
+
+
+def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks():
     import json
     from pathlib import Path
 
     from PySide6.QtWidgets import QGraphicsItem
 
     from app.core.layout_analyzer import LayoutAnalyzer
-    from app.models import Page
+    from app.models import BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
-    sample = Path("/mnt/d/project/ocr_process/file/244771纵校/120166.tif")
-    layout_json = Path("/mnt/d/project/ocr_process/file/244771纵校/120166.layout-api.json")
+    project_root = Path(__file__).resolve().parents[1]
+    layout_json = (
+        project_root
+        / "tests"
+        / "fixtures"
+        / "layout"
+        / "120166-layout-api-fixture.json"
+    )
     raw = json.loads(layout_json.read_text(encoding="utf-8"))
     page_info = raw["page"]
+    sample = project_root / page_info["display_image_path"]
     page = Page(
         image_path=str(sample),
         width=int(page_info["width"]),
@@ -1807,23 +2488,77 @@ def test_layout_panel_exposes_real_inline_formula_overlays_readonly():
     panel = LayoutPanel()
     try:
         overlays = panel._collect_readonly_layout_overlays(page)
-        assert len(overlays) == 7
-        assert all(label == "inline_formula" for label, _bbox in overlays)
+        assert overlays == []
 
         panel.show_analysis_result([page])
         app.processEvents()
 
-        assert len(panel._viewer._readonly_overlay_items) == 7
+        inline_blocks = [block for block in page.blocks if block.source_label == "inline_formula"]
+        assert len(inline_blocks) == 7
+        assert all(block.block_type == BlockType.EQUATION for block in inline_blocks)
+        assert all(not block.is_locked for block in inline_blocks)
+        assert len(panel._viewer._readonly_overlay_items) == 0
         assert len(panel._viewer._block_items) == len(page.blocks)
-        assert all(
-            not (item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-            for item in panel._viewer._readonly_overlay_items
-        )
-        assert all("inline_formula" in item.toolTip() for item in panel._viewer._readonly_overlay_items)
+        inline_items = [
+            item for item, block in panel._viewer._block_items
+            if block.source_label == "inline_formula"
+        ]
+        assert len(inline_items) == 7
+        assert all(item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable for item in inline_items)
+        assert all(item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable for item in inline_items)
+
+        first_inline = inline_blocks[0]
+        first_item = next(item for item, block in panel._viewer._block_items if block is first_inline)
+        first_item.setSelected(True)
+        panel._delete_selected()
+        assert first_inline not in page.blocks
+        panel._show_page_layers(page)
+        assert len([block for block in page.blocks if block.source_label == "inline_formula"]) == 6
     finally:
         panel.close()
 
-    print("test_layout_panel_exposes_real_inline_formula_overlays_readonly PASSED")
+    print("test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks PASSED")
+
+
+def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169():
+    import json
+    from pathlib import Path
+
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    project_root = Path(__file__).resolve().parents[1]
+    layout_json = project_root / "file" / "244771纵校" / "120169.layout-api.json"
+    raw = json.loads(layout_json.read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    page = Page(
+        image_path=str(project_root / "file" / "244771纵校" / "120169.tif"),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=169,
+    )
+    blocks, _raw_overlays = LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+    page.blocks = blocks
+    footnote = next(block for block in page.blocks if block.source_label == "vision_footnote")
+    assert footnote.block_type == BlockType.TEXT
+
+    panel = LayoutPanel()
+    try:
+        inline_bboxes = [
+            bbox.to_xyxy()
+            for _parent, _subblock, bbox in panel._iter_inline_formula_subblocks(page)
+        ]
+    finally:
+        panel.close()
+
+    assert (372, 2022, 440, 2069) not in inline_bboxes  # $ ^{*} $
+    assert (619, 2737, 672, 2785) not in inline_bboxes  # $ ^{②} $
+    assert (434, 2658, 547, 2710) in inline_bboxes      # $ Time_{t} $
+    assert (1273, 2740, 1325, 2793) in inline_bboxes    # $ \beta_{t} $
+
+    print("test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169 PASSED")
 
 
 def test_workflow_controller_layout_progress_signal():
@@ -1870,6 +2605,128 @@ def test_main_window_layout_error_is_status_only():
     print("test_main_window_layout_error_is_status_only PASSED")
 
 
+def test_main_window_centered_resize_expands_from_current_center():
+    from app.ui.main_window import MainWindow
+
+    app = _get_qapp()
+    window = MainWindow()
+    try:
+        window.setGeometry(200, 180, 300, 240)
+        window.show()
+        app.processEvents()
+        before = window.frameGeometry().center()
+
+        window._set_centered_window_size(500, 400)
+        app.processEvents()
+
+        after = window.frameGeometry().center()
+        assert window.width() == 500
+        assert window.height() == 400
+        assert abs(after.x() - before.x()) <= 1
+        assert abs(after.y() - before.y()) <= 1
+    finally:
+        window.close()
+
+    print("test_main_window_centered_resize_expands_from_current_center PASSED")
+
+
+def test_main_window_maximize_state_is_not_forced_back_to_normal():
+    from app.ui.main_window import MainWindow
+
+    app = _get_qapp()
+    window = MainWindow()
+    try:
+        window.show()
+        app.processEvents()
+        normal_size = window.size()
+
+        window.showMaximized()
+        app.processEvents()
+        assert window.isMaximized()
+
+        window.showNormal()
+        app.processEvents()
+        assert not window.isMaximized()
+        assert window.size() == normal_size
+    finally:
+        window.close()
+
+    print("test_main_window_maximize_state_is_not_forced_back_to_normal PASSED")
+
+
+def test_main_window_file_menu_uses_close_project_action():
+    from PySide6.QtGui import QKeySequence
+
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    window = MainWindow()
+    try:
+        file_menu_action = next(
+            action
+            for action in window.menuBar().actions()
+            if action.menu() is not None and "文件" in action.text()
+        )
+        file_menu = file_menu_action.menu()
+        actions = [action for action in file_menu.actions() if not action.isSeparator()]
+        action_texts = [action.text() for action in actions]
+        assert any("关闭项目" in text for text in action_texts)
+        assert not any("退出" in text for text in action_texts)
+        close_action = next(action for action in actions if "关闭项目" in action.text())
+        assert close_action.shortcut().toString(QKeySequence.SequenceFormat.PortableText) == "Ctrl+W"
+    finally:
+        window.close()
+
+    print("test_main_window_file_menu_uses_close_project_action PASSED")
+
+
+def test_main_window_close_project_prompts_save_and_resets_workspace():
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.models import OcrProject
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    questions = []
+    warnings = []
+    saves = []
+    original_question = QMessageBox.question
+    original_warning = QMessageBox.warning
+    QMessageBox.question = lambda *args, **kwargs: questions.append(args) or QMessageBox.StandardButton.Save
+    QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
+
+    class FakeStore:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    window = MainWindow()
+    store = FakeStore()
+    try:
+        window._controller._project = OcrProject(name="demo")
+        window._controller._store = store
+        window._controller.save_project = lambda: saves.append(True) or True
+
+        window._close_project()
+
+        assert questions
+        assert saves == [True]
+        assert warnings == []
+        assert store.closed is True
+        assert window._controller.project is None
+        assert window._stack.currentWidget() is window._import_panel
+        assert window._layout_panel._pages == []
+        assert window.statusBar().currentMessage() == "项目已关闭"
+    finally:
+        QMessageBox.question = original_question
+        QMessageBox.warning = original_warning
+        window.close()
+
+    print("test_main_window_close_project_prompts_save_and_resets_workspace PASSED")
+
+
 # =====================================================================
 # Fake OCR 引擎测试
 # =====================================================================
@@ -1911,7 +2768,9 @@ def test_confidence_normalization():
     print("test_confidence_normalization PASSED")
 
 
-def test_api_ocr_engine_requests_return_word_box():
+def test_api_ocr_engine_does_not_request_return_word_box():
+    import base64
+
     import numpy as np
     import requests
 
@@ -1953,7 +2812,8 @@ def test_api_ocr_engine_requests_return_word_box():
         assert lines == []
         assert captured["url"] == "https://example.com/ocr"
         assert captured["proxies"] == {"http": None, "https": None, "all": None}
-        assert captured["json"]["returnWordBox"] is True
+        assert base64.b64decode(captured["json"]["file"]).startswith(b"\x89PNG\r\n\x1a\n")
+        assert "returnWordBox" not in captured["json"]
         assert captured["json"]["useDocOrientationClassify"] is False
         assert captured["json"]["useDocUnwarping"] is False
         assert captured["json"]["useTextlineOrientation"] is False
@@ -1964,364 +2824,7 @@ def test_api_ocr_engine_requests_return_word_box():
         requests.post = original_post
         cfg.reset_to_defaults()
 
-    print("test_api_ocr_engine_requests_return_word_box PASSED")
-
-
-def test_api_ocr_engine_parses_char_level_word_boxes():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["天地"],
-                                    "rec_scores": [0.93],
-                                    "rec_boxes": [[10, 20, 50, 80]],
-                                },
-                                "text_word": [["天", "地"]],
-                                "text_word_region": [[
-                                    [[10, 20], [28, 20], [28, 80], [10, 80]],
-                                    [[30, 20], [48, 20], [48, 80], [30, 80]],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        lines = engine.recognize(np.zeros((120, 80, 3), dtype=np.uint8), OcrContext())
-        assert len(lines) == 1
-        assert lines[0].bbox == BBox(10, 20, 40, 60)
-        assert len(lines[0].chars) == 2
-        assert lines[0].chars[0].bbox == BBox(10, 20, 18, 60)
-        assert lines[0].chars[0].bbox_source == "ocr"
-        assert lines[0].chars[0].bbox_granularity == "char"
-        assert lines[0].chars[1].token_text == "地"
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_parses_char_level_word_boxes PASSED")
-
-
-def test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "ocrResults": [
-                        {
-                            "prunedResult": {
-                                "rec_texts": ["天地"],
-                                "rec_scores": [0.93],
-                                "rec_boxes": [[10, 20, 70, 50]],
-                                "textWord": [["天", "地"]],
-                                "textWordRegion": [[
-                                    [[10, 20], [40, 20], [40, 50], [10, 50]],
-                                    [[41, 20], [70, 20], [70, 50], [41, 50]],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        line = engine.recognize(np.zeros((80, 100, 3), dtype=np.uint8), OcrContext())[0]
-        assert line.bbox == BBox(10, 20, 60, 30)
-        assert len(line.chars) == 2
-        assert all(ch.bbox_source == "ocr" for ch in line.chars)
-        assert line.chars[0].bbox == BBox(10, 20, 30, 30)
-        assert line.chars[1].token_text == "地"
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes PASSED")
-
-
-def test_api_ocr_engine_parses_text_word_boxes_alias():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "ocrResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["源码"],
-                                    "rec_scores": [0.94],
-                                    "rec_boxes": [[10, 20, 70, 50]],
-                                },
-                                "text_word": [["源", "码"]],
-                                "text_word_boxes": [[
-                                    [10, 20, 40, 50],
-                                    [41, 20, 70, 50],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        line = engine.recognize(np.zeros((80, 100, 3), dtype=np.uint8), OcrContext())[0]
-        assert line.text == "源码"
-        assert line.chars[0].bbox == BBox(10, 20, 30, 30)
-        assert line.chars[1].bbox == BBox(41, 20, 29, 30)
-        assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_parses_text_word_boxes_alias PASSED")
-
-
-def test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion():
-    import numpy as np
-
-    from app.core.wordbox_anchor import refine_wordbox_anchors
-    from app.models import BBox
-
-    image = np.full((100, 140, 3), 255, dtype=np.uint8)
-    image[30:58, 26:45] = 0
-    source = BBox(30, 20, 50, 50)
-
-    anchors = refine_wordbox_anchors(
-        image,
-        BBox(20, 20, 90, 50),
-        [("税", source)],
-    )
-
-    assert len(anchors) == 1
-    assert anchors[0].kind == "cjk"
-    assert anchors[0].crop_bbox.x < source.x
-    assert anchors[0].crop_bbox.x2 <= source.x2
-    assert anchors[0].kept_cc_count >= 1
-
-    print("test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion PASSED")
-
-
-def test_api_ocr_engine_refines_cjk_word_box_with_anchor():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "ocrResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["税"],
-                                    "rec_scores": [0.96],
-                                    "rec_boxes": [[20, 20, 110, 70]],
-                                },
-                                "text_word": [["税"]],
-                                "text_word_boxes": [[[30, 20, 80, 70]]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        image = np.full((100, 140, 3), 255, dtype=np.uint8)
-        image[30:58, 26:45] = 0
-        line = ApiOcrEngine().recognize(image, OcrContext())[0]
-        assert line.chars[0].bbox.x < 30
-        assert line.chars[0].bbox.x2 <= 80
-        assert line.chars[0].bbox_source == "ocr"
-        assert line.chars[0].bbox_granularity == "char"
-        assert line.chars[0].bbox != BBox(30, 20, 50, 50)
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_refines_cjk_word_box_with_anchor PASSED")
-
-
-def test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["南京市长江大桥"],
-                                    "rec_scores": [0.97],
-                                    "rec_polys": [[
-                                        [5, 10], [105, 10], [105, 40], [5, 40],
-                                    ]],
-                                },
-                                "text_word": [["南京市", "长江大桥"]],
-                                "text_word_region": [[
-                                    [[5, 10], [42, 10], [42, 40], [5, 40]],
-                                    [[48, 10], [105, 10], [105, 40], [48, 40]],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        line = engine.recognize(np.zeros((80, 160, 3), dtype=np.uint8), OcrContext())[0]
-        assert len(line.chars) == len(line.text)
-        assert all(ch.bbox_source == "ocr" for ch in line.chars)
-        assert all(ch.bbox_granularity == "word" for ch in line.chars[:3])
-        assert all(ch.bbox_granularity == "word" for ch in line.chars[3:])
-        assert line.chars[0].bbox == line.chars[2].bbox
-        assert line.chars[3].bbox == line.chars[-1].bbox
-        assert line.chars[0].token_text == "南京市"
-        assert line.chars[-1].token_text == "长江大桥"
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision PASSED")
-
-
-def test_api_ocr_engine_filters_empty_narrow_word_boxes():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["甲乙"],
-                                    "rec_scores": [0.95],
-                                    "rec_boxes": [[10, 10, 70, 40]],
-                                },
-                                "text_word": [["甲", "乙"]],
-                                "text_word_region": [[
-                                    [[10, 10], [28, 10], [28, 40], [10, 40]],
-                                    [[60, 12], [61, 12], [61, 13], [60, 13]],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        image = np.full((80, 120, 3), 255, dtype=np.uint8)
-        image[10:40, 10:28] = 0
-        line = engine.recognize(image, OcrContext())[0]
-        assert line.chars[0].bbox_source == "ocr"
-        assert line.chars[0].bbox is not None
-        assert line.chars[1].bbox is None
-        assert line.chars[1].bbox_source == "fallback"
-        assert line.chars[1].bbox_granularity == "fallback"
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_filters_empty_narrow_word_boxes PASSED")
+    print("test_api_ocr_engine_does_not_request_return_word_box PASSED")
 
 
 def test_api_ocr_engine_does_not_promote_block_content_to_line():
@@ -2378,6 +2881,52 @@ def test_api_ocr_engine_does_not_promote_block_content_to_line():
     print("test_api_ocr_engine_does_not_promote_block_content_to_line PASSED")
 
 
+def test_api_ocr_engine_reads_direct_pruned_ppocr_rows():
+    import numpy as np
+    import requests
+
+    from app.core.app_config import AppConfig, update_config
+    from app.engines import OcrContext
+    from app.engines.real_ocr_adapter import ApiOcrEngine
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "result": {
+                    "ocrResults": [
+                        {
+                            "prunedResult": {
+                                "rec_texts": ["PP行"],
+                                "rec_scores": [0.96],
+                                "rec_boxes": [[10, 20, 90, 50]],
+                            },
+                        }
+                    ],
+                },
+            }
+
+    original_post = requests.post
+    requests.post = lambda *args, **kwargs: DummyResponse()
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="api", api_url="https://example.com", api_timeout=12)
+    try:
+        engine = ApiOcrEngine()
+        lines = engine.recognize(np.zeros((120, 200, 3), dtype=np.uint8), OcrContext())
+        assert len(lines) == 1
+        assert lines[0].text == "PP行"
+        assert lines[0].bbox.to_xyxy() == (10, 20, 90, 50)
+        assert lines[0].confidence == 0.96
+    finally:
+        requests.post = original_post
+        cfg.reset_to_defaults()
+
+    print("test_api_ocr_engine_reads_direct_pruned_ppocr_rows PASSED")
+
+
 def test_api_ocr_engine_ignores_block_content_without_rec_rows():
     import numpy as np
     import requests
@@ -2423,149 +2972,6 @@ def test_api_ocr_engine_ignores_block_content_without_rec_rows():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_ignores_block_content_without_rec_rows PASSED")
-
-
-def test_api_ocr_engine_aligns_token_rows_by_bbox_not_index():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["因为", "2016"],
-                                    "rec_scores": [0.96, 0.94],
-                                    "rec_boxes": [
-                                        [10, 10, 60, 42],
-                                        [10, 60, 90, 92],
-                                    ],
-                                },
-                                "text_word": [
-                                    ["2", "0", "1", "6"],
-                                    ["因", "为"],
-                                ],
-                                "text_word_region": [
-                                    [
-                                        [[10, 60], [26, 60], [26, 92], [10, 92]],
-                                        [[28, 60], [44, 60], [44, 92], [28, 92]],
-                                        [[46, 60], [62, 60], [62, 92], [46, 92]],
-                                        [[64, 60], [80, 60], [80, 92], [64, 92]],
-                                    ],
-                                    [
-                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
-                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
-                                    ],
-                                ],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        image = np.full((120, 120, 3), 255, dtype=np.uint8)
-        image[10:42, 10:30] = 0
-        image[10:42, 34:54] = 0
-        image[60:92, 10:80] = 0
-        lines = engine.recognize(image, OcrContext())
-        assert [line.text for line in lines] == ["因为", "2016"]
-        assert lines[0].chars[0].token_text == "因"
-        assert lines[0].chars[1].token_text == "为"
-        assert lines[1].chars[0].token_text == "2"
-        assert lines[1].chars[-1].token_text == "6"
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_aligns_token_rows_by_bbox_not_index PASSED")
-
-
-def test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["因为", "错配"],
-                                    "rec_scores": [0.96, 0.94],
-                                    "rec_boxes": [],
-                                },
-                                "text_word": [
-                                    ["因", "为"],
-                                    ["不", "同"],
-                                ],
-                                "text_word_region": [
-                                    [
-                                        [[10, 10], [30, 10], [30, 42], [10, 42]],
-                                        [[34, 10], [54, 10], [54, 42], [34, 42]],
-                                    ],
-                                    [
-                                        [[10, 60], [30, 60], [30, 92], [10, 92]],
-                                        [[34, 60], [54, 60], [54, 92], [34, 92]],
-                                    ],
-                                ],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        image = np.full((120, 120, 3), 255, dtype=np.uint8)
-        image[10:42, 10:30] = 0
-        image[10:42, 34:54] = 0
-        lines = engine.recognize(image, OcrContext())
-        assert len(lines) == 2
-        assert lines[0].text == "因为"
-        assert lines[0].bbox == BBox(10, 10, 44, 32)
-        assert lines[0].chars[0].token_text == "因"
-        assert lines[0].chars[1].token_text == "为"
-        assert lines[1].text == "错配"
-        assert lines[1].bbox == BBox(0, 0, 120, 120)
-        assert MISSING_LINE_BBOX_FLAG in lines[1].review_flags
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing PASSED")
 
 
 def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
@@ -2618,66 +3024,6 @@ def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_preserves_rec_text_without_any_geometry PASSED")
-
-
-def test_api_ocr_engine_preserves_token_text_when_rec_rows_missing():
-    import numpy as np
-    import requests
-
-    from app.core.app_config import AppConfig, update_config
-    from app.core.ocr_ir import OCR_IR_TOKEN_TEXT_FALLBACK_FLAG
-    from app.engines import OcrContext
-    from app.engines.real_ocr_adapter import ApiOcrEngine
-    from app.models import BBox, ProofStatus
-
-    class DummyResponse:
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {
-                "result": {
-                    "layoutParsingResults": [
-                        {
-                            "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": [],
-                                    "rec_scores": [],
-                                    "rec_boxes": [],
-                                },
-                                "text_word": [["漏", "字"]],
-                                "text_word_region": [[
-                                    [[10, 20], [28, 20], [28, 44], [10, 44]],
-                                    [[32, 20], [50, 20], [50, 44], [32, 44]],
-                                ]],
-                            },
-                        }
-                    ],
-                },
-            }
-
-    original_post = requests.post
-    requests.post = lambda *args, **kwargs: DummyResponse()
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://example.com", api_timeout=12)
-    try:
-        engine = ApiOcrEngine()
-        image = np.full((80, 100, 3), 255, dtype=np.uint8)
-        image[20:44, 10:28] = 0
-        image[20:44, 32:50] = 0
-        lines = engine.recognize(image, OcrContext())
-        assert len(lines) == 1
-        assert lines[0].text == "漏字"
-        assert lines[0].bbox == BBox(10, 20, 40, 24)
-        assert OCR_IR_TOKEN_TEXT_FALLBACK_FLAG in lines[0].review_flags
-        assert lines[0].proof_status == ProofStatus.AUTO_FLAGGED
-        assert [char.token_text for char in lines[0].chars] == ["漏", "字"]
-    finally:
-        requests.post = original_post
-        cfg.reset_to_defaults()
-
-    print("test_api_ocr_engine_preserves_token_text_when_rec_rows_missing PASSED")
 
 
 def test_fake_layout_engine():
@@ -2864,14 +3210,14 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         os.unlink(img_path)
 
 
-def test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars():
+def test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_chars():
     import tempfile
     import cv2
     import numpy as np
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
-    class PartialWordBoxEngine:
+    class PartialCharBoxEngine:
         bbox_space = "crop"
 
         def recognize(self, image_bgr, context):
@@ -2907,8 +3253,8 @@ def test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars():
     try:
         block = Block(block_type=BlockType.TEXT, bbox=BBox(100, 60, 100, 40))
         page = Page(image_path=img_path, width=220, height=120, blocks=[block])
-        result = OcrPipeline(engine=PartialWordBoxEngine()).process_project(
-            OcrProject(name="PartialWordBox", pages=[page])
+        result = OcrPipeline(engine=PartialCharBoxEngine()).process_project(
+            OcrProject(name="PartialCharBox", pages=[page])
         )
         line = result.pages[0].blocks[0].lines[0]
 
@@ -3278,16 +3624,16 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
             include_chars=True,
         )
 
-        assert [row.source for row in rows] == ["hanwang", "ppvl", "ppvl_fallback"]
+        assert [row.source for row in rows] == ["hanwang", "ppvl", "hanwang"]
         assert rows[0].text == "天地"
         assert rows[0].lines[0].chars[0].text == "天"
         assert rows[0].lines[0].chars[0].bbox == (12, 22, 35, 58)
         assert rows[1].text == "$$x+y$$"
-        assert rows[2].text == "参考文献很长"
-        assert rows[2].fallback_reason.startswith("short_hanwang_text")
+        assert rows[2].text == "短"
+        assert rows[2].fallback_reason == ""
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
-        assert stats.n_blocks_fallback == 1
+        assert stats.n_blocks_fallback == 0
         assert recog_shapes == [(74, 136)]
         assert recog_recblocks == [[(0, 0, 96, 36), (0, 38, 136, 74)]]
         assert stats.recog_full_page_pixels == 220 * 240 * 2
@@ -3303,6 +3649,147 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         micro_module.native_bridge.run_linecut_recog = original_recog
 
     print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
+
+
+def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+
+    captured = {}
+
+    def fake_runner(
+        image_bgr,
+        ppvl_blocks,
+        *,
+        seg_timeout=0,
+        recog_timeout=0,
+        include_chars=True,
+        page_ocr_lines=None,
+        progress_callback=None,
+    ):
+        captured["blocks"] = ppvl_blocks
+        row = micro_module.BlockResult(
+            block_idx=0,
+            block_label="equation",
+            block_bbox=(20, 30, 80, 54),
+            source="ppvl",
+            text="",
+            ppvl_text="",
+            lines=[
+                micro_module.LineResult(
+                    text="",
+                    bbox=(20, 30, 80, 54),
+                    confidence=0.0,
+                    source="ppvl",
+                )
+            ],
+            raw_block=dict(ppvl_blocks[0]),
+        )
+        return [row], micro_module.RunStats(n_blocks_total=1, n_blocks_ppvl=1)
+
+    page = Page(image_path="/tmp/manual-formula.png", width=120, height=90, page_number=1)
+    page.ppvl_parsing_res_list = [
+        {"block_label": "text", "block_bbox": [0, 0, 100, 20], "block_content": "stale paddle text"}
+    ]
+    page.blocks = [
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(20, 30, 60, 24),
+            source=BlockSource.MANUAL_DRAW,
+        )
+    ]
+
+    engine = micro_module.HanwangMicroRecBlockEngine(runner=fake_runner)
+    engine.recognize_page_blocks(np.zeros((90, 120, 3), dtype=np.uint8), page)
+
+    assert captured["blocks"][0]["block_label"] == "equation"
+    assert captured["blocks"][0]["block_bbox"] == [20, 30, 80, 54]
+    assert captured["blocks"][0]["_layout_block_source"] == "manual_draw"
+    assert "stale paddle text" not in str(captured["blocks"][0])
+    assert len(page.blocks) == 1
+    assert page.blocks[0].block_type == BlockType.EQUATION
+    assert page.blocks[0].recognizable is False
+    assert len(page.blocks[0].lines) == 1
+    assert page.blocks[0].lines[0].text == ""
+    assert "manual_formula_needs_text" in page.blocks[0].lines[0].review_flags
+
+    print("test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes PASSED")
+
+
+def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
+    from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    parent_record = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 200, 40],
+        "block_content": "甲 $ A $ 乙 $ B $ 丙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+        ],
+        "_layout_line_routes": [
+            {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text", "bbox": [0, 0, 200, 40]}]},
+        ],
+    }
+    page = Page(
+        image_path="/tmp/manual-binding-route.png",
+        width=220,
+        height=60,
+        ppvl_parsing_res_list=[dict(parent_record)],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 200, 40),
+                lines=[Line(text="bad active ocr", confidence=0.0, bbox=BBox.from_xyxy(0, 0, 200, 40))],
+                raw_payload=dict(parent_record),
+            ),
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(110, 0, 140, 30),
+                source=BlockSource.MANUAL_DRAW,
+                source_label="inline_formula",
+                raw_payload={
+                    "paddle_binding": {
+                        "status": BINDING_PARENT_FORMULA_INFERRED,
+                        "block_type": "equation",
+                        "source_label": "inline_formula",
+                        "text": "$ B $",
+                        "parent_index": 0,
+                        "manual_bbox": [110, 0, 140, 30],
+                    },
+                },
+            ),
+        ],
+    )
+
+    blocks = _page_blocks_from_layout(page)
+    assert len(blocks) == 1
+    parent = blocks[0]
+    assert parent["block_content"] == "甲 $ A $ 乙 $ B $ 丙"
+    assert "_layout_line_routes" not in parent
+    assert [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]] == [
+        [40, 0, 70, 40],
+        [110, 0, 140, 40],
+    ]
+
+    routes = line_routes_for_block(parent, 220, 60)
+    formula_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    assert [segment["text"] for segment in formula_segments] == ["$ A $", "$ B $"]
+    assert [route["bbox"] for route in text_slice_routes_for_block(parent, 220, 60)] == [
+        [0, 0, 40, 40],
+        [70, 0, 110, 40],
+        [140, 0, 200, 40],
+    ]
+
+    print("test_hanwang_layout_injects_manual_formula_binding_into_parent_route PASSED")
 
 
 def test_hanwang_inline_formula_text_slices_keep_chars():
@@ -3404,11 +3891,9 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
         assert seen_recblocks == [
             (0, 0, 70, 30),
             (110, 0, 210, 30),
-            (0, 30, 210, 40),
             (0, 40, 40, 70),
             (90, 40, 140, 70),
             (180, 40, 210, 70),
-            (0, 70, 210, 80),
         ]
         assert len(rows) == len(blocks)
         assert [row.source for row in rows] == ["hanwang"]
@@ -3461,6 +3946,55 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
         micro_module.native_bridge.run_linecut_recog = original_recog
 
     print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
+
+
+def test_hanwang_recog_filters_empty_decoded_char_boxes():
+    from app.engines.hanwang.micro_recblock import _line_results_from_recog
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    raw = {
+        "lines": [
+            {
+                "groups": [
+                    {
+                        "bbox": {"left": 0, "top": 0, "right": 90, "bottom": 30},
+                        "chars": [
+                            {
+                                "codes": [code("甲")],
+                                "scores": [5],
+                                "bbox": {"left": 0, "top": 0, "right": 30, "bottom": 30},
+                            },
+                            {
+                                "codes": [0],
+                                "scores": [100],
+                                "bbox": {"left": 30, "top": 0, "right": 60, "bottom": 30},
+                            },
+                            {
+                                "codes": [code("乙")],
+                                "scores": [5],
+                                "bbox": {"left": 60, "top": 0, "right": 90, "bottom": 30},
+                            },
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+
+    lines = _line_results_from_recog(
+        raw,
+        fallback_bbox=(0, 0, 90, 30),
+        include_chars=True,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "甲乙"
+    assert [char.text for char in lines[0].chars] == ["甲", "乙"]
+    assert [char.bbox for char in lines[0].chars] == [(0, 0, 30, 30), (60, 0, 90, 30)]
+
+    print("test_hanwang_recog_filters_empty_decoded_char_boxes PASSED")
 
 
 def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
@@ -3629,6 +4163,130 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
     print("test_hanwang_pre_page_ocr_lines_split_before_recog PASSED")
 
 
+def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "bbox": {
+                                "left": x1 - 2,
+                                "top": y1 + 2,
+                                "right": x2 + 2,
+                                "bottom": y2 - 2,
+                            }
+                        }
+                    ]
+                }
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        h, w = image_bgr.shape[:2]
+        text = {40: "甲", 50: "乙"}.get(w, "")
+        if not text:
+            return {"lines": []}
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                            "chars": [
+                                {
+                                    "codes": [code(text)],
+                                    "scores": [5],
+                                    "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((60, 140, 3), dtype=np.uint8),
+            [
+                {
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 120, 40],
+                    "block_content": "甲 $ A $ 乙",
+                    "_route_subblocks": [
+                        {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 40]},
+                    ],
+                }
+            ],
+            include_chars=True,
+        )
+
+        assert seen_recblocks == [(0, 0, 40, 40), (70, 0, 120, 40)]
+        assert stats.n_blocks_hanwang == 1
+        assert rows[0].text == "甲$ A $乙"
+        assert rows[0].layout_bbox == (0, 0, 120, 40)
+        assert rows[0].block_bbox_source == "layout_line_routes_union"
+        assert rows[0].route_text_slice_bboxes == [(0, 0, 40, 40), (70, 0, 120, 40)]
+        assert rows[0].recog_group_bboxes == [(0, 2, 40, 38), (70, 2, 120, 38)]
+        assert rows[0].segimg_group_audits == [
+            {
+                "route_text_slice_bbox": [0, 0, 40, 40],
+                "segimg_group_bbox": [0, 2, 42, 38],
+                "recog_group_bbox": [0, 2, 40, 38],
+                "clipped": True,
+                "dropped": False,
+            },
+            {
+                "route_text_slice_bbox": [70, 0, 120, 40],
+                "segimg_group_bbox": [68, 2, 122, 38],
+                "recog_group_bbox": [70, 2, 120, 38],
+                "clipped": True,
+                "dropped": False,
+            },
+        ]
+        assert [line.bbox_source for line in rows[0].lines] == ["layout_route_assembled"]
+        audit = rows[0].raw_block["_hanwang_bbox_audit"]
+        assert audit["schema"] == "hanwang_bbox_audit.v1"
+        assert audit["layout_block_bbox"] == [0, 0, 120, 40]
+        assert audit["effective_block_bbox"] == [0, 0, 120, 40]
+        assert audit["effective_block_bbox_source"] == "layout_line_routes_union"
+        assert audit["layout_line_route_bboxes"] == [[0, 0, 120, 40]]
+        assert audit["route_text_slice_bboxes"] == [[0, 0, 40, 40], [70, 0, 120, 40]]
+        assert audit["hanwang_recog_group_bboxes"] == [[0, 2, 40, 38], [70, 2, 120, 38]]
+        assert audit["hanwang_segimg_group_clipped_count"] == 2
+        assert audit["hanwang_segimg_group_dropped_count"] == 0
+        assert audit["route_text_slice_count"] == 2
+        assert audit["hanwang_recog_group_count"] == 2
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes PASSED")
+
+
 def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
     import os
     import tempfile
@@ -3757,7 +4415,783 @@ def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
     print("test_paddle_line_routing_builds_layout_line_routes_from_reading_order PASSED")
 
 
-def test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl():
+def test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair():
+    from app.core.paddle_line_routing import _formula_spans, build_layout_line_routes
+
+    assert _formula_spans(r"price is \$5, formula $ x $ and display $$ y+z $$") == [
+        "$ x $",
+        "$$ y+z $$",
+    ]
+
+    block = {
+        "block_label": "display_formula",
+        "block_bbox": [0, 0, 120, 30],
+        "block_content": " $$ x+y $$ ",
+        "_route_subblocks": [
+            {"block_label": "display_formula", "block_bbox": [0, 0, 120, 30]},
+        ],
+    }
+
+    routes = build_layout_line_routes(block, 140, 50)
+    formula_texts = [
+        segment["text"]
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    assert formula_texts == ["$$ x+y $$"]
+
+    print("test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair PASSED")
+
+
+def test_paddle_line_routing_line_hint_formula_recovery_does_not_shift_next_line():
+    from app.core.paddle_line_routing import (
+        PaddleRouteLineHint,
+        recover_inline_formula_segments,
+    )
+
+    recovered = recover_inline_formula_segments(
+        parent_text="甲 $ A $ 乙 $ B $ 丙 $ C $ 丁",
+        line_hints=[
+            PaddleRouteLineHint(text="甲 $ A $ 乙 $ B $", bbox=(0, 0, 200, 30)),
+            PaddleRouteLineHint(text="丙 $ C $ 丁", bbox=(0, 40, 200, 70)),
+        ],
+        subblocks=[
+            {"label": "inline_formula", "bbox": [100, 0, 130, 30]},
+            {"label": "inline_formula", "bbox": [60, 40, 90, 70]},
+        ],
+    )
+
+    assert [(item.line_index, item.text, item.bbox) for item in recovered] == [
+        (0, "$ A $", (100, 0, 130, 30)),
+        (1, "$ C $", (60, 40, 90, 70)),
+    ]
+
+    print("test_paddle_line_routing_line_hint_formula_recovery_does_not_shift_next_line PASSED")
+
+
+def test_paddle_line_routing_missing_formula_box_does_not_shift_later_rows():
+    from app.core.paddle_line_routing import (
+        PaddleRouteLineHint,
+        recover_inline_formula_segments,
+    )
+
+    recovered = recover_inline_formula_segments(
+        parent_text=(
+            "被解释变量 $ Y_{ct} $为地级市商品供需适配程度变量。"
+            "核心解释变量 $ Incentive_{c} \\times Post_{t} $为强度变量与政策时点变量的交乘项，其中 "
+            "$ Incentive_{c} $表示2016年增值税分成改革下各地级市结构性财政激励程度，"
+            "政策时点变量 $ Post_{t} $为改革年份虚拟变量。 $ X_{ct} $为地区层面控制变量。"
+            "年龄结构等。 $ \\delta_{c} $和 $ \\varphi_{t} $分别表示城市固定效应和年份固定效应，"
+            " $ \\varepsilon_{ct} $为随机扰动项。"
+        ),
+        line_hints=[
+            PaddleRouteLineHint(text="被解释变量Y为地级市商品供需适配程度变量。", bbox=(0, 0, 200, 30)),
+            PaddleRouteLineHint(text="核心解释变量Incentive×Post为强度变量与政策时点变量的交乘项，其中", bbox=(0, 40, 260, 70)),
+            PaddleRouteLineHint(text="Incentive表示2016年增值税分成改革下各地级市结构性财政激励程度", bbox=(0, 80, 260, 110)),
+            PaddleRouteLineHint(text="政策时点变量Post为改革年份虚拟变量。", bbox=(0, 120, 260, 150)),
+            PaddleRouteLineHint(text="X为地区层面控制变量。", bbox=(0, 160, 260, 190)),
+            PaddleRouteLineHint(text="年龄结构等。δ和φ分别表示城市固定效应和年份固定效应，ε为随机扰动项。", bbox=(0, 200, 300, 230)),
+        ],
+        subblocks=[
+            {"label": "inline_formula", "bbox": [80, 0, 110, 30]},
+            {"label": "inline_formula", "bbox": [95, 40, 155, 70]},
+            # Missing "$ Incentive_{c} $" box on physical line 2.
+            {"label": "inline_formula", "bbox": [90, 120, 130, 150]},
+            {"label": "inline_formula", "bbox": [40, 160, 70, 190]},
+            {"label": "inline_formula", "bbox": [50, 200, 80, 230]},
+            {"label": "inline_formula", "bbox": [110, 200, 140, 230]},
+            {"label": "inline_formula", "bbox": [230, 200, 270, 230]},
+        ],
+    )
+
+    assert [(item.line_index, item.text) for item in recovered] == [
+        (0, "$ Y_{ct} $"),
+        (1, "$ Incentive_{c} \\times Post_{t} $"),
+        (3, "$ Post_{t} $"),
+        (4, "$ X_{ct} $"),
+        (5, "$ \\delta_{c} $"),
+        (5, "$ \\varphi_{t} $"),
+        (5, "$ \\varepsilon_{ct} $"),
+    ]
+
+    print("test_paddle_line_routing_missing_formula_box_does_not_shift_later_rows PASSED")
+
+
+def test_paddle_line_routing_marker_formula_does_not_cut_text_slice():
+    from app.core.paddle_line_routing import build_layout_line_routes, text_slice_routes_for_block
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 300, 40],
+        "block_content": "甲 $ ^{②} $ 乙 $ B $ 丙",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [70, 0, 100, 30]},
+            {"block_label": "inline_formula", "block_bbox": [170, 0, 200, 30]},
+        ],
+    }
+
+    routes = build_layout_line_routes(block, 320, 60)
+    formula_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    text_slice_bboxes = [
+        route["bbox"]
+        for route in text_slice_routes_for_block(block, 320, 60)
+    ]
+
+    assert [segment["text"] for segment in formula_segments] == ["$ B $"]
+    assert [70, 0, 100, 30] not in text_slice_bboxes
+    assert [0, 0, 170, 30] in text_slice_bboxes
+
+    print("test_paddle_line_routing_marker_formula_does_not_cut_text_slice PASSED")
+
+
+def test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt():
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, line_routes_for_block
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 300, 40],
+        "block_content": "甲 $ ^{②} $ 乙 $ B $ 丙",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [70, 0, 100, 30]},
+            {"block_label": "inline_formula", "block_bbox": [170, 0, 200, 30]},
+        ],
+        LAYOUT_LINE_ROUTES_FIELD: [
+            {
+                "bbox": [0, 0, 300, 40],
+                "segments": [
+                    {"kind": "text", "bbox": [0, 0, 70, 40]},
+                    {"kind": "formula", "bbox": [70, 0, 100, 40], "text": "$ ^{②} $"},
+                    {"kind": "text", "bbox": [100, 0, 170, 40]},
+                    {"kind": "formula", "bbox": [170, 0, 200, 40], "text": "$ B $"},
+                    {"kind": "text", "bbox": [200, 0, 300, 40]},
+                ],
+            }
+        ],
+    }
+
+    routes = line_routes_for_block(block, 320, 60)
+    formula_texts = [
+        segment["text"]
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    text_bboxes = [
+        segment["bbox"]
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "text"
+    ]
+
+    assert formula_texts == ["$ B $"]
+    assert [0, 0, 170, 30] in text_bboxes
+    assert all(segment.get("text") != "$ ^{②} $" for route in routes for segment in route["segments"])
+
+    print("test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt PASSED")
+
+
+def test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_line_routing import line_routes_for_block, text_slice_routes_for_block
+    from app.models import Page
+
+    project_root = Path(__file__).resolve().parents[1]
+    raw = json.loads((project_root / "file" / "244771纵校" / "120169.layout-api.json").read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    page = Page(
+        image_path=str(project_root / page_info["display_image_path"]),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=int(page_info["page_number"]),
+    )
+    LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+
+    parent = page.ppvl_parsing_res_list[12]
+    routes = line_routes_for_block(parent, page.width, page.height)
+    formula_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    text_slice_bboxes = [
+        tuple(route["bbox"])
+        for route in text_slice_routes_for_block(parent, page.width, page.height)
+    ]
+
+    assert [segment["text"] for segment in formula_segments] == ["$ Time_{t} $", "$ \\beta_{t} $"]
+    assert (192, 2737, 619, 2793) not in text_slice_bboxes
+    assert (619, 2737, 672, 2793) not in text_slice_bboxes
+    assert (192, 2710, 2051, 2737) not in text_slice_bboxes
+    assert (192, 2785, 1273, 2793) not in text_slice_bboxes
+    assert (192, 2737, 1273, 2793) in text_slice_bboxes
+
+    print("test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero PASSED")
+
+
+def test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text():
+    from app.core.paddle_line_routing import (
+        PageOcrLineHint,
+        attach_page_ocr_line_routes,
+    )
+
+    parent = {
+        "block_label": "text",
+        "block_bbox": [192, 2650, 2051, 2878],
+        "block_content": (
+            "其中， $ Time_{t} $ 为以样本数据第一年（2010年）为基期构建的改革时点变量，"
+            "当年份为 t 时取 1，否则取 0。结果显示 $ ^{②} $，相比基期年， "
+            "$ \\beta_{t} $ 在 2011~2015 年大致位于 0 附近"
+        ),
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [434, 2658, 547, 2710]},
+            {"block_label": "inline_formula", "block_bbox": [619, 2737, 672, 2785]},
+            {"block_label": "inline_formula", "block_bbox": [1273, 2740, 1325, 2793]},
+        ],
+    }
+    lines = [
+        PageOcrLineHint(
+            text="其中，Time,为以样本数据第一年(2010年)为基期构建的改革时点变量,当年份",
+            bbox=(296, 2642, 2043, 2718),
+        ),
+        PageOcrLineHint(
+            text="为t时取1,否则取0。结果显示②，相比基期年，β{在2011~2015年大致位于0附近",
+            bbox=(198, 2715, 2046, 2796),
+        ),
+    ]
+
+    attach_page_ocr_line_routes([parent], lines, 2320, 3416)
+
+    formula_segments = [
+        segment
+        for route in parent["_layout_line_routes"]
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    text_slice_bboxes = [
+        tuple(segment["bbox"])
+        for route in parent["_layout_line_routes"]
+        for segment in route["segments"]
+        if segment["kind"] == "text"
+    ]
+
+    assert [segment["text"] for segment in formula_segments] == ["$ Time_{t} $", "$ \\beta_{t} $"]
+    assert all(segment["text"] != "$ ^{②} $" for segment in formula_segments)
+    assert (198, 2715, 1273, 2796) in text_slice_bboxes
+
+    print("test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text PASSED")
+
+
+def test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text():
+    from app.core.paddle_line_routing import (
+        PageOcrLineHint,
+        attach_page_ocr_line_routes,
+    )
+
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 160, 40],
+        "block_content": "甲 $ A $ 乙",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [45, 0, 75, 40]},
+        ],
+    }
+
+    attach_page_ocr_line_routes(
+        [parent],
+        [PageOcrLineHint(text="甲 $ WRONG $ 乙", bbox=(0, 0, 160, 40))],
+        200,
+        80,
+    )
+
+    formula_segments = [
+        segment
+        for route in parent["_layout_line_routes"]
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+
+    assert [segment["text"] for segment in formula_segments] == ["$ A $"]
+
+    print("test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text PASSED")
+
+
+def test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes():
+    from app.core.paddle_line_routing import (
+        LAYOUT_LINE_ROUTES_FIELD,
+        PageOcrLineHint,
+        attach_page_ocr_line_routes,
+        text_slice_routes_for_block,
+    )
+
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 100, 100],
+        "block_content": "甲 $ A $ 乙",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [30, 10, 50, 40]},
+        ],
+        LAYOUT_LINE_ROUTES_FIELD: [
+            {
+                "bbox": [0, 80, 100, 95],
+                "segments": [{"kind": "text", "bbox": [0, 80, 100, 95]}],
+            }
+        ],
+    }
+
+    attach_page_ocr_line_routes(
+        [parent],
+        [PageOcrLineHint(text="unrelated", bbox=(200, 200, 260, 230))],
+        300,
+        300,
+    )
+
+    assert LAYOUT_LINE_ROUTES_FIELD not in parent
+    text_slice_bboxes = [
+        tuple(route["bbox"])
+        for route in text_slice_routes_for_block(parent, 300, 300)
+    ]
+
+    assert (0, 80, 100, 95) not in text_slice_bboxes
+    assert (0, 10, 30, 40) in text_slice_bboxes
+
+    print("test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes PASSED")
+
+
+def test_paddle_line_routing_formula_number_is_skip_not_formula_carrier():
+    from app.core.paddle_line_routing import build_layout_line_routes
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 230, 40],
+        "block_content": "正文 $ A $ 公式编号",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [60, 0, 90, 30]},
+            {"block_label": "formula_number", "block_bbox": [180, 0, 220, 30], "block_content": "(1)"},
+        ],
+    }
+
+    routes = build_layout_line_routes(block, 240, 60)
+    formula_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    skip_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "skip"
+    ]
+
+    assert [(segment["label"], segment["text"]) for segment in formula_segments] == [
+        ("inline_formula", "$ A $"),
+    ]
+    assert [(segment["label"], segment["text"]) for segment in skip_segments] == [
+        ("formula_number", "(1)"),
+    ]
+
+    print("test_paddle_line_routing_formula_number_is_skip_not_formula_carrier PASSED")
+
+
+def test_paddle_line_routing_formula_rows_use_single_horizontal_band():
+    from app.core.paddle_line_routing import build_layout_line_routes
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 80],
+        "block_content": "前 $ A $ 中 $ B $ 后 $ C $ 末",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [40, 10, 70, 34]},
+            {"block_label": "inline_formula", "block_bbox": [95, 14, 125, 42]},
+            {"block_label": "inline_formula", "block_bbox": [160, 8, 190, 36]},
+        ],
+    }
+
+    routes = build_layout_line_routes(block, 240, 100)
+    formula_route = next(
+        route for route in routes
+        if sum(1 for segment in route["segments"] if segment["kind"] == "formula") == 3
+    )
+
+    assert [segment["text"] for segment in formula_route["segments"] if segment["kind"] == "formula"] == [
+        "$ A $",
+        "$ B $",
+        "$ C $",
+    ]
+    assert all(
+        segment["bbox"][1] == formula_route["bbox"][1]
+        and segment["bbox"][3] == formula_route["bbox"][3]
+        for segment in formula_route["segments"]
+    )
+    assert [segment["kind"] for segment in formula_route["segments"]] == [
+        "text",
+        "formula",
+        "text",
+        "formula",
+        "text",
+        "formula",
+        "text",
+    ]
+
+    print("test_paddle_line_routing_formula_rows_use_single_horizontal_band PASSED")
+
+
+def test_paddle_line_routing_has_layout_routes_is_pure():
+    from app.core.paddle_line_routing import (
+        LAYOUT_LINE_ROUTES_FIELD,
+        has_layout_line_routes,
+        line_routes_for_block,
+    )
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 120, 30],
+        "block_content": "before $ A $ after",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [45, 0, 70, 30]},
+        ],
+    }
+
+    assert LAYOUT_LINE_ROUTES_FIELD not in block
+    assert has_layout_line_routes(block, 140, 50) is True
+    assert LAYOUT_LINE_ROUTES_FIELD not in block
+
+    routes = line_routes_for_block(block, 140, 50)
+    assert routes
+    assert block[LAYOUT_LINE_ROUTES_FIELD] == routes
+
+    print("test_paddle_line_routing_has_layout_routes_is_pure PASSED")
+
+
+def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_line_routing import (
+        LAYOUT_LINE_ROUTES_FIELD,
+        ROUTE_SUBBLOCKS_FIELD,
+    )
+    from app.models import Page
+
+    project_root = Path(__file__).resolve().parents[1]
+    layout_json = (
+        project_root
+        / "tests"
+        / "fixtures"
+        / "layout"
+        / "120166-layout-api-fixture.json"
+    )
+    raw = json.loads(layout_json.read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    sample = project_root / page_info["display_image_path"]
+    page = Page(
+        image_path=str(sample),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=int(page_info["page_number"]),
+    )
+
+    LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+
+    skip_records = [
+        record for record in page.ppvl_parsing_res_list
+        if record.get("block_label") in {"display_formula", "formula_number"}
+    ]
+    assert skip_records
+    assert all(ROUTE_SUBBLOCKS_FIELD not in record for record in skip_records)
+    assert all(LAYOUT_LINE_ROUTES_FIELD not in record for record in skip_records)
+
+    text_record = next(
+        record for record in page.ppvl_parsing_res_list
+        if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
+    )
+    assert len(text_record[ROUTE_SUBBLOCKS_FIELD]) == 7
+
+    formula_routes = [
+        route for route in text_record[LAYOUT_LINE_ROUTES_FIELD]
+        if any(segment["kind"] == "formula" for segment in route["segments"])
+    ]
+    assert len(formula_routes) == 5
+    three_formula_route = next(
+        route for route in formula_routes
+        if sum(1 for segment in route["segments"] if segment["kind"] == "formula") == 3
+    )
+    assert [segment["text"] for segment in three_formula_route["segments"] if segment["kind"] == "formula"] == [
+        "$ X_{ct} $",
+        "$ \\delta_{c} $",
+        "$ \\varphi_{t} $",
+    ]
+    assert all(
+        segment["bbox"][1] == three_formula_route["bbox"][1]
+        and segment["bbox"][3] == three_formula_route["bbox"][3]
+        for segment in three_formula_route["segments"]
+    )
+
+    print("test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands PASSED")
+
+
+def test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_line_routing import (
+        LAYOUT_LINE_ROUTES_FIELD,
+        attach_page_ocr_line_routes,
+    )
+    from app.models import BBox, Line, Page
+
+    project_root = Path(__file__).resolve().parents[1]
+    layout_json = (
+        project_root
+        / "tests"
+        / "fixtures"
+        / "layout"
+        / "120166-layout-api-fixture.json"
+    )
+    ocr_lines_json = (
+        project_root
+        / "tests"
+        / "fixtures"
+        / "layout"
+        / "120166-page-ocr-lines.json"
+    )
+    raw = json.loads(layout_json.read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    sample = project_root / page_info["display_image_path"]
+    page = Page(
+        image_path=str(sample),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=int(page_info["page_number"]),
+    )
+    LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+
+    ocr_raw = json.loads(ocr_lines_json.read_text(encoding="utf-8"))
+    page_ocr_lines = []
+    for row in ocr_raw["lines"]:
+        page_ocr_lines.append(
+            Line(
+                text=str(row["text"]),
+                confidence=float(row["score"]),
+                bbox=BBox.from_xyxy(*row["bbox"]),
+            )
+        )
+
+    attach_page_ocr_line_routes(
+        page.ppvl_parsing_res_list,
+        page_ocr_lines,
+        page.width,
+        page.height,
+    )
+    text_record = next(
+        record for record in page.ppvl_parsing_res_list
+        if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
+    )
+    formula_texts = [
+        segment["text"]
+        for route in text_record[LAYOUT_LINE_ROUTES_FIELD]
+        for segment in route["segments"]
+        if segment["kind"] == "formula" and segment.get("text")
+    ]
+
+    assert formula_texts == [
+        "$ Y_{ct} $",
+        "$ Incentive_{c} \\times Post_{t} $",
+        "$ Post_{t} $",
+        "$ X_{ct} $",
+        "$ \\delta_{c} $",
+        "$ \\varphi_{t} $",
+        "$ \\varepsilon_{ct} $",
+    ]
+
+    final_formula_route = next(
+        route for route in text_record[LAYOUT_LINE_ROUTES_FIELD]
+        if route["bbox"][1] == 2271
+    )
+    assert [segment["text"] for segment in final_formula_route["segments"] if segment["kind"] == "formula"] == [
+        "$ \\delta_{c} $",
+        "$ \\varphi_{t} $",
+        "$ \\varepsilon_{ct} $",
+    ]
+
+    print("test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box PASSED")
+
+
+def test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_artifact_index import (
+        BINDING_GEOMETRY_HIT,
+        BINDING_PARENT_FORMULA_INFERRED,
+        PaddleArtifactIndex,
+    )
+    from app.models import BBox, BlockType, Page
+
+    project_root = Path(__file__).resolve().parents[1]
+    layout_json = (
+        project_root
+        / "tests"
+        / "fixtures"
+        / "layout"
+        / "120166-layout-api-fixture.json"
+    )
+    raw = json.loads(layout_json.read_text(encoding="utf-8"))
+    page_info = raw["page"]
+    page = Page(
+        image_path=str(project_root / page_info["display_image_path"]),
+        width=int(page_info["width"]),
+        height=int(page_info["height"]),
+        page_number=int(page_info["page_number"]),
+    )
+    LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
+
+    index = PaddleArtifactIndex.from_page(page)
+    geometry = index.bind_manual_bbox(
+        BBox.from_xyxy(1030, 1888, 1165, 1960),
+        BlockType.EQUATION,
+    )
+    missing = index.bind_manual_bbox(
+        BBox.from_xyxy(292, 1958, 620, 2038),
+        BlockType.EQUATION,
+    )
+
+    assert geometry.status == BINDING_GEOMETRY_HIT
+    assert geometry.text == "$ Incentive_{c} \\times Post_{t} $"
+    assert geometry.recognizable is False
+    assert missing.status == BINDING_PARENT_FORMULA_INFERRED
+    assert missing.text == "$ Incentive_{c} $"
+    assert "manual_formula_from_parent_text" in missing.review_flags
+
+    print("test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth PASSED")
+
+
+def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
+    from app.core.paddle_artifact_index import (
+        BINDING_EMPTY_REVIEW,
+        BINDING_PARENT_TABLE_HIT,
+        PaddleArtifactIndex,
+    )
+    from app.models import BBox, BlockType, Page
+
+    page = Page(image_path="/tmp/table-page.png", width=300, height=220)
+    page.ppvl_parsing_res_list = [
+        {
+            "block_label": "table",
+            "block_bbox": [40, 50, 260, 160],
+            "block_content": "<table><tr><td>A</td></tr></table>",
+        },
+        {
+            "block_label": "text",
+            "block_bbox": [40, 170, 260, 205],
+            "block_content": "plain text without formula",
+        },
+    ]
+
+    index = PaddleArtifactIndex.from_page(page)
+    table = index.bind_manual_bbox(BBox.from_xyxy(35, 45, 265, 165), BlockType.TABLE)
+    empty_formula = index.bind_manual_bbox(BBox.from_xyxy(50, 174, 120, 198), BlockType.EQUATION)
+
+    assert table.status == BINDING_PARENT_TABLE_HIT
+    assert table.text == "<table><tr><td>A</td></tr></table>"
+    assert table.source_label == "table"
+    assert table.recognizable is False
+    assert empty_formula.status == BINDING_EMPTY_REVIEW
+    assert empty_formula.text == ""
+    assert "manual_formula_needs_text" in empty_formula.review_flags
+
+    print("test_paddle_artifact_index_binds_parent_table_and_empty_formula_review PASSED")
+
+
+def test_layout_panel_manual_formula_writes_paddle_binding_payload():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(300, 120, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=300, height=120)
+        page.ppvl_parsing_res_list = [
+            {
+                "block_label": "text",
+                "block_bbox": [10, 10, 260, 70],
+                "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                "_route_subblocks": [
+                    {"block_label": "inline_formula", "block_bbox": [60, 12, 90, 40]},
+                ],
+            }
+        ]
+        block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox.from_xyxy(120, 12, 150, 42),
+            source=BlockSource.MANUAL_DRAW,
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel._bind_manual_block_to_paddle(page, block)
+
+            binding = block.raw_payload["paddle_binding"]
+            assert binding["status"] == BINDING_PARENT_FORMULA_INFERRED
+            assert binding["text"] == "$ B $"
+            assert block.source_label == "inline_formula"
+            assert block.recognizable is False
+            assert block.lines[0].text == "$ B $"
+        finally:
+            panel.close()
+            app.processEvents()
+
+    print("test_layout_panel_manual_formula_writes_paddle_binding_payload PASSED")
+
+
+def test_layout_analyzer_reads_formula_geometry_records_for_routes():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.models import Page
+
+    page = Page(image_path="/tmp/formula-geometry-key.png", width=160, height=80)
+    data = {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "prunedResult": {
+                        "layout_det_res": {
+                            "formula": [
+                                {"label": "inline_formula", "coordinate": [50, 10, 80, 32]},
+                            ],
+                        },
+                        "parsing_res_list": [
+                            {"block_label": "text", "block_bbox": [10, 0, 140, 50], "block_content": "甲 $ A $ 乙"},
+                        ],
+                    },
+                },
+            ],
+        },
+    }
+
+    blocks, overlays = LayoutAnalyzer()._extract_api_blocks(page, data)
+    subblocks = page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD]
+
+    assert blocks[0].raw_payload[ROUTE_SUBBLOCKS_FIELD] == subblocks
+    assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
+        ("inline_formula", [50, 10, 80, 32]),
+    ]
+    assert [label for label, _bbox in overlays] == ["text", "inline_formula"]
+
+    print("test_layout_analyzer_reads_formula_geometry_records_for_routes PASSED")
+
+
+def test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -3787,15 +5221,15 @@ def test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl():
         )
 
         assert len(rows) == 1
-        assert rows[0].source == "ppvl_fallback"
-        assert rows[0].text == parent_text
-        assert rows[0].lines[0].text == parent_text
-        assert rows[0].fallback_reason == "empty_hanwang_text"
-        assert stats.n_blocks_fallback == 1
+        assert rows[0].source == "hanwang"
+        assert rows[0].text == ""
+        assert rows[0].lines == []
+        assert rows[0].fallback_reason == ""
+        assert stats.n_blocks_fallback == 0
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
-    print("test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl PASSED")
+    print("test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result PASSED")
 
 
 def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
@@ -3877,7 +5311,7 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
     print("test_hanwang_group_chunk_cannot_readmit_skipped_subregions PASSED")
 
 
-def test_hanwang_formula_style_footer_and_footnote_bypass_hanwang():
+def test_hanwang_formula_style_footer_bypasses_hanwang():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -3900,27 +5334,102 @@ def test_hanwang_formula_style_footer_and_footnote_bypass_hanwang():
                     "block_bbox": [10, 20, 90, 38],
                     "block_content": " $  \\frac{1}{2}  $",
                 },
-                {
-                    "block_label": "footnote",
-                    "block_bbox": [10, 40, 90, 58],
-                    "block_content": " $$ x = y $$ ",
-                },
             ],
         )
 
         assert called_segimg is False
-        assert len(rows) == 2
-        assert [row.source for row in rows] == ["ppvl", "ppvl"]
-        assert [row.block_label for row in rows] == ["formula", "formula"]
-        assert [row.lines[0].text for row in rows] == ["$  \\frac{1}{2}  $", "$$ x = y $$"]
-        assert [row.lines[0].chars for row in rows] == [[], []]
+        assert len(rows) == 1
+        assert rows[0].source == "ppvl"
+        assert rows[0].block_label == "formula"
+        assert rows[0].lines[0].text == "$  \\frac{1}{2}  $"
+        assert rows[0].lines[0].chars == []
         assert stats.n_blocks_hanwang == 0
-        assert stats.n_blocks_ppvl == 2
+        assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 0
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
-    print("test_hanwang_formula_style_footer_and_footnote_bypass_hanwang PASSED")
+    print("test_hanwang_formula_style_footer_bypasses_hanwang PASSED")
+
+
+def test_hanwang_footnote_labels_route_through_hanwang():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    captured_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        captured_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        h, w = image_bgr.shape[:2]
+        return {
+            "lines": [
+                {"groups": [{
+                    "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                    "chars": [{
+                        "codes": [code("注")],
+                        "scores": [5],
+                        "bbox": {"left": 0, "top": 0, "right": min(20, w), "bottom": h},
+                    }],
+                }]}
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((100, 300, 3), dtype=np.uint8),
+            [
+                {
+                    "block_label": "vision_footnote",
+                    "block_bbox": [10, 10, 250, 40],
+                    "block_content": "注",
+                },
+                {
+                    "block_label": "footnote",
+                    "block_bbox": [10, 50, 280, 90],
+                    "block_content": "注",
+                },
+            ],
+            include_chars=True,
+        )
+
+        assert captured_recblocks == [(10, 10, 250, 40), (10, 50, 280, 90)]
+        assert [row.source for row in rows] == ["hanwang", "hanwang"]
+        assert [row.block_label for row in rows] == ["vision_footnote", "footnote"]
+        assert [row.text for row in rows] == ["注", "注"]
+        assert [row.lines[0].chars[0].text for row in rows] == ["注", "注"]
+        assert stats.n_blocks_hanwang == 2
+        assert stats.n_blocks_ppvl == 0
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+
+    print("test_hanwang_footnote_labels_route_through_hanwang PASSED")
 
 
 def test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path():
@@ -4138,14 +5647,13 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 block_idx=2,
                 block_label="reference",
                 block_bbox=(20, 140, 180, 180),
-                source="ppvl_fallback",
-                text="参考文献",
+                source="hanwang",
+                text="",
                 ppvl_text="参考文献",
-                fallback_reason="empty_hanwang_text",
                 raw_block={"block_label": "reference", "block_content": "参考文献", "ref_level": 1},
-                lines=[LineResult(text="参考文献", bbox=(20, 140, 180, 180), source="ppvl_fallback")],
+                lines=[],
             ),
-        ], RunStats(n_blocks_total=3, n_blocks_hanwang=2, n_blocks_ppvl=1, n_blocks_fallback=1)
+        ], RunStats(n_blocks_total=3, n_blocks_hanwang=2, n_blocks_ppvl=1, n_blocks_fallback=0)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -4205,8 +5713,8 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert out_page.blocks[1].lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].recognizable is False
         assert out_page.blocks[1].raw_payload["formula_format"] == "latex"
-        assert "fallback_reason=empty_hanwang_text" in out_page.blocks[2].note
-        assert out_page.blocks[2].lines[0].review_flags == ["hanwang_micro_recblock_fallback"]
+        assert "fallback_reason=" not in out_page.blocks[2].note
+        assert out_page.blocks[2].lines == []
         assert out_page.blocks[2].raw_payload["ref_level"] == 1
     finally:
         os.unlink(img_path)
@@ -4249,7 +5757,44 @@ def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     print("test_hanwang_page_blocks_from_layout_preserves_raw_source_label PASSED")
 
 
-def test_hanwang_empty_ppvl_fallback_uses_layout_authority_label():
+def test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text():
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+
+    page = Page(
+        image_path="/tmp/internal-note-formula.png",
+        width=120,
+        height=80,
+        blocks=[
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(20, 10, 80, 30),
+                source=BlockSource.USER_EDITED,
+                note="manual_draw_merge_requires_ocr_rerun",
+                source_label="inline_formula",
+                raw_payload={"block_label": "inline_formula"},
+            ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(20, 40, 80, 60),
+                source=BlockSource.USER_EDITED,
+                note="active text",
+                source_label="text",
+                raw_payload={"block_label": "text"},
+            ),
+        ],
+    )
+
+    blocks = _page_blocks_from_layout(page)
+
+    assert blocks[0]["block_label"] == "inline_formula"
+    assert blocks[0]["block_content"] == ""
+    assert blocks[1]["block_content"] == "active text"
+
+    print("test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text PASSED")
+
+
+def test_hanwang_ppvl_skip_uses_layout_authority_label():
     import numpy as np
 
     from app.engines.hanwang.micro_recblock import BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats
@@ -4274,7 +5819,7 @@ def test_hanwang_empty_ppvl_fallback_uses_layout_authority_label():
         ], RunStats(n_blocks_total=1, n_blocks_ppvl=1)
 
     page = Page(
-        image_path="/tmp/empty-ppvl-fallback.png",
+        image_path="/tmp/ppvl-skip-authority.png",
         width=100,
         height=100,
         ppvl_parsing_res_list=[],
@@ -4298,7 +5843,7 @@ def test_hanwang_empty_ppvl_fallback_uses_layout_authority_label():
     assert page.blocks[0].source_label == "figure"
     assert page.blocks[0].recognizable is False
 
-    print("test_hanwang_empty_ppvl_fallback_uses_layout_authority_label PASSED")
+    print("test_hanwang_ppvl_skip_uses_layout_authority_label PASSED")
 
 
 def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
@@ -4411,7 +5956,7 @@ def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
         assert controller._proof_ocr_worker is None
         assert started == []
         assert controller._auto_start_ocr_after_layout is False
-        assert any("PP-VL 版面分析（汉王混合）中" in message for message in messages)
+        assert any("VL1.6 版面分析（汉王混合）中" in message for message in messages)
         assert not any("PP-OCRv5" in message for message in messages)
     finally:
         workflow_module.get_config = original_get_config
@@ -5659,7 +7204,7 @@ def test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_c
     print("test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_carrier PASSED")
 
 
-def test_char_index_suppresses_punctuation_topic_for_shared_word_box():
+def test_char_index_suppresses_punctuation_topic_for_shared_token_bbox():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
 
@@ -5685,7 +7230,7 @@ def test_char_index_suppresses_punctuation_topic_for_shared_word_box():
     assert svc.query("。") == []
     assert svc.first_entry("税").bbox_granularity == "word"
 
-    print("test_char_index_suppresses_punctuation_topic_for_shared_word_box PASSED")
+    print("test_char_index_suppresses_punctuation_topic_for_shared_token_bbox PASSED")
 
 
 def test_char_index_uses_token_collection_for_word_level_han_bbox():
@@ -5972,9 +7517,11 @@ def test_api_model_profile_helpers():
         "PP-StructureV3",
         "PaddleOCR-VL",
         "PaddleOCR-VL-1.5",
+        "PaddleOCR-VL-1.6",
     ]
     assert get_api_model_profile_url("pp-ocrv5").endswith("/ocr")
     assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
+    assert get_api_model_profile_url("paddleocr-vl-1.6").endswith("/api/v2/ocr/jobs")
     assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
     assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
 
@@ -5982,11 +7529,11 @@ def test_api_model_profile_helpers():
 
 
 def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
-    """Layout role 已全面切到 PaddleOCR-VL-1.5；OCR proof role 仍走 PP-OCRv5。
+    """Layout role 已全面切到 PaddleOCR-VL-1.6；OCR proof role 仍走 PP-OCRv5。
 
     所有官方预设 (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 在 role="layout"
-    下都被 strong-redirect 到 paddleocr-vl-1.5 预设 URL。
-    自托管根 URL 仍只做 /ocr <-> /layout-parsing 后缀切换。
+    下都被 strong-redirect 到 paddleocr-vl-1.6 预设 URL。
+    自托管根 URL 按 role 自动补 /api/v2/ocr/jobs 或 /ocr。
     """
     from app.core.api_profiles import (
         get_api_model_profile_url,
@@ -5994,51 +7541,52 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         resolve_api_endpoint_for_role,
     )
 
-    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
+    vl16_url = get_api_model_profile_url("paddleocr-vl-1.6")
     ocr_url = get_api_model_profile_url("pp-ocrv5")
     structure_url = get_api_model_profile_url("pp-structurev3")
     structure_root = structure_url.removesuffix("/layout-parsing")
-    vl15_root = vl15_url.removesuffix("/layout-parsing")
+    vl16_root = vl16_url.removesuffix("/api/v2/ocr/jobs")
     ocr_root = ocr_url.removesuffix("/ocr")
-    vl_root = vl15_url.removesuffix("/layout-parsing")
 
     assert normalize_api_base_url(structure_url) == structure_root
     assert normalize_api_base_url(ocr_url) == ocr_root
+    assert normalize_api_base_url(vl16_url) == vl16_root
 
-    # Layout role: 任何官方 PP-* 预设 -> VL-1.5
+    # Layout role: 任何官方 PP-* / 旧 VL 预设 -> VL-1.6
     assert resolve_api_endpoint_for_role(
         structure_url,
         profile="pp-structurev3",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
     assert resolve_api_endpoint_for_role(
         ocr_url,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
     assert resolve_api_endpoint_for_role(
         structure_root,
         profile="pp-structurev3",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
     assert resolve_api_endpoint_for_role(
         ocr_root,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl15_url
-    # 旧 paddleocr-vl 预设也归入 VL-1.5（统一升级到 1.5）
+    ) == vl16_url
+    # 旧 paddleocr-vl 预设也归入 VL-1.6
     old_vl_url = get_api_model_profile_url("paddleocr-vl")
     assert resolve_api_endpoint_for_role(
         old_vl_url,
         profile="paddleocr-vl",
         role="layout",
-    ) == vl15_url
-    # VL-1.5 自身保持
+    ) == vl16_url
+    # VL-1.5 自身也升级到 VL-1.6
+    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
     assert resolve_api_endpoint_for_role(
         vl15_url,
         profile="paddleocr-vl-1.5",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
 
     # OCR role: 任何 layout 预设 -> PP-OCRv5；PP-OCRv5 自身保持
     assert resolve_api_endpoint_for_role(
@@ -6047,17 +7595,17 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        vl15_url,
-        profile="paddleocr-vl-1.5",
+        vl16_url,
+        profile="paddleocr-vl-1.6",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
         structure_root,
         profile="",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
     assert resolve_api_endpoint_for_role(
-        vl15_root,
+        vl16_root,
         profile="",
         role="ocr",
     ) == ocr_url
@@ -6075,19 +7623,19 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         ocr_url,
         profile="pp-ocrv5",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
     assert resolve_api_endpoint_for_role(
         ocr_root,
         profile="",
         role="layout",
-    ) == vl15_url
+    ) == vl16_url
 
-    # 自托管根 URL: 不做 host 跳转，仅按后缀切换
+    # 自托管根 URL: 不做 host 跳转，仅按 VL1.6 jobs suffix 补全
     assert resolve_api_endpoint_for_role(
         "https://self-hosted.example.com",
         profile="",
         role="layout",
-    ) == "https://self-hosted.example.com/layout-parsing"
+    ) == "https://self-hosted.example.com/api/v2/ocr/jobs"
     assert resolve_api_endpoint_for_role(
         "https://self-hosted.example.com/layout-parsing",
         profile="",
@@ -6097,7 +7645,7 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         "https://self-hosted.example.com/ocr",
         profile="",
         role="layout",
-    ) == "https://self-hosted.example.com/layout-parsing"
+    ) == "https://self-hosted.example.com/api/v2/ocr/jobs"
 
     print("test_api_endpoint_role_resolution_keeps_layout_and_proof_separate PASSED")
 
@@ -6160,15 +7708,15 @@ def test_app_config_tracks_api_model_profile():
 
     update_config(
         mode="api",
-        api_model_profile="paddleocr-vl-1.5",
-        api_url="https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
+        api_model_profile="paddleocr-vl-1.6",
+        api_url="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
         api_token="demo",
         api_timeout=12,
         api_layout_model_name="",
     )
     current = get_config()
-    assert current["api_model_profile"] == "paddleocr-vl-1.5"
-    assert current["api_url"] == "https://15j75bd0964dzbwe.aistudio-app.com"
+    assert current["api_model_profile"] == "paddleocr-vl-1.6"
+    assert current["api_url"] == "https://paddleocr.aistudio-app.com"
     assert current["api_timeout"] == 12
     assert current["api_token"] == "demo"
     assert current["api_layout_model_name"] == ""
@@ -6351,7 +7899,7 @@ def test_api_settings_dialog_persists_hanwang_mode_with_api_runtime():
         assert dialog._api_form_panel.isEnabled() is True
         assert dialog._btn_test.isEnabled() is True
         assert "汉王混合链路" in dialog._summary_model.text()
-        assert "PP-VL" in dialog._summary_desc.text()
+        assert "PaddleOCR-VL-1.6" in dialog._summary_desc.text()
         assert "需要 API 地址与 Token" in dialog._api_mode_notice.text()
 
         dialog._save_and_accept()
@@ -6391,20 +7939,20 @@ def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
     print("test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking PASSED")
 
 
-def test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5():
+def test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5():
     from app.core.api_profiles import get_api_model_profile_url, resolve_api_endpoint_for_role
 
-    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
+    vl16_url = get_api_model_profile_url("paddleocr-vl-1.6")
     ppocr_url = get_api_model_profile_url("pp-ocrv5")
-    vl15_root = vl15_url.removesuffix("/layout-parsing")
+    vl16_root = vl16_url.removesuffix("/api/v2/ocr/jobs")
     ppocr_root = ppocr_url.removesuffix("/ocr")
 
-    assert resolve_api_endpoint_for_role(vl15_root, role="layout") == vl15_url
-    assert resolve_api_endpoint_for_role(vl15_root, role="ocr") == ppocr_url
-    assert resolve_api_endpoint_for_role(ppocr_root, role="layout") == vl15_url
+    assert resolve_api_endpoint_for_role(vl16_root, role="layout") == vl16_url
+    assert resolve_api_endpoint_for_role(vl16_root, role="ocr") == ppocr_url
+    assert resolve_api_endpoint_for_role(ppocr_root, role="layout") == vl16_url
     assert resolve_api_endpoint_for_role(ppocr_root, role="ocr") == ppocr_url
 
-    print("test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5 PASSED")
+    print("test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5 PASSED")
 
 
 def test_api_settings_dialog_persists_llm_candidate_settings():
@@ -6750,285 +8298,6 @@ def test_layout_analyzer_builds_api_payload():
     print("test_layout_analyzer_builds_api_payload PASSED")
 
 
-def test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing():
-    import sys
-    import types
-
-    from tools.ocr_inspector.ui.panels.run_ocr import _run_structure_ocr
-
-    class FakeResult:
-        def json(self):
-            return {
-                "overall_ocr_res": {
-                    "rec_texts": ["兼容回退"],
-                    "rec_boxes": [[10, 20, 80, 40]],
-                }
-            }
-
-    class FakePPStructureV3:
-        def __init__(self, **kwargs):
-            raise RuntimeError(
-                "The pipeline (PP-StructureV3) does not exist! Please use a pipeline name or a config file path!"
-            )
-
-    class FakePaddleOCR:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def predict(self, image_path, **kwargs):
-            return [FakeResult()]
-
-    fake_module = types.SimpleNamespace(
-        PPStructureV3=FakePPStructureV3,
-        PaddleOCR=FakePaddleOCR,
-    )
-
-    original = sys.modules.get("paddleocr")
-    sys.modules["paddleocr"] = fake_module
-    try:
-        raw = _run_structure_ocr(
-            "/tmp/sample.png",
-            {
-                "structure": {"layout_threshold": 0.5},
-                "ocr_init": {"lang": "ch", "ocr_version": None},
-                "ocr_pred": {"return_word_box": True},
-            },
-        )
-    finally:
-        if original is None:
-            sys.modules.pop("paddleocr", None)
-        else:
-            sys.modules["paddleocr"] = original
-
-    assert raw["overall_ocr_res"]["rec_texts"] == ["兼容回退"]
-    assert raw["_inspector_meta"]["fallback"] == "paddleocr_layout_compat"
-    assert "PP-StructureV3" in raw["_inspector_meta"]["reason"]
-
-    print("test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing PASSED")
-
-
-def test_inspector_flattens_api_layout_parsing_result():
-    from tools.ocr_inspector.ui.panels.run_ocr import _flatten_api_result
-
-    raw = {
-        "result": {
-            "layoutParsingResults": [
-                {
-                    "prunedResult": {
-                        "parsing_res_list": [
-                            {"block_label": "paragraph", "block_bbox": [1, 2, 30, 40]},
-                        ],
-                        "layout_det_res": {
-                            "boxes": [
-                                {"label": "paragraph", "coordinate": [1, 2, 30, 40], "score": 0.9},
-                            ],
-                        },
-                        "overall_ocr_res": {
-                            "rec_texts": ["第一行"],
-                            "rec_boxes": [[1, 2, 30, 20]],
-                            "text_word": [["第一行"]],
-                            "text_word_region": [[[1, 2, 30, 20]]],
-                        },
-                    }
-                }
-            ]
-        }
-    }
-
-    flattened = _flatten_api_result(raw)
-
-    assert flattened["parsing_res_list"][0]["block_label"] == "paragraph"
-    assert flattened["layout_det_res"]["boxes"][0]["label"] == "paragraph"
-    assert flattened["overall_ocr_res"]["rec_texts"] == ["第一行"]
-    assert flattened["overall_ocr_res"]["text_word"][0] == ["第一行"]
-
-    print("test_inspector_flattens_api_layout_parsing_result PASSED")
-
-
-def test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars():
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-    from tools.ocr_inspector.ui.panels.run_ocr import _flatten_api_result
-
-    raw = {
-        "result": {
-            "ocrResults": [
-                {
-                    "prunedResult": {
-                        "overall_ocr_res": {
-                            "rec_texts": ["测试"],
-                            "rec_scores": [0.96],
-                            "rec_boxes": [[10, 20, 70, 50]],
-                        },
-                        "text_word": [["测", "试"]],
-                        "text_word_region": [
-                            [
-                                [[10, 20], [35, 20], [35, 50], [10, 50]],
-                                [[36, 20], [70, 20], [70, 50], [36, 50]],
-                            ]
-                        ],
-                    }
-                }
-            ]
-        }
-    }
-
-    flattened = _flatten_api_result(raw)
-    doc = PaddleAdapter().parse(flattened)
-    line = doc.pages[0].all_lines[0]
-
-    assert flattened["text_word"][0] == ["测", "试"]
-    assert len(line.chars) == 2
-    assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    assert all(ch.bbox_granularity == "char" for ch in line.chars)
-
-    print("test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars PASSED")
-
-
-def test_inspector_local_flatteners_preserve_word_box_rows():
-    from tools.ocr_inspector.ui.panels.run_ocr import (
-        _flatten_paddle_result,
-        _flatten_structure_result,
-    )
-
-    class FakeResult:
-        def __init__(self, payload):
-            self._payload = payload
-
-        def json(self):
-            return self._payload
-
-    payload = {
-        "parsing_res_list": [
-            {"block_label": "text", "block_bbox": [1, 2, 80, 40], "block_content": "本地"},
-        ],
-        "overall_ocr_res": {
-            "rec_texts": ["本地"],
-            "rec_scores": [0.92],
-            "rec_boxes": [[1, 2, 80, 40]],
-        },
-        "text_word": [["本", "地"]],
-        "text_word_region": [
-            [
-                [[1, 2], [30, 2], [30, 40], [1, 40]],
-                [[31, 2], [80, 2], [80, 40], [31, 40]],
-            ]
-        ],
-    }
-
-    paddle_flattened = _flatten_paddle_result([FakeResult(payload)])
-    structure_flattened = _flatten_structure_result([FakeResult(payload)])
-    direct_flattened = _flatten_paddle_result([FakeResult({
-        "rec_texts": ["直出"],
-        "rec_boxes": [[2, 3, 40, 20]],
-        "textWord": [["直", "出"]],
-        "textWordRegion": [
-            [
-                [[2, 3], [20, 3], [20, 20], [2, 20]],
-                [[21, 3], [40, 3], [40, 20], [21, 20]],
-            ]
-        ],
-    })])
-    boxes_flattened = _flatten_paddle_result([FakeResult({
-        "rec_texts": ["源码"],
-        "rec_boxes": [[3, 4, 50, 24]],
-        "text_word": [["源", "码"]],
-        "text_word_region": [],
-        "text_word_boxes": [
-            [
-                [3, 4, 25, 24],
-                [26, 4, 50, 24],
-            ]
-        ],
-    })])
-
-    assert paddle_flattened["text_word"][0] == ["本", "地"]
-    assert paddle_flattened["overall_ocr_res"]["rec_texts"] == ["本地"]
-    assert structure_flattened["text_word_region"][0][0][0] == [1, 2]
-    assert structure_flattened["parsing_res_list"][0]["block_label"] == "text"
-    assert direct_flattened["overall_ocr_res"]["rec_texts"] == ["直出"]
-    assert direct_flattened["text_word"][0] == ["直", "出"]
-    assert boxes_flattened["text_word_region"][0] == [[3, 4, 25, 24], [26, 4, 50, 24]]
-
-    print("test_inspector_local_flatteners_preserve_word_box_rows PASSED")
-
-
-def test_inspector_builds_api_request_body_from_shared_config():
-    from tools.ocr_inspector.ui.panels.run_ocr import _build_api_request_body
-
-    body = _build_api_request_body(
-        "abc123",
-        {
-            "ocr_init": {
-                "use_doc_orientation_classify": True,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": True,
-            },
-            "ocr_pred": {
-                "return_word_box": True,
-                "text_det_thresh": 0.25,
-                "text_det_box_thresh": 0.55,
-                "text_det_unclip_ratio": 1.4,
-                "text_det_limit_side_len": 960,
-                "text_det_limit_type": "max",
-                "text_rec_score_thresh": 0.2,
-            },
-        },
-        {"api_layout_model_name": "PP-StructureV3"},
-    )
-
-    assert body["file"] == "abc123"
-    assert body["fileType"] == 1
-    assert body["model_name"] == "PP-StructureV3"
-    assert body["returnWordBox"] is True
-    assert body["useDocOrientationClassify"] is True
-    assert body["useDocUnwarping"] is False
-    assert body["useTextlineOrientation"] is True
-    assert body["textDetThresh"] == 0.25
-    assert body["textDetBoxThresh"] == 0.55
-    assert body["textDetUnclipRatio"] == 1.4
-    assert body["textDetLimitSideLen"] == 960
-    assert body["textDetLimitType"] == "max"
-    assert body["textRecScoreThresh"] == 0.2
-
-    print("test_inspector_builds_api_request_body_from_shared_config PASSED")
-
-
-def test_inspector_runtime_meta_records_actual_request_and_response_fields():
-    from tools.ocr_inspector.core import build_paddle_document
-    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta, _summarize_relevant_response_fields
-
-    raw = {
-        "overall_ocr_res": {
-            "rec_texts": ["测"],
-            "rec_boxes": [[10, 20, 40, 50]],
-        }
-    }
-
-    _attach_inspector_runtime_meta(
-        raw,
-        source="api",
-        pipeline="aistudio",
-        image_path="/tmp/test.jpg",
-        request_summary={"returnWordBox": True, "textDetUnclipRatio": 2.0},
-        response_raw={"result": {"ocrResults": [{"prunedResult": raw}]}},
-        api_url="https://example.test/ocr",
-        api_model_profile="pp-ocrv5",
-    )
-    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
-    log_text = "\n".join(str(entry) for entry in result.document.parse_log)
-    codes = {diag.code for diag in result.diagnostics}
-
-    assert raw["_inspector_meta"]["request_summary"]["returnWordBox"] is True
-    assert raw["_inspector_meta"]["response_field_summary"]["ocrResults"] == 1
-    assert raw["_inspector_meta"]["flattened_field_summary"]["rec_texts"] == 1
-    assert "text_word_boxes" not in _summarize_relevant_response_fields(raw)
-    assert "returnWordBox=True" in log_text
-    assert "response-fields" in log_text
-    assert "server_missing_text_word_region" in codes
-
-    print("test_inspector_runtime_meta_records_actual_request_and_response_fields PASSED")
-
-
 # =====================================================================
 # CharIndexService — 整条字索引链路：纵/横 bbox、去重、排序、稳定查询
 # =====================================================================
@@ -7149,574 +8418,6 @@ def test_char_index_skips_whitespace():
 # =====================================================================
 
 # =====================================================================
-# OCR Inspector — crop module + char bbox source tests
-# =====================================================================
-
-def test_crop_bbox_ascii_path():
-    """crop_bbox should work on ASCII paths and return a PIL Image."""
-    import tempfile, os, shutil
-    import numpy as np
-    try:
-        import cv2
-    except ImportError:
-        print("test_crop_bbox_ascii_path SKIPPED (cv2 not installed)")
-        return
-    from tools.ocr_inspector.crop import crop_bbox
-    from tools.ocr_inspector.models.ir import BBox
-    tmpdir = tempfile.mkdtemp()
-    img_path = os.path.join(tmpdir, "test.png")
-    arr = np.zeros((100, 200, 3), dtype=np.uint8)
-    arr[20:60, 50:150] = [0, 128, 255]
-    cv2.imwrite(img_path, arr)
-    bbox = BBox(x=50, y=20, w=100, h=40)
-    crop = crop_bbox(img_path, bbox)
-    assert crop.size == (100, 40), crop.size
-    crop_pad = crop_bbox(img_path, bbox, padding=5)
-    assert crop_pad.size == (110, 50), crop_pad.size
-    shutil.rmtree(tmpdir)
-    print("test_crop_bbox_ascii_path PASSED")
-
-
-def test_crop_bbox_chinese_path():
-    """crop_bbox must handle Chinese directory names."""
-    import tempfile, os, shutil
-    import numpy as np
-    try:
-        import cv2
-    except ImportError:
-        print("test_crop_bbox_chinese_path SKIPPED (cv2 not installed)")
-        return
-    from tools.ocr_inspector.crop import crop_bbox
-    from tools.ocr_inspector.models.ir import BBox
-    tmpdir = tempfile.mkdtemp()
-    cn_dir = os.path.join(tmpdir, "纵校测试")
-    os.makedirs(cn_dir, exist_ok=True)
-    img_path = os.path.join(cn_dir, "120167.png")
-    arr = np.zeros((100, 200, 3), dtype=np.uint8)
-    cv2.imwrite(img_path, arr)
-    bbox = BBox(x=10, y=10, w=80, h=40)
-    crop = crop_bbox(img_path, bbox)
-    assert crop.size == (80, 40), crop.size
-    shutil.rmtree(tmpdir)
-    print("test_crop_bbox_chinese_path PASSED")
-
-
-def test_find_text_matches_lines():
-    """find_text_matches finds line-level matches."""
-    from tools.ocr_inspector.crop import find_text_matches
-    from tools.ocr_inspector.models.ir import BBox, DocumentNode, LineNode, PageNode
-    doc = DocumentNode.make(source_path="test.json")
-    page = PageNode.make(page_number=1, image_path="/tmp/test.jpg")
-    doc.pages.append(page)
-    bbox = BBox(x=10, y=20, w=200, h=30)
-    line = LineNode.make(text="测试文字", confidence=0.95, bbox=bbox)
-    page.orphan_lines.append(line)
-    matches = find_text_matches(doc, "测试", search_chars=False, search_lines=True)
-    assert len(matches) == 1 and matches[0].kind == "line" and matches[0].bbox == bbox
-    assert len(find_text_matches(doc, "", search_lines=True)) == 0
-    print("test_find_text_matches_lines PASSED")
-
-
-def test_find_text_matches_ocr_chars():
-    """find_text_matches finds OCR-true chars, skips fallback chars."""
-    from tools.ocr_inspector.crop import find_text_matches
-    from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
-    doc = DocumentNode.make(source_path="test.json")
-    page = PageNode.make(page_number=1, image_path="/tmp/test.jpg")
-    doc.pages.append(page)
-    line_bbox = BBox(x=10, y=20, w=200, h=30)
-    line = LineNode.make(text="测试", confidence=0.95, bbox=line_bbox)
-    c_real = CharNode.make(char="测", bbox=BBox(10, 20, 20, 30),
-        confidence=0.95, bbox_source="ocr", bbox_granularity="char", token_text="测")
-    c_fb = CharNode.make(char="试", bbox=line_bbox,
-        confidence=0.95, bbox_source="fallback", bbox_granularity="line", token_text="试")
-    line.chars = [c_real, c_fb]
-    page.orphan_lines.append(line)
-    m = find_text_matches(doc, "测", search_chars=True, search_lines=False)
-    assert len(m) == 1 and m[0].kind == "char"
-    m2 = find_text_matches(doc, "试", search_chars=True, search_lines=False)
-    assert len(m2) == 0, f"fallback char should not match, got {len(m2)}"
-    print("test_find_text_matches_ocr_chars PASSED")
-
-
-def test_planb_core_seam_diagnoses_missing_word_region():
-    from tools.ocr_inspector.core import build_paddle_document, raw_contains_word_regions
-
-    raw = {"overall_ocr_res": {
-        "rec_texts": ["测试"],
-        "rec_boxes": [[10, 20, 80, 50]],
-        "rec_scores": [0.95],
-    }}
-
-    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
-    doc = result.document
-    line = doc.pages[0].all_lines[0]
-    codes = {diag.code for diag in result.diagnostics}
-
-    assert raw_contains_word_regions(raw) is False
-    assert "server_missing_text_word_region" in codes
-    assert all(ch.bbox_source == "unavailable" and ch.bbox is None for ch in line.chars)
-
-    print("test_planb_core_seam_diagnoses_missing_word_region PASSED")
-
-
-def test_planb_core_seam_preserves_word_region_and_search_identity():
-    from tools.ocr_inspector.core import build_paddle_document, query_text_search_index, raw_contains_word_regions
-
-    raw = {
-        "result": {
-            "ocrResults": [
-                {
-                    "prunedResult": {
-                        "overall_ocr_res": {
-                            "rec_texts": ["南京市"],
-                            "rec_boxes": [[10, 20, 100, 50]],
-                            "rec_scores": [0.96],
-                        },
-                        "text_word": [["南京市"]],
-                        "text_word_region": [[[10, 20, 100, 20, 100, 50, 10, 50]]],
-                    }
-                }
-            ]
-        }
-    }
-
-    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
-    doc = result.document
-    line = doc.pages[0].all_lines[0]
-    matches = query_text_search_index(doc, "南京", include_lines=False)
-    codes = {diag.code for diag in result.diagnostics}
-
-    assert raw_contains_word_regions(raw) is True
-    assert "word_regions_preserved" in codes
-    assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    assert all(ch.bbox_granularity == "word" for ch in line.chars)
-    assert len(matches) == 1
-    assert matches[0].identity.startswith("p0:l0:token0:")
-    assert matches[0].bbox_source == "ocr"
-    assert matches[0].bbox_granularity == "word"
-
-    print("test_planb_core_seam_preserves_word_region_and_search_identity PASSED")
-
-
-def test_planb_core_seam_reads_paddle_json_text_word_boxes_alias():
-    from tools.ocr_inspector.core import build_paddle_document, query_text_search_index, raw_contains_word_regions
-
-    raw = {
-        "overall_ocr_res": {
-            "rec_texts": ["源码"],
-            "rec_boxes": [[10, 20, 80, 50]],
-            "rec_scores": [0.97],
-        },
-        "text_word": [["源", "码"]],
-        "text_word_region": [],
-        "text_word_boxes": [[[10, 20, 40, 50], [41, 20, 80, 50]]],
-    }
-
-    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
-    doc = result.document
-    line = doc.pages[0].all_lines[0]
-    matches = query_text_search_index(doc, "源", include_lines=False)
-    codes = {diag.code for diag in result.diagnostics}
-
-    assert raw_contains_word_regions(raw) is True
-    assert "word_regions_preserved" in codes
-    assert len(line.chars) == 2
-    assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    assert all(ch.bbox_granularity == "char" for ch in line.chars)
-    assert line.chars[0].bbox is not None and line.chars[0].bbox.x == 10
-    assert len(matches) == 1
-    assert matches[0].identity.startswith("p0:l0:token0:")
-
-    print("test_planb_core_seam_reads_paddle_json_text_word_boxes_alias PASSED")
-
-
-def test_planb_core_seam_flags_invalid_word_region():
-    from tools.ocr_inspector.core import build_paddle_document, raw_contains_word_regions
-
-    raw = {"overall_ocr_res": {
-        "rec_texts": ["测"],
-        "rec_boxes": [[10, 20, 80, 50]],
-        "rec_scores": [0.95],
-    }, "text_word": [["测"]], "text_word_region": [[["bad-region"]]]}
-
-    result = build_paddle_document(raw, image_path="/tmp/test.jpg")
-    codes = {diag.code for diag in result.diagnostics}
-    char = result.document.pages[0].all_lines[0].chars[0]
-
-    assert raw_contains_word_regions(raw) is True
-    assert "invalid_region_format" in codes
-    assert "word_regions_not_consumed" in codes
-    assert char.bbox_source == "unavailable"
-
-    print("test_planb_core_seam_flags_invalid_word_region PASSED")
-
-
-def test_crop_panel_search_selects_canvas_node():
-    """Selecting a text-search result must update AppState so canvas/tree can highlight it."""
-    from tools.ocr_inspector.models.ir import BBox, DocumentNode, LineNode, PageNode
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.panels.crop_panel import CropPanel
-
-    _get_qapp()
-
-    doc = DocumentNode.make(source_path="test.json")
-    page = PageNode.make(page_number=1, image_path="")
-    doc.pages.append(page)
-    line = LineNode.make(text="测试文字", confidence=0.95, bbox=BBox(x=10, y=20, w=200, h=30))
-    page.orphan_lines.append(line)
-
-    state = AppState()
-    state.set_document(doc)
-    panel = CropPanel(state)
-    panel.set_query("测试")
-
-    assert state.active_document is doc
-    assert state.selected_node is line
-    panel.close()
-    print("test_crop_panel_search_selects_canvas_node PASSED")
-
-
-def test_paddle_adapter_char_bbox_source():
-    """PaddleAdapter sets bbox_source=ocr for text_word_region chars."""
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-    raw = {"overall_ocr_res": {
-        "rec_texts": ["测试"], "rec_boxes": [[10, 20, 210, 50]], "rec_scores": [0.95],
-        "rec_polys": [],
-        "text_word": [["测", "试"]],
-        "text_word_region": [
-            [[[10,20],[30,20],[30,50],[10,50]], [[31,20],[60,20],[60,50],[31,50]]]
-        ],
-    }}
-    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
-    line = doc.pages[0].all_lines[0]
-    assert len(line.chars) == 2
-    assert all(c.bbox_source == "ocr" for c in line.chars)
-    assert line.chars[0].bbox != line.chars[1].bbox
-    print("test_paddle_adapter_char_bbox_source PASSED")
-
-
-def test_paddle_adapter_reads_direct_and_camelcase_word_rows():
-    """PaddleAdapter accepts flattened top-level and camelCase word-box fields."""
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-
-    raw = {
-        "rec_texts": ["天地"],
-        "rec_boxes": [[10, 20, 70, 50]],
-        "rec_scores": [0.95],
-        "textWord": [["天", "地"]],
-        "textWordRegion": [
-            [
-                [[10, 20], [40, 20], [40, 50], [10, 50]],
-                [[41, 20], [70, 20], [70, 50], [41, 50]],
-            ]
-        ],
-    }
-
-    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
-    line = doc.pages[0].all_lines[0]
-
-    assert line.text == "天地"
-    assert len(line.chars) == 2
-    assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    assert line.chars[0].bbox != line.chars[1].bbox
-
-    print("test_paddle_adapter_reads_direct_and_camelcase_word_rows PASSED")
-
-
-def test_paddle_adapter_char_fallback_when_no_word_region():
-    """PaddleAdapter keeps char bbox unavailable when text_word_region is absent."""
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-    raw = {"overall_ocr_res": {
-        "rec_texts": ["测试"], "rec_boxes": [[10, 20, 210, 50]], "rec_scores": [0.95],
-    }}
-    doc = PaddleAdapter().parse(raw, image_path="/tmp/test.jpg")
-    line = doc.pages[0].all_lines[0]
-    assert len(line.chars) == 2
-    for ch in line.chars:
-        assert ch.bbox_source == "unavailable"
-        assert ch.bbox_granularity == "unavailable"
-        assert ch.bbox is None
-    print("test_paddle_adapter_char_fallback_when_no_word_region PASSED")
-
-
-
-# =====================================================================
-# Canvas node_item_map + char selection tests (no Qt required)
-# =====================================================================
-
-def test_canvas_node_item_map_char_fallback():
-    """All fallback chars sharing a bbox must be mapped in _node_item_map."""
-    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode, DocumentNode
-    # Simulate what _draw_chars does:  seen_fallback maps bbox_key→item
-    # and ALL char nodes get mapped to that item.
-    page = PageNode.make(page_number=1, image_path="")
-    line_bbox = BBox(x=10, y=20, w=200, h=30)
-    line = LineNode.make(text="AB", confidence=0.9, bbox=line_bbox)
-    c1 = CharNode.make(char="A", bbox=line_bbox, confidence=0.9, bbox_source="fallback", bbox_granularity="line", token_text="A")
-    c2 = CharNode.make(char="B", bbox=line_bbox, confidence=0.9, bbox_source="fallback", bbox_granularity="line", token_text="B")
-    line.chars = [c1, c2]
-    page.orphan_lines.append(line)
-
-    # Replicate the dedup logic from _draw_chars
-    seen_fallback: dict = {}
-    node_item_map: dict = {}
-    _sentinel = object()  # stand-in for a canvas item
-
-    for char in page.all_chars:
-        if char.bbox:
-            key = (char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
-            bs = getattr(char, "bbox_source", "") or "fallback"
-            is_ocr = (bs == "ocr")
-            if not is_ocr:
-                if key not in seen_fallback:
-                    item = object()  # stand-in
-                    seen_fallback[key] = item
-                node_item_map[id(char)] = seen_fallback[key]
-
-    # Both chars should be in node_item_map
-    assert id(c1) in node_item_map, "c1 not mapped"
-    assert id(c2) in node_item_map, "c2 not mapped"
-    # Both point to the same display item
-    assert node_item_map[id(c1)] is node_item_map[id(c2)], "c1 and c2 should share item"
-    print("test_canvas_node_item_map_char_fallback PASSED")
-
-
-def test_canvas_node_item_map_char_ocr():
-    """OCR-true chars with distinct token_text get separate items."""
-    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
-    page = PageNode.make(page_number=1, image_path="")
-    bbox_a = BBox(x=10, y=20, w=20, h=30)
-    bbox_b = BBox(x=30, y=20, w=20, h=30)
-    line = LineNode.make(text="AB", confidence=0.9, bbox=BBox(10, 20, 40, 30))
-    c1 = CharNode.make(char="A", bbox=bbox_a, confidence=0.9, bbox_source="ocr", bbox_granularity="char", token_text="A")
-    c2 = CharNode.make(char="B", bbox=bbox_b, confidence=0.9, bbox_source="ocr", bbox_granularity="char", token_text="B")
-    line.chars = [c1, c2]
-    page.orphan_lines.append(line)
-
-    # Replicate _draw_chars OCR dedup logic
-    seen_ocr: dict = {}
-    node_item_map: dict = {}
-    for char in page.all_chars:
-        if char.bbox:
-            b = char.bbox
-            coord_key = (b.x, b.y, b.w, b.h)
-            bs = getattr(char, "bbox_source", "") or "fallback"
-            if bs == "ocr":
-                tok = getattr(char, "token_text", char.char) or char.char
-                key = (coord_key, tok)
-                if key not in seen_ocr:
-                    seen_ocr[key] = object()  # stand-in item
-                node_item_map[id(char)] = seen_ocr[key]
-
-    assert id(c1) in node_item_map, "c1 not mapped"
-    assert id(c2) in node_item_map, "c2 not mapped"
-    # Different bbox → different items
-    assert node_item_map[id(c1)] is not node_item_map[id(c2)], "distinct bboxes should get distinct items"
-    print("test_canvas_node_item_map_char_ocr PASSED")
-
-
-def test_canvas_char_fallback_source_colour():
-    """SOURCE_COLOURS must contain char_fallback key."""
-    from tools.ocr_inspector.ui.canvas import SOURCE_COLOURS
-    assert "char_fallback" in SOURCE_COLOURS, f"char_fallback missing from SOURCE_COLOURS: {list(SOURCE_COLOURS)}"
-    assert "text_word_region" in SOURCE_COLOURS
-    print("test_canvas_char_fallback_source_colour PASSED")
-
-
-def test_canvas_char_overlay_default_visible():
-    """OCR char/token bbox layer should be visible without requiring the user to discover F3 first."""
-    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.canvas import OcrCanvas
-
-    _get_qapp()
-
-    state = AppState()
-    assert state.overlay_flags["chars"] is True
-    page = PageNode.make(page_number=1, image_path="")
-    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
-    char = CharNode.make(
-        char="测",
-        bbox=BBox(10, 20, 20, 30),
-        confidence=0.95,
-        bbox_source="ocr",
-        bbox_granularity="char",
-        token_text="测",
-    )
-    line.chars = [char]
-    page.orphan_lines.append(line)
-
-    canvas = OcrCanvas(state)
-    canvas.load_page(page)
-    item = canvas._node_item_map.get(id(char))
-
-    assert item is not None
-    assert item.isVisible()
-    assert item._source_field == "text_word_region"
-    canvas.close()
-    print("test_canvas_char_overlay_default_visible PASSED")
-
-
-def test_canvas_shows_unavailable_note_without_word_region():
-    """When no text_word_region exists, canvas must show a visible unavailable note instead of faking char boxes."""
-    from PySide6.QtWidgets import QGraphicsTextItem
-
-    from tools.ocr_inspector.models.ir import BBox, CharNode, LineNode, PageNode
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.canvas import OcrCanvas
-
-    _get_qapp()
-
-    state = AppState()
-    page = PageNode.make(page_number=1, image_path="")
-    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
-    line.chars = [
-        CharNode.make(
-            char="测",
-            bbox=None,
-            confidence=0.95,
-            bbox_source="unavailable",
-            bbox_granularity="unavailable",
-            token_text="测",
-        )
-    ]
-    page.orphan_lines.append(line)
-
-    canvas = OcrCanvas(state)
-    canvas.load_page(page)
-    notes = [
-        item.toPlainText()
-        for item in canvas._scene.items()
-        if isinstance(item, QGraphicsTextItem)
-    ]
-
-    assert any("text_word_region" in note and "unavailable" in note for note in notes), notes
-    assert id(line.chars[0]) not in canvas._node_item_map
-    canvas.close()
-    print("test_canvas_shows_unavailable_note_without_word_region PASSED")
-
-
-def test_canvas_warning_reports_server_missing_after_return_word_box_sent():
-    from PySide6.QtWidgets import QGraphicsTextItem
-
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.canvas import OcrCanvas
-    from tools.ocr_inspector.ui.panels.run_ocr import _attach_inspector_runtime_meta
-
-    _get_qapp()
-
-    raw = {
-        "overall_ocr_res": {
-            "rec_texts": ["测"],
-            "rec_boxes": [[10, 20, 40, 50]],
-        }
-    }
-    _attach_inspector_runtime_meta(
-        raw,
-        source="api",
-        pipeline="aistudio",
-        image_path="/tmp/test.jpg",
-        request_summary={"returnWordBox": True},
-        response_raw={"result": {"ocrResults": [{"prunedResult": raw}]}},
-        api_url="https://example.test/ocr",
-        api_model_profile="pp-ocrv5",
-    )
-    doc = PaddleAdapter().parse(raw, image_path="")
-    state = AppState()
-    state.set_document(doc)
-
-    canvas = OcrCanvas(state)
-    canvas.load_page(doc.pages[0])
-    notes = [
-        item.toPlainText()
-        for item in canvas._scene.items()
-        if isinstance(item, QGraphicsTextItem)
-    ]
-
-    assert any("returnWordBox=true" in note and "响应没有 text_word_region/text_word_boxes" in note for note in notes), notes
-    canvas.close()
-    print("test_canvas_warning_reports_server_missing_after_return_word_box_sent PASSED")
-
-
-def test_inspector_tree_syncs_external_char_selection():
-    """Canvas-selected char nodes must already exist in the left tree and become current."""
-    from tools.ocr_inspector.models.ir import BBox, CharNode, DocumentNode, LineNode, PageNode
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.panels import JsonTreePanel
-
-    _get_qapp()
-
-    doc = DocumentNode.make(source_path="test.json")
-    page = PageNode.make(page_number=1, image_path="")
-    doc.pages.append(page)
-    line = LineNode.make(text="测", confidence=0.95, bbox=BBox(10, 20, 40, 30))
-    char = CharNode.make(
-        char="测",
-        bbox=BBox(10, 20, 20, 30),
-        confidence=0.95,
-        bbox_source="ocr",
-        bbox_granularity="char",
-        token_text="测",
-    )
-    line.chars = [char]
-    page.orphan_lines.append(line)
-
-    state = AppState()
-    tree = JsonTreePanel(state)
-    state.set_document(doc)
-    state.set_selection(char)
-
-    assert tree.currentItem() is not None
-    assert tree.currentItem().data(0, 0x0100) is char  # Qt.UserRole
-    tree.close()
-    print("test_inspector_tree_syncs_external_char_selection PASSED")
-
-
-def test_params_ref_matrix_marks_vl_word_box_unsupported():
-    from app.core.api_profiles import PADDLE_COORD_STABILITY_FLAGS, PADDLE_OCR_WORD_BOX_PARAMS
-    from tools.ocr_inspector.ui.panels.params_ref import _PARAMS, build_paddle_param_matrix
-
-    ocr_rows, ocr_payload = build_paddle_param_matrix("pp-ocrv5")
-    ocr_map = {row.name: row for row in ocr_rows}
-    assert ocr_map["returnWordBox"].sent is True
-    assert ocr_map["returnWordBox"].current_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
-    assert ocr_map["returnWordBox"].default_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
-    assert ocr_payload["returnWordBox"] is True
-    assert ocr_payload["textDetLimitSideLen"] == 1536
-    assert ocr_map["textDetLimitSideLen"].current_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetLimitSideLen"]
-    assert ocr_map["textDetLimitSideLen"].default_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetLimitSideLen"]
-    assert ocr_payload["textDetUnclipRatio"] == 2.0
-    assert ocr_map["textDetUnclipRatio"].default_value == PADDLE_OCR_WORD_BOX_PARAMS["textDetUnclipRatio"]
-    assert ocr_map["useDocOrientationClassify"].current_value is PADDLE_COORD_STABILITY_FLAGS["useDocOrientationClassify"]
-    assert ocr_map["useDocOrientationClassify"].default_value is PADDLE_COORD_STABILITY_FLAGS["useDocOrientationClassify"]
-    assert ocr_map["useTextlineOrientation"].current_value is PADDLE_COORD_STABILITY_FLAGS["useTextlineOrientation"]
-    assert ocr_map["useTextlineOrientation"].default_value is PADDLE_COORD_STABILITY_FLAGS["useTextlineOrientation"]
-
-    vl_rows, vl_payload = build_paddle_param_matrix("paddleocr-vl")
-    vl_map = {row.name: row for row in vl_rows}
-    assert vl_map["returnWordBox"].sent is False
-    assert vl_map["returnWordBox"].current_value == "unsupported"
-    assert vl_map["returnWordBox"].default_value is PADDLE_OCR_WORD_BOX_PARAMS["returnWordBox"]
-    assert "VL" in vl_map["returnWordBox"].reason
-    assert "returnWordBox" not in vl_payload
-    assert vl_payload["useDocUnwarping"] is False
-
-    static_defaults = {
-        entry[0]: entry[2]
-        for entry in _PARAMS
-        if entry[0] != "__cat__"
-    }
-    assert static_defaults["returnWordBox"] == "True"
-    assert static_defaults["useDocOrientationClassify"] == "False"
-    assert static_defaults["useTextlineOrientation"] == "False"
-    assert static_defaults["textDetUnclipRatio"] == "2.0"
-    assert static_defaults["textDetLimitSideLen"] == "1536"
-
-    print("test_params_ref_matrix_marks_vl_word_box_unsupported PASSED")
-
-
 
 def test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile():
     import numpy as np
@@ -7789,7 +8490,7 @@ def test_api_request_builders_split_profile_params():
         endpoint_url="https://example.com/ocr",
     )
     assert ocr_body["file"] == "abc"
-    assert ocr_body["returnWordBox"] is True
+    assert "returnWordBox" not in ocr_body
     assert ocr_body["textDetLimitType"] == "max"
     assert ocr_body["useDocUnwarping"] is False
 
@@ -7811,7 +8512,8 @@ def test_api_request_builders_split_profile_params():
         profile="pp-structurev3",
         endpoint_url="https://example.com/layout-parsing",
     )
-    assert layout_body["returnWordBox"] is True
+    assert "returnWordBox" not in layout_body
+    assert layout_body["textDetLimitType"] == "max"
 
     vl_layout_body = LayoutAnalyzer()._build_api_request_body(
         "abc",
@@ -7823,62 +8525,6 @@ def test_api_request_builders_split_profile_params():
     assert vl_layout_body["useDocUnwarping"] is False
 
     print("test_api_request_builders_split_profile_params PASSED")
-
-
-def test_ocr_inspector_run_panel_profile_request_params():
-    from tools.ocr_inspector.state import AppState
-    from tools.ocr_inspector.ui.panels.run_ocr import RunOcrPanel, _build_api_request_body
-
-    _get_qapp()
-
-    panel = RunOcrPanel(AppState())
-    assert panel._return_word_box.isChecked() is True
-    assert panel._det_unclip_ratio.value() == 2.0
-    assert panel._det_limit_side_len.value() == 1536
-    panel.close()
-
-    params = {
-        "ocr_init": {
-            "use_doc_orientation_classify": False,
-            "use_doc_unwarping": False,
-            "use_textline_orientation": False,
-        },
-        "ocr_pred": {
-            "return_word_box": True,
-            "text_det_thresh": 0.3,
-            "text_det_box_thresh": 0.6,
-            "text_det_unclip_ratio": 2.0,
-            "text_det_limit_side_len": 1536,
-            "text_det_limit_type": "max",
-            "text_rec_score_thresh": 0.0,
-        },
-    }
-
-    ocr_body = _build_api_request_body(
-        "abc",
-        params,
-        {
-            "api_model_profile": "pp-ocrv5",
-            "_resolved_api_url": "https://example.com/ocr",
-        },
-    )
-    assert ocr_body["returnWordBox"] is True
-    assert ocr_body["textDetLimitSideLen"] == 1536
-
-    vl_body = _build_api_request_body(
-        "abc",
-        params,
-        {
-            "api_model_profile": "paddleocr-vl",
-            "_resolved_api_url": "https://example.com/layout-parsing",
-        },
-    )
-    assert vl_body["file"] == "abc"
-    assert vl_body["fileType"] == 1
-    assert vl_body["useDocUnwarping"] is False
-    assert "returnWordBox" not in vl_body
-
-    print("test_ocr_inspector_run_panel_profile_request_params PASSED")
 
 
 def test_layout_analyzer_uses_datainfo_canvas_scale():
@@ -7984,6 +8630,7 @@ def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_spac
 
 
 def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected():
+    import json
     import tempfile
 
     import cv2
@@ -7996,26 +8643,140 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
 
     captured = {}
 
-    class DummyResponse:
+    class SubmitResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"jobId": "job-1"}}
+
+    class PollResponse:
         def raise_for_status(self):
             return None
 
         def json(self):
             return {
+                "data": {
+                    "state": "done",
+                    "resultUrl": {"jsonUrl": "https://result.example.com/page.jsonl"},
+                },
+            }
+
+    class JsonlResponse:
+        text = json.dumps(
+            {
                 "result": {
-                    "ocrResults": [
+                    "layoutParsingResults": [
                         {
                             "prunedResult": {
-                                "overall_ocr_res": {
-                                    "rec_texts": ["OCR行"],
-                                    "rec_scores": [0.91],
-                                    "rec_boxes": [[10, 20, 110, 50]],
-                                },
+                                "parsing_res_list": [
+                                    {
+                                        "block_label": "text",
+                                        "block_bbox": [10, 20, 110, 50],
+                                        "block_content": "OCR行",
+                                    },
+                                ],
                             },
                         },
                     ],
                 },
-            }
+            },
+            ensure_ascii=False,
+        )
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, data, files, headers, timeout, **kwargs):
+        captured["url"] = url
+        captured["data"] = data
+        captured["files"] = files
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        captured["proxies"] = kwargs.get("proxies")
+        return SubmitResponse()
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        captured.setdefault("gets", []).append({
+            "url": url,
+            "headers": headers or {},
+            "timeout": timeout,
+            "proxies": kwargs.get("proxies"),
+        })
+        if url.endswith("/job-1"):
+            return PollResponse()
+        if url == "https://result.example.com/page.jsonl":
+            return JsonlResponse()
+        raise AssertionError(f"unexpected GET URL: {url}")
+
+    original_post = requests.post
+    original_get = requests.get
+    requests.post = fake_post
+    requests.get = fake_get
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_model_profile="pp-ocrv5",
+        api_url="https://example.com/root",
+        api_token="demo",
+        api_timeout=12,
+    )
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
+        page = Page(image_path=page_path, width=200, height=120)
+        LayoutAnalyzer()._api_analyze(page)
+        assert captured["url"] == "https://example.com/root/api/v2/ocr/jobs"
+        assert captured["timeout"] == 180
+        assert captured["proxies"] == {"http": None, "https": None, "all": None}
+        assert captured["headers"]["Authorization"] == "bearer demo"
+        assert captured["data"]["model"] == "PaddleOCR-VL-1.6"
+        optional_payload = json.loads(captured["data"]["optionalPayload"])
+        assert optional_payload["useDocOrientationClassify"] is False
+        assert optional_payload["useDocUnwarping"] is False
+        assert optional_payload["useChartRecognition"] is False
+        filename, image_bytes, mime = captured["files"]["file"]
+        assert filename == "page.png"
+        assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+        assert mime == "image/png"
+        assert captured["gets"][0]["url"] == "https://example.com/root/api/v2/ocr/jobs/job-1"
+        assert captured["gets"][0]["headers"]["Authorization"] == "bearer demo"
+        assert captured["gets"][0]["proxies"] == {"http": None, "https": None, "all": None}
+        assert len(page.blocks) == 1
+        assert page.blocks[0].block_type == BlockType.TEXT
+        assert "OCR行" in page.blocks[0].note
+    finally:
+        requests.post = original_post
+        requests.get = original_get
+        cfg.reset_to_defaults()
+        os.unlink(page_path)
+
+    print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
+
+
+def test_layout_analyzer_legacy_json_request_helper_preserves_png_payload():
+    import base64
+    import tempfile
+
+    import cv2
+    import numpy as np
+    import requests
+
+    from app.core.api_profiles import resolve_api_endpoint
+    from app.core.app_config import AppConfig, update_config
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import Page
+
+    captured = {}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"layoutParsingResults": []}}
 
     def fake_post(url, json, headers, timeout, **kwargs):
         captured["url"] = url
@@ -8028,33 +8789,42 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     requests.post = fake_post
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
-    update_config(
-        mode="api",
-        api_model_profile="pp-ocrv5",
-        api_url="https://example.com/root",
-        api_timeout=12,
-    )
+    update_config(mode="api", api_url="https://legacy.example.com", api_timeout=12)
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         page_path = f.name
     try:
         cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
         page = Page(image_path=page_path, width=200, height=120)
-        LayoutAnalyzer()._api_analyze(page)
-        assert captured["url"] == "https://example.com/root/layout-parsing"
+        analyzer = LayoutAnalyzer()
+        legacy_url = resolve_api_endpoint(
+            "https://legacy.example.com",
+            default_suffix="/layout-parsing",
+            profile="pp-structurev3",
+        )
+        assert legacy_url == "https://legacy.example.com/layout-parsing"
+        # Directly exercise the legacy JSON request shape; main role resolution is VL1.6-first.
+        import app.core.api_profiles as profiles
+
+        original_fixed = profiles.FIXED_LAYOUT_PROFILE
+        original_default = profiles.LAYOUT_DEFAULT_PROFILE
+        profiles.FIXED_LAYOUT_PROFILE = "pp-structurev3"
+        profiles.LAYOUT_DEFAULT_PROFILE = "pp-structurev3"
+        try:
+            analyzer._api_analyze(page)
+        finally:
+            profiles.FIXED_LAYOUT_PROFILE = original_fixed
+            profiles.LAYOUT_DEFAULT_PROFILE = original_default
         assert captured["timeout"] == 180
         assert captured["proxies"] == {"http": None, "https": None, "all": None}
+        assert base64.b64decode(captured["json"]["file"]).startswith(b"\x89PNG\r\n\x1a\n")
         assert captured["json"]["useDocUnwarping"] is False
         assert "returnWordBox" not in captured["json"]
-        assert "textDetLimitSideLen" not in captured["json"]
-        assert len(page.blocks) == 1
-        assert page.blocks[0].block_type == BlockType.TEXT
-        assert "OCR行" in page.blocks[0].note
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
         os.unlink(page_path)
 
-    print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
+    print("test_layout_analyzer_legacy_json_request_helper_preserves_png_payload PASSED")
 
 
 def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
@@ -8398,11 +9168,18 @@ def test_hproof_line_iterator_excludes_position_source_labels():
             source_label="text",
             raw_payload={"block_label": "text"},
         ),
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(1, 40, 80, 12),
+            lines=[Line(text="脚注", confidence=0.9, bbox=BBox(1, 40, 80, 12))],
+            source_label="footnote",
+            raw_payload={"block_label": "footnote"},
+        ),
     ]
 
     texts = [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)]
 
-    assert texts == ["正文"]
+    assert texts == ["正文", "脚注"]
 
     print("test_hproof_line_iterator_excludes_position_source_labels PASSED")
 
@@ -8431,6 +9208,14 @@ def test_block_attributes_reads_raw_payload_without_note():
         raw_payload={"block_label": "page_number"},
     )
     assert is_position_only_block(position)
+
+    footnote = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(1, 20, 80, 10),
+        raw_payload={"block_label": "footnote"},
+    )
+    assert not is_position_only_block(footnote)
+    assert block_display_label(footnote) == "text · footnote"
 
     print("test_block_attributes_reads_raw_payload_without_note PASSED")
 
@@ -8833,13 +9618,11 @@ def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
-    # proof-layout-collections 第 3 任务：字号贴近行图字号。
-    assert h_proof.TEXT_FONT_PX == 24
+    # 脚注/数字/标点的 Hanwang 字符框更窄，横校文本字号不能再按正文 24px 硬挤。
+    assert h_proof.TEXT_FONT_PX == 20
     assert h_proof.TEXT_LINE_HEIGHT_PX <= 28
-    assert h_proof.TEXT_EDITOR_MAX_H <= 30
-    # hproof-yaxis-residual：第三行文本仍然去掉，pair 高度继续收紧到
-    # 「图 + inline editor」两层（image_row 32 + editor 30 + padding ≈ 64）。
-    assert h_proof.LINE_PAIR_H == 64
+    assert h_proof.TEXT_EDITOR_MAX_H <= 32
+    assert h_proof.LINE_PAIR_H == 70
     assert (
         h_proof.LINE_PAIR_H
         >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H + 2
@@ -8869,6 +9652,186 @@ def test_image_viewer_char_boxes_update_char_bbox():
     viewer.close()
 
     print("test_image_viewer_char_boxes_update_char_bbox PASSED")
+
+
+def test_image_viewer_space_pan_temporarily_disables_box_editing():
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QImage, QKeyEvent
+    from PySide6.QtWidgets import QGraphicsItem, QGraphicsView
+
+    from app.models import BBox, Block, BlockType
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(80, 60, QImage.Format.Format_RGB888))
+    block = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 12, 20, 22))
+    viewer.show_blocks([block])
+    item, _ = viewer._block_items[0]
+
+    assert viewer.dragMode() == QGraphicsView.DragMode.NoDrag
+    assert bool(item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+
+    viewer.keyPressEvent(QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_Space,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert viewer.dragMode() == QGraphicsView.DragMode.ScrollHandDrag
+    assert not bool(item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+
+    viewer.keyReleaseEvent(QKeyEvent(
+        QEvent.Type.KeyRelease,
+        Qt.Key.Key_Space,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert viewer.dragMode() == QGraphicsView.DragMode.NoDrag
+    assert bool(item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+    viewer.close()
+
+    print("test_image_viewer_space_pan_temporarily_disables_box_editing PASSED")
+
+
+def test_image_viewer_shift_left_drag_creates_block_bbox():
+    from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.resize(300, 240)
+    viewer.set_image_from_qimage(QImage(100, 80, QImage.Format.Format_RGB888))
+    created = []
+    viewer.block_created.connect(lambda bbox: created.append(bbox))
+
+    start = QPointF(viewer.mapFromScene(QPointF(10, 10)))
+    end = QPointF(viewer.mapFromScene(QPointF(40, 30)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        start,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+    viewer.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove,
+        end,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        end,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+
+    assert len(created) == 1
+    assert created[0].w >= 10
+    assert created[0].h >= 10
+    viewer.close()
+
+    print("test_image_viewer_shift_left_drag_creates_block_bbox PASSED")
+
+
+def test_image_viewer_draw_uses_snapper_only_for_created_bbox():
+    from PySide6.QtCore import QEvent, QPointF, QRectF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+
+    from app.models import BBox
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.resize(300, 240)
+    viewer.set_image_from_qimage(QImage(100, 80, QImage.Format.Format_RGB888))
+    viewer.set_bbox_snapper(lambda _bbox: BBox(10, 10, 40, 20))
+    created = []
+    viewer.block_created.connect(lambda bbox: created.append(bbox))
+
+    start = QPointF(viewer.mapFromScene(QPointF(9, 9)))
+    end = QPointF(viewer.mapFromScene(QPointF(43, 27)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        start,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+    viewer.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove,
+        end,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+    assert viewer._draw_item is not None
+    assert viewer._draw_item.rect() != QRectF(10, 10, 40, 20)
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        end,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ShiftModifier,
+    ))
+
+    assert created == [BBox(10, 10, 40, 20)]
+    viewer.close()
+
+    print("test_image_viewer_draw_uses_snapper_only_for_created_bbox PASSED")
+
+
+def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+
+    from app.models import BBox, Block, BlockType
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.resize(300, 240)
+    viewer.set_image_from_qimage(QImage(120, 80, QImage.Format.Format_RGB888))
+    first = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))
+    second = Block(block_type=BlockType.TABLE, bbox=BBox(45, 10, 20, 20))
+    locked = Block(block_type=BlockType.TEXT, bbox=BBox(78, 10, 20, 20), is_locked=True)
+    viewer.show_blocks([first, second, locked])
+    created = []
+    viewer.block_created.connect(lambda bbox: created.append(bbox))
+
+    start = QPointF(viewer.mapFromScene(QPointF(5, 5)))
+    end = QPointF(viewer.mapFromScene(QPointF(105, 40)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        start,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove,
+        end,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        end,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+
+    assert created == []
+    assert viewer.selected_blocks() == [first, second]
+    assert not viewer._block_items[2][0].isSelected()
+    viewer.close()
+
+    print("test_image_viewer_right_drag_selects_blocks_without_creating_bbox PASSED")
 
 
 def test_ui_block_labels_use_structured_semantic_label():
@@ -8920,90 +9883,6 @@ def test_hanwang_concurrency_evaluation_script_help():
     print("test_hanwang_concurrency_evaluation_script_help PASSED")
 
 
-def test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable():
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-
-    raw = {
-        "api_model_profile": "paddleocr-vl",
-        "result": {
-            "layoutParsingResults": [
-                {
-                    "prunedResult": {
-                        "layout_det_res": {
-                            "boxes": [
-                                {
-                                    "label": "text",
-                                    "coordinate": [8, 18, 72, 55],
-                                    "score": 0.87,
-                                }
-                            ]
-                        },
-                        "parsing_res_list": [
-                            {
-                                "block_label": "paragraph",
-                                "block_bbox": [10, 20, 70, 50],
-                                "block_content": "天地",
-                            }
-                        ],
-                        "overall_ocr_res": {
-                            "rec_texts": ["天地"],
-                            "rec_scores": [0.91],
-                            "rec_boxes": [[10, 20, 70, 50]],
-                        }
-                    }
-                }
-            ]
-        },
-    }
-
-    doc = PaddleAdapter().parse(raw)
-    page = doc.pages[0]
-    assert page.blocks[0].source_field == "parsing_res_list"
-    assert page.layout_det_blocks[0].source_field == "layout_det_res"
-    assert page.layout_det_blocks[0].bbox.area > 0
-    line = page.blocks[0].lines[0]
-    assert line.bbox is not None
-    assert line.chars[0].bbox is None
-    assert line.chars[0].bbox_source == "unavailable"
-    assert line.chars[0].bbox_granularity == "unavailable"
-    assert any("max_text_bbox_granularity=line" in msg for msg in doc.parse_log)
-
-    print("test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable PASSED")
-
-
-def test_ocr_inspector_paddle_adapter_marks_word_not_fake_char():
-    from tools.ocr_inspector.adapters.paddle import PaddleAdapter
-
-    raw = {
-        "result": {
-            "ocrResults": [
-                {
-                    "prunedResult": {
-                        "overall_ocr_res": {
-                            "rec_texts": ["南京市"],
-                            "rec_scores": [0.95],
-                            "rec_polys": [[10, 20, 90, 20, 90, 50, 10, 50]],
-                        },
-                        "text_word": [["南京市"]],
-                        "text_word_region": [[[10, 20, 90, 20, 90, 50, 10, 50]]],
-                    }
-                }
-            ]
-        }
-    }
-
-    doc = PaddleAdapter().parse(raw)
-    line = doc.pages[0].orphan_lines[0]
-    assert line.bbox.to_dict() == {"x": 10, "y": 20, "w": 80, "h": 30}
-    assert len(line.chars) == 3
-    assert all(ch.bbox_source == "ocr" for ch in line.chars)
-    assert all(ch.bbox_granularity == "word" for ch in line.chars)
-    assert all(ch.collection_kind == "token" for ch in line.chars)
-    assert line.chars[0].bbox == line.chars[-1].bbox
-
-    print("test_ocr_inspector_paddle_adapter_marks_word_not_fake_char PASSED")
-
-
 if __name__ == "__main__":
     test_models()
     test_bbox_tools()
@@ -9038,33 +9917,45 @@ if __name__ == "__main__":
     test_export_dialog_reports_partial_success_without_critical_error()
     test_export_dialog_surfaces_output_path_failure_from_real_worker()
     test_layout_panel_analysis_progress_lifecycle()
+    test_layout_panel_workbench_height_is_not_forced_by_sidebar()
+    test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench()
     test_layout_panel_merges_selected_blocks_for_ocr_rerun()
-    test_layout_panel_exposes_real_inline_formula_overlays_readonly()
+    test_layout_panel_defaults_auto_text_blocks_locked()
+    test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle()
+    test_layout_panel_draw_merge_uses_large_box_and_removes_overlap()
+    test_layout_panel_draw_ignores_locked_text_targets()
+    test_layout_panel_drawn_block_is_selected_and_type_editable()
+    test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks()
+    test_layout_panel_ink_snap_reuses_cached_image_mask()
+    test_layout_panel_delete_selected_removes_unlocked_box()
+    test_layout_panel_readonly_char_boxes_do_not_block_formula_delete()
+    test_layout_panel_hides_empty_and_invalidated_char_boxes()
+    test_layout_panel_excludes_inline_formula_carriers_from_char_boxes()
+    test_layout_panel_type_combo_changes_unlocked_block_type()
+    test_layout_panel_undo_restores_block_edits()
+    test_layout_panel_undo_preserves_view_transform()
+    test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
+    test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()
+    test_main_window_centered_resize_expands_from_current_center()
+    test_main_window_maximize_state_is_not_forced_back_to_normal()
+    test_main_window_file_menu_uses_close_project_action()
+    test_main_window_close_project_prompts_save_and_resets_workspace()
     test_fake_ocr_engine()
     test_confidence_normalization()
-    test_api_ocr_engine_requests_return_word_box()
-    test_api_ocr_engine_parses_char_level_word_boxes()
-    test_api_ocr_engine_parses_pruned_direct_camelcase_word_boxes()
-    test_api_ocr_engine_parses_text_word_boxes_alias()
-    test_wordbox_anchor_allows_cjk_left_overflow_without_right_expansion()
-    test_api_ocr_engine_refines_cjk_word_box_with_anchor()
-    test_api_ocr_engine_marks_word_level_boxes_without_fake_char_precision()
-    test_api_ocr_engine_filters_empty_narrow_word_boxes()
+    test_api_ocr_engine_does_not_request_return_word_box()
     test_api_ocr_engine_does_not_promote_block_content_to_line()
+    test_api_ocr_engine_reads_direct_pruned_ppocr_rows()
     test_api_ocr_engine_ignores_block_content_without_rec_rows()
-    test_api_ocr_engine_aligns_token_rows_by_bbox_not_index()
-    test_api_ocr_engine_uses_matching_token_row_when_rec_bbox_missing()
     test_api_ocr_engine_preserves_rec_text_without_any_geometry()
-    test_api_ocr_engine_preserves_token_text_when_rec_rows_missing()
     test_fake_layout_engine()
     test_fake_llm_engine_disabled()
     test_fake_llm_engine()
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
-    test_ocr_pipeline_prefers_ocr_boxes_and_only_falls_back_for_missing_chars()
+    test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_chars()
     test_ocr_pipeline_normalizes_proof_geometry()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
@@ -9072,19 +9963,43 @@ if __name__ == "__main__":
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
+    test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes()
+    test_hanwang_layout_injects_manual_formula_binding_into_parent_route()
     test_hanwang_inline_formula_text_slices_keep_chars()
+    test_hanwang_recog_filters_empty_decoded_char_boxes()
     test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers()
     test_hanwang_pre_page_ocr_lines_split_before_recog()
+    test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes()
     test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter()
     test_paddle_line_routing_builds_layout_line_routes_from_reading_order()
-    test_hanwang_inline_formula_empty_text_slices_fall_back_to_ppvl()
+    test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair()
+    test_paddle_line_routing_line_hint_formula_recovery_does_not_shift_next_line()
+    test_paddle_line_routing_missing_formula_box_does_not_shift_later_rows()
+    test_paddle_line_routing_marker_formula_does_not_cut_text_slice()
+    test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt()
+    test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero()
+    test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text()
+    test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text()
+    test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes()
+    test_paddle_line_routing_formula_number_is_skip_not_formula_carrier()
+    test_paddle_line_routing_formula_rows_use_single_horizontal_band()
+    test_paddle_line_routing_has_layout_routes_is_pure()
+    test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands()
+    test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
+    test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth()
+    test_paddle_artifact_index_binds_parent_table_and_empty_formula_review()
+    test_layout_panel_manual_formula_writes_paddle_binding_payload()
+    test_layout_analyzer_reads_formula_geometry_records_for_routes()
+    test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result()
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
-    test_hanwang_formula_style_footer_and_footnote_bypass_hanwang()
+    test_hanwang_formula_style_footer_bypasses_hanwang()
+    test_hanwang_footnote_labels_route_through_hanwang()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
-    test_hanwang_empty_ppvl_fallback_uses_layout_authority_label()
+    test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text()
+    test_hanwang_ppvl_skip_uses_layout_authority_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
@@ -9119,7 +10034,7 @@ if __name__ == "__main__":
     test_api_model_profile_helpers()
     test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
     test_api_http_post_json_disables_environment_proxies()
-    test_fixed_api_chain_resolves_official_roots_to_vl15_and_ppocrv5()
+    test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5()
     test_api_ocr_engine_resolves_ocr_endpoint_for_pp_ocrv5_profile()
     test_api_ocr_engine_parses_paddle_coordinate_variants()
     test_api_request_builders_split_profile_params()
@@ -9160,16 +10075,13 @@ if __name__ == "__main__":
     test_vproof_candidate_button_applies_to_ocr_text()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
+    test_image_viewer_space_pan_temporarily_disables_box_editing()
+    test_image_viewer_shift_left_drag_creates_block_bbox()
+    test_image_viewer_draw_uses_snapper_only_for_created_bbox()
+    test_image_viewer_right_drag_selects_blocks_without_creating_bbox()
     test_ui_block_labels_use_structured_semantic_label()
     test_hanwang_concurrency_evaluation_script_help()
     test_layout_analyzer_builds_api_payload()
-    test_inspector_structure_ocr_falls_back_when_ppstructure_pipeline_missing()
-    test_inspector_flattens_api_layout_parsing_result()
-    test_inspector_flattens_api_pruned_word_boxes_for_adapter_chars()
-    test_inspector_local_flatteners_preserve_word_box_rows()
-    test_inspector_builds_api_request_body_from_shared_config()
-    test_inspector_runtime_meta_records_actual_request_and_response_fields()
-    test_ocr_inspector_run_panel_profile_request_params()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
     test_char_index_hides_fallback_units_by_default()
@@ -9181,32 +10093,10 @@ if __name__ == "__main__":
     test_char_index_filters_non_cjk_from_default_vproof()
     test_char_index_sorts_digit_tokens_short_to_long()
     test_char_index_groups_formula_runs_below_digits()
-    test_char_index_suppresses_punctuation_topic_for_shared_word_box()
+    test_char_index_suppresses_punctuation_topic_for_shared_token_bbox()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()
     test_char_index_skips_lines_with_unverified_geometry()
     test_char_index_deduplicates_overlapping_duplicate_lines()
     test_vproof_text_map_deduplicates_overlapping_duplicate_lines()
-    test_crop_bbox_ascii_path()
-    test_crop_bbox_chinese_path()
-    test_find_text_matches_lines()
-    test_find_text_matches_ocr_chars()
-    test_planb_core_seam_diagnoses_missing_word_region()
-    test_planb_core_seam_preserves_word_region_and_search_identity()
-    test_planb_core_seam_reads_paddle_json_text_word_boxes_alias()
-    test_planb_core_seam_flags_invalid_word_region()
-    test_crop_panel_search_selects_canvas_node()
-    test_paddle_adapter_char_bbox_source()
-    test_paddle_adapter_reads_direct_and_camelcase_word_rows()
-    test_paddle_adapter_char_fallback_when_no_word_region()
-    test_ocr_inspector_paddle_adapter_keeps_line_only_chars_unavailable()
-    test_ocr_inspector_paddle_adapter_marks_word_not_fake_char()
-    test_canvas_node_item_map_char_fallback()
-    test_canvas_node_item_map_char_ocr()
-    test_canvas_char_fallback_source_colour()
-    test_canvas_char_overlay_default_visible()
-    test_canvas_shows_unavailable_note_without_word_region()
-    test_canvas_warning_reports_server_missing_after_return_word_box_sent()
-    test_inspector_tree_syncs_external_char_selection()
-    test_params_ref_matrix_marks_vl_word_box_unsupported()
     print("\n✓ 所有测试通过")

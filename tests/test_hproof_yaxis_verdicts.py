@@ -178,7 +178,7 @@ def test_line_pair_uses_inline_y_axis_text_metrics():
     block_fmt = pair._editor.document().firstBlock().blockFormat()
     assert block_fmt.lineHeightType() == QTextBlockFormat.LineHeightTypes.FixedHeight.value
     assert block_fmt.lineHeight() == h_proof.TEXT_LINE_HEIGHT_PX
-    assert h_proof.LINE_PAIR_H == 64
+    assert h_proof.LINE_PAIR_H == 70
     assert not hasattr(pair, "_ribbon")
     pair.deleteLater()
 

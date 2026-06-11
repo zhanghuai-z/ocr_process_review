@@ -45,7 +45,13 @@ def test_hproof_text_editor_has_no_frame_border():
     ed = h._pairs[0]._editor
     ss = ed.styleSheet()
     assert "border:none" in ss.replace(" ", "") or "border:none" in ss
-    assert "background:transparent" in ss.replace(" ", "") or "background:transparent" in ss
+    assert "background:#eaf3ff" in ss.replace(" ", "") or "background:#eaf3ff" in ss
+    h._activate(1)
+    inactive_ss = h._pairs[0]._editor.styleSheet()
+    assert (
+        "background:transparent" in inactive_ss.replace(" ", "")
+        or "background:transparent" in inactive_ss
+    )
     # cursor width 0 = caret 不显示
     assert ed.cursorWidth() == 0
 

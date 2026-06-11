@@ -120,6 +120,12 @@ def test_confidence_badge_has_no_tooltip_calls():
     assert "self.setToolTip(" not in src
 
 
+def test_hproof_status_label_has_no_tooltip_calls():
+    """任务 2：行级状态标签也必须静默，不能残留 setToolTip("") 这类空气泡。"""
+    src = open("app/ui/proof/h_proof.py", encoding="utf-8").read()
+    assert "self._status_lbl.setToolTip(" not in src
+
+
 def test_layout_still_two_rows_after_yaxis_refit():
     """任务 1 的"红线"：保持 image+editor 两层结构，不能借机回到 3 行
     stacked elements。"""

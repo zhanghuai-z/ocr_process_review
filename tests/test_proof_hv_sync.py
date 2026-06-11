@@ -1051,6 +1051,216 @@ def test_phase25_save_button_text_is_just_save():
     h.deleteLater()
 
 
+def test_hproof_right_dock_updates_progress_and_status_counts():
+    from app.models import ProofStatus
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project_with_char_crops("甲乙", lines_per_page=4)
+    lines = proj.pages[0].blocks[0].lines
+    lines[0].proof_status = ProofStatus.OK
+    lines[1].proof_status = ProofStatus.MODIFIED
+    lines[2].proof_status = ProofStatus.AUTO_FLAGGED
+    lines[3].proof_status = ProofStatus.UNCHECKED
+
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+
+    assert h._current_scope_lbl.text() == "全部页面 · 正文"
+    assert h._current_line_lbl.text() == "当前行 1 / 4"
+    assert h._proof_progress_bar.value() == 2
+    assert h._handled_lbl.text() == "已处理 2 / 4"
+    assert h._confirmed_lbl.text() == "已确认 1"
+    assert h._modified_lbl.text() == "已修改 1"
+    assert h._flagged_lbl.text() == "疑点 1"
+    assert h._pending_lbl.text() == "待确认 1"
+
+    h._activate(2)
+    assert h._current_line_lbl.text() == "当前行 3 / 4"
+    h.deleteLater()
+
+
+def test_hproof_debug_mode_banner_tracks_formula_filter():
+    from app.ui.proof.h_proof import HProofPanel
+
+    h = HProofPanel()
+    assert h._mode_banner.isHidden()
+
+    h._btn_debug_formula.setChecked(True)
+
+    assert not h._mode_banner.isHidden()
+    assert "公式调试视图" in h._mode_banner.text()
+    assert h._current_scope_lbl.text() == "全部页面 · 公式调试"
+    h.deleteLater()
+
+
+def test_hproof_active_pair_exposes_stronger_visual_state():
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project_with_char_crops("甲乙", lines_per_page=2)
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    first, second = h._pairs
+
+    assert first.property("active") is True
+    assert "border-top" in first.styleSheet()
+
+    h._activate(1)
+
+    assert first.property("active") is False
+    assert first.styleSheet() == ""
+    assert second.property("active") is True
+    h.deleteLater()
+
+
+def test_hproof_debug_buttons_filter_formula_and_table_lines():
+    from app.ui.proof.h_proof import HProofPanel
+
+    normal_line = Line(text="正文", confidence=0.9, bbox=BBox(0, 0, 40, 12))
+    inline_formula_line = Line(
+        text="含$ A $公式",
+        confidence=0.9,
+        bbox=BBox(0, 16, 80, 12),
+        chars=[
+            Char(char="含", confidence=0.9, bbox=BBox(0, 16, 10, 12)),
+            Char(
+                char="$ A $",
+                confidence=1.0,
+                bbox=BBox(12, 16, 30, 12),
+                bbox_source="paddle_inline_formula",
+            ),
+        ],
+    )
+    formula_number_line = Line(text="(1)", confidence=1.0, bbox=BBox(86, 32, 14, 12))
+    formula_line = Line(text="$$ E=mc^2 $$", confidence=1.0, bbox=BBox(0, 48, 80, 12))
+    table_line = Line(text="表格OCR", confidence=0.8, bbox=BBox(0, 64, 80, 12))
+    route_table_line = Line(
+        text="表格子区",
+        confidence=0.0,
+        bbox=BBox(0, 80, 80, 12),
+        review_flags=["hanwang_route_table"],
+    )
+    page = Page(image_path="/tmp/hproof-debug.png", width=120, height=120, page_number=1)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 0, 100, 30),
+            lines=[normal_line, inline_formula_line],
+        ),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(86, 32, 14, 12),
+            lines=[formula_number_line],
+            source_label="formula_number",
+            raw_payload={"block_label": "formula_number"},
+        ),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 48, 80, 12),
+            lines=[formula_line],
+            source_label="display_formula",
+            raw_payload={"block_label": "display_formula"},
+        ),
+        Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox(0, 64, 80, 12),
+            lines=[table_line],
+            source_label="table_region",
+            raw_payload={"block_label": "table_region"},
+        ),
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 80, 80, 12),
+            lines=[route_table_line],
+        ),
+    ]
+
+    h = HProofPanel()
+    h.load_pages([page])
+    assert [line.text for _block, line, _page, _idx in h._items] == [
+        "正文",
+        "含$ A $公式",
+    ]
+
+    h._btn_debug_formula.setChecked(True)
+    assert [line.text for _block, line, _page, _idx in h._items] == [
+        "含$ A $公式",
+        "$$ E=mc^2 $$",
+    ]
+    assert [pair._debug_badge for pair in h._pairs] == ["公式", "公式"]
+
+    h._btn_debug_formula.setChecked(False)
+    h._btn_debug_table.setChecked(True)
+    assert [line.text for _block, line, _page, _idx in h._items] == [
+        "表格OCR",
+        "表格子区",
+    ]
+    assert [pair._debug_badge for pair in h._pairs] == ["表格", "表格"]
+
+    h._btn_debug_formula.setChecked(True)
+    assert [line.text for _block, line, _page, _idx in h._items] == [
+        "含$ A $公式",
+        "$$ E=mc^2 $$",
+        "表格OCR",
+        "表格子区",
+    ]
+    h.deleteLater()
+
+
+def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
+    from app.ui.proof.h_proof import iter_unique_page_hproof_debug_lines
+
+    marker_line = Line(
+        text="注：$ ^{*} $说明",
+        confidence=0.9,
+        bbox=BBox(0, 0, 100, 12),
+        chars=[
+            Char(
+                char="$ ^{*} $",
+                confidence=1.0,
+                bbox=BBox(20, 0, 24, 12),
+                bbox_source="paddle_inline_formula",
+                token_text="$ ^{*} $",
+            )
+        ],
+        review_flags=["hanwang_route_inline_formula"],
+    )
+    true_formula_line = Line(
+        text="其中 $ \\beta_t $ 显著",
+        confidence=0.9,
+        bbox=BBox(0, 16, 120, 12),
+        chars=[
+            Char(
+                char="$ \\beta_t $",
+                confidence=1.0,
+                bbox=BBox(30, 16, 30, 12),
+                bbox_source="paddle_inline_formula",
+                token_text="$ \\beta_t $",
+            )
+        ],
+        review_flags=["hanwang_route_inline_formula"],
+    )
+    marker_block_line = Line(
+        text="$ ^{②} $",
+        confidence=1.0,
+        bbox=BBox(0, 32, 20, 12),
+    )
+    page = Page(image_path="/tmp/hproof-debug-marker.png", width=140, height=80, page_number=1)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 30), lines=[marker_line, true_formula_line]),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 32, 20, 12),
+            lines=[marker_block_line],
+            source_label="inline_formula",
+            raw_payload={"block_label": "inline_formula"},
+        ),
+    ]
+
+    rows = list(iter_unique_page_hproof_debug_lines(page, formulas=True))
+
+    assert [line.text for _block, line, _idx in rows] == ["其中 $ \\beta_t $ 显著"]
+
+
 def test_phase25_editor_always_visible_and_weak_cursor():
     """Phase 25：editor 始终可见，cursorWidth=0（弱光标）。"""
     from app.ui.proof.h_proof import HProofPanel
