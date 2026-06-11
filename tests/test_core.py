@@ -885,6 +885,33 @@ def test_project_store_update_lines_rolls_back_as_single_transaction():
     print("test_project_store_update_lines_rolls_back_as_single_transaction PASSED")
 
 
+def test_project_store_new_db_records_current_schema_version():
+    import sqlite3
+
+    from app.core.logging import APP_VERSION, SCHEMA_VERSION
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        with ProjectStore(db_path):
+            pass
+
+        conn = sqlite3.connect(db_path)
+        try:
+            meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        finally:
+            conn.close()
+
+        assert int(meta["schema_version"]) == SCHEMA_VERSION
+        assert meta["app_version"] == APP_VERSION
+
+        print("test_project_store_new_db_records_current_schema_version PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_schema_migration():
     """从 v1 schema 迁移到当前版本。"""
     import sqlite3
@@ -10347,6 +10374,7 @@ if __name__ == "__main__":
     test_project_store_upsert_rejects_foreign_parent_rowids()
     test_project_store_persists_page_ocr_invalidation_reason()
     test_project_store_update_lines_rolls_back_as_single_transaction()
+    test_project_store_new_db_records_current_schema_version()
     test_project_store_schema_migration()
     test_proof_engine()
     test_export_txt()

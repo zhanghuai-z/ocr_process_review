@@ -226,24 +226,29 @@ class ProjectStore:
     # ------------------------------------------------------------------ open/close
 
     def open(self) -> None:
+        db_file = Path(self.db_path)
+        is_new_database = not db_file.exists() or db_file.stat().st_size == 0
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(DDL_V3)
         self._conn.commit()
-        self._ensure_meta()
+        self._ensure_meta(schema_version=SCHEMA_VERSION if is_new_database else 1)
         self._migrate()
 
-    def _ensure_meta(self) -> None:
+    def _ensure_meta(self, *, schema_version: int) -> None:
         """确保 meta 表和版本记录存在。"""
         row = self.conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
         if row is None:
+            app_version = APP_VERSION if schema_version >= SCHEMA_VERSION else "0.1.0"
             self.conn.execute(
-                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')"
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (str(schema_version),),
             )
             self.conn.execute(
-                "INSERT OR IGNORE INTO meta (key, value) VALUES ('app_version', '0.1.0')"
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('app_version', ?)",
+                (app_version,),
             )
             self.conn.commit()
 
