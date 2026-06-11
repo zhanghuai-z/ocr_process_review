@@ -25,6 +25,7 @@ PADDLE_HANWANG_TEXT_LABELS = {
     "header",
     "footer",
     "footnote",
+    "vision_footnote",
     "number",
     "page_number",
     "reference",

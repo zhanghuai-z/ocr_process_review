@@ -1,8 +1,8 @@
 """Layout analysis wrapper. Supports local / api modes.
 
-主链的 layout 角色已全面切换到 PaddleOCR-VL-1.5（替代 PP-StructureV3）：
+主链的 layout 角色已全面切换到 PaddleOCR-VL-1.6（替代 VL1.5 / PP-StructureV3）：
   resolve_api_endpoint_for_role(api_url, role="layout")
-    -> https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing  (官方预置)
+    -> https://paddleocr.aistudio-app.com/api/v2/ocr/jobs  (官方预置)
 
 VL 响应与 Structure 在这里采用的抽取路径兑现上兼容：
   result.layoutParsingResults[0].prunedResult:
@@ -18,7 +18,6 @@ VL 响应与 Structure 在这里采用的抽取路径兑现上兼容：
 PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
 """
 from __future__ import annotations
-import base64
 import json
 from pathlib import Path
 from typing import Iterable, List
@@ -26,11 +25,12 @@ from typing import Iterable, List
 from PySide6.QtCore import QThread, Signal
 
 from app.core.api_profiles import (
+    FIXED_LAYOUT_PROFILE,
     get_api_request_options,
     infer_api_model_profile_from_endpoint,
     resolve_api_endpoint_for_role,
 )
-from app.core.api_profiles import FIXED_LAYOUT_PROFILE, get_api_request_options, infer_api_model_profile_from_endpoint, resolve_api_endpoint_for_role
+from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
@@ -53,13 +53,17 @@ from app.core.paddle_response import (
     result_dict,
     result_items,
 )
+from app.core.paddle_v16_client import (
+    PaddleV16LayoutClient,
+    build_paddle_v16_optional_payload,
+    is_paddle_v16_endpoint,
+)
 from app.models import Block, BlockType, Page
 
 logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
 LOCAL_LAYOUT_CANVAS_H = 608
 LAYOUT_API_TIMEOUT_FLOOR = 180
-LAYOUT_API_JPEG_QUALITY = 85
 
 
 class LayoutWorker(QThread):
@@ -315,12 +319,22 @@ class LayoutAnalyzer:
         if not route_records:
             return
 
+        parent_entries: list[tuple[dict, object]] = []
+        subblocks_by_parent: dict[int, list[dict]] = {}
         for parent in parsing_records:
+            parent_label = self._extract_label_from_record(parent)
+            if is_hanwang_skip_label(parent_label):
+                continue
             parent_bbox = self._record_bbox_in_page_space(parent, page, scale_x, scale_y)
             if parent_bbox is None:
                 continue
-            subblocks = []
-            for label, bbox, raw in route_records:
+            parent_entries.append((parent, parent_bbox))
+            subblocks_by_parent[id(parent)] = []
+
+        for label, bbox, raw in route_records:
+            best_parent: dict | None = None
+            best_score = 0.0
+            for parent, parent_bbox in parent_entries:
                 x1 = max(parent_bbox.x1, bbox.x1)
                 y1 = max(parent_bbox.y1, bbox.y1)
                 x2 = min(parent_bbox.x2, bbox.x2)
@@ -334,11 +348,19 @@ class LayoutAnalyzer:
                 )
                 if not center_inside and inter_area < bbox.area * 0.5:
                     continue
-                subblocks.append({
+                score = (inter_area / max(1, bbox.area)) + (0.25 if center_inside else 0.0)
+                if score > best_score:
+                    best_score = score
+                    best_parent = parent
+            if best_parent is not None:
+                subblocks_by_parent[id(best_parent)].append({
                     "block_label": label,
                     "block_bbox": list(bbox.to_xyxy()),
                     "raw_payload": dict(raw),
                 })
+
+        for parent, parent_bbox in parent_entries:
+            subblocks = subblocks_by_parent.get(id(parent), [])
             if subblocks:
                 parent[ROUTE_SUBBLOCKS_FIELD] = subblocks
                 line_routes = build_layout_line_routes(
@@ -715,10 +737,10 @@ class LayoutAnalyzer:
             profile=FIXED_LAYOUT_PROFILE,
             role="layout",
         )
-        # 主链 layout 已被 strong-redirect 到 VL-1.5；但配置里仍可能是旧
+        # 主链 layout 已被 strong-redirect 到 VL-1.6；但配置里仍可能是旧
         # profile (pp-structurev3 / pp-ocrv5)。这里按最终 endpoint 重推
         # profile，保证 _build_api_request_body 选出正确的 request_family
-        # (vl-layout vs ocr-word-box)，不会把 OCR detector/recognizer 参数误发
+        # (vl-layout vs ocr-text)，不会把 OCR detector/recognizer 参数误发
         # 到 VL 端点。与 Inspector 处理保持一致。
         effective_profile = (
             infer_api_model_profile_from_endpoint(url)
@@ -732,33 +754,40 @@ class LayoutAnalyzer:
         if img is None:
             raise RuntimeError(f"Cannot read image: {page.display_image_path}")
         page.height, page.width = img.shape[:2]
-        ok, buf = cv2.imencode(
-            ".jpg",
-            img,
-            [int(cv2.IMWRITE_JPEG_QUALITY), LAYOUT_API_JPEG_QUALITY],
-        )
-        if not ok:
-            raise RuntimeError(f"Cannot encode image: {page.display_image_path}")
-        file_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+        if is_paddle_v16_endpoint(url):
+            client = PaddleV16LayoutClient(
+                jobs_url=url,
+                token=token,
+                request_timeout=timeout,
+                poll_timeout=timeout,
+            )
+            data = client.analyze_image(
+                img,
+                optional_payload=build_paddle_v16_optional_payload(),
+            )
+        else:
+            file_b64 = encode_image_b64_for_paddle(img)
+            if not file_b64:
+                raise RuntimeError(f"Cannot encode image: {page.display_image_path}")
 
-        headers: dict = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
+            headers: dict = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"token {token}"
 
-        resp = post_json_without_env_proxy(
-            url,
-            json=self._build_api_request_body(
-                file_b64,
-                1,
-                layout_model_name,
-                profile=effective_profile,
-                endpoint_url=url,
-            ),
-            headers=headers,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+            resp = post_json_without_env_proxy(
+                url,
+                json=self._build_api_request_body(
+                    file_b64,
+                    1,
+                    layout_model_name,
+                    profile=effective_profile,
+                    endpoint_url=url,
+                ),
+                headers=headers,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
         self._write_api_debug_response(page, data)
 
         page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)

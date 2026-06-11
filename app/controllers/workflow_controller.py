@@ -390,6 +390,47 @@ class WorkflowController(QObject):
             self.worker_error.emit(f"保存失败：{e}")
             return False
 
+    def has_running_workers(self) -> bool:
+        """是否存在仍在运行的后台任务。"""
+        return any(
+            self._worker_is_running(worker)
+            for worker in (
+                self._layout_worker,
+                self._ocr_worker,
+                self._proof_ocr_worker,
+            )
+        )
+
+    def close_project(self) -> bool:
+        """关闭当前项目，但不退出应用。"""
+        if self.has_running_workers():
+            self.status_message.emit("后台任务仍在运行，请等待完成后再关闭项目")
+            return False
+        if self._store:
+            self._store.close()
+        self._store = None
+        self._project = None
+        self._pending_layout_pages = None
+        self._pending_proof_pages = None
+        self._discard_parallel_proof_result = False
+        self._ocr_target_page_numbers = None
+        self._auto_start_ocr_after_layout = True
+        self._queued_ocr_progress_callback = None
+        self.reset_proof_sync_state()
+        self._max_step = STEP_IMPORT
+        self._current_step = STEP_IMPORT
+        self._current_page_number = 1
+        self._layout_run_enabled = False
+        qp.reset_active_store()
+        self.project_changed.emit(None)
+        self.step_enabled_changed.emit(self._max_step)
+        self.current_step_changed.emit(self._current_step)
+        self.current_page_number_changed.emit(self._current_page_number)
+        self.layout_run_enabled_changed.emit(self._layout_run_enabled)
+        self._emit_view_state()
+        self.status_message.emit("项目已关闭")
+        return True
+
     def auto_save(self) -> None:
         """校对时自动保存修改的行。"""
         if not self._project or not self._store:
@@ -629,7 +670,7 @@ class WorkflowController(QObject):
     def _layout_status_label(self) -> str:
         return {
             "api": "API 版面分析",
-            "hanwang": "PP-VL 版面分析（汉王混合）",
+            "hanwang": "VL1.6 版面分析（汉王混合）",
         }.get(self._current_ocr_mode(), "Paddle 版面分析")
 
     def _ocr_status_label(self) -> str:

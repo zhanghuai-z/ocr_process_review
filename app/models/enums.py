@@ -49,6 +49,7 @@ class BlockType(str, Enum):
             "header": cls.TEXT,
             "footer": cls.TEXT,
             "footnote": cls.TEXT,
+            "vision_footnote": cls.TEXT,
             "sidebar_text": cls.TEXT,
             "algorithm": cls.TEXT,
             "figure": cls.FIGURE,

@@ -15,7 +15,7 @@ from app.core.ocr_ir import (
     OcrIrToken,
     classify_ir_text,
 )
-from app.core.paddle_response import overall_ocr_res, word_box_rows
+from app.core.paddle_response import legacy_word_box_rows, overall_ocr_res
 from app.core.proof_status import normalize_confidence
 from app.core.spatial_matching import merge_bboxes, min_area_overlap_ratio, select_token_row_for_line
 from app.models import BBox
@@ -58,7 +58,7 @@ def normalize_token_texts(token_row) -> list[str]:
 
 
 def build_token_rows(item: dict, image_shape=None) -> list[TokenRow]:
-    token_rows, region_rows = word_box_rows(item)
+    token_rows, region_rows = legacy_word_box_rows(item)
     rows: list[TokenRow] = []
     for token_row, region_row in zip(token_rows, region_rows):
         tokens = [token.strip() for token in normalize_token_texts(token_row) if token.strip()]
@@ -150,7 +150,14 @@ def build_ir_lines_from_item(
     fallback_bbox: BBox,
     refine_tokens: TokenRefiner | None = None,
     existing_lines: list[OcrIrLine] | None = None,
+    include_word_boxes: bool = False,
 ) -> list[OcrIrLine]:
+    """Build line IR from a Paddle OCR item.
+
+    ``include_word_boxes`` is retained for explicit legacy response
+    compatibility. The default is ``False`` so Paddle wordbox data cannot become
+    proof-facing character truth by accident.
+    """
     ocr_res = overall_ocr_res(item)
     texts = _as_sequence(ocr_res.get("rec_texts", []))
     scores = _as_sequence(ocr_res.get("rec_scores", []))
@@ -161,7 +168,7 @@ def build_ir_lines_from_item(
         or ocr_res.get("dt_polys")
         or []
     )
-    token_rows = build_token_rows(item, image_shape)
+    token_rows = build_token_rows(item, image_shape) if include_word_boxes else []
     used_token_rows: set[int] = set()
     ir_lines: list[OcrIrLine] = []
 

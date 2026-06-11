@@ -33,6 +33,8 @@ def overall_ocr_res(item: dict) -> dict:
     ocr_res = pruned.get("overall_ocr_res")
     if isinstance(ocr_res, dict):
         return ocr_res
+    if isinstance(pruned, dict) and any(key in pruned for key in ("rec_texts", "rec_boxes", "rec_polys", "dt_polys")):
+        return pruned
     direct = item.get("overall_ocr_res") if isinstance(item, dict) else None
     if isinstance(direct, dict):
         return direct
@@ -50,7 +52,7 @@ def first_list_from_sources(sources: list[dict], keys: tuple[str, ...]) -> list:
     return []
 
 
-def word_box_rows(item: dict) -> tuple[list, list]:
+def legacy_word_box_rows(item: dict) -> tuple[list, list]:
     pruned = pruned_result(item)
     ocr_res = overall_ocr_res(item)
     direct = item if isinstance(item, dict) else {}
@@ -84,7 +86,7 @@ def layout_geometry_records_from_item(item: dict) -> list[dict]:
     ):
         if not isinstance(container, dict):
             continue
-        for key in ("boxes", "layout_boxes", "regions", "blocks"):
+        for key in ("boxes", "layout_boxes", "regions", "blocks", "formula"):
             values = container.get(key)
             if isinstance(values, list):
                 candidates.extend(value for value in values if isinstance(value, dict))

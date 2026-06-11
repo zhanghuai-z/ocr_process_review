@@ -16,9 +16,9 @@ BBOX_GRANULARITY_UNAVAILABLE = "unavailable"
 
 # Sources whose char-granularity bboxes are inherently trustworthy and must NOT
 # be subject to the neighbor-repair heuristic in ensure_line_char_bboxes.
-# Paddle OCR ("ocr") delivers per-character boxes derived from its own word-box
-# splitting; Hanwang ("hanwang:*") delivers CharRcg boxes from its native
-# per-character recognition pass — both are first-party char-level evidence.
+# Engine adapters may still provide explicit per-character boxes as source
+# "ocr"; Hanwang ("hanwang:*") delivers CharRcg boxes from its native
+# recognition pass. These are first-party char-level evidence.
 _TRUSTED_OCR_CHAR_SOURCES = ("ocr",)
 _TRUSTED_OCR_CHAR_SOURCE_PREFIXES = ("hanwang:",)
 

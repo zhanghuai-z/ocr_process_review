@@ -2,14 +2,15 @@
 
 The UI lets users store either a service root URL or a full model endpoint.
 Core OCR/layout code must resolve that value consistently instead of blindly
-appending `/layout-parsing`.
+appending the role-specific endpoint suffix.
 """
 from __future__ import annotations
 
 from typing import Any
 
-KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing")
-FIXED_LAYOUT_PROFILE = "paddleocr-vl-1.5"
+PADDLE_V16_JOBS_PATH = "/api/v2/ocr/jobs"
+KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing", PADDLE_V16_JOBS_PATH)
+FIXED_LAYOUT_PROFILE = "paddleocr-vl-1.6"
 FIXED_OCR_PROFILE = "pp-ocrv5"
 
 PADDLE_COORD_STABILITY_FLAGS: dict[str, bool] = {
@@ -18,8 +19,7 @@ PADDLE_COORD_STABILITY_FLAGS: dict[str, bool] = {
     "useTextlineOrientation": False,
 }
 
-PADDLE_OCR_WORD_BOX_PARAMS: dict[str, object] = {
-    "returnWordBox": True,
+PADDLE_OCR_TEXT_DET_PARAMS: dict[str, object] = {
     "textDetLimitSideLen": 1536,
     "textDetLimitType": "max",
     "textDetThresh": 0.3,
@@ -34,9 +34,9 @@ API_MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "url": "https://n6z9feddjca4l7b5.aistudio-app.com/ocr",
         "desc": "通用文字识别（/ocr）",
         "endpoint_suffix": "/ocr",
-        "request_family": "ocr-word-box",
-        "returns": ("line", "word", "token"),
-        "max_text_bbox_granularity": "word",
+        "request_family": "ocr-text",
+        "returns": ("line",),
+        "max_text_bbox_granularity": "line",
         "layout": False,
     },
     "pp-structurev3": {
@@ -44,9 +44,9 @@ API_MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "url": "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
         "desc": "版面 + OCR（/layout-parsing）",
         "endpoint_suffix": "/layout-parsing",
-        "request_family": "ocr-word-box",
-        "returns": ("layout", "block", "line", "word", "token", "markdown"),
-        "max_text_bbox_granularity": "word",
+        "request_family": "ocr-text",
+        "returns": ("layout", "block", "line", "markdown"),
+        "max_text_bbox_granularity": "line",
         "layout": True,
     },
     "paddleocr-vl": {
@@ -65,6 +65,16 @@ API_MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "desc": "VL 1.5 升级版",
         "endpoint_suffix": "/layout-parsing",
         "request_family": "vl-layout",
+        "returns": ("layout", "block", "line", "markdown"),
+        "max_text_bbox_granularity": "line",
+        "layout": True,
+    },
+    "paddleocr-vl-1.6": {
+        "label": "PaddleOCR-VL-1.6",
+        "url": f"https://paddleocr.aistudio-app.com{PADDLE_V16_JOBS_PATH}",
+        "desc": "VL 1.6 官方 jobs API",
+        "endpoint_suffix": PADDLE_V16_JOBS_PATH,
+        "request_family": "vl-layout-v2",
         "returns": ("layout", "block", "line", "markdown"),
         "max_text_bbox_granularity": "line",
         "layout": True,
@@ -153,11 +163,11 @@ def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> 
     return None
 
 
-# 主链 layout 角色固定走 PaddleOCR-VL-1.5（替代 PP-StructureV3）。
-# 仅当用户填写 *自定义* 根 URL 时，按后缀规则原地补 /layout-parsing；
+# 主链 layout 角色固定走 PaddleOCR-VL-1.6（替代 VL-1.5 / PP-StructureV3）。
+# 仅当用户填写 *自定义* 根 URL 时，按后缀规则原地补 jobs path；
 # 当用户配的是 *官方预置* (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 时，
-# 全部重定向到 paddleocr-vl-1.5 预置 URL，保证「全面替代 structure」。
-LAYOUT_DEFAULT_PROFILE = "paddleocr-vl-1.5"
+# 全部重定向到 paddleocr-vl-1.6 预置 URL，保证旧模型不会干扰主线。
+LAYOUT_DEFAULT_PROFILE = "paddleocr-vl-1.6"
 
 
 def resolve_api_endpoint_for_role(
@@ -169,12 +179,12 @@ def resolve_api_endpoint_for_role(
     """Resolve the concrete endpoint for the model role used by the main app.
 
     The proof workflow is intentionally dual-model:
-    - layout role -> PaddleOCR-VL-1.5 `/layout-parsing` (replaces PP-StructureV3)
+    - layout role -> PaddleOCR-VL-1.6 `/api/v2/ocr/jobs`
     - OCR proof role -> PP-OCRv5 `/ocr`
 
     Official AiStudio presets use different hosts, so exact preset URLs are
     switched to their paired role endpoint.  Custom self-hosted URLs keep the
-    same root and only swap `/layout-parsing` <-> `/ocr`.
+    same root and use the role endpoint suffix.
     """
     normalized = (api_url or "").strip().rstrip("/")
     if not normalized:
@@ -199,15 +209,18 @@ def resolve_api_endpoint_for_role(
         )
 
     if role == "layout":
-        # 任何官方 PP-* 预置（包括旧的 pp-structurev3、纯 OCR pp-ocrv5、旧 VL）
-        # 都强制重定向到 paddleocr-vl-1.5 预置 URL。
-        if profile_key in ("pp-ocrv5", "pp-structurev3", "paddleocr-vl"):
+        # 任何官方旧预置都强制重定向到 paddleocr-vl-1.6 预置 URL。
+        if profile_key in ("pp-ocrv5", "pp-structurev3", "paddleocr-vl", "paddleocr-vl-1.5"):
             return get_api_model_profile_url(LAYOUT_DEFAULT_PROFILE)
         if normalized.endswith("/ocr"):
-            return f"{normalized[:-len('/ocr')]}/layout-parsing"
+            return resolve_api_endpoint(
+                normalized[: -len("/ocr")],
+                default_suffix=PADDLE_V16_JOBS_PATH,
+                profile=LAYOUT_DEFAULT_PROFILE,
+            )
         return resolve_api_endpoint(
             base_url,
-            default_suffix="/layout-parsing",
+            default_suffix=PADDLE_V16_JOBS_PATH,
             profile=LAYOUT_DEFAULT_PROFILE,
         )
 
@@ -219,10 +232,12 @@ def infer_api_model_profile_from_endpoint(endpoint_url: str | None) -> str | Non
     matched = match_api_model_profile_from_url(normalized)
     if matched:
         return matched
+    if normalized.endswith(PADDLE_V16_JOBS_PATH):
+        return "paddleocr-vl-1.6"
     if normalized.endswith("/ocr"):
         return "pp-ocrv5"
     if normalized.endswith("/layout-parsing"):
-        # 主链 layout 已切到 VL-1.5；自定义 /layout-parsing 端点按 VL family 处理
+        # 主链 layout 已切到 VL-1.6；旧 /layout-parsing 端点按 VL family 处理
         # （不再发送 OCR detector/recognizer 字段）。
         return LAYOUT_DEFAULT_PROFILE
     return None
@@ -244,8 +259,8 @@ def get_api_request_options(profile: str | None, endpoint_url: str | None = None
     family = API_MODEL_PROFILES[profile_key].get("request_family")
     options: dict[str, object] = {}
     options.update(PADDLE_COORD_STABILITY_FLAGS)
-    if family == "ocr-word-box":
-        options.update(PADDLE_OCR_WORD_BOX_PARAMS)
+    if family == "ocr-text":
+        options.update(PADDLE_OCR_TEXT_DET_PARAMS)
         return options
     return options
 

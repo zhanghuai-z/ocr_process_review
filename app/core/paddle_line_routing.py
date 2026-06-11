@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.ocr_ir import is_formula_token
+from app.core.ocr_ir import is_formula_marker_token, is_formula_token
 from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label, normalize_paddle_label
 from app.models import BlockType
 
@@ -14,7 +14,31 @@ ROUTE_SUBBLOCKS_FIELD = "_route_subblocks"
 LAYOUT_LINE_ROUTES_FIELD = "_layout_line_routes"
 ROUTE_INLINE_FORMULA_FLAG = "hanwang_route_inline_formula"
 ROUTE_TABLE_FLAG = "hanwang_route_table"
-_FORMULA_STYLE_POSITION_LABELS = {"footer", "footnote"}
+_FORMULA_STYLE_POSITION_LABELS = {"footer"}
+_ROUTE_FORMULA_LABELS = {
+    "display_formula",
+    "equation",
+    "equation_block",
+    "formula",
+    "inline_formula",
+    "isolated_formula",
+}
+_FORMULA_PATTERN = re.compile(
+    r"(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$(?!\$).*?(?<!\\)\$(?!\$)",
+    re.DOTALL,
+)
+_CONTEXT_MATCH_WINDOW = 18
+_CONTEXT_MATCH_THRESHOLD = 4
+_FORMULA_COMMAND_ALIASES = {
+    "alpha": ("alpha", "α"),
+    "beta": ("beta", "β"),
+    "gamma": ("gamma", "γ"),
+    "delta": ("delta", "δ"),
+    "epsilon": ("epsilon", "ε"),
+    "varepsilon": ("varepsilon", "epsilon", "ε"),
+    "phi": ("phi", "φ"),
+    "varphi": ("varphi", "phi", "φ"),
+}
 
 
 @dataclass(frozen=True)
@@ -74,6 +98,10 @@ def is_formula_style_position_block(block: dict[str, Any]) -> bool:
 
 def is_formula_label(label: str) -> bool:
     return BlockType.from_paddle(label) == BlockType.EQUATION
+
+
+def _is_route_formula_label(label: str) -> bool:
+    return normalize_paddle_label(label) in _ROUTE_FORMULA_LABELS
 
 
 def is_table_label(label: str) -> bool:
@@ -176,13 +204,16 @@ def _horizontal_gap_segments(
         ox1, _oy1, ox2, _oy2 = overlap
         if ox2 <= ox1:
             continue
-        kind = "formula" if is_formula_label(subblock["label"]) else "skip"
+        kind = "formula" if _is_route_formula_label(subblock["label"]) else "skip"
+        text = formula_texts_by_bbox.get(sub_bbox, subblock.get("text", ""))
+        if kind == "formula" and is_formula_marker_token(text):
+            continue
         cuts.append(
             {
                 "kind": kind,
                 "label": subblock["label"],
                 "bbox": (ox1, ly1, ox2, ly2),
-                "text": formula_texts_by_bbox.get(sub_bbox, subblock.get("text", "")),
+                "text": text,
             }
         )
     cuts.sort(key=lambda item: (item["bbox"][0], item["bbox"][1]))
@@ -281,9 +312,22 @@ def attach_page_ocr_line_routes(
     for block_idx, block, _block_bbox in parent_entries:
         lines = sorted(assigned.get(block_idx, []), key=lambda item: (item.bbox[1], item.bbox[0]))
         if not lines:
+            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
             continue
         subblocks = route_subblocks_for_block(block, width, height)
-        formula_subblocks = [subblock for subblock in subblocks if is_formula_label(subblock["label"])]
+        formula_subblocks = [subblock for subblock in subblocks if _is_route_formula_label(subblock["label"])]
+        parent_formula_texts_by_bbox = _formula_texts_by_bbox(formula_subblocks, block_text(block))
+        routed_subblocks = [
+            subblock
+            for subblock in subblocks
+            if (
+                not _is_route_formula_label(subblock["label"])
+                or not is_formula_marker_token(
+                    parent_formula_texts_by_bbox.get(tuple(subblock["bbox"]), subblock.get("text", ""))
+                )
+            )
+        ]
+        formula_subblocks = [subblock for subblock in routed_subblocks if _is_route_formula_label(subblock["label"])]
         line_hints_for_formula = [PaddleRouteLineHint(text=line.text, bbox=line.bbox) for line in lines]
         recovered = recover_inline_formula_segments(
             parent_text=block_text(block),
@@ -295,7 +339,7 @@ def attach_page_ocr_line_routes(
         )
         formula_texts_by_bbox = {segment.bbox: segment.text for segment in recovered}
         routes = [
-            _build_route_line(_horizontal_gap_segments(line.bbox, subblocks, formula_texts_by_bbox))
+            _build_route_line(_horizontal_gap_segments(line.bbox, routed_subblocks, formula_texts_by_bbox))
             for line in lines
         ]
         if routes:
@@ -303,6 +347,9 @@ def attach_page_ocr_line_routes(
 
 
 def _route_subblock_text(subblock: dict[str, Any]) -> str:
+    text = block_text(subblock)
+    if text:
+        return text
     raw = subblock.get("raw") or {}
     raw_payload = raw.get("raw_payload") if isinstance(raw, dict) else None
     if isinstance(raw_payload, dict):
@@ -346,7 +393,172 @@ def route_subblocks_for_block(
 
 
 def _formula_spans(text: str) -> list[str]:
-    return [match.group(0) for match in re.finditer(r"\$.*?\$", text, re.DOTALL)]
+    return [match.group(0) for match in _FORMULA_PATTERN.finditer(text)]
+
+
+def _route_formula_spans(text: str) -> list[str]:
+    return [span for span in _formula_spans(text) if not is_formula_marker_token(span)]
+
+
+def _formula_span_records(text: str) -> list[dict[str, Any]]:
+    matches = list(_FORMULA_PATTERN.finditer(text or ""))
+    records: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        if is_formula_marker_token(match.group(0)):
+            continue
+        prev_start = matches[index - 1].end() if index > 0 else 0
+        next_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        records.append(
+            {
+                "text": match.group(0),
+                "prev_context": text[prev_start:match.start()],
+                "next_context": text[match.end():next_end],
+            }
+        )
+    return records
+
+
+def _normalize_context_text(text: str) -> str:
+    return "".join(ch.lower() for ch in str(text or "") if ch.isalnum())
+
+
+def _context_match_score(fragment: str, line_text: str) -> float:
+    if not fragment or not line_text:
+        return 0.0
+    if fragment in line_text:
+        return float(len(fragment) * 2)
+    limit = min(len(fragment), len(line_text), _CONTEXT_MATCH_WINDOW)
+    for size in range(limit, _CONTEXT_MATCH_THRESHOLD - 1, -1):
+        if fragment[:size] in line_text or fragment[-size:] in line_text:
+            return float(size)
+    return 0.0
+
+
+def _formula_text_candidates(span: str) -> list[str]:
+    text = str(span or "").strip().strip("$").strip()
+    candidates: list[str] = []
+    for command, aliases in _FORMULA_COMMAND_ALIASES.items():
+        if ("\\" + command) in text:
+            candidates.extend(aliases)
+    for token in re.findall(r"[A-Za-z]+|[0-9]+", text):
+        candidates.append(token)
+    compact = _normalize_context_text(re.sub(r"\\[A-Za-z]+", "", text))
+    if compact:
+        candidates.append(compact)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        normalized = _normalize_context_text(candidate)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def _formula_match_score(span: str, line_text: str) -> float:
+    best = 0.0
+    for candidate in _formula_text_candidates(span):
+        if candidate in line_text:
+            best = max(best, float(max(6, len(candidate) * 2)))
+        else:
+            best = max(best, _context_match_score(candidate, line_text))
+    return best
+
+
+def _infer_formula_spans_by_line(
+    parent_text: str,
+    line_hints: list[PaddleRouteLineHint],
+    formula_box_counts_by_line: dict[int, int],
+) -> dict[int, list[str]]:
+    """Infer which physical OCR line each parent LaTeX span belongs to.
+
+    PP-OCR/Hanwang line text usually does not preserve ``$...$`` formula
+    delimiters, so direct ``_formula_spans(line.text)`` is often empty.  We use
+    non-formula context around each parent span instead and keep inline formula
+    boxes as word/token-level geometry evidence.  The box counts are used only
+    as a tie-breaker so one missing Paddle box does not shift all later spans.
+    """
+    if not line_hints:
+        return {}
+    line_texts = [_normalize_context_text(hint.text) for hint in line_hints]
+    if not any(line_texts):
+        return {}
+
+    spans_by_line: dict[int, list[str]] = {}
+    assigned_counts: dict[int, int] = {}
+    for record in _formula_span_records(parent_text):
+        prev_tail = _normalize_context_text(record["prev_context"])[-_CONTEXT_MATCH_WINDOW:]
+        next_head = _normalize_context_text(record["next_context"])[:_CONTEXT_MATCH_WINDOW]
+        chosen: int | None = None
+        best_score = 0.0
+        for index, line_text in enumerate(line_texts):
+            score = (
+                _context_match_score(prev_tail, line_text)
+                + _context_match_score(next_head, line_text)
+                + _formula_match_score(str(record["text"]), line_text) * 2.0
+            )
+            capacity = formula_box_counts_by_line.get(index, 0)
+            if capacity > 0 and assigned_counts.get(index, 0) >= capacity:
+                score -= 8.0
+            if score > best_score:
+                best_score = score
+                chosen = index
+
+        if best_score < _CONTEXT_MATCH_THRESHOLD:
+            chosen = None
+
+        if chosen is None:
+            continue
+        spans_by_line.setdefault(chosen, []).append(str(record["text"]))
+        assigned_counts[chosen] = assigned_counts.get(chosen, 0) + 1
+    return spans_by_line
+
+
+def _reading_order_by_row(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    buckets: list[list[dict[str, Any]]] = []
+    for item in sorted(items, key=lambda value: (value["bbox"][1], value["bbox"][0])):
+        item_bbox = tuple(item["bbox"])
+        for bucket in buckets:
+            bucket_bbox = union_xyxy([tuple(value["bbox"]) for value in bucket])
+            if vertical_overlap_ratio(bucket_bbox, item_bbox) >= 0.25:
+                bucket.append(item)
+                break
+        else:
+            buckets.append([item])
+
+    ordered: list[dict[str, Any]] = []
+    for bucket in sorted(buckets, key=lambda values: (min(value["bbox"][1] for value in values), min(value["bbox"][0] for value in values))):
+        ordered.extend(sorted(bucket, key=lambda value: (value["bbox"][0], value["bbox"][1])))
+    return ordered
+
+
+def _formula_texts_by_bbox(
+    formula_subblocks: list[dict[str, Any]],
+    parent_text: str,
+) -> dict[tuple[int, int, int, int], str]:
+    formula_spans = _formula_spans(parent_text)
+    texts_by_bbox: dict[tuple[int, int, int, int], str] = {}
+    for index, item in enumerate(_reading_order_by_row(formula_subblocks)):
+        if index >= len(formula_spans):
+            break
+        texts_by_bbox[tuple(item["bbox"])] = formula_spans[index]
+    return texts_by_bbox
+
+
+def formula_texts_by_subblock_bbox(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+) -> dict[tuple[int, int, int, int], str]:
+    formula_subblocks = [
+        subblock
+        for subblock in route_subblocks_for_block(block, width, height)
+        if _is_route_formula_label(subblock["label"])
+    ]
+    return _formula_texts_by_bbox(formula_subblocks, block_text(block))
 
 
 def _nearest_line_index(
@@ -379,11 +591,11 @@ def recover_inline_formula_segments(
     parent_text: str,
     line_hints: list[PaddleRouteLineHint],
     subblocks: list[dict[str, Any]],
-    is_formula_label: Any = is_formula_label,
+    is_formula_label: Any = _is_route_formula_label,
 ) -> list[RecoveredInlineFormulaSegment]:
-    formula_spans = _formula_spans(parent_text)
+    parent_spans = _route_formula_spans(parent_text)
+    parent_text_by_bbox: dict[tuple[int, int, int, int], str] = {}
     recovered: list[RecoveredInlineFormulaSegment] = []
-    formula_cursor = 0
     formula_items: list[tuple[str, tuple[int, int, int, int]]] = []
     for subblock in subblocks:
         label = str(subblock.get("label") or subblock.get("block_label") or "")
@@ -395,20 +607,80 @@ def recover_inline_formula_segments(
             continue
         formula_items.append((label, bbox.to_xyxy()))
 
-    formula_items.sort(key=lambda item: (item[1][1], item[1][0]))
-    for label, bbox in formula_items:
-        text = formula_spans[formula_cursor] if formula_cursor < len(formula_spans) else ""
-        formula_cursor += 1
-        if not text:
-            continue
-        recovered.append(
-            RecoveredInlineFormulaSegment(
-                line_index=_nearest_line_index(bbox, line_hints),
-                text=text,
-                bbox=bbox,
-                label=label,
-            )
+    ordered_formula_items = [
+        (item["label"], tuple(item["bbox"]))
+        for item in _reading_order_by_row([
+            {"label": label, "bbox": bbox}
+            for label, bbox in formula_items
+        ])
+    ]
+    all_parent_spans = _formula_spans(parent_text)
+    marker_bboxes = {
+        bbox
+        for index, (_label, bbox) in enumerate(ordered_formula_items)
+        if len(ordered_formula_items) == len(all_parent_spans)
+        and index < len(all_parent_spans)
+        and is_formula_marker_token(all_parent_spans[index])
+    }
+    if marker_bboxes:
+        ordered_formula_items = [
+            (label, bbox)
+            for label, bbox in ordered_formula_items
+            if bbox not in marker_bboxes
+        ]
+    for index, (_label, bbox) in enumerate(ordered_formula_items):
+        if index < len(parent_spans):
+            parent_text_by_bbox[bbox] = parent_spans[index]
+
+    formula_items_by_line: dict[int, list[tuple[str, tuple[int, int, int, int]]]] = {}
+    for label, bbox in ordered_formula_items:
+        formula_items_by_line.setdefault(_nearest_line_index(bbox, line_hints), []).append((label, bbox))
+    formula_box_counts_by_line = {
+        line_index: len(items)
+        for line_index, items in formula_items_by_line.items()
+    }
+    global_fallback_is_safe = (
+        not line_hints or len(parent_spans) == len(ordered_formula_items)
+    )
+    inferred_spans_by_line = (
+        {}
+        if global_fallback_is_safe
+        else _infer_formula_spans_by_line(
+            parent_text,
+            line_hints,
+            formula_box_counts_by_line,
         )
+    )
+
+    for line_index in sorted(formula_items_by_line):
+        line_items = sorted(formula_items_by_line[line_index], key=lambda item: (item[1][0], item[1][1]))
+        if global_fallback_is_safe:
+            # Complete formula geometry is authoritative: PP-OCRv5 contributes
+            # line geometry only; formula text comes from the Paddle parent.
+            line_spans = []
+        else:
+            direct_line_spans = _route_formula_spans(line_hints[line_index].text) if line_index < len(line_hints) else []
+            inferred_line_spans = inferred_spans_by_line.get(line_index, [])
+            if len(direct_line_spans) >= len(line_items):
+                line_spans = direct_line_spans
+            elif len(inferred_line_spans) == len(line_items):
+                line_spans = inferred_line_spans
+            else:
+                line_spans = []
+        for local_index, (label, bbox) in enumerate(line_items):
+            text = line_spans[local_index] if local_index < len(line_spans) else ""
+            if not text and global_fallback_is_safe:
+                text = parent_text_by_bbox.get(bbox, "")
+            if not text:
+                continue
+            recovered.append(
+                RecoveredInlineFormulaSegment(
+                    line_index=line_index,
+                    text=text,
+                    bbox=bbox,
+                    label=label,
+                )
+            )
     recovered.sort(key=lambda item: (item.line_index, item.bbox[0], item.bbox[1]))
     return recovered
 
@@ -430,6 +702,37 @@ def _build_route_line(
     }
 
 
+def _route_has_formula(route: dict[str, Any]) -> bool:
+    return any(segment.get("kind") == "formula" for segment in route.get("segments", []))
+
+
+def _filter_thin_text_artifact_routes(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formula_heights = [
+        int(route["bbox"][3]) - int(route["bbox"][1])
+        for route in routes
+        if _route_has_formula(route)
+    ]
+    if not formula_heights:
+        return routes
+    formula_heights.sort()
+    median_formula_height = formula_heights[len(formula_heights) // 2]
+    min_text_height = max(8, int(round(median_formula_height * 0.6)))
+
+    filtered: list[dict[str, Any]] = []
+    for route in routes:
+        if _route_has_formula(route):
+            filtered.append(route)
+            continue
+        segments = route.get("segments", [])
+        if not segments or any(segment.get("kind") != "text" for segment in segments):
+            filtered.append(route)
+            continue
+        height = int(route["bbox"][3]) - int(route["bbox"][1])
+        if height >= min_text_height:
+            filtered.append(route)
+    return filtered
+
+
 def build_layout_line_routes(
     block: dict[str, Any],
     width: int,
@@ -440,15 +743,29 @@ def build_layout_line_routes(
     if not subblocks:
         return []
 
-    text_rects = [parent_bbox]
+    all_formula_subblocks = [item for item in subblocks if _is_route_formula_label(item["label"])]
+    formula_texts_by_bbox = _formula_texts_by_bbox(all_formula_subblocks, block_text(block))
+    marker_formula_subblocks: list[dict[str, Any]] = []
+    routed_subblocks: list[dict[str, Any]] = []
     for subblock in subblocks:
+        is_formula = _is_route_formula_label(subblock["label"])
+        is_marker = is_formula and is_formula_marker_token(
+            formula_texts_by_bbox.get(tuple(subblock["bbox"]), subblock.get("text", ""))
+        )
+        if is_marker:
+            marker_formula_subblocks.append(subblock)
+            continue
+        routed_subblocks.append(subblock)
+
+    text_rects = [parent_bbox]
+    for subblock in routed_subblocks:
         next_rects: list[tuple[int, int, int, int]] = []
         for rect in text_rects:
             next_rects.extend(subtract_xyxy(rect, subblock["bbox"]))
         text_rects = next_rects
 
-    formula_subblocks = [item for item in subblocks if is_formula_label(item["label"])]
-    skip_subblocks = [item for item in subblocks if not is_formula_label(item["label"])]
+    formula_subblocks = [item for item in routed_subblocks if _is_route_formula_label(item["label"])]
+    skip_subblocks = [item for item in routed_subblocks if not _is_route_formula_label(item["label"])]
 
     bucket_candidates = [
         {"kind": "text", "bbox": rect}
@@ -464,6 +781,16 @@ def build_layout_line_routes(
         }
         for item in formula_subblocks
     )
+    if formula_subblocks:
+        bucket_candidates.extend(
+            {
+                "kind": "anchor",
+                "label": item["label"],
+                "bbox": item["bbox"],
+                "text": formula_texts_by_bbox.get(tuple(item["bbox"]), item.get("text", "")),
+            }
+            for item in marker_formula_subblocks
+        )
     bucket_candidates.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
 
     buckets: list[list[dict[str, Any]]] = []
@@ -476,18 +803,26 @@ def build_layout_line_routes(
         else:
             buckets.append([segment])
 
-    formula_spans = _formula_spans(block_text(block))
-    formula_cursor = 0
+    formula_texts_by_bbox = {
+        bbox: text
+        for bbox, text in formula_texts_by_bbox.items()
+        if not is_formula_marker_token(text)
+    }
     routes = []
     for bucket in buckets:
         bucket.sort(key=lambda item: (item["bbox"][0], item["bbox"][1]))
-        for segment in bucket:
-            if segment["kind"] != "formula":
-                continue
-            if formula_cursor < len(formula_spans):
-                segment["text"] = formula_spans[formula_cursor]
-            formula_cursor += 1
-        routes.append(_build_route_line(bucket))
+        if any(segment["kind"] == "formula" for segment in bucket):
+            row_bbox = union_xyxy([tuple(segment["bbox"]) for segment in bucket])
+            row_subblocks = [
+                subblock
+                for subblock in formula_subblocks
+                if vertical_overlap_ratio(row_bbox, subblock["bbox"]) >= 0.25
+            ]
+            routes.append(_build_route_line(_horizontal_gap_segments(row_bbox, row_subblocks, formula_texts_by_bbox)))
+        else:
+            text_segments = [segment for segment in bucket if segment["kind"] == "text"]
+            if text_segments:
+                routes.append(_build_route_line(text_segments))
 
     for subblock in skip_subblocks:
         label = subblock["label"]
@@ -510,7 +845,7 @@ def build_layout_line_routes(
             item["bbox"][0],
         )
     )
-    return routes
+    return _filter_thin_text_artifact_routes(routes)
 
 
 def _normalize_cached_line_routes(
@@ -545,6 +880,16 @@ def _normalize_cached_line_routes(
     return normalized
 
 
+def _routes_have_marker_formula(routes: list[dict[str, Any]]) -> bool:
+    return any(
+        segment.get("kind") == "formula"
+        and is_formula_marker_token(segment.get("text", ""))
+        for route in routes
+        for segment in route.get("segments", [])
+        if isinstance(segment, dict)
+    )
+
+
 def line_routes_for_block(
     block: dict[str, Any],
     width: int,
@@ -552,8 +897,11 @@ def line_routes_for_block(
 ) -> list[dict[str, Any]]:
     cached = _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height)
     if cached:
-        block[LAYOUT_LINE_ROUTES_FIELD] = cached
-        return cached
+        if _routes_have_marker_formula(cached) and route_subblocks_for_block(block, width, height):
+            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+        else:
+            block[LAYOUT_LINE_ROUTES_FIELD] = cached
+            return cached
     routes = build_layout_line_routes(block, width, height)
     if routes:
         block[LAYOUT_LINE_ROUTES_FIELD] = routes
@@ -589,7 +937,6 @@ def text_slice_routes_for_block(
                 }
             )
     slices.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
-    slices.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
     return slices
 
 
@@ -598,7 +945,10 @@ def has_layout_line_routes(
     width: int,
     height: int,
 ) -> bool:
-    return bool(line_routes_for_block(block, width, height))
+    """Return whether layout routes exist or can be derived without mutating block."""
+    if _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height):
+        return True
+    return bool(route_subblocks_for_block(block, width, height))
 
 
 __all__ = [
@@ -613,6 +963,7 @@ __all__ = [
     "block_bbox_xyxy",
     "block_text",
     "build_layout_line_routes",
+    "formula_texts_by_subblock_bbox",
     "clamp_xyxy",
     "has_layout_line_routes",
     "intersect_xyxy",

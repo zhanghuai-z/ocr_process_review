@@ -7,17 +7,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import unicodedata
+import re
 from typing import Any, Literal, Optional
 
 from app.models import BBox
 
 OCR_IR_SOURCE_REC_TEXT = "overall_ocr_res.rec_texts"
-OCR_IR_SOURCE_TOKEN_TEXT = "text_word"
+OCR_IR_SOURCE_TOKEN_TEXT = "legacy_token_rows"
 OCR_IR_TOKEN_TEXT_FALLBACK_FLAG = "ir_token_text_fallback"
 
 OcrIrKind = Literal["text", "digit", "formula", "punct", "symbol", "other"]
 
 _FORMULA_SYMBOLS = set("=+-−*/×÷^_()[]{}<>≤≥±√∑∫∞≈≠πΠαβγδθλμσΩω|")
+_SUPERSCRIPT_MARKER_RE = re.compile(r"^\^\{(?:\*{1,3}|[①②③④⑤⑥⑦⑧⑨⑩])\}$")
 
 
 def is_cjk_char(char: str) -> bool:
@@ -52,6 +54,20 @@ def is_formula_token(text: str) -> bool:
         is_formula_char(ch) or unicodedata.category(ch).startswith("P")
         for ch in compact
     )
+
+
+def is_formula_marker_token(text: str) -> bool:
+    """Return True for visual footnote/significance markers misreported as formula.
+
+    Paddle can emit inline_formula boxes for superscript markers such as
+    ``$ ^{*} $`` or ``$ ^{②} $``.  They should stay in parent text/table
+    content, but not drive formula-debug routing or editable formula boxes.
+    """
+    compact = "".join(ch for ch in str(text or "") if not ch.isspace())
+    if not compact:
+        return False
+    compact = compact.strip("$")
+    return bool(_SUPERSCRIPT_MARKER_RE.fullmatch(compact))
 
 
 def classify_ir_text(text: str) -> OcrIrKind:

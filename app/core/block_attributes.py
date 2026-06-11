@@ -51,7 +51,6 @@ class BlockAttributes:
             "formula_number",
             "header",
             "footer",
-            "footnote",
             "sidebar_text",
         }
 
