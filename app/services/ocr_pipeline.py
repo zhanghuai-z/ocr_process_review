@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Protocol
+from typing import Callable, List, Optional
 
 import cv2
 import numpy as np
@@ -24,7 +24,7 @@ from app.core.ocr_dispatch_policy import (
 )
 from app.core.proof_status import apply_auto_flag
 from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
-from app.engines import OcrContext, get_engine_bbox_space
+from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
@@ -222,10 +222,7 @@ class OcrPipeline:
         return bool(getattr(self._engine, "prefer_page_ocr", False))
 
     def _prefers_page_hybrid_blocks(self) -> bool:
-        return bool(
-            getattr(self._engine, "prefer_page_hybrid_blocks", False)
-            and hasattr(self._engine, "recognize_page_blocks")
-        )
+        return supports_page_block_ocr(self._engine)
 
     def _append_block_failure_note(self, block: Block, message: str) -> None:
         note = f"OCR failed: {message}"
@@ -294,6 +291,8 @@ class OcrPipeline:
         if progress_callback:
             line_count = sum(len(block.lines) for block in page.blocks)
             progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
+        if not supports_page_block_ocr(self._engine):
+            raise RuntimeError("Configured OCR engine does not support page-block OCR")
         self._engine.recognize_page_blocks(
             img,
             page,

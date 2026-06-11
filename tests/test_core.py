@@ -2852,6 +2852,24 @@ def test_fake_ocr_engine():
     print("test_fake_ocr_engine PASSED")
 
 
+def test_create_engine_hanwang_exposes_page_block_capability():
+    from app.engines import OCR_BBOX_SPACE_PAGE, supports_page_block_ocr
+    from app.engines.real_ocr_adapter import create_engine
+
+    engine = create_engine("hanwang")
+
+    assert supports_page_block_ocr(engine) is True
+    assert getattr(engine, "engine_id", "") == "hanwang.micro_recblock"
+    assert getattr(engine, "bbox_space", "") == OCR_BBOX_SPACE_PAGE
+
+    class FlagOnly:
+        prefer_page_hybrid_blocks = True
+
+    assert supports_page_block_ocr(FlagOnly()) is False
+
+    print("test_create_engine_hanwang_exposes_page_block_capability PASSED")
+
+
 def test_confidence_normalization():
     from app.engines.real_ocr_adapter import normalize_confidence
     from app.ui.widgets.confidence_badge import normalize_badge_score
@@ -10111,6 +10129,7 @@ if __name__ == "__main__":
     test_main_window_file_menu_uses_close_project_action()
     test_main_window_close_project_prompts_save_and_resets_workspace()
     test_fake_ocr_engine()
+    test_create_engine_hanwang_exposes_page_block_capability()
     test_confidence_normalization()
     test_api_ocr_engine_does_not_request_return_word_box()
     test_api_ocr_engine_does_not_promote_block_content_to_line()

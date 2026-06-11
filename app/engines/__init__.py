@@ -1,11 +1,11 @@
 """OCR 和版面分析引擎接口定义。"""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol
+from typing import Callable, List, Optional, Protocol, TypeGuard
 
 import numpy as np
 
-from app.models import Block, BlockType, BBox, Line
+from app.models import Block, BlockType, BBox, Line, Page
 
 OCR_BBOX_SPACE_CROP = "crop"
 OCR_BBOX_SPACE_PAGE = "page"
@@ -42,6 +42,37 @@ class OcrEngine(Protocol):
             坐标是相对 image_bgr 的（调用方负责转换到整页坐标）。
         """
         ...
+
+
+class PageBlockOcrEngine(Protocol):
+    """Page-level engine that writes OCR results back to layout blocks.
+
+    Hanwang micro-recblock uses this capability: Paddle/PP-VL supplies layout
+    blocks, PP-OCR can supply page-line hints, and the engine returns block
+    results in page coordinates.
+    """
+
+    engine_id: str
+    prefer_page_hybrid_blocks: bool
+    bbox_space: str
+
+    def recognize_page_blocks(
+        self,
+        image_bgr: np.ndarray,
+        page: Page,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> object:
+        """Recognize a full page using existing layout blocks."""
+        ...
+
+
+def supports_page_block_ocr(engine: object) -> TypeGuard[PageBlockOcrEngine]:
+    """Return whether an engine exposes the page-block OCR capability."""
+    recognize_page_blocks = getattr(engine, "recognize_page_blocks", None)
+    return bool(
+        getattr(engine, "prefer_page_hybrid_blocks", False)
+        and callable(recognize_page_blocks)
+    )
 
 
 def get_engine_bbox_space(engine: object) -> str:

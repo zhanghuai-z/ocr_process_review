@@ -43,6 +43,7 @@ from app.core.paddle_labels import (
     is_hanwang_skip_label,
 )
 from app.core.proof_status import proof_status_for
+from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
 
 from . import native_bridge
@@ -1586,8 +1587,9 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
 class HanwangMicroRecBlockEngine:
     """OcrPipeline page-level engine for PP-VL layout + Hanwang text OCR."""
 
+    engine_id = "hanwang.micro_recblock"
     prefer_page_hybrid_blocks = True
-    bbox_space = "page"
+    bbox_space = OCR_BBOX_SPACE_PAGE
 
     def __init__(
         self,
