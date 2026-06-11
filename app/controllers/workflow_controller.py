@@ -18,7 +18,19 @@ from app.core.logging import get_logger
 from app.core.ocr_config import get_config
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
-from app.core.workflow_state import WorkflowProgressState, WorkflowViewState
+from app.core.workflow_state import (
+    STEP_HPROOF,
+    STEP_IMPORT,
+    STEP_LAYOUT,
+    STEP_OCR,
+    STEP_VPROOF,
+    PageGateInfo,
+    WorkflowProgressState,
+    WorkflowViewState,
+    compute_max_step,
+    page_gate_info,
+    pending_ocr_pages,
+)
 from app.core import quality_probe as qp
 from app.engines.real_ocr_adapter import create_engine
 from app.models import (
@@ -29,13 +41,6 @@ from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
 PARALLEL_PROOF_PAGE_KEY_ATTR = "_parallel_proof_page_key"
-
-# 步骤索引（与 stacked widget 顺序一致）
-STEP_IMPORT = 0
-STEP_LAYOUT = 1
-STEP_OCR = 2
-STEP_HPROOF = 3
-STEP_VPROOF = 4
 
 
 class WorkflowController(QObject):
@@ -523,18 +528,7 @@ class WorkflowController(QObject):
 
     def _compute_max_step(self) -> int:
         """根据项目状态计算可进入的最大步骤。"""
-        if not self._project or not self._project.pages:
-            return STEP_IMPORT
-
-        pages = self._project.pages
-        has_blocks = any(p.is_analyzed for p in pages)
-        has_ocr = self._project.has_any_ocr_result
-
-        if has_ocr:
-            return STEP_VPROOF
-        if has_blocks:
-            return STEP_OCR
-        return STEP_LAYOUT
+        return compute_max_step(self._project)
 
     def _update_max_step(self) -> None:
         """更新最大可进入步骤并通知 UI。"""
@@ -549,66 +543,25 @@ class WorkflowController(QObject):
             mode = "local"
         return mode
 
-    def _page_gate_info(self, page: Page) -> tuple[str, bool, str, str, str, str, bool]:
-        if not page.is_analyzed:
-            return (
-                "layout_pending",
-                True,
-                "layout_not_done",
-                "请先完成版面分析",
-                "enter_ocr",
-                "提交并进入 OCR",
-                False,
-            )
-        if page.needs_ocr_rerun:
-            return (
-                "ocr_invalidated",
-                True,
-                "invalidated_after_edit",
-                "当前页版面已变更，需要重新进入 OCR",
-                "rerun_ocr",
-                "重新进入 OCR",
-                True,
-            )
-        if page.has_ocr_result or page.is_ocr_done:
-            return (
-                "ocr_complete",
-                False,
-                "ocr_complete",
-                "当前页 OCR 已完成",
-                "enter_ocr",
-                "提交并进入 OCR",
-                False,
-            )
-        return (
-            "ocr_ready",
-            True,
-            "ready_for_ocr",
-            "当前页版面已确认，可进入 OCR",
-            "enter_ocr",
-            "提交并进入 OCR",
-            True,
-        )
+    def _page_gate_info(self, page: Page) -> PageGateInfo:
+        return page_gate_info(page)
 
     def _pending_hanwang_pages(self) -> list[Page]:
-        if not self._project:
-            return []
-        return [
-            page for page in self._project.pages
-            if self._page_gate_info(page)[1]
-        ]
+        return pending_ocr_pages(self._project)
 
     def _first_pending_hanwang_page(self) -> Page | None:
         pending = self._pending_hanwang_pages()
         return pending[0] if pending else None
 
     def _emit_page_gate_state(self, page: Page) -> None:
-        page_state, is_pending, reason_code, reason_text, action_key, label, enabled = self._page_gate_info(page)
-        if not self._pending_hanwang_pages() and page_state == "ocr_complete":
+        gate = self._page_gate_info(page)
+        reason_code = gate.reason_code
+        reason_text = gate.reason_text
+        if not self._pending_hanwang_pages() and gate.page_state == "ocr_complete":
             reason_code = "all_pages_done"
             reason_text = "全部已完成 OCR"
-        self.page_gate_state.emit(page.page_number, page_state, is_pending, reason_code, reason_text)
-        self.primary_action.emit(page.page_number, action_key, label, enabled)
+        self.page_gate_state.emit(page.page_number, gate.page_state, gate.is_pending, reason_code, reason_text)
+        self.primary_action.emit(page.page_number, gate.action_key, gate.action_label, gate.action_enabled)
 
     def refresh_page_gate_states(self) -> None:
         if not self._project:
@@ -650,23 +603,23 @@ class WorkflowController(QObject):
             self.focus_page.emit(pending_page.page_number)
             self.step_requested.emit(STEP_LAYOUT)
             self._emit_page_gate_state(pending_page)
-            self.status_message.emit(self._page_gate_info(pending_page)[3])
+            self.status_message.emit(self._page_gate_info(pending_page).reason_text)
             return
 
         target = self.page_by_number(page_number) or pending_page
         if target is None:
             self.status_message.emit("全部已完成 OCR")
             return
-        page_state, _is_pending, reason_code, reason_text, _action_key, _label, enabled = self._page_gate_info(target)
-        if not enabled:
+        gate = self._page_gate_info(target)
+        if not gate.action_enabled:
             self._emit_page_gate_state(target)
-            self.status_message.emit("全部已完成 OCR" if reason_code == "ocr_complete" else reason_text)
+            self.status_message.emit("全部已完成 OCR" if gate.reason_code == "ocr_complete" else gate.reason_text)
             return
-        if page_state == "layout_pending":
+        if gate.page_state == "layout_pending":
             self.focus_page.emit(target.page_number)
             self.step_requested.emit(STEP_LAYOUT)
             self._emit_page_gate_state(target)
-            self.status_message.emit(reason_text)
+            self.status_message.emit(gate.reason_text)
             return
         self.start_ocr([target], target_page_numbers={target.page_number})
 

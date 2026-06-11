@@ -143,6 +143,52 @@ def test_models():
     print("test_models PASSED")
 
 
+def test_workflow_state_keeps_project_and_page_ocr_state_separate():
+    from app.core.workflow_state import (
+        STEP_VPROOF,
+        compute_max_step,
+        page_gate_info,
+        pending_ocr_pages,
+    )
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    done_page = Page(
+        image_path="/tmp/done.png",
+        width=100,
+        height=100,
+        status=PageStatus.OCR_DONE,
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(0, 0, 80, 20),
+                lines=[Line(text="已识别", confidence=0.9, bbox=BBox(0, 0, 80, 20))],
+            )
+        ],
+    )
+    pending_page = Page(
+        image_path="/tmp/pending.png",
+        width=100,
+        height=100,
+        status=PageStatus.LAYOUT_DONE,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 80, 20))],
+    )
+    project = OcrProject(name="mixed", pages=[done_page, pending_page])
+
+    assert project.has_any_ocr_result is True
+    assert project.all_pages_ocr_done is False
+    assert compute_max_step(project) == STEP_VPROOF
+    assert page_gate_info(done_page).is_pending is False
+    assert page_gate_info(pending_page).page_state == "ocr_ready"
+    assert pending_ocr_pages(project) == [pending_page]
+
+    pending_page.invalidate_ocr("block_moved")
+    invalidated = page_gate_info(pending_page)
+    assert invalidated.page_state == "ocr_invalidated"
+    assert invalidated.action_enabled is True
+
+    print("test_workflow_state_keeps_project_and_page_ocr_state_separate PASSED")
+
+
 # =====================================================================
 # BBox 工具测试
 # =====================================================================
@@ -10362,6 +10408,7 @@ def test_hanwang_concurrency_evaluation_script_help():
 
 if __name__ == "__main__":
     test_models()
+    test_workflow_state_keeps_project_and_page_ocr_state_separate()
     test_bbox_tools()
     test_block_type_mapping()
     test_block_payload_helpers_preserve_existing_entries()
