@@ -1,10 +1,17 @@
 """Shared policy for dispatching layout blocks to text OCR."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label
-from app.models import Block, BlockType
+from app.models.enums import BlockType
+
+
+class OcrDispatchBlock(Protocol):
+    block_type: BlockType
+    source_label: str
+    raw_payload: dict[str, Any]
+    recognizable: bool
 
 
 TEXT_OCR_BLOCK_TYPES = {
@@ -32,7 +39,7 @@ def _payload_label(payload: dict[str, Any]) -> str:
     return authoritative_paddle_label(payload, default="")
 
 
-def authoritative_block_label(block: Block) -> str:
+def authoritative_block_label(block: OcrDispatchBlock) -> str:
     """Return the best available vendor/source label for routing decisions."""
     if block.source_label:
         return str(block.source_label)
@@ -43,7 +50,7 @@ def authoritative_block_label(block: Block) -> str:
     return block.block_type.value
 
 
-def is_text_ocr_candidate(block: Block) -> bool:
+def is_text_ocr_candidate(block: OcrDispatchBlock) -> bool:
     """Whether the block's semantic type/source label may enter text OCR.
 
     This ignores ``block.recognizable`` so UI code can use it when refreshing
@@ -58,12 +65,12 @@ def is_text_ocr_candidate(block: Block) -> bool:
     return block.block_type in TEXT_OCR_BLOCK_TYPES
 
 
-def should_dispatch_to_text_ocr(block: Block) -> bool:
+def should_dispatch_to_text_ocr(block: OcrDispatchBlock) -> bool:
     """Whether this block should be sent to a text OCR engine now."""
     return bool(block.recognizable) and is_text_ocr_candidate(block)
 
 
-def should_block_page_ocr_line(block: Block) -> bool:
+def should_block_page_ocr_line(block: OcrDispatchBlock) -> bool:
     """Whether page-level OCR lines inside this block should be ignored.
 
     Page OCR runs on the full image, so formula/table/figure text may still be

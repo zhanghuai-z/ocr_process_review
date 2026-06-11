@@ -219,8 +219,15 @@ class Page:
 
     @property
     def recognizable_blocks(self) -> List[Block]:
-        """返回可送 OCR 的块。"""
-        return [b for b in self.blocks if b.recognizable]
+        """兼容旧调用：返回当前应送文字 OCR 的块。"""
+        return self.text_ocr_blocks
+
+    @property
+    def text_ocr_blocks(self) -> List[Block]:
+        """返回按统一 dispatch 策略应送文字 OCR 的块。"""
+        from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
+
+        return [b for b in self.blocks if should_dispatch_to_text_ocr(b)]
 
     @property
     def total_lines(self) -> int:
@@ -318,8 +325,8 @@ class OcrProject:
     @property
     def has_unrecognized_blocks(self) -> bool:
         return any(
-            b.recognizable and not b.lines
-            for p in self.pages for b in p.blocks
+            not b.lines
+            for p in self.pages for b in p.text_ocr_blocks
         )
 
     def get_export_summary(self) -> dict:
@@ -330,7 +337,7 @@ class OcrProject:
             "unproofed_lines": self.total_unproofed_lines,
             "flagged_lines": self.total_flagged_lines,
             "unrecognized_blocks": sum(
-                1 for p in self.pages for b in p.blocks
-                if b.recognizable and not b.lines
+                1 for p in self.pages for b in p.text_ocr_blocks
+                if not b.lines
             ),
         }

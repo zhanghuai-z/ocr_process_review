@@ -342,11 +342,12 @@ class OcrPipeline:
         ]
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
+            blocker = select_container_block_for_line(line, blockers)
+            if blocker is not None:
+                continue
             block = select_container_block_for_line(line, containers)
             if block is None:
-                blocker = select_container_block_for_line(line, blockers)
-                if blocker is None:
-                    unmatched.append(line)
+                unmatched.append(line)
             else:
                 block.lines.append(line)
 

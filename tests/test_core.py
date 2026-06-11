@@ -97,9 +97,13 @@ def test_models():
     # Page
     page = Page(image_path="/tmp/test.jpg", width=800, height=1200)
     page.blocks.append(block)
+    formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, recognizable=True)
+    page.blocks.append(formula_block)
     assert page.is_analyzed
     assert page.status == PageStatus.IMPORTED
     assert page.source_type == "image"
+    assert page.text_ocr_blocks == [block]
+    assert page.recognizable_blocks == [block]
 
     # Page new fields
     page2 = Page(
@@ -133,6 +137,8 @@ def test_models():
     summary = project.get_export_summary()
     assert summary["total_pages"] == 1
     assert summary["total_lines"] >= 0
+    assert summary["unrecognized_blocks"] == 0
+    assert project.has_unrecognized_blocks is False
 
     print("test_models PASSED")
 
@@ -3622,6 +3628,35 @@ def test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks():
         os.unlink(img_path)
 
     print("test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks PASSED")
+
+
+def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    text = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 200, 200), order=0)
+    equation = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(50, 50, 50, 30),
+        order=1,
+        recognizable=True,
+    )
+    normal_line = Line(text="文", confidence=0.95, bbox=BBox(10, 10, 10, 10))
+    formula_line = Line(text="式", confidence=0.95, bbox=BBox(55, 55, 10, 10))
+    page = Page(
+        image_path="/tmp/nested-equation.png",
+        width=200,
+        height=200,
+        blocks=[text, equation],
+    )
+
+    OcrPipeline().assign_page_ocr_lines_to_blocks(page, [normal_line, formula_line])
+
+    assert [line.text for line in text.lines] == ["文"]
+    assert equation.lines == []
+    assert len(page.blocks) == 2
+
+    print("test_page_ocr_nested_equation_blocks_before_parent_text_assignment PASSED")
 
 
 def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
@@ -10148,6 +10183,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
     test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels()
     test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks()
+    test_page_ocr_nested_equation_blocks_before_parent_text_assignment()
     test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()

@@ -34,6 +34,7 @@ from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
+from app.core.ocr_dispatch_policy import is_text_ocr_candidate
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_SUBBLOCKS_FIELD,
@@ -256,14 +257,16 @@ class LayoutAnalyzer:
             note_parts.append(f"source_label={raw_type}")
 
         raw_overlay_items.append((raw_type, bbox))
-        page_blocks.append(Block(
+        block = Block(
             block_type=BlockType.from_paddle(raw_type),
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
             source_label=raw_type,
             raw_payload=dict(record),
-        ))
+        )
+        block.recognizable = is_text_ocr_candidate(block)
+        page_blocks.append(block)
         return order + 1
 
     def _append_overlay_record(
