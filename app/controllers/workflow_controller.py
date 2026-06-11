@@ -155,10 +155,17 @@ class WorkflowController(QObject):
 
     @property
     def ocr_completed(self) -> bool:
-        """OCR 是否完成（与 OcrProject.ocr_completed 同义）；无项目时 False。"""
+        """项目是否已有任意 OCR 结果；无项目时 False。"""
         if self._project is None:
             return False
-        return self._project.ocr_completed
+        return self._project.has_any_ocr_result
+
+    @property
+    def all_pages_ocr_done(self) -> bool:
+        """所有页面是否都已完成 OCR；无项目时 False。"""
+        if self._project is None:
+            return False
+        return self._project.all_pages_ocr_done
 
     @property
     def cache_dir(self) -> "Path":
@@ -472,7 +479,7 @@ class WorkflowController(QObject):
                 return False
         except Exception:
             pass
-        if not self._project.ocr_completed:
+        if not self._project.all_pages_ocr_done:
             return False
         try:
             cfg = qp.sampler_config_from_app_config()
@@ -520,7 +527,7 @@ class WorkflowController(QObject):
 
         pages = self._project.pages
         has_blocks = any(p.is_analyzed for p in pages)
-        has_ocr = any(p.total_lines > 0 for p in pages)
+        has_ocr = self._project.has_any_ocr_result
 
         if has_ocr:
             return STEP_VPROOF
@@ -552,7 +559,7 @@ class WorkflowController(QObject):
                 "提交并进入 OCR",
                 False,
             )
-        if bool(getattr(page, "_ocr_invalidated_after_edit", False)):
+        if page.needs_ocr_rerun:
             return (
                 "ocr_invalidated",
                 True,
@@ -562,7 +569,7 @@ class WorkflowController(QObject):
                 "重新进入 OCR",
                 True,
             )
-        if page.total_lines > 0 or page.status == PageStatus.OCR_DONE:
+        if page.has_ocr_result or page.is_ocr_done:
             return (
                 "ocr_complete",
                 False,
@@ -612,7 +619,7 @@ class WorkflowController(QObject):
         page = self.page_by_number(page_number)
         if page is None:
             return
-        had_ocr = page.total_lines > 0 or page.status == PageStatus.OCR_DONE
+        had_ocr = page.has_ocr_result or page.is_ocr_done
         for block in page.blocks:
             block.lines = []
             block.raw_payload = {
@@ -621,7 +628,7 @@ class WorkflowController(QObject):
                 "ocr_invalidation_kind": change_kind,
             }
         if had_ocr:
-            setattr(page, "_ocr_invalidated_after_edit", True)
+            page.invalidate_ocr(change_kind)
         page.status = PageStatus.LAYOUT_DONE
         self.set_current_page_number(page_number)
         self._update_max_step()
@@ -664,7 +671,6 @@ class WorkflowController(QObject):
             self._emit_page_gate_state(target)
             self.status_message.emit(reason_text)
             return
-        setattr(target, "_ocr_invalidated_after_edit", False)
         self.start_ocr([target], target_page_numbers={target.page_number})
 
     def _layout_status_label(self) -> str:
@@ -799,7 +805,7 @@ class WorkflowController(QObject):
                 page.status = PageStatus.ERROR
             else:
                 page.status = PageStatus.OCR_DONE
-                setattr(page, "_ocr_invalidated_after_edit", False)
+                page.clear_ocr_invalidation()
 
         self._proof_crop_service.normalize_pages(processed_pages)
 
@@ -1013,7 +1019,7 @@ class WorkflowController(QObject):
         self.on_ocr_done(layout_pages)
 
     def _on_ocr_progress(self, progress: OcrProgress) -> None:
-        if self._project and any(page.total_lines > 0 for page in self._project.pages):
+        if self._project and self._project.has_any_ocr_result:
             if self._max_step < STEP_VPROOF:
                 self._update_max_step()
         self.progress_state_changed.emit(WorkflowProgressState(

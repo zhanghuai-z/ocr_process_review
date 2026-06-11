@@ -117,6 +117,17 @@ def test_models():
     assert project.page_count == 1
     assert project.total_lines == 2
     assert project.ocr_completed is True
+    assert project.has_any_ocr_result is True
+    assert project.all_pages_ocr_done is False
+    page.status = PageStatus.OCR_DONE
+    assert page.has_ocr_result is True
+    assert page.is_ocr_done is True
+    assert project.all_pages_ocr_done is True
+    page.invalidate_ocr("block_moved")
+    assert page.needs_ocr_rerun is True
+    assert page.ocr_invalidated_reason == "block_moved"
+    page.clear_ocr_invalidation()
+    assert page.needs_ocr_rerun is False
 
     # Export summary
     summary = project.get_export_summary()
@@ -551,6 +562,92 @@ def test_project_store_clean_on_resave():
         os.unlink(db_path)
 
 
+def test_project_store_persists_page_ocr_invalidation_reason():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        page = Page(
+            image_path="/tmp/img.jpg",
+            width=800,
+            height=600,
+            status=PageStatus.LAYOUT_DONE,
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=bb,
+                    lines=[Line(text="旧 OCR", confidence=0.9, bbox=bb)],
+                )
+            ],
+        )
+        page.invalidate_ocr("block_type_changed")
+        project = OcrProject(name="invalidate", pages=[page])
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+
+        assert loaded.pages[0].ocr_invalidated_reason == "block_type_changed"
+        assert loaded.pages[0].needs_ocr_rerun is True
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_persists_page_ocr_invalidation_reason PASSED")
+
+
+def test_project_store_update_lines_rolls_back_as_single_transaction():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line1 = Line(text="第一行", confidence=0.9, bbox=bb)
+        line2 = Line(text="第二行", confidence=0.9, bbox=bb)
+        project = OcrProject(
+            name="batch",
+            pages=[
+                Page(
+                    image_path="/tmp/img.jpg",
+                    width=800,
+                    height=600,
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])],
+                )
+            ],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            line1.update_text("第一行已改")
+            line2.update_text("第二行已改")
+            line2.id = -999999
+            try:
+                store.update_lines([line1, line2])
+            except Exception:
+                pass
+            else:
+                raise AssertionError("update_lines should fail on invalid line id")
+
+            loaded = store.load_project(project_id=1)
+
+        loaded_lines = loaded.pages[0].blocks[0].lines
+        assert [line.final_text for line in loaded_lines] == ["第一行", "第二行"]
+        assert [line.proof_status for line in loaded_lines] == [
+            ProofStatus.UNCHECKED,
+            ProofStatus.UNCHECKED,
+        ]
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_update_lines_rolls_back_as_single_transaction PASSED")
+
+
 def test_project_store_schema_migration():
     """从 v1 schema 迁移到当前版本。"""
     import sqlite3
@@ -623,6 +720,8 @@ def test_project_store_schema_migration():
         assert int(ver[0]) >= 4
         final_text_col = conn2.execute("PRAGMA table_info(line)").fetchall()
         assert any(col[1] == "final_text" for col in final_text_col)
+        page_cols = conn2.execute("PRAGMA table_info(page)").fetchall()
+        assert any(col[1] == "ocr_invalidated_reason" for col in page_cols)
         conn2.close()
 
         print("test_project_store_schema_migration PASSED")
@@ -1932,7 +2031,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             assert "未进入 Hanwang text-slice 路由" in panel._inspector._lbl_hanwang_audit.text()
 
             text_block.raw_payload["ocr_text_invalidated"] = True
-            setattr(page, "_ocr_invalidated_after_edit", True)
+            page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
             panel._inspector.set_block(text_block)
@@ -2297,7 +2396,7 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
             assert panel._viewer._char_items == []
 
             block.raw_payload.clear()
-            setattr(page, "_ocr_invalidated_after_edit", True)
+            page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
         finally:
@@ -6127,7 +6226,8 @@ def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
 
         assert page1.total_lines == 0
         assert page1.status == PageStatus.LAYOUT_DONE
-        assert getattr(page1, "_ocr_invalidated_after_edit") is True
+        assert page1.needs_ocr_rerun is True
+        assert page1.ocr_invalidated_reason == "block_moved"
         assert page2.total_lines == 1
         assert page2.status == PageStatus.OCR_DONE
     finally:
@@ -9891,6 +9991,8 @@ if __name__ == "__main__":
     test_project_store_persists_ppvl_parsing_res_list()
     test_line_final_text_alias_and_project_store_roundtrip()
     test_project_store_clean_on_resave()
+    test_project_store_persists_page_ocr_invalidation_reason()
+    test_project_store_update_lines_rolls_back_as_single_transaction()
     test_project_store_schema_migration()
     test_proof_engine()
     test_export_txt()

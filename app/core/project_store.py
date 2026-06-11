@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS page (
     thumbnail_path  TEXT    NOT NULL DEFAULT '',
     status          TEXT    NOT NULL DEFAULT 'imported',
     error_message   TEXT    NOT NULL DEFAULT '',
+    ocr_invalidated_reason TEXT NOT NULL DEFAULT '',
     ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]'
 );
 
@@ -167,6 +168,9 @@ MIGRATIONS: dict[int, list[str]] = {
     6: [
         "ALTER TABLE block ADD COLUMN source_label TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE block ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT '{}';",
+    ],
+    7: [
+        "ALTER TABLE page ADD COLUMN ocr_invalidated_reason TEXT NOT NULL DEFAULT '';",
     ],
 }
 
@@ -360,12 +364,13 @@ class ProjectStore:
                 "INSERT INTO page (project_id, image_path, width, height, "
                 "page_number, source_path, source_type, source_page_index, "
                 "cache_image_path, thumbnail_path, status, error_message, "
-                "ppvl_parsing_res_list_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "ocr_invalidated_reason, ppvl_parsing_res_list_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (project_id, page.image_path, page.width, page.height,
                  page.page_number, page.source_path, page.source_type,
                  page.source_page_index, page.cache_image_path,
                  page.thumbnail_path, page.status.value, page.error_message,
+                 page.ocr_invalidated_reason,
                  json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False)),
             )
             page.id = cur.lastrowid
@@ -374,12 +379,14 @@ class ProjectStore:
                 "UPDATE page SET image_path=?, width=?, height=?, page_number=?, "
                 "source_path=?, source_type=?, source_page_index=?, "
                 "cache_image_path=?, thumbnail_path=?, status=?, error_message=?, "
+                "ocr_invalidated_reason=?, "
                 "ppvl_parsing_res_list_json=? "
                 "WHERE id=?",
                 (page.image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
                  page.cache_image_path, page.thumbnail_path, page.status.value,
                  page.error_message,
+                 page.ocr_invalidated_reason,
                  json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False),
                  page.id),
             )
@@ -455,11 +462,15 @@ class ProjectStore:
 
     def update_line(self, line: Line) -> None:
         """只更新单行文字（校对时使用）。"""
+        self._update_line_no_commit(line)
+        self.conn.commit()
+
+    def _update_line_no_commit(self, line: Line) -> None:
         bb = line.bbox
         final_text = line.final_text or line.text
         line.final_text = final_text
         line.text = final_text
-        self.conn.execute(
+        cur = self.conn.execute(
             "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
             "review_flags_json=? WHERE id=?",
@@ -468,7 +479,8 @@ class ProjectStore:
              line.llm_review_status.value,
              _review_flags_to_json(line.review_flags), line.id),
         )
-        self.conn.commit()
+        if cur.rowcount != 1:
+            raise RuntimeError(f"Line update failed or matched multiple rows: id={line.id!r}")
 
     # ------------------------------------------------------------------ batch update lines
 
@@ -477,7 +489,7 @@ class ProjectStore:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             for line in lines:
-                self.update_line(line)
+                self._update_line_no_commit(line)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -519,6 +531,7 @@ class ProjectStore:
                 thumbnail_path=pr["thumbnail_path"],
                 status=PageStatus(pr["status"]),
                 error_message=pr["error_message"],
+                ocr_invalidated_reason=pr["ocr_invalidated_reason"],
                 ppvl_parsing_res_list=_json_to_list(pr["ppvl_parsing_res_list_json"]),
             )
             page.blocks = self._load_blocks(page.id)

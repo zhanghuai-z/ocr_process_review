@@ -196,6 +196,7 @@ class Page:
     thumbnail_path: str = ""                # 缩略图路径
     status: PageStatus = PageStatus.IMPORTED
     error_message: str = ""                 # 当前页失败原因
+    ocr_invalidated_reason: str = ""        # 版面变更导致 OCR 结果失效的原因
     ppvl_parsing_res_list: List[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -224,6 +225,27 @@ class Page:
     @property
     def total_lines(self) -> int:
         return sum(len(b.lines) for b in self.blocks)
+
+    @property
+    def has_ocr_result(self) -> bool:
+        """当前页是否已有可展示/校对的 OCR 行。"""
+        return self.total_lines > 0
+
+    @property
+    def is_ocr_done(self) -> bool:
+        """当前页是否处于 OCR 完成状态。"""
+        return self.status == PageStatus.OCR_DONE
+
+    @property
+    def needs_ocr_rerun(self) -> bool:
+        """版面变更后，已有 OCR 结果是否被显式标记为失效。"""
+        return bool(self.ocr_invalidated_reason)
+
+    def invalidate_ocr(self, reason: str) -> None:
+        self.ocr_invalidated_reason = str(reason or "layout_changed")
+
+    def clear_ocr_invalidation(self) -> None:
+        self.ocr_invalidated_reason = ""
 
     @property
     def proofed_lines(self) -> int:
@@ -271,7 +293,27 @@ class OcrProject:
 
     @property
     def ocr_completed(self) -> bool:
-        return any(p.total_lines > 0 for p in self.pages)
+        """兼容旧调用：项目是否已有任意 OCR 结果。
+
+        不再把它作为“项目所有页面 OCR 完成”的权威语义；新代码应使用
+        has_any_ocr_result / all_pages_ocr_done。
+        """
+        return self.has_any_ocr_result
+
+    @property
+    def has_any_ocr_result(self) -> bool:
+        return any(p.has_ocr_result for p in self.pages)
+
+    @property
+    def all_pages_ocr_done(self) -> bool:
+        return bool(self.pages) and all(p.is_ocr_done for p in self.pages)
+
+    @property
+    def has_pending_ocr_pages(self) -> bool:
+        return any(
+            p.is_analyzed and (not p.is_ocr_done or p.needs_ocr_rerun)
+            for p in self.pages
+        )
 
     @property
     def has_unrecognized_blocks(self) -> bool:

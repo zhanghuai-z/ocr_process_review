@@ -623,7 +623,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _collect_page_chars(page: Page):
-        if bool(getattr(page, "_ocr_invalidated_after_edit", False)):
+        if page.needs_ocr_rerun:
             return []
         chars = []
         for block in page.blocks:
