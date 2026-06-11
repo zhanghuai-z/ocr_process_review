@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget,
@@ -179,6 +179,22 @@ class TopNavBar(QWidget):
         self._project_lbl.setText(name)
 
 
+class _CurrentPageStack(QStackedWidget):
+    """QStackedWidget variant whose size hint follows the visible page only."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.currentChanged.connect(lambda _idx: self.updateGeometry())
+
+    def sizeHint(self):
+        current = self.currentWidget()
+        return current.sizeHint() if current is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        current = self.currentWidget()
+        return current.minimumSizeHint() if current is not None else super().minimumSizeHint()
+
+
 # ── 主窗口 ─────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
@@ -189,15 +205,80 @@ class MainWindow(QMainWindow):
         # WorkflowController；此处不再持有镜像。MainWindow 通过 controller 的
         # WorkflowViewState typed signal 同步 UI。
         self._last_workflow_view_state: Optional[WorkflowViewState] = None
+        self._workbench_initial_resize_done = False
 
         self.setWindowTitle("OCR 后处理")
-        _screen = QApplication.primaryScreen().availableGeometry()
-        self.resize(int(_screen.width() * 0.85), int(_screen.height() * 0.85))
         self._build_ui()
         self._build_menu()
         self._connect_signals()
         self._nav_rail.set_enabled_up_to(self._controller.max_step)
         self._go_to_step(STEP_IMPORT)
+        self._resize_for_initial_import_page()
+
+    def _resize_for_initial_import_page(self) -> None:
+        target_w, target_h = 960, 540
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            target_w = min(target_w, max(320, available.width() - 80))
+            target_h = min(target_h, max(320, available.height() - 80))
+        self.resize(target_w, target_h)
+
+    def _resize_for_initial_workbench_page(self) -> None:
+        if self._workbench_initial_resize_done or self.isMaximized() or self.isFullScreen():
+            return
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self._set_centered_window_size(max(self.width(), 1280), max(self.height(), 720))
+            self._workbench_initial_resize_done = True
+            return
+        available = screen.availableGeometry()
+        target_w = min(
+            max(self.width(), int(available.width() * 0.80)),
+            max(320, available.width() - 40),
+        )
+        target_h = min(
+            max(self.height(), int(available.height() * 0.80)),
+            max(320, available.height() - 40),
+        )
+        self._set_centered_window_size(target_w, target_h)
+        self._workbench_initial_resize_done = True
+
+    def _set_centered_window_size(self, target_w: int, target_h: int) -> None:
+        geometry = self.geometry()
+        frame = self.frameGeometry()
+        center = frame.center()
+        left_frame = max(0, geometry.left() - frame.left())
+        top_frame = max(0, geometry.top() - frame.top())
+        right_frame = max(0, frame.right() - geometry.right())
+        bottom_frame = max(0, frame.bottom() - geometry.bottom())
+        frame_w = target_w + left_frame + right_frame
+        frame_h = target_h + top_frame + bottom_frame
+        frame_x = center.x() - frame_w // 2
+        frame_y = center.y() - frame_h // 2
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            max_frame_x = available.right() - frame_w + 1
+            max_frame_y = available.bottom() - frame_h + 1
+            frame_x = (
+                available.left()
+                if max_frame_x < available.left()
+                else max(available.left(), min(frame_x, max_frame_x))
+            )
+            frame_y = (
+                available.top()
+                if max_frame_y < available.top()
+                else max(available.top(), min(frame_y, max_frame_y))
+            )
+
+        self.setGeometry(
+            frame_x + left_frame,
+            frame_y + top_frame,
+            target_w,
+            target_h,
+        )
 
     # ── UI 构建 ────────────────────────────────────────────────
 
@@ -229,7 +310,7 @@ class MainWindow(QMainWindow):
         right_v.addWidget(self._top_bar)
 
         # 中：QStackedWidget
-        self._stack = QStackedWidget()
+        self._stack = _CurrentPageStack()
 
         self._import_panel  = ImportPanel()
         self._layout_panel  = LayoutPanel()
@@ -302,12 +383,13 @@ class MainWindow(QMainWindow):
         act_new  = QAction("新建项目(&N)", self)
         act_open = QAction("打开项目(&O)…", self)
         act_save = QAction("保存项目(&S)", self)
-        act_quit = QAction("退出(&Q)", self)
+        act_close_project = QAction("关闭项目(&W)", self)
+        act_close_project.setShortcut(QKeySequence("Ctrl+W"))
         act_new.triggered.connect(self._new_project)
         act_open.triggered.connect(self._open_project)
         act_save.triggered.connect(self._save_project)
-        act_quit.triggered.connect(self.close)
-        for a in (act_new, act_open, act_save, None, act_quit):
+        act_close_project.triggered.connect(self._close_project)
+        for a in (act_new, act_open, act_save, None, act_close_project):
             if a is None:
                 file_m.addSeparator()
             else:
@@ -389,6 +471,8 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(widget)
         self._nav_rail.set_active(step)
         self._top_bar.set_step_name(_STEP_BREADCRUMB.get(step, ""))
+        if step != STEP_IMPORT:
+            self._resize_for_initial_workbench_page()
 
     def _on_current_page_number_changed(self, page_number: int) -> None:
         """controller.current_page_number_changed → 同步两个相关面板。"""
@@ -433,7 +517,11 @@ class MainWindow(QMainWindow):
 
     # ── Controller 回调 ─────────────────────────────────────────
 
-    def _on_project_changed(self, project: OcrProject) -> None:
+    def _on_project_changed(self, project: Optional[OcrProject]) -> None:
+        if project is None:
+            self._top_bar.set_project_name("")
+            self._top_bar.set_status("hidden")
+            return
         self._top_bar.set_project_name(project.name)
         # 新项目载入：复位状态徽章为「未运行版面分析」
         self._top_bar.set_status("idle", "未运行")
@@ -525,6 +613,51 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "当前无项目，请先新建或打开项目")
             return
         self._controller.save_project()
+
+    def _confirm_close_project_save(self) -> bool:
+        if not self._controller.project:
+            return True
+        result = QMessageBox.question(
+            self,
+            "关闭项目",
+            "关闭当前项目前是否保存？\n选择“取消”会保留当前项目。",
+            (
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            ),
+            QMessageBox.StandardButton.Save,
+        )
+        if result == QMessageBox.StandardButton.Cancel:
+            return False
+        if result == QMessageBox.StandardButton.Save and not self._controller.save_project():
+            QMessageBox.warning(self, "保存失败", "项目未保存，已取消关闭。")
+            return False
+        return True
+
+    def _close_project(self) -> None:
+        if not self._controller.project:
+            self._status_bar.showMessage("当前没有打开的项目")
+            return
+        if self._controller.has_running_workers():
+            QMessageBox.warning(self, "关闭项目", "后台任务仍在运行，请等待完成后再关闭项目。")
+            return
+        if not self._confirm_close_project_save():
+            return
+        if self._controller.close_project():
+            self._reset_workspace_after_project_closed()
+
+    def _reset_workspace_after_project_closed(self) -> None:
+        self._workbench_initial_resize_done = False
+        self._ocr_placeholder.finish()
+        self._import_panel.reset()
+        self._layout_panel.reset()
+        self._hproof_panel.reset()
+        self._vproof_panel.reset()
+        self._top_bar.set_project_name("")
+        self._top_bar.set_status("hidden")
+        self._stack.setCurrentWidget(self._import_panel)
+        self._status_bar.showMessage("项目已关闭")
 
     def _auto_save(self) -> None:
         self._controller.auto_save()

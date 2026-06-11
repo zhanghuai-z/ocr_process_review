@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import List, Optional, Tuple
 
 import cv2
@@ -34,11 +35,13 @@ from PySide6.QtGui import (
     QTextBlockFormat, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-    QScrollArea, QSizePolicy, QSplitter, QToolTip, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QProgressBar,
+    QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
-from app.models import Block, Line, OcrProject, Page, ProofStatus
+from app.models import Block, BlockType, Line, OcrProject, Page, ProofStatus
+from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
+from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
 from app.ui.widgets.page_directory import PageDirectoryList
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
@@ -68,16 +71,13 @@ from app.ui.proof import char_verdict as _cv
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
-# proof-layout-collections 第 3 任务：用户反馈 “字体大小没有接近图中文字大小”。
-# 之前 18 px 在 32 px 行图下显得像 “两个系统”。提到 24 px 让 editor 文本
-# 与行图字体在视觉重心上接近（行图实际字高 ≈ 24-28 px）。editor 高度同步
-# 调大让光标不挤压。
-TEXT_FONT_PX = 24
+# 脚注、数字、标点的 Hanwang 字符框通常比正文窄。字号按较小文本优先，
+# 避免按 slot center 自绘时把标点和数字挤在一起。
+TEXT_FONT_PX = 20
 TEXT_LINE_HEIGHT_PX = 28
-TEXT_EDITOR_MAX_H = 30
-# hproof-yaxis-residual：行内 text editor 不再保留文本框式文档边距，
-# image_row(32) + editor(30) + 上下 padding(2) = 64 px，图/字 y 轴贴得更紧。
-LINE_PAIR_H = 64
+TEXT_EDITOR_MAX_H = 32
+# 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
+LINE_PAIR_H = 70
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
 # CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
 # Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
@@ -100,6 +100,126 @@ _STATUS_LABEL = {
     ProofStatus.AUTO_FLAGGED: "⚑ 疑点",
     ProofStatus.UNCHECKED:    "待确认",
 }
+
+_DEBUG_FORMULA_LINE_FLAGS = {"hanwang_route_inline_formula"}
+_DEBUG_TABLE_LINE_FLAGS = {"hanwang_route_table"}
+_DEBUG_FORMULA_EXCLUDED_LABELS = {"formula_number"}
+_DEBUG_FORMULA_LABEL_TOKENS = ("formula", "equation", "math")
+_DEBUG_TABLE_LABEL_TOKENS = ("table",)
+
+
+def _debug_block_labels(block: Block) -> set[str]:
+    attrs = block_attributes(block)
+    labels = {
+        attrs.normalized_source_label,
+        normalize_source_label(attrs.raw_label),
+        attrs.normalized_semantic_label,
+    }
+    for key in ("block_label", "label", "type", "category"):
+        value = attrs.raw_payload.get(key)
+        if value:
+            labels.add(normalize_source_label(value))
+    return {label for label in labels if label}
+
+
+def _line_has_formula_source(line: Line) -> bool:
+    has_formula_route = any(flag in _DEBUG_FORMULA_LINE_FLAGS for flag in line.review_flags)
+    formula_texts: list[str] = []
+    for char in line.chars or []:
+        source = normalize_source_label(getattr(char, "bbox_source", ""))
+        if source == "paddle_inline_formula":
+            formula_texts.append(str(getattr(char, "token_text", "") or getattr(char, "char", "") or ""))
+    if formula_texts:
+        return any(not is_formula_marker_token(text) for text in formula_texts)
+    if has_formula_route:
+        return not is_formula_marker_token(line.text or line.final_text)
+    return False
+
+
+def _line_is_formula_marker_only(line: Line) -> bool:
+    text = line.text or line.final_text
+    if text and is_formula_marker_token(text):
+        return True
+    formula_texts = [
+        str(getattr(char, "token_text", "") or getattr(char, "char", "") or "")
+        for char in line.chars or []
+        if normalize_source_label(getattr(char, "bbox_source", "")) == "paddle_inline_formula"
+    ]
+    return bool(formula_texts) and all(is_formula_marker_token(text) for text in formula_texts)
+
+
+def _line_has_table_source(line: Line) -> bool:
+    return any(flag in _DEBUG_TABLE_LINE_FLAGS for flag in line.review_flags)
+
+
+def _is_debug_formula_block(block: Block) -> bool:
+    labels = _debug_block_labels(block)
+    if labels & _DEBUG_FORMULA_EXCLUDED_LABELS:
+        return False
+    if semantic_block_type(block) == BlockType.EQUATION:
+        return True
+    return any(
+        token in label
+        for label in labels
+        for token in _DEBUG_FORMULA_LABEL_TOKENS
+    )
+
+
+def _is_debug_table_block(block: Block) -> bool:
+    if semantic_block_type(block) == BlockType.TABLE:
+        return True
+    labels = _debug_block_labels(block)
+    return any(
+        token in label
+        for label in labels
+        for token in _DEBUG_TABLE_LABEL_TOKENS
+    )
+
+
+def _debug_line_kind(block: Block, line: Line) -> str:
+    if (_is_debug_formula_block(block) and not _line_is_formula_marker_only(line)) or _line_has_formula_source(line):
+        return "公式"
+    if _is_debug_table_block(block) or _line_has_table_source(line):
+        return "表格"
+    return ""
+
+
+def _is_duplicate_debug_line(line: Line, seen: list[tuple[str, object]]) -> bool:
+    text = line.text or ""
+    bbox = line.bbox.normalize()
+    for seen_text, seen_bbox in seen:
+        if text == seen_text and bbox.iou(seen_bbox) >= 0.85:
+            return True
+    seen.append((text, bbox))
+    return False
+
+
+def iter_unique_page_hproof_debug_lines(
+    page: Page,
+    *,
+    formulas: bool = False,
+    tables: bool = False,
+) -> Iterator[tuple[Block, Line, int]]:
+    """Yield formula/table debug lines without changing normal HProof routing."""
+    if not formulas and not tables:
+        return
+    seen: list[tuple[str, object]] = []
+    for block in page.blocks:
+        formula_block = _is_debug_formula_block(block)
+        table_block = _is_debug_table_block(block)
+        for line_idx, line in enumerate(block.lines):
+            include_formula = formulas and (
+                (formula_block and not _line_is_formula_marker_only(line))
+                or _line_has_formula_source(line)
+            )
+            include_table = tables and (
+                table_block or _line_has_table_source(line)
+            )
+            if not include_formula and not include_table:
+                continue
+            if _is_duplicate_debug_line(line, seen):
+                continue
+            yield block, line, line_idx
 
 
 # ─────────────────────────────────────────────────────────────
@@ -497,6 +617,7 @@ class _LinePair(QFrame):
         page: Page,
         line_in_page: int,   # 在页面内的行序号（1-based，用于显示）
         cache: PageImageCache,
+        debug_badge: str = "",
         parent=None,
     ):
         super().__init__(parent)
@@ -506,6 +627,7 @@ class _LinePair(QFrame):
         self._page         = page
         self._line_in_page = line_in_page
         self._cache        = cache
+        self._debug_badge  = debug_badge
         self._active       = False
         self._image_loaded = False
         self._line_crop = None
@@ -567,10 +689,7 @@ class _LinePair(QFrame):
         # 标心智依然强烈。去掉边框、底色随激活态走（激活 = #f0f6ff，
         # 非激活 = transparent），让用户看到的是"一行可改的文字"，而
         # 非"一个文本框"。
-        self._editor.setStyleSheet(
-            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            "padding:0; background:transparent; border:none;"
-        )
+        self._editor.setStyleSheet(self._editor_style(active=False))
         self._editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
         self._editor.document().setDocumentMargin(0)
@@ -637,6 +756,14 @@ class _LinePair(QFrame):
 
     # ── 对外接口 ──────────────────────────────────────────────
 
+    @staticmethod
+    def _editor_style(*, active: bool) -> str:
+        bg = "#eaf3ff" if active else "transparent"
+        return (
+            f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
+            f"padding:0; background:{bg}; border:none;"
+        )
+
     def set_active(self, active: bool) -> None:
         if self._active == active:
             return
@@ -644,7 +771,12 @@ class _LinePair(QFrame):
         blue = "#1a73e8"
         if active:
             bar_style = f"background:{blue}; border-radius:2px;"
-            bg = "#f0f6ff"
+            frame_style = (
+                "QFrame#linePair { background:#eaf3ff; "
+                "border-top:1px solid #c9ddff; border-bottom:1px solid #c9ddff; }"
+            )
+            content_bg = "#eaf3ff"
+            image_style = "background:#f8fbff; border-bottom:1px solid #d9e7ff;"
             self._editor.setFocus()
         else:
             # 切走前先把 in-flight 文本保存（编辑器始终可见）
@@ -658,14 +790,17 @@ class _LinePair(QFrame):
             self._editor.setExtraSelections([])
             self._hover_char_idx = -1
             bar_style = "background:transparent;"
-            bg = "transparent"
+            frame_style = ""
+            content_bg = "transparent"
+            image_style = "background:#fafbfc; border-bottom:1px solid #edf1f7;"
 
         self._active_bar.setStyleSheet(bar_style)
         self._active_bar2.setStyleSheet(bar_style)
-        self.setStyleSheet(
-            f"QFrame#linePair {{ background:{bg}; }}"
-            if active else ""
-        )
+        self._content.setStyleSheet(f"background:{content_bg};")
+        self._img_lbl.setStyleSheet(image_style)
+        self._editor.setStyleSheet(self._editor_style(active=active))
+        self.setProperty("active", active)
+        self.setStyleSheet(frame_style)
         self._refresh_status()
         self._refresh_extra_selections()
         self._render_line_image()
@@ -1049,12 +1184,20 @@ class _LinePair(QFrame):
         # 图字 x 映射；当 _render_scale 还未就绪时 _sync 会自动清空进入降级。
         self._sync_editor_slot_geometry()
 
-    def rebind(self, block: Block, line: Line, page: Page, line_in_page: int) -> None:
+    def rebind(
+        self,
+        block: Block,
+        line: Line,
+        page: Page,
+        line_in_page: int,
+        debug_badge: str = "",
+    ) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
         self._block = block
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
+        self._debug_badge = debug_badge
         self._image_loaded = False
         self._line_crop = None
         # Phase 25：editor 始终可见。rebind 不触碰 editor 内容，
@@ -1130,8 +1273,14 @@ class _LinePair(QFrame):
             )
         else:
             tip = ""
+        badge = ""
+        if self._debug_badge:
+            badge = (
+                f"<span style='color:#555;font-size:10px;'>"
+                f"{self._debug_badge}</span><br/>"
+            )
         self._status_lbl.setText(
-            f"<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
+            f"{badge}<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
         )
         # proof-interaction-slots 第 1 任务：彻底不给 status_lbl 设 tooltip（连空串都不设）
         # 避免 Qt 某些环境下“空白 hover 框”。是否未对齐已经用 warn 图标表达。
@@ -1156,6 +1305,8 @@ class HProofPanel(QWidget):
         self._current_idx: int = 0
         self._filter_updating = False
         self._selected_page_number: int | None = None  # Phase 25：左侧目录唯一过滤源
+        self._show_formula_debug = False
+        self._show_table_debug = False
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
         # H/V 校对联动：订阅其他 panel 编辑事件；origin == id(self) 的事件忽略。
@@ -1223,6 +1374,14 @@ class HProofPanel(QWidget):
         self._empty_lbl.setMinimumHeight(120)
         self._list_layout.insertWidget(0, self._empty_lbl)
 
+        self._mode_banner = QLabel("")
+        self._mode_banner.setObjectName("hproofModeBanner")
+        self._mode_banner.setStyleSheet(
+            "background:#fff7ed; color:#9a3412; border-bottom:1px solid #fed7aa; "
+            "padding:6px 10px; font-size:12px;"
+        )
+        self._mode_banner.setVisible(False)
+        center_v.addWidget(self._mode_banner)
         self._scroll.setWidget(self._list_widget)
         center_v.addWidget(self._scroll, 1)
         splitter.addWidget(center)
@@ -1230,11 +1389,11 @@ class HProofPanel(QWidget):
         # ── 右：工具栏（垂直）+ 快捷键说明 ──────────────────────
         right = QWidget()
         right.setObjectName("hproofRightDock")
-        right.setMinimumWidth(180)
-        right.setMaximumWidth(260)
+        right.setMinimumWidth(220)
+        right.setMaximumWidth(300)
         right_v = QVBoxLayout(right)
-        right_v.setContentsMargins(8, 8, 8, 8)
-        right_v.setSpacing(8)
+        right_v.setContentsMargins(10, 10, 10, 10)
+        right_v.setSpacing(10)
 
         # 操作按钮组（Phase 25：右栏精简，只剩保存 / 标记 / 跳过）
         actions_lbl = QLabel("操作")
@@ -1248,6 +1407,72 @@ class HProofPanel(QWidget):
         self._btn_skip = QPushButton("跳过  F6")
         for btn in (self._btn_save, self._btn_flag, self._btn_skip):
             btn.setMinimumHeight(30)
+            right_v.addWidget(btn)
+
+        status_lbl = QLabel("当前")
+        status_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
+        right_v.addWidget(status_lbl)
+
+        self._current_scope_lbl = QLabel("全部页面")
+        self._current_scope_lbl.setObjectName("muted")
+        self._current_scope_lbl.setWordWrap(True)
+        self._current_scope_lbl.setStyleSheet("font-size:12px; color:#5f6b7a;")
+        right_v.addWidget(self._current_scope_lbl)
+
+        self._current_line_lbl = QLabel("当前行 0 / 0")
+        self._current_line_lbl.setStyleSheet("font-size:13px; color:#1f2937;")
+        right_v.addWidget(self._current_line_lbl)
+
+        self._proof_progress_bar = QProgressBar()
+        self._proof_progress_bar.setTextVisible(False)
+        self._proof_progress_bar.setFixedHeight(8)
+        self._proof_progress_bar.setRange(0, 1)
+        self._proof_progress_bar.setValue(0)
+        self._proof_progress_bar.setStyleSheet(
+            "QProgressBar { background:#e5e7eb; border:0; border-radius:4px; }"
+            "QProgressBar::chunk { background:#1a73e8; border-radius:4px; }"
+        )
+        right_v.addWidget(self._proof_progress_bar)
+
+        self._handled_lbl = QLabel("已处理 0 / 0")
+        self._handled_lbl.setObjectName("muted")
+        self._handled_lbl.setStyleSheet("font-size:11px; color:#667085;")
+        right_v.addWidget(self._handled_lbl)
+
+        stats_lbl = QLabel("统计")
+        stats_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
+        right_v.addWidget(stats_lbl)
+
+        self._pending_lbl = QLabel("待确认 0")
+        self._confirmed_lbl = QLabel("已确认 0")
+        self._modified_lbl = QLabel("已修改 0")
+        self._flagged_lbl = QLabel("疑点 0")
+        for lbl in (
+            self._pending_lbl,
+            self._confirmed_lbl,
+            self._modified_lbl,
+            self._flagged_lbl,
+        ):
+            lbl.setMinimumHeight(22)
+            lbl.setStyleSheet(
+                "font-size:12px; color:#344054; padding:2px 0;"
+            )
+            right_v.addWidget(lbl)
+
+        debug_lbl = QLabel("调试")
+        debug_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
+        right_v.addWidget(debug_lbl)
+
+        self._btn_debug_formula = QPushButton("公式")
+        self._btn_debug_formula.setObjectName("ghostBtn")
+        self._btn_debug_formula.setCheckable(True)
+        self._btn_debug_formula.setToolTip("只显示被识别为公式或内联公式路由的行")
+        self._btn_debug_table = QPushButton("表格")
+        self._btn_debug_table.setObjectName("ghostBtn")
+        self._btn_debug_table.setCheckable(True)
+        self._btn_debug_table.setToolTip("只显示被识别为表格或表格路由的行")
+        for btn in (self._btn_debug_formula, self._btn_debug_table):
+            btn.setMinimumHeight(28)
             right_v.addWidget(btn)
 
         # 统计徽章（保留：用于全局进度小字提示）
@@ -1299,6 +1524,8 @@ class HProofPanel(QWidget):
         self._btn_save.clicked.connect(self._save_all)
         self._btn_flag.clicked.connect(self._toggle_flag)
         self._btn_skip.clicked.connect(self._next)
+        self._btn_debug_formula.toggled.connect(self._on_debug_filter_changed)
+        self._btn_debug_table.toggled.connect(self._on_debug_filter_changed)
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self._save_all)
         # 滚动时触发懒加载
@@ -1328,7 +1555,7 @@ class HProofPanel(QWidget):
         added = False
         for page in self._filtered_pages():
             page_line_num = 1
-            for block, line, li in iter_unique_page_hproof_lines(page):
+            for block, line, li in self._iter_page_lines(page):
                 key = self._line_key(block, line, page, li)
                 existing_index = loaded_keys.get(key)
                 if existing_index is not None:
@@ -1341,7 +1568,10 @@ class HProofPanel(QWidget):
                         display_text=_displayed_text(line, page, block),
                         source="hproof.merge",
                     )
-                    self._pairs[existing_index].rebind(block, line, page, page_line_num)
+                    self._pairs[existing_index].rebind(
+                        block, line, page, page_line_num,
+                        self._debug_badge_for(block, line),
+                    )
                     page_line_num += 1
                     continue
                 if page.page_number != prev_page_number:
@@ -1362,11 +1592,9 @@ class HProofPanel(QWidget):
 
     def _refresh_page_filter(self) -> None:
         """Phase 25：仅维护左侧 PageDirectoryList 的页面项；不再有 combo。"""
-        from pathlib import Path
-
         usable_pages = [
             page for page in self._pages
-            if any(True for _ in iter_unique_page_hproof_lines(page))
+            if self._page_has_lines(page)
         ]
         page_numbers = [p.page_number for p in usable_pages]
         self._filter_updating = True
@@ -1377,7 +1605,10 @@ class HProofPanel(QWidget):
                     page_numbers.index(self._selected_page_number)
                 )
         # 若选中页消失（被移除），回退到"全部页面"
-        if self._selected_page_number is not None and                 self._selected_page_number not in page_numbers:
+        if (
+            self._selected_page_number is not None
+            and self._selected_page_number not in page_numbers
+        ):
             self._selected_page_number = None
         self._filter_updating = False
 
@@ -1393,7 +1624,7 @@ class HProofPanel(QWidget):
         if hasattr(self, "_page_dir"):
             usable_numbers = [
                 p.page_number for p in self._pages
-                if any(True for _ in iter_unique_page_hproof_lines(p))
+                if self._page_has_lines(p)
             ]
             if page_number in usable_numbers:
                 self._page_dir.set_current_index(usable_numbers.index(page_number))
@@ -1405,7 +1636,7 @@ class HProofPanel(QWidget):
             return
         usable_pages = [
             page for page in self._pages
-            if any(True for _ in iter_unique_page_hproof_lines(page))
+            if self._page_has_lines(page)
         ]
         if not (0 <= dir_idx < len(usable_pages)):
             return
@@ -1436,13 +1667,15 @@ class HProofPanel(QWidget):
             w.deleteLater()
 
         # 无数据时显示空状态
-        has_data = any(True for page in pages for _ in iter_unique_page_hproof_lines(page))
+        self._empty_lbl.setText(self._empty_text())
+        has_data = any(True for page in pages for _ in self._iter_page_lines(page))
         self._empty_lbl.setVisible(not has_data)
+        self._update_mode_banner()
 
         prev_page_number: int = -1
         for page in pages:
             page_line_num = 1
-            for block, line, li in iter_unique_page_hproof_lines(page):
+            for block, line, li in self._iter_page_lines(page):
                 # 每页第一行前插入页面分隔条，让用户清晰知道当前所处页面
                 if page.page_number != prev_page_number:
                     sep = QLabel(f"── 第 {page.page_number} 页 ──")
@@ -1476,6 +1709,7 @@ class HProofPanel(QWidget):
         pair = _LinePair(
             len(self._pairs), block, line, page, page_line_num,
             self._cache,
+            debug_badge=self._debug_badge_for(block, line),
         )
         pair.clicked.connect(self._on_pair_clicked)
         pair.text_saved.connect(self._on_text_saved)
@@ -1486,6 +1720,76 @@ class HProofPanel(QWidget):
         pair.skip_req.connect(self._next)
         self._pairs.append(pair)
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
+
+    def _debug_enabled(self) -> bool:
+        return self._show_formula_debug or self._show_table_debug
+
+    def _debug_label(self) -> str:
+        labels = []
+        if self._show_formula_debug:
+            labels.append("公式")
+        if self._show_table_debug:
+            labels.append("表格")
+        return " / ".join(labels)
+
+    def _scope_label(self) -> str:
+        if self._selected_page_number is None:
+            scope = "全部页面"
+        else:
+            scope = f"第 {self._selected_page_number} 页"
+        if self._debug_enabled():
+            return f"{scope} · {self._debug_label()}调试"
+        return f"{scope} · 正文"
+
+    def _update_mode_banner(self) -> None:
+        if not hasattr(self, "_mode_banner"):
+            return
+        if self._debug_enabled():
+            self._mode_banner.setText(
+                f"{self._debug_label()}调试视图 · 当前只显示路由命中的校验行"
+            )
+            self._mode_banner.setVisible(True)
+        else:
+            self._mode_banner.setText("")
+            self._mode_banner.setVisible(False)
+
+    def _empty_text(self) -> str:
+        if self._debug_enabled():
+            return f"当前页面没有可显示的{self._debug_label()}调试行"
+        return "完成 OCR 识别后，横校数据将在此展示"
+
+    def _iter_page_lines(self, page: Page) -> Iterator[tuple[Block, Line, int]]:
+        if not self._debug_enabled():
+            yield from iter_unique_page_hproof_lines(page)
+            return
+        yield from iter_unique_page_hproof_debug_lines(
+            page,
+            formulas=self._show_formula_debug,
+            tables=self._show_table_debug,
+        )
+
+    def _page_has_lines(self, page: Page) -> bool:
+        return any(True for _ in self._iter_page_lines(page))
+
+    def _debug_badge_for(self, block: Block, line: Line) -> str:
+        if not self._debug_enabled():
+            return ""
+        return _debug_line_kind(block, line)
+
+    def _on_debug_filter_changed(self, *_args) -> None:
+        new_formula = bool(self._btn_debug_formula.isChecked())
+        new_table = bool(self._btn_debug_table.isChecked())
+        if (
+            new_formula == self._show_formula_debug
+            and new_table == self._show_table_debug
+        ):
+            return
+        self._save_current(silent=True)
+        self._show_formula_debug = new_formula
+        self._show_table_debug = new_table
+        self._refresh_page_filter()
+        self._update_mode_banner()
+        self._render_pages(self._filtered_pages())
 
     def _line_key(self, block: Block, line: Line, page: Page, line_idx: int) -> tuple:
         bbox = line.bbox.normalize()
@@ -1504,6 +1808,18 @@ class HProofPanel(QWidget):
         )
 
     def reset(self) -> None:
+        self._selected_page_number = None
+        for btn in (
+            getattr(self, "_btn_debug_formula", None),
+            getattr(self, "_btn_debug_table", None),
+        ):
+            if btn is None:
+                continue
+            btn.blockSignals(True)
+            btn.setChecked(False)
+            btn.blockSignals(False)
+        self._show_formula_debug = False
+        self._show_table_debug = False
         self.load_pages([])
         self._stat_lbl.setText("")
         self._total_lbl.setText("总字数 0")
@@ -1528,6 +1844,7 @@ class HProofPanel(QWidget):
         self._current_idx = idx
         pair = self._pairs[idx]
         pair.set_active(True)
+        self._update_stats()
         # 滚动到可见
         QTimer.singleShot(30, lambda: self._scroll.ensureWidgetVisible(pair, 0, 40))
 
@@ -1669,6 +1986,38 @@ class HProofPanel(QWidget):
         pct = (diff_count / max(1, len(self._items))) * 100
         self._total_lbl.setText(f"总字数 {total_chars:,}")
         self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
+
+        total_lines = len(self._items)
+        current = self._current_idx + 1 if self._pairs else 0
+        confirmed = sum(
+            1 for _, ln, _, _ in self._items
+            if ln.proof_status == ProofStatus.OK
+        )
+        modified = sum(
+            1 for _, ln, _, _ in self._items
+            if ln.proof_status == ProofStatus.MODIFIED
+        )
+        flagged = sum(
+            1 for _, ln, _, _ in self._items
+            if ln.proof_status == ProofStatus.AUTO_FLAGGED
+        )
+        pending = sum(
+            1 for _, ln, _, _ in self._items
+            if ln.proof_status == ProofStatus.UNCHECKED
+        )
+        handled = confirmed + modified
+
+        if hasattr(self, "_current_scope_lbl"):
+            self._current_scope_lbl.setText(self._scope_label())
+            self._current_line_lbl.setText(f"当前行 {current} / {total_lines}")
+            self._proof_progress_bar.setRange(0, max(1, total_lines))
+            self._proof_progress_bar.setValue(handled)
+            self._handled_lbl.setText(f"已处理 {handled} / {total_lines}")
+            self._pending_lbl.setText(f"待确认 {pending}")
+            self._confirmed_lbl.setText(f"已确认 {confirmed}")
+            self._modified_lbl.setText(f"已修改 {modified}")
+            self._flagged_lbl.setText(f"疑点 {flagged}")
+            self._stat_lbl.setText(f"{self._scope_label()} · {total_lines} 行")
 
 
     def refresh_quality_probe_state(self) -> None:

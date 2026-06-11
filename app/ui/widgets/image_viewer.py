@@ -1,18 +1,17 @@
 """图像查看器：支持缩放、平移，以及 BBox 框叠加显示与编辑。
 
 模式：
-- view 模式（默认）：ScrollHandDrag，鼠标拖拽=平移
-- edit 模式：RubberBandDrag，BBox 可拖动；移动后发出 block_moved
-  - 编辑模式额外功能：选中框时出现 8 个缩放手柄（可拖拽四角/四边缩放）
-  - 右键长按拖拽 → 画出新矩形 → 发出 block_created(BBox)
+- edit 模式（默认）：BBox 可拖动/缩放；Shift+左键拖拽画出新矩形。
+- 右键拖拽：框选非锁定 BBox。
+- pan 模式：按住 Space 临时进入平移，期间 BBox 不可编辑。
 """
 from __future__ import annotations
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QCursor
 from PySide6.QtWidgets import (
-    QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
+    QApplication, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
     QGraphicsScene, QGraphicsView,
 )
 
@@ -106,6 +105,7 @@ class _ResizeHandle(QGraphicsRectItem):
             self._drag_start = event.scenePos()
             # 记录父 item 在场景中的原始矩形
             bi = self._bbox_item
+            bi._emit_edit_started_once()
             sp = bi.scenePos()
             r  = bi.rect()
             self._orig_scene_rect = QRectF(
@@ -145,6 +145,7 @@ class _ResizeHandle(QGraphicsRectItem):
     def mouseReleaseEvent(self, event) -> None:
         self._drag_start = None
         self._orig_scene_rect = None
+        self._bbox_item._edit_started_for_drag = False
         event.accept()
 
 
@@ -152,6 +153,7 @@ class _ResizeHandle(QGraphicsRectItem):
 
 class _BBoxSignals(QObject):
     """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
+    edit_started = Signal(object)  # payload = block
     moved = Signal(object)  # payload = block
 
 
@@ -171,6 +173,9 @@ class BBoxItem(QGraphicsRectItem):
         self._block: Optional[object] = None
         self.signals = _BBoxSignals()
         self._handles: List[_ResizeHandle] = []
+        self._editable = True
+        self._selectable = True
+        self._edit_started_for_drag = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
@@ -186,7 +191,9 @@ class BBoxItem(QGraphicsRectItem):
         self._block = block
 
     def set_editable(self, editable: bool) -> None:
+        self._editable = editable
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, editable)
+        self._refresh_mouse_acceptance()
         if editable:
             self.setCursor(Qt.CursorShape.SizeAllCursor)
         else:
@@ -195,6 +202,20 @@ class BBoxItem(QGraphicsRectItem):
         show_handles = editable and self.isSelected()
         for h in self._handles:
             h.setVisible(show_handles)
+
+    def is_editable(self) -> bool:
+        return self._editable
+
+    def set_selectable(self, selectable: bool) -> None:
+        self._selectable = selectable
+        if not selectable and self.isSelected():
+            self.setSelected(False)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, selectable)
+        self._refresh_mouse_acceptance()
+
+    def _refresh_mouse_acceptance(self) -> None:
+        buttons = Qt.MouseButton.LeftButton if (self._selectable or self._editable) else Qt.MouseButton.NoButton
+        self.setAcceptedMouseButtons(buttons)
 
     def _update_tooltip(self) -> None:
         r = self.sceneBoundingRect()
@@ -205,6 +226,8 @@ class BBoxItem(QGraphicsRectItem):
             self.setToolTip(coord)
 
     def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange:
+            self._emit_edit_started_once()
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._update_tooltip()
             if self._block is not None and hasattr(self._block, "bbox"):
@@ -226,6 +249,19 @@ class BBoxItem(QGraphicsRectItem):
                 h.setVisible(show)
         return super().itemChange(change, value)
 
+    def mousePressEvent(self, event) -> None:
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._edit_started_for_drag = False
+        super().mouseReleaseEvent(event)
+
+    def _emit_edit_started_once(self) -> None:
+        if not self._editable or not self._selectable or self._block is None or self._edit_started_for_drag:
+            return
+        self._edit_started_for_drag = True
+        self.signals.edit_started.emit(self._block)
+
     def paint(self, painter: QPainter, option, widget=None):
         if self.isSelected():
             fill = QColor(self._color)
@@ -238,9 +274,11 @@ class ImageViewer(QGraphicsView):
     """通用图像查看组件。"""
 
     block_clicked  = Signal(object)  # Block
+    block_edit_started = Signal(object)  # Block — 用于上层在几何变化前记录撤销点
     block_moved    = Signal(object)  # Block
-    block_created  = Signal(object)  # BBox — 右键拖拽画出新矩形
+    block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted  = Signal(object)  # Block — Delete 键删除选中框
+    edit_blocked   = Signal(object, str)  # Block, reason
     char_bbox_moved = Signal(object)  # Char
 
     def __init__(self, parent=None):
@@ -254,11 +292,16 @@ class ImageViewer(QGraphicsView):
         self._readonly_overlay_items: List[QGraphicsRectItem] = []
         self._highlight_item = None  # highlight_bbox 使用
 
-        # 右键拖拽画框状态
+        # Shift+左键拖拽画框状态
         self._draw_start: Optional[QPointF] = None   # scene 坐标
         self._draw_item: Optional[QGraphicsRectItem] = None
+        self._selection_start: Optional[QPointF] = None
+        self._selection_item: Optional[QGraphicsRectItem] = None
+        self._bbox_snapper: Optional[Callable[[BBox], BBox]] = None
+        self._edit_mode = True
+        self._space_pan_active = False
 
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -293,6 +336,21 @@ class ImageViewer(QGraphicsView):
         self.resetTransform()
         self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
+    def clear(self) -> None:
+        """清空当前图像和所有叠加层。"""
+        self._highlight_item = None
+        self._draw_start = None
+        self._draw_item = None
+        self._selection_start = None
+        self._selection_item = None
+        self._pixmap_item = None
+        self._block_items.clear()
+        self._char_items.clear()
+        self._readonly_overlay_items.clear()
+        self._scene.clear()
+        self._scene.setSceneRect(QRectF())
+        self.resetTransform()
+
     def show_blocks(self, blocks: List[Block]) -> None:
         self._clear_overlays()
         for block in blocks:
@@ -304,8 +362,11 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)
-            item.set_editable(True)  # 始终可编辑
+            item.set_selectable(not getattr(block, "is_locked", False))
+            item.set_editable(self._block_is_editable(block))
+            item.setZValue(self._block_z_value(block))
             item.setData(0, block)
+            item.signals.edit_started.connect(self.block_edit_started.emit)
             item.signals.moved.connect(self.block_moved.emit)
             self._scene.addItem(item)
             self._block_items.append((item, block))
@@ -325,14 +386,14 @@ class ImageViewer(QGraphicsView):
             rect.setPen(pen)
             rect.setBrush(QColor(217, 48, 37, 28))
             rect.setPos(bbox.x, bbox.y)
-            rect.setZValue(6)
+            rect.setZValue(4)
             rect.setToolTip(f"[{label}] read-only overlay\nx={bbox.x} y={bbox.y} w={bbox.w} h={bbox.h}")
             rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
             rect.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
             self._scene.addItem(rect)
             self._readonly_overlay_items.append(rect)
 
-    def show_char_boxes(self, chars: List[Char]) -> None:
+    def show_char_boxes(self, chars: List[Char], *, editable: bool = True) -> None:
         """Overlay editable OCR char/token boxes on top of layout blocks."""
         for item, _ in self._char_items:
             if item.scene() is self._scene:
@@ -346,8 +407,9 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(QRectF(0, 0, bb.w, bb.h), color, f"[char] {char.char or char.token_text}")
             item.setPos(bb.x, bb.y)
             item.set_block(char)
-            item.set_editable(True)
-            item.setZValue(8)
+            item.set_selectable(editable)
+            item.set_editable(editable and self._edit_mode and not self._space_pan_active)
+            item.setZValue(8 if editable else 1)
             item.signals.moved.connect(self.char_bbox_moved.emit)
             self._scene.addItem(item)
             self._char_items.append((item, char))
@@ -356,15 +418,34 @@ class ImageViewer(QGraphicsView):
         """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
         to_remove = [
             (item, block) for item, block in self._block_items
-            if item.isSelected()
+            if item.isSelected() and not getattr(block, "is_locked", False)
         ]
         for item, block in to_remove:
+            if getattr(block, "is_locked", False):
+                self.edit_blocked.emit(block, "locked")
+                continue
             self._scene.removeItem(item)
             self._block_items.remove((item, block))
             self.block_deleted.emit(block)
 
     def selected_blocks(self) -> List[Block]:
-        return [block for item, block in self._block_items if item.isSelected()]
+        return [
+            block for item, block in self._block_items
+            if item.isSelected() and not getattr(block, "is_locked", False)
+        ]
+
+    def set_bbox_snapper(self, snapper: Optional[Callable[[BBox], BBox]]) -> None:
+        """Install a layout-level snap callback used while drawing new boxes."""
+        self._bbox_snapper = snapper
+
+    def select_block(self, target: Block) -> bool:
+        """Select one visible, editable layout block after overlays are rebuilt."""
+        selected = False
+        for item, block in self._block_items:
+            should_select = block is target and not getattr(block, "is_locked", False)
+            item.setSelected(should_select)
+            selected = selected or should_select
+        return selected
 
     def highlight_bbox(self, bbox: BBox, *, zoom: bool = False) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
@@ -412,8 +493,15 @@ class ImageViewer(QGraphicsView):
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_edit_mode(self, on: bool) -> None:
-        """兼容旧调用，始终保持可编辑状态。"""
-        pass  # 始终 editable，无需切换
+        """设置 BBox 编辑权限；Space 平移期间会临时关闭。"""
+        self._edit_mode = bool(on)
+        if self._space_pan_active:
+            return
+        self.setDragMode(QGraphicsView.DragMode.NoDrag if on else QGraphicsView.DragMode.ScrollHandDrag)
+        self._refresh_item_editability()
+
+    def is_pan_mode_active(self) -> bool:
+        return self._space_pan_active
 
     # ------------------------------------------------------------------ events
 
@@ -429,24 +517,35 @@ class ImageViewer(QGraphicsView):
             self.scale(factor, factor)
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._enter_space_pan()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Delete:
             self.delete_selected()
             event.accept()
         else:
             super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+            self._leave_space_pan()
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton:
-            # 右键开始画新框
-            self._draw_start = self.mapToScene(event.pos())
-            pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
-            self._draw_item = QGraphicsRectItem(
-                QRectF(self._draw_start, self._draw_start)
-            )
-            self._draw_item.setPen(pen)
-            self._draw_item.setBrush(QColor(26, 115, 232, 30))
-            self._draw_item.setZValue(50)
-            self._scene.addItem(self._draw_item)
+        if (
+            self._edit_mode
+            and not self._space_pan_active
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._event_has_shift(event)
+        ):
+            self._begin_draw(event)
+            event.accept()
+            return
+        if self._edit_mode and not self._space_pan_active and event.button() == Qt.MouseButton.RightButton:
+            self._begin_box_selection(event)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -459,18 +558,21 @@ class ImageViewer(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         if self._draw_start is not None and self._draw_item is not None:
-            cur = self.mapToScene(event.pos())
-            self._draw_item.setRect(
-                QRectF(self._draw_start, cur).normalized()
-            )
+            cur = self._map_event_to_scene(event)
+            self._draw_item.setRect(QRectF(self._draw_start, cur).normalized())
+            event.accept()
+            return
+        if self._selection_start is not None and self._selection_item is not None:
+            cur = self._map_event_to_scene(event)
+            self._selection_item.setRect(QRectF(self._selection_start, cur).normalized())
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.RightButton and self._draw_start is not None:
-            cur = self.mapToScene(event.pos())
-            rect = QRectF(self._draw_start, cur).normalized()
+        if self._draw_start is not None and event.button() == Qt.MouseButton.LeftButton:
+            cur = self._map_event_to_scene(event)
+            rect = self._snap_draw_rect(QRectF(self._draw_start, cur).normalized())
             # 移除临时画框
             if self._draw_item is not None:
                 self._scene.removeItem(self._draw_item)
@@ -483,6 +585,12 @@ class ImageViewer(QGraphicsView):
                     int(rect.width()), int(rect.height())
                 )
                 self.block_created.emit(bbox)
+            event.accept()
+            return
+        if self._selection_start is not None and event.button() == Qt.MouseButton.RightButton:
+            cur = self._map_event_to_scene(event)
+            rect = QRectF(self._selection_start, cur).normalized()
+            self._finish_box_selection(rect)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -502,3 +610,97 @@ class ImageViewer(QGraphicsView):
         for item in self._readonly_overlay_items:
             self._scene.removeItem(item)
         self._readonly_overlay_items.clear()
+
+    def _begin_draw(self, event) -> None:
+        self._draw_start = self._map_event_to_scene(event)
+        pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
+        self._draw_item = QGraphicsRectItem(QRectF(self._draw_start, self._draw_start))
+        self._draw_item.setPen(pen)
+        self._draw_item.setBrush(QColor(26, 115, 232, 30))
+        self._draw_item.setZValue(50)
+        self._scene.addItem(self._draw_item)
+
+    def _begin_box_selection(self, event) -> None:
+        self._selection_start = self._map_event_to_scene(event)
+        pen = QPen(QColor("#0f9d58"), 2, Qt.PenStyle.DashLine)
+        self._selection_item = QGraphicsRectItem(QRectF(self._selection_start, self._selection_start))
+        self._selection_item.setPen(pen)
+        self._selection_item.setBrush(QColor(15, 157, 88, 24))
+        self._selection_item.setZValue(55)
+        self._scene.addItem(self._selection_item)
+
+    def _finish_box_selection(self, rect: QRectF) -> None:
+        if self._selection_item is not None and self._selection_item.scene() is self._scene:
+            self._scene.removeItem(self._selection_item)
+        self._selection_item = None
+        self._selection_start = None
+        if rect.width() < 4 or rect.height() < 4:
+            return
+        selected_blocks: list[Block] = []
+        for item, block in self._block_items:
+            selectable = not getattr(block, "is_locked", False)
+            selected = selectable and rect.intersects(item.sceneBoundingRect())
+            item.setSelected(selected)
+            if selected:
+                selected_blocks.append(block)
+        if len(selected_blocks) == 1:
+            self.block_clicked.emit(selected_blocks[0])
+
+    def _snap_draw_rect(self, rect: QRectF) -> QRectF:
+        if self._bbox_snapper is None or rect.width() <= 0 or rect.height() <= 0:
+            return rect
+        bbox = BBox(int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
+        snapped = self._bbox_snapper(bbox)
+        return QRectF(snapped.x, snapped.y, snapped.w, snapped.h)
+
+    @staticmethod
+    def _event_has_shift(event) -> bool:
+        event_mods = event.modifiers() if hasattr(event, "modifiers") else Qt.KeyboardModifier.NoModifier
+        app_mods = QApplication.keyboardModifiers()
+        return bool((event_mods | app_mods) & Qt.KeyboardModifier.ShiftModifier)
+
+    def _map_event_to_scene(self, event) -> QPointF:
+        if hasattr(event, "position"):
+            return self.mapToScene(event.position().toPoint())
+        return self.mapToScene(event.pos())
+
+    def _enter_space_pan(self) -> None:
+        self._space_pan_active = True
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self._refresh_item_editability(force=False)
+        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def _leave_space_pan(self) -> None:
+        self._space_pan_active = False
+        self.setDragMode(
+            QGraphicsView.DragMode.NoDrag
+            if self._edit_mode
+            else QGraphicsView.DragMode.ScrollHandDrag
+        )
+        self._refresh_item_editability()
+        self.viewport().unsetCursor()
+
+    def _block_is_editable(self, block: Block) -> bool:
+        return self._edit_mode and not self._space_pan_active and not getattr(block, "is_locked", False)
+
+    @staticmethod
+    def _block_z_value(block: Block) -> int:
+        if getattr(block, "is_locked", False):
+            return 2
+        attrs = block_attributes(block)
+        if attrs.semantic_block_type == BlockType.EQUATION:
+            return 14
+        if attrs.semantic_block_type == BlockType.TABLE:
+            return 12
+        if attrs.semantic_block_type in (BlockType.FIGURE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION):
+            return 10
+        return 8
+
+    def _refresh_item_editability(self, *, force: Optional[bool] = None) -> None:
+        for item, block in self._block_items:
+            item.set_selectable(not getattr(block, "is_locked", False))
+            item.set_editable(force if force is not None else self._block_is_editable(block))
+            item.setZValue(self._block_z_value(block))
+        char_editable = force if force is not None else (self._edit_mode and not self._space_pan_active)
+        for item, _char in self._char_items:
+            item.set_editable(char_editable)

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout, QWidget,
 )
 
+from app.core.block_attributes import block_attributes, block_display_label
 from app.models import Block, Page
 from app.models.enums import BlockType
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -122,6 +123,12 @@ class BlockInspector(QWidget):
         self._lbl_source.setObjectName("muted")
         root.addWidget(self._lbl_source)
 
+        root.addWidget(self._field_label("Hanwang \u6846\u94fe"))
+        self._lbl_hanwang_audit = QLabel("\u2014")
+        self._lbl_hanwang_audit.setObjectName("muted")
+        self._lbl_hanwang_audit.setWordWrap(True)
+        root.addWidget(self._lbl_hanwang_audit)
+
         # ── \u5f53\u524d\u9875\u7edf\u8ba1\u533a ───────────────────────────
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.Shape.HLine)
@@ -172,8 +179,7 @@ class BlockInspector(QWidget):
 
         self._empty_hint.hide()
 
-        bt = getattr(block, "block_type", None)
-        self._lbl_type.setText(getattr(bt, "value", str(bt) if bt else "\u2014"))
+        self._lbl_type.setText(block_display_label(block))
 
         bb = getattr(block, "bbox", None)
         if bb is not None:
@@ -196,7 +202,12 @@ class BlockInspector(QWidget):
         self._lbl_stats.setText(f"{line_count} \u884c  /  {char_count} \u5b57")
 
         src = getattr(block, "source", None)
-        self._lbl_source.setText(getattr(src, "value", str(src) if src else "\u2014"))
+        attrs = block_attributes(block)
+        source_text = getattr(src, "value", str(src) if src else "\u2014")
+        if attrs.source_label:
+            source_text = f"{source_text} · {attrs.source_label}"
+        self._lbl_source.setText(source_text)
+        self._lbl_hanwang_audit.setText(self._hanwang_audit_summary(block))
 
     def set_page_stats(self, page: Optional[Page]) -> None:
         """\u66f4\u65b0\u300c\u7edf\u8ba1\u300d\u533a\u7684\u5757\u7c7b\u578b\u5206\u5e03\u8fdb\u5ea6\u6761\u3002"""
@@ -231,9 +242,31 @@ class BlockInspector(QWidget):
         self._lbl_bbox.setText("\u2014")
         self._lbl_stats.setText("\u2014")
         self._lbl_source.setText("\u2014")
+        self._lbl_hanwang_audit.setText("\u2014")
         self._conf_badge.hide()
         self._lbl_conf_na.show()
         self._empty_hint.show()
+
+    @staticmethod
+    def _hanwang_audit_summary(block: Block) -> str:
+        payload = dict(getattr(block, "raw_payload", {}) or {})
+        audit = payload.get("_hanwang_bbox_audit")
+        if not isinstance(audit, dict):
+            return "\u65e0"
+        if bool(payload.get("ocr_text_invalidated")):
+            return "\u5df2\u5931\u6548\uff0c\u9700\u8981\u91cd\u65b0\u8fdb\u5165 OCR"
+        route_count = int(audit.get("route_text_slice_count") or 0)
+        recog_count = int(audit.get("hanwang_recog_group_count") or 0)
+        if route_count <= 0 and recog_count <= 0:
+            return "\u672a\u8fdb\u5165 Hanwang text-slice \u8def\u7531"
+        source = audit.get("effective_block_bbox_source") or "\u2014"
+        return (
+            f"route={route_count}  "
+            f"recog={recog_count}\n"
+            f"clipped={audit.get('hanwang_segimg_group_clipped_count', 0)}  "
+            f"dropped={audit.get('hanwang_segimg_group_dropped_count', 0)}\n"
+            f"source={source}"
+        )
 
 
 __all__ = ["BlockInspector"]

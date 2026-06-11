@@ -19,7 +19,7 @@ class DropArea(QLabel):
         self.setText("将图片或 PDF 拖拽至此\n或点击下方按钮选择文件")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(88)
         self.setObjectName("dropArea")
         self.setStyleSheet(
             "QLabel#dropArea{border:2px dashed #b8d4ff; border-radius:8px;"
@@ -56,8 +56,8 @@ class ImportPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
         # 标题
         title = QLabel("① 导入文件")
@@ -94,7 +94,7 @@ class ImportPanel(QWidget):
         # 下一步按钮
         self._btn_next = QPushButton("开始版面分析 →")
         self._btn_next.setEnabled(False)
-        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(34)
+        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(32)
         self._btn_next.clicked.connect(self._emit_ready)
         layout.addWidget(self._btn_next, alignment=Qt.AlignmentFlag.AlignRight)
 

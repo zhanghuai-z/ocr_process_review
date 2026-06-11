@@ -21,8 +21,14 @@ from app.core.api_profiles import (
     normalize_api_base_url,
     resolve_api_endpoint_for_role,
 )
+from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.llm_rules import get_default_llm_rules_path
 from app.core.ocr_config import get_config, update_config
+from app.core.paddle_v16_client import (
+    PaddleV16LayoutClient,
+    build_paddle_v16_optional_payload,
+    is_paddle_v16_endpoint,
+)
 
 
 # ------------------------------------------------------------------ profiles
@@ -377,7 +383,7 @@ class ApiSettingsDialog(QDialog):
         hero_layout.addWidget(hero_title)
 
         hero_desc = QLabel(
-            "当前主流程固定为 PP-VL/API 版面 + Hanwang micro-recblock 文字识别。"
+            "当前主流程固定为 PaddleOCR-VL-1.6/API 版面 + Hanwang micro-recblock 文字识别。"
             "这里只维护统一的 API 地址与 Token，不再让用户在多套引擎模式之间切换。"
         )
         hero_desc.setObjectName("heroDesc")
@@ -387,7 +393,7 @@ class ApiSettingsDialog(QDialog):
         hero_pills = QHBoxLayout()
         hero_pills.setContentsMargins(0, 0, 0, 0)
         hero_pills.setSpacing(8)
-        hero_pills.addWidget(_pill("PP-VL 版面"))
+        hero_pills.addWidget(_pill("VL1.6 版面"))
         hero_pills.addWidget(_pill("Hanwang 文字块"))
         hero_pills.addWidget(_pill("Token 本机保存"))
         hero_pills.addStretch()
@@ -396,7 +402,7 @@ class ApiSettingsDialog(QDialog):
 
         mode_card, mode_layout = _section_card(
             "当前链路",
-            "固定使用 PP-VL/API 版面块 + Hanwang micro-recblock，不再暴露并列模式选择。",
+            "固定使用 PaddleOCR-VL-1.6/API 版面块 + Hanwang micro-recblock，不再暴露并列模式选择。",
         )
         mode_row = QHBoxLayout()
         mode_row.setSpacing(12)
@@ -417,8 +423,8 @@ class ApiSettingsDialog(QDialog):
         )
         self._hanwang_mode_card = _ModeCard(
             self._radio_hanwang,
-            "PP-VL + Hanwang",
-            "API 提供 PP-VL 版面块；文字块走 Hanwang micro-recblock，公式/表格/图片保留 PP-VL。",
+            "VL1.6 + Hanwang",
+            "API 提供 VL1.6 版面块；文字块走 Hanwang micro-recblock，公式/表格/图片保留 VL1.6。",
             "需地址/Token",
         )
         mode_row.addWidget(self._hanwang_mode_card, 1)
@@ -429,7 +435,7 @@ class ApiSettingsDialog(QDialog):
 
         self._api_card, api_layout = _section_card(
             "API 连接",
-            "填写不带 /layout-parsing 或 /ocr 的服务根地址。主流程会用它获取 PP-VL parsing_res_list。",
+            "填写不带 /api/v2/ocr/jobs 或 /ocr 的服务根地址。主流程会用它获取 VL1.6 parsing_res_list。",
         )
 
         self._api_mode_notice = QLabel()
@@ -549,7 +555,7 @@ class ApiSettingsDialog(QDialog):
         side_layout.addWidget(hint_title)
 
         for text in (
-            "服务根地址会按角色自动补全 /layout-parsing 与 /ocr。",
+            "服务根地址会按角色自动补全 /api/v2/ocr/jobs 与 /ocr。",
             "如果粘贴完整端点，保存时会自动剥离为基础地址。",
             "Token 只保存在本机配置中，项目文件不写入 Token。",
             "版面分析会上传整页图片；若网络较慢可适当提高请求超时。",
@@ -614,7 +620,7 @@ class ApiSettingsDialog(QDialog):
         root.addStretch()
 
         self._footer_note = QLabel(
-            "保存后主流程按 PP-VL/API + Hanwang micro-recblock 链路运行。"
+            "保存后主流程按 PaddleOCR-VL-1.6/API + Hanwang micro-recblock 链路运行。"
         )
         self._footer_note.setObjectName("footerNote")
         self._footer_note.setWordWrap(True)
@@ -680,10 +686,10 @@ class ApiSettingsDialog(QDialog):
         ) if url else ""
 
         self._model_note.setText("")
-        self._summary_model.setText("汉王混合链路：PP-VL + micro-recblock")
+        self._summary_model.setText("汉王混合链路：PaddleOCR-VL-1.6 + micro-recblock")
         self._summary_desc.setText(
-            "版面分析依赖 PP-VL/API 的 parsing_res_list；文字类 block 交给 Hanwang micro-recblock，"
-            "公式、表格、图片类 block 直接保留 PP-VL 内容。"
+            "版面分析依赖 PaddleOCR-VL-1.6/API 的 parsing_res_list；文字类 block 交给 Hanwang micro-recblock，"
+            "公式、表格、图片类 block 直接保留 VL1.6 内容。"
         )
 
         if not url:
@@ -691,7 +697,10 @@ class ApiSettingsDialog(QDialog):
             self._summary_endpoint_kind.setText("端点待填写")
             self._summary_endpoint.setText("尚未填写 API 地址。")
         elif any(url.rstrip("/").endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
-            endpoint_type = "/ocr" if url.rstrip("/").endswith("/ocr") else "/layout-parsing"
+            endpoint_type = next(
+                suffix for suffix in KNOWN_API_ENDPOINT_SUFFIXES
+                if url.rstrip("/").endswith(suffix)
+            )
             self._url_note.setText(f"当前地址包含 {endpoint_type}，保存时会自动改为基础地址：{base_url}")
             self._summary_endpoint_kind.setText("保存为基础地址")
             self._summary_endpoint.setText(f"base: {base_url}\nlayout: {layout_endpoint}\nocr: {ocr_endpoint}")
@@ -702,7 +711,7 @@ class ApiSettingsDialog(QDialog):
 
         self._summary_mode.setText("当前链路：汉王混合")
         self._api_mode_notice.setText(
-            "当前主流程需要 API 地址与 Token 先取得 PP-VL 版面块；Hanwang 只负责文字块识别。"
+            "当前主流程需要 API 地址与 Token 先取得 VL1.6 版面块；Hanwang 只负责文字块识别。"
         )
 
     def _on_mode_changed(self) -> None:
@@ -761,8 +770,8 @@ class ApiSettingsDialog(QDialog):
     # ------------------------------------------------------------------ test
 
     def _test_connection(self) -> None:
-        import base64
         from app.core.api_http import post_json_without_env_proxy
+        import requests
 
         url = resolve_api_endpoint_for_role(
             self._url_edit.text().strip(),
@@ -781,8 +790,7 @@ class ApiSettingsDialog(QDialog):
             img = np.full((200, 400, 3), 240, dtype=np.uint8)
             cv2.putText(img, "OCR Test", (80, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.8, (30, 30, 30), 2)
-            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            file_b64 = base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
+            file_b64 = encode_image_b64_for_paddle(img)
         except Exception:
             file_b64 = ""
 
@@ -797,28 +805,43 @@ class ApiSettingsDialog(QDialog):
         self._btn_test.setEnabled(False)
         self._btn_test.setText("测试中…")
         try:
-            payload = build_api_payload(
-                file_b64,
-                1,
-                profile=FIXED_LAYOUT_PROFILE,
-                endpoint_url=url,
-            )
-            resp = post_json_without_env_proxy(url, json=payload, headers=headers, timeout=timeout)
-            code = resp.status_code
-            try:
-                body = resp.json()
+            if is_paddle_v16_endpoint(url):
+                client = PaddleV16LayoutClient(
+                    jobs_url=url,
+                    token=token,
+                    request_timeout=timeout,
+                    poll_timeout=timeout,
+                )
+                body = client.analyze_image(
+                    img,
+                    optional_payload=build_paddle_v16_optional_payload(),
+                )
+                code = 200
                 err_code = body.get("errorCode", -1)
                 err_msg = body.get("errorMsg", "")
-            except Exception:
-                body = {}
-                err_code = -1
-                err_msg = resp.text[:300]
+            else:
+                payload = build_api_payload(
+                    file_b64,
+                    1,
+                    profile=FIXED_LAYOUT_PROFILE,
+                    endpoint_url=url,
+                )
+                resp = post_json_without_env_proxy(url, json=payload, headers=headers, timeout=timeout)
+                code = resp.status_code
+                try:
+                    body = resp.json()
+                    err_code = body.get("errorCode", -1)
+                    err_msg = body.get("errorMsg", "")
+                except Exception:
+                    body = {}
+                    err_code = -1
+                    err_msg = resp.text[:300]
 
             if code == 200 and err_code == 0:
                 kind = detect_api_result_kind(body)
                 kind_label = {
                     "ocr": "PP-OCRv5 /ocr",
-                    "layout": "PaddleOCR-VL-1.5 /layout-parsing",
+                    "layout": "PaddleOCR-VL-1.6 /api/v2/ocr/jobs",
                     "unknown": "未知结构（请确认端点是否正确）",
                 }.get(kind, kind)
                 QMessageBox.information(
