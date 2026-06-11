@@ -375,15 +375,19 @@ class ProjectStore:
                 "cache_image_path=?, thumbnail_path=?, status=?, error_message=?, "
                 "ocr_invalidated_reason=?, "
                 "ppvl_parsing_res_list_json=? "
-                "WHERE id=?",
+                "WHERE id=? AND project_id=?",
                 (page.image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
                  page.cache_image_path, page.thumbnail_path, page.status.value,
                  page.error_message,
                  page.ocr_invalidated_reason,
                  json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False),
-                 page.id),
+                 page.id, project_id),
             )
+            if cur.rowcount != 1:
+                page.id = None
+                self._save_page(cur, page, project_id)
+                return
 
         old_block_ids = {
             r["id"] for r in cur.execute(
@@ -419,8 +423,8 @@ class ProjectStore:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, is_locked=?, recognizable=?, note=?, "
-                "source_label=?, raw_payload_json=? WHERE id=?",
-                (*values, block.id),
+                "source_label=?, raw_payload_json=? WHERE id=? AND page_id=?",
+                (*values, block.id, page_id),
             )
             if cur.rowcount != 1:
                 block.id = None
@@ -467,8 +471,8 @@ class ProjectStore:
                 "UPDATE line SET block_id=?, text=?, final_text=?, original_text=?, "
                 "confidence=?, proof_status=?, x=?, y=?, w=?, h=?, ocr_text=?, "
                 "llm_suggestion=?, llm_reason=?, llm_review_status=?, review_flags_json=? "
-                "WHERE id=?",
-                (*values, line.id),
+                "WHERE id=? AND block_id=?",
+                (*values, line.id, block_id),
             )
             if cur.rowcount != 1:
                 line.id = None
@@ -515,8 +519,8 @@ class ProjectStore:
         else:
             cur.execute(
                 "UPDATE char_ SET line_id=?, char=?, confidence=?, x=?, y=?, w=?, h=?, "
-                "bbox_source=?, bbox_granularity=?, token_text=? WHERE id=?",
-                (*values, char.id),
+                "bbox_source=?, bbox_granularity=?, token_text=? WHERE id=? AND line_id=?",
+                (*values, char.id, line_id),
             )
             if cur.rowcount != 1:
                 char.id = None
