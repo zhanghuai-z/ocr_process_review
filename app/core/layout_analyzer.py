@@ -31,17 +31,24 @@ from app.core.api_profiles import (
     resolve_api_endpoint_for_role,
 )
 from app.core.api_image_codec import encode_image_b64_for_paddle
-from app.core.bbox_extraction import BBOX_FIELD_KEYS, bbox_from_variant, raw_bbox_max_from_variant
+from app.core.bbox_extraction import bbox_from_variant, raw_bbox_max_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
 from app.core.ocr_dispatch_policy import is_text_ocr_candidate
+from app.core.paddle_layout_schema import (
+    normalize_paddle_layout_record,
+    paddle_record_bbox,
+    paddle_record_label,
+    paddle_record_score,
+    raw_bbox_max_from_record,
+    route_subblock_payload,
+)
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_SUBBLOCKS_FIELD,
     build_layout_line_routes,
 )
 from app.core.paddle_labels import (
-    authoritative_paddle_label,
     is_hanwang_skip_label,
     normalize_paddle_label,
 )
@@ -149,37 +156,16 @@ class LayoutAnalyzer:
         return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
 
     def _extract_label_from_record(self, record: dict, default: str = "unknown") -> str:
-        return authoritative_paddle_label(record, default)
+        return paddle_record_label(record, default)
 
     def _extract_score_from_record(self, record: dict) -> float | None:
-        for key in (
-            "score", "confidence", "layout_score", "cls_score",
-            "block_score", "prob", "probability",
-        ):
-            value = record.get(key)
-            try:
-                if value is not None:
-                    return float(value)
-            except (TypeError, ValueError):
-                continue
-        return None
+        return paddle_record_score(record)
 
     def _extract_bbox_from_record(self, record: dict, page: Page):
-        for key in BBOX_FIELD_KEYS:
-            if key in record:
-                bbox = self._extract_bbox_from_coordinate(record.get(key), page)
-                if bbox and bbox.area > 0:
-                    return bbox
-        return None
+        return paddle_record_bbox(record, page.width, page.height)
 
     def _raw_bbox_max_from_record(self, record: dict) -> tuple[float, float] | None:
-        for key in BBOX_FIELD_KEYS:
-            if key not in record:
-                continue
-            max_xy = self._raw_bbox_max_from_coordinate(record.get(key))
-            if max_xy is not None:
-                return max_xy
-        return None
+        return raw_bbox_max_from_record(record)
 
     def _raw_bbox_max_from_coordinate(self, coord: object) -> tuple[float, float] | None:
         """Extract raw max x/y before scaling or clamping."""
@@ -217,28 +203,25 @@ class LayoutAnalyzer:
         raw_overlay_items: List[tuple[str, object]],
         default_label: str = "unknown",
     ) -> int:
-        bbox = self._extract_bbox_from_record(record, page)
-        if not bbox or bbox.area <= 0:
+        normalized = normalize_paddle_layout_record(
+            record,
+            page_width=page.width,
+            page_height=page.height,
+            scale_x=scale_x,
+            scale_y=scale_y,
+            default_label=default_label,
+        )
+        if normalized is None:
             return order
 
-        if scale_x != 1.0 or scale_y != 1.0:
-            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
-            if bbox.area <= 0:
-                return order
-
-        raw_type = self._extract_label_from_record(record, default=default_label)
-        signature = (raw_type, bbox.x, bbox.y, bbox.w, bbox.h)
-        if signature in seen:
+        bbox = normalized.bbox
+        raw_type = normalized.label
+        if normalized.signature in seen:
             return order
-        seen.add(signature)
+        seen.add(normalized.signature)
 
-        preview = ""
-        for key in ("block_content", "text", "content", "markdown"):
-            value = record.get(key)
-            if isinstance(value, str) and value.strip():
-                preview = value.strip()
-                break
-        score = self._extract_score_from_record(record)
+        preview = normalized.text
+        score = normalized.score
         note_parts = []
         if preview:
             note_parts.append(preview[:120])
@@ -263,7 +246,7 @@ class LayoutAnalyzer:
             order=order,
             note=" | ".join(note_parts),
             source_label=raw_type,
-            raw_payload=dict(record),
+            raw_payload=dict(normalized.raw),
         )
         block.recognizable = is_text_ocr_candidate(block)
         page_blocks.append(block)
@@ -278,14 +261,16 @@ class LayoutAnalyzer:
         scale_y: float,
         raw_overlay_items: List[tuple[str, object]],
     ) -> None:
-        bbox = self._extract_bbox_from_record(record, page)
-        if not bbox or bbox.area <= 0:
+        normalized = normalize_paddle_layout_record(
+            record,
+            page_width=page.width,
+            page_height=page.height,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        )
+        if normalized is None:
             return
-        if scale_x != 1.0 or scale_y != 1.0:
-            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
-            if bbox.area <= 0:
-                return
-        raw_overlay_items.append((self._extract_label_from_record(record), bbox))
+        raw_overlay_items.append((normalized.label, normalized.bbox))
 
     def _record_bbox_in_page_space(
         self,
@@ -294,12 +279,14 @@ class LayoutAnalyzer:
         scale_x: float,
         scale_y: float,
     ):
-        bbox = self._extract_bbox_from_record(record, page)
-        if not bbox or bbox.area <= 0:
-            return None
-        if scale_x != 1.0 or scale_y != 1.0:
-            bbox = scale_bbox(bbox, scale_x, scale_y).clamp(page.width, page.height)
-        return bbox if bbox.area > 0 else None
+        normalized = normalize_paddle_layout_record(
+            record,
+            page_width=page.width,
+            page_height=page.height,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        )
+        return normalized.bbox if normalized is not None else None
 
     def _attach_route_subblocks(
         self,
@@ -310,15 +297,18 @@ class LayoutAnalyzer:
         scale_x: float,
         scale_y: float,
     ) -> None:
-        route_records: list[tuple[str, object, dict]] = []
+        route_records = []
         for record in geometry_records:
-            label = self._extract_label_from_record(record)
-            if not is_hanwang_skip_label(label):
+            normalized = normalize_paddle_layout_record(
+                record,
+                page_width=page.width,
+                page_height=page.height,
+                scale_x=scale_x,
+                scale_y=scale_y,
+            )
+            if normalized is None or not is_hanwang_skip_label(normalized.label):
                 continue
-            bbox = self._record_bbox_in_page_space(record, page, scale_x, scale_y)
-            if bbox is None:
-                continue
-            route_records.append((label, bbox, record))
+            route_records.append(normalized)
         if not route_records:
             return
 
@@ -334,7 +324,8 @@ class LayoutAnalyzer:
             parent_entries.append((parent, parent_bbox))
             subblocks_by_parent[id(parent)] = []
 
-        for label, bbox, raw in route_records:
+        for child in route_records:
+            bbox = child.bbox
             best_parent: dict | None = None
             best_score = 0.0
             for parent, parent_bbox in parent_entries:
@@ -356,11 +347,7 @@ class LayoutAnalyzer:
                     best_score = score
                     best_parent = parent
             if best_parent is not None:
-                subblocks_by_parent[id(best_parent)].append({
-                    "block_label": label,
-                    "block_bbox": list(bbox.to_xyxy()),
-                    "raw_payload": dict(raw),
-                })
+                subblocks_by_parent[id(best_parent)].append(route_subblock_payload(child))
 
         for parent, parent_bbox in parent_entries:
             subblocks = subblocks_by_parent.get(id(parent), [])

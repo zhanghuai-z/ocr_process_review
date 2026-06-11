@@ -7,7 +7,8 @@ from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.ocr_ir import is_formula_marker_token, is_formula_token
-from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label, normalize_paddle_label
+from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
+from app.core.paddle_layout_schema import paddle_record_label, paddle_record_text
 from app.models import BlockType
 
 ROUTE_SUBBLOCKS_FIELD = "_route_subblocks"
@@ -63,16 +64,11 @@ class PageOcrLineHint:
 
 
 def route_authority_label(block: dict[str, Any], default: str = "unknown") -> str:
-    return normalize_paddle_label(authoritative_paddle_label(block, default))
+    return normalize_paddle_label(paddle_record_label(block, default))
 
 
 def block_text(block: dict[str, Any]) -> str:
-    return str(
-        block.get("block_content")
-        or block.get("text")
-        or block.get("content")
-        or ""
-    ).strip()
+    return paddle_record_text(block, include_markdown=False)
 
 
 def is_formula_style_text(text: str) -> bool:
@@ -90,7 +86,7 @@ def is_formula_style_text(text: str) -> bool:
 
 
 def is_formula_style_position_block(block: dict[str, Any]) -> bool:
-    label = normalize_paddle_label(authoritative_paddle_label(block))
+    label = normalize_paddle_label(paddle_record_label(block))
     if label not in _FORMULA_STYLE_POSITION_LABELS:
         return False
     return is_formula_style_text(block_text(block))

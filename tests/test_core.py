@@ -407,6 +407,52 @@ def test_block_payload_helpers_preserve_existing_entries():
     print("test_block_payload_helpers_preserve_existing_entries PASSED")
 
 
+def test_paddle_layout_schema_normalizes_record_fields():
+    from app.core.paddle_layout_schema import (
+        normalize_paddle_layout_record,
+        paddle_record_text,
+        raw_bbox_max_from_record,
+        route_subblock_payload,
+    )
+    from app.core.paddle_line_routing import block_text
+
+    record = {
+        "block_label": "inline_formula",
+        "label": "text",
+        "block_bbox": [10, 20, 110, 60],
+        "block_content": " $ A $ ",
+        "block_score": "0.91",
+        "custom_raw": {"keep": True},
+    }
+
+    normalized = normalize_paddle_layout_record(
+        record,
+        page_width=500,
+        page_height=500,
+        scale_x=2.0,
+        scale_y=0.5,
+    )
+
+    assert normalized is not None
+    assert normalized.label == "inline_formula"
+    assert normalized.normalized_label == "inline_formula"
+    assert normalized.bbox.to_xyxy() == (20, 10, 220, 30)
+    assert normalized.text == "$ A $"
+    assert normalized.score == 0.91
+    assert normalized.raw["custom_raw"]["keep"] is True
+    assert normalized.signature == ("inline_formula", 20, 10, 200, 20)
+    assert raw_bbox_max_from_record(record) == (110, 60)
+
+    payload = route_subblock_payload(normalized)
+    assert payload["block_label"] == "inline_formula"
+    assert payload["block_bbox"] == [20, 10, 220, 30]
+    assert payload["raw_payload"]["label"] == "text"
+    assert paddle_record_text({"markdown": " preview "}) == "preview"
+    assert block_text({"markdown": "must not route"}) == ""
+
+    print("test_paddle_layout_schema_normalizes_record_fields PASSED")
+
+
 # =====================================================================
 # ProjectStore 测试
 # =====================================================================
@@ -10292,6 +10338,7 @@ if __name__ == "__main__":
     test_bbox_tools()
     test_block_type_mapping()
     test_block_payload_helpers_preserve_existing_entries()
+    test_paddle_layout_schema_normalizes_record_fields()
     test_project_store()
     test_project_store_persists_ppvl_parsing_res_list()
     test_line_final_text_alias_and_project_store_roundtrip()
