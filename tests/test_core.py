@@ -867,6 +867,139 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
     print("test_project_store_upsert_rejects_foreign_parent_rowids PASSED")
 
 
+def test_project_store_uid_recovers_same_parent_stale_rowid():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line1 = Line(
+            text="第一行",
+            confidence=0.9,
+            bbox=bb,
+            chars=[Char(char="一", confidence=0.9, bbox=BBox(0, 0, 10, 10))],
+        )
+        line2 = Line(
+            text="第二行",
+            confidence=0.9,
+            bbox=BBox(0, 30, 100, 20),
+            chars=[Char(char="二", confidence=0.9, bbox=BBox(0, 30, 10, 10))],
+        )
+        block1 = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1])
+        block2 = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 60, 100, 20),
+            lines=[line2],
+            order=1,
+        )
+        project = OcrProject(
+            name="same parent stale rowid",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block1, block2])],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            original = {
+                "block1_id": block1.id,
+                "block1_uid": block1.uid,
+                "block2_id": block2.id,
+                "block2_uid": block2.uid,
+                "line1_id": line1.id,
+                "line1_uid": line1.uid,
+                "line2_id": line2.id,
+                "line2_uid": line2.uid,
+            }
+
+            block2.id = block1.id
+            line2.id = line1.id
+            block2.note = "第二块已更新"
+            line2.update_text("第二行已更新")
+            store.save_project(project)
+            loaded = store.load_project(project_id=project.id)
+
+        loaded_blocks = {block.uid: block for block in loaded.pages[0].blocks}
+        loaded_block1 = loaded_blocks[original["block1_uid"]]
+        loaded_block2 = loaded_blocks[original["block2_uid"]]
+        loaded_line1 = loaded_block1.lines[0]
+        loaded_line2 = loaded_block2.lines[0]
+
+        assert loaded_block1.id == original["block1_id"]
+        assert loaded_block2.id == original["block2_id"]
+        assert loaded_block1.note == ""
+        assert loaded_block2.note == "第二块已更新"
+        assert loaded_line1.id == original["line1_id"]
+        assert loaded_line2.id == original["line2_id"]
+        assert loaded_line1.uid == original["line1_uid"]
+        assert loaded_line2.uid == original["line2_uid"]
+        assert loaded_line1.display_text == "第一行"
+        assert loaded_line2.display_text == "第二行已更新"
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_uid_recovers_same_parent_stale_rowid PASSED")
+
+
+def test_project_store_duplicate_sibling_uids_are_reminted():
+    import copy
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line1 = Line(
+            text="甲",
+            confidence=0.9,
+            bbox=bb,
+            chars=[Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))],
+        )
+        line2 = copy.deepcopy(line1)
+        line2.text = "乙"
+        line2.final_text = "乙"
+        line2.ocr_text = "乙"
+        line2.chars[0].char = "乙"
+
+        line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
+        block_copy = copy.deepcopy(line_block)
+        block_copy.order = 1
+        block_copy.lines[0].text = "丙"
+        block_copy.lines[0].final_text = "丙"
+        block_copy.lines[0].ocr_text = "丙"
+        block_copy.lines[0].chars[0].char = "丙"
+
+        project = OcrProject(
+            name="duplicate sibling uids",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[line_block, block_copy])],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=project.id)
+
+        assert len(loaded.pages[0].blocks) == 2
+        assert len({block.uid for block in loaded.pages[0].blocks}) == 2
+        first_block, second_block = loaded.pages[0].blocks
+        assert [line.display_text for line in first_block.lines] == ["甲", "乙"]
+        assert len({line.uid for line in first_block.lines}) == 2
+        assert [line.display_text for line in second_block.lines] == ["丙", "乙"]
+        assert len({line.uid for block in loaded.pages[0].blocks for line in block.lines}) == 4
+        assert len({
+            char.uid
+            for block in loaded.pages[0].blocks
+            for line in block.lines
+            for char in line.chars
+        }) == 4
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_duplicate_sibling_uids_are_reminted PASSED")
+
+
 def test_project_store_persists_page_ocr_invalidation_reason():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
     from app.core.project_store import ProjectStore
@@ -10594,6 +10727,8 @@ if __name__ == "__main__":
     test_project_store_clean_on_resave()
     test_project_store_save_project_preserves_child_rowids()
     test_project_store_upsert_rejects_foreign_parent_rowids()
+    test_project_store_uid_recovers_same_parent_stale_rowid()
+    test_project_store_duplicate_sibling_uids_are_reminted()
     test_project_store_persists_page_ocr_invalidation_reason()
     test_project_store_update_lines_rolls_back_as_single_transaction()
     test_project_store_new_db_records_current_schema_version()

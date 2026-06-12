@@ -393,11 +393,34 @@ class ProjectStore:
             (uid,),
         ).fetchone() is not None
 
-    def _fresh_db_uid(self, cur: sqlite3.Cursor, table: str, kind: str) -> str:
+    def _fresh_db_uid(
+        self,
+        cur: sqlite3.Cursor,
+        table: str,
+        kind: str,
+        reserved: set[str] | None = None,
+    ) -> str:
+        reserved = reserved or set()
         while True:
             uid = new_entity_uid(kind)
-            if not self._uid_exists(cur, table, uid):
+            if uid not in reserved and not self._uid_exists(cur, table, uid):
                 return uid
+
+    def _ensure_unique_child_uid(
+        self,
+        cur: sqlite3.Cursor,
+        obj: object,
+        *,
+        kind: str,
+        table: str,
+        seen_uids: set[str],
+    ) -> None:
+        uid = ensure_entity_uid(getattr(obj, "uid", ""), kind)
+        if uid in seen_uids:
+            setattr(obj, "id", None)
+            uid = self._fresh_db_uid(cur, table, kind, seen_uids)
+        setattr(obj, "uid", uid)
+        seen_uids.add(uid)
 
     def _prepare_entity_identity(
         self,
@@ -409,20 +432,54 @@ class ProjectStore:
         parent_col: str,
         parent_id: int,
     ) -> None:
-        uid = ensure_entity_uid(getattr(obj, "uid", ""), kind)
+        raw_uid = str(getattr(obj, "uid", "") or "").strip()
+        uid_was_missing = not raw_uid
+        uid = ensure_entity_uid(raw_uid, kind)
         setattr(obj, "uid", uid)
 
         object_id = getattr(obj, "id", None)
+        id_row = None
         if object_id is not None:
-            row = self._row_by_id_and_parent(cur, table, object_id, parent_col, parent_id)
-            if row is not None:
-                setattr(obj, "uid", row["uid"] or uid)
-                return
+            id_row = self._row_by_id_and_parent(cur, table, object_id, parent_col, parent_id)
 
-        row = self._row_by_uid_and_parent(cur, table, uid, parent_col, parent_id)
-        if row is not None:
-            setattr(obj, "id", row["id"])
-            setattr(obj, "uid", row["uid"])
+        uid_row = self._row_by_uid_and_parent(cur, table, uid, parent_col, parent_id)
+
+        if id_row is not None and uid_row is not None:
+            if id_row["id"] != uid_row["id"]:
+                logger.warning(
+                    "Stable uid recovered stale rowid: table=%s parent=%s:%s rowid=%s uid=%s",
+                    table,
+                    parent_col,
+                    parent_id,
+                    object_id,
+                    uid,
+                )
+            setattr(obj, "id", uid_row["id"])
+            setattr(obj, "uid", uid_row["uid"])
+            return
+
+        if uid_row is not None:
+            setattr(obj, "id", uid_row["id"])
+            setattr(obj, "uid", uid_row["uid"])
+            return
+
+        if id_row is not None:
+            db_uid = str(id_row["uid"] or "").strip()
+            if uid_was_missing or db_uid == uid:
+                setattr(obj, "id", id_row["id"])
+                setattr(obj, "uid", db_uid or uid)
+                return
+            logger.warning(
+                "Stable uid rejected stale rowid: table=%s parent=%s:%s rowid=%s uid=%s",
+                table,
+                parent_col,
+                parent_id,
+                object_id,
+                uid,
+            )
+            setattr(obj, "id", None)
+            if self._uid_exists(cur, table, uid):
+                setattr(obj, "uid", self._fresh_db_uid(cur, table, kind))
             return
 
         setattr(obj, "id", None)
@@ -460,7 +517,15 @@ class ProjectStore:
                 ).fetchall()
             ]
 
+            seen_page_uids: set[str] = set()
             for page in project.pages:
+                self._ensure_unique_child_uid(
+                    cur,
+                    page,
+                    kind="page",
+                    table="page",
+                    seen_uids=seen_page_uids,
+                )
                 self._save_page(cur, page, project.id)
 
             # 删除已移除的 page（级联删除 block/line/char）
@@ -529,7 +594,15 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
+        seen_block_uids: set[str] = set()
         for block in page.blocks:
+            self._ensure_unique_child_uid(
+                cur,
+                block,
+                kind="block",
+                table="block",
+                seen_uids=seen_block_uids,
+            )
             self._save_block(cur, block, page.id)
             if block.id is not None:
                 saved_block_ids.add(block.id)
@@ -582,7 +655,15 @@ class ProjectStore:
             ).fetchall()
         }
         saved_line_ids: set[int] = set()
+        seen_line_uids: set[str] = set()
         for line in block.lines:
+            self._ensure_unique_child_uid(
+                cur,
+                line,
+                kind="line",
+                table="line",
+                seen_uids=seen_line_uids,
+            )
             self._save_line(cur, line, block.id)
             if line.id is not None:
                 saved_line_ids.add(line.id)
@@ -641,7 +722,15 @@ class ProjectStore:
             ).fetchall()
         }
         saved_char_ids: set[int] = set()
+        seen_char_uids: set[str] = set()
         for char in line.chars:
+            self._ensure_unique_child_uid(
+                cur,
+                char,
+                kind="char",
+                table="char_",
+                seen_uids=seen_char_uids,
+            )
             self._save_char(cur, char, line.id)
             if char.id is not None:
                 saved_char_ids.add(char.id)
