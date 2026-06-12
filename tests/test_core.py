@@ -867,6 +867,96 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
     print("test_project_store_upsert_rejects_foreign_parent_rowids PASSED")
 
 
+def test_project_store_cross_project_uid_collision_remints_without_stealing():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    def make_project(name: str, text: str) -> OcrProject:
+        bb = BBox(0, 0, 100, 20)
+        line = Line(
+            text=text,
+            confidence=0.9,
+            bbox=bb,
+            chars=[Char(char=text[:1], confidence=0.9, bbox=BBox(0, 0, 10, 10))],
+        )
+        return OcrProject(
+            name=name,
+            pages=[
+                Page(
+                    image_path=f"/tmp/{name}.jpg",
+                    width=800,
+                    height=600,
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])],
+                )
+            ],
+        )
+
+    try:
+        project1 = make_project("p1", "甲")
+        project2 = make_project("p2", "乙")
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project1)
+            store.save_project(project2)
+
+            p1_page = project1.pages[0]
+            p1_block = p1_page.blocks[0]
+            p1_line = p1_block.lines[0]
+            p1_char = p1_line.chars[0]
+            p1_ids = (p1_page.id, p1_block.id, p1_line.id, p1_char.id)
+            p1_uids = (p1_page.uid, p1_block.uid, p1_line.uid, p1_char.uid)
+
+            p2_page = project2.pages[0]
+            p2_block = p2_page.blocks[0]
+            p2_line = p2_block.lines[0]
+            p2_char = p2_line.chars[0]
+
+            p2_page.id, p2_page.uid = p1_page.id, p1_page.uid
+            p2_block.id, p2_block.uid = p1_block.id, p1_block.uid
+            p2_line.id, p2_line.uid = p1_line.id, p1_line.uid
+            p2_char.id, p2_char.uid = p1_char.id, p1_char.uid
+            p2_line.update_text("乙已改")
+            p2_char.char = "乙"
+
+            store.save_project(project2)
+
+            reloaded1 = store.load_project(project_id=project1.id)
+            reloaded2 = store.load_project(project_id=project2.id)
+
+        p1_loaded_page = reloaded1.pages[0]
+        p1_loaded_block = p1_loaded_page.blocks[0]
+        p1_loaded_line = p1_loaded_block.lines[0]
+        p1_loaded_char = p1_loaded_line.chars[0]
+        assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
+        assert (
+            p1_loaded_page.uid,
+            p1_loaded_block.uid,
+            p1_loaded_line.uid,
+            p1_loaded_char.uid,
+        ) == p1_uids
+        assert p1_loaded_line.display_text == "甲"
+        assert p1_loaded_char.char == "甲"
+
+        p2_loaded_page = reloaded2.pages[0]
+        p2_loaded_block = p2_loaded_page.blocks[0]
+        p2_loaded_line = p2_loaded_block.lines[0]
+        p2_loaded_char = p2_loaded_line.chars[0]
+        assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) != p1_ids
+        assert p2_loaded_page.uid != p1_uids[0]
+        assert p2_loaded_block.uid != p1_uids[1]
+        assert p2_loaded_line.uid != p1_uids[2]
+        assert p2_loaded_char.uid != p1_uids[3]
+        assert p2_loaded_line.display_text == "乙已改"
+        assert p2_loaded_char.char == "乙"
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_cross_project_uid_collision_remints_without_stealing PASSED")
+
+
 def test_project_store_uid_recovers_same_parent_stale_rowid():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
@@ -10856,6 +10946,7 @@ if __name__ == "__main__":
     test_project_store_clean_on_resave()
     test_project_store_save_project_preserves_child_rowids()
     test_project_store_upsert_rejects_foreign_parent_rowids()
+    test_project_store_cross_project_uid_collision_remints_without_stealing()
     test_project_store_uid_recovers_same_parent_stale_rowid()
     test_project_store_duplicate_sibling_uids_are_reminted()
     test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order()

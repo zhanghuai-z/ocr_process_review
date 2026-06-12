@@ -387,16 +387,43 @@ class ProjectStore:
             (uid, parent_id),
         ).fetchone()
 
-    def _row_by_uid(
+    def _row_by_uid_in_project(
         self,
         cur: sqlite3.Cursor,
         table: str,
         uid: str,
+        project_id: int,
     ) -> sqlite3.Row | None:
-        return cur.execute(
-            f"SELECT id, uid FROM {table} WHERE uid=?",
-            (uid,),
-        ).fetchone()
+        if table == "page":
+            return cur.execute(
+                "SELECT id, uid FROM page WHERE uid=? AND project_id=?",
+                (uid, project_id),
+            ).fetchone()
+        if table == "block":
+            return cur.execute(
+                "SELECT b.id, b.uid FROM block b "
+                "JOIN page p ON p.id = b.page_id "
+                "WHERE b.uid=? AND p.project_id=?",
+                (uid, project_id),
+            ).fetchone()
+        if table == "line":
+            return cur.execute(
+                "SELECT l.id, l.uid FROM line l "
+                "JOIN block b ON b.id = l.block_id "
+                "JOIN page p ON p.id = b.page_id "
+                "WHERE l.uid=? AND p.project_id=?",
+                (uid, project_id),
+            ).fetchone()
+        if table == "char_":
+            return cur.execute(
+                "SELECT c.id, c.uid FROM char_ c "
+                "JOIN line l ON l.id = c.line_id "
+                "JOIN block b ON b.id = l.block_id "
+                "JOIN page p ON p.id = b.page_id "
+                "WHERE c.uid=? AND p.project_id=?",
+                (uid, project_id),
+            ).fetchone()
+        raise ValueError(f"Unsupported uid lookup table: {table}")
 
     def _uid_exists(self, cur: sqlite3.Cursor, table: str, uid: str) -> bool:
         return cur.execute(
@@ -442,6 +469,7 @@ class ProjectStore:
         table: str,
         parent_col: str,
         parent_id: int,
+        project_id: int,
     ) -> None:
         raw_uid = str(getattr(obj, "uid", "") or "").strip()
         uid_was_missing = not raw_uid
@@ -474,9 +502,9 @@ class ProjectStore:
             setattr(obj, "uid", uid_row["uid"])
             return
 
-        global_uid_row = self._row_by_uid(cur, table, uid)
-        if global_uid_row is not None:
-            if id_row is not None and id_row["id"] != global_uid_row["id"]:
+        project_uid_row = self._row_by_uid_in_project(cur, table, uid, project_id)
+        if project_uid_row is not None:
+            if id_row is not None and id_row["id"] != project_uid_row["id"]:
                 logger.warning(
                     "Stable uid moved across parent and ignored stale rowid: "
                     "table=%s parent=%s:%s rowid=%s uid=%s",
@@ -486,8 +514,8 @@ class ProjectStore:
                     object_id,
                     uid,
                 )
-            setattr(obj, "id", global_uid_row["id"])
-            setattr(obj, "uid", global_uid_row["uid"])
+            setattr(obj, "id", project_uid_row["id"])
+            setattr(obj, "uid", project_uid_row["uid"])
             return
 
         if id_row is not None:
@@ -590,6 +618,7 @@ class ProjectStore:
             table="page",
             parent_col="project_id",
             parent_id=project_id,
+            project_id=project_id,
         )
         if page.id is None:
             cur.execute(
@@ -641,7 +670,7 @@ class ProjectStore:
                 table="block",
                 seen_uids=save_seen_uids["block"],
             )
-            self._save_block(cur, block, page.id, save_seen_uids=save_seen_uids)
+            self._save_block(cur, block, page.id, project_id, save_seen_uids=save_seen_uids)
             if block.id is not None:
                 saved_block_ids.add(block.id)
 
@@ -653,6 +682,7 @@ class ProjectStore:
         cur: sqlite3.Cursor,
         block: Block,
         page_id: int,
+        project_id: int,
         *,
         save_seen_uids: dict[str, set[str]],
     ) -> None:
@@ -663,6 +693,7 @@ class ProjectStore:
             table="block",
             parent_col="page_id",
             parent_id=page_id,
+            project_id=project_id,
         )
         bb = block.bbox
         values = (
@@ -691,7 +722,7 @@ class ProjectStore:
             )
             if cur.rowcount != 1:
                 block.id = None
-                self._save_block(cur, block, page_id, save_seen_uids=save_seen_uids)
+                self._save_block(cur, block, page_id, project_id, save_seen_uids=save_seen_uids)
                 return
 
         old_line_ids = {
@@ -708,7 +739,7 @@ class ProjectStore:
                 table="line",
                 seen_uids=save_seen_uids["line"],
             )
-            self._save_line(cur, line, block.id, save_seen_uids=save_seen_uids)
+            self._save_line(cur, line, block.id, project_id, save_seen_uids=save_seen_uids)
             if line.id is not None:
                 saved_line_ids.add(line.id)
 
@@ -720,6 +751,7 @@ class ProjectStore:
         cur: sqlite3.Cursor,
         line: Line,
         block_id: int,
+        project_id: int,
         *,
         save_seen_uids: dict[str, set[str]],
     ) -> None:
@@ -730,6 +762,7 @@ class ProjectStore:
             table="line",
             parent_col="block_id",
             parent_id=block_id,
+            project_id=project_id,
         )
         bb = line.bbox
         final_text = line.final_text or line.text
@@ -764,7 +797,7 @@ class ProjectStore:
             )
             if cur.rowcount != 1:
                 line.id = None
-                self._save_line(cur, line, block_id, save_seen_uids=save_seen_uids)
+                self._save_line(cur, line, block_id, project_id, save_seen_uids=save_seen_uids)
                 return
 
         old_char_ids = {
@@ -781,14 +814,20 @@ class ProjectStore:
                 table="char_",
                 seen_uids=save_seen_uids["char"],
             )
-            self._save_char(cur, char, line.id)
+            self._save_char(cur, char, line.id, project_id)
             if char.id is not None:
                 saved_char_ids.add(char.id)
 
         for old_id in old_char_ids - saved_char_ids:
             cur.execute("DELETE FROM char_ WHERE id=?", (old_id,))
 
-    def _save_char(self, cur: sqlite3.Cursor, char: Char, line_id: int) -> None:
+    def _save_char(
+        self,
+        cur: sqlite3.Cursor,
+        char: Char,
+        line_id: int,
+        project_id: int,
+    ) -> None:
         self._prepare_entity_identity(
             cur,
             char,
@@ -796,6 +835,7 @@ class ProjectStore:
             table="char_",
             parent_col="line_id",
             parent_id=line_id,
+            project_id=project_id,
         )
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
@@ -827,7 +867,7 @@ class ProjectStore:
             )
             if cur.rowcount != 1:
                 char.id = None
-                self._save_char(cur, char, line_id)
+                self._save_char(cur, char, line_id, project_id)
 
     # ------------------------------------------------------------------ update single line
 
