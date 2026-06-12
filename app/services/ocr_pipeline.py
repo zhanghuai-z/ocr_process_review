@@ -318,12 +318,7 @@ class OcrPipeline:
                     source_space=bbox_space,
                 )
             apply_auto_flag(line)
-            if not line.ocr_text:
-                line.ocr_text = line.text
-            if not line.original_text:
-                line.original_text = line.ocr_text or line.text
-            if not line.final_text:
-                line.final_text = line.ocr_text or line.text
+            line.ensure_text_contract(fill_original=True)
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:

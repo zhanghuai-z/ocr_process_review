@@ -770,12 +770,7 @@ class ProjectStore:
             project_id=project_id,
         )
         bb = line.bbox
-        final_text = line.final_text or line.text
-        ocr_text = line.ocr_text or line.text or final_text
-        if not line.text:
-            line.text = ocr_text
-        line.final_text = final_text
-        line.ocr_text = ocr_text
+        line.ensure_text_contract()
         values = (
             block_id, line.text, line.final_text, line.original_text, line.confidence,
             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
@@ -888,12 +883,7 @@ class ProjectStore:
             raise RuntimeError(f"Line update requires stable uid: id={line.id!r}")
         line.uid = ensure_entity_uid(line.uid, "line")
         bb = line.bbox
-        final_text = line.final_text or line.text
-        ocr_text = line.ocr_text or line.text or final_text
-        if not line.text:
-            line.text = ocr_text
-        line.final_text = final_text
-        line.ocr_text = ocr_text
+        line.ensure_text_contract()
         cur = self.conn.execute(
             "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "

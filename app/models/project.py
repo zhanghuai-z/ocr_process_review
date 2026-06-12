@@ -146,6 +146,17 @@ class Line:
         self.final_text = new_text
         self.proof_status = ProofStatus.MODIFIED
 
+    def ensure_text_contract(self, *, fill_original: bool = False) -> None:
+        """Normalize legacy/current text fields before persistence or OCR handoff."""
+        final_text = self.final_text or self.text
+        ocr_text = self.ocr_text or self.text or final_text
+        if not self.text:
+            self.text = ocr_text
+        if fill_original and not self.original_text:
+            self.original_text = ocr_text or self.text or final_text
+        self.final_text = final_text
+        self.ocr_text = ocr_text
+
     @property
     def display_text(self) -> str:
         return self.final_text or self.text or ""

@@ -655,11 +655,28 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert line.display_text == "人工终稿"
         line.text = "直接兼容写入"
         assert line.final_text == "人工终稿"
+        line.ensure_text_contract()
+        assert line.text == "直接兼容写入"
+        assert line.final_text == "人工终稿"
+        assert line.ocr_text == "OCR text"
         line.final_text = "最终真值"
         assert line.text == "直接兼容写入"
         line.final_text = ""
         assert line.display_text == "直接兼容写入"
         line.update_final_text("最终真值")
+
+        line_without_text = Line(
+            text="",
+            ocr_text="OCR补全文本",
+            confidence=0.8,
+            bbox=bb,
+            original_text="",
+        )
+        line_without_text.original_text = ""
+        line_without_text.ensure_text_contract(fill_original=True)
+        assert line_without_text.text == "OCR补全文本"
+        assert line_without_text.ocr_text == "OCR补全文本"
+        assert line_without_text.original_text == "OCR补全文本"
 
         project = OcrProject(
             name="final_text",
