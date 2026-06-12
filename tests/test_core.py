@@ -1947,6 +1947,55 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     print("test_project_to_export_ir_builder_maps_final_text_and_fallbacks PASSED")
 
 
+def test_export_ir_char_source_fallbacks_are_unique_across_lines():
+    from app.export.ir_builder import build_export_ir
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    bb = BBox(1, 2, 30, 10)
+    lines = [
+        Line(
+            text="甲乙",
+            confidence=0.9,
+            bbox=bb,
+            chars=[
+                Char(char="甲", confidence=0.9, bbox=bb),
+                Char(char="乙", confidence=0.9, bbox=bb),
+            ],
+        ),
+        Line(
+            text="丙丁",
+            confidence=0.9,
+            bbox=BBox(1, 20, 30, 10),
+            chars=[
+                Char(char="丙", confidence=0.9, bbox=bb),
+                Char(char="丁", confidence=0.9, bbox=bb),
+            ],
+        ),
+    ]
+    for line in lines:
+        line.uid = ""
+        for char in line.chars:
+            char.uid = ""
+    block = Block(block_type=BlockType.TEXT, bbox=bb, order=0, lines=lines)
+    block.uid = ""
+    project = OcrProject(
+        name="fallback source ids",
+        pages=[Page(image_path="/tmp/page.png", width=100, height=100, blocks=[block])],
+    )
+
+    document = build_export_ir(project, "json")
+    source = document.to_dict()["pages"][0]["elements"][0]["source"]
+    assert source["line_ids"] == [0, 1]
+    assert source["char_ids"] == [
+        "line-0-char-0",
+        "line-0-char-1",
+        "line-1-char-0",
+        "line-1-char-1",
+    ]
+
+    print("test_export_ir_char_source_fallbacks_are_unique_across_lines PASSED")
+
+
 def test_export_ir_preserves_structured_block_attributes():
     from app.export.ir_builder import build_export_ir
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -11129,6 +11178,7 @@ if __name__ == "__main__":
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
+    test_export_ir_char_source_fallbacks_are_unique_across_lines()
     test_export_ir_preserves_structured_block_attributes()
     test_pdf_page_faithful_plans_use_image_and_char_layer()
     test_pdf_dual_textless_page_degrades_without_text_font()

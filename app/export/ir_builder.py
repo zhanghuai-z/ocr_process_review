@@ -256,9 +256,9 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
         block_ids=[_entity_source_id(block, f"p{page.page_number}-block-{block.order}")],
         line_ids=[_entity_source_id(line, idx) for idx, line in enumerate(lines)],
         char_ids=[
-            _entity_source_id(char, idx)
-            for line in lines
-            for idx, char in enumerate(line.chars)
+            _entity_source_id(char, f"line-{line_idx}-char-{char_idx}")
+            for line_idx, line in enumerate(lines)
+            for char_idx, char in enumerate(line.chars)
         ],
         block_type=block.block_type.value,
         source_label=attrs.source_label,
