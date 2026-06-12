@@ -81,6 +81,7 @@ class OcrPipeline:
 
         try:
             for page_idx, page in enumerate(project.pages):
+                self._clear_ocr_error(page)
                 img = cv2.imread(page.display_image_path)
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)
@@ -217,6 +218,13 @@ class OcrPipeline:
             self.close()
 
         return result
+
+    @staticmethod
+    def _clear_ocr_error(page: Page) -> None:
+        """Clear stale OCR-owned errors before retrying OCR on a page."""
+        message = str(page.error_message or "")
+        if message.startswith("OCR "):
+            page.error_message = ""
 
     def _prefers_page_ocr(self) -> bool:
         return bool(getattr(self._engine, "prefer_page_ocr", False))

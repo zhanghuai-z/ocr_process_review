@@ -4313,6 +4313,7 @@ def test_ocr_pipeline():
         bb = BBox(10, 10, 200, 300)
         block = Block(block_type=BlockType.TEXT, bbox=bb)
         page = Page(image_path=img_path, width=600, height=400)
+        page.error_message = "OCR 失败：上一轮失败"
         page.blocks = [block]
         project = OcrProject(name="PipelineTest", pages=[page])
 
@@ -4325,6 +4326,7 @@ def test_ocr_pipeline():
         # fake OCR 应生成了 lines
         assert len(result.pages[0].blocks[0].lines) > 0
         assert result.pages[0].blocks[0].lines[0].text is not None
+        assert result.pages[0].error_message == ""
 
         print("test_ocr_pipeline PASSED")
     finally:
