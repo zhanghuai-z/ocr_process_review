@@ -1555,17 +1555,30 @@ def test_project_store_new_db_records_current_schema_version():
         db_path = f.name
 
     try:
-        with ProjectStore(db_path):
-            pass
+        with ProjectStore(db_path) as store:
+            store.log_operation(
+                project_id=1,
+                action="proof_edit",
+                object_type="line",
+                object_id=7,
+                object_uid="line_test_uid",
+                payload={"field": "final_text"},
+            )
 
         conn = sqlite3.connect(db_path)
         try:
             meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+            operation_cols = conn.execute("PRAGMA table_info(operation_log)").fetchall()
+            log_row = conn.execute(
+                "SELECT object_id, object_uid, action, payload_json FROM operation_log"
+            ).fetchone()
         finally:
             conn.close()
 
         assert int(meta["schema_version"]) == SCHEMA_VERSION
         assert meta["app_version"] == APP_VERSION
+        assert any(col[1] == "object_uid" for col in operation_cols)
+        assert log_row == (7, "line_test_uid", "proof_edit", '{"field": "final_text"}')
 
         print("test_project_store_new_db_records_current_schema_version PASSED")
     finally:
@@ -1649,6 +1662,8 @@ def test_project_store_schema_migration():
         assert any(col[1] == "final_text" for col in final_text_col)
         page_cols = conn2.execute("PRAGMA table_info(page)").fetchall()
         assert any(col[1] == "ocr_invalidated_reason" for col in page_cols)
+        operation_cols = conn2.execute("PRAGMA table_info(operation_log)").fetchall()
+        assert any(col[1] == "object_uid" for col in operation_cols)
         for table in ("page", "block", "line", "char_"):
             cols = conn2.execute(f"PRAGMA table_info({table})").fetchall()
             assert any(col[1] == "uid" for col in cols)

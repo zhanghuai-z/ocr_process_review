@@ -119,6 +119,7 @@ CREATE TABLE IF NOT EXISTS operation_log (
     page_id         INTEGER,
     object_type     TEXT NOT NULL,
     object_id       INTEGER,
+    object_uid      TEXT NOT NULL DEFAULT '',
     action          TEXT NOT NULL,
     payload_json    TEXT NOT NULL DEFAULT '{}',
     created_at      REAL NOT NULL
@@ -187,6 +188,9 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE block ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE line ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE char_ ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
+    ],
+    10: [
+        "ALTER TABLE operation_log ADD COLUMN object_uid TEXT NOT NULL DEFAULT '';",
     ],
 }
 
@@ -1066,13 +1070,14 @@ class ProjectStore:
         action: str,
         object_type: str = "",
         object_id: int | None = None,
+        object_uid: str = "",
         page_id: int | None = None,
         payload: dict | None = None,
     ) -> None:
         self.conn.execute(
             "INSERT INTO operation_log (project_id, page_id, object_type, object_id, "
-            "action, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "object_uid, action, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (project_id, page_id, object_type, object_id,
-             action, json.dumps(payload or {}, ensure_ascii=False), time.time()),
+             object_uid, action, json.dumps(payload or {}, ensure_ascii=False), time.time()),
         )
         self.conn.commit()
