@@ -144,6 +144,34 @@ def test_h_proof_external_handler_refreshes_matching_line():
     h.deleteLater()
 
 
+def test_h_proof_external_handler_matches_line_uid_before_rowid():
+    """line rowid stale 时，横校应优先用稳定 line_uid 同步刷新。"""
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("xy")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    target_line = proj.pages[0].blocks[0].lines[0]
+
+    flags = {"refresh": 0, "stats": 0}
+    for p in h._pairs:
+        orig = p.refresh_text
+        p.refresh_text = lambda *a, _orig=orig, **kw: (flags.__setitem__("refresh", flags["refresh"] + 1), _orig(*a, **kw))[1]  # type: ignore
+    orig_us = h._update_stats
+    h._update_stats = lambda _o=orig_us: (flags.__setitem__("stats", flags["stats"] + 1), _o())[1]  # type: ignore
+
+    h._on_external_line_changed(
+        page_uid=proj.pages[0].uid,
+        page_id=-1,
+        line_uid=target_line.uid,
+        line_id=-1,
+        status="MODIFIED",
+        origin=999,
+    )
+    assert flags["refresh"] >= 1
+    assert flags["stats"] == 1
+    h.deleteLater()
+
+
 def test_v_proof_external_handler_skips_self_origin():
     from app.ui.proof.v_proof import VProofPanel
     proj = _make_project("xy")
@@ -178,6 +206,30 @@ def test_v_proof_external_handler_reloads_current_page_when_line_matches():
     )
     # vproof-direct-overwrite-residual round 11: external refresh is debounced
     # via QTimer now; flush it synchronously to keep the assertion semantics.
+    v._do_external_refresh()
+    assert called["load"] == 1
+    v.deleteLater()
+
+
+def test_v_proof_external_handler_matches_line_uid_before_rowid():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("abc")
+    v = VProofPanel(); v.load_pages(proj.pages)
+
+    called = {"load": 0}
+    orig_load = v._load_page
+    v._load_page = lambda i, _o=orig_load: (called.__setitem__("load", called["load"] + 1), _o(i))[1]  # type: ignore
+
+    page = proj.pages[0]
+    line = page.blocks[0].lines[0]
+    v._on_external_line_changed(
+        page_uid=page.uid,
+        page_id=-1,
+        line_uid=line.uid,
+        line_id=-1,
+        origin=99999,
+    )
     v._do_external_refresh()
     assert called["load"] == 1
     v.deleteLater()

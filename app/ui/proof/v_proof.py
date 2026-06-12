@@ -611,7 +611,7 @@ class VProofPanel(QWidget):
         self._external_refresh_timer.setSingleShot(True)
         self._external_refresh_timer.setInterval(80)
         self._external_refresh_timer.timeout.connect(self._do_external_refresh)
-        self._pending_external_lines: set[int] = set()
+        self._pending_external_lines: set[int | str] = set()
         # vproof-ime-persist-visibility round 12 任务 3+4：本地直输/槽位编辑
         # 之后需要把 _text_edit 落盘到 line.final_text 并重建 _char_svc，
         # 否则切走再回来 / 字索引计数都是旧的。debounce 120ms 合并连续按键。
@@ -2254,6 +2254,8 @@ class VProofPanel(QWidget):
             page_id=page.id,
             line_id=line.id,
             status=status,
+            page_uid=page.uid,
+            line_uid=line.uid,
             origin=id(self),
             selection=ProofSelection.for_line(
                 page=page, block=block, line=line, line_index=line_index, source=source,
@@ -2292,17 +2294,24 @@ class VProofPanel(QWidget):
             return
         if not self._pages:
             return
+        line_uid = request.line_uid or None
         line_id = request.line_id
+        page_uid = request.page_uid or None
         page_id = request.page_id
-        if line_id is None:
+        if line_uid is None and line_id is None:
             return
         cur_page = self._pages[self._current_page_idx]
-        if page_id is not None and cur_page.id != page_id:
+        if page_uid is not None and cur_page.uid != page_uid:
+            return
+        if page_uid is None and page_id is not None and cur_page.id != page_id:
             return
         # 当前页有这一行才入队；不在当前页的事件直接丢，因为切页时会自然刷新
         for _block, line, _li in iter_unique_page_text_lines(cur_page):
-            if line.id == line_id:
-                self._pending_external_lines.add(line_id)
+            if (
+                (line_uid is not None and line.uid == line_uid)
+                or (line_uid is None and line.id == line_id)
+            ):
+                self._pending_external_lines.add(line_uid if line_uid is not None else line_id)
                 self._external_refresh_timer.start()  # 80ms 内的 N 次 publish 合并成 1 次
                 return
 

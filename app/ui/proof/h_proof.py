@@ -1937,6 +1937,8 @@ class HProofPanel(QWidget):
             page_id=page.id,
             line_id=line.id,
             status=status,
+            page_uid=page.uid,
+            line_uid=line.uid,
             origin=id(self),
             selection=ProofSelection.for_line(
                 page=page, block=block, line=line, line_index=line_index, source=source,
@@ -1954,12 +1956,16 @@ class HProofPanel(QWidget):
         request = ProofUpdateRequest.from_legacy(event, **kwargs)
         if request.origin == id(self):
             return
+        line_uid = request.line_uid or None
         line_id = request.line_id
-        if line_id is None:
+        if line_uid is None and line_id is None:
             return
         touched = False
         for i, (block, line, page, _li) in enumerate(self._items):
-            if line.id == line_id:
+            if (
+                (line_uid is not None and line.uid == line_uid)
+                or (line_uid is None and line.id == line_id)
+            ):
                 pair = self._pairs[i]
                 # Phase 25：editor 始终可见 → 直接走 refresh_text 同步显示文本。
                 pair.refresh_text()

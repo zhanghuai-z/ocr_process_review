@@ -8066,11 +8066,22 @@ def test_proof_state_bus_typed_contracts():
     bus.subscribe(TOPIC_LINE_PROOF_CHANGED, lambda **payload: legacy_line_events.append(payload))
     bus.subscribe(TOPIC_PROBE_OBSERVED, probe_events.append)
 
-    selection = ProofSelection(page_number=3, line_id=11, line_index=2, char_index=1, source="test")
+    selection = ProofSelection(
+        page_number=3,
+        page_id=5,
+        page_uid="page_uid_5",
+        line_id=11,
+        line_uid="line_uid_11",
+        line_index=2,
+        char_index=1,
+        source="test",
+    )
     request = ProofUpdateRequest(
         page_id=5,
         line_id=11,
         status="modified",
+        page_uid="page_uid_5",
+        line_uid="line_uid_11",
         origin=123,
         selection=selection,
         source="unit",
@@ -8091,6 +8102,14 @@ def test_proof_state_bus_typed_contracts():
     assert legacy_line_events[0]["status"] == "modified"
     assert ProofUpdateRequest.from_legacy(request) == request
     assert ProofUpdateRequest.from_legacy(request.to_legacy_payload()).line_id == 11
+    assert "line_uid" not in request.to_legacy_payload()
+    assert ProofUpdateRequest.from_legacy({
+        "page_id": 5,
+        "page_uid": "page_uid_5",
+        "line_id": 11,
+        "line_uid": "line_uid_11",
+        "status": "modified",
+    }).line_uid == "line_uid_11"
     assert probe_events == [observation]
     assert ProbeObservation.from_legacy(observation.to_legacy_payload()) == observation
 

@@ -17,8 +17,10 @@ class ProofSelection:
 
     page_number: int
     page_id: Optional[int] = None
+    page_uid: Optional[str] = None
     block_order: Optional[int] = None
     line_id: Optional[int] = None
+    line_uid: Optional[str] = None
     line_index: Optional[int] = None
     char_index: Optional[int] = None
     source: str = ""
@@ -36,8 +38,10 @@ class ProofSelection:
         return cls(
             page_number=int(page.page_number),
             page_id=page.id,
+            page_uid=page.uid,
             block_order=int(block.order),
             line_id=line.id,
+            line_uid=line.uid,
             line_index=int(line_index),
             source=source,
         )
@@ -47,8 +51,10 @@ class ProofSelection:
         line = getattr(entry, "line", None)
         return cls(
             page_number=int(getattr(entry, "page_number", 1)),
+            page_uid=getattr(entry, "page_uid", None),
             block_order=int(getattr(entry, "block_order", 0)),
             line_id=getattr(line, "id", None),
+            line_uid=getattr(line, "uid", None),
             line_index=int(getattr(entry, "line_idx", 0)),
             char_index=int(getattr(entry, "char_idx", 0)),
             source=source,
@@ -105,6 +111,8 @@ class ProofUpdateRequest:
     page_id: Optional[int]
     line_id: Optional[int]
     status: str
+    page_uid: Optional[str] = None
+    line_uid: Optional[str] = None
     origin: Optional[int] = None
     selection: Optional[ProofSelection] = None
     source: str = ""
@@ -121,6 +129,8 @@ class ProofUpdateRequest:
             page_id=data.get("page_id"),
             line_id=data.get("line_id"),
             status=str(data.get("status", "")),
+            page_uid=data.get("page_uid"),
+            line_uid=data.get("line_uid"),
             origin=data.get("origin"),
             selection=data.get("selection"),
             source=str(data.get("source", "")),
