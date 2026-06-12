@@ -743,7 +743,7 @@ class WorkflowController(QObject):
             else [page for page in pages if page.page_number in target_page_numbers]
         )
         for page in processed_pages:
-            if page.error_message and page.total_lines == 0:
+            if page.error_message:
                 page.status = PageStatus.ERROR
             else:
                 page.status = PageStatus.OCR_DONE
@@ -758,7 +758,7 @@ class WorkflowController(QObject):
         self.ocr_finished.emit(pages)
         failed_pages = [
             page for page in pages
-            if page.error_message and page.total_lines == 0
+            if page.error_message
         ]
         self.status_message.emit(
             f"{self._ocr_status_label()}完成，自动标记 {flagged} 行低置信度内容；"

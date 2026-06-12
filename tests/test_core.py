@@ -7950,6 +7950,34 @@ def test_workflow_controller_ocr_done_does_not_force_hproof_step():
     print("test_workflow_controller_ocr_done_does_not_force_hproof_step PASSED")
 
 
+def test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core.workflow_state import page_gate_info
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    page = Page(image_path="/tmp/partial-error.png", width=120, height=80)
+    page.blocks = [
+        Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 0, 100, 40),
+            lines=[Line(text="预识别", confidence=0.95, bbox=BBox(1, 2, 40, 16))],
+        )
+    ]
+    page.error_message = "OCR 失败：micro-recblock failed"
+    controller = WorkflowController()
+    controller._project = OcrProject(name="PartialError", pages=[page])
+
+    controller.on_ocr_done([page])
+
+    assert page.total_lines == 1
+    assert page.status == PageStatus.ERROR
+    gate = page_gate_info(page)
+    assert gate.page_state == "error"
+    assert gate.action_enabled is False
+
+    print("test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines PASSED")
+
+
 def test_main_window_ocr_finished_preserves_current_step():
     from app.controllers.workflow_controller import STEP_HPROOF, STEP_LAYOUT, STEP_OCR
     from app.services.ocr_pipeline import OcrProgress
