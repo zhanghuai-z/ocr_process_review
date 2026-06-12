@@ -150,6 +150,24 @@ class ProofUpdateRequest:
         return payload
 
 
+def proof_request_matches_page(request: ProofUpdateRequest, page: Page) -> bool:
+    """Return whether a proof event targets the given page."""
+    page_uid = request.page_uid or None
+    if page_uid is not None:
+        return page.uid == page_uid
+    page_id = request.page_id
+    return page_id is None or page.id == page_id
+
+
+def proof_request_matches_line(request: ProofUpdateRequest, line: Line) -> bool:
+    """Return whether a proof event targets the given line, preferring stable UID."""
+    line_uid = request.line_uid or None
+    if line_uid is not None:
+        return line.uid == line_uid
+    line_id = request.line_id
+    return line_id is not None and line.id == line_id
+
+
 @dataclass(frozen=True)
 class CandidateOption:
     text: str

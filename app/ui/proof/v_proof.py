@@ -48,6 +48,8 @@ from app.core.proof_state import (
     CandidateSet,
     ProofSelection,
     ProofUpdateRequest,
+    proof_request_matches_line,
+    proof_request_matches_page,
 )
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
@@ -2295,23 +2297,16 @@ class VProofPanel(QWidget):
         if not self._pages:
             return
         line_uid = request.line_uid or None
-        line_id = request.line_id
-        page_uid = request.page_uid or None
-        page_id = request.page_id
-        if line_uid is None and line_id is None:
+        if line_uid is None and request.line_id is None:
             return
         cur_page = self._pages[self._current_page_idx]
-        if page_uid is not None and cur_page.uid != page_uid:
-            return
-        if page_uid is None and page_id is not None and cur_page.id != page_id:
+        if not proof_request_matches_page(request, cur_page):
             return
         # 当前页有这一行才入队；不在当前页的事件直接丢，因为切页时会自然刷新
         for _block, line, _li in iter_unique_page_text_lines(cur_page):
-            if (
-                (line_uid is not None and line.uid == line_uid)
-                or (line_uid is None and line.id == line_id)
-            ):
-                self._pending_external_lines.add(line_uid if line_uid is not None else line_id)
+            if proof_request_matches_line(request, line):
+                line_key = line_uid if line_uid is not None else request.line_id
+                self._pending_external_lines.add(line_key)
                 self._external_refresh_timer.start()  # 80ms 内的 N 次 publish 合并成 1 次
                 return
 

@@ -50,6 +50,7 @@ from app.core.proof_state import (
     ProofLineViewModel,
     ProofSelection,
     ProofUpdateRequest,
+    proof_request_matches_line,
 )
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
@@ -1956,16 +1957,11 @@ class HProofPanel(QWidget):
         request = ProofUpdateRequest.from_legacy(event, **kwargs)
         if request.origin == id(self):
             return
-        line_uid = request.line_uid or None
-        line_id = request.line_id
-        if line_uid is None and line_id is None:
+        if (request.line_uid or None) is None and request.line_id is None:
             return
         touched = False
         for i, (block, line, page, _li) in enumerate(self._items):
-            if (
-                (line_uid is not None and line.uid == line_uid)
-                or (line_uid is None and line.id == line_id)
-            ):
+            if proof_request_matches_line(request, line):
                 pair = self._pairs[i]
                 # Phase 25：editor 始终可见 → 直接走 refresh_text 同步显示文本。
                 pair.refresh_text()

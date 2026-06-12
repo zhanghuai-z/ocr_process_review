@@ -136,6 +136,7 @@ def test_h_proof_external_handler_refreshes_matching_line():
     h._on_external_line_changed(
         page_id=proj.pages[0].id,
         line_id=target_line.id,
+        line_uid="",
         status="MODIFIED",
         origin=999,  # 假装别人发的
     )
@@ -202,6 +203,7 @@ def test_v_proof_external_handler_reloads_current_page_when_line_matches():
     v._on_external_line_changed(
         page_id=proj.pages[0].id,
         line_id=proj.pages[0].blocks[0].lines[0].id,
+        line_uid="",
         origin=99999,
     )
     # vproof-direct-overwrite-residual round 11: external refresh is debounced

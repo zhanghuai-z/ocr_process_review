@@ -8181,8 +8181,11 @@ def test_proof_state_bus_typed_contracts():
         ProbeObservation,
         ProofSelection,
         ProofUpdateRequest,
+        proof_request_matches_line,
+        proof_request_matches_page,
     )
     from app.core.proof_state_bus import get_proof_state_bus
+    from app.models import BBox, Line, Page
 
     bus = get_proof_state_bus()
     bus.clear()
@@ -8239,6 +8242,34 @@ def test_proof_state_bus_typed_contracts():
         "line_uid": "line_uid_11",
         "status": "modified",
     }).line_uid == "line_uid_11"
+    page = Page(image_path="/tmp/page.png", width=100, height=100)
+    page.id = 5
+    page.uid = "page_uid_5"
+    line = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+    line.id = 11
+    line.uid = "line_uid_11"
+    assert proof_request_matches_page(request, page)
+    assert proof_request_matches_line(request, line)
+    assert proof_request_matches_page(
+        ProofUpdateRequest(page_id=-1, page_uid="page_uid_5", line_id=11, status="modified"),
+        page,
+    )
+    assert not proof_request_matches_page(
+        ProofUpdateRequest(page_id=5, page_uid="other_page", line_id=11, status="modified"),
+        page,
+    )
+    assert proof_request_matches_line(
+        ProofUpdateRequest(page_id=5, line_id=-1, line_uid="line_uid_11", status="modified"),
+        line,
+    )
+    assert proof_request_matches_line(
+        ProofUpdateRequest(page_id=5, line_id=11, line_uid="", status="modified"),
+        line,
+    )
+    assert not proof_request_matches_line(
+        ProofUpdateRequest(page_id=5, line_id=11, line_uid="other_line", status="modified"),
+        line,
+    )
     assert probe_events == [observation]
     assert ProbeObservation.from_legacy(observation.to_legacy_payload()) == observation
 
