@@ -94,6 +94,24 @@ def test_block_eligibility_excludes_specific_types():
     assert is_block_eligible(_block(BlockType.TEXT, [line]))
 
 
+def test_block_eligibility_uses_dispatch_policy_for_source_labels():
+    line = _line("这是一段足够长的正文用来测试可投放性")
+    formula_like = _block(BlockType.TEXT, [line])
+    formula_like.source_label = "inline_formula"
+
+    table_like = _block(BlockType.TEXT, [line])
+    table_like.app_payload = {
+        "paddle_binding": {
+            "source_label": "table",
+            "block_type": "table",
+        }
+    }
+
+    assert not is_block_eligible(formula_like)
+    assert not is_block_eligible(table_like)
+    assert is_block_eligible(_block(BlockType.TEXT, [line]))
+
+
 def test_line_eligibility_rejects_short_digit_math_lines():
     assert not is_line_eligible(_line("太短"))
     assert not is_line_eligible(_line("12345678901234"))

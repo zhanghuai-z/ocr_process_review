@@ -46,6 +46,7 @@ import random
 from dataclasses import dataclass, field, asdict
 from typing import Iterable, Optional
 
+from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
 from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
@@ -186,9 +187,9 @@ LINE_EDGE_GUARD = 1
 
 
 def is_block_eligible(block: Block) -> bool:
-    if block.block_type in EXCLUDED_BLOCK_TYPES:
+    if not should_dispatch_to_text_ocr(block):
         return False
-    if not block.recognizable:
+    if block.block_type in EXCLUDED_BLOCK_TYPES:
         return False
     if not block.lines:
         return False
