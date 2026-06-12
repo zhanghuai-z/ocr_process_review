@@ -387,6 +387,17 @@ class ProjectStore:
             (uid, parent_id),
         ).fetchone()
 
+    def _row_by_uid(
+        self,
+        cur: sqlite3.Cursor,
+        table: str,
+        uid: str,
+    ) -> sqlite3.Row | None:
+        return cur.execute(
+            f"SELECT id, uid FROM {table} WHERE uid=?",
+            (uid,),
+        ).fetchone()
+
     def _uid_exists(self, cur: sqlite3.Cursor, table: str, uid: str) -> bool:
         return cur.execute(
             f"SELECT 1 FROM {table} WHERE uid=? LIMIT 1",
@@ -463,6 +474,22 @@ class ProjectStore:
             setattr(obj, "uid", uid_row["uid"])
             return
 
+        global_uid_row = self._row_by_uid(cur, table, uid)
+        if global_uid_row is not None:
+            if id_row is not None and id_row["id"] != global_uid_row["id"]:
+                logger.warning(
+                    "Stable uid moved across parent and ignored stale rowid: "
+                    "table=%s parent=%s:%s rowid=%s uid=%s",
+                    table,
+                    parent_col,
+                    parent_id,
+                    object_id,
+                    uid,
+                )
+            setattr(obj, "id", global_uid_row["id"])
+            setattr(obj, "uid", global_uid_row["uid"])
+            return
+
         if id_row is not None:
             db_uid = str(id_row["uid"] or "").strip()
             if uid_was_missing or db_uid == uid:
@@ -517,16 +544,21 @@ class ProjectStore:
                 ).fetchall()
             ]
 
-            seen_page_uids: set[str] = set()
+            save_seen_uids: dict[str, set[str]] = {
+                "page": set(),
+                "block": set(),
+                "line": set(),
+                "char": set(),
+            }
             for page in project.pages:
                 self._ensure_unique_child_uid(
                     cur,
                     page,
                     kind="page",
                     table="page",
-                    seen_uids=seen_page_uids,
+                    seen_uids=save_seen_uids["page"],
                 )
-                self._save_page(cur, page, project.id)
+                self._save_page(cur, page, project.id, save_seen_uids=save_seen_uids)
 
             # 删除已移除的 page（级联删除 block/line/char）
             saved_page_ids = {p.id for p in project.pages if p.id is not None}
@@ -543,7 +575,14 @@ class ProjectStore:
             logger.error("Save project failed: %s", e)
             raise
 
-    def _save_page(self, cur: sqlite3.Cursor, page: Page, project_id: int) -> None:
+    def _save_page(
+        self,
+        cur: sqlite3.Cursor,
+        page: Page,
+        project_id: int,
+        *,
+        save_seen_uids: dict[str, set[str]],
+    ) -> None:
         self._prepare_entity_identity(
             cur,
             page,
@@ -573,19 +612,19 @@ class ProjectStore:
                 "source_path=?, source_type=?, source_page_index=?, "
                 "cache_image_path=?, thumbnail_path=?, status=?, error_message=?, "
                 "ocr_invalidated_reason=?, "
-                "ppvl_parsing_res_list_json=? "
-                "WHERE id=? AND project_id=?",
+                "ppvl_parsing_res_list_json=?, project_id=? "
+                "WHERE id=? AND uid=?",
                 (page.image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
                  page.cache_image_path, page.thumbnail_path, page.status.value,
                  page.error_message,
                  page.ocr_invalidated_reason,
                  json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False),
-                 page.id, project_id),
+                 project_id, page.id, page.uid),
             )
             if cur.rowcount != 1:
                 page.id = None
-                self._save_page(cur, page, project_id)
+                self._save_page(cur, page, project_id, save_seen_uids=save_seen_uids)
                 return
 
         old_block_ids = {
@@ -594,23 +633,29 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        seen_block_uids: set[str] = set()
         for block in page.blocks:
             self._ensure_unique_child_uid(
                 cur,
                 block,
                 kind="block",
                 table="block",
-                seen_uids=seen_block_uids,
+                seen_uids=save_seen_uids["block"],
             )
-            self._save_block(cur, block, page.id)
+            self._save_block(cur, block, page.id, save_seen_uids=save_seen_uids)
             if block.id is not None:
                 saved_block_ids.add(block.id)
 
         for old_id in old_block_ids - saved_block_ids:
             cur.execute("DELETE FROM block WHERE id=?", (old_id,))
 
-    def _save_block(self, cur: sqlite3.Cursor, block: Block, page_id: int) -> None:
+    def _save_block(
+        self,
+        cur: sqlite3.Cursor,
+        block: Block,
+        page_id: int,
+        *,
+        save_seen_uids: dict[str, set[str]],
+    ) -> None:
         self._prepare_entity_identity(
             cur,
             block,
@@ -641,12 +686,12 @@ class ProjectStore:
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, is_locked=?, recognizable=?, note=?, "
                 "source_label=?, raw_payload_json=?, app_payload_json=? "
-                "WHERE id=? AND page_id=?",
-                (*values, block.id, page_id),
+                "WHERE id=? AND uid=?",
+                (*values, block.id, block.uid),
             )
             if cur.rowcount != 1:
                 block.id = None
-                self._save_block(cur, block, page_id)
+                self._save_block(cur, block, page_id, save_seen_uids=save_seen_uids)
                 return
 
         old_line_ids = {
@@ -655,23 +700,29 @@ class ProjectStore:
             ).fetchall()
         }
         saved_line_ids: set[int] = set()
-        seen_line_uids: set[str] = set()
         for line in block.lines:
             self._ensure_unique_child_uid(
                 cur,
                 line,
                 kind="line",
                 table="line",
-                seen_uids=seen_line_uids,
+                seen_uids=save_seen_uids["line"],
             )
-            self._save_line(cur, line, block.id)
+            self._save_line(cur, line, block.id, save_seen_uids=save_seen_uids)
             if line.id is not None:
                 saved_line_ids.add(line.id)
 
         for old_id in old_line_ids - saved_line_ids:
             cur.execute("DELETE FROM line WHERE id=?", (old_id,))
 
-    def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
+    def _save_line(
+        self,
+        cur: sqlite3.Cursor,
+        line: Line,
+        block_id: int,
+        *,
+        save_seen_uids: dict[str, set[str]],
+    ) -> None:
         self._prepare_entity_identity(
             cur,
             line,
@@ -708,12 +759,12 @@ class ProjectStore:
                 "UPDATE line SET block_id=?, text=?, final_text=?, original_text=?, "
                 "confidence=?, proof_status=?, x=?, y=?, w=?, h=?, ocr_text=?, "
                 "llm_suggestion=?, llm_reason=?, llm_review_status=?, review_flags_json=? "
-                "WHERE id=? AND block_id=?",
-                (*values, line.id, block_id),
+                "WHERE id=? AND uid=?",
+                (*values, line.id, line.uid),
             )
             if cur.rowcount != 1:
                 line.id = None
-                self._save_line(cur, line, block_id)
+                self._save_line(cur, line, block_id, save_seen_uids=save_seen_uids)
                 return
 
         old_char_ids = {
@@ -722,14 +773,13 @@ class ProjectStore:
             ).fetchall()
         }
         saved_char_ids: set[int] = set()
-        seen_char_uids: set[str] = set()
         for char in line.chars:
             self._ensure_unique_child_uid(
                 cur,
                 char,
                 kind="char",
                 table="char_",
-                seen_uids=seen_char_uids,
+                seen_uids=save_seen_uids["char"],
             )
             self._save_char(cur, char, line.id)
             if char.id is not None:
@@ -772,8 +822,8 @@ class ProjectStore:
         else:
             cur.execute(
                 "UPDATE char_ SET line_id=?, char=?, confidence=?, x=?, y=?, w=?, h=?, "
-                "bbox_source=?, bbox_granularity=?, token_text=? WHERE id=? AND line_id=?",
-                (*values, char.id, line_id),
+                "bbox_source=?, bbox_granularity=?, token_text=? WHERE id=? AND uid=?",
+                (*values, char.id, char.uid),
             )
             if cur.rowcount != 1:
                 char.id = None

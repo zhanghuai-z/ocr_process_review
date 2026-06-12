@@ -1000,6 +1000,135 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
     print("test_project_store_duplicate_sibling_uids_are_reminted PASSED")
 
 
+def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    def make_project() -> tuple[OcrProject, dict[str, str]]:
+        bb = BBox(0, 0, 100, 20)
+        moved_block_line = Line(text="跨页块", confidence=0.9, bbox=bb)
+        moved_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=bb,
+            lines=[moved_block_line],
+            order=0,
+        )
+        source_line = Line(
+            text="跨块行",
+            confidence=0.9,
+            bbox=BBox(0, 30, 100, 20),
+            chars=[Char(char="行", confidence=0.9, bbox=BBox(0, 30, 10, 10))],
+        )
+        line_source_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 30, 100, 20),
+            lines=[source_line],
+            order=1,
+        )
+        line_target_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 60, 100, 20),
+            lines=[],
+            order=2,
+        )
+        char_source_line = Line(
+            text="源",
+            confidence=0.9,
+            bbox=BBox(0, 90, 100, 20),
+            chars=[Char(char="源", confidence=0.9, bbox=BBox(0, 90, 10, 10))],
+        )
+        char_target_line = Line(
+            text="目标",
+            confidence=0.9,
+            bbox=BBox(0, 120, 100, 20),
+            chars=[],
+        )
+        char_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(0, 90, 100, 50),
+            lines=[char_source_line, char_target_line],
+            order=3,
+        )
+        page1 = Page(
+            image_path="/tmp/p1.jpg",
+            width=800,
+            height=600,
+            page_number=1,
+            blocks=[moved_block, line_source_block, line_target_block, char_block],
+        )
+        page2 = Page(
+            image_path="/tmp/p2.jpg",
+            width=800,
+            height=600,
+            page_number=2,
+            blocks=[],
+        )
+        project = OcrProject(name="cross parent moves", pages=[page1, page2])
+        uids = {
+            "block": moved_block.uid,
+            "line": source_line.uid,
+            "char": char_source_line.chars[0].uid,
+            "line_target_block": line_target_block.uid,
+            "char_target_line": char_target_line.uid,
+        }
+        return project, uids
+
+    def exercise(page_order: str, block_order: str) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+            db_path = f.name
+        try:
+            project, uids = make_project()
+            with ProjectStore(db_path) as store:
+                store.save_project(project)
+                page1, page2 = project.pages
+                moved_block = next(block for block in page1.blocks if block.uid == uids["block"])
+                line_source_block = next(block for block in page1.blocks if block.order == 1)
+                line_target_block = next(block for block in page1.blocks if block.uid == uids["line_target_block"])
+                char_block = next(block for block in page1.blocks if block.order == 3)
+                source_line = line_source_block.lines.pop(0)
+                char_source_line = char_block.lines[0]
+                char_target_line = next(line for line in char_block.lines if line.uid == uids["char_target_line"])
+                moved_char = char_source_line.chars.pop(0)
+
+                page1.blocks.remove(moved_block)
+                page2.blocks.append(moved_block)
+                line_target_block.lines.append(source_line)
+                char_target_line.chars.append(moved_char)
+
+                if block_order == "new_parent_first":
+                    page1.blocks.remove(line_target_block)
+                    page1.blocks.insert(0, line_target_block)
+                    char_block.lines = [char_target_line, char_source_line]
+                else:
+                    char_block.lines = [char_source_line, char_target_line]
+                if page_order == "new_parent_first":
+                    project.pages = [page2, page1]
+                else:
+                    project.pages = [page1, page2]
+
+                store.save_project(project)
+                loaded = store.load_project(project_id=project.id)
+
+            loaded_pages = {page.page_number: page for page in loaded.pages}
+            assert any(block.uid == uids["block"] for block in loaded_pages[2].blocks)
+            assert all(block.uid != uids["block"] for block in loaded_pages[1].blocks)
+
+            loaded_blocks = [block for page in loaded.pages for block in page.blocks]
+            loaded_line_target = next(block for block in loaded_blocks if block.uid == uids["line_target_block"])
+            assert [line.uid for line in loaded_line_target.lines] == [uids["line"]]
+
+            loaded_lines = [line for block in loaded_blocks for line in block.lines]
+            loaded_char_target = next(line for line in loaded_lines if line.uid == uids["char_target_line"])
+            assert [char.uid for char in loaded_char_target.chars] == [uids["char"]]
+        finally:
+            os.unlink(db_path)
+
+    exercise("old_parent_first", "old_parent_first")
+    exercise("new_parent_first", "new_parent_first")
+
+    print("test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order PASSED")
+
+
 def test_project_store_persists_page_ocr_invalidation_reason():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
     from app.core.project_store import ProjectStore
@@ -10729,6 +10858,7 @@ if __name__ == "__main__":
     test_project_store_upsert_rejects_foreign_parent_rowids()
     test_project_store_uid_recovers_same_parent_stale_rowid()
     test_project_store_duplicate_sibling_uids_are_reminted()
+    test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order()
     test_project_store_persists_page_ocr_invalidation_reason()
     test_project_store_update_lines_rolls_back_as_single_transaction()
     test_project_store_new_db_records_current_schema_version()
