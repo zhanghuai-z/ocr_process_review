@@ -57,7 +57,7 @@ def compute_max_step(project: OcrProject | None) -> int:
         return STEP_IMPORT
 
     has_blocks = any(page.is_analyzed for page in project.pages)
-    if project.has_any_ocr_result:
+    if project.has_any_ocr_done_page:
         return STEP_VPROOF
     if has_blocks:
         return STEP_OCR
@@ -86,7 +86,7 @@ def page_gate_info(page: Page) -> PageGateInfo:
             action_label="重新进入 OCR",
             action_enabled=True,
         )
-    if page.has_ocr_result or page.is_ocr_done:
+    if page.is_ocr_done:
         return PageGateInfo(
             page_state="ocr_complete",
             is_pending=False,

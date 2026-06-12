@@ -950,6 +950,7 @@ class ProjectStore:
                 ppvl_parsing_res_list=_json_to_list(pr["ppvl_parsing_res_list_json"]),
             )
             page.blocks = self._load_blocks(page.id)
+            page.reconcile_ocr_done_from_result()
             project.pages.append(page)
 
         return project

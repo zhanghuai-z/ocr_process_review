@@ -130,6 +130,8 @@ def test_models():
     page.status = PageStatus.OCR_DONE
     assert page.has_ocr_result is True
     assert page.is_ocr_done is True
+    page.status = PageStatus.PROOFING
+    assert page.is_ocr_done is True
     assert project.all_pages_ocr_done is True
     page.invalidate_ocr("block_moved")
     assert page.needs_ocr_rerun is True
@@ -149,6 +151,7 @@ def test_models():
 
 def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     from app.core.workflow_state import (
+        STEP_OCR,
         STEP_VPROOF,
         compute_max_step,
         page_gate_info,
@@ -184,6 +187,24 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     assert page_gate_info(done_page).is_pending is False
     assert page_gate_info(pending_page).page_state == "ocr_ready"
     assert pending_ocr_pages(project) == [pending_page]
+
+    lines_without_done_status = Page(
+        image_path="/tmp/legacy-ish.png",
+        width=100,
+        height=100,
+        status=PageStatus.LAYOUT_DONE,
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(0, 0, 80, 20),
+                lines=[Line(text="有行但状态未完成", confidence=0.9, bbox=BBox(0, 0, 80, 20))],
+            )
+        ],
+    )
+    assert lines_without_done_status.has_ocr_result is True
+    assert lines_without_done_status.is_ocr_done is False
+    assert compute_max_step(OcrProject(name="lines-only", pages=[lines_without_done_status])) == STEP_OCR
+    assert page_gate_info(lines_without_done_status).page_state == "ocr_ready"
 
     pending_page.invalidate_ocr("block_moved")
     invalidated = page_gate_info(pending_page)
@@ -1250,10 +1271,52 @@ def test_project_store_persists_page_ocr_invalidation_reason():
 
         assert loaded.pages[0].ocr_invalidated_reason == "block_type_changed"
         assert loaded.pages[0].needs_ocr_rerun is True
+        assert loaded.pages[0].status == PageStatus.LAYOUT_DONE
     finally:
         os.unlink(db_path)
 
     print("test_project_store_persists_page_ocr_invalidation_reason PASSED")
+
+
+def test_project_store_reconciles_legacy_ocr_status_from_lines():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        project = OcrProject(
+            name="legacy status",
+            pages=[
+                Page(
+                    image_path="/tmp/img.jpg",
+                    width=800,
+                    height=600,
+                    status=PageStatus.LAYOUT_DONE,
+                    blocks=[
+                        Block(
+                            block_type=BlockType.TEXT,
+                            bbox=bb,
+                            lines=[Line(text="旧 OCR", confidence=0.9, bbox=bb)],
+                        )
+                    ],
+                )
+            ],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+
+        assert loaded.pages[0].has_ocr_result is True
+        assert loaded.pages[0].status == PageStatus.OCR_DONE
+        assert loaded.pages[0].is_ocr_done is True
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_reconciles_legacy_ocr_status_from_lines PASSED")
 
 
 def test_project_store_update_lines_rolls_back_as_single_transaction():
@@ -7016,12 +7079,18 @@ def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
 def test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page():
     import app.controllers.workflow_controller as workflow_module
     from app.controllers.workflow_controller import STEP_LAYOUT
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
     original_get_config = workflow_module.get_config
     workflow_module.get_config = lambda: {"mode": "hanwang"}
     try:
-        page_done = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
+        page_done = Page(
+            image_path="/tmp/p1.png",
+            width=100,
+            height=100,
+            page_number=1,
+            status=PageStatus.OCR_DONE,
+        )
         page_done.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
             Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
         ])]
@@ -10063,7 +10132,7 @@ def test_workflow_controller_marks_partial_layout_failures_without_blocking_succ
 
 def test_workflow_controller_enables_proof_steps_after_first_ocr_page():
     from app.controllers.workflow_controller import STEP_OCR, STEP_VPROOF, WorkflowController
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
     from app.services.ocr_pipeline import OcrProgress
 
     page1 = Page(image_path="/tmp/ocr-page-1.png", width=100, height=100, page_number=1)
@@ -10087,6 +10156,7 @@ def test_workflow_controller_enables_proof_steps_after_first_ocr_page():
 
     assert enabled[-1] == STEP_VPROOF
     assert controller.can_enter_step(STEP_VPROOF)
+    assert page1.status == PageStatus.OCR_DONE
 
     print("test_workflow_controller_enables_proof_steps_after_first_ocr_page PASSED")
 
@@ -10951,6 +11021,7 @@ if __name__ == "__main__":
     test_project_store_duplicate_sibling_uids_are_reminted()
     test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order()
     test_project_store_persists_page_ocr_invalidation_reason()
+    test_project_store_reconciles_legacy_ocr_status_from_lines()
     test_project_store_update_lines_rolls_back_as_single_transaction()
     test_project_store_new_db_records_current_schema_version()
     test_project_store_schema_migration()

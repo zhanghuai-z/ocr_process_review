@@ -965,7 +965,10 @@ class WorkflowController(QObject):
         self.on_ocr_done(layout_pages)
 
     def _on_ocr_progress(self, progress: OcrProgress) -> None:
-        if self._project and self._project.has_any_ocr_result:
+        if self._project:
+            for page in self._project.pages:
+                page.reconcile_ocr_done_from_result()
+        if self._project and self._project.has_any_ocr_done_page:
             if self._max_step < STEP_VPROOF:
                 self._update_max_step()
         self.progress_state_changed.emit(WorkflowProgressState(

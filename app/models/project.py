@@ -9,6 +9,14 @@ from .enums import (
 from .entity_id import ensure_entity_uid
 
 
+OCR_AVAILABLE_PAGE_STATUSES = {
+    PageStatus.OCR_DONE,
+    PageStatus.PRE_REVIEW_DONE,
+    PageStatus.PROOFING,
+    PageStatus.PROOF_DONE,
+}
+
+
 @dataclass
 class BBox:
     """像素坐标包围盒（左上角原点）。"""
@@ -252,8 +260,8 @@ class Page:
 
     @property
     def is_ocr_done(self) -> bool:
-        """当前页是否处于 OCR 完成状态。"""
-        return self.status == PageStatus.OCR_DONE
+        """当前页是否已通过 OCR 阶段，可进入或继续校对。"""
+        return self.status in OCR_AVAILABLE_PAGE_STATUSES
 
     @property
     def needs_ocr_rerun(self) -> bool:
@@ -265,6 +273,16 @@ class Page:
 
     def clear_ocr_invalidation(self) -> None:
         self.ocr_invalidated_reason = ""
+
+    def reconcile_ocr_done_from_result(self) -> None:
+        """Promote legacy/progress-loaded OCR content into explicit page state."""
+        if (
+            self.has_ocr_result
+            and not self.is_ocr_done
+            and not self.needs_ocr_rerun
+            and not self.error_message
+        ):
+            self.status = PageStatus.OCR_DONE
 
     @property
     def proofed_lines(self) -> int:
@@ -317,6 +335,10 @@ class OcrProject:
     @property
     def all_pages_ocr_done(self) -> bool:
         return bool(self.pages) and all(p.is_ocr_done for p in self.pages)
+
+    @property
+    def has_any_ocr_done_page(self) -> bool:
+        return any(p.is_ocr_done for p in self.pages)
 
     @property
     def has_pending_ocr_pages(self) -> bool:
