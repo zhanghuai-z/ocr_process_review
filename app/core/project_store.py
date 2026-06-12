@@ -18,6 +18,7 @@ from app.models import (
     BBox, Block, BlockSource, BlockType, Char, Line,
     LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
 )
+from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
 from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS project (
 
 CREATE TABLE IF NOT EXISTS page (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid             TEXT    NOT NULL DEFAULT '',
     project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
     image_path      TEXT    NOT NULL,
     width           INTEGER NOT NULL,
@@ -56,6 +58,7 @@ CREATE TABLE IF NOT EXISTS page (
 
 CREATE TABLE IF NOT EXISTS block (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid             TEXT    NOT NULL DEFAULT '',
     page_id         INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
     block_type      TEXT    NOT NULL,
     x INTEGER NOT NULL, y INTEGER NOT NULL,
@@ -72,6 +75,7 @@ CREATE TABLE IF NOT EXISTS block (
 
 CREATE TABLE IF NOT EXISTS line (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid               TEXT    NOT NULL DEFAULT '',
     block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
     text              TEXT    NOT NULL DEFAULT '',
     final_text        TEXT    NOT NULL DEFAULT '',
@@ -89,6 +93,7 @@ CREATE TABLE IF NOT EXISTS line (
 
 CREATE TABLE IF NOT EXISTS char_ (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid         TEXT    NOT NULL DEFAULT '',
     line_id     INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,
     char        TEXT    NOT NULL,
     confidence  REAL    NOT NULL DEFAULT 0.0,
@@ -177,6 +182,12 @@ MIGRATIONS: dict[int, list[str]] = {
     8: [
         "ALTER TABLE block ADD COLUMN app_payload_json TEXT NOT NULL DEFAULT '{}';",
     ],
+    9: [
+        "ALTER TABLE page ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE block ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE line ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
+        "ALTER TABLE char_ ADD COLUMN uid TEXT NOT NULL DEFAULT '';",
+    ],
 }
 
 
@@ -219,6 +230,21 @@ def _json_to_dict(s: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+_ENTITY_UID_TABLES = (
+    ("page", "page", "idx_page_uid"),
+    ("block", "block", "idx_block_uid"),
+    ("line", "line", "idx_line_uid"),
+    ("char_", "char", "idx_char_uid"),
+)
+
+
+def _new_unique_uid(kind: str, seen: set[str]) -> str:
+    while True:
+        uid = new_entity_uid(kind)
+        if uid not in seen:
+            return uid
+
+
 # ---------------------------------------------------------------- store class
 
 class ProjectStore:
@@ -239,6 +265,7 @@ class ProjectStore:
         self._conn.commit()
         self._ensure_meta(schema_version=SCHEMA_VERSION if is_new_database else 1)
         self._migrate()
+        self._ensure_entity_uids()
 
     def _ensure_meta(self, *, schema_version: int) -> None:
         """确保 meta 表和版本记录存在。"""
@@ -295,6 +322,27 @@ class ProjectStore:
                     logger.error("Migration to v%d failed: %s", ver, e)
                     raise
 
+    def _ensure_entity_uids(self) -> None:
+        """Backfill stable business IDs and enforce per-entity uniqueness."""
+        for table, kind, index_name in _ENTITY_UID_TABLES:
+            rows = self.conn.execute(
+                f"SELECT id, uid FROM {table} ORDER BY id"
+            ).fetchall()
+            seen: set[str] = set()
+            for row in rows:
+                uid = str(row["uid"] or "").strip()
+                if not uid or uid in seen:
+                    uid = _new_unique_uid(kind, seen)
+                    self.conn.execute(
+                        f"UPDATE {table} SET uid=? WHERE id=?",
+                        (uid, row["id"]),
+                    )
+                seen.add(uid)
+            self.conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table}(uid)"
+            )
+        self.conn.commit()
+
     def close(self) -> None:
         if self._conn:
             self._conn.close()
@@ -312,6 +360,74 @@ class ProjectStore:
         if self._conn is None:
             raise RuntimeError("ProjectStore is not open. Call open() first.")
         return self._conn
+
+    def _row_by_id_and_parent(
+        self,
+        cur: sqlite3.Cursor,
+        table: str,
+        object_id: int,
+        parent_col: str,
+        parent_id: int,
+    ) -> sqlite3.Row | None:
+        return cur.execute(
+            f"SELECT id, uid FROM {table} WHERE id=? AND {parent_col}=?",
+            (object_id, parent_id),
+        ).fetchone()
+
+    def _row_by_uid_and_parent(
+        self,
+        cur: sqlite3.Cursor,
+        table: str,
+        uid: str,
+        parent_col: str,
+        parent_id: int,
+    ) -> sqlite3.Row | None:
+        return cur.execute(
+            f"SELECT id, uid FROM {table} WHERE uid=? AND {parent_col}=?",
+            (uid, parent_id),
+        ).fetchone()
+
+    def _uid_exists(self, cur: sqlite3.Cursor, table: str, uid: str) -> bool:
+        return cur.execute(
+            f"SELECT 1 FROM {table} WHERE uid=? LIMIT 1",
+            (uid,),
+        ).fetchone() is not None
+
+    def _fresh_db_uid(self, cur: sqlite3.Cursor, table: str, kind: str) -> str:
+        while True:
+            uid = new_entity_uid(kind)
+            if not self._uid_exists(cur, table, uid):
+                return uid
+
+    def _prepare_entity_identity(
+        self,
+        cur: sqlite3.Cursor,
+        obj: object,
+        *,
+        kind: str,
+        table: str,
+        parent_col: str,
+        parent_id: int,
+    ) -> None:
+        uid = ensure_entity_uid(getattr(obj, "uid", ""), kind)
+        setattr(obj, "uid", uid)
+
+        object_id = getattr(obj, "id", None)
+        if object_id is not None:
+            row = self._row_by_id_and_parent(cur, table, object_id, parent_col, parent_id)
+            if row is not None:
+                setattr(obj, "uid", row["uid"] or uid)
+                return
+
+        row = self._row_by_uid_and_parent(cur, table, uid, parent_col, parent_id)
+        if row is not None:
+            setattr(obj, "id", row["id"])
+            setattr(obj, "uid", row["uid"])
+            return
+
+        setattr(obj, "id", None)
+        if self._uid_exists(cur, table, uid):
+            setattr(obj, "uid", self._fresh_db_uid(cur, table, kind))
 
     # ------------------------------------------------------------------ save (transactional upsert)
 
@@ -363,14 +479,22 @@ class ProjectStore:
             raise
 
     def _save_page(self, cur: sqlite3.Cursor, page: Page, project_id: int) -> None:
+        self._prepare_entity_identity(
+            cur,
+            page,
+            kind="page",
+            table="page",
+            parent_col="project_id",
+            parent_id=project_id,
+        )
         if page.id is None:
             cur.execute(
-                "INSERT INTO page (project_id, image_path, width, height, "
+                "INSERT INTO page (uid, project_id, image_path, width, height, "
                 "page_number, source_path, source_type, source_page_index, "
                 "cache_image_path, thumbnail_path, status, error_message, "
                 "ocr_invalidated_reason, ppvl_parsing_res_list_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (project_id, page.image_path, page.width, page.height,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (page.uid, project_id, page.image_path, page.width, page.height,
                  page.page_number, page.source_path, page.source_type,
                  page.source_page_index, page.cache_image_path,
                  page.thumbnail_path, page.status.value, page.error_message,
@@ -414,6 +538,14 @@ class ProjectStore:
             cur.execute("DELETE FROM block WHERE id=?", (old_id,))
 
     def _save_block(self, cur: sqlite3.Cursor, block: Block, page_id: int) -> None:
+        self._prepare_entity_identity(
+            cur,
+            block,
+            kind="block",
+            table="block",
+            parent_col="page_id",
+            parent_id=page_id,
+        )
         bb = block.bbox
         values = (
             page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
@@ -424,11 +556,11 @@ class ProjectStore:
         )
         if block.id is None:
             cur.execute(
-                "INSERT INTO block (page_id, block_type, x, y, w, h, block_order, "
+                "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
                 "source, is_locked, recognizable, note, source_label, raw_payload_json, "
                 "app_payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (block.uid, *values),
             )
             block.id = cur.lastrowid
         else:
@@ -459,6 +591,14 @@ class ProjectStore:
             cur.execute("DELETE FROM line WHERE id=?", (old_id,))
 
     def _save_line(self, cur: sqlite3.Cursor, line: Line, block_id: int) -> None:
+        self._prepare_entity_identity(
+            cur,
+            line,
+            kind="line",
+            table="line",
+            parent_col="block_id",
+            parent_id=block_id,
+        )
         bb = line.bbox
         final_text = line.final_text or line.text
         ocr_text = line.ocr_text or line.text or final_text
@@ -475,11 +615,11 @@ class ProjectStore:
         )
         if line.id is None:
             cur.execute(
-                "INSERT INTO line (block_id, text, final_text, original_text, confidence, proof_status, "
+                "INSERT INTO line (uid, block_id, text, final_text, original_text, confidence, proof_status, "
                 "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
                 "review_flags_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (line.uid, *values),
             )
             line.id = cur.lastrowid
         else:
@@ -510,6 +650,14 @@ class ProjectStore:
             cur.execute("DELETE FROM char_ WHERE id=?", (old_id,))
 
     def _save_char(self, cur: sqlite3.Cursor, char: Char, line_id: int) -> None:
+        self._prepare_entity_identity(
+            cur,
+            char,
+            kind="char",
+            table="char_",
+            parent_col="line_id",
+            parent_id=line_id,
+        )
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
         values = (
@@ -526,10 +674,10 @@ class ProjectStore:
         )
         if char.id is None:
             cur.execute(
-                "INSERT INTO char_ (line_id, char, confidence, x, y, w, h, "
+                "INSERT INTO char_ (uid, line_id, char, confidence, x, y, w, h, "
                 "bbox_source, bbox_granularity, token_text) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (char.uid, *values),
             )
             char.id = cur.lastrowid
         else:
@@ -611,6 +759,7 @@ class ProjectStore:
                 height=pr["height"],
                 page_number=pr["page_number"],
                 id=pr["id"],
+                uid=pr["uid"],
                 source_path=pr["source_path"],
                 source_type=pr["source_type"],
                 source_page_index=pr["source_page_index"],
@@ -641,6 +790,7 @@ class ProjectStore:
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 order=r["block_order"],
                 id=r["id"],
+                uid=r["uid"],
                 source=BlockSource(r["source"]),
                 is_locked=bool(r["is_locked"]),
                 recognizable=bool(r["recognizable"]),
@@ -667,6 +817,7 @@ class ProjectStore:
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 proof_status=ProofStatus(r["proof_status"]),
                 id=r["id"],
+                uid=r["uid"],
                 ocr_text=r["ocr_text"] or r["text"],
                 llm_suggestion=r["llm_suggestion"],
                 llm_reason=r["llm_reason"],
@@ -689,6 +840,7 @@ class ProjectStore:
                 confidence=r["confidence"],
                 bbox=bbox,
                 id=r["id"],
+                uid=r["uid"],
                 bbox_source=r["bbox_source"],
                 bbox_granularity=r["bbox_granularity"],
                 token_text=r["token_text"],

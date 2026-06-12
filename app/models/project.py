@@ -6,6 +6,7 @@ import time
 from .enums import (
     BlockSource, BlockType, LlmReviewStatus, PageStatus, ProofStatus,
 )
+from .entity_id import ensure_entity_uid
 
 
 @dataclass
@@ -93,6 +94,10 @@ class Char:
     bbox_source: str = ""
     bbox_granularity: str = ""
     token_text: str = ""
+    uid: str = ""             # 稳定业务 ID
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "char")
 
 
 @dataclass
@@ -113,8 +118,10 @@ class Line:
     llm_reason: str = ""                  # LLM 修改原因
     llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
+    uid: str = ""                         # 稳定业务 ID
 
     def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "line")
         if not self.final_text:
             self.final_text = self.text
         if not self.ocr_text:
@@ -138,6 +145,7 @@ class Line:
     def to_dict(self) -> dict:
         return {
             "text": self.text,
+            "uid": self.uid,
             "final_text": self.final_text,
             "confidence": self.confidence,
             "bbox": self.bbox.to_dict(),
@@ -167,6 +175,10 @@ class Block:
     source_label: str = ""                          # 原始 PP-VL/Paddle label
     raw_payload: dict[str, Any] = field(default_factory=dict)  # 外部引擎原始块属性
     app_payload: dict[str, Any] = field(default_factory=dict)  # 应用派生状态/人工绑定
+    uid: str = ""                                   # 稳定业务 ID
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "block")
 
     @property
     def full_text(self) -> str:
@@ -199,6 +211,10 @@ class Page:
     error_message: str = ""                 # 当前页失败原因
     ocr_invalidated_reason: str = ""        # 版面变更导致 OCR 结果失效的原因
     ppvl_parsing_res_list: List[dict[str, Any]] = field(default_factory=list)
+    uid: str = ""                           # 稳定业务 ID
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "page")
 
     @property
     def is_analyzed(self) -> bool:

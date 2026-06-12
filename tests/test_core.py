@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_models():
     from app.models import (
-        BBox, Block, BlockSource, BlockType, Line,
+        BBox, Block, BlockSource, BlockType, Char, Line,
         LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
     )
 
@@ -60,6 +60,7 @@ def test_models():
 
     # Line
     line = Line(text="测试文字", confidence=0.95, bbox=bb)
+    assert line.uid.startswith("line_")
     assert line.proof_status == ProofStatus.UNCHECKED
     assert line.llm_review_status == LlmReviewStatus.DISABLED
     assert line.review_flags == []
@@ -77,8 +78,12 @@ def test_models():
     assert line2.ocr_text == "OCR原文"
     assert line2.llm_suggestion == "LLM建议"
 
+    char = Char(char="测", confidence=0.9, bbox=bb)
+    assert char.uid.startswith("char_")
+
     # Block
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line, line2])
+    assert block.uid.startswith("block_")
     assert block.full_text == "修改文字\n终稿"
     assert block.source == BlockSource.AUTO_LAYOUT
     assert block.recognizable is True
@@ -96,6 +101,7 @@ def test_models():
 
     # Page
     page = Page(image_path="/tmp/test.jpg", width=800, height=1200)
+    assert page.uid.startswith("page_")
     page.blocks.append(block)
     formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, recognizable=True)
     page.blocks.append(formula_block)
@@ -727,6 +733,12 @@ def test_project_store_save_project_preserves_child_rowids():
                 "removed_line": line2.id,
                 "removed_char": line2.chars[0].id,
             }
+            uids = {
+                "page": project.pages[0].uid,
+                "block": block.uid,
+                "line": line1.uid,
+                "char": line1.chars[0].uid,
+            }
 
             line1.update_text("第一行已校对")
             line1.chars[0].char = "一"
@@ -744,6 +756,10 @@ def test_project_store_save_project_preserves_child_rowids():
         assert loaded_block.id == ids["block"]
         assert loaded_line.id == ids["line"]
         assert loaded_char.id == ids["char"]
+        assert loaded_page.uid == uids["page"]
+        assert loaded_block.uid == uids["block"]
+        assert loaded_line.uid == uids["line"]
+        assert loaded_char.uid == uids["char"]
         assert loaded_line.final_text == "第一行已校对"
         assert loaded_char.char == "一"
         assert loaded_block.note == "updated without id churn"
@@ -809,6 +825,7 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
             p2_line = p2_block.lines[0]
             p2_char = p2_line.chars[0]
             original_p2_ids = (p2_page.id, p2_block.id, p2_line.id, p2_char.id)
+            original_p2_uids = (p2_page.uid, p2_block.uid, p2_line.uid, p2_char.uid)
 
             p2_page.id = p1_page.id
             p2_block.id = p1_block.id
@@ -833,13 +850,17 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
         assert reloaded2.pages[0].blocks[0].id != p1_block.id
         assert reloaded2.pages[0].blocks[0].lines[0].id != p1_line.id
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id != p1_char.id
+        assert reloaded2.pages[0].id == original_p2_ids[0]
+        assert reloaded2.pages[0].blocks[0].id == original_p2_ids[1]
+        assert reloaded2.pages[0].blocks[0].lines[0].id == original_p2_ids[2]
+        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id == original_p2_ids[3]
+        assert reloaded2.pages[0].uid == original_p2_uids[0]
+        assert reloaded2.pages[0].blocks[0].uid == original_p2_uids[1]
+        assert reloaded2.pages[0].blocks[0].lines[0].uid == original_p2_uids[2]
+        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].uid == original_p2_uids[3]
         assert reloaded2.pages[0].blocks[0].lines[0].final_text == "乙已改"
         assert reloaded2.pages[0].blocks[0].lines[0].display_text == "乙已改"
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].char == "乙"
-        assert reloaded2.pages[0].id != original_p2_ids[0]
-        assert reloaded2.pages[0].blocks[0].id != original_p2_ids[1]
-        assert reloaded2.pages[0].blocks[0].lines[0].id != original_p2_ids[2]
-        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id != original_p2_ids[3]
     finally:
         os.unlink(db_path)
 
@@ -1021,6 +1042,9 @@ def test_project_store_schema_migration():
             assert loaded.name == "legacy"
             assert loaded.pages[0].blocks[0].lines[0].text == "legacy text"
             assert loaded.pages[0].blocks[0].lines[0].final_text == "legacy text"
+            assert loaded.pages[0].uid.startswith("page_")
+            assert loaded.pages[0].blocks[0].uid.startswith("block_")
+            assert loaded.pages[0].blocks[0].lines[0].uid.startswith("line_")
 
         # 验证 schema 版本已更新
         conn2 = sqlite3.connect(db_path)
@@ -1033,6 +1057,26 @@ def test_project_store_schema_migration():
         assert any(col[1] == "final_text" for col in final_text_col)
         page_cols = conn2.execute("PRAGMA table_info(page)").fetchall()
         assert any(col[1] == "ocr_invalidated_reason" for col in page_cols)
+        for table in ("page", "block", "line", "char_"):
+            cols = conn2.execute(f"PRAGMA table_info({table})").fetchall()
+            assert any(col[1] == "uid" for col in cols)
+        uid_counts = {
+            table: conn2.execute(
+                f"SELECT COUNT(*), COUNT(NULLIF(uid, '')) FROM {table}"
+            ).fetchone()
+            for table in ("page", "block", "line")
+        }
+        assert uid_counts == {
+            "page": (1, 1),
+            "block": (1, 1),
+            "line": (1, 1),
+        }
+        indexes = {
+            row[1]
+            for table in ("page", "block", "line", "char_")
+            for row in conn2.execute(f"PRAGMA index_list({table})").fetchall()
+        }
+        assert {"idx_page_uid", "idx_block_uid", "idx_line_uid", "idx_char_uid"} <= indexes
         conn2.close()
 
         print("test_project_store_schema_migration PASSED")
