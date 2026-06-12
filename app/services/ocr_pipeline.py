@@ -22,6 +22,7 @@ from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,
     should_dispatch_to_text_ocr,
 )
+from app.core.page_errors import is_ocr_error_message
 from app.core.proof_status import apply_auto_flag
 from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
@@ -222,8 +223,7 @@ class OcrPipeline:
     @staticmethod
     def _clear_ocr_error(page: Page) -> None:
         """Clear stale OCR-owned errors before retrying OCR on a page."""
-        message = str(page.error_message or "")
-        if message.startswith("OCR "):
+        if is_ocr_error_message(page.error_message):
             page.error_message = ""
 
     def _prefers_page_ocr(self) -> bool:

@@ -220,6 +220,20 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     assert errored_gate.action_enabled is False
     assert pending_ocr_pages(OcrProject(name="error-page", pages=[errored_page])) == []
 
+    ocr_error_page = Page(
+        image_path="/tmp/ocr-error.png",
+        width=100,
+        height=100,
+        status=PageStatus.ERROR,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 80, 20))],
+        error_message="OCR 失败：micro-recblock failed",
+    )
+    ocr_error_gate = page_gate_info(ocr_error_page)
+    assert ocr_error_gate.page_state == "ocr_error"
+    assert ocr_error_gate.is_pending is True
+    assert ocr_error_gate.action_enabled is True
+    assert pending_ocr_pages(OcrProject(name="ocr-error-page", pages=[ocr_error_page])) == [ocr_error_page]
+
     pending_page.invalidate_ocr("block_moved")
     invalidated = page_gate_info(pending_page)
     assert invalidated.page_state == "ocr_invalidated"
@@ -7453,6 +7467,66 @@ def test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready():
     print("test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready PASSED")
 
 
+def test_workflow_controller_hanwang_retries_ocr_error_page_from_main_entry():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page = Page(image_path="/tmp/ocr-error.png", width=100, height=100, page_number=1)
+        page.status = PageStatus.ERROR
+        page.error_message = "OCR 失败：micro-recblock failed"
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page])
+        messages = []
+        steps = []
+        focused = []
+        controller.status_message.connect(messages.append)
+        controller.step_requested.connect(steps.append)
+        controller.focus_page.connect(focused.append)
+
+        controller.handle_ocr_entry_requested("main_window", 1)
+
+        assert focused == [1]
+        assert steps == [workflow_module.STEP_LAYOUT]
+        assert messages[-1].startswith("当前页 OCR 失败，可重新进入 OCR")
+        assert messages[-1] != "全部已完成 OCR"
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_retries_ocr_error_page_from_main_entry PASSED")
+
+
+def test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page = Page(image_path="/tmp/ocr-error-submit.png", width=100, height=100, page_number=1)
+        page.status = PageStatus.ERROR
+        page.error_message = "OCR 失败：micro-recblock failed"
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Gate", pages=[page])
+        started = []
+        controller.start_ocr = (
+            lambda pages, notify_page_callback=None, target_page_numbers=None:
+            started.append((pages, target_page_numbers)) or True
+        )
+
+        controller.handle_ocr_entry_requested("layout_submit", 1)
+
+        assert started == [([page], {1})]
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page PASSED")
+
+
 def test_workflow_controller_hanwang_layout_submit_merges_only_target_page():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
@@ -7974,8 +8048,8 @@ def test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines
     assert page.total_lines == 1
     assert page.status == PageStatus.ERROR
     gate = page_gate_info(page)
-    assert gate.page_state == "error"
-    assert gate.action_enabled is False
+    assert gate.page_state == "ocr_error"
+    assert gate.action_enabled is True
 
     print("test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines PASSED")
 
@@ -11542,6 +11616,8 @@ if __name__ == "__main__":
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
     test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
     test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready()
+    test_workflow_controller_hanwang_retries_ocr_error_page_from_main_entry()
+    test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page()
     test_workflow_controller_hanwang_layout_submit_merges_only_target_page()
     test_workflow_controller_hanwang_block_edit_invalidates_only_that_page()
     test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect()
@@ -11551,6 +11627,7 @@ if __name__ == "__main__":
     test_workflow_controller_falls_back_to_block_ocr_when_parallel_proof_failed()
     test_workflow_controller_emits_ocr_progress_and_navigation()
     test_workflow_controller_ocr_done_does_not_force_hproof_step()
+    test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines()
     test_main_window_ocr_finished_preserves_current_step()
     test_empty_llm_config_does_not_block_ocr_done()
     test_workflow_controller_normalizes_loaded_project_geometry()

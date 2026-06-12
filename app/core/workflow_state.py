@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.page_errors import is_ocr_error_message
 from app.models import OcrProject, Page
 
 # 步骤索引（与 stacked widget 顺序一致）
@@ -67,6 +68,16 @@ def compute_max_step(project: OcrProject | None) -> int:
 def page_gate_info(page: Page) -> PageGateInfo:
     """Return the OCR entry gate for one page."""
     if page.error_message:
+        if is_ocr_error_message(page.error_message):
+            return PageGateInfo(
+                page_state="ocr_error",
+                is_pending=True,
+                reason_code="ocr_failed",
+                reason_text=f"当前页 OCR 失败，可重新进入 OCR：{page.error_message}",
+                action_key="rerun_ocr",
+                action_label="重新进入 OCR",
+                action_enabled=True,
+            )
         return PageGateInfo(
             page_state="error",
             is_pending=False,
