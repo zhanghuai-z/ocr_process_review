@@ -878,6 +878,14 @@ class ProjectStore:
         self.conn.commit()
 
     def _update_line_no_commit(self, line: Line) -> None:
+        if line.id is not None and not str(line.uid or "").strip():
+            row = self.conn.execute(
+                "SELECT uid FROM line WHERE id=?",
+                (line.id,),
+            ).fetchone()
+            if row is not None and str(row["uid"] or "").strip():
+                line.uid = str(row["uid"])
+        line.uid = ensure_entity_uid(line.uid, "line")
         bb = line.bbox
         final_text = line.final_text or line.text
         ocr_text = line.ocr_text or line.text or final_text
@@ -888,14 +896,16 @@ class ProjectStore:
         cur = self.conn.execute(
             "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
-            "review_flags_json=? WHERE id=?",
+            "review_flags_json=? WHERE id=? AND uid=?",
             (line.text, line.final_text, line.original_text, line.proof_status.value,
              line.ocr_text, line.llm_suggestion, line.llm_reason,
              line.llm_review_status.value,
-             _review_flags_to_json(line.review_flags), line.id),
+             _review_flags_to_json(line.review_flags), line.id, line.uid),
         )
         if cur.rowcount != 1:
-            raise RuntimeError(f"Line update failed or matched multiple rows: id={line.id!r}")
+            raise RuntimeError(
+                f"Line update failed or matched multiple rows: id={line.id!r} uid={line.uid!r}"
+            )
 
     # ------------------------------------------------------------------ batch update lines
 

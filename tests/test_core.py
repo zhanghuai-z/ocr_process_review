@@ -1455,6 +1455,69 @@ def test_project_store_update_lines_rolls_back_as_single_transaction():
     print("test_project_store_update_lines_rolls_back_as_single_transaction PASSED")
 
 
+def test_project_store_update_line_requires_stable_uid_match():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line1 = Line(text="第一行", confidence=0.9, bbox=bb)
+        line2 = Line(text="第二行", confidence=0.9, bbox=bb)
+        project = OcrProject(
+            name="line uid guard",
+            pages=[
+                Page(
+                    image_path="/tmp/img.jpg",
+                    width=800,
+                    height=600,
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])],
+                )
+            ],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            line1_id = line1.id
+            line2_id = line2.id
+            line1_uid = line1.uid
+            line2_uid = line2.uid
+
+            line2.id = line1_id
+            line2.update_text("不应写入第一行")
+            try:
+                store.update_line(line2)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("update_line should reject stale rowid with mismatched uid")
+
+            loaded = store.load_project(project_id=project.id)
+            loaded_lines = loaded.pages[0].blocks[0].lines
+            assert loaded_lines[0].id == line1_id
+            assert loaded_lines[0].uid == line1_uid
+            assert loaded_lines[0].display_text == "第一行"
+            assert loaded_lines[1].id == line2_id
+            assert loaded_lines[1].uid == line2_uid
+            assert loaded_lines[1].display_text == "第二行"
+
+            line1.id = line1_id
+            line1.uid = ""
+            line1.update_text("第一行已改")
+            store.update_line(line1)
+            loaded = store.load_project(project_id=project.id)
+
+        assert loaded.pages[0].blocks[0].lines[0].id == line1_id
+        assert loaded.pages[0].blocks[0].lines[0].uid == line1_uid
+        assert loaded.pages[0].blocks[0].lines[0].display_text == "第一行已改"
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_update_line_requires_stable_uid_match PASSED")
+
+
 def test_project_store_new_db_records_current_schema_version():
     import sqlite3
 
@@ -11186,6 +11249,7 @@ if __name__ == "__main__":
     test_project_store_persists_page_ocr_invalidation_reason()
     test_project_store_reconciles_legacy_ocr_status_from_lines()
     test_project_store_update_lines_rolls_back_as_single_transaction()
+    test_project_store_update_line_requires_stable_uid_match()
     test_project_store_new_db_records_current_schema_version()
     test_project_store_schema_migration()
     test_proof_engine()
