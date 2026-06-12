@@ -42,6 +42,7 @@ from app.core.paddle_labels import (
     PADDLE_HANWANG_TEXT_LABELS,
     authoritative_paddle_label,
     is_hanwang_skip_label,
+    normalize_paddle_label,
 )
 from app.core.proof_status import proof_status_for
 from app.engines import OCR_BBOX_SPACE_PAGE
@@ -151,6 +152,7 @@ class RunStats:
     n_blocks_hanwang: int = 0
     n_blocks_ppvl: int = 0
     n_blocks_fallback: int = 0
+    n_unknown_paddle_labels: int = 0
     n_groups: int = 0
     seg_seconds: float = 0.0
     recog_seconds: float = 0.0
@@ -196,7 +198,14 @@ def _is_skip_label(label: str) -> bool:
 
 
 def _is_text_label(label: str) -> bool:
-    return label in TEXT_LABELS or not _is_skip_label(label)
+    return normalize_paddle_label(label) in TEXT_LABELS or not _is_skip_label(label)
+
+
+def _is_unknown_hanwang_label(label: str) -> bool:
+    normalized = normalize_paddle_label(label)
+    if normalized in TEXT_LABELS or normalized in SKIP_LABELS:
+        return False
+    return not _is_skip_label(label)
 
 
 def _block_text(block: dict[str, Any]) -> str:
@@ -569,8 +578,13 @@ def _hanwang_bbox_audit(
     text_slice_bboxes = route_text_slice_bboxes or []
     group_bboxes = recog_group_bboxes or []
     group_audits = segimg_group_audits or []
+    label = _effective_label_for_block(raw)
+    unknown_label = _is_unknown_hanwang_label(label)
     return {
         "schema": "hanwang_bbox_audit.v1",
+        "paddle_label": label,
+        "paddle_label_unknown": unknown_label,
+        "paddle_label_unknown_action": "default_text_ocr" if unknown_label else "",
         "layout_block_bbox": list(layout_bbox),
         "effective_block_bbox": list(effective_bbox),
         "effective_block_bbox_source": (
@@ -882,6 +896,8 @@ def run_micro_recblock(
     skip_indices: list[int] = []
     for idx, block in enumerate(ppvl_blocks):
         label = _effective_label_for_block(block)
+        if _is_unknown_hanwang_label(label):
+            stats.n_unknown_paddle_labels += 1
         if _is_skip_label(label):
             skip_indices.append(idx)
         elif _is_text_label(label):
@@ -1711,6 +1727,8 @@ class HanwangMicroRecBlockEngine:
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
                 if failed_groups:
                     note_parts.append(f"hanwang_recog_group_failed={failed_groups}")
+                if audit.get("paddle_label_unknown"):
+                    note_parts.append(f"unknown_paddle_label={row.block_label}")
             new_blocks.append(
                 Block(
                     block_type=block_type,
@@ -1729,13 +1747,15 @@ class HanwangMicroRecBlockEngine:
         page.blocks = new_blocks
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
-            "groups=%d group_failures=%d chunks=%d guarded_chunks=%d batch_failures=%d batch_disabled=%s "
+            "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
+            "batch_failures=%d batch_disabled=%s "
             "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
             stats.n_blocks_ppvl,
             stats.n_blocks_fallback,
+            stats.n_unknown_paddle_labels,
             stats.n_groups,
             stats.recog_group_failures,
             stats.recog_batch_chunks,

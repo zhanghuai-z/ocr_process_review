@@ -6036,6 +6036,65 @@ def test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path():
     print("test_hanwang_micro_recblock_keeps_caption_labels_on_hanwang_path PASSED")
 
 
+def test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {"lines": [{"groups": []}]}
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        raise AssertionError("no groups should mean no recog call")
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((80, 140, 3), dtype=np.uint8),
+            [
+                {
+                    "block_label": "new_unknown_text_kind",
+                    "block_bbox": [10, 20, 110, 60],
+                    "block_content": "未知标签文字",
+                }
+            ],
+            include_chars=True,
+        )
+
+        assert seen_recblocks == [(10, 20, 110, 60)]
+        assert rows[0].source == "hanwang"
+        assert rows[0].text == ""
+        assert rows[0].ppvl_text == "未知标签文字"
+        assert rows[0].fallback_reason == ""
+        assert stats.n_blocks_hanwang == 1
+        assert stats.n_blocks_ppvl == 0
+        assert stats.n_unknown_paddle_labels == 1
+        audit = rows[0].raw_block["_hanwang_bbox_audit"]
+        assert audit["paddle_label"] == "new_unknown_text_kind"
+        assert audit["paddle_label_unknown"] is True
+        assert audit["paddle_label_unknown_action"] == "default_text_ocr"
+        assert audit["route_text_slice_count"] == 1
+        assert audit["hanwang_recog_group_count"] == 0
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit PASSED")
+
+
 def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -10601,6 +10660,7 @@ if __name__ == "__main__":
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
     test_hanwang_formula_style_footer_bypasses_hanwang()
     test_hanwang_footnote_labels_route_through_hanwang()
+    test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit()
     test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()

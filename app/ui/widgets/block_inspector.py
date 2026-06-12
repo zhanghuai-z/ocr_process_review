@@ -265,6 +265,10 @@ class BlockInspector(QWidget):
         if route_count <= 0 and recog_count <= 0:
             return "\u672a\u8fdb\u5165 Hanwang text-slice \u8def\u7531"
         source = audit.get("effective_block_bbox_source") or "\u2014"
+        unknown = ""
+        if audit.get("paddle_label_unknown"):
+            unknown_label = audit.get("paddle_label") or "\u2014"
+            unknown = f"\nunknown_label={unknown_label}"
         return (
             f"route={route_count}  "
             f"recog={recog_count}\n"
@@ -272,6 +276,7 @@ class BlockInspector(QWidget):
             f"dropped={audit.get('hanwang_segimg_group_dropped_count', 0)}\n"
             f"failed={audit.get('hanwang_recog_group_failed_count', 0)}\n"
             f"source={source}"
+            f"{unknown}"
         )
 
 
