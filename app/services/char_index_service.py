@@ -113,6 +113,8 @@ class CharEntry:
     line: Line
     char_idx: int
     bbox: BBox
+    page_id: Optional[int] = None
+    page_uid: str = ""
     page_idx: int = 0
     block_order: int = 0
     line_idx: int = 0
@@ -425,6 +427,8 @@ class CharIndexService:
             line=line,
             char_idx=char_idx,
             bbox=bbox,
+            page_id=page.id,
+            page_uid=page.uid,
             page_idx=page_idx,
             block_order=block_order,
             line_idx=line_idx,

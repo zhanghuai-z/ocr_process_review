@@ -8239,10 +8239,12 @@ def test_workflow_controller_emits_typed_view_state():
 
 
 def test_char_index_service():
+    from app.core.proof_state import ProofSelection
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharEntry, CharIndexEntry, CharIndexService
 
     page = Page(image_path="/tmp/page.png", width=400, height=300)
+    page.id = 42
     page.page_number = 7
     page.blocks = [
         Block(
@@ -8272,6 +8274,8 @@ def test_char_index_service():
     assert CharIndexEntry is CharEntry
     assert isinstance(yi_entries[0], CharEntry)
     assert yi_entries[0].page_idx == 0
+    assert yi_entries[0].page_id == 42
+    assert yi_entries[0].page_uid == page.uid
     assert yi_entries[0].page_path == page.display_image_path
     assert yi_entries[0].page_number == 7
     assert yi_entries[0].line is page.blocks[0].lines[0]
@@ -8283,6 +8287,10 @@ def test_char_index_service():
     assert service.unique_chars() == 3
     assert service.total_chars() == 4
     assert service.char_frequency() == [("乙", 2), ("丙", 1), ("甲", 1)]
+    selection = ProofSelection.for_char_entry(yi_entries[0], source="unit")
+    assert selection.page_id == 42
+    assert selection.page_uid == page.uid
+    assert selection.line_uid == yi_entries[0].line.uid
 
     print("test_char_index_service PASSED")
 

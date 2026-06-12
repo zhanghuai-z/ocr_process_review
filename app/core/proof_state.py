@@ -51,6 +51,7 @@ class ProofSelection:
         line = getattr(entry, "line", None)
         return cls(
             page_number=int(getattr(entry, "page_number", 1)),
+            page_id=getattr(entry, "page_id", None),
             page_uid=getattr(entry, "page_uid", None),
             block_order=int(getattr(entry, "block_order", 0)),
             line_id=getattr(line, "id", None),
