@@ -222,3 +222,49 @@ def run_linecut_recog(
                 p.unlink()
             except FileNotFoundError:
                 pass
+
+
+def run_eng20_recogline(
+    image_bgr: np.ndarray,
+    *,
+    timeout: float = 30.0,
+) -> dict:
+    """Run Eng20 on a single physical line crop.
+
+    This is an English/Latin geometry probe. The caller must treat returned
+    text as geometry evidence only; it is not authoritative OCR text for mixed
+    Chinese/Latin lines.
+    """
+    bin_dir = get_hanwang_bin_dir()
+    exe = bin_dir / "eng20_probe.exe"
+    if not exe.is_file():
+        raise HanwangNativeError(f"eng20_probe.exe 缺失：{exe}")
+
+    img_path = _save_temp_image(image_bgr, bin_dir)
+    out_path = bin_dir / f"{img_path.stem}.eng20.json"
+    try:
+        run = _run_exe(
+            exe,
+            [
+                img_path.name,
+                out_path.name,
+                "__missing_rb.tsv",
+                "recogline_engstr",
+                "packed",
+                "tbrl",
+            ],
+            cwd=bin_dir,
+            timeout=timeout,
+        )
+        if run.returncode != 0 or not out_path.is_file():
+            raise HanwangNativeError(
+                f"eng20_probe 失败 (rc={run.returncode}): "
+                f"{run.stderr.strip() or run.stdout.strip()}"
+            )
+        return json.loads(out_path.read_text(encoding="utf-8"))
+    finally:
+        for p in (img_path, out_path):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass

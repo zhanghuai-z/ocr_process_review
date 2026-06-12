@@ -5312,6 +5312,144 @@ def test_hanwang_recog_filters_empty_decoded_char_boxes():
     print("test_hanwang_recog_filters_empty_decoded_char_boxes PASSED")
 
 
+def test_hanwang_latin_engcut_updates_geometry_without_changing_text():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "bbox": {
+                                "left": 0,
+                                "top": 0,
+                                "right": image_bgr.shape[1],
+                                "bottom": image_bgr.shape[0],
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        text = "甲PE/VC乙"
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "bbox": {
+                                "left": 0,
+                                "top": 0,
+                                "right": image_bgr.shape[1],
+                                "bottom": image_bgr.shape[0],
+                            },
+                            "chars": [
+                                {
+                                    "codes": [code(ch)],
+                                    "scores": [5],
+                                    "bbox": {
+                                        "left": idx * 20,
+                                        "top": 0,
+                                        "right": idx * 20 + 18,
+                                        "bottom": 30,
+                                    },
+                                }
+                                for idx, ch in enumerate(text)
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+
+    eng20_calls = []
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        eng20_calls.append(image_bgr.shape[:2])
+        text = "~PE/VC~"
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "chars": [
+                                {
+                                    "codes": [ord(ch)],
+                                    "bbox": {
+                                        "left": idx * 9,
+                                        "top": 2,
+                                        "right": idx * 9 + 7,
+                                        "bottom": 22,
+                                    },
+                                }
+                                for idx, ch in enumerate(text)
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((40, 160, 3), dtype=np.uint8),
+            [{
+                "block_label": "text",
+                "block_bbox": [0, 0, 160, 40],
+                "block_content": "甲PE/VC乙",
+            }],
+        )
+
+        line = rows[0].lines[0]
+        assert line.text == "甲PE/VC乙"
+        assert [char.text for char in line.chars] == list("甲PE/VC乙")
+        assert eng20_calls == [(40, 160)]
+        assert stats.latin_engcut_probe_calls == 1
+        assert stats.latin_engcut_probe_failures == 0
+        assert stats.latin_engcut_exact_tokens == 1
+        assert stats.latin_engcut_review_tokens == 0
+        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG not in line.review_flags
+        assert [
+            (char.text, char.source, char.bbox, char.bbox_granularity, char.token_text)
+            for char in line.chars[1:6]
+        ] == [
+            ("P", "hanwang:EngCut:latin_exact", (9, 2, 16, 22), "char", "PE/VC"),
+            ("E", "hanwang:EngCut:latin_exact", (18, 2, 25, 22), "char", "PE/VC"),
+            ("/", "hanwang:EngCut:latin_exact", (27, 2, 34, 22), "char", "PE/VC"),
+            ("V", "hanwang:EngCut:latin_exact", (36, 2, 43, 22), "char", "PE/VC"),
+            ("C", "hanwang:EngCut:latin_exact", (45, 2, 52, 22), "char", "PE/VC"),
+        ]
+        assert line.chars[0].source == "hanwang:micro_recblock"
+        assert line.chars[-1].source == "hanwang:micro_recblock"
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_updates_geometry_without_changing_text PASSED")
+
+
 def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
     import os
     import tempfile

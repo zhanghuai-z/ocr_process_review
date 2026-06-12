@@ -10,6 +10,16 @@ import numpy as np
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY, split_legacy_raw_payload
 from app.core.logging import get_logger
+from app.core.latin_span_recovery import (
+    LATIN_ENGCUT_BBOX_GRANULARITY,
+    LATIN_ENGCUT_BBOX_SOURCE,
+    LATIN_ENGCUT_EXACT_STATUS,
+    LATIN_ENGCUT_REVIEW_FLAG,
+    bind_latin_tokens_to_engcut_chars,
+    engcut_chars_from_payload,
+    has_latin_token,
+    offset_engcut_chars,
+)
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_INLINE_FORMULA_FLAG,
@@ -62,6 +72,8 @@ MAX_RECOG_COLLAGE_PIXELS = 2_000_000
 MAX_RECOG_COLLAGE_ASPECT = 4.5
 _BATCH_DISABLED_FOR_SESSION = False
 _BATCH_DISABLE_REASON = ""
+_LATIN_ENGCUT_DISABLED_FOR_SESSION = False
+_LATIN_ENGCUT_DISABLE_REASON = ""
 
 
 @dataclass
@@ -167,6 +179,11 @@ class RunStats:
     recog_max_collage_width: int = 0
     recog_max_collage_height: int = 0
     recog_max_collage_pixels: int = 0
+    latin_engcut_probe_calls: int = 0
+    latin_engcut_probe_failures: int = 0
+    latin_engcut_exact_tokens: int = 0
+    latin_engcut_review_tokens: int = 0
+    latin_engcut_disabled: bool = False
 
 
 @dataclass
@@ -748,6 +765,95 @@ def _offset_line_results(
     return shifted
 
 
+def _line_char_offset_map(line: LineResult) -> list[int] | None:
+    char_text = "".join(char.text for char in line.chars)
+    if char_text != line.text:
+        return None
+    offsets: list[int] = []
+    for char_index, char in enumerate(line.chars):
+        offsets.extend([char_index] * len(char.text))
+    return offsets
+
+
+def _mark_latin_engcut_review(line: LineResult) -> None:
+    if LATIN_ENGCUT_REVIEW_FLAG not in line.review_flags:
+        line.review_flags.append(LATIN_ENGCUT_REVIEW_FLAG)
+
+
+def _apply_latin_engcut_geometry(line: LineResult, raw_eng20: dict[str, Any], *, dx: int, dy: int) -> tuple[int, int]:
+    local_chars = engcut_chars_from_payload(raw_eng20)
+    page_chars = offset_engcut_chars(local_chars, dx=dx, dy=dy)
+    bindings = bind_latin_tokens_to_engcut_chars(line.text, page_chars)
+    if not bindings:
+        return 0, 0
+
+    offset_map = _line_char_offset_map(line)
+    exact_count = 0
+    review_count = 0
+    for binding in bindings:
+        if binding.status != LATIN_ENGCUT_EXACT_STATUS:
+            review_count += 1
+            continue
+        if offset_map is None or binding.token.end > len(offset_map):
+            review_count += 1
+            continue
+        char_indices = offset_map[binding.token.start:binding.token.end]
+        if len(char_indices) != len(binding.char_bboxes) or len(set(char_indices)) != len(char_indices):
+            review_count += 1
+            continue
+        if any(line.chars[index].text != binding.token.text[offset] for offset, index in enumerate(char_indices)):
+            review_count += 1
+            continue
+
+        for offset, char_index in enumerate(char_indices):
+            char = line.chars[char_index]
+            char.bbox = binding.char_bboxes[offset]
+            char.source = LATIN_ENGCUT_BBOX_SOURCE
+            char.bbox_granularity = LATIN_ENGCUT_BBOX_GRANULARITY
+            char.token_text = binding.token.text
+        exact_count += 1
+
+    if review_count:
+        _mark_latin_engcut_review(line)
+    return exact_count, review_count
+
+
+def _enhance_lines_with_latin_engcut(
+    image_bgr: np.ndarray,
+    lines: list[LineResult],
+    stats: RunStats,
+    *,
+    timeout: float,
+) -> None:
+    global _LATIN_ENGCUT_DISABLED_FOR_SESSION, _LATIN_ENGCUT_DISABLE_REASON
+    if _LATIN_ENGCUT_DISABLED_FOR_SESSION:
+        stats.latin_engcut_disabled = True
+        return
+    height, width = image_bgr.shape[:2]
+    for line in lines:
+        if not line.text or not line.chars or not has_latin_token(line.text):
+            continue
+        x1, y1, x2, y2 = _clamp_xyxy(line.bbox, width, height)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        crop = image_bgr[y1:y2, x1:x2].copy()
+        if crop.size == 0:
+            continue
+        try:
+            stats.latin_engcut_probe_calls += 1
+            raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
+        except Exception as exc:
+            stats.latin_engcut_probe_failures += 1
+            stats.latin_engcut_disabled = True
+            _LATIN_ENGCUT_DISABLED_FOR_SESSION = True
+            _LATIN_ENGCUT_DISABLE_REASON = str(exc)
+            logger.debug("EngCut Latin geometry probe failed bbox=%s text=%r: %s", line.bbox, line.text, exc)
+            return
+        exact_count, review_count = _apply_latin_engcut_geometry(line, raw_eng20, dx=x1, dy=y1)
+        stats.latin_engcut_exact_tokens += exact_count
+        stats.latin_engcut_review_tokens += review_count
+
+
 def _intersection_area(
     a: tuple[int, int, int, int],
     b: tuple[int, int, int, int],
@@ -1177,6 +1283,12 @@ def run_micro_recblock(
                     width=width,
                     height=height,
                 )
+            _enhance_lines_with_latin_engcut(
+                image_bgr,
+                lines,
+                stats,
+                timeout=min(30.0, max(1.0, float(recog_timeout))),
+            )
             hw_text = "".join(line.text for line in lines).strip()
             source = "hanwang"
             text = hw_text
@@ -1749,7 +1861,9 @@ class HanwangMicroRecBlockEngine:
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
             "batch_failures=%d batch_disabled=%s "
-            "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d",
+            "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d "
+            "latin_engcut_calls=%d latin_engcut_failures=%d latin_engcut_exact=%d "
+            "latin_engcut_review=%d latin_engcut_disabled=%s",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
@@ -1767,6 +1881,11 @@ class HanwangMicroRecBlockEngine:
             stats.recog_probe_calls,
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
+            stats.latin_engcut_probe_calls,
+            stats.latin_engcut_probe_failures,
+            stats.latin_engcut_exact_tokens,
+            stats.latin_engcut_review_tokens,
+            stats.latin_engcut_disabled,
         )
         return stats
 
