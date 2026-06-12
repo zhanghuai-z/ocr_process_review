@@ -1503,9 +1503,36 @@ def test_project_store_update_line_requires_stable_uid_match():
             assert loaded_lines[1].uid == line2_uid
             assert loaded_lines[1].display_text == "第二行"
 
+            line2.id = line1_id
+            line2.uid = ""
+            line2.update_text("仍不应写入第一行")
+            try:
+                store.update_line(line2)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("update_line should reject missing uid even when rowid exists")
+
+            loaded = store.load_project(project_id=project.id)
+            loaded_lines = loaded.pages[0].blocks[0].lines
+            assert loaded_lines[0].id == line1_id
+            assert loaded_lines[0].uid == line1_uid
+            assert loaded_lines[0].display_text == "第一行"
+            assert loaded_lines[1].id == line2_id
+            assert loaded_lines[1].uid == line2_uid
+            assert loaded_lines[1].display_text == "第二行"
+
             line1.id = line1_id
             line1.uid = ""
             line1.update_text("第一行已改")
+            try:
+                store.update_line(line1)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("update_line should reject missing uid on a valid rowid")
+
+            line1.uid = line1_uid
             store.update_line(line1)
             loaded = store.load_project(project_id=project.id)
 
@@ -2047,7 +2074,8 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
     )
 
     document = build_export_ir(project, "json")
-    source = document.to_dict()["pages"][0]["elements"][0]["source"]
+    element = document.to_dict()["pages"][0]["elements"][0]
+    source = element["source"]
     assert source["line_ids"] == [0, 1]
     assert source["char_ids"] == [
         "line-0-char-0",
@@ -2055,6 +2083,12 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
         "line-1-char-0",
         "line-1-char-1",
     ]
+    payload_char_ids = [
+        char["char_id"]
+        for line_payload in element["payload"]["lines"]
+        for char in line_payload["chars"]
+    ]
+    assert payload_char_ids == source["char_ids"]
 
     print("test_export_ir_char_source_fallbacks_are_unique_across_lines PASSED")
 

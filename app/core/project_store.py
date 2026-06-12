@@ -878,13 +878,10 @@ class ProjectStore:
         self.conn.commit()
 
     def _update_line_no_commit(self, line: Line) -> None:
-        if line.id is not None and not str(line.uid or "").strip():
-            row = self.conn.execute(
-                "SELECT uid FROM line WHERE id=?",
-                (line.id,),
-            ).fetchone()
-            if row is not None and str(row["uid"] or "").strip():
-                line.uid = str(row["uid"])
+        if line.id is None:
+            raise RuntimeError("Line update requires a rowid and stable uid")
+        if not str(line.uid or "").strip():
+            raise RuntimeError(f"Line update requires stable uid: id={line.id!r}")
         line.uid = ensure_entity_uid(line.uid, "line")
         bb = line.bbox
         final_text = line.final_text or line.text
