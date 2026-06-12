@@ -525,16 +525,17 @@ class ProjectStore:
                 setattr(obj, "uid", db_uid or uid)
                 return
             logger.warning(
-                "Stable uid rejected stale rowid: table=%s parent=%s:%s rowid=%s uid=%s",
+                "Stable uid restored current row from conflicting uid: "
+                "table=%s parent=%s:%s rowid=%s db_uid=%s incoming_uid=%s",
                 table,
                 parent_col,
                 parent_id,
                 object_id,
+                db_uid,
                 uid,
             )
-            setattr(obj, "id", None)
-            if self._uid_exists(cur, table, uid):
-                setattr(obj, "uid", self._fresh_db_uid(cur, table, kind))
+            setattr(obj, "id", id_row["id"])
+            setattr(obj, "uid", db_uid or uid)
             return
 
         setattr(obj, "id", None)
