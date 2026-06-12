@@ -227,7 +227,7 @@ def _build_element(
 
 def _line_payload(line: Line, index: int) -> dict[str, Any]:
     return {
-        "line_id": line.id if line.id is not None else index,
+        "line_id": _entity_source_id(line, index),
         "text": get_export_text(line),
         "ocr_text": line.ocr_text,
         "bbox": _bbox_to_dict(line.bbox),
@@ -239,7 +239,7 @@ def _line_payload(line: Line, index: int) -> dict[str, Any]:
 
 def _char_payload(char, index: int) -> dict[str, Any]:
     return {
-        "char_id": char.id if char.id is not None else index,
+        "char_id": _entity_source_id(char, index),
         "char": char.char,
         "bbox": _bbox_to_dict(char.bbox),
         "confidence": float(char.confidence),
@@ -253,13 +253,12 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
     attrs = block_attributes(block)
     return ExportSource(
         page_number=page.page_number,
-        block_ids=[block.id if block.id is not None else f"p{page.page_number}-block-{block.order}"],
-        line_ids=[line.id if line.id is not None else idx for idx, line in enumerate(lines)],
+        block_ids=[_entity_source_id(block, f"p{page.page_number}-block-{block.order}")],
+        line_ids=[_entity_source_id(line, idx) for idx, line in enumerate(lines)],
         char_ids=[
-            char.id
+            _entity_source_id(char, idx)
             for line in lines
-            for char in line.chars
-            if char.id is not None
+            for idx, char in enumerate(line.chars)
         ],
         block_type=block.block_type.value,
         source_label=attrs.source_label,
@@ -268,6 +267,11 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
         raw_payload=dict(attrs.raw_payload),
         origin=_origin(block.source),
     )
+
+
+def _entity_source_id(entity: Any, fallback: int | str) -> int | str:
+    uid = str(getattr(entity, "uid", "") or "").strip()
+    return uid or fallback
 
 
 def _origin(source: BlockSource) -> str:

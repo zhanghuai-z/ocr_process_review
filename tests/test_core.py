@@ -1804,11 +1804,12 @@ def test_export_ir_rules_load_and_validate():
 def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     from app.export.ir_builder import build_export_ir
     from app.export.rules import load_export_rules
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page, ProofStatus
 
     bb = BBox(1, 2, 30, 40)
     edited = Line(text="OCR原文", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED)
     edited.ocr_text = "OCR原文"
+    edited.chars = [Char(char="O", confidence=0.9, bbox=bb)]
     edited.update_text("人工终审")
     table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
     page = Page(
@@ -1840,7 +1841,12 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
         "table", "table_caption", "equation", "unknown",
     ]
     paragraph = data["pages"][0]["elements"][1]
+    assert paragraph["source"]["block_ids"] == [page.blocks[1].uid]
+    assert paragraph["source"]["line_ids"] == [edited.uid]
+    assert paragraph["source"]["char_ids"] == [edited.chars[0].uid]
     assert paragraph["payload"]["text"] == "人工终审"
+    assert paragraph["payload"]["lines"][0]["line_id"] == edited.uid
+    assert paragraph["payload"]["lines"][0]["chars"][0]["char_id"] == edited.chars[0].uid
     assert paragraph["payload"]["lines"][0]["ocr_text"] == "OCR原文"
     assert paragraph["proof"]["corrected"] is True
     table = data["pages"][0]["elements"][5]
@@ -2112,7 +2118,8 @@ def test_xml_authority_and_json_mirror_archive_parity():
         assert xml_projection == json_projection
 
         first_element = xml_projection["pages"][0]["elements"][0]
-        assert first_element["source"]["block_ids"] == [10]
+        assert first_element["source"]["block_ids"] == [page.blocks[0].uid]
+        assert first_element["payload"]["lines"][0]["line_id"] == edited.uid
         assert first_element["proof"]["status"] == "modified"
         assert first_element["proof"]["flags"] == ["low_confidence"]
         assert first_element["payload"]["lines"][0]["ocr_text"] == "OCR旧文"
