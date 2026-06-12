@@ -117,6 +117,36 @@ def test_round18_save_displayed_edit_user_types_other_char_still_marks_corrected
     assert line.final_text == "己巳"
 
 
+def test_round18_save_displayed_edit_length_change_does_not_persist_untouched_fake_char():
+    line = Line(text="甲乙丙", confidence=0.9, bbox=BBox(0, 0, 120, 20))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 20), lines=[line])
+    block.order = 0
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/round18-len.png", width=120, height=20)
+    _store, probe = _plant_probe(line, page, block, true_ch="乙", fake_ch="己", char_index=1)
+
+    assert displayed_text(line, page, block) == "甲己丙"
+    changed = save_displayed_edit(line, page, block, "甲己丙丁")
+
+    assert changed is True
+    assert line.final_text == "甲乙丙丁"
+    assert "己" not in line.final_text
+    assert probe.observation == "corrected"
+
+
+def test_round18_save_displayed_edit_length_change_keeps_user_replacement():
+    line = Line(text="甲乙丙", confidence=0.9, bbox=BBox(0, 0, 120, 20))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 20), lines=[line])
+    block.order = 0
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/round18-len.png", width=120, height=20)
+    _store, probe = _plant_probe(line, page, block, true_ch="乙", fake_ch="己", char_index=1)
+
+    changed = save_displayed_edit(line, page, block, "甲巳丙丁")
+
+    assert changed is True
+    assert line.final_text == "甲巳丙丁"
+    assert probe.observation == "corrected"
+
+
 def test_round18_corrected_probe_position_appears_in_true_char_gallery():
     """编辑后必须以文本为锚点回到正确集合：CharIndexService.query(true_char) 包含该位置。"""
     page, block, line = _make_pages()

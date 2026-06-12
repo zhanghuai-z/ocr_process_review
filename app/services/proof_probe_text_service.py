@@ -16,15 +16,16 @@
       line.final_text[i] = displayed_new[i]；若 i 命中某个 pending probe，则把该
       probe 标 ``corrected``（即"以文本为锚点回正确集合"——line.final_text 上的
       字符变了，CharIndexService 重建后该位置自动归到新字符的 gallery）。
-    - 若 displayed_new 与 displayed_old 长度不同：按整行差异处理 ——
-      调用 ``line.update_text``、对齐 ``line.chars``，整行的 probe（若有）
-      全部按"位置不再持有 fake_char"判定标 corrected。
+    - 若 displayed_new 与 displayed_old 长度不同：用旧显示文本和真实文本
+      做差异映射；未触碰的旧显示片段回填真实文本，避免 fake_char 回灌到
+      final_text。结构性编辑会让本行 pending probe 全部转 corrected。
 
 - ``observe_slot_edit_at`` 仍保留：原 v_proof 槽位编辑流程在某些路径里会
   直接报点，因此保留这个薄包装作为冗余报点入口。
 """
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 from typing import Optional, Tuple
 
 from app.models import Block, Line, Page
@@ -87,7 +88,7 @@ def save_displayed_edit(
     store = qp.get_active_store()
     idx = resolve_block_line_index(page, block, line)
 
-    # 走 probe-aware 反向路径的前提：有 store、能定位 (bi, li)、长度一致
+    # 走 probe-aware 反向路径的前提：有 store、能定位 (bi, li)
     probes_pending: list[qp.Probe] = []
     if store is not None and idx is not None:
         bi, li = idx
@@ -110,21 +111,51 @@ def save_displayed_edit(
                 _mark_probe_corrected(probe, page.page_number, idx[0], idx[1], ci)
         new_true = "".join(new_true_chars)
     else:
-        # 长度变化 / 无 probe：直接以 displayed_new 作为新 line.final_text
-        new_true = displayed_new_text
-        # 整行已被破坏：所有 pending probe 都按"位置不再持有 fake_char"判定
+        if probes_pending:
+            new_true = _map_non_equal_display_edit_to_true_text(
+                base_true=base_true,
+                displayed_old=displayed_old,
+                displayed_new=displayed_new_text,
+            )
+        else:
+            new_true = displayed_new_text
+        # 结构性编辑后 probe 的位置语义可能漂移；保守转 corrected。
         if probes_pending and idx is not None:
             bi, li = idx
             for p in probes_pending:
-                ci = p.key.char_index
-                if ci >= len(new_true) or new_true[ci] != p.fake_char:
-                    _mark_probe_corrected(p, page.page_number, bi, li, ci)
+                _mark_probe_corrected(p, page.page_number, bi, li, p.key.char_index)
 
     if new_true == line.display_text:
         return False
     line.update_text(new_true)
     _sync_chars_glyphs(line, new_true)
     return True
+
+
+def _map_non_equal_display_edit_to_true_text(
+    *,
+    base_true: str,
+    displayed_old: str,
+    displayed_new: str,
+) -> str:
+    """Map a structural display-space edit back into true text space.
+
+    Equal spans are copied from ``base_true`` so unchanged fake chars injected
+    into ``displayed_old`` cannot be persisted. Insert/replace spans are user
+    input and are copied from ``displayed_new``.
+    """
+    if len(base_true) != len(displayed_old):
+        return displayed_new
+    parts: list[str] = []
+    matcher = SequenceMatcher(a=displayed_old, b=displayed_new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            parts.append(base_true[i1:i2])
+        elif tag in {"insert", "replace"}:
+            parts.append(displayed_new[j1:j2])
+        elif tag == "delete":
+            continue
+    return "".join(parts)
 
 
 def observe_slot_edit_at(
