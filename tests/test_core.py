@@ -206,6 +206,20 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     assert compute_max_step(OcrProject(name="lines-only", pages=[lines_without_done_status])) == STEP_OCR
     assert page_gate_info(lines_without_done_status).page_state == "ocr_ready"
 
+    errored_page = Page(
+        image_path="/tmp/error.png",
+        width=100,
+        height=100,
+        status=PageStatus.LAYOUT_DONE,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 80, 20))],
+        error_message="layout failed",
+    )
+    errored_gate = page_gate_info(errored_page)
+    assert errored_gate.page_state == "error"
+    assert errored_gate.is_pending is False
+    assert errored_gate.action_enabled is False
+    assert pending_ocr_pages(OcrProject(name="error-page", pages=[errored_page])) == []
+
     pending_page.invalidate_ocr("block_moved")
     invalidated = page_gate_info(pending_page)
     assert invalidated.page_state == "ocr_invalidated"
@@ -675,8 +689,17 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         line_without_text.original_text = ""
         line_without_text.ensure_text_contract(fill_original=True)
         assert line_without_text.text == "OCR补全文本"
+        assert line_without_text.final_text == "OCR补全文本"
         assert line_without_text.ocr_text == "OCR补全文本"
         assert line_without_text.original_text == "OCR补全文本"
+
+        final_only = Line(text="", final_text="人工终稿", confidence=0.8, bbox=bb)
+        final_only.ocr_text = ""
+        final_only.original_text = ""
+        final_only.ensure_text_contract(fill_original=True)
+        assert final_only.final_text == "人工终稿"
+        assert final_only.ocr_text == ""
+        assert final_only.original_text == ""
 
         project = OcrProject(
             name="final_text",
@@ -1581,21 +1604,33 @@ def test_project_store_new_db_records_current_schema_version():
                 object_uid="line_test_uid",
                 payload={"field": "final_text"},
             )
+            store.log_operation(
+                1,
+                "legacy_edit",
+                "line",
+                8,
+                2,
+                {"field": "legacy"},
+            )
 
         conn = sqlite3.connect(db_path)
         try:
             meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
             operation_cols = conn.execute("PRAGMA table_info(operation_log)").fetchall()
-            log_row = conn.execute(
-                "SELECT object_id, object_uid, action, payload_json FROM operation_log"
-            ).fetchone()
+            log_rows = conn.execute(
+                "SELECT object_id, object_uid, page_id, action, payload_json "
+                "FROM operation_log ORDER BY id"
+            ).fetchall()
         finally:
             conn.close()
 
         assert int(meta["schema_version"]) == SCHEMA_VERSION
         assert meta["app_version"] == APP_VERSION
         assert any(col[1] == "object_uid" for col in operation_cols)
-        assert log_row == (7, "line_test_uid", "proof_edit", '{"field": "final_text"}')
+        assert log_rows == [
+            (7, "line_test_uid", None, "proof_edit", '{"field": "final_text"}'),
+            (8, "", 2, "legacy_edit", '{"field": "legacy"}'),
+        ]
 
         print("test_project_store_new_db_records_current_schema_version PASSED")
     finally:

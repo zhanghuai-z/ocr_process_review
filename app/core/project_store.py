@@ -1060,9 +1060,10 @@ class ProjectStore:
         action: str,
         object_type: str = "",
         object_id: int | None = None,
-        object_uid: str = "",
         page_id: int | None = None,
         payload: dict | None = None,
+        *,
+        object_uid: str = "",
     ) -> None:
         self.conn.execute(
             "INSERT INTO operation_log (project_id, page_id, object_type, object_id, "

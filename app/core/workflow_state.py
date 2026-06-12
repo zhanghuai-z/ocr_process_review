@@ -66,6 +66,16 @@ def compute_max_step(project: OcrProject | None) -> int:
 
 def page_gate_info(page: Page) -> PageGateInfo:
     """Return the OCR entry gate for one page."""
+    if page.error_message:
+        return PageGateInfo(
+            page_state="error",
+            is_pending=False,
+            reason_code="page_error",
+            reason_text=f"当前页处理失败：{page.error_message}",
+            action_key="enter_ocr",
+            action_label="提交并进入 OCR",
+            action_enabled=False,
+        )
     if not page.is_analyzed:
         return PageGateInfo(
             page_state="layout_pending",
