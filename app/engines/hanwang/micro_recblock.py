@@ -157,6 +157,7 @@ class RunStats:
     recog_full_page_pixels: int = 0
     recog_crop_pixels: int = 0
     recog_probe_calls: int = 0
+    recog_group_failures: int = 0
     recog_batch_chunks: int = 0
     recog_batch_failures: int = 0
     recog_batch_disabled: bool = False
@@ -581,6 +582,7 @@ def _hanwang_bbox_audit(
         "hanwang_segimg_groups": [dict(item) for item in group_audits],
         "hanwang_segimg_group_clipped_count": sum(1 for item in group_audits if item.get("clipped")),
         "hanwang_segimg_group_dropped_count": sum(1 for item in group_audits if item.get("dropped")),
+        "hanwang_recog_group_failed_count": sum(1 for item in group_audits if item.get("recog_failed")),
         "route_text_slice_count": len(text_slice_bboxes),
         "hanwang_recog_group_count": len(group_bboxes),
     }
@@ -984,6 +986,25 @@ def run_micro_recblock(
             group_area_indices.append(group["_area_idx"])
             recog_group_bboxes_by_route.setdefault(route.key, []).append(bbox)
 
+        def mark_recog_group_failure(placement: _GroupPlacement, error: Exception) -> None:
+            stats.recog_group_failures += 1
+            route = text_routes[placement.area_idx]
+            audits = segimg_group_audits_by_route.setdefault(route.key, [])
+            for item in audits:
+                if item.get("recog_group_bbox") == list(placement.page_bbox):
+                    item["recog_failed"] = True
+                    item["recog_error"] = str(error)
+                    return
+            audits.append({
+                "route_text_slice_bbox": list(route.bbox),
+                "segimg_group_bbox": list(placement.page_bbox),
+                "recog_group_bbox": list(placement.page_bbox),
+                "clipped": False,
+                "dropped": False,
+                "recog_failed": True,
+                "recog_error": str(error),
+            })
+
         def recognize_individually(placements: list[_GroupPlacement]) -> None:
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
@@ -999,6 +1020,7 @@ def run_micro_recblock(
                     )
                 except Exception as exc:
                     logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
+                    mark_recog_group_failure(placement, exc)
                     raw = {}
                 local_lines = _line_results_from_recog(
                     raw,
@@ -1684,6 +1706,11 @@ class HanwangMicroRecBlockEngine:
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
             raw_payload, app_payload = split_legacy_raw_payload(row.raw_block)
+            audit = app_payload.get(HANWANG_BBOX_AUDIT_KEY)
+            if isinstance(audit, dict):
+                failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
+                if failed_groups:
+                    note_parts.append(f"hanwang_recog_group_failed={failed_groups}")
             new_blocks.append(
                 Block(
                     block_type=block_type,
@@ -1702,7 +1729,7 @@ class HanwangMicroRecBlockEngine:
         page.blocks = new_blocks
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
-            "groups=%d chunks=%d guarded_chunks=%d batch_failures=%d batch_disabled=%s "
+            "groups=%d group_failures=%d chunks=%d guarded_chunks=%d batch_failures=%d batch_disabled=%s "
             "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d",
             page.page_number,
             stats.n_blocks_total,
@@ -1710,6 +1737,7 @@ class HanwangMicroRecBlockEngine:
             stats.n_blocks_ppvl,
             stats.n_blocks_fallback,
             stats.n_groups,
+            stats.recog_group_failures,
             stats.recog_batch_chunks,
             stats.recog_batch_guarded_chunks,
             stats.recog_batch_failures,

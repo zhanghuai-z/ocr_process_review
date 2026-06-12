@@ -270,6 +270,7 @@ class BlockInspector(QWidget):
             f"recog={recog_count}\n"
             f"clipped={audit.get('hanwang_segimg_group_clipped_count', 0)}  "
             f"dropped={audit.get('hanwang_segimg_group_dropped_count', 0)}\n"
+            f"failed={audit.get('hanwang_recog_group_failed_count', 0)}\n"
             f"source={source}"
         )
 
