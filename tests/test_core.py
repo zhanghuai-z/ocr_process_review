@@ -5450,6 +5450,84 @@ def test_hanwang_latin_engcut_updates_geometry_without_changing_text():
     print("test_hanwang_latin_engcut_updates_geometry_without_changing_text PASSED")
 
 
+def test_hanwang_latin_engcut_failure_is_line_local():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def _line(text, y):
+        return micro_module.LineResult(
+            text=text,
+            bbox=(0, y, 80, y + 30),
+            chars=[
+                micro_module.CharResult(
+                    text=ch,
+                    bbox=(idx * 20, y, idx * 20 + 18, y + 30),
+                )
+                for idx, ch in enumerate(text)
+            ],
+        )
+
+    calls = []
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        calls.append(image_bgr.shape[:2])
+        if len(calls) == 1:
+            raise RuntimeError("bad line crop")
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "chars": [
+                                {
+                                    "codes": [ord(ch)],
+                                    "bbox": {
+                                        "left": idx * 9,
+                                        "top": 2,
+                                        "right": idx * 9 + 7,
+                                        "bottom": 22,
+                                    },
+                                }
+                                for idx, ch in enumerate("~CD~")
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+
+    try:
+        stats = micro_module.RunStats()
+        first = _line("AB", 0)
+        second = _line("CD", 40)
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((80, 100, 3), dtype=np.uint8),
+            [first, second],
+            stats,
+            timeout=1.0,
+        )
+
+        assert calls == [(30, 80), (30, 80)]
+        assert stats.latin_engcut_probe_calls == 2
+        assert stats.latin_engcut_probe_failures == 1
+        assert stats.latin_engcut_exact_tokens == 1
+        assert [char.source for char in first.chars] == ["hanwang:micro_recblock", "hanwang:micro_recblock"]
+        assert [
+            (char.text, char.source, char.bbox, char.token_text)
+            for char in second.chars
+        ] == [
+            ("C", "hanwang:EngCut:latin_exact", (9, 42, 16, 62), "CD"),
+            ("D", "hanwang:EngCut:latin_exact", (18, 42, 25, 62), "CD"),
+        ]
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_failure_is_line_local PASSED")
+
+
 def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
     import os
     import tempfile
@@ -11081,6 +11159,58 @@ def test_vproof_merge_pages_preserves_current_page_text():
     print("test_vproof_merge_pages_preserves_current_page_text PASSED")
 
 
+def test_vproof_indexes_latin_digits_and_punctuation():
+    from PySide6.QtCore import Qt
+
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="甲A，1。",
+        confidence=0.9,
+        bbox=BBox(1, 1, 90, 20),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 12, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="A", confidence=0.9, bbox=BBox(18, 1, 12, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="，", confidence=0.9, bbox=BBox(34, 1, 8, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="1", confidence=0.9, bbox=BBox(48, 1, 10, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="。", confidence=0.9, bbox=BBox(62, 1, 8, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-noncjk.png", width=120, height=80, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40), lines=[line])]
+
+    panel = VProofPanel()
+    panel.load_pages([page])
+
+    assert panel._char_svc.query("甲")
+    assert panel._char_svc.query("A")
+    assert panel._char_svc.query("，")
+    assert panel._char_svc.query("1")
+    assert panel._char_svc.query("。")
+    tokens = {
+        panel._char_list.item(i).data(Qt.ItemDataRole.UserRole)
+        for i in range(panel._char_list.count())
+    }
+    assert {"甲", "A", "，", "1", "。"}.issubset(tokens)
+
+    item = next(
+        panel._char_list.item(i)
+        for i in range(panel._char_list.count())
+        if panel._char_list.item(i).data(Qt.ItemDataRole.UserRole) == "A"
+    )
+    panel._on_char_clicked(item)
+    assert panel._gallery_model.rowCount() == 1
+
+    panel.reset()
+    panel.load_pages([page])
+    assert panel._char_svc.query("A")
+    panel.close()
+
+    print("test_vproof_indexes_latin_digits_and_punctuation PASSED")
+
+
 def test_top_nav_moves_layout_run_button_and_removes_prev_next():
     from app.ui.main_window import TopNavBar
 
@@ -11355,6 +11485,8 @@ def test_hproof_visual_size_is_compact():
         >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H + 2
     )
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
+    assert h_proof.TEXT_SLOT_MIN_W >= 10.0
+    assert h_proof.TEXT_SLOT_GUTTER_W >= 2.0
 
     print("test_hproof_visual_size_is_compact PASSED")
 

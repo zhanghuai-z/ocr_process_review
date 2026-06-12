@@ -76,6 +76,8 @@ IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 TEXT_FONT_PX = 20
 TEXT_LINE_HEIGHT_PX = 28
 TEXT_EDITOR_MAX_H = 32
+TEXT_SLOT_MIN_W = 10.0
+TEXT_SLOT_GUTTER_W = 4.0
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
 LINE_PAIR_H = 70
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
@@ -387,7 +389,7 @@ class _RowEditor(QPlainTextEdit):
                     continue
                 ch = text[i]
                 slot_w = self._slot_widths[i] if i < len(self._slot_widths or []) else 12.0
-                slot_w = max(8.0, float(slot_w))
+                slot_w = max(TEXT_SLOT_MIN_W, float(slot_w))
                 left = int(round(xc - slot_w / 2.0))
                 right = int(round(xc + slot_w / 2.0))
                 cell = QRect(left, 0, max(1, right - left), vp.height())
@@ -1152,7 +1154,7 @@ class _LinePair(QFrame):
                 continue
             cx_src = (ch.bbox.x + ch.bbox.x2) / 2.0 - float(ox)
             x_centers.append(cx_src * scale)
-            widths.append(max(8.0, float(ch.bbox.w) * scale))
+            widths.append(max(TEXT_SLOT_MIN_W, float(ch.bbox.w) * scale + TEXT_SLOT_GUTTER_W))
         editor.set_slot_geometry(x_centers, widths)
 
     def refresh_text(self) -> None:

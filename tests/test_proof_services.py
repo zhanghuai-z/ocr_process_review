@@ -200,9 +200,9 @@ def test_adaptive_pad_typical_small_char():
     assert adaptive_pad_for_bbox(BBox(0, 0, 40, 40)) == 4
 
 
-def test_adaptive_pad_very_small_char_floors_to_one():
-    # 3x3 字 → 0.3 → max(1, 0) = 1
-    assert adaptive_pad_for_bbox(BBox(0, 0, 3, 3)) == 1
+def test_adaptive_pad_very_small_char_floors_to_two():
+    # Narrow punctuation needs a small safety margin; 3x3 -> 0.3 -> floor to 2.
+    assert adaptive_pad_for_bbox(BBox(0, 0, 3, 3)) == 2
 
 
 def test_adaptive_pad_large_char_caps_at_max():

@@ -825,10 +825,6 @@ def _enhance_lines_with_latin_engcut(
     *,
     timeout: float,
 ) -> None:
-    global _LATIN_ENGCUT_DISABLED_FOR_SESSION, _LATIN_ENGCUT_DISABLE_REASON
-    if _LATIN_ENGCUT_DISABLED_FOR_SESSION:
-        stats.latin_engcut_disabled = True
-        return
     height, width = image_bgr.shape[:2]
     for line in lines:
         if not line.text or not line.chars or not has_latin_token(line.text):
@@ -844,11 +840,8 @@ def _enhance_lines_with_latin_engcut(
             raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
         except Exception as exc:
             stats.latin_engcut_probe_failures += 1
-            stats.latin_engcut_disabled = True
-            _LATIN_ENGCUT_DISABLED_FOR_SESSION = True
-            _LATIN_ENGCUT_DISABLE_REASON = str(exc)
             logger.debug("EngCut Latin geometry probe failed bbox=%s text=%r: %s", line.bbox, line.text, exc)
-            return
+            continue
         exact_count, review_count = _apply_latin_engcut_geometry(line, raw_eng20, dx=x1, dy=y1)
         stats.latin_engcut_exact_tokens += exact_count
         stats.latin_engcut_review_tokens += review_count

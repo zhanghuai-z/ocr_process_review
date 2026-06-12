@@ -594,7 +594,7 @@ class VProofPanel(QWidget):
         self._current_page_idx: int = 0
         self._cache = PageImageCache.instance()
         self._bus = ProofStateBus.instance()
-        self._char_svc = CharIndexService()
+        self._char_svc = CharIndexService(include_non_cjk=True)
         self._text_map: List[Tuple[Line, int, int, int]] = []
         self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
@@ -1147,7 +1147,7 @@ class VProofPanel(QWidget):
 
     def reset(self) -> None:
         self._pages = []
-        self._char_svc = CharIndexService()
+        self._char_svc = CharIndexService(include_non_cjk=True)
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])

@@ -52,7 +52,7 @@ def adaptive_pad_for_bbox(bbox: BBox, *, max_pad: int = 6, ratio: float = 0.10) 
     避免纵排字（高度 ~40px）被固定 12px padding 拽进邻字（之前在 v_proof
     里写死的 ``max(1, min(int(min(bbox.w, bbox.h) * 0.10), 6))``）。
     """
-    return max(1, min(int(min(bbox.w, bbox.h) * ratio), max_pad))
+    return max(2, min(int(min(bbox.w, bbox.h) * ratio), max_pad))
 
 
 def verified_char_crop(
