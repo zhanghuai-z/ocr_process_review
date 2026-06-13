@@ -9275,9 +9275,47 @@ def test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_c
     assert carrier_entry is not None
     assert carrier_entry.bbox_source == "paddle_inline_formula"
     assert carrier_entry.bbox_granularity == "word"
+    assert carrier_entry.char_idx == 2
     assert line.chars[2].char == carrier
 
+    trailing_entry = svc.first_entry("税")
+    assert trailing_entry is not None
+    assert trailing_entry.char_idx == len("A+") + len(carrier)
+    assert trailing_entry.bbox == BBox(188, 20, 18, 24)
+
     print("test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_carrier PASSED")
+
+
+def test_vproof_index_geometry_echo_renders_display_offset_overlay(tmp_path):
+    import cv2
+    import numpy as np
+
+    from scripts.render_vproof_index_geometry_echo import render_vproof_index_geometry_echo
+
+    result = render_vproof_index_geometry_echo(tmp_path)
+    carrier = result["carrier"]
+    tax_entry = result["tax_entry"]
+    after_entry = result["after_entry"]
+    flat_text = result["flat_text"]
+    text_map = result["text_map"]
+    overlay_path = result["overlay_path"]
+    report_path = result["report_path"]
+
+    assert tax_entry.char_idx == len("A+") + len(carrier)
+    assert after_entry.char_idx == tax_entry.char_idx + 1
+    assert flat_text[text_map[tax_entry.char_idx][2]] == "税"
+    assert flat_text[text_map[after_entry.char_idx][2]] == "后"
+    assert overlay_path.exists()
+    assert report_path.exists()
+
+    overlay = cv2.imread(str(overlay_path), cv2.IMREAD_COLOR)
+    assert overlay is not None
+    red_pixels = np.count_nonzero(
+        (overlay[:, :, 2] > 180) & (overlay[:, :, 1] < 80) & (overlay[:, :, 0] < 80)
+    )
+    assert red_pixels > 30
+
+    print("test_vproof_index_geometry_echo_renders_display_offset_overlay PASSED")
 
 
 def test_char_index_suppresses_punctuation_topic_for_shared_token_bbox():

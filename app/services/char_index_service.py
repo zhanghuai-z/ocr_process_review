@@ -95,6 +95,15 @@ def _is_tokenized_char(char: Char) -> bool:
     return char.bbox_granularity == "word" or len(char.char or "") > 1
 
 
+def _display_width(char: Char) -> int:
+    raw = char.char or ""
+    return max(1, len(raw)) if _is_tokenized_char(char) else 1
+
+
+def _span_display_width(chars: List[Char]) -> int:
+    return sum(_display_width(char) for char in chars)
+
+
 def _is_vertical_line(bbox: BBox) -> bool:
     if bbox.w <= 0:
         return True
@@ -324,18 +333,21 @@ class CharIndexService:
         chars = line.chars
         text = line.display_text
         idx = 0
+        display_idx = 0
         while idx < len(chars):
             char_obj = chars[idx]
             raw_glyph = char_obj.char or ""
-            glyph = raw_glyph if _is_tokenized_char(char_obj) else (text[idx] if idx < len(text) else raw_glyph)
+            glyph = raw_glyph if _is_tokenized_char(char_obj) else (text[display_idx] if display_idx < len(text) else raw_glyph)
             if not glyph or glyph.isspace():
+                display_idx += _display_width(char_obj)
                 idx += 1
                 continue
 
             if char_obj.bbox_granularity == "word" and char_obj.token_text:
                 end = self._word_span_end(chars, idx)
                 span_chars = chars[idx:end]
-                units.extend(self._build_word_units(span_chars, idx, line))
+                units.extend(self._build_word_units(span_chars, display_idx, line))
+                display_idx += _span_display_width(span_chars)
                 idx = end
                 continue
 
@@ -343,7 +355,9 @@ class CharIndexService:
                 end = idx + 1
                 while end < len(chars) and (chars[end].char or "").isdigit() and chars[end].bbox_granularity != "word":
                     end += 1
-                units.append(self._build_digit_unit(chars[idx:end], idx, line))
+                span_chars = chars[idx:end]
+                units.append(self._build_digit_unit(span_chars, display_idx, line))
+                display_idx += _span_display_width(span_chars)
                 idx = end
                 continue
 
@@ -355,14 +369,16 @@ class CharIndexService:
                     and is_formula_char(chars[end].char or "")
                 ):
                     end += 1
-                units.append(self._build_formula_unit(chars[idx:end], idx, line))
+                span_chars = chars[idx:end]
+                units.append(self._build_formula_unit(span_chars, display_idx, line))
+                display_idx += _span_display_width(span_chars)
                 idx = end
                 continue
 
             bbox = char_obj.bbox or _estimate_char_bbox(line, idx, len(chars)) or line.bbox
             units.append({
                 "key": glyph,
-                "char_idx": idx,
+                "char_idx": display_idx,
                 "bbox": bbox,
                 "confidence": float(char_obj.confidence),
                 "bbox_source": char_obj.bbox_source or "fallback",
@@ -370,6 +386,7 @@ class CharIndexService:
                 "token_text": char_obj.token_text or glyph,
                 "collection_kind": "char",
             })
+            display_idx += _display_width(char_obj)
             idx += 1
         return units
 
