@@ -107,6 +107,27 @@ def test_line_pair_uses_slot_line_editor_for_visible_hproof_text():
     pair.deleteLater()
 
 
+def test_slot_line_editor_accepts_chinese_ime_commit():
+    """中文输入法提交走 QInputMethodEvent.commitString，不走 keyPressEvent。"""
+    from PySide6.QtCore import QCoreApplication, Qt
+    from PySide6.QtGui import QInputMethodEvent
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    pair = _make_pair_with_chars("abc")
+    editor = pair._editor
+    assert isinstance(editor, _SlotLineEditor)
+    assert editor.testAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled)
+    assert editor.inputMethodQuery(Qt.InputMethodQuery.ImEnabled) is True
+
+    editor._select_slot_index(1)
+    ev = QInputMethodEvent("", [])
+    ev.setCommitString("好")
+    QCoreApplication.sendEvent(editor, ev)
+
+    assert editor.toPlainText() == "a好c"
+    pair.deleteLater()
+
+
 def test_line_pair_degrades_when_chars_misaligned():
     """chars 长度与文本不等 → _chars_aligned False → editor 清空 slot 几何，
     走原生渲染降级。"""

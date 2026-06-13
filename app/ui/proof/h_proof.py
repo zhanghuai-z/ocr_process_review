@@ -685,6 +685,7 @@ class _SlotLineEditor(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(TEXT_EDITOR_MAX_H)
         self._document = QTextDocument(self)
@@ -876,6 +877,25 @@ class _SlotLineEditor(QWidget):
         if text:
             self._replace_selected_slots(text)
 
+    def inputMethodQuery(self, query):  # type: ignore[override]
+        if query == Qt.InputMethodQuery.ImEnabled:
+            return True
+        if query == Qt.InputMethodQuery.ImSurroundingText:
+            return self.toPlainText()
+        if query == Qt.InputMethodQuery.ImCurrentSelection:
+            return self._cursor.selectedText() if self._cursor.hasSelection() else ""
+        if query == Qt.InputMethodQuery.ImCursorRectangle:
+            return self._cursor_rect()
+        return super().inputMethodQuery(query)
+
+    def inputMethodEvent(self, event) -> None:  # type: ignore[override]
+        commit = event.commitString() if event is not None else ""
+        if commit:
+            self._replace_selected_slots(commit)
+            event.accept()
+            return
+        super().inputMethodEvent(event)
+
     # ── 绘制 ───────────────────────────────────────────────────
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -952,6 +972,18 @@ class _SlotLineEditor(QWidget):
             return self._cursor.selectionStart(), self._cursor.selectionEnd()
         pos = self._cursor.position()
         return pos, min(pos + 1, len(self.toPlainText()))
+
+    def _cursor_rect(self) -> QRect:
+        pos = self._cursor.selectionStart() if self._cursor.hasSelection() else self._cursor.position()
+        centers = self._slot_x_centers or self._fallback_slot_centers(self.toPlainText())
+        widths = self._slot_widths or [max(TEXT_SLOT_MIN_W, TEXT_FONT_PX * 0.8)] * len(centers)
+        if 0 <= pos < len(centers):
+            center = centers[pos]
+            if center is not None:
+                width = widths[pos] if pos < len(widths) else TEXT_SLOT_MIN_W
+                left = int(round(float(center) - max(TEXT_SLOT_MIN_W, float(width)) / 2.0))
+                return QRect(left, 2, max(1, int(round(width))), self.height() - 4)
+        return QRect(0, 0, 1, self.height())
 
     # ── 事件 ───────────────────────────────────────────────────
 
