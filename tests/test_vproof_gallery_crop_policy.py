@@ -23,10 +23,14 @@ def _entry(
     )
 
 
-def test_vproof_gallery_uses_exact_crop_for_ascii_char_boxes():
-    assert _gallery_crop_pad_for_entry(_entry("A")) == 0
-    assert _gallery_crop_pad_for_entry(_entry("9")) == 0
-    assert _gallery_crop_pad_for_entry(_entry("/")) == 0
+def test_vproof_gallery_uses_tight_safety_margin_for_ascii_letters_and_digits():
+    assert _gallery_crop_pad_for_entry(_entry("A")) == 1
+    assert _gallery_crop_pad_for_entry(_entry("9")) == 1
+
+
+def test_vproof_gallery_keeps_small_context_for_ascii_punctuation():
+    assert _gallery_crop_pad_for_entry(_entry(".")) == 2
+    assert _gallery_crop_pad_for_entry(_entry("/")) == 2
 
 
 def test_vproof_gallery_keeps_adaptive_padding_for_cjk_and_tokens():
