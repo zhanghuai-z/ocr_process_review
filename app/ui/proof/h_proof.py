@@ -341,6 +341,62 @@ class _RowEditor(QPlainTextEdit):
     def has_slot_geometry(self) -> bool:
         return bool(self._slot_x_centers)
 
+    def _slot_index_for_x(self, x: float, *, nearest: bool = False) -> int:
+        """Return the visible slot index at editor-local x.
+
+        In slot-paint mode the visible glyph positions no longer match Qt's
+        native text layout. Mouse hit-testing must therefore use the same slot
+        centers that paintEvent uses, otherwise a click on the visible glyph can
+        move the cursor to a different text offset.
+        """
+        centers = self._slot_x_centers or []
+        if not centers:
+            return -1
+        widths = self._slot_widths or [TEXT_SLOT_MIN_W] * len(centers)
+        best_idx = -1
+        best_dist = float("inf")
+        first_left: float | None = None
+        last_right: float | None = None
+        for idx, center in enumerate(centers):
+            if center is None:
+                continue
+            width = widths[idx] if idx < len(widths) else TEXT_SLOT_MIN_W
+            half = max(TEXT_SLOT_MIN_W / 2.0, float(width) / 2.0)
+            left = float(center) - half
+            right = float(center) + half
+            first_left = left if first_left is None else min(first_left, left)
+            last_right = right if last_right is None else max(last_right, right)
+            if left <= x <= right:
+                return idx
+            dist = abs(float(center) - x)
+            if dist < best_dist:
+                best_idx = idx
+                best_dist = dist
+        if not nearest or best_idx < 0:
+            return -1
+        # Clicks between adjacent narrow slots should still select the nearest
+        # visible glyph. Large blank margins remain non-character area.
+        margin = max(24.0, TEXT_SLOT_MIN_W * 2.0)
+        if first_left is not None and last_right is not None:
+            if x < first_left - margin or x > last_right + margin:
+                return -1
+        return best_idx
+
+    def _event_pos(self, event):
+        try:
+            return event.position().toPoint()
+        except AttributeError:
+            return event.pos()
+
+    def _select_slot_index(self, idx: int) -> None:
+        """Select one visible slot so typing overwrites that character."""
+        if idx < 0 or idx >= len(self.toPlainText()):
+            return
+        cur = self.textCursor()
+        cur.setPosition(idx)
+        cur.setPosition(idx + 1, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cur)
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """图字 y 轴对应核心：当 _slot_x_centers 已就绪，**完全自绘文本**
         到 image bbox 决定的 x 位置；否则走 super 原生渲染。
@@ -560,16 +616,17 @@ class _RowEditor(QPlainTextEdit):
 
     # ── 鼠标悬停 → 字符索引（hproof-visual-marking）─────────
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
-        super().mouseMoveEvent(event)
-        try:
-            pos = event.position().toPoint()
-        except AttributeError:
-            pos = event.pos()
-        cur = self.cursorForPosition(pos)
-        idx = cur.position()
-        # 末尾点击会落到 len(text)；当成离开
-        if idx >= len(self.toPlainText()):
-            idx = -1
+        if self._slot_x_centers:
+            pos = self._event_pos(event)
+            idx = self._slot_index_for_x(float(pos.x()), nearest=False)
+        else:
+            super().mouseMoveEvent(event)
+            pos = self._event_pos(event)
+            cur = self.cursorForPosition(pos)
+            idx = cur.position()
+            # 末尾点击会落到 len(text)；当成离开
+            if idx >= len(self.toPlainText()):
+                idx = -1
         if idx != self._last_hover_idx:
             self._last_hover_idx = idx
             self.hover_char_changed.emit(idx)
@@ -585,6 +642,17 @@ class _RowEditor(QPlainTextEdit):
     # 点 _active_bar / _img_lbl 才切行，点文本不行——这与用户直觉相反）。
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self.row_focus_requested.emit()
+        if self._slot_x_centers:
+            pos = self._event_pos(event)
+            idx = self._slot_index_for_x(float(pos.x()), nearest=True)
+            if idx >= 0:
+                self._select_slot_index(idx)
+                self.setFocus()
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return
         super().mousePressEvent(event)
 
     def focusInEvent(self, event) -> None:  # type: ignore[override]
@@ -731,6 +799,7 @@ class _LinePair(QFrame):
         # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
         self._editor.textChanged.connect(self._refresh_extra_selections)
         # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
+        self._editor.textChanged.connect(self._sync_editor_slot_geometry)
         self._editor.textChanged.connect(self._refresh_status)
         # proof-direct-input-closure round 10 任务 1：editor focus/click → 激活本行
         self._editor.row_focus_requested.connect(self._on_editor_focus_in)

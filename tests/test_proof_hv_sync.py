@@ -1437,6 +1437,45 @@ def test_phase25_horizontal_scroll_as_needed():
     h.deleteLater()
 
 
+def test_hproof_slot_editor_hit_testing_uses_painted_slot_geometry():
+    """横校文本自绘后，鼠标命中必须按可见槽位算，不能按 Qt 原生文本布局算。"""
+    from app.ui.proof.h_proof import _RowEditor
+
+    editor = _RowEditor()
+    editor.setPlainText("abc")
+    editor.set_slot_geometry([100.0, 160.0, 220.0], [20.0, 20.0, 20.0])
+
+    assert editor._slot_index_for_x(160.0, nearest=False) == 1
+    assert editor._slot_index_for_x(140.0, nearest=True) == 1
+
+    editor._select_slot_index(1)
+    cursor = editor.textCursor()
+    assert cursor.selectionStart() == 1
+    assert cursor.selectionEnd() == 2
+    assert cursor.selectedText() == "b"
+    editor.deleteLater()
+
+
+def test_hproof_slot_geometry_clears_when_edit_breaks_alignment():
+    """文本长度变动后必须立刻停用旧槽位几何，避免旧 bbox 映射继续误导高亮。"""
+    from app.ui.proof.h_proof import HProofPanel
+
+    project = _make_project_with_char_crops("abc")
+    panel = HProofPanel()
+    panel.load_pages(project.pages)
+    pair = panel._pairs[0]
+
+    pair._line_crop = object()
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    pair._sync_editor_slot_geometry()
+    assert pair._editor.has_slot_geometry()
+
+    pair._editor.setPlainText("abcd")
+    assert not pair._editor.has_slot_geometry()
+    panel.deleteLater()
+
+
 def test_phase25_page_dir_thumbnails_loaded():
     """Phase 25：左侧页面目录每项带有缩略图空间。"""
     from app.ui.proof.h_proof import HProofPanel
