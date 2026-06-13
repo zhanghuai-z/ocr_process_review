@@ -412,7 +412,7 @@ class WorkflowController(QObject):
             if not self._project:
                 self.worker_error.emit("项目文件无效或为空")
                 return False
-            self._proof_crop_service.normalize_project(self._project)
+            proof_stats = self._proof_crop_service.normalize_project(self._project)
 
             # 切换项目：先清空全局评测状态，再尝试从 sidecar 恢复
             qp.reset_active_store()
@@ -427,7 +427,11 @@ class WorkflowController(QObject):
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
             self._emit_view_state()
-            self.status_message.emit(f"已打开：{db_path}")
+            fallback_warning = self._proof_fallback_warning(proof_stats, self._project.pages)
+            if fallback_warning:
+                self.status_message.emit(f"已打开：{db_path}；{fallback_warning}")
+            else:
+                self.status_message.emit(f"已打开：{db_path}")
             return True
         except Exception as e:
             logger.error("Failed to open project: %s", e)
@@ -804,7 +808,7 @@ class WorkflowController(QObject):
                 page.status = PageStatus.OCR_DONE
                 page.clear_ocr_invalidation()
 
-        self._proof_crop_service.normalize_pages(processed_pages)
+        proof_stats = self._proof_crop_service.normalize_pages(processed_pages)
 
         # 自动标记低置信行
         flagged = self._proof_engine.auto_flag(processed_pages)
@@ -815,10 +819,12 @@ class WorkflowController(QObject):
             page for page in pages
             if page.error_message
         ]
+        fallback_warning = self._proof_fallback_warning(proof_stats, processed_pages)
         self.status_message.emit(
             f"{self._ocr_status_label()}完成，自动标记 {flagged} 行低置信度内容；"
             f"横向/纵向校对已可进入"
             + (f"（{len(failed_pages)} 页失败）" if failed_pages else "")
+            + (f"；{fallback_warning}" if fallback_warning else "")
         )
 
         if self._store:
@@ -1031,6 +1037,35 @@ class WorkflowController(QObject):
         self.ocr_progress.emit(progress)
         if progress.message:
             self.status_message.emit(progress.message)
+
+    @staticmethod
+    def _proof_fallback_warning(stats, pages: list[Page] | None = None) -> str:
+        fallback_total = (
+            int(getattr(stats, "fallback_chars", 0))
+            + int(getattr(stats, "unavailable_chars", 0))
+        )
+        fallback_lines = int(getattr(stats, "fallback_lines", 0))
+        if fallback_total <= 0 and pages:
+            seen_lines: set[int] = set()
+            for page in pages:
+                for _block, line, _line_idx in iter_unique_page_text_lines(page):
+                    line_fallback_chars = 0
+                    for char in line.chars:
+                        source = (char.bbox_source or "").strip().lower()
+                        granularity = (char.bbox_granularity or "").strip().lower()
+                        if source in {"fallback", "unavailable"} or granularity in {"fallback", "unavailable", "line"}:
+                            line_fallback_chars += 1
+                    if line_fallback_chars:
+                        fallback_total += line_fallback_chars
+                        if id(line) not in seen_lines:
+                            fallback_lines += 1
+                            seen_lines.add(id(line))
+        if fallback_total <= 0:
+            return ""
+        return (
+            f"警告：proof fallback {fallback_lines} 行/"
+            f"{fallback_total} 字，字框为估算或不可用"
+        )
 
     def _on_worker_error(self, msg: str) -> None:
         self._discard_parallel_proof_result = True

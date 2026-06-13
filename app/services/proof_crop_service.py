@@ -57,6 +57,9 @@ class ProofCropStats:
     lines: int = 0
     line_bbox_updates: int = 0
     char_bbox_updates: int = 0
+    fallback_lines: int = 0
+    fallback_chars: int = 0
+    unavailable_chars: int = 0
 
 
 class ProofCropService:
@@ -100,6 +103,8 @@ class ProofCropService:
                 if needs_fallback_chars and INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
                     text = line.display_text
                     if text and MISSING_LINE_BBOX_FLAG in line.review_flags:
+                        stats.fallback_lines += 1
+                        stats.unavailable_chars += len(text)
                         line.chars = [
                             _fallback_char(
                                 glyph,
@@ -112,6 +117,8 @@ class ProofCropService:
                         ]
                     elif text:
                         boxes = split_line_bbox_into_char_bboxes(line.bbox, text)
+                        stats.fallback_lines += 1
+                        stats.fallback_chars += len(text)
                         line.chars = _complete_positional_chars(line, text, boxes)
 
                 if line.bbox != old_line_bbox:

@@ -3797,6 +3797,24 @@ def test_main_window_layout_error_is_status_only():
     print("test_main_window_layout_error_is_status_only PASSED")
 
 
+def test_layout_panel_status_label_elides_long_errors():
+    from app.ui.recognize.layout_panel import LayoutPanel, STATUS_LABEL_MAX_CHARS
+
+    _get_qapp()
+    panel = LayoutPanel()
+    try:
+        long_error = "OCR 失败：" + "network-timeout-" * 30
+        panel.finish_analysis_progress(long_error)
+
+        assert len(panel._status_lbl.text()) <= STATUS_LABEL_MAX_CHARS
+        assert panel._status_lbl.text().endswith("…")
+        assert panel._status_lbl.toolTip() == long_error
+    finally:
+        panel.close()
+
+    print("test_layout_panel_status_label_elides_long_errors PASSED")
+
+
 def test_main_window_centered_resize_expands_from_current_center():
     from app.ui.main_window import MainWindow
 
@@ -4551,6 +4569,44 @@ def test_ocr_pipeline_normalizes_proof_geometry():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class FallbackLineEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="甲A1", confidence=0.86, bbox=BBox(10, 10, 90, 24), chars=[])]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((100, 180, 3), 255, dtype=np.uint8)
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(20, 30, 120, 50))
+        page = Page(image_path=img_path, width=180, height=100, blocks=[block])
+        progress_events = []
+
+        result = OcrPipeline(engine=FallbackLineEngine()).process_project(
+            OcrProject(name="FallbackWarn", pages=[page]),
+            progress_callback=progress_events.append,
+        )
+
+        assert result.pages[0].error_message == ""
+        assert result.pages[0].blocks[0].lines[0].chars
+        warnings = [event.message for event in progress_events if "proof fallback" in event.message]
+        assert warnings == ["警告：第 1/1 页触发 proof fallback，1 行/3 字使用估算或不可用字框"]
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers PASSED")
+
+
 def test_ocr_pipeline_reports_real_page_progress():
     import tempfile
     import cv2
@@ -4581,11 +4637,21 @@ def test_ocr_pipeline_reports_real_page_progress():
         )
 
         assert len(result.pages) == 2
-        assert len(progress_events) == 2
-        assert progress_events[0].completed_pages == 1
-        assert progress_events[0].current_page == 1
-        assert progress_events[1].completed_pages == 2
-        assert "第 2/2 页" in progress_events[1].message
+        page_progress_events = [
+            event for event in progress_events
+            if event.message.startswith("OCR 识别中")
+        ]
+        warning_events = [
+            event for event in progress_events
+            if "proof fallback" in event.message
+        ]
+        assert len(page_progress_events) == 2
+        assert page_progress_events[0].completed_pages == 1
+        assert page_progress_events[0].current_page == 1
+        assert page_progress_events[1].completed_pages == 2
+        assert "第 2/2 页" in page_progress_events[1].message
+        assert len(warning_events) == 2
+        assert [event.completed_pages for event in warning_events] == [1, 2]
 
     print("test_ocr_pipeline_reports_real_page_progress PASSED")
 
@@ -5865,6 +5931,68 @@ def test_proof_crop_service_does_not_rewrite_existing_ocr_geometry(tmp_path):
     assert [char.bbox for char in line.chars] == before_char_boxes
 
     print("test_proof_crop_service_does_not_rewrite_existing_ocr_geometry PASSED")
+
+
+def test_proof_crop_service_reports_fallback_geometry(tmp_path):
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.proof_crop_service import ProofCropService
+
+    img = np.full((80, 180, 3), 255, dtype=np.uint8)
+    img_path = str(tmp_path / "fallback-page.png")
+    cv2.imwrite(img_path, img)
+
+    line = Line(
+        text="甲A1",
+        confidence=0.8,
+        bbox=BBox(10, 20, 90, 24),
+        chars=[],
+    )
+    page = Page(
+        image_path=img_path,
+        width=180,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 160, 60), lines=[line])],
+    )
+
+    stats = ProofCropService().normalize_pages([page])
+
+    assert stats.fallback_lines == 1
+    assert stats.fallback_chars == 3
+    assert stats.unavailable_chars == 0
+    assert [char.bbox_granularity for char in line.chars] == ["fallback", "fallback", "fallback"]
+
+    print("test_proof_crop_service_reports_fallback_geometry PASSED")
+
+
+def test_workflow_controller_fallback_warning_scans_existing_chars():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.services.proof_crop_service import ProofCropStats
+
+    line = Line(
+        text="甲乙",
+        confidence=0.8,
+        bbox=BBox(10, 20, 60, 24),
+        chars=[
+            Char(char="甲", confidence=0.8, bbox=BBox(10, 20, 30, 24), bbox_source="fallback", bbox_granularity="fallback"),
+            Char(char="乙", confidence=0.8, bbox=BBox(40, 20, 30, 24), bbox_source="fallback", bbox_granularity="fallback"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 60), lines=[line])],
+    )
+
+    warning = WorkflowController._proof_fallback_warning(ProofCropStats(), [page])
+
+    assert warning == "警告：proof fallback 1 行/2 字，字框为估算或不可用"
+
+    print("test_workflow_controller_fallback_warning_scans_existing_chars PASSED")
 
 
 def test_hanwang_pre_page_ocr_lines_split_before_recog():
@@ -9082,7 +9210,7 @@ def test_char_index_hides_fallback_units_by_default():
     print("test_char_index_hides_fallback_units_by_default PASSED")
 
 
-def test_char_index_groups_digit_runs_as_tokens():
+def test_char_index_indexes_digit_runs_as_single_digits():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
 
@@ -9106,14 +9234,51 @@ def test_char_index_groups_digit_runs_as_tokens():
     )
 
     svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="digit-group", pages=[page]))
-    digit_entries = svc.query("2026")
-    assert len(digit_entries) == 1
-    assert digit_entries[0].bbox == BBox(10, 20, 48, 24)
-    assert digit_entries[0].collection_kind == "token"
-    assert svc.query("2") == []
+    assert svc.query("2026") == []
+    two_entries = svc.query("2")
+    assert len(two_entries) == 2
+    assert [entry.bbox for entry in two_entries] == [
+        BBox(10, 20, 12, 24),
+        BBox(34, 20, 12, 24),
+    ]
+    assert all(entry.collection_kind == "char" for entry in two_entries)
+    assert len(svc.query("0")) == 1
+    assert len(svc.query("6")) == 1
     assert len(svc.query("年")) == 1
 
-    print("test_char_index_groups_digit_runs_as_tokens PASSED")
+    print("test_char_index_indexes_digit_runs_as_single_digits PASSED")
+
+
+def test_char_index_does_not_merge_plain_digit_with_circled_marker():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="附表1①。",
+        confidence=0.93,
+        bbox=BBox(10, 20, 120, 28),
+        chars=[
+            Char(char="附", confidence=0.93, bbox=BBox(10, 20, 18, 28), bbox_source="ocr", bbox_granularity="char", token_text="附"),
+            Char(char="表", confidence=0.93, bbox=BBox(30, 20, 18, 28), bbox_source="ocr", bbox_granularity="char", token_text="表"),
+            Char(char="1", confidence=0.93, bbox=BBox(52, 20, 10, 28), bbox_source="ocr", bbox_granularity="char", token_text="1"),
+            Char(char="①", confidence=0.93, bbox=BBox(66, 20, 20, 28), bbox_source="ocr", bbox_granularity="char", token_text="①"),
+            Char(char="。", confidence=0.93, bbox=BBox(90, 20, 8, 28), bbox_source="ocr", bbox_granularity="char", token_text="。"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/p1.png",
+        width=200,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 150, 50), lines=[line])],
+    )
+
+    svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="marker-split", pages=[page]))
+
+    assert svc.query("1①") == []
+    assert svc.first_entry("1").bbox == BBox(52, 20, 10, 28)
+    assert svc.first_entry("①").bbox == BBox(66, 20, 20, 28)
+
+    print("test_char_index_does_not_merge_plain_digit_with_circled_marker PASSED")
 
 
 def test_char_index_filters_non_cjk_from_default_vproof():
@@ -9155,7 +9320,7 @@ def test_char_index_filters_non_cjk_from_default_vproof():
     print("test_char_index_filters_non_cjk_from_default_vproof PASSED")
 
 
-def test_char_index_sorts_digit_tokens_short_to_long():
+def test_char_index_sorts_digit_characters_as_buckets():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
 
@@ -9186,12 +9351,14 @@ def test_char_index_sorts_digit_tokens_short_to_long():
     svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="digit-sort", pages=[page]))
     sorted_keys = [key for key, _count in svc.sorted_chars()]
     digit_keys = [key for key in sorted_keys if key.isdigit()]
-    assert digit_keys == ["9", "11", "2026"]
+    assert digit_keys == ["0", "1", "2", "6", "9"]
+    assert svc.query("11") == []
+    assert svc.query("2026") == []
 
-    print("test_char_index_sorts_digit_tokens_short_to_long PASSED")
+    print("test_char_index_sorts_digit_characters_as_buckets PASSED")
 
 
-def test_char_index_groups_formula_runs_below_digits():
+def test_char_index_exposes_latin_formula_like_runs_as_chars():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
 
@@ -9218,18 +9385,15 @@ def test_char_index_groups_formula_runs_below_digits():
     )
     svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="formula-group", pages=[page]))
 
-    assert svc.query("A") == []
-    assert svc.query("+") == []
-    assert svc.query("B") == []
-    formula = svc.first_entry("A+B")
-    assert formula is not None
-    assert formula.collection_kind == "token"
-    assert formula.bbox == BBox(84, 20, 34, 24)
+    assert svc.first_entry("A").bbox == BBox(84, 20, 12, 24)
+    assert svc.first_entry("+").bbox == BBox(96, 20, 10, 24)
+    assert svc.first_entry("B").bbox == BBox(106, 20, 12, 24)
+    assert svc.query("A+B") == []
 
     sorted_keys = [key for key, _count in svc.sorted_chars()]
-    assert sorted_keys.index("2026") < sorted_keys.index("A+B")
+    assert "2026" not in sorted_keys
 
-    print("test_char_index_groups_formula_runs_below_digits PASSED")
+    print("test_char_index_exposes_latin_formula_like_runs_as_chars PASSED")
 
 
 def test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_carrier():
@@ -9266,10 +9430,9 @@ def test_char_index_keeps_formula_span_separate_from_word_level_inline_formula_c
 
     svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="formula-carrier-guard", pages=[page]))
 
-    formula = svc.first_entry("A+")
-    assert formula is not None
-    assert formula.collection_kind == "token"
-    assert formula.bbox == BBox(10, 20, 22, 24)
+    assert svc.first_entry("A").bbox == BBox(10, 20, 12, 24)
+    assert svc.first_entry("+").bbox == BBox(22, 20, 10, 24)
+    assert svc.query("A+") == []
 
     carrier_entry = svc.first_entry(carrier)
     assert carrier_entry is not None
@@ -12222,6 +12385,7 @@ if __name__ == "__main__":
     test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169()
     test_workflow_controller_layout_progress_signal()
     test_main_window_layout_error_is_status_only()
+    test_layout_panel_status_label_elides_long_errors()
     test_main_window_centered_resize_expands_from_current_center()
     test_main_window_maximize_state_is_not_forced_back_to_normal()
     test_main_window_file_menu_uses_close_project_action()
@@ -12242,6 +12406,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_offsets_crop_relative_boxes()
     test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_chars()
     test_ocr_pipeline_normalizes_proof_geometry()
+    test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
     test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels()
@@ -12382,10 +12547,11 @@ if __name__ == "__main__":
     test_char_index_sort_categories()
     test_char_index_query_stable_order()
     test_char_index_skips_whitespace()
-    test_char_index_groups_digit_runs_as_tokens()
+    test_char_index_indexes_digit_runs_as_single_digits()
+    test_char_index_does_not_merge_plain_digit_with_circled_marker()
     test_char_index_filters_non_cjk_from_default_vproof()
-    test_char_index_sorts_digit_tokens_short_to_long()
-    test_char_index_groups_formula_runs_below_digits()
+    test_char_index_sorts_digit_characters_as_buckets()
+    test_char_index_exposes_latin_formula_like_runs_as_chars()
     test_char_index_suppresses_punctuation_topic_for_shared_token_bbox()
     test_char_index_uses_token_collection_for_word_level_han_bbox()
     test_char_index_skips_empty_narrow_ocr_bbox()

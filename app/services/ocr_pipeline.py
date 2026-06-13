@@ -139,7 +139,12 @@ class OcrPipeline:
                             completed_pages=page_idx + 1,
                             message=f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，Hanwang micro-recblock 已写回版面块",
                         ))
-                    self._proof_crop_service.normalize_pages([page])
+                    self._normalize_proof_crops(
+                        page,
+                        page_idx=page_idx,
+                        total_pages=total_pages,
+                        progress_callback=progress_callback,
+                    )
                     result.pages.append(page)
                     continue
 
@@ -162,7 +167,12 @@ class OcrPipeline:
                             completed_pages=page_idx + 1,
                             message=f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，PP-OCRv5 页级 proof line 已归属到版面块",
                         ))
-                    self._proof_crop_service.normalize_pages([page])
+                    self._normalize_proof_crops(
+                        page,
+                        page_idx=page_idx,
+                        total_pages=total_pages,
+                        progress_callback=progress_callback,
+                    )
                     result.pages.append(page)
                     continue
 
@@ -213,7 +223,12 @@ class OcrPipeline:
                         summary += "；…"
                     page.error_message = f"OCR 失败：{summary}"
 
-                self._proof_crop_service.normalize_pages([page])
+                self._normalize_proof_crops(
+                    page,
+                    page_idx=page_idx,
+                    total_pages=total_pages,
+                    progress_callback=progress_callback,
+                )
                 result.pages.append(page)
         finally:
             self.close()
@@ -225,6 +240,35 @@ class OcrPipeline:
         """Clear stale OCR-owned errors before retrying OCR on a page."""
         if is_ocr_error_message(page.error_message):
             page.error_message = ""
+
+    def _normalize_proof_crops(
+        self,
+        page: Page,
+        *,
+        page_idx: int,
+        total_pages: int,
+        progress_callback: Optional[Callable[[OcrProgress], None]] = None,
+    ):
+        stats = self._proof_crop_service.normalize_pages([page])
+        fallback_total = stats.fallback_chars + stats.unavailable_chars
+        if fallback_total <= 0:
+            return stats
+
+        message = (
+            f"警告：第 {page_idx + 1}/{total_pages} 页触发 proof fallback，"
+            f"{stats.fallback_lines} 行/{fallback_total} 字使用估算或不可用字框"
+        )
+        logger.warning(message)
+        if progress_callback:
+            progress_callback(OcrProgress(
+                current_page=page_idx + 1,
+                total_pages=total_pages,
+                current_block=0,
+                total_blocks=0,
+                completed_pages=page_idx + 1,
+                message=message,
+            ))
+        return stats
 
     def _prefers_page_ocr(self) -> bool:
         return bool(getattr(self._engine, "prefer_page_ocr", False))
@@ -390,7 +434,12 @@ class OcrPipeline:
         page = Page(image_path=page_image_path, width=0, height=0)
         lines = self._process_block(img, block, page, 0)
         block.lines = lines
-        self._proof_crop_service.normalize_pages([page])
+        self._normalize_proof_crops(
+            page,
+            page_idx=0,
+            total_pages=1,
+            progress_callback=None,
+        )
         return block
 
     def _process_block(

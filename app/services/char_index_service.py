@@ -104,6 +104,30 @@ def _span_display_width(chars: List[Char]) -> int:
     return sum(_display_width(char) for char in chars)
 
 
+def _should_group_formula_char(char: Char, glyph: str) -> bool:
+    if not glyph or glyph.isspace():
+        return False
+    # Latin letters and digits now have reliable EngCut/Hanwang char boxes in
+    # the main path, so VProof should expose them as a-z/0-9 buckets instead of
+    # re-aggregating them into opaque formula-like tokens.
+    if glyph.isascii() and (glyph.isalpha() or glyph.isdigit()):
+        return False
+    return is_formula_char(glyph)
+
+
+def _word_content_should_index_as_chars(content: List[tuple[int, Char]]) -> bool:
+    if not content:
+        return False
+    for _offset, char in content:
+        glyph = char.char or ""
+        if len(glyph) != 1 or is_cjk_char(glyph):
+            return False
+        kind = _char_kind(glyph)
+        if kind not in (_KIND_LETTER, _KIND_DIGIT):
+            return False
+    return True
+
+
 def _is_vertical_line(bbox: BBox) -> bool:
     if bbox.w <= 0:
         return True
@@ -351,22 +375,12 @@ class CharIndexService:
                 idx = end
                 continue
 
-            if glyph.isdigit():
-                end = idx + 1
-                while end < len(chars) and (chars[end].char or "").isdigit() and chars[end].bbox_granularity != "word":
-                    end += 1
-                span_chars = chars[idx:end]
-                units.append(self._build_digit_unit(span_chars, display_idx, line))
-                display_idx += _span_display_width(span_chars)
-                idx = end
-                continue
-
-            if is_formula_char(glyph):
+            if _should_group_formula_char(char_obj, glyph):
                 end = idx + 1
                 while (
                     end < len(chars)
                     and chars[end].bbox_granularity != "word"
-                    and is_formula_char(chars[end].char or "")
+                    and _should_group_formula_char(chars[end], chars[end].char or "")
                 ):
                     end += 1
                 span_chars = chars[idx:end]
@@ -383,7 +397,7 @@ class CharIndexService:
                 "confidence": float(char_obj.confidence),
                 "bbox_source": char_obj.bbox_source or "fallback",
                 "bbox_granularity": _bbox_granularity_for_index(char_obj),
-                "token_text": char_obj.token_text or glyph,
+                "token_text": glyph,
                 "collection_kind": "char",
             })
             display_idx += _display_width(char_obj)
@@ -464,6 +478,22 @@ class CharIndexService:
         ]
         if not content:
             return []
+
+        if _word_content_should_index_as_chars(content):
+            units: List[dict] = []
+            for offset, char in content:
+                glyph = char.char
+                units.append({
+                    "key": glyph,
+                    "char_idx": start_idx + offset,
+                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line.chars)) or line.bbox,
+                    "confidence": float(char.confidence),
+                    "bbox_source": char.bbox_source or "fallback",
+                    "bbox_granularity": _bbox_granularity_for_index(char),
+                    "token_text": glyph,
+                    "collection_kind": "char",
+                })
+            return units
 
         has_digit = any(char.char.isdigit() for _, char in content)
         has_non_digit = any(not char.char.isdigit() for _, char in content)

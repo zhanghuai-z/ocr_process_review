@@ -7,7 +7,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QProgressBar, QPushButton, QScrollArea, QSplitter, QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from app.core.bbox_extraction import bbox_from_variant
@@ -46,6 +47,15 @@ from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.block_inspector import BlockInspector
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
+
+STATUS_LABEL_MAX_CHARS = 96
+
+
+def _compact_status_text(text: str) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= STATUS_LABEL_MAX_CHARS:
+        return value
+    return value[: STATUS_LABEL_MAX_CHARS - 1] + "…"
 
 
 class LayoutPanel(QWidget):
@@ -97,6 +107,10 @@ class LayoutPanel(QWidget):
 
         self._status_lbl = QLabel("请先导入文件并运行版面分析")
         self._status_lbl.setObjectName("muted")
+        self._status_lbl.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
 
         # 主区域（两栏：页面列表 + 图像查看器）
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -342,7 +356,7 @@ class LayoutPanel(QWidget):
         self._ink_mask_cache.clear()
         self._page_list.set_pages([])
         self._viewer.clear()
-        self._status_lbl.setText("请先导入文件并运行版面分析")
+        self._set_status_text("请先导入文件并运行版面分析")
         self._btn_run.setEnabled(False)
         self._btn_undo.setEnabled(False)
         self._type_combo.setEnabled(False)
@@ -363,29 +377,29 @@ class LayoutPanel(QWidget):
         total_blocks = sum(len(p.blocks) for p in pages)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
-            self._status_lbl.setText(
+            self._set_status_text(
                 f"共 {len(pages)} 页，{total_blocks} 个版面块，{failed} 页分析失败"
             )
         else:
-            self._status_lbl.setText(f"共 {len(pages)} 页，{total_blocks} 个版面块")
+            self._set_status_text(f"共 {len(pages)} 页，{total_blocks} 个版面块")
 
     def start_analysis_progress(self, total_pages: int) -> None:
         self._progress_bar.setRange(0, max(1, total_pages))
         self._progress_bar.setValue(0)
         self._progress_bar.show()
-        self._status_lbl.setText(f"正在分析版面… 0/{total_pages}")
+        self._set_status_text(f"正在分析版面… 0/{total_pages}")
 
     def update_analysis_progress(self, current: int, total: int) -> None:
         current_done = max(0, min(current + 1, total))
         self._progress_bar.setRange(0, max(1, total))
         self._progress_bar.setValue(current_done)
         self._progress_bar.show()
-        self._status_lbl.setText(f"正在分析版面… {current_done}/{total}")
+        self._set_status_text(f"正在分析版面… {current_done}/{total}")
 
     def finish_analysis_progress(self, message: str = "") -> None:
         self._progress_bar.hide()
         if message:
-            self._status_lbl.setText(message)
+            self._set_status_text(message)
 
     def set_current_page_number(self, page_number: int) -> None:
         for idx, page in enumerate(self._pages):
@@ -406,13 +420,19 @@ class LayoutPanel(QWidget):
     ) -> None:
         self._page_gate_states[page_number] = (page_state, is_pending, reason_code, reason_text)
         if self._pages and self._pages[self._current_page_idx].page_number == page_number:
-            self._status_lbl.setText(reason_text)
+            self._set_status_text(reason_text)
 
     def set_primary_action(self, page_number: int, action_key: str, label: str, enabled: bool) -> None:
         self._primary_actions[page_number] = (action_key, label, enabled)
         if self._pages and self._pages[self._current_page_idx].page_number == page_number:
             self._btn_submit.setText(label)
             self._btn_submit.setEnabled(enabled)
+
+    def _set_status_text(self, text: str) -> None:
+        full = str(text or "")
+        compact = _compact_status_text(full)
+        self._status_lbl.setText(compact)
+        self._status_lbl.setToolTip(full if compact != full else "")
 
     # ------------------------------------------------------------------ private
 
@@ -436,7 +456,7 @@ class LayoutPanel(QWidget):
         if page.is_analyzed:
             self._show_page_layers(page)
         elif page.error_message:
-            self._status_lbl.setText(f"第 {page.page_number} 页分析失败：{page.error_message}")
+            self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
         self._type_combo.setEnabled(False)
         self._btn_lock.setEnabled(False)
@@ -448,7 +468,7 @@ class LayoutPanel(QWidget):
         self._inspector.set_page_stats(page)
         gate = self._page_gate_states.get(page.page_number)
         if gate is not None:
-            self._status_lbl.setText(gate[3])
+            self._set_status_text(gate[3])
         action = self._primary_actions.get(page.page_number)
         if action is not None:
             self._btn_submit.setText(action[1])
@@ -473,7 +493,7 @@ class LayoutPanel(QWidget):
 
     def _on_block_clicked(self, block: Block) -> None:
         if getattr(block, "is_locked", False):
-            self._status_lbl.setText("该框已锁定；如需编辑，请先解除本页锁定")
+            self._set_status_text("该框已锁定；如需编辑，请先解除本页锁定")
             return
         self._selected_block = block
         bb = block.bbox
@@ -517,7 +537,7 @@ class LayoutPanel(QWidget):
             merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt)
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
-            self._status_lbl.setText("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
+            self._set_status_text("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
             self.geometry_changed.emit()
             self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
@@ -538,7 +558,7 @@ class LayoutPanel(QWidget):
         if not self._pages:
             return
         if getattr(block, "is_locked", False):
-            self._status_lbl.setText("选中框已锁定，需先解锁后删除")
+            self._set_status_text("选中框已锁定，需先解锁后删除")
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
@@ -556,7 +576,7 @@ class LayoutPanel(QWidget):
     def _delete_selected(self) -> None:
         """底部栏 ✕ 删除框 按钮。"""
         if not self._viewer.selected_blocks():
-            self._status_lbl.setText("请先选择要删除的非锁定框")
+            self._set_status_text("请先选择要删除的非锁定框")
             return
         self._viewer.delete_selected()
 
@@ -565,7 +585,7 @@ class LayoutPanel(QWidget):
             return
         selected = [block for block in self._viewer.selected_blocks() if block in self._pages[self._current_page_idx].blocks]
         if len(selected) < 2:
-            self._status_lbl.setText("请先在画布中多选至少两个框再合并")
+            self._set_status_text("请先在画布中多选至少两个框再合并")
             return
 
         page = self._pages[self._current_page_idx]
@@ -604,7 +624,7 @@ class LayoutPanel(QWidget):
         self._show_page_layers(page)
         self._select_block_for_edit(primary)
         self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
-        self._status_lbl.setText("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
+        self._set_status_text("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "blocks_merged")
 
@@ -612,7 +632,7 @@ class LayoutPanel(QWidget):
         if self._selected_block is None:
             return
         if getattr(self._selected_block, "is_locked", False):
-            self._status_lbl.setText("该框已锁定；如需修改属性，请先解除本页锁定")
+            self._set_status_text("该框已锁定；如需修改属性，请先解除本页锁定")
             return
         new_type = self._coerce_block_type(self._type_combo.currentData(), BlockType.UNKNOWN)
         if new_type:
@@ -688,11 +708,11 @@ class LayoutPanel(QWidget):
         binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
         apply_paddle_binding_to_block(block, binding)
         if binding.status == BINDING_EMPTY_REVIEW:
-            self._status_lbl.setText("已创建空校验框；Paddle 父框没有可直接召回的真值")
+            self._set_status_text("已创建空校验框；Paddle 父框没有可直接召回的真值")
         elif binding.status == BINDING_AMBIGUOUS:
-            self._status_lbl.setText("已创建校验框；Paddle 父框存在多个候选，需要人工确认")
+            self._set_status_text("已创建校验框；Paddle 父框存在多个候选，需要人工确认")
         elif binding.text:
-            self._status_lbl.setText("已绑定 Paddle 父框真值，提交后不会交给 Hanwang 强识别")
+            self._set_status_text("已绑定 Paddle 父框真值，提交后不会交给 Hanwang 强识别")
 
     def _sync_lock_button(self, block: Optional[Block]) -> None:
         if block is None:
@@ -730,7 +750,7 @@ class LayoutPanel(QWidget):
 
     def _on_viewer_edit_blocked(self, block: Block, reason: str) -> None:
         if reason == "locked":
-            self._status_lbl.setText("选中框已锁定，需先解锁后编辑")
+            self._set_status_text("选中框已锁定，需先解锁后编辑")
 
     def _unlock_page_blocks(self) -> None:
         if not self._pages:
@@ -738,7 +758,7 @@ class LayoutPanel(QWidget):
         page = self._pages[self._current_page_idx]
         locked = [block for block in page.blocks if getattr(block, "is_locked", False)]
         if not locked:
-            self._status_lbl.setText("本页没有锁定框")
+            self._set_status_text("本页没有锁定框")
             return
         self._push_undo_snapshot()
         for block in locked:
@@ -748,7 +768,7 @@ class LayoutPanel(QWidget):
         self._sync_lock_button(None)
         self._selected_block = None
         self._inspector.set_page_stats(page)
-        self._status_lbl.setText(f"已解除本页 {len(locked)} 个锁定框")
+        self._set_status_text(f"已解除本页 {len(locked)} 个锁定框")
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_lock_changed")
 
@@ -783,7 +803,7 @@ class LayoutPanel(QWidget):
                 self._page_list.blockSignals(False)
             self._update_viewer(page_idx)
         self._update_page_nav()
-        self._status_lbl.setText("已撤销上一步版面编辑")
+        self._set_status_text("已撤销上一步版面编辑")
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "layout_undo")
 
@@ -1143,14 +1163,14 @@ class LayoutPanel(QWidget):
         """完成本页编辑（占位：发出信号供控制器处理；当前仅状态提示）。"""
         if not self._pages:
             return
-        self._status_lbl.setText(f"第 {self._pages[self._current_page_idx].page_number} 页编辑已记录")
+        self._set_status_text(f"第 {self._pages[self._current_page_idx].page_number} 页编辑已记录")
         self.page_completed.emit(self._current_page_idx)
 
     def _on_cancel_clicked(self) -> None:
         """取消本页未提交的编辑（占位：发出信号供控制器处理）。"""
         if not self._pages:
             return
-        self._status_lbl.setText(f"已取消第 {self._pages[self._current_page_idx].page_number} 页编辑")
+        self._set_status_text(f"已取消第 {self._pages[self._current_page_idx].page_number} 页编辑")
         self.edits_cancelled.emit(self._current_page_idx)
 
     def _on_submit_clicked(self) -> None:
