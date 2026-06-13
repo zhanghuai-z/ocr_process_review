@@ -274,6 +274,23 @@ def _verified_char_crop(
     return _shared_verified_char_crop(cache, page_path, bbox, size, pad=pad)
 
 
+def _gallery_crop_pad_for_entry(entry: CharEntry) -> Optional[int]:
+    """纵校 gallery 的字符裁图 padding 策略。
+
+    CJK 字符保留 shared service 的自适应 padding，避免缩略图太贴边。英文、
+    数字、半角符号的字符框通常来自 EngCut 或 micro_recblock 的单字符 bbox，
+    字距又很窄；继续向外扩 2px 会把邻字边缘带进缩略图，干扰人工判断。
+    """
+    if entry.collection_kind != "char":
+        return None
+    if (entry.bbox_granularity or "").strip().lower() != "char":
+        return None
+    char = entry.char or ""
+    if len(char) == 1 and char.isascii() and not char.isspace():
+        return 0
+    return None
+
+
 # ─────────────────────────────────────────────────────────────
 # 虚拟 Gallery Model / Delegate（水平条）
 # ─────────────────────────────────────────────────────────────
@@ -304,6 +321,7 @@ class _GalleryModel(QAbstractListModel):
             return _verified_char_crop(
                 self._cache, entry.page_path, entry.bbox,
                 _GalleryDelegate.SOURCE_PX,
+                pad=_gallery_crop_pad_for_entry(entry),
             )
         if role == Qt.ItemDataRole.DisplayRole:
             display_key = entry.token_text or entry.char
