@@ -8,6 +8,7 @@ from typing import Any, Iterable
 XYXY = tuple[int, int, int, int]
 
 LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9./&+\-]{1,}")
+TEXT_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9./&+\-]{1,}|[0-9]{2,}(?:[./\-][0-9A-Za-z]+)*")
 FORMULA_SPAN_RE = re.compile(
     r"(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$(?!\$).*?(?<!\\)\$(?!\$)",
     re.DOTALL,
@@ -17,8 +18,12 @@ LATIN_ENGCUT_BBOX_SOURCE = "hanwang:EngCut:latin_exact"
 LATIN_ENGCUT_BBOX_GRANULARITY = "char"
 LATIN_ENGCUT_REVIEW_FLAG = "hanwang_latin_engcut_review"
 LATIN_ENGCUT_EXACT_STATUS = "latin_token_engcut_line_exact"
+LATIN_ENGCUT_VARIANT_STATUS = "latin_token_engcut_variant_exact"
+LATIN_ENGCUT_REVERSE_STATUS = "latin_token_engcut_reverse_exact"
+LATIN_ENGCUT_MULTILINE_STATUS = "latin_token_engcut_multiline_review"
 LATIN_ENGCUT_NOT_FOUND_STATUS = "not_found_in_engcut_line_exact"
 LATIN_ENGCUT_INCOMPLETE_BBOX_STATUS = "found_without_complete_engcut_char_bbox"
+SLASH_VARIANTS = ("/", "f", "!", "l", "I", "1", "|")
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,7 @@ class LatinToken:
     text: str
     start: int
     end: int
+    kind: str = "latin"
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,57 @@ def latin_token_spans(text: str, *, skip_formula_spans: bool = True) -> list[Lat
 
 def has_latin_token(text: str) -> bool:
     return bool(latin_token_spans(text))
+
+
+def normalize_text_token(text: str) -> str:
+    value = (text or "").strip()
+    value = value.translate(str.maketrans({
+        "／": "/",
+        "⁄": "/",
+        "∕": "/",
+        "－": "-",
+        "—": "-",
+        "–": "-",
+        "＋": "+",
+        "＆": "&",
+        "．": ".",
+    }))
+    return value.strip(" \t\r\n,，.。;；:：()（）[]【】{}")
+
+
+def text_token_spans(text: str, *, skip_formula_spans: bool = True) -> list[LatinToken]:
+    value = text or ""
+    formula_ranges = _formula_ranges(value) if skip_formula_spans else []
+    tokens: list[LatinToken] = []
+    for match in TEXT_TOKEN_RE.finditer(value):
+        if skip_formula_spans and _overlaps_any_formula(match.start(), match.end(), formula_ranges):
+            continue
+        token = normalize_text_token(match.group(0))
+        if len(token) < 2:
+            continue
+        compact = token.replace(".", "").replace("/", "").replace("-", "")
+        kind = "number" if compact.isdigit() else "latin"
+        tokens.append(LatinToken(text=token, start=match.start(), end=match.end(), kind=kind))
+    return tokens
+
+
+def token_variants(token: str) -> list[str]:
+    token = normalize_text_token(token)
+    variants = [token]
+    if "/" in token:
+        expanded = [""]
+        for char in token:
+            replacements = SLASH_VARIANTS if char == "/" else (char,)
+            expanded = [prefix + replacement for prefix in expanded for replacement in replacements]
+        variants.extend(expanded)
+        variants.append(token.replace("/", ""))
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in variants:
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
 
 
 def _code_to_text(code: int) -> str:

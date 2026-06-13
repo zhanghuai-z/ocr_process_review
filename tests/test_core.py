@@ -5528,6 +5528,191 @@ def test_hanwang_latin_engcut_failure_is_line_local():
     print("test_hanwang_latin_engcut_failure_is_line_local PASSED")
 
 
+def test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    line = micro_module.LineResult(
+        text="Gua吨lia",
+        bbox=(0, 0, 120, 32),
+        chars=[
+            micro_module.CharResult(text="G", bbox=(0, 0, 10, 28)),
+            micro_module.CharResult(text="u", bbox=(12, 8, 22, 28)),
+            micro_module.CharResult(text="a", bbox=(24, 8, 34, 28)),
+            micro_module.CharResult(text="吨", confidence=0.19, bbox=(36, 0, 70, 32)),
+            micro_module.CharResult(text="l", bbox=(72, 0, 82, 28)),
+            micro_module.CharResult(text="i", bbox=(84, 0, 94, 28)),
+            micro_module.CharResult(text="a", bbox=(96, 8, 106, 28)),
+        ],
+    )
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        return {
+            "lines": [{
+                "groups": [{
+                    "chars": [
+                        {
+                            "codes": [ord(ch)],
+                            "bbox": {
+                                "left": idx * 12,
+                                "top": 2,
+                                "right": idx * 12 + 10,
+                                "bottom": 30,
+                            },
+                        }
+                        for idx, ch in enumerate("Guariglia")
+                    ]
+                }]
+            }]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        stats = micro_module.RunStats()
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((40, 140, 3), dtype=np.uint8),
+            [line],
+            stats,
+            timeout=1.0,
+            block_text="Chen和Guariglia，",
+        )
+
+        assert line.text == "Guariglia"
+        assert [char.text for char in line.chars] == list("Guariglia")
+        assert all(char.source == "hanwang:EngCut:latin_exact" for char in line.chars)
+        assert all(char.token_text == "Guariglia" for char in line.chars)
+        assert stats.latin_engcut_exact_tokens == 1
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span PASSED")
+
+
+def test_hanwang_latin_engcut_marks_slash_variant_for_review_without_text_rewrite():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    line = micro_module.LineResult(
+        text="PE!VC",
+        bbox=(0, 0, 90, 32),
+        chars=[
+            micro_module.CharResult(text=ch, bbox=(idx * 14, 0, idx * 14 + 10, 28))
+            for idx, ch in enumerate("PE!VC")
+        ],
+    )
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        return {
+            "lines": [{
+                "groups": [{
+                    "chars": [
+                        {
+                            "codes": [ord(ch)],
+                            "bbox": {
+                                "left": idx * 14,
+                                "top": 2,
+                                "right": idx * 14 + 10,
+                                "bottom": 30,
+                            },
+                        }
+                        for idx, ch in enumerate("PE!VC")
+                    ]
+                }]
+            }]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        stats = micro_module.RunStats()
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((40, 100, 3), dtype=np.uint8),
+            [line],
+            stats,
+            timeout=1.0,
+            block_text="其他PE/VC基金",
+        )
+
+        assert line.text == "PE!VC"
+        assert [char.text for char in line.chars] == list("PE!VC")
+        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG in line.review_flags
+        assert stats.latin_engcut_exact_tokens == 0
+        assert stats.latin_engcut_review_tokens == 1
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_marks_slash_variant_for_review_without_text_rewrite PASSED")
+
+
+def test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_guard():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    lines = [
+        micro_module.LineResult(
+            text="Other",
+            bbox=(0, 0, 80, 30),
+            chars=[
+                micro_module.CharResult(text=ch, bbox=(idx * 12, 0, idx * 12 + 10, 26))
+                for idx, ch in enumerate("Other")
+            ],
+        ),
+        micro_module.LineResult(
+            text="PE/VC",
+            bbox=(0, 40, 90, 72),
+            chars=[
+                micro_module.CharResult(text=ch, bbox=(idx * 14, 40, idx * 14 + 10, 68))
+                for idx, ch in enumerate("PE/VC")
+            ],
+        ),
+    ]
+    engcut_texts = ["Other", "PE/VC"]
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        text = engcut_texts.pop(0)
+        return {
+            "lines": [{
+                "groups": [{
+                    "chars": [
+                        {
+                            "codes": [ord(ch)],
+                            "bbox": {
+                                "left": idx * 14,
+                                "top": 2,
+                                "right": idx * 14 + 10,
+                                "bottom": 28,
+                            },
+                        }
+                        for idx, ch in enumerate(text)
+                    ]
+                }]
+            }]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        stats = micro_module.RunStats()
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((90, 120, 3), dtype=np.uint8),
+            lines,
+            stats,
+            timeout=1.0,
+            block_text="PE/VC Other",
+        )
+
+        assert lines[1].text == "PE/VC"
+        assert [char.source for char in lines[1].chars] == ["hanwang:EngCut:latin_exact"] * 5
+        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG not in lines[1].review_flags
+        assert stats.latin_engcut_exact_tokens == 2
+        assert stats.latin_engcut_review_tokens == 0
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_guard PASSED")
+
+
 def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
     import os
     import tempfile
@@ -11209,6 +11394,39 @@ def test_vproof_indexes_latin_digits_and_punctuation():
     panel.close()
 
     print("test_vproof_indexes_latin_digits_and_punctuation PASSED")
+
+
+def test_vproof_indexes_line_fallback_when_chars_are_missing():
+    from PySide6.QtCore import Qt
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="甲A1。",
+        confidence=0.8,
+        bbox=BBox(1, 1, 80, 22),
+        chars=[],
+    )
+    page = Page(image_path="/tmp/vproof-line-fallback.png", width=120, height=80, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40), lines=[line])]
+
+    panel = VProofPanel()
+    panel.load_pages([page])
+
+    assert panel._char_svc.query("甲")
+    assert panel._char_svc.query("A")
+    assert panel._char_svc.query("1")
+    assert panel._char_svc.query("。")
+    tokens = {
+        panel._char_list.item(i).data(Qt.ItemDataRole.UserRole)
+        for i in range(panel._char_list.count())
+    }
+    assert {"甲", "A", "1", "。"}.issubset(tokens)
+    panel.close()
+
+    print("test_vproof_indexes_line_fallback_when_chars_are_missing PASSED")
 
 
 def test_top_nav_moves_layout_run_button_and_removes_prev_next():

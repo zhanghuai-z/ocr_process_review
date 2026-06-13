@@ -14,11 +14,18 @@ from app.core.latin_span_recovery import (
     LATIN_ENGCUT_BBOX_GRANULARITY,
     LATIN_ENGCUT_BBOX_SOURCE,
     LATIN_ENGCUT_EXACT_STATUS,
+    LATIN_ENGCUT_MULTILINE_STATUS,
     LATIN_ENGCUT_REVIEW_FLAG,
+    LATIN_ENGCUT_REVERSE_STATUS,
+    LATIN_ENGCUT_VARIANT_STATUS,
+    EngcutChar,
+    LatinToken,
     bind_latin_tokens_to_engcut_chars,
     engcut_chars_from_payload,
     has_latin_token,
     offset_engcut_chars,
+    text_token_spans,
+    token_variants,
 )
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
@@ -780,6 +787,301 @@ def _mark_latin_engcut_review(line: LineResult) -> None:
         line.review_flags.append(LATIN_ENGCUT_REVIEW_FLAG)
 
 
+CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
+LATIN_REVERSE_OCCUPY_CONFIDENCE = 0.50
+LATIN_CANDIDATE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./&+-")
+
+
+@dataclass
+class _EngcutLine:
+    line: LineResult
+    bbox: tuple[int, int, int, int]
+    chars: list[EngcutChar]
+    text: str
+    order: int
+
+
+@dataclass
+class _EngcutEntry:
+    char: EngcutChar
+    line_record: _EngcutLine
+
+
+@dataclass
+class _TokenBinding:
+    token: LatinToken
+    status: str
+    matched_text: str
+    chars: list[EngcutChar]
+    line_records: list[_EngcutLine]
+
+    @property
+    def bbox(self) -> tuple[int, int, int, int] | None:
+        boxes = [char.bbox for char in self.chars if char.bbox is not None]
+        if not boxes:
+            return None
+        return (
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        )
+
+
+def _looks_cjk_text(text: str) -> bool:
+    return any(
+        "\u3400" <= char <= "\u4dbf"
+        or "\u4e00" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        for char in text or ""
+    )
+
+
+def _is_occupied_cjk_or_punct(char: CharResult) -> bool:
+    if not char.text or char.bbox is None:
+        return False
+    if char.confidence < LATIN_REVERSE_OCCUPY_CONFIDENCE:
+        return False
+    return _looks_cjk_text(char.text) or char.text in CHINESE_PUNCT
+
+
+def _box_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
+    return (float(box[0] + box[2]) / 2.0, float(box[1] + box[3]) / 2.0)
+
+
+def _contains_point(box: tuple[int, int, int, int], point: tuple[float, float]) -> bool:
+    return box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]
+
+
+def _overlap_ratio(
+    candidate: tuple[int, int, int, int],
+    blocker: tuple[int, int, int, int],
+) -> float:
+    area = _intersection_area(candidate, blocker)
+    if area <= 0:
+        return 0.0
+    return area / max(1, (candidate[2] - candidate[0]) * (candidate[3] - candidate[1]))
+
+
+def _engcut_candidate_char(text: str) -> bool:
+    return len(text) == 1 and text in LATIN_CANDIDATE_CHARS
+
+
+def _engcut_char_blocked(char: EngcutChar, occupied: list[tuple[int, int, int, int]]) -> bool:
+    if char.bbox is None:
+        return True
+    point = _box_center(char.bbox)
+    for blocker in occupied:
+        if _contains_point(blocker, point):
+            return True
+    return any(_overlap_ratio(char.bbox, blocker) >= 0.55 for blocker in occupied)
+
+
+def _engcut_stream(records: list[_EngcutLine]) -> tuple[str, list[_EngcutEntry | None]]:
+    parts: list[str] = []
+    entries: list[_EngcutEntry | None] = []
+    for record in records:
+        for char in record.chars:
+            parts.append(char.text)
+            entries.append(_EngcutEntry(char=char, line_record=record))
+        parts.append("\n")
+        entries.append(None)
+    return "".join(parts), entries
+
+
+def _future_token_before(
+    stream_text: str,
+    cursor: int,
+    candidate_start: int,
+    future_tokens: list[LatinToken],
+) -> bool:
+    for future in future_tokens:
+        for variant in token_variants(future.text):
+            pos = stream_text.find(variant, cursor)
+            if 0 <= pos < candidate_start:
+                return True
+    return False
+
+
+def _bind_token_in_stream(
+    token: LatinToken,
+    future_tokens: list[LatinToken],
+    stream_text: str,
+    entries: list[_EngcutEntry | None],
+    cursor: int,
+) -> tuple[_TokenBinding | None, int]:
+    best: tuple[int, str] | None = None
+    for variant in token_variants(token.text):
+        pos = stream_text.find(variant, cursor)
+        if pos >= 0 and (best is None or pos < best[0]):
+            best = (pos, variant)
+    if best is None:
+        return None, cursor
+    found, variant = best
+    if _future_token_before(stream_text, cursor, found, future_tokens):
+        return None, cursor
+    end = found + len(variant)
+    entry_slice = entries[found:end]
+    if len(entry_slice) != len(variant) or any(item is None or item.char.bbox is None for item in entry_slice):
+        return None, cursor
+    records: list[_EngcutLine] = []
+    chars: list[EngcutChar] = []
+    for item in entry_slice:
+        assert item is not None
+        chars.append(item.char)
+        if item.line_record not in records:
+            records.append(item.line_record)
+    status = LATIN_ENGCUT_EXACT_STATUS if variant == token.text else LATIN_ENGCUT_VARIANT_STATUS
+    if len(records) > 1:
+        status = LATIN_ENGCUT_MULTILINE_STATUS
+    return _TokenBinding(token=token, status=status, matched_text=variant, chars=chars, line_records=records), end
+
+
+def _reverse_groups(records: list[_EngcutLine]) -> list[_TokenBinding]:
+    groups: list[_TokenBinding] = []
+    for record in records:
+        occupied = [
+            char.bbox
+            for char in record.line.chars
+            if _is_occupied_cjk_or_punct(char) and char.bbox is not None
+        ]
+        current: list[EngcutChar] = []
+        for char in record.chars:
+            keep = (
+                _engcut_candidate_char(char.text)
+                and char.bbox is not None
+                and not _engcut_char_blocked(char, occupied)
+            )
+            if keep:
+                current.append(char)
+                continue
+            if current:
+                text = "".join(item.text for item in current)
+                groups.append(_TokenBinding(
+                    token=LatinToken(text=text, start=-1, end=-1),
+                    status=LATIN_ENGCUT_REVERSE_STATUS,
+                    matched_text=text,
+                    chars=current,
+                    line_records=[record],
+                ))
+                current = []
+        if current:
+            text = "".join(item.text for item in current)
+            groups.append(_TokenBinding(
+                token=LatinToken(text=text, start=-1, end=-1),
+                status=LATIN_ENGCUT_REVERSE_STATUS,
+                matched_text=text,
+                chars=current,
+                line_records=[record],
+            ))
+    return [group for group in groups if len(group.matched_text) >= 2]
+
+
+def _reverse_group_matches(group_text: str, token_text: str) -> tuple[bool, str]:
+    for variant in token_variants(token_text):
+        if group_text == variant:
+            return True, variant
+        if group_text.strip("/f!lI1|") == variant:
+            return True, group_text
+    return False, ""
+
+
+def _bind_token_from_reverse_groups(
+    token: LatinToken,
+    groups: list[_TokenBinding],
+    cursor: int,
+) -> tuple[_TokenBinding | None, int]:
+    for idx in range(cursor, len(groups)):
+        group = groups[idx]
+        ok, variant = _reverse_group_matches(group.matched_text, token.text)
+        if ok:
+            return _TokenBinding(
+                token=token,
+                status=LATIN_ENGCUT_REVERSE_STATUS,
+                matched_text=variant,
+                chars=group.chars,
+                line_records=group.line_records,
+            ), idx + 1
+    return None, cursor
+
+
+def _char_center_inside_binding(
+    char: CharResult,
+    binding_bbox: tuple[int, int, int, int],
+) -> bool:
+    if char.bbox is None:
+        return False
+    x1, y1, x2, y2 = binding_bbox
+    cx, cy = _box_center(char.bbox)
+    return (x1 - 2) <= cx <= (x2 + 2) and (y1 - 4) <= cy <= (y2 + 4)
+
+
+def _span_for_binding(
+    line: LineResult,
+    binding_bbox: tuple[int, int, int, int],
+    token: str,
+    matched_text: str,
+) -> tuple[int, int] | None:
+    for candidate in (token, matched_text):
+        if not candidate:
+            continue
+        pos = line.text.find(candidate)
+        if pos < 0:
+            continue
+        offset_map = _line_char_offset_map(line)
+        if offset_map is not None and pos + len(candidate) <= len(offset_map):
+            mapped = offset_map[pos:pos + len(candidate)]
+            return min(mapped), max(mapped) + 1
+    indices = [
+        idx
+        for idx, char in enumerate(line.chars)
+        if _char_center_inside_binding(char, binding_bbox)
+    ]
+    if indices:
+        return min(indices), max(indices) + 1
+    return None
+
+
+def _replace_line_span_with_binding(line: LineResult, binding: _TokenBinding) -> bool:
+    if len(binding.line_records) != 1 or not binding.chars:
+        return False
+    if binding.line_records[0].line is not line:
+        return False
+    binding_bbox = binding.bbox
+    if binding_bbox is None:
+        return False
+    span = _span_for_binding(line, binding_bbox, binding.token.text, binding.matched_text)
+    if span is None:
+        return False
+    start, end = span
+    token_text = binding.token.text
+    if len(binding.chars) != len(token_text):
+        return False
+    replacement = [
+        CharResult(
+            text=token_text[idx],
+            confidence=line.confidence,
+            bbox=char.bbox,
+            candidates=[token_text[idx]],
+            source=LATIN_ENGCUT_BBOX_SOURCE,
+            bbox_granularity=LATIN_ENGCUT_BBOX_GRANULARITY,
+            token_text=token_text,
+        )
+        for idx, char in enumerate(binding.chars)
+    ]
+    line.chars[start:end] = replacement
+    line.text = "".join(char.text for char in line.chars)
+    return True
+
+
+def _binding_can_update_text(binding: _TokenBinding) -> bool:
+    if binding.status == LATIN_ENGCUT_EXACT_STATUS:
+        return binding.matched_text == binding.token.text
+    if binding.status == LATIN_ENGCUT_REVERSE_STATUS:
+        return binding.matched_text == binding.token.text
+    return False
+
+
 def _apply_latin_engcut_geometry(line: LineResult, raw_eng20: dict[str, Any], *, dx: int, dy: int) -> tuple[int, int]:
     local_chars = engcut_chars_from_payload(raw_eng20)
     page_chars = offset_engcut_chars(local_chars, dx=dx, dy=dy)
@@ -824,10 +1126,16 @@ def _enhance_lines_with_latin_engcut(
     stats: RunStats,
     *,
     timeout: float,
+    block_text: str = "",
 ) -> None:
     height, width = image_bgr.shape[:2]
-    for line in lines:
-        if not line.text or not line.chars or not has_latin_token(line.text):
+    block_tokens = text_token_spans(block_text) if block_text else []
+    should_probe_all = bool(block_tokens)
+    records: list[_EngcutLine] = []
+    for order, line in enumerate(lines):
+        if not line.text or not line.chars:
+            continue
+        if not should_probe_all and not has_latin_token(line.text):
             continue
         x1, y1, x2, y2 = _clamp_xyxy(line.bbox, width, height)
         if x2 <= x1 or y2 <= y1:
@@ -842,9 +1150,87 @@ def _enhance_lines_with_latin_engcut(
             stats.latin_engcut_probe_failures += 1
             logger.debug("EngCut Latin geometry probe failed bbox=%s text=%r: %s", line.bbox, line.text, exc)
             continue
-        exact_count, review_count = _apply_latin_engcut_geometry(line, raw_eng20, dx=x1, dy=y1)
-        stats.latin_engcut_exact_tokens += exact_count
-        stats.latin_engcut_review_tokens += review_count
+        local_chars = engcut_chars_from_payload(raw_eng20)
+        page_chars = offset_engcut_chars(local_chars, dx=x1, dy=y1)
+        records.append(_EngcutLine(
+            line=line,
+            bbox=(x1, y1, x2, y2),
+            chars=page_chars,
+            text="".join(char.text for char in page_chars),
+            order=order,
+        ))
+
+    if not records:
+        return
+
+    if not block_tokens:
+        for record in records:
+            exact_count = 0
+            review_count = 0
+            bindings = bind_latin_tokens_to_engcut_chars(record.line.text, record.chars)
+            for binding in bindings:
+                if binding.status != LATIN_ENGCUT_EXACT_STATUS:
+                    review_count += 1
+                    continue
+                token_binding = _TokenBinding(
+                    token=binding.token,
+                    status=binding.status,
+                    matched_text=binding.token.text,
+                    chars=[
+                        EngcutChar(text=binding.token.text[idx], bbox=box)
+                        for idx, box in enumerate(binding.char_bboxes)
+                    ],
+                    line_records=[record],
+                )
+                if _replace_line_span_with_binding(record.line, token_binding):
+                    exact_count += 1
+                else:
+                    review_count += 1
+            if review_count:
+                _mark_latin_engcut_review(record.line)
+            stats.latin_engcut_exact_tokens += exact_count
+            stats.latin_engcut_review_tokens += review_count
+        return
+
+    stream_text, entries = _engcut_stream(records)
+    reverse = _reverse_groups(records)
+    stream_cursor = 0
+    reverse_cursor = 0
+    exact_count = 0
+    review_count = 0
+    for token_idx, token in enumerate(block_tokens):
+        binding, next_cursor = _bind_token_in_stream(
+            token,
+            block_tokens[token_idx + 1:],
+            stream_text,
+            entries,
+            stream_cursor,
+        )
+        if binding is not None:
+            stream_cursor = next_cursor
+        else:
+            binding, next_reverse = _bind_token_from_reverse_groups(token, reverse, reverse_cursor)
+            if binding is not None:
+                reverse_cursor = next_reverse
+
+        if binding is None:
+            continue
+        if binding.status == LATIN_ENGCUT_MULTILINE_STATUS:
+            for record in binding.line_records:
+                _mark_latin_engcut_review(record.line)
+            review_count += 1
+            continue
+        target_line = binding.line_records[0].line if binding.line_records else None
+        if target_line is None:
+            review_count += 1
+            continue
+        if _binding_can_update_text(binding) and _replace_line_span_with_binding(target_line, binding):
+            exact_count += 1
+        else:
+            _mark_latin_engcut_review(target_line)
+            review_count += 1
+    stats.latin_engcut_exact_tokens += exact_count
+    stats.latin_engcut_review_tokens += review_count
 
 
 def _intersection_area(
@@ -1281,6 +1667,7 @@ def run_micro_recblock(
                 lines,
                 stats,
                 timeout=min(30.0, max(1.0, float(recog_timeout))),
+                block_text=ppvl_text,
             )
             hw_text = "".join(line.text for line in lines).strip()
             source = "hanwang"

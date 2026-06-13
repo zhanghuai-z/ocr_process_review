@@ -182,9 +182,40 @@ class CharIndexService:
         line: Line,
         seen: Set[Tuple[int, int, str]],
     ) -> None:
+        had_explicit_chars = bool(line.chars)
         if ROUTE_INLINE_FORMULA_FLAG not in line.review_flags:
             ensure_line_char_bboxes(line, page_image=page_image)
         if MISSING_LINE_BBOX_FLAG in line.review_flags:
+            return
+
+        if not had_explicit_chars:
+            text = line.display_text
+            synthesized_chars = line.chars if len(line.chars) == len(text) else []
+            for char_idx, glyph in enumerate(text):
+                synthesized = synthesized_chars[char_idx] if char_idx < len(synthesized_chars) else None
+                fallback_bbox = _estimate_char_bbox(line, char_idx, len(text)) or line.bbox
+                explicit_bbox = (synthesized.bbox if synthesized is not None else None) or fallback_bbox
+                confidence = synthesized.confidence if synthesized is not None else line.confidence
+                bbox_source = (synthesized.bbox_source if synthesized is not None else "") or "fallback"
+                bbox_granularity = (synthesized.bbox_granularity if synthesized is not None else "") or "fallback"
+                token_text = (synthesized.token_text if synthesized is not None else "") or glyph
+                self._maybe_add(
+                    glyph,
+                    line=line,
+                    char_idx=char_idx,
+                    page=page,
+                    page_idx=page_idx,
+                    block_order=block_order,
+                    line_idx=line_idx,
+                    explicit_bbox=explicit_bbox,
+                    confidence=float(confidence),
+                    seen=seen,
+                    bbox_source=bbox_source,
+                    bbox_granularity=bbox_granularity,
+                    token_text=token_text,
+                    collection_kind="char",
+                    page_image=page_image,
+                )
             return
 
         if not line.chars:
