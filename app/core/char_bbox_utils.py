@@ -37,6 +37,16 @@ def _is_trusted_char_bbox_source(bbox_source: str) -> bool:
     return any(s.startswith(pfx) for pfx in _TRUSTED_OCR_CHAR_SOURCE_PREFIXES)
 
 
+def _normalized_existing_bbox_granularity(char: Char, has_explicit_bbox: bool) -> str:
+    if not has_explicit_bbox:
+        return "fallback"
+    if char.bbox_granularity:
+        return char.bbox_granularity
+    if _is_trusted_char_bbox_source(char.bbox_source):
+        return "char"
+    return "fallback"
+
+
 def infer_line_direction(line_bbox: BBox, text_length: int) -> str:
     """根据行框长宽比推断字符分布方向。"""
     if text_length <= 1:
@@ -530,8 +540,8 @@ def ensure_line_char_bboxes(
             else "fallback"
         )
         bbox_granularity = (
-            existing.bbox_granularity
-            if has_explicit_bbox and not repaired_neighbor_bbox and existing and existing.bbox_granularity
+            _normalized_existing_bbox_granularity(existing, has_explicit_bbox)
+            if has_explicit_bbox and not repaired_neighbor_bbox and existing
             else "fallback"
         )
         token_text = (

@@ -347,6 +347,37 @@ def test_ensure_preserves_hanwang_char_bboxes():
         assert ch.bbox_granularity == "char"
 
 
+def test_ensure_backfills_missing_hanwang_granularity_as_char():
+    """Old projects may have Hanwang char bboxes with an empty granularity field."""
+    chars = [
+        Char(
+            char="甲",
+            confidence=0.92,
+            bbox=BBox(2, 2, 28, 28),
+            bbox_source="hanwang:micro_recblock",
+            bbox_granularity="",
+        ),
+        Char(
+            char="A",
+            confidence=0.91,
+            bbox=BBox(34, 2, 18, 28),
+            bbox_source="hanwang:micro_recblock",
+            bbox_granularity="",
+        ),
+    ]
+    line = Line(
+        text="甲A",
+        confidence=0.9,
+        bbox=BBox(0, 0, 60, 32),
+        chars=chars,
+    )
+
+    result = ensure_line_char_bboxes(line, page_image=_dummy_image(h=50, w=80))
+
+    assert [ch.bbox_source for ch in result] == ["hanwang:micro_recblock", "hanwang:micro_recblock"]
+    assert [ch.bbox_granularity for ch in result] == ["char", "char"]
+
+
 def test_ensure_preserves_char_fallback_single_char_line():
     """Single-char char_fallback lines must not lose their bbox."""
     ch = _hw_fallback_char("己", x=50, y=80, w=30, h=30)
@@ -535,3 +566,28 @@ def test_char_index_svc_default_params_hanwang_chars_indexed():
     assert svc._is_fallback_unit("", "char")
     assert svc._is_fallback_unit("hanwang:CharRcg", "line")
     assert svc._is_fallback_unit("some_engine", "char")
+
+
+def test_char_index_indexes_old_hanwang_chars_with_empty_granularity():
+    """VProof must not be empty for projects saved before granularity was populated."""
+    line = Line(
+        text="甲A，",
+        confidence=0.9,
+        bbox=BBox(0, 0, 90, 32),
+        chars=[
+            Char(char="甲", confidence=0.92, bbox=BBox(2, 2, 28, 28), bbox_source="hanwang:micro_recblock"),
+            Char(char="A", confidence=0.91, bbox=BBox(34, 2, 18, 28), bbox_source="hanwang:micro_recblock"),
+            Char(char="，", confidence=0.89, bbox=BBox(58, 22, 8, 8), bbox_source="hanwang:micro_recblock"),
+        ],
+    )
+    page = Page(image_path="/tmp/old-hanwang-granularity.png", width=100, height=50)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 90, 32), order=0, lines=[line])
+    ]
+
+    svc = CharIndexService(include_non_cjk=True).build([page])
+
+    assert svc.query("甲")
+    assert svc.query("A")
+    assert svc.query("，")
+    assert {ch.bbox_granularity for ch in line.chars} == {"char"}
