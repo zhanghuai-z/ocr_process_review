@@ -13,7 +13,7 @@ import pytest
 from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_HPROOF, STEP_LAYOUT,
 )
-from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 
 
 # ── 辅助 ───────────────────────────────────────────────────────
@@ -173,6 +173,34 @@ def test_sync_proof_panels_second_call_merges(ctrl):
     assert len(v.merge_calls) == 1
 
 
+def test_sync_proof_panels_merges_when_char_geometry_changes_with_same_line_count(ctrl):
+    """重跑 OCR 后行数可能不变，但字框/文本已变；proof 面板不能继续用旧缓存。"""
+    h = _StubPanel(); v = _StubPanel()
+    ctrl.register_proof_panels(h, v)
+    line = _line("业")
+    line.chars = [
+        Char(
+            char="业",
+            confidence=0.96,
+            bbox=BBox(10, 20, 30, 40),
+            bbox_source="linecut",
+            bbox_granularity="char",
+            token_text="业",
+        )
+    ]
+    ctrl._project = OcrProject(name="t", pages=[_page(1, [_block([line])])])
+
+    ctrl.sync_proof_panels()
+    h.load_calls.clear(); v.load_calls.clear()
+    line.chars[0].bbox = BBox(11, 20, 30, 40)
+
+    ctrl.sync_proof_panels()
+    assert ctrl.total_line_count == 1
+    assert h.load_calls == [] and v.load_calls == []
+    assert len(h.merge_calls) == 1
+    assert len(v.merge_calls) == 1
+
+
 def test_sync_proof_panels_skips_when_unchanged(ctrl):
     """行数未变化时 sync 应该 no-op（避免 OCR 进度回调里频繁刷新）。"""
     h = _StubPanel(); v = _StubPanel()
@@ -206,8 +234,10 @@ def test_reset_proof_sync_state_resets_counter(ctrl):
     ctrl._project = OcrProject(name="t", pages=[p1])
     ctrl.sync_proof_panels()
     assert ctrl._proof_loaded_line_count > 0
+    assert ctrl._proof_loaded_signature
     ctrl.reset_proof_sync_state()
     assert ctrl._proof_loaded_line_count == 0
+    assert ctrl._proof_loaded_signature == ()
 
 
 # refresh_proof_quality_probe_state：原行为 = 进横校只刷横校，进纵校只刷纵校。

@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from app.core.block_payload import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
+from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.project_store import ProjectStore
 from app.core.proof_engine import ProofEngine
 from app.core.workflow_state import (
@@ -83,6 +84,7 @@ class WorkflowController(QObject):
         self._queued_ocr_progress_callback: Optional[Callable] = None
         # proof 面板同步状态（供 sync_proof_panels 使用）
         self._proof_loaded_line_count: int = 0
+        self._proof_loaded_signature: tuple = ()
         self._hproof_panel = None
         self._vproof_panel = None
         # view-state ownership: 哪个 step 激活、哪个 page_number 激活、版面按钮可用性
@@ -212,13 +214,62 @@ class WorkflowController(QObject):
         self._hproof_panel = hproof
         self._vproof_panel = vproof
 
+    @staticmethod
+    def _bbox_signature(bbox: BBox | None) -> tuple[int, int, int, int] | None:
+        if bbox is None:
+            return None
+        return int(bbox.x), int(bbox.y), int(bbox.w), int(bbox.h)
+
+    def _proof_pages_signature(self) -> tuple:
+        if not self._project:
+            return ()
+        parts: list[tuple] = [("total_line_count", self.total_line_count)]
+        for page_idx, page in enumerate(self._project.pages):
+            parts.append((
+                "page",
+                page.uid,
+                page.id,
+                page_idx,
+                page.page_number,
+                page.display_image_path,
+                page.width,
+                page.height,
+            ))
+            for block, line, line_idx in iter_unique_page_text_lines(page):
+                parts.append((
+                    "line",
+                    block.uid,
+                    block.id,
+                    block.order,
+                    block.block_type.value,
+                    line.uid,
+                    line.id,
+                    line_idx,
+                    line.display_text,
+                    self._bbox_signature(line.bbox),
+                    tuple(line.review_flags),
+                ))
+                for char_idx, char in enumerate(line.chars):
+                    parts.append((
+                        "char",
+                        char.uid,
+                        char_idx,
+                        char.char,
+                        self._bbox_signature(char.bbox),
+                        char.bbox_source,
+                        char.bbox_granularity,
+                        char.token_text,
+                        round(float(char.confidence), 6),
+                    ))
+        return tuple(parts)
+
     def sync_proof_panels(self, *, force_load: bool = False) -> None:
-        """根据当前 project.pages 的行数同步两个校对面板。
+        """根据当前 project.pages 的 proof 数据同步两个校对面板。
 
         - ``force_load=True``：不论之前是否已 load 过，都走 load_pages（用于
           打开项目这种"全量初始化"场景）。
         - 否则按"已加载 → merge / 未加载 → load"切换，与原 MainWindow 实现等价。
-        - 若行数没变化则什么都不做（避免 OCR 进度回调里频繁刷新）。
+        - 若 proof 数据签名没变化则什么都不做（避免 OCR 进度回调里频繁刷新）。
         """
         panels = (getattr(self, "_hproof_panel", None),
                   getattr(self, "_vproof_panel", None))
@@ -227,12 +278,14 @@ class WorkflowController(QObject):
         line_count = self.total_line_count
         if line_count <= 0:
             return
+        signature = self._proof_pages_signature()
         if force_load:
             for p in panels:
                 p.load_pages(self._project.pages)
             self._proof_loaded_line_count = line_count
+            self._proof_loaded_signature = signature
             return
-        if line_count == getattr(self, "_proof_loaded_line_count", 0):
+        if signature == getattr(self, "_proof_loaded_signature", ()):
             return
         if getattr(self, "_proof_loaded_line_count", 0) > 0:
             for p in panels:
@@ -241,10 +294,12 @@ class WorkflowController(QObject):
             for p in panels:
                 p.load_pages(self._project.pages)
         self._proof_loaded_line_count = line_count
+        self._proof_loaded_signature = signature
 
     def reset_proof_sync_state(self) -> None:
         """新建/打开项目前清掉 proof 同步计数。"""
         self._proof_loaded_line_count = 0
+        self._proof_loaded_signature = ()
 
     def refresh_proof_quality_probe_state(self, step: int) -> None:
         """只刷新与 ``step`` 对应的那一个校对面板的 quality-probe 显示。
