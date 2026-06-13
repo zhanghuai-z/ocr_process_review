@@ -5,10 +5,50 @@ from typing import Iterable
 
 import cv2
 
-from app.core.char_bbox_utils import ensure_line_char_bboxes, refine_line_bbox
-from app.models import OcrProject, Page
+from app.core.char_bbox_utils import (
+    BBOX_GRANULARITY_UNAVAILABLE,
+    BBOX_SOURCE_UNAVAILABLE,
+    MISSING_LINE_BBOX_FLAG,
+    split_line_bbox_into_char_bboxes,
+)
+from app.models import BBox, Char, Line, OcrProject, Page
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
+
+
+def _is_tokenized_char(char: Char) -> bool:
+    return char.bbox_granularity == "word" or len(char.char or "") > 1
+
+
+def _fallback_char(glyph: str, line: Line, bbox: BBox | None, source: str, granularity: str) -> Char:
+    return Char(
+        char=glyph,
+        confidence=float(line.confidence),
+        bbox=bbox,
+        bbox_source=source,
+        bbox_granularity=granularity,
+        token_text=glyph,
+    )
+
+
+def _complete_positional_chars(line: Line, text: str, boxes: list[BBox] | None) -> list[Char]:
+    completed: list[Char] = []
+    existing = list(line.chars)
+    for idx, glyph in enumerate(text):
+        current = existing[idx] if idx < len(existing) else None
+        if current is not None and current.char == glyph and current.bbox is not None:
+            completed.append(current)
+            continue
+        completed.append(
+            _fallback_char(
+                glyph,
+                line,
+                boxes[idx] if boxes is not None and idx < len(boxes) else None,
+                "fallback",
+                "fallback",
+            )
+        )
+    return completed
 
 
 @dataclass
@@ -49,9 +89,30 @@ class ProofCropService:
                     for char in line.chars
                 ]
 
-                line.bbox = refine_line_bbox(line.bbox, image)
-                if INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
-                    ensure_line_char_bboxes(line, page_image=image)
+                has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
+                needs_fallback_chars = (
+                    not line.chars
+                    or (
+                        not has_tokenized_chars
+                        and len(line.chars) != len(line.display_text)
+                    )
+                )
+                if needs_fallback_chars and INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
+                    text = line.display_text
+                    if text and MISSING_LINE_BBOX_FLAG in line.review_flags:
+                        line.chars = [
+                            _fallback_char(
+                                glyph,
+                                line,
+                                None,
+                                BBOX_SOURCE_UNAVAILABLE,
+                                BBOX_GRANULARITY_UNAVAILABLE,
+                            )
+                            for glyph in text
+                        ]
+                    elif text:
+                        boxes = split_line_bbox_into_char_bboxes(line.bbox, text)
+                        line.chars = _complete_positional_chars(line, text, boxes)
 
                 if line.bbox != old_line_bbox:
                     page_line_updates += 1

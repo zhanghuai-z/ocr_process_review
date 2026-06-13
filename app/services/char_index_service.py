@@ -10,11 +10,11 @@ import cv2
 
 from app.core.char_bbox_utils import (
     MISSING_LINE_BBOX_FLAG,
-    ensure_line_char_bboxes,
     is_meaningful_text_bbox,
+    refine_line_char_bboxes,
+    split_line_bbox_into_char_bboxes,
 )
 from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
-from app.core.paddle_line_routing import ROUTE_INLINE_FORMULA_FLAG
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 
@@ -83,6 +83,16 @@ def _sort_key(char: str) -> Tuple[int, str, str]:
     else:
         label = char
     return kind, label, char
+
+
+def _bbox_granularity_for_index(char: Char) -> str:
+    if char.bbox_granularity:
+        return char.bbox_granularity
+    return "char" if char.bbox is not None and char.bbox.area > 0 else "fallback"
+
+
+def _is_tokenized_char(char: Char) -> bool:
+    return char.bbox_granularity == "word" or len(char.char or "") > 1
 
 
 def _is_vertical_line(bbox: BBox) -> bool:
@@ -182,62 +192,43 @@ class CharIndexService:
         line: Line,
         seen: Set[Tuple[int, int, str]],
     ) -> None:
-        had_explicit_chars = bool(line.chars)
-        if ROUTE_INLINE_FORMULA_FLAG not in line.review_flags:
-            ensure_line_char_bboxes(line, page_image=page_image)
         if MISSING_LINE_BBOX_FLAG in line.review_flags:
             return
 
-        if not had_explicit_chars:
-            text = line.display_text
-            synthesized_chars = line.chars if len(line.chars) == len(text) else []
-            for char_idx, glyph in enumerate(text):
-                synthesized = synthesized_chars[char_idx] if char_idx < len(synthesized_chars) else None
-                fallback_bbox = _estimate_char_bbox(line, char_idx, len(text)) or line.bbox
-                explicit_bbox = (synthesized.bbox if synthesized is not None else None) or fallback_bbox
-                confidence = synthesized.confidence if synthesized is not None else line.confidence
-                bbox_source = (synthesized.bbox_source if synthesized is not None else "") or "fallback"
-                bbox_granularity = (synthesized.bbox_granularity if synthesized is not None else "") or "fallback"
-                token_text = (synthesized.token_text if synthesized is not None else "") or glyph
-                self._maybe_add(
-                    glyph,
-                    line=line,
-                    char_idx=char_idx,
-                    page=page,
-                    page_idx=page_idx,
-                    block_order=block_order,
-                    line_idx=line_idx,
-                    explicit_bbox=explicit_bbox,
-                    confidence=float(confidence),
-                    seen=seen,
-                    bbox_source=bbox_source,
-                    bbox_granularity=bbox_granularity,
-                    token_text=token_text,
-                    collection_kind="char",
-                    page_image=page_image,
-                )
+        text = line.display_text
+        if not text:
             return
 
-        if not line.chars:
-            text = line.display_text
-            for char_idx, glyph in enumerate(text):
-                self._maybe_add(
-                    glyph,
-                    line=line,
-                    char_idx=char_idx,
-                    page=page,
-                    page_idx=page_idx,
-                    block_order=block_order,
-                    line_idx=line_idx,
-                    explicit_bbox=line.bbox,
-                    confidence=float(line.confidence),
-                    seen=seen,
-                    bbox_source="fallback",
-                    bbox_granularity="fallback",
-                    token_text=glyph,
-                    collection_kind="char",
-                    page_image=page_image,
-                )
+        if line.chars:
+            for char in line.chars:
+                if char.bbox is not None and char.bbox.area > 0 and not char.bbox_granularity:
+                    char.bbox_granularity = "char"
+
+        has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
+        if not line.chars or (len(line.chars) != len(text) and not has_tokenized_chars):
+            self._index_fallback_line(
+                text=text,
+                line=line,
+                page=page,
+                page_idx=page_idx,
+                block_order=block_order,
+                line_idx=line_idx,
+                seen=seen,
+                page_image=page_image,
+            )
+            return
+
+        if not has_tokenized_chars and any((char.char or "") != text[idx] for idx, char in enumerate(line.chars)):
+            self._index_positional_line(
+                text=text,
+                line=line,
+                page=page,
+                page_idx=page_idx,
+                block_order=block_order,
+                line_idx=line_idx,
+                seen=seen,
+                page_image=page_image,
+            )
             return
 
         for unit in self._iter_index_units(line):
@@ -259,13 +250,84 @@ class CharIndexService:
                 page_image=page_image,
             )
 
+    def _index_positional_line(
+        self,
+        *,
+        text: str,
+        line: Line,
+        page: Page,
+        page_idx: int,
+        block_order: int,
+        line_idx: int,
+        seen: Set[Tuple[int, int, str]],
+        page_image,
+    ) -> None:
+        for char_idx, glyph in enumerate(text):
+            char_obj = line.chars[char_idx]
+            explicit_bbox = char_obj.bbox or _estimate_char_bbox(line, char_idx, len(text)) or line.bbox
+            self._maybe_add(
+                glyph,
+                line=line,
+                char_idx=char_idx,
+                page=page,
+                page_idx=page_idx,
+                block_order=block_order,
+                line_idx=line_idx,
+                explicit_bbox=explicit_bbox,
+                confidence=float(char_obj.confidence),
+                seen=seen,
+                bbox_source=char_obj.bbox_source or "fallback",
+                bbox_granularity=_bbox_granularity_for_index(char_obj),
+                token_text=glyph,
+                collection_kind="char",
+                page_image=page_image,
+            )
+
+    def _index_fallback_line(
+        self,
+        *,
+        text: str,
+        line: Line,
+        page: Page,
+        page_idx: int,
+        block_order: int,
+        line_idx: int,
+        seen: Set[Tuple[int, int, str]],
+        page_image,
+    ) -> None:
+        boxes = (
+            refine_line_char_bboxes(line.bbox, text, page_image)
+            if page_image is not None
+            else split_line_bbox_into_char_bboxes(line.bbox, text)
+        )
+        for char_idx, glyph in enumerate(text):
+            self._maybe_add(
+                glyph,
+                line=line,
+                char_idx=char_idx,
+                page=page,
+                page_idx=page_idx,
+                block_order=block_order,
+                line_idx=line_idx,
+                explicit_bbox=boxes[char_idx] if char_idx < len(boxes) else (_estimate_char_bbox(line, char_idx, len(text)) or line.bbox),
+                confidence=float(line.confidence),
+                seen=seen,
+                bbox_source="fallback",
+                bbox_granularity="fallback",
+                token_text=glyph,
+                collection_kind="char",
+                page_image=page_image,
+            )
+
     def _iter_index_units(self, line: Line) -> List[dict]:
         units: List[dict] = []
         chars = line.chars
+        text = line.display_text
         idx = 0
         while idx < len(chars):
             char_obj = chars[idx]
-            glyph = char_obj.char or ""
+            raw_glyph = char_obj.char or ""
+            glyph = raw_glyph if _is_tokenized_char(char_obj) else (text[idx] if idx < len(text) else raw_glyph)
             if not glyph or glyph.isspace():
                 idx += 1
                 continue
@@ -304,7 +366,7 @@ class CharIndexService:
                 "bbox": bbox,
                 "confidence": float(char_obj.confidence),
                 "bbox_source": char_obj.bbox_source or "fallback",
-                "bbox_granularity": char_obj.bbox_granularity or "fallback",
+                "bbox_granularity": _bbox_granularity_for_index(char_obj),
                 "token_text": char_obj.token_text or glyph,
                 "collection_kind": "char",
             })
@@ -347,7 +409,7 @@ class CharIndexService:
             "bbox": bbox,
             "confidence": confidence,
             "bbox_source": chars[0].bbox_source or "fallback",
-            "bbox_granularity": chars[0].bbox_granularity or "fallback",
+            "bbox_granularity": _bbox_granularity_for_index(chars[0]),
             "token_text": token,
             "collection_kind": "token" if len(token) > 1 else "char",
         }
@@ -362,7 +424,7 @@ class CharIndexService:
             "bbox": bbox,
             "confidence": confidence,
             "bbox_source": chars[0].bbox_source or "fallback",
-            "bbox_granularity": chars[0].bbox_granularity or "fallback",
+            "bbox_granularity": _bbox_granularity_for_index(chars[0]),
             "token_text": token,
             "collection_kind": "token",
         }
@@ -412,7 +474,7 @@ class CharIndexService:
             "bbox": bbox,
             "confidence": confidence,
             "bbox_source": chars[0].bbox_source or "fallback",
-            "bbox_granularity": chars[0].bbox_granularity or "fallback",
+            "bbox_granularity": _bbox_granularity_for_index(chars[0]),
             "token_text": chars[0].token_text or core_text,
             "collection_kind": "char" if len(core_text) == 1 else "token",
         }]
@@ -486,7 +548,7 @@ class CharIndexService:
             and not source.startswith("hanwang:")
         ):
             return True
-        return granularity in {"", "fallback", "unavailable", "line"}
+        return granularity in {"fallback", "unavailable", "line"}
 
     def _is_cjk_index_key(self, glyph: str) -> bool:
         compact = "".join(ch for ch in str(glyph) if not ch.isspace())

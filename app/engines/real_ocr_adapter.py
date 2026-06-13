@@ -168,8 +168,6 @@ class ApiOcrEngine:
                 item,
                 image_shape=image_bgr.shape[:2],
                 fallback_bbox=self._unverified_full_crop_bbox(image_bgr),
-                existing_lines=ir_lines,
-                include_word_boxes=False,
             ))
 
         lines: List[Line] = []

@@ -43,28 +43,6 @@ def overall_ocr_res(item: dict) -> dict:
     return {}
 
 
-def first_list_from_sources(sources: list[dict], keys: tuple[str, ...]) -> list:
-    for source in sources:
-        for key in keys:
-            value = source.get(key)
-            if isinstance(value, list):
-                return value
-    return []
-
-
-def legacy_word_box_rows(item: dict) -> tuple[list, list]:
-    pruned = pruned_result(item)
-    ocr_res = overall_ocr_res(item)
-    direct = item if isinstance(item, dict) else {}
-    sources = [pruned, direct, ocr_res]
-    token_rows = first_list_from_sources(sources, ("text_word", "textWord"))
-    region_rows = first_list_from_sources(
-        sources,
-        ("text_word_region", "textWordRegion", "text_word_boxes", "textWordBoxes"),
-    )
-    return token_rows, region_rows
-
-
 def parsing_records_from_item(item: dict) -> list[dict]:
     pruned = pruned_result(item)
     records: list[dict] = []

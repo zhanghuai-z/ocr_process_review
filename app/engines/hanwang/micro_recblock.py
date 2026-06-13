@@ -558,6 +558,22 @@ def _clamp_xyxy(
     return left, top, right, bottom
 
 
+def _expand_xyxy(
+    bbox: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    *,
+    pad_x: int = 0,
+    pad_y: int = 0,
+) -> tuple[int, int, int, int]:
+    left, top, right, bottom = bbox
+    return _clamp_xyxy(
+        (left - pad_x, top - pad_y, right + pad_x, bottom + pad_y),
+        width,
+        height,
+    )
+
+
 def _layout_block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, int, int]:
     return block_bbox_xyxy(raw, width, height)
 
@@ -790,6 +806,10 @@ def _mark_latin_engcut_review(line: LineResult) -> None:
 CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
 LATIN_REVERSE_OCCUPY_CONFIDENCE = 0.50
 LATIN_CANDIDATE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./&+-")
+RECOG_GROUP_CROP_PAD_X = 2
+RECOG_GROUP_CROP_PAD_Y = 2
+ENGCUT_LINE_CROP_PAD_X = 2
+ENGCUT_LINE_CROP_PAD_Y = 2
 
 
 @dataclass
@@ -1137,7 +1157,13 @@ def _enhance_lines_with_latin_engcut(
             continue
         if not should_probe_all and not has_latin_token(line.text):
             continue
-        x1, y1, x2, y2 = _clamp_xyxy(line.bbox, width, height)
+        x1, y1, x2, y2 = _expand_xyxy(
+            line.bbox,
+            width,
+            height,
+            pad_x=ENGCUT_LINE_CROP_PAD_X,
+            pad_y=ENGCUT_LINE_CROP_PAD_Y,
+        )
         if x2 <= x1 or y2 <= y1:
             continue
         crop = image_bgr[y1:y2, x1:x2].copy()
@@ -1472,20 +1498,33 @@ def run_micro_recblock(
                 height,
             )
             bbox = _intersect_xyxy(raw_group_bbox, recblock)
+            recog_bbox = (
+                _expand_xyxy(
+                    bbox,
+                    width,
+                    height,
+                    pad_x=RECOG_GROUP_CROP_PAD_X,
+                    pad_y=RECOG_GROUP_CROP_PAD_Y,
+                )
+                if bbox is not None
+                else None
+            )
             segimg_group_audits_by_route.setdefault(route.key, []).append({
                 "route_text_slice_bbox": list(recblock),
                 "segimg_group_bbox": list(raw_group_bbox),
-                "recog_group_bbox": list(bbox) if bbox is not None else None,
+                "recog_group_bbox": list(recog_bbox) if recog_bbox is not None else None,
+                "recog_group_bbox_before_padding": list(bbox) if bbox is not None else None,
+                "recog_group_bbox_padded": recog_bbox is not None and recog_bbox != bbox,
                 "clipped": bbox is not None and bbox != raw_group_bbox,
                 "dropped": bbox is None,
             })
-            if bbox is None:
+            if recog_bbox is None:
                 continue
-            if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            if recog_bbox[2] <= recog_bbox[0] or recog_bbox[3] <= recog_bbox[1]:
                 continue
-            group_bboxes.append(bbox)
+            group_bboxes.append(recog_bbox)
             group_area_indices.append(group["_area_idx"])
-            recog_group_bboxes_by_route.setdefault(route.key, []).append(bbox)
+            recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
 
         def mark_recog_group_failure(placement: _GroupPlacement, error: Exception) -> None:
             stats.recog_group_failures += 1

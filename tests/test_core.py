@@ -4037,6 +4037,43 @@ def test_api_ocr_engine_does_not_request_return_word_box():
     print("test_api_ocr_engine_does_not_request_return_word_box PASSED")
 
 
+def test_ocr_ir_builder_ignores_legacy_word_box_payload():
+    from app.core.char_bbox_utils import MISSING_LINE_BBOX_FLAG
+    from app.core.ocr_ir_builder import build_ir_lines_from_item
+    from app.models import BBox
+
+    item = {
+        "prunedResult": {
+            "overall_ocr_res": {
+                "rec_texts": ["甲乙"],
+                "rec_scores": [0.95],
+            },
+            "text_word": [["甲", "乙"]],
+            "text_word_region": [[
+                [10, 20, 30, 40],
+                [30, 20, 50, 40],
+            ]],
+        }
+    }
+
+    lines = build_ir_lines_from_item(item, fallback_bbox=BBox(0, 0, 100, 40))
+
+    assert len(lines) == 1
+    assert lines[0].bbox == BBox(0, 0, 100, 40)
+    assert lines[0].tokens == []
+    assert MISSING_LINE_BBOX_FLAG in lines[0].review_flags
+
+    token_only = {
+        "prunedResult": {
+            "text_word": [["甲", "乙"]],
+            "text_word_region": [[[10, 20, 30, 40], [30, 20, 50, 40]]],
+        }
+    }
+    assert build_ir_lines_from_item(token_only, fallback_bbox=BBox(0, 0, 100, 40)) == []
+
+    print("test_ocr_ir_builder_ignores_legacy_word_box_payload PASSED")
+
+
 def test_api_ocr_engine_does_not_promote_block_content_to_line():
     import numpy as np
     import requests
@@ -4508,8 +4545,7 @@ def test_ocr_pipeline_normalizes_proof_geometry():
         )
         line = result.pages[0].blocks[0].lines[0]
 
-        assert abs(line.bbox.y - 67) <= 3
-        assert line.bbox.h <= 18
+        assert line.bbox == BBox(10, 44, 160, 40)
         assert len(line.chars) == 2
     finally:
         os.unlink(img_path)
@@ -4896,20 +4932,20 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         recog_recblocks.append(recblocks_xyxy)
         assert recblock_xyxy is None
         h, w = image_bgr.shape[:2]
-        assert (h, w) == (74, 136)
-        assert recblocks_xyxy == [(0, 0, 96, 36), (0, 38, 136, 74)]
+        assert (h, w) == (82, 140)
+        assert recblocks_xyxy == [(0, 0, 100, 40), (0, 42, 140, 82)]
         return {"lines": [
             {"groups": [{
-                "bbox": {"left": 0, "top": 0, "right": 96, "bottom": 36},
+                "bbox": {"left": 0, "top": 0, "right": 100, "bottom": 40},
                 "chars": [
-                    {"codes": [code("天")], "scores": [5], "bbox": {"left": 0, "top": 0, "right": 23, "bottom": 36}},
-                    {"codes": [code("地")], "scores": [6], "bbox": {"left": 28, "top": 0, "right": 51, "bottom": 36}},
+                    {"codes": [code("天")], "scores": [5], "bbox": {"left": 2, "top": 2, "right": 25, "bottom": 38}},
+                    {"codes": [code("地")], "scores": [6], "bbox": {"left": 30, "top": 2, "right": 53, "bottom": 38}},
                 ],
             }]},
             {"groups": [{
-                "bbox": {"left": 0, "top": 38, "right": 136, "bottom": 74},
+                "bbox": {"left": 0, "top": 42, "right": 140, "bottom": 82},
                 "chars": [
-                    {"codes": [code("短")], "scores": [12], "bbox": {"left": 0, "top": 38, "right": 28, "bottom": 74}},
+                    {"codes": [code("短")], "scores": [12], "bbox": {"left": 2, "top": 44, "right": 30, "bottom": 80}},
                 ],
             }]},
         ]}
@@ -4941,16 +4977,16 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 0
-        assert recog_shapes == [(74, 136)]
-        assert recog_recblocks == [[(0, 0, 96, 36), (0, 38, 136, 74)]]
+        assert recog_shapes == [(82, 140)]
+        assert recog_recblocks == [[(0, 0, 100, 40), (0, 42, 140, 82)]]
         assert stats.recog_full_page_pixels == 220 * 240 * 2
-        assert stats.recog_crop_pixels == 36 * 96 + 36 * 136
+        assert stats.recog_crop_pixels == 40 * 100 + 40 * 140
         assert stats.recog_probe_calls == 1
         assert stats.recog_batch_chunks == 1
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
-        assert stats.recog_max_collage_width == 136
-        assert stats.recog_max_collage_height == 74
+        assert stats.recog_max_collage_width == 140
+        assert stats.recog_max_collage_height == 82
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -5139,11 +5175,11 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
         timeout=0,
     ):
         text_by_shape = {
-            (70, 30): "甲甲",
-            (100, 30): "乙乙。",
-            (40, 30): "丙",
-            (50, 30): "丁",
-            (30, 30): "戊",
+            (72, 32): "甲甲",
+            (104, 32): "乙乙。",
+            (42, 34): "丙",
+            (54, 34): "丁",
+            (34, 34): "戊",
         }
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
         lines = []
@@ -5510,7 +5546,7 @@ def test_hanwang_latin_engcut_failure_is_line_local():
             timeout=1.0,
         )
 
-        assert calls == [(30, 80), (30, 80)]
+        assert calls == [(32, 82), (34, 82)]
         assert stats.latin_engcut_probe_calls == 2
         assert stats.latin_engcut_probe_failures == 1
         assert stats.latin_engcut_exact_tokens == 1
@@ -5519,8 +5555,8 @@ def test_hanwang_latin_engcut_failure_is_line_local():
             (char.text, char.source, char.bbox, char.token_text)
             for char in second.chars
         ] == [
-            ("C", "hanwang:EngCut:latin_exact", (9, 42, 16, 62), "CD"),
-            ("D", "hanwang:EngCut:latin_exact", (18, 42, 25, 62), "CD"),
+            ("C", "hanwang:EngCut:latin_exact", (9, 40, 16, 60), "CD"),
+            ("D", "hanwang:EngCut:latin_exact", (18, 40, 25, 60), "CD"),
         ]
     finally:
         micro_module.native_bridge.run_eng20_recogline = original_eng20
@@ -5713,6 +5749,15 @@ def test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_
     print("test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_guard PASSED")
 
 
+def test_hanwang_crop_padding_expands_without_leaving_page():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    assert micro_module._expand_xyxy((10, 20, 30, 40), 100, 100, pad_x=2, pad_y=3) == (8, 17, 32, 43)
+    assert micro_module._expand_xyxy((0, 1, 99, 100), 100, 100, pad_x=5, pad_y=5) == (0, 0, 100, 100)
+
+    print("test_hanwang_crop_padding_expands_without_leaving_page PASSED")
+
+
 def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
     import os
     import tempfile
@@ -5783,6 +5828,45 @@ def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
     print("test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers PASSED")
 
 
+def test_proof_crop_service_does_not_rewrite_existing_ocr_geometry(tmp_path):
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.services.proof_crop_service import ProofCropService
+
+    img = np.full((120, 220, 3), 255, dtype=np.uint8)
+    cv2.rectangle(img, (20, 62), (160, 76), (0, 0, 0), -1)
+    img_path = str(tmp_path / "proof-page.png")
+    cv2.imwrite(img_path, img)
+
+    line = Line(
+        text="汉王",
+        confidence=0.9,
+        bbox=BBox(10, 44, 180, 46),
+        chars=[
+            Char(char="汉", confidence=0.9, bbox=BBox(20, 62, 30, 20), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
+            Char(char="王", confidence=0.9, bbox=BBox(70, 62, 30, 20), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
+        ],
+    )
+    page = Page(
+        image_path=img_path,
+        width=220,
+        height=120,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 200, 100), lines=[line])],
+    )
+    before_line_bbox = line.bbox
+    before_char_boxes = [char.bbox for char in line.chars]
+
+    stats = ProofCropService().normalize_pages([page])
+
+    assert stats.line_bbox_updates == 0
+    assert line.bbox == before_line_bbox
+    assert [char.bbox for char in line.chars] == before_char_boxes
+
+    print("test_proof_crop_service_does_not_rewrite_existing_ocr_geometry PASSED")
+
+
 def test_hanwang_pre_page_ocr_lines_split_before_recog():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -5810,10 +5894,10 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
         timeout=0,
     ):
         text_by_shape = {
-            (60, 20): "甲",
-            (90, 20): "乙",
-            (80, 20): "丙",
-            (70, 20): "丁",
+            (62, 24): "甲",
+            (94, 24): "乙",
+            (82, 24): "丙",
+            (74, 24): "丁",
         }
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
         return {
@@ -5917,7 +6001,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         timeout=0,
     ):
         h, w = image_bgr.shape[:2]
-        text = {40: "甲", 50: "乙"}.get(w, "")
+        text = {42: "甲", 54: "乙"}.get(w, "")
         if not text:
             return {"lines": []}
         return {
@@ -5966,19 +6050,23 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert rows[0].layout_bbox == (0, 0, 120, 40)
         assert rows[0].block_bbox_source == "layout_line_routes_union"
         assert rows[0].route_text_slice_bboxes == [(0, 0, 40, 40), (70, 0, 120, 40)]
-        assert rows[0].recog_group_bboxes == [(0, 2, 40, 38), (70, 2, 120, 38)]
+        assert rows[0].recog_group_bboxes == [(0, 0, 42, 40), (68, 0, 122, 40)]
         assert rows[0].segimg_group_audits == [
             {
                 "route_text_slice_bbox": [0, 0, 40, 40],
                 "segimg_group_bbox": [0, 2, 42, 38],
-                "recog_group_bbox": [0, 2, 40, 38],
+                "recog_group_bbox": [0, 0, 42, 40],
+                "recog_group_bbox_before_padding": [0, 2, 40, 38],
+                "recog_group_bbox_padded": True,
                 "clipped": True,
                 "dropped": False,
             },
             {
                 "route_text_slice_bbox": [70, 0, 120, 40],
                 "segimg_group_bbox": [68, 2, 122, 38],
-                "recog_group_bbox": [70, 2, 120, 38],
+                "recog_group_bbox": [68, 0, 122, 40],
+                "recog_group_bbox_before_padding": [70, 2, 120, 38],
+                "recog_group_bbox_padded": True,
                 "clipped": True,
                 "dropped": False,
             },
@@ -5991,7 +6079,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert audit["effective_block_bbox_source"] == "layout_line_routes_union"
         assert audit["layout_line_route_bboxes"] == [[0, 0, 120, 40]]
         assert audit["route_text_slice_bboxes"] == [[0, 0, 40, 40], [70, 0, 120, 40]]
-        assert audit["hanwang_recog_group_bboxes"] == [[0, 2, 40, 38], [70, 2, 120, 38]]
+        assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 42, 40], [68, 0, 122, 40]]
         assert audit["hanwang_segimg_group_clipped_count"] == 2
         assert audit["hanwang_segimg_group_dropped_count"] == 0
         assert audit["route_text_slice_count"] == 2
@@ -6098,7 +6186,7 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         with_charrcg=True,
         timeout=0,
     ):
-        text_by_shape = {(60, 20): "甲", (90, 20): "乙"}
+        text_by_shape = {(62, 24): "甲", (94, 24): "乙"}
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
         return {
             "lines": [
@@ -7421,7 +7509,7 @@ def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
         assert stats.recog_probe_calls == 2
-        assert stats.recog_max_collage_width == 1850
+        assert stats.recog_max_collage_width == 1852
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -8566,8 +8654,7 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
         try:
             assert controller.open_project(db_path) is True
             loaded_line = controller.project.pages[0].blocks[0].lines[0]
-            assert abs(loaded_line.bbox.y - 67) <= 3
-            assert loaded_line.bbox.h <= 18
+            assert loaded_line.bbox == BBox(10, 44, 160, 40)
             assert len(loaded_line.chars) == 2
         finally:
             controller.close()
@@ -10338,6 +10425,72 @@ def test_char_index_dedup_on_rebuild():
     n2 = len(svc.query("永"))
     assert n1 == n2 == 2, f"expected 2 entries each build, got {n1}/{n2}"
     print("test_char_index_dedup_on_rebuild PASSED")
+
+
+def test_char_index_build_does_not_rewrite_line_bbox_or_chars(tmp_path):
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.char_index_service import CharIndexService
+
+    img = np.full((120, 220, 3), 255, dtype=np.uint8)
+    cv2.rectangle(img, (20, 62), (160, 76), (0, 0, 0), -1)
+    img_path = str(tmp_path / "page.png")
+    cv2.imwrite(img_path, img)
+
+    line = Line(text="天地", confidence=0.9, bbox=BBox(10, 44, 180, 46))
+    page = Page(
+        image_path=img_path,
+        width=220,
+        height=120,
+        page_number=1,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 200, 100), lines=[line])],
+    )
+
+    before_bbox = line.bbox
+    before_chars = list(line.chars)
+
+    svc = CharIndexService(include_fallback=True).build([page])
+
+    assert line.bbox == before_bbox
+    assert line.chars == before_chars
+    assert svc.query("天")
+    assert svc.query("地")
+
+    print("test_char_index_build_does_not_rewrite_line_bbox_or_chars PASSED")
+
+
+def test_char_index_uses_display_text_for_existing_positional_boxes():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="甲乙",
+        final_text="甲丙",
+        confidence=0.9,
+        bbox=BBox(10, 20, 60, 24),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(10, 20, 20, 24), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(40, 20, 20, 24), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
+        ],
+    )
+    page = Page(
+        image_path="/tmp/display-text-index.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 100, 60), lines=[line])],
+    )
+
+    svc = CharIndexService(include_fallback=True).build_index(OcrProject(name="display-index", pages=[page]))
+
+    assert svc.query("乙") == []
+    entries = svc.query("丙")
+    assert len(entries) == 1
+    assert entries[0].char_idx == 1
+    assert entries[0].bbox == BBox(40, 20, 20, 24)
+
+    print("test_char_index_uses_display_text_for_existing_positional_boxes PASSED")
 
 
 def test_char_index_sort_categories():

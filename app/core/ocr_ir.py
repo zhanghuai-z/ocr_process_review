@@ -13,8 +13,6 @@ from typing import Any, Literal, Optional
 from app.models import BBox
 
 OCR_IR_SOURCE_REC_TEXT = "overall_ocr_res.rec_texts"
-OCR_IR_SOURCE_TOKEN_TEXT = "legacy_token_rows"
-OCR_IR_TOKEN_TEXT_FALLBACK_FLAG = "ir_token_text_fallback"
 
 OcrIrKind = Literal["text", "digit", "formula", "punct", "symbol", "other"]
 
