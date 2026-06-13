@@ -1,6 +1,7 @@
 """Page-level PP-VL block -> Hanwang linecut micro-recblock integration."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -77,8 +78,16 @@ MAX_RECOG_COLLAGE_WIDTH = 1600
 MAX_RECOG_COLLAGE_HEIGHT = 1600
 MAX_RECOG_COLLAGE_PIXELS = 2_000_000
 MAX_RECOG_COLLAGE_ASPECT = 4.5
-_BATCH_DISABLED_FOR_SESSION = False
-_BATCH_DISABLE_REASON = ""
+_BATCH_ENABLED_BY_ENV = (
+    os.environ.get("HANWANG_MICRO_RECBLOCK_BATCH", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+_BATCH_DISABLED_FOR_SESSION = not _BATCH_ENABLED_BY_ENV
+_BATCH_DISABLE_REASON = (
+    ""
+    if _BATCH_ENABLED_BY_ENV
+    else "native batch disabled by default; set HANWANG_MICRO_RECBLOCK_BATCH=1 to enable"
+)
 _LATIN_ENGCUT_DISABLED_FOR_SESSION = False
 _LATIN_ENGCUT_DISABLE_REASON = ""
 

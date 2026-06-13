@@ -5018,8 +5018,12 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    original_batch_reason = micro_module._BATCH_DISABLE_REASON
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = False
+    micro_module._BATCH_DISABLE_REASON = ""
 
     try:
         blocks = [
@@ -5056,6 +5060,8 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+        micro_module._BATCH_DISABLE_REASON = original_batch_reason
 
     print("test_hanwang_micro_recblock_routes_and_fallbacks PASSED")
 

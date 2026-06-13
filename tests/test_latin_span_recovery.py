@@ -65,6 +65,14 @@ def test_engcut_binding_does_not_fuzzy_accept_variant_text():
     assert [binding.status for binding in bindings] == [LATIN_ENGCUT_NOT_FOUND_STATUS]
 
 
+def test_engcut_binding_does_not_force_lerner_when_engcut_reads_lemer():
+    """120186 边界：rn 粘连被 EngCut 读成 m 时，不能冒充精确字框。"""
+    chars = engcut_chars_from_payload(_payload_for_text("~Lemer~"))
+    bindings = bind_latin_tokens_to_engcut_chars("（Lerner，2000）", chars)
+
+    assert [binding.status for binding in bindings] == [LATIN_ENGCUT_NOT_FOUND_STATUS]
+
+
 def test_engcut_binding_uses_formula_tokens_only_as_source_order_blockers():
     chars = engcut_chars_from_payload(_payload_for_text("~Incentive~Incentive~"))
     bindings = bind_latin_tokens_to_engcut_chars("$ Incentive_c $ Incentive", chars)
