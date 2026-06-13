@@ -2340,6 +2340,83 @@ def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
     print("test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font PASSED")
 
 
+def test_pdf_dual_positions_mixed_chars_without_copy_spaces():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    text = "资本积累（Whited和Wu，2006；Chen"
+    char_specs = [
+        ("资", 100, 100, 42, 46),
+        ("本", 152, 100, 42, 46),
+        ("积", 204, 100, 42, 46),
+        ("累", 256, 100, 40, 46),
+        ("（", 308, 100, 12, 46),
+        ("W", 332, 107, 40, 34),
+        ("h", 376, 106, 21, 35),
+        ("i", 401, 108, 10, 33),
+        ("t", 414, 112, 11, 29),
+        ("e", 428, 113, 19, 28),
+        ("d", 451, 106, 21, 35),
+        ("和", 488, 101, 42, 45),
+        ("W", 544, 107, 41, 34),
+        ("u", 589, 113, 21, 28),
+        ("，", 622, 136, 7, 13),
+        ("2", 646, 107, 22, 34),
+        ("0", 671, 107, 22, 34),
+        ("0", 696, 107, 22, 34),
+        ("6", 721, 107, 21, 34),
+        ("；", 755, 121, 8, 28),
+        ("C", 777, 107, 25, 34),
+        ("h", 807, 106, 21, 35),
+        ("e", 831, 113, 18, 28),
+        ("n", 853, 113, 21, 28),
+    ]
+    chars = [
+        Char(char=ch, confidence=0.99, bbox=BBox(x, y, w, h), bbox_source="ocr", bbox_granularity="char")
+        for ch, x, y, w, h in char_specs
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (1000, 240), "white").save(image_path)
+        project = OcrProject(name="PdfMixed", pages=[
+            Page(image_path=image_path, width=1000, height=240, blocks=[
+                Block(block_type=BlockType.TEXT, bbox=BBox(100, 100, 780, 50), order=0, lines=[
+                    Line(text=text, confidence=0.99, bbox=BBox(100, 100, 780, 50), chars=chars),
+                ]),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            extracted = page.get_text()
+            assert text in extracted
+            assert "Whited 和" not in extracted
+            assert len(page.search_for("（Whited和Wu，2006；Chen")) == 1
+
+            raw_chars = []
+            for block in page.get_text("rawdict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        raw_chars.extend(span.get("chars", []))
+            raw_text = "".join(char["c"] for char in raw_chars)
+            w_idx = raw_text.index("W")
+            i_idx = raw_text.index("i")
+            scale = 72 / 300
+            assert abs(raw_chars[w_idx]["bbox"][0] - 332 * scale) < 0.4
+            assert abs(raw_chars[i_idx]["bbox"][0] - 401 * scale) < 0.4
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_positions_mixed_chars_without_copy_spaces PASSED")
+
+
 def test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error():
     import app.export.pdf as pdf_module
     from app.export.pdf import PdfPagePlan, PdfTextItem, PdfTextSpan, _write_invisible_text_layer

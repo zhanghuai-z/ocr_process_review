@@ -98,6 +98,7 @@ class PdfTextSpan:
     w: float
     h: float
     source: str = ""
+    items: tuple[PdfTextItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -328,7 +329,15 @@ def _span_from_items(text: str, items: list[PdfTextItem], *, source: str) -> Pdf
     y1 = min(item.y for item in items)
     x2 = max(item.x + item.w for item in items)
     y2 = max(item.y + item.h for item in items)
-    return PdfTextSpan(text=text.replace("\n", ""), x=x1, y=y1, w=x2 - x1, h=y2 - y1, source=source)
+    return PdfTextSpan(
+        text=text.replace("\n", ""),
+        x=x1,
+        y=y1,
+        w=x2 - x1,
+        h=y2 - y1,
+        source=source,
+        items=tuple(items),
+    )
 
 
 def _add_page_with_size(pdf, plan: PdfPagePlan) -> None:
@@ -357,7 +366,7 @@ def _write_invisible_text_layer(pdf, plan: PdfPagePlan) -> None:
         pdf.set_font("CJK", size=font_size)
         for span in plan.text_spans:
             try:
-                _write_span_text(pdf, plan, span, font_size)
+                _write_positioned_span_text(pdf, plan, span, font_size)
             except Exception as e:
                 logger.warning("PDF invisible text write failed for %s: %s", span.source, e)
     finally:
@@ -401,6 +410,77 @@ def _span_text_stretching(pdf, span: PdfTextSpan) -> float:
     # Without this, fpdf writes the line at natural font width and the hidden
     # text layer is visibly shorter than the scanned line image.
     return max(10.0, min(1000.0, span.w / natural_width * 100.0))
+
+
+def _write_positioned_span_text(pdf, plan: PdfPagePlan, span: PdfTextSpan, font_size: float) -> None:
+    items = [item for item in span.items if item.text and item.text != "\n"]
+    if len(items) < 2 or not _supports_low_level_text_array(pdf):
+        _write_span_text(pdf, plan, span, font_size)
+        return
+
+    try:
+        content = _char_advance_text_object(pdf, plan, span, items, font_size)
+    except Exception:
+        _write_span_text(pdf, plan, span, font_size)
+        return
+    pdf._out(content)
+
+
+def _supports_low_level_text_array(pdf) -> bool:
+    current_font = getattr(pdf, "current_font", None)
+    return (
+        current_font is not None
+        and hasattr(current_font, "encode_text")
+        and hasattr(pdf, "normalize_text")
+        and hasattr(pdf, "_out")
+    )
+
+
+def _char_advance_text_object(
+    pdf,
+    plan: PdfPagePlan,
+    span: PdfTextSpan,
+    items: list[PdfTextItem],
+    font_size: float,
+) -> str:
+    _reset_text_stretching(pdf)
+    _ensure_current_font_on_page(pdf)
+    baseline_y = plan.height_pt - _span_baseline_top_y(plan, span, font_size)
+    ops: list[str] = []
+    for idx, item in enumerate(items):
+        advance = _target_item_advance(item, items[idx + 1] if idx + 1 < len(items) else None)
+        literal = _encoded_text_literal(pdf, item.text)
+        natural_width = float(pdf.get_string_width(item.text))
+        stretching = 100.0 if natural_width <= 0 else advance / natural_width * 100.0
+        ops.append(f"{_clamp_text_stretching(stretching):.3f} Tz {literal} Tj")
+    ops.append("100 Tz")
+    return f"BT {span.x:.2f} {baseline_y:.2f} Td {' '.join(ops)} ET"
+
+
+def _target_item_advance(item: PdfTextItem, next_item: PdfTextItem | None) -> float:
+    if next_item is not None:
+        advance = next_item.x - item.x
+        if advance > 0:
+            return advance
+    return max(0.1, item.w)
+
+
+def _encoded_text_literal(pdf, text: str) -> str:
+    encoded = pdf.current_font.encode_text(pdf.normalize_text(text))
+    suffix = " Tj"
+    if not encoded.endswith(suffix):
+        raise RuntimeError("unsupported encoded PDF text literal")
+    return encoded[: -len(suffix)].strip()
+
+
+def _clamp_text_stretching(stretching: float) -> float:
+    return max(10.0, min(1000.0, stretching))
+
+
+def _ensure_current_font_on_page(pdf) -> None:
+    if getattr(pdf, "current_font_is_set_on_page", True):
+        return
+    pdf._out(pdf._set_font_for_page(pdf.current_font, pdf.font_size_pt))
 
 
 def _set_text_stretching(pdf, stretching: float) -> None:
