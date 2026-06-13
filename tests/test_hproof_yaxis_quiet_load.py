@@ -82,6 +82,31 @@ def test_line_pair_pushes_image_aligned_xcenters_to_editor():
     pair.deleteLater()
 
 
+def test_line_pair_uses_slot_line_editor_for_visible_hproof_text():
+    """横校可见文本层应是 slot editor，而不是 QPlainTextEdit 原生布局。"""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    pair = _make_pair_with_chars("abc")
+    assert isinstance(pair._editor, _SlotLineEditor)
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    pair._sync_editor_slot_geometry()
+    pair._editor._select_slot_index(1)
+    ev = QKeyEvent(
+        QKeyEvent.Type.KeyPress,
+        int(Qt.Key.Key_X),
+        Qt.KeyboardModifier.NoModifier,
+        "X",
+    )
+    pair._editor.keyPressEvent(ev)
+
+    assert pair._editor.toPlainText() == "aXc"
+    assert pair._editor.has_slot_geometry() is True
+    pair.deleteLater()
+
+
 def test_line_pair_degrades_when_chars_misaligned():
     """chars 长度与文本不等 → _chars_aligned False → editor 清空 slot 几何，
     走原生渲染降级。"""

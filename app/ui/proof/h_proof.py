@@ -31,11 +31,11 @@ from typing import List, Optional, Tuple
 import cv2
 from PySide6.QtCore import Qt, QRect, QTimer, Signal
 from PySide6.QtGui import (
-    QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
-    QTextBlockFormat, QTextCharFormat, QTextCursor,
+    QColor, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
+    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QProgressBar,
+    QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QProgressBar,
     QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -660,6 +660,401 @@ class _RowEditor(QPlainTextEdit):
         super().focusInEvent(event)
 
 
+class _SlotLineEditor(QWidget):
+    """横校逐字 slot 编辑器。
+
+    这个控件只把 ``QTextDocument`` 当作文本状态容器，不使用 Qt 原生文本布局。
+    屏幕上的字符、命中区域、选中背景都按 ``line.chars[i].bbox`` 传入的
+    slot geometry 绘制，避免“视觉字位”和 Qt 文本光标坐标不一致。
+    """
+
+    confirm_requested = Signal()
+    prev_requested = Signal()
+    next_requested = Signal()
+    flag_requested = Signal()
+    skip_requested = Signal()
+    revert_requested = Signal()
+    length_violation = Signal(str)
+    hover_char_changed = Signal(int)
+    row_focus_requested = Signal()
+    textChanged = Signal()
+    selectionChanged = Signal()
+    cursorPositionChanged = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(TEXT_EDITOR_MAX_H)
+        self._document = QTextDocument(self)
+        self._document.setDocumentMargin(0)
+        self._cursor = QTextCursor(self._document)
+        self._cursor_width = 0
+        self._fixed_length: Optional[int] = None
+        self._slot_x_centers: Optional[List[Optional[float]]] = None
+        self._slot_widths: Optional[List[float]] = None
+        self._extra_selections: list = []
+        self._last_hover_idx = -1
+        self._active_visual = False
+        self._apply_document_line_height()
+
+    # ── 兼容 QPlainTextEdit 调用面 ─────────────────────────────
+
+    def document(self) -> QTextDocument:
+        return self._document
+
+    def setFrameShape(self, *_args, **_kwargs) -> None:
+        return
+
+    def setLineWrapMode(self, *_args, **_kwargs) -> None:
+        return
+
+    def setVerticalScrollBarPolicy(self, *_args, **_kwargs) -> None:
+        return
+
+    def setCursorWidth(self, width: int) -> None:
+        self._cursor_width = int(width)
+
+    def cursorWidth(self) -> int:
+        return self._cursor_width
+
+    def set_active_visual(self, active: bool) -> None:
+        self._active_visual = bool(active)
+        self.update()
+
+    def setPlainText(self, text: str) -> None:
+        old = self.toPlainText()
+        self._document.setPlainText(text or "")
+        self._apply_document_line_height()
+        self._cursor = QTextCursor(self._document)
+        if self._document.characterCount() > 1:
+            self._cursor.setPosition(0)
+            self._cursor.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
+        if self.toPlainText() != old:
+            self.textChanged.emit()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.update()
+
+    def toPlainText(self) -> str:
+        return self._document.toPlainText()
+
+    def textCursor(self) -> QTextCursor:
+        return QTextCursor(self._cursor)
+
+    def setTextCursor(self, cursor: QTextCursor) -> None:
+        self._cursor = QTextCursor(cursor)
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.update()
+
+    def setExtraSelections(self, selections) -> None:
+        self._extra_selections = list(selections or [])
+        self.update()
+
+    def extraSelections(self):
+        return list(self._extra_selections)
+
+    def set_fixed_length(self, n: Optional[int]) -> None:
+        self._fixed_length = n
+
+    def fixed_length(self) -> Optional[int]:
+        return self._fixed_length
+
+    def apply_inline_y_axis_metrics(self) -> None:
+        self._apply_document_line_height()
+
+    def set_slot_geometry(
+        self,
+        x_centers: Optional[List[Optional[float]]],
+        widths: Optional[List[float]],
+    ) -> None:
+        if not x_centers:
+            self._slot_x_centers = None
+            self._slot_widths = None
+        else:
+            self._slot_x_centers = list(x_centers)
+            self._slot_widths = list(widths) if widths else [TEXT_SLOT_MIN_W] * len(x_centers)
+        self.update()
+
+    def has_slot_geometry(self) -> bool:
+        return bool(self._slot_x_centers)
+
+    def _apply_document_line_height(self) -> None:
+        cursor = QTextCursor(self._document)
+        cursor.select(QTextCursor.SelectionType.Document)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setLineHeight(
+            float(TEXT_LINE_HEIGHT_PX),
+            QTextBlockFormat.LineHeightTypes.FixedHeight.value,
+        )
+        cursor.mergeBlockFormat(block_fmt)
+
+    # ── slot 选择 / 文本修改 ───────────────────────────────────
+
+    def _slot_index_for_x(self, x: float, *, nearest: bool = False) -> int:
+        centers = self._slot_x_centers or []
+        if not centers:
+            return -1
+        widths = self._slot_widths or [TEXT_SLOT_MIN_W] * len(centers)
+        best_idx = -1
+        best_dist = float("inf")
+        first_left: float | None = None
+        last_right: float | None = None
+        for idx, center in enumerate(centers):
+            if center is None:
+                continue
+            width = widths[idx] if idx < len(widths) else TEXT_SLOT_MIN_W
+            half = max(TEXT_SLOT_MIN_W / 2.0, float(width) / 2.0)
+            left = float(center) - half
+            right = float(center) + half
+            first_left = left if first_left is None else min(first_left, left)
+            last_right = right if last_right is None else max(last_right, right)
+            if left <= x <= right:
+                return idx
+            dist = abs(float(center) - x)
+            if dist < best_dist:
+                best_idx = idx
+                best_dist = dist
+        if not nearest or best_idx < 0:
+            return -1
+        margin = max(24.0, TEXT_SLOT_MIN_W * 2.0)
+        if first_left is not None and last_right is not None:
+            if x < first_left - margin or x > last_right + margin:
+                return -1
+        return best_idx
+
+    def _select_slot_index(self, idx: int) -> None:
+        text_len = len(self.toPlainText())
+        if idx < 0 or idx >= text_len:
+            return
+        cur = QTextCursor(self._document)
+        cur.setPosition(idx)
+        cur.setPosition(idx + 1, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(cur)
+
+    def _selected_range(self) -> tuple[int, int]:
+        if self._cursor.hasSelection():
+            return self._cursor.selectionStart(), self._cursor.selectionEnd()
+        pos = self._cursor.position()
+        return pos, min(pos + 1, len(self.toPlainText()))
+
+    def _replace_selected_slots(self, text: str) -> None:
+        current = self.toPlainText()
+        if not current:
+            return
+        start, end = self._selected_range()
+        start = max(0, min(start, len(current)))
+        end = max(start, min(end, len(current)))
+        if start == end:
+            if start >= len(current):
+                return
+            end = start + 1
+        width = end - start
+        replacement = (text or "")[:width]
+        if len(replacement) < width:
+            replacement += " " * (width - len(replacement))
+        new_text = current[:start] + replacement + current[end:]
+        self._document.setPlainText(new_text)
+        self._apply_document_line_height()
+        next_pos = min(len(new_text), start + max(1, len(replacement)))
+        self._cursor = QTextCursor(self._document)
+        if next_pos < len(new_text):
+            self._cursor.setPosition(next_pos)
+            self._cursor.setPosition(next_pos + 1, QTextCursor.MoveMode.KeepAnchor)
+        else:
+            self._cursor.setPosition(len(new_text))
+        self.textChanged.emit()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.update()
+
+    def insertFromMimeData(self, source) -> None:
+        text = source.text() if source is not None else ""
+        text = text.replace("\r", "").replace("\n", "")
+        if text:
+            self._replace_selected_slots(text)
+
+    # ── 绘制 ───────────────────────────────────────────────────
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        p = QPainter(self)
+        try:
+            p.fillRect(self.rect(), self.palette().base())
+            text = self.toPlainText()
+            centers = self._slot_x_centers or self._fallback_slot_centers(text)
+            widths = self._slot_widths or [max(TEXT_SLOT_MIN_W, TEXT_FONT_PX * 0.8)] * len(centers)
+            fg_color, bg_color = self._selection_colors()
+            selected_start, selected_end = self._selection_bounds_for_paint() if self._active_visual else (-1, -1)
+            p.setFont(self.font())
+            fm = QFontMetrics(self.font())
+            y_baseline = (self.height() + fm.ascent() - fm.descent()) // 2
+            n = min(len(text), len(centers))
+            for i in range(n):
+                center = centers[i]
+                if center is None:
+                    continue
+                width = widths[i] if i < len(widths) else TEXT_SLOT_MIN_W
+                slot_w = max(TEXT_SLOT_MIN_W, float(width))
+                left = int(round(float(center) - slot_w / 2.0))
+                cell = QRect(left, 2, max(1, int(round(slot_w))), self.height() - 4)
+                if i == self._last_hover_idx:
+                    p.fillRect(cell, QColor("#e8f0fe"))
+                if selected_start <= i < selected_end:
+                    p.fillRect(cell, QColor("#cfe2ff"))
+                bg = bg_color.get(i)
+                if bg is not None and bg.alpha() > 0:
+                    p.fillRect(cell, bg)
+                p.setPen(QPen(QColor("#d6dce5"), 1))
+                p.drawRect(cell.adjusted(0, 0, -1, -1))
+                color = fg_color.get(i) or self.palette().text().color()
+                p.setPen(QPen(color, 1))
+                ch = text[i]
+                char_w = fm.horizontalAdvance(ch)
+                tx = int(round(float(center) - char_w / 2.0))
+                p.drawText(tx, y_baseline, ch)
+        finally:
+            p.end()
+
+    def _fallback_slot_centers(self, text: str) -> list[Optional[float]]:
+        if not text:
+            return []
+        fm = QFontMetrics(self.font())
+        x = max(6.0, TEXT_SLOT_MIN_W / 2.0)
+        centers: list[Optional[float]] = []
+        for ch in text:
+            w = max(TEXT_SLOT_MIN_W, float(fm.horizontalAdvance(ch)) + TEXT_SLOT_GUTTER_W)
+            centers.append(x + w / 2.0)
+            x += w
+        return centers
+
+    def _selection_colors(self) -> tuple[dict[int, QColor], dict[int, QColor]]:
+        fg_color: dict[int, QColor] = {}
+        bg_color: dict[int, QColor] = {}
+        for sel in self._extra_selections:
+            cur = sel.cursor
+            start = cur.selectionStart()
+            end = cur.selectionEnd()
+            fmt = sel.format
+            if fmt.foreground().style() != Qt.BrushStyle.NoBrush:
+                color = fmt.foreground().color()
+                for i in range(start, end):
+                    fg_color[i] = color
+            if fmt.background().style() != Qt.BrushStyle.NoBrush:
+                color = fmt.background().color()
+                for i in range(start, end):
+                    bg_color[i] = color
+        return fg_color, bg_color
+
+    def _selection_bounds_for_paint(self) -> tuple[int, int]:
+        if self._cursor.hasSelection():
+            return self._cursor.selectionStart(), self._cursor.selectionEnd()
+        pos = self._cursor.position()
+        return pos, min(pos + 1, len(self.toPlainText()))
+
+    # ── 事件 ───────────────────────────────────────────────────
+
+    def _event_pos(self, event):
+        try:
+            return event.position().toPoint()
+        except AttributeError:
+            return event.pos()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        self.row_focus_requested.emit()
+        pos = self._event_pos(event)
+        idx = self._slot_index_for_x(float(pos.x()), nearest=True)
+        if idx >= 0:
+            self._select_slot_index(idx)
+        self.setFocus()
+
+    def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+        pos = self._event_pos(event)
+        idx = self._slot_index_for_x(float(pos.x()), nearest=False)
+        if idx != self._last_hover_idx:
+            self._last_hover_idx = idx
+            self.hover_char_changed.emit(idx)
+            self.update()
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        super().leaveEvent(event)
+        if self._last_hover_idx != -1:
+            self._last_hover_idx = -1
+            self.hover_char_changed.emit(-1)
+            self.update()
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        self.row_focus_requested.emit()
+        super().focusInEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        key = event.key()
+        mod = event.modifiers()
+        no_mod = mod == Qt.KeyboardModifier.NoModifier
+        ctrl = bool(mod & Qt.KeyboardModifier.ControlModifier)
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and no_mod:
+            self.confirm_requested.emit()
+            return
+        if key == Qt.Key.Key_Up and ctrl:
+            self.prev_requested.emit()
+            return
+        if key == Qt.Key.Key_Down and ctrl:
+            self.next_requested.emit()
+            return
+        if key == Qt.Key.Key_F5:
+            self.flag_requested.emit()
+            return
+        if key == Qt.Key.Key_F6:
+            self.skip_requested.emit()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.revert_requested.emit()
+            return
+        if ctrl and key == Qt.Key.Key_A:
+            cur = QTextCursor(self._document)
+            cur.setPosition(0)
+            cur.setPosition(len(self.toPlainText()), QTextCursor.MoveMode.KeepAnchor)
+            self.setTextCursor(cur)
+            return
+        if ctrl and key == Qt.Key.Key_C:
+            selected = self._cursor.selectedText() if self._cursor.hasSelection() else ""
+            QApplication.clipboard().setText(selected)
+            return
+        if ctrl and key == Qt.Key.Key_V:
+            text = QApplication.clipboard().text()
+            if text:
+                self._replace_selected_slots(text.replace("\r", "").replace("\n", ""))
+            return
+        if ctrl and key == Qt.Key.Key_X:
+            selected = self._cursor.selectedText() if self._cursor.hasSelection() else ""
+            if selected:
+                QApplication.clipboard().setText(selected)
+            self._replace_selected_slots(" ")
+            return
+        if key == Qt.Key.Key_Left and no_mod:
+            self._select_slot_index(max(0, self._cursor.selectionStart() - 1))
+            return
+        if key == Qt.Key.Key_Right and no_mod:
+            self._select_slot_index(min(max(0, len(self.toPlainText()) - 1), self._cursor.selectionEnd()))
+            return
+        if key == Qt.Key.Key_Backspace and no_mod:
+            if self._cursor.hasSelection():
+                self._replace_selected_slots(" ")
+            else:
+                self._select_slot_index(max(0, self._cursor.position() - 1))
+                self._replace_selected_slots(" ")
+            return
+        if key == Qt.Key.Key_Delete and no_mod:
+            self._replace_selected_slots(" ")
+            return
+        text = event.text()
+        if text and text.isprintable() and not ctrl:
+            self._replace_selected_slots(text)
+            return
+        super().keyPressEvent(event)
+
+
 # ─────────────────────────────────────────────────────────────
 # 评测位 (quality probe) 显示↔真实 桥接
 # 共享实现见 app.services.proof_probe_text_service；本文件保留同名局部别名
@@ -756,7 +1151,7 @@ class _LinePair(QFrame):
         # 的 hover/click 联动表达（_on_editor_hover_char / _img_clicked_lookup）。
 
         # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
-        self._editor = _RowEditor()
+        self._editor = _SlotLineEditor()
         # proof-direct-input-closure round 10 任务 2：继续弱化"文本框感"。
         # 之前的 border:1px solid #e3e8ef 让每行都像一个独立输入框，光
         # 标心智依然强烈。去掉边框、底色随激活态走（激活 = #f0f6ff，
@@ -873,6 +1268,8 @@ class _LinePair(QFrame):
         self._content.setStyleSheet(f"background:{content_bg};")
         self._img_lbl.setStyleSheet(image_style)
         self._editor.setStyleSheet(self._editor_style(active=active))
+        if hasattr(self._editor, "set_active_visual"):
+            self._editor.set_active_visual(active)
         self.setProperty("active", active)
         self.setStyleSheet(frame_style)
         self._refresh_status()
