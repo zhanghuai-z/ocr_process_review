@@ -19,15 +19,20 @@ PDF_DEFAULT_DPI = 300
 # incorrectly treating the bbox bottom as the baseline itself.
 PDF_TEXT_ASCENDER_RATIO = 1.043
 
-# 字体搜索顺序：项目内置优先，其次 Windows/Linux 系统字体
+# 字体搜索顺序：优先选择同时覆盖 CJK + Latin/digits 的字体。
 _FONT_CANDIDATES = [
     _RESOURCES_FONTS / "NotoSansSC-Regular.ttf",
-    _RESOURCES_FONTS / "DroidSansFallbackFull.ttf",
-    Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
+    Path("/mnt/c/Windows/Fonts/msyh.ttc"),
+    Path("C:/Windows/Fonts/msyh.ttc"),
+    Path("/mnt/c/Windows/Fonts/simsun.ttc"),
+    Path("C:/Windows/Fonts/simsun.ttc"),
     Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
-    Path("C:/Windows/Fonts/msyh.ttc"),
-    Path("C:/Windows/Fonts/simsun.ttc"),
+    # DroidSansFallbackFull in this repository covers CJK but not Latin digits
+    # reliably. Keep it as a last-resort CJK fallback, not the default dual-PDF
+    # text-layer font.
+    _RESOURCES_FONTS / "DroidSansFallbackFull.ttf",
+    Path("/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf"),
 ]
 
 _LATIN_FONT_CANDIDATES = [
@@ -65,7 +70,7 @@ def _add_latin_fallback_font(pdf) -> None:
         return
     try:
         pdf.add_font("LatinFallback", "", latin_font)
-        pdf.set_fallback_fonts(["LatinFallback"])
+        pdf.set_fallback_fonts(["LatinFallback"], exact_match=False)
     except Exception as e:
         logger.warning("PDF Latin fallback font setup failed: %s", e)
         return
@@ -352,10 +357,11 @@ def _write_invisible_text_layer(pdf, plan: PdfPagePlan) -> None:
         pdf.set_font("CJK", size=font_size)
         for span in plan.text_spans:
             try:
-                _write_text(pdf, span.x, _span_baseline_top_y(plan, span, font_size), span.text)
+                _write_span_text(pdf, plan, span, font_size)
             except Exception as e:
                 logger.warning("PDF invisible text write failed for %s: %s", span.source, e)
     finally:
+        _reset_text_stretching(pdf)
         _set_text_rendering_mode(pdf, 0)
 
 
@@ -371,6 +377,39 @@ def _page_text_font_size(plan: PdfPagePlan) -> float:
 def _span_baseline_top_y(plan: PdfPagePlan, span: PdfTextSpan, font_size: float) -> float:
     baseline_pdf_y = span.y + span.h - font_size * PDF_TEXT_ASCENDER_RATIO
     return plan.height_pt - baseline_pdf_y
+
+
+def _write_span_text(pdf, plan: PdfPagePlan, span: PdfTextSpan, font_size: float) -> None:
+    stretching = _span_text_stretching(pdf, span)
+    try:
+        _set_text_stretching(pdf, stretching)
+        _write_text(pdf, span.x, _span_baseline_top_y(plan, span, font_size), span.text)
+    finally:
+        _reset_text_stretching(pdf)
+
+
+def _span_text_stretching(pdf, span: PdfTextSpan) -> float:
+    if span.w <= 0 or not span.text:
+        return 100.0
+    try:
+        natural_width = float(pdf.get_string_width(span.text))
+    except Exception:
+        return 100.0
+    if natural_width <= 0:
+        return 100.0
+    # Keep the searchable text's extracted bbox close to the OCR line bbox.
+    # Without this, fpdf writes the line at natural font width and the hidden
+    # text layer is visibly shorter than the scanned line image.
+    return max(10.0, min(1000.0, span.w / natural_width * 100.0))
+
+
+def _set_text_stretching(pdf, stretching: float) -> None:
+    if hasattr(pdf, "set_stretching"):
+        pdf.set_stretching(stretching)
+
+
+def _reset_text_stretching(pdf) -> None:
+    _set_text_stretching(pdf, 100.0)
 
 
 def _set_text_rendering_mode(pdf, mode: int) -> None:

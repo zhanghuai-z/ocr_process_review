@@ -2316,6 +2316,15 @@ def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
             assert len(page.search_for("多少")) == 1
             first_rect = page.search_for("大小")[0]
             second_rect = page.search_for("多少")[0]
+            expected_x0 = 10 * 72 / 300
+            expected_x1 = 50 * 72 / 300
+            expected_w = 40 * 72 / 300
+            assert abs(first_rect.x0 - expected_x0) < 0.3
+            assert abs(first_rect.x1 - expected_x1) < 0.3
+            assert abs(first_rect.width - expected_w) < 0.3
+            assert abs(second_rect.x0 - expected_x0) < 0.3
+            assert abs(second_rect.x1 - expected_x1) < 0.3
+            assert abs(second_rect.width - expected_w) < 0.3
             assert abs(first_rect.y0 - (20 * 72 / 300)) < 0.3
             assert abs(second_rect.y0 - (60 * 72 / 300)) < 0.3
             sizes = set()
@@ -2517,6 +2526,8 @@ def test_export_dialog_offers_markdown():
         assert "pdf-single" in dialog._checkboxes
         assert "pdf-dual" in dialog._checkboxes
         assert "pdf" not in dialog._checkboxes
+        assert dialog._checkboxes["pdf-single"].text() == "PDF 原图单层 (.pdf)"
+        assert dialog._checkboxes["pdf-dual"].text() == "PDF 原图+可搜索文本 (.pdf)"
         assert dialog._checkboxes["md"].isChecked()
         assert dialog._checkboxes["json"].isChecked()
     finally:
