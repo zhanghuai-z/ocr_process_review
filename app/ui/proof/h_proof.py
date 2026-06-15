@@ -110,6 +110,22 @@ _DEBUG_FORMULA_LABEL_TOKENS = ("formula", "equation", "math")
 _DEBUG_TABLE_LABEL_TOKENS = ("table",)
 
 
+def _slot_visual_width(
+    text_char: str,
+    font_metrics: QFontMetrics,
+    *,
+    bbox_width: float | None = None,
+) -> float:
+    """Return the visual slot width used by HProof's painted text layer.
+
+    The data identity is still ``Char.bbox``; this only prevents narrow bbox
+    punctuation/digits from drawing outside their visual slot.
+    """
+    glyph_width = float(font_metrics.horizontalAdvance(text_char or " ")) + TEXT_SLOT_GUTTER_W
+    bbox_width = 0.0 if bbox_width is None else float(bbox_width) + TEXT_SLOT_GUTTER_W
+    return max(TEXT_SLOT_MIN_W, glyph_width, bbox_width)
+
+
 def _debug_block_labels(block: Block) -> set[str]:
     attrs = block_attributes(block)
     labels = {
@@ -903,12 +919,15 @@ class _SlotLineEditor(QWidget):
         try:
             p.fillRect(self.rect(), self.palette().base())
             text = self.toPlainText()
-            centers = self._slot_x_centers or self._fallback_slot_centers(text)
-            widths = self._slot_widths or [max(TEXT_SLOT_MIN_W, TEXT_FONT_PX * 0.8)] * len(centers)
-            fg_color, bg_color = self._selection_colors()
-            selected_start, selected_end = self._selection_bounds_for_paint() if self._active_visual else (-1, -1)
             p.setFont(self.font())
             fm = QFontMetrics(self.font())
+            centers = self._slot_x_centers or self._fallback_slot_centers(text)
+            widths = self._slot_widths or [
+                _slot_visual_width(ch, fm)
+                for ch in text
+            ]
+            fg_color, bg_color = self._selection_colors()
+            selected_start, selected_end = self._selection_bounds_for_paint() if self._active_visual else (-1, -1)
             y_baseline = (self.height() + fm.ascent() - fm.descent()) // 2
             n = min(len(text), len(centers))
             for i in range(n):
@@ -926,8 +945,9 @@ class _SlotLineEditor(QWidget):
                 bg = bg_color.get(i)
                 if bg is not None and bg.alpha() > 0:
                     p.fillRect(cell, bg)
-                p.setPen(QPen(QColor("#d6dce5"), 1))
-                p.drawRect(cell.adjusted(0, 0, -1, -1))
+                if i == self._last_hover_idx or selected_start <= i < selected_end:
+                    p.setPen(QPen(QColor("#9cc2ff"), 1))
+                    p.drawRect(cell.adjusted(0, 0, -1, -1))
                 color = fg_color.get(i) or self.palette().text().color()
                 p.setPen(QPen(color, 1))
                 ch = text[i]
@@ -944,7 +964,7 @@ class _SlotLineEditor(QWidget):
         x = max(6.0, TEXT_SLOT_MIN_W / 2.0)
         centers: list[Optional[float]] = []
         for ch in text:
-            w = max(TEXT_SLOT_MIN_W, float(fm.horizontalAdvance(ch)) + TEXT_SLOT_GUTTER_W)
+            w = _slot_visual_width(ch, fm)
             centers.append(x + w / 2.0)
             x += w
         return centers
@@ -976,7 +996,11 @@ class _SlotLineEditor(QWidget):
     def _cursor_rect(self) -> QRect:
         pos = self._cursor.selectionStart() if self._cursor.hasSelection() else self._cursor.position()
         centers = self._slot_x_centers or self._fallback_slot_centers(self.toPlainText())
-        widths = self._slot_widths or [max(TEXT_SLOT_MIN_W, TEXT_FONT_PX * 0.8)] * len(centers)
+        fm = QFontMetrics(self.font())
+        widths = self._slot_widths or [
+            _slot_visual_width(ch, fm)
+            for ch in self.toPlainText()
+        ]
         if 0 <= pos < len(centers):
             center = centers[pos]
             if center is not None:
@@ -1645,14 +1669,23 @@ class _LinePair(QFrame):
             return
         x_centers: list = []
         widths: list = []
-        for ch in self._line.chars:
+        fm = QFontMetrics(editor.font())
+        text = editor.toPlainText()
+        for idx, ch in enumerate(self._line.chars):
             if ch.bbox is None:
                 x_centers.append(None)
                 widths.append(0.0)
                 continue
             cx_src = (ch.bbox.x + ch.bbox.x2) / 2.0 - float(ox)
             x_centers.append(cx_src * scale)
-            widths.append(max(TEXT_SLOT_MIN_W, float(ch.bbox.w) * scale + TEXT_SLOT_GUTTER_W))
+            text_char = text[idx] if idx < len(text) else ch.char
+            widths.append(
+                _slot_visual_width(
+                    text_char,
+                    fm,
+                    bbox_width=float(ch.bbox.w) * scale,
+                )
+            )
         editor.set_slot_geometry(x_centers, widths)
 
     def refresh_text(self) -> None:

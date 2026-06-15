@@ -82,6 +82,40 @@ def test_line_pair_pushes_image_aligned_xcenters_to_editor():
     pair.deleteLater()
 
 
+def test_line_pair_slot_width_keeps_narrow_punctuation_inside_visual_slot():
+    """窄 bbox 标点只放大横校视觉槽宽，不改写真实 Char.bbox。"""
+    from PySide6.QtGui import QFontMetrics
+
+    from app.models import Block, BBox, Char, Line, Page, ProofStatus
+    from app.models.project import BlockType
+    from app.core.page_image_cache import PageImageCache
+    from app.ui.proof.h_proof import _LinePair, TEXT_SLOT_GUTTER_W
+
+    punct_bbox = BBox(10, 0, 2, 20)
+    line = Line(
+        text="，",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 24),
+        chars=[Char(char="，", confidence=0.9, bbox=punct_bbox)],
+        proof_status=ProofStatus.UNCHECKED,
+        ocr_text="，",
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 24), lines=[line])
+    page = Page(image_path="", width=40, height=24, blocks=[block])
+    pair = _LinePair(0, block, line, page, 1, PageImageCache.instance())
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+
+    pair._sync_editor_slot_geometry()
+
+    widths = pair._editor._slot_widths
+    assert widths is not None and len(widths) == 1
+    expected_min = QFontMetrics(pair._editor.font()).horizontalAdvance("，") + TEXT_SLOT_GUTTER_W
+    assert widths[0] >= expected_min
+    assert line.chars[0].bbox == punct_bbox
+    pair.deleteLater()
+
+
 def test_line_pair_uses_slot_line_editor_for_visible_hproof_text():
     """横校可见文本层应是 slot editor，而不是 QPlainTextEdit 原生布局。"""
     from PySide6.QtCore import Qt
