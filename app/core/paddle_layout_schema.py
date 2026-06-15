@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.bbox_extraction import (
-    BBOX_FIELD_KEYS,
     bbox_from_variant,
     raw_bbox_max_from_variant,
 )
@@ -18,16 +17,13 @@ from app.core.bbox_utils import scale_bbox
 from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
 from app.models import BBox
 
-PADDLE_TEXT_KEYS = ("block_content", "text", "content")
-PADDLE_PREVIEW_TEXT_KEYS = PADDLE_TEXT_KEYS + ("markdown",)
-PADDLE_SCORE_KEYS = (
-    "score",
-    "confidence",
-    "layout_score",
-    "cls_score",
-    "block_score",
-    "prob",
-    "probability",
+PADDLE_TEXT_KEYS = ("block_content",)
+PADDLE_SCORE_KEYS = ("score",)
+PADDLE_LAYOUT_BBOX_KEYS = (
+    "block_bbox",
+    "block_polygon_points",
+    "coordinate",
+    "polygon_points",
 )
 
 
@@ -50,8 +46,7 @@ def paddle_record_label(record: dict[str, Any], default: str = "unknown") -> str
 
 
 def paddle_record_text(record: dict[str, Any], *, include_markdown: bool = True) -> str:
-    keys = PADDLE_PREVIEW_TEXT_KEYS if include_markdown else PADDLE_TEXT_KEYS
-    for key in keys:
+    for key in PADDLE_TEXT_KEYS:
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -70,11 +65,17 @@ def paddle_record_score(record: dict[str, Any]) -> float | None:
 
 
 def paddle_record_bbox(record: dict[str, Any], page_width: int, page_height: int) -> BBox | None:
-    return bbox_from_variant(record, max_w=page_width, max_h=page_height)
+    for key in PADDLE_LAYOUT_BBOX_KEYS:
+        if key not in record:
+            continue
+        bbox = bbox_from_variant(record.get(key), max_w=page_width, max_h=page_height)
+        if bbox is not None:
+            return bbox
+    return None
 
 
 def raw_bbox_max_from_record(record: dict[str, Any]) -> tuple[float, float] | None:
-    for key in BBOX_FIELD_KEYS:
+    for key in PADDLE_LAYOUT_BBOX_KEYS:
         if key not in record:
             continue
         max_xy = raw_bbox_max_from_variant(record.get(key))

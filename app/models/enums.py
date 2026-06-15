@@ -15,7 +15,7 @@ class BlockType(str, Enum):
 
     @classmethod
     def from_paddle(cls, label: str) -> "BlockType":
-        """将 PP-Structure 返回的 type 字符串映射到枚举。"""
+        """将 PaddleOCR-VL 标签映射到程序内粗粒度块类型。"""
         if not label:
             return cls.UNKNOWN
 
@@ -78,6 +78,7 @@ class BlockType(str, Enum):
             "table_note": cls.TABLE_CAPTION,
             "table_title": cls.TABLE_CAPTION,
             "reference": cls.REFERENCE,
+            "reference_content": cls.REFERENCE,
             "references": cls.REFERENCE,
             "reference_list": cls.REFERENCE,
             "reference_text": cls.REFERENCE,
@@ -102,10 +103,10 @@ class BlockType(str, Enum):
             return cls.FIGURE_CAPTION
         if "table" in normalized:
             return cls.TABLE
-        if any(token in normalized for token in ("paragraph", "text", "body", "content")):
-            return cls.TEXT
         if any(token in normalized for token in ("reference", "bibliography")):
             return cls.REFERENCE
+        if any(token in normalized for token in ("paragraph", "text", "body", "content")):
+            return cls.TEXT
         if any(token in normalized for token in ("figure", "image", "picture", "illustration", "graphic", "logo", "photo")):
             return cls.FIGURE
         if any(token in normalized for token in ("equation", "formula", "math")):

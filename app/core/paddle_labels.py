@@ -6,11 +6,6 @@ from typing import Any
 PADDLE_LABEL_AUTHORITY_KEYS = (
     "block_label",
     "label",
-    "type",
-    "category",
-    "category_name",
-    "cls_name",
-    "layout_label",
 )
 
 PADDLE_HANWANG_TEXT_LABELS = {
@@ -29,6 +24,7 @@ PADDLE_HANWANG_TEXT_LABELS = {
     "number",
     "page_number",
     "reference",
+    "reference_content",
     "references",
     "reference_list",
     "bibliography",

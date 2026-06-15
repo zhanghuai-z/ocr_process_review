@@ -9,9 +9,17 @@ from __future__ import annotations
 from typing import Any
 
 PADDLE_V16_JOBS_PATH = "/api/v2/ocr/jobs"
-KNOWN_API_ENDPOINT_SUFFIXES = ("/ocr", "/layout-parsing", PADDLE_V16_JOBS_PATH)
+LEGACY_LAYOUT_ENDPOINT_SUFFIX = "/layout-parsing"
+CURRENT_API_ENDPOINT_SUFFIXES = ("/ocr", PADDLE_V16_JOBS_PATH)
+KNOWN_API_ENDPOINT_SUFFIXES = CURRENT_API_ENDPOINT_SUFFIXES + (LEGACY_LAYOUT_ENDPOINT_SUFFIX,)
 FIXED_LAYOUT_PROFILE = "paddleocr-vl-1.6"
 FIXED_OCR_PROFILE = "pp-ocrv5"
+PADDLE_V16_OFFICIAL_ROOT = "https://paddleocr.aistudio-app.com"
+LEGACY_OFFICIAL_LAYOUT_ROOTS = frozenset({
+    "https://fbv8f7s7v9u9hbk7.aistudio-app.com",
+    "https://c92fu3s8m4y5i0je.aistudio-app.com",
+    "https://15j75bd0964dzbwe.aistudio-app.com",
+})
 
 PADDLE_COORD_STABILITY_FLAGS: dict[str, bool] = {
     "useDocOrientationClassify": False,
@@ -39,39 +47,9 @@ API_MODEL_PROFILES: dict[str, dict[str, Any]] = {
         "max_text_bbox_granularity": "line",
         "layout": False,
     },
-    "pp-structurev3": {
-        "label": "PP-StructureV3",
-        "url": "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing",
-        "desc": "版面 + OCR（/layout-parsing）",
-        "endpoint_suffix": "/layout-parsing",
-        "request_family": "ocr-text",
-        "returns": ("layout", "block", "line", "markdown"),
-        "max_text_bbox_granularity": "line",
-        "layout": True,
-    },
-    "paddleocr-vl": {
-        "label": "PaddleOCR-VL",
-        "url": "https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing",
-        "desc": "VL 大模型版面解析",
-        "endpoint_suffix": "/layout-parsing",
-        "request_family": "vl-layout",
-        "returns": ("layout", "block", "line", "markdown"),
-        "max_text_bbox_granularity": "line",
-        "layout": True,
-    },
-    "paddleocr-vl-1.5": {
-        "label": "PaddleOCR-VL-1.5",
-        "url": "https://15j75bd0964dzbwe.aistudio-app.com/layout-parsing",
-        "desc": "VL 1.5 升级版",
-        "endpoint_suffix": "/layout-parsing",
-        "request_family": "vl-layout",
-        "returns": ("layout", "block", "line", "markdown"),
-        "max_text_bbox_granularity": "line",
-        "layout": True,
-    },
     "paddleocr-vl-1.6": {
         "label": "PaddleOCR-VL-1.6",
-        "url": f"https://paddleocr.aistudio-app.com{PADDLE_V16_JOBS_PATH}",
+        "url": f"{PADDLE_V16_OFFICIAL_ROOT}{PADDLE_V16_JOBS_PATH}",
         "desc": "VL 1.6 官方 jobs API",
         "endpoint_suffix": PADDLE_V16_JOBS_PATH,
         "request_family": "vl-layout-v2",
@@ -89,13 +67,7 @@ def get_api_model_profile_options() -> list[tuple[str, str]]:
 def get_api_model_profile_url(profile: str | None) -> str:
     if isinstance(profile, str) and profile in API_MODEL_PROFILES:
         return str(API_MODEL_PROFILES[profile]["url"])
-    return str(API_MODEL_PROFILES["pp-structurev3"]["url"])
-
-
-def get_api_model_profile(profile: str | None) -> dict[str, Any]:
-    if isinstance(profile, str) and profile in API_MODEL_PROFILES:
-        return API_MODEL_PROFILES[profile]
-    return API_MODEL_PROFILES["pp-structurev3"]
+    return str(API_MODEL_PROFILES[FIXED_LAYOUT_PROFILE]["url"])
 
 
 def match_api_model_profile_from_url(api_url: str | None) -> str | None:
@@ -111,7 +83,10 @@ def normalize_api_base_url(api_url: str | None) -> str:
     normalized = (api_url or "").strip().rstrip("/")
     for suffix in KNOWN_API_ENDPOINT_SUFFIXES:
         if normalized.endswith(suffix):
-            return normalized[: -len(suffix)]
+            normalized = normalized[: -len(suffix)]
+            break
+    if normalized in LEGACY_OFFICIAL_LAYOUT_ROOTS:
+        return PADDLE_V16_OFFICIAL_ROOT
     return normalized
 
 
@@ -125,7 +100,7 @@ def match_api_model_profile_from_base_url(api_url: str | None) -> str | None:
     return None
 
 
-def default_endpoint_suffix_for_profile(profile: str | None, fallback: str = "/layout-parsing") -> str:
+def default_endpoint_suffix_for_profile(profile: str | None, fallback: str = PADDLE_V16_JOBS_PATH) -> str:
     if isinstance(profile, str) and profile in API_MODEL_PROFILES:
         return str(API_MODEL_PROFILES[profile].get("endpoint_suffix") or fallback)
     return fallback
@@ -134,16 +109,17 @@ def default_endpoint_suffix_for_profile(profile: str | None, fallback: str = "/l
 def resolve_api_endpoint(
     api_url: str | None,
     *,
-    default_suffix: str = "/layout-parsing",
+    default_suffix: str = PADDLE_V16_JOBS_PATH,
     profile: str | None = None,
 ) -> str:
     url = (api_url or "").strip().rstrip("/")
     if not url:
         return ""
-    if any(url.endswith(suffix) for suffix in KNOWN_API_ENDPOINT_SUFFIXES):
+    if any(url.endswith(suffix) for suffix in CURRENT_API_ENDPOINT_SUFFIXES):
         return url
+    base_url = normalize_api_base_url(url)
     suffix = default_endpoint_suffix_for_profile(profile, default_suffix)
-    return f"{url}{suffix}"
+    return f"{base_url}{suffix}"
 
 
 def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> str | None:
@@ -163,10 +139,9 @@ def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> 
     return None
 
 
-# 主链 layout 角色固定走 PaddleOCR-VL-1.6（替代 VL-1.5 / PP-StructureV3）。
-# 仅当用户填写 *自定义* 根 URL 时，按后缀规则原地补 jobs path；
-# 当用户配的是 *官方预置* (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 时，
-# 全部重定向到 paddleocr-vl-1.6 预置 URL，保证旧模型不会干扰主线。
+# 主链 layout 角色固定走 PaddleOCR-VL-1.6；OCR proof 角色固定走 PP-OCRv5。
+# 旧 /layout-parsing 只在 normalize_api_base_url() 中作为历史配置后缀剥离，
+# 不再作为可请求的 layout endpoint。
 LAYOUT_DEFAULT_PROFILE = "paddleocr-vl-1.6"
 
 
@@ -209,9 +184,6 @@ def resolve_api_endpoint_for_role(
         )
 
     if role == "layout":
-        # 任何官方旧预置都强制重定向到 paddleocr-vl-1.6 预置 URL。
-        if profile_key in ("pp-ocrv5", "pp-structurev3", "paddleocr-vl", "paddleocr-vl-1.5"):
-            return get_api_model_profile_url(LAYOUT_DEFAULT_PROFILE)
         if normalized.endswith("/ocr"):
             return resolve_api_endpoint(
                 normalized[: -len("/ocr")],
@@ -236,26 +208,22 @@ def infer_api_model_profile_from_endpoint(endpoint_url: str | None) -> str | Non
         return "paddleocr-vl-1.6"
     if normalized.endswith("/ocr"):
         return "pp-ocrv5"
-    if normalized.endswith("/layout-parsing"):
-        # 主链 layout 已切到 VL-1.6；旧 /layout-parsing 端点按 VL family 处理
-        # （不再发送 OCR detector/recognizer 字段）。
-        return LAYOUT_DEFAULT_PROFILE
     return None
 
 
 def get_api_request_options(profile: str | None, endpoint_url: str | None = None) -> dict[str, object]:
     """Return request options supported by the selected model family.
 
-    OCR detector/recognizer tuning is meaningful for PP-OCRv5 and the
-    Structure OCR path.  VL layout endpoints may ignore or reject these fields,
-    so they intentionally do not receive them.  The orientation/unwarping flags
-    are coordinate-space guards and are sent for every known family.
+    OCR detector/recognizer tuning is meaningful for PP-OCRv5.  VL layout
+    endpoints may ignore or reject these fields, so they intentionally do not
+    receive them.  The orientation/unwarping flags are coordinate-space guards
+    and are sent for every known family.
     """
     profile_key = profile if isinstance(profile, str) and profile in API_MODEL_PROFILES else None
     if profile_key is None:
         profile_key = infer_api_model_profile_from_endpoint(endpoint_url)
     if profile_key is None:
-        profile_key = "pp-structurev3"
+        profile_key = LAYOUT_DEFAULT_PROFILE
     family = API_MODEL_PROFILES[profile_key].get("request_family")
     options: dict[str, object] = {}
     options.update(PADDLE_COORD_STABILITY_FLAGS)
@@ -263,16 +231,3 @@ def get_api_request_options(profile: str | None, endpoint_url: str | None = None
         options.update(PADDLE_OCR_TEXT_DET_PARAMS)
         return options
     return options
-
-
-def detect_api_result_kind(data: dict) -> str:
-    if not isinstance(data, dict):
-        return "unknown"
-    result = data.get("result", {})
-    if not isinstance(result, dict):
-        return "unknown"
-    if isinstance(result.get("ocrResults"), list):
-        return "ocr"
-    if isinstance(result.get("layoutParsingResults"), list):
-        return "layout"
-    return "unknown"

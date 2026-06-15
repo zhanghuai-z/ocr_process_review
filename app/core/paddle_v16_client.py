@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from io import BytesIO
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -89,6 +90,14 @@ class PaddleV16LayoutClient:
             headers["Authorization"] = f"bearer {self.token}"
         return headers
 
+    def _raise_submit_error(self, resp) -> None:
+        try:
+            body = resp.text[:1000]
+        except Exception:
+            body = ""
+        detail = f": {body}" if body else ""
+        raise RuntimeError(f"PaddleOCR-VL-1.6 submit failed: HTTP {resp.status_code}{detail}")
+
     def submit_image(
         self,
         image_bgr: np.ndarray,
@@ -118,7 +127,9 @@ class PaddleV16LayoutClient:
             "model": model,
             "optionalPayload": json.dumps(payload, ensure_ascii=False),
         }
-        files = {"file": (filename, image_bytes, "image/png")}
+        file_obj = BytesIO(image_bytes)
+        file_obj.name = filename
+        files = {"file": file_obj}
         resp = post_multipart_without_env_proxy(
             self.jobs_url,
             data=data,
@@ -126,6 +137,8 @@ class PaddleV16LayoutClient:
             headers=self._headers(),
             timeout=self.request_timeout,
         )
+        if getattr(resp, "status_code", 200) >= 400:
+            self._raise_submit_error(resp)
         resp.raise_for_status()
         body = resp.json()
         try:

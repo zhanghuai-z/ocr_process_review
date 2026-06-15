@@ -13,15 +13,11 @@ from app.core.api_profiles import (
     API_MODEL_PROFILES,
     FIXED_LAYOUT_PROFILE,
     KNOWN_API_ENDPOINT_SUFFIXES,
-    detect_api_result_kind,
-    get_api_request_options,
     get_api_model_profile_options,
     get_api_model_profile_url,
-    match_api_model_profile_from_url,
     normalize_api_base_url,
     resolve_api_endpoint_for_role,
 )
-from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.llm_rules import get_default_llm_rules_path
 from app.core.app_config import get_config, update_config
 from app.core.paddle_v16_client import (
@@ -29,21 +25,6 @@ from app.core.paddle_v16_client import (
     build_paddle_v16_optional_payload,
     is_paddle_v16_endpoint,
 )
-
-
-# ------------------------------------------------------------------ profiles
-
-
-def build_api_payload(
-    file_b64: str,
-    file_type: int,
-    *,
-    profile: str | None = None,
-    endpoint_url: str | None = None,
-) -> dict[str, object]:
-    payload: dict[str, object] = {"file": file_b64, "fileType": file_type}
-    payload.update(get_api_request_options(profile, endpoint_url))
-    return payload
 
 
 # ------------------------------------------------------------------ stylesheet
@@ -770,7 +751,6 @@ class ApiSettingsDialog(QDialog):
     # ------------------------------------------------------------------ test
 
     def _test_connection(self) -> None:
-        from app.core.api_http import post_json_without_env_proxy
         import requests
 
         url = resolve_api_endpoint_for_role(
@@ -781,6 +761,9 @@ class ApiSettingsDialog(QDialog):
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 API 地址。")
             return
+        if not is_paddle_v16_endpoint(url):
+            QMessageBox.warning(self, "提示", "版面分析只支持 PaddleOCR-VL-1.6 jobs API。")
+            return
         token = self._token_edit.text().strip()
         timeout = self._timeout_spin.value()
 
@@ -790,63 +773,31 @@ class ApiSettingsDialog(QDialog):
             img = np.full((200, 400, 3), 240, dtype=np.uint8)
             cv2.putText(img, "OCR Test", (80, 110),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.8, (30, 30, 30), 2)
-            file_b64 = encode_image_b64_for_paddle(img)
         except Exception:
-            file_b64 = ""
-
-        if not file_b64:
             QMessageBox.critical(self, "错误", "无法生成测试图像，请确认 opencv-python 已安装。")
             return
-
-        headers: dict = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"token {token}"
 
         self._btn_test.setEnabled(False)
         self._btn_test.setText("测试中…")
         try:
-            if is_paddle_v16_endpoint(url):
-                client = PaddleV16LayoutClient(
-                    jobs_url=url,
-                    token=token,
-                    request_timeout=timeout,
-                    poll_timeout=timeout,
-                )
-                body = client.analyze_image(
-                    img,
-                    optional_payload=build_paddle_v16_optional_payload(),
-                )
-                code = 200
-                err_code = body.get("errorCode", -1)
-                err_msg = body.get("errorMsg", "")
-            else:
-                payload = build_api_payload(
-                    file_b64,
-                    1,
-                    profile=FIXED_LAYOUT_PROFILE,
-                    endpoint_url=url,
-                )
-                resp = post_json_without_env_proxy(url, json=payload, headers=headers, timeout=timeout)
-                code = resp.status_code
-                try:
-                    body = resp.json()
-                    err_code = body.get("errorCode", -1)
-                    err_msg = body.get("errorMsg", "")
-                except Exception:
-                    body = {}
-                    err_code = -1
-                    err_msg = resp.text[:300]
+            client = PaddleV16LayoutClient(
+                jobs_url=url,
+                token=token,
+                request_timeout=timeout,
+                poll_timeout=timeout,
+            )
+            body = client.analyze_image(
+                img,
+                optional_payload=build_paddle_v16_optional_payload(),
+            )
+            code = 200
+            err_code = body.get("errorCode", -1)
+            err_msg = body.get("errorMsg", "")
 
             if code == 200 and err_code == 0:
-                kind = detect_api_result_kind(body)
-                kind_label = {
-                    "ocr": "PP-OCRv5 /ocr",
-                    "layout": "PaddleOCR-VL-1.6 /api/v2/ocr/jobs",
-                    "unknown": "未知结构（请确认端点是否正确）",
-                }.get(kind, kind)
                 QMessageBox.information(
                     self, "测试成功",
-                    f"✓ 连接正常，API 响应成功！\n\n响应类型：{kind_label}",
+                    "✓ 连接正常，PaddleOCR-VL-1.6 jobs API 响应成功！",
                 )
             elif code in (401, 403) or err_code in (401, 403):
                 QMessageBox.warning(

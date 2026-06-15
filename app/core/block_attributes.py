@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
-from app.models import Block, BlockType
+from app.models import Block, BlockSource, BlockType
 
 
 def normalize_source_label(label: object) -> str:
@@ -72,7 +72,8 @@ def block_attributes(block: Block) -> BlockAttributes:
     if isinstance(binding, dict):
         binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
     source_label = block.source_label or binding_label or raw_label
-    semantic_label = raw_label or source_label or block.block_type.value
+    user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
+    semantic_label = (source_label if user_authored_label else raw_label) or source_label or block.block_type.value
     semantic_block_type = BlockType.from_paddle(semantic_label)
     if semantic_block_type == BlockType.UNKNOWN:
         semantic_block_type = block.block_type

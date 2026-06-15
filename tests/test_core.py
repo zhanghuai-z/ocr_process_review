@@ -520,7 +520,7 @@ def test_paddle_layout_schema_normalizes_record_fields():
         "label": "text",
         "block_bbox": [10, 20, 110, 60],
         "block_content": " $ A $ ",
-        "block_score": "0.91",
+        "score": "0.91",
         "custom_raw": {"keep": True},
     }
 
@@ -546,7 +546,8 @@ def test_paddle_layout_schema_normalizes_record_fields():
     assert payload["block_label"] == "inline_formula"
     assert payload["block_bbox"] == [20, 10, 220, 30]
     assert payload["raw_payload"]["label"] == "text"
-    assert paddle_record_text({"markdown": " preview "}) == "preview"
+    assert paddle_record_text({"block_content": " preview "}) == "preview"
+    assert paddle_record_text({"markdown": " preview "}) == ""
     assert block_text({"markdown": "must not route"}) == ""
 
     print("test_paddle_layout_schema_normalizes_record_fields PASSED")
@@ -3250,10 +3251,7 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
         try:
             panel.set_pages([page])
             app.processEvents()
-            for i in range(panel._new_type_combo.count()):
-                if panel._new_type_combo.itemData(i) == BlockType.EQUATION:
-                    panel._new_type_combo.setCurrentIndex(i)
-                    break
+            panel._new_type_buttons[BlockType.EQUATION].click()
 
             panel._on_block_created(BBox(10, 10, 90, 30))
 
@@ -3300,10 +3298,7 @@ def test_layout_panel_draw_ignores_locked_text_targets():
         try:
             panel.set_pages([page])
             app.processEvents()
-            for i in range(panel._new_type_combo.count()):
-                if panel._coerce_block_type(panel._new_type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.EQUATION:
-                    panel._new_type_combo.setCurrentIndex(i)
-                    break
+            panel._new_type_buttons[BlockType.EQUATION].click()
 
             panel._on_block_created(BBox(25, 22, 20, 12))
 
@@ -3311,6 +3306,7 @@ def test_layout_panel_draw_ignores_locked_text_targets():
             assert len(page.blocks) == 2
             assert page.blocks[0] is text_block
             assert page.blocks[1].block_type == BlockType.EQUATION
+            assert page.blocks[1].source_label == "display_formula"
             assert page.blocks[1].bbox == BBox(25, 22, 20, 12)
         finally:
             panel.close()
@@ -3343,15 +3339,13 @@ def test_layout_panel_drawn_block_is_selected_and_type_editable():
             assert len(page.blocks) == 1
             block = page.blocks[0]
             assert panel._selected_block is block
-            assert panel._type_combo.isEnabled()
+            assert panel._selected_type_buttons[BlockType.TABLE].isEnabled()
             assert any(item.isSelected() and item_block is block for item, item_block in panel._viewer._block_items)
 
-            for i in range(panel._type_combo.count()):
-                if panel._coerce_block_type(panel._type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.TABLE:
-                    panel._type_combo.setCurrentIndex(i)
-                    break
+            panel._selected_type_buttons[BlockType.TABLE].click()
 
             assert block.block_type == BlockType.TABLE
+            assert block.source_label == "table"
         finally:
             panel.close()
 
@@ -3383,10 +3377,7 @@ def test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks():
         try:
             panel.set_pages([page])
             app.processEvents()
-            for i in range(panel._new_type_combo.count()):
-                if panel._coerce_block_type(panel._new_type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.EQUATION:
-                    panel._new_type_combo.setCurrentIndex(i)
-                    break
+            panel._new_type_buttons[BlockType.EQUATION].click()
 
             panel._on_block_created(BBox(17, 19, 25, 13))
 
@@ -3622,7 +3613,7 @@ def test_layout_panel_excludes_inline_formula_carriers_from_char_boxes():
     print("test_layout_panel_excludes_inline_formula_carriers_from_char_boxes PASSED")
 
 
-def test_layout_panel_type_combo_changes_unlocked_block_type():
+def test_layout_panel_type_buttons_change_unlocked_block_type():
     from pathlib import Path
     import tempfile
 
@@ -3643,17 +3634,117 @@ def test_layout_panel_type_combo_changes_unlocked_block_type():
             panel.set_pages([page])
             app.processEvents()
             panel._on_block_clicked(formula_block)
-            for i in range(panel._type_combo.count()):
-                if panel._coerce_block_type(panel._type_combo.itemData(i), BlockType.UNKNOWN) == BlockType.TABLE:
-                    panel._type_combo.setCurrentIndex(i)
-                    break
+            panel._selected_type_buttons[BlockType.TABLE].click()
 
             assert formula_block.block_type == BlockType.TABLE
+            assert formula_block.source_label == "table"
             assert formula_block.source == BlockSource.USER_EDITED
         finally:
             panel.close()
 
-    print("test_layout_panel_type_combo_changes_unlocked_block_type PASSED")
+    print("test_layout_panel_type_buttons_change_unlocked_block_type PASSED")
+
+
+def test_layout_panel_type_buttons_are_grouped():
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    from app.ui.recognize.layout_panel import (
+        BLOCK_SUBTYPE_BUTTON_ORDER,
+        BLOCK_TYPE_BUTTON_GROUPS,
+        BLOCK_TYPE_BUTTON_ORDER,
+        LayoutPanel,
+    )
+
+    _get_qapp()
+    flat_specs = tuple(spec for _title, specs in BLOCK_TYPE_BUTTON_GROUPS for spec in specs)
+    assert flat_specs == BLOCK_SUBTYPE_BUTTON_ORDER
+    assert BLOCK_TYPE_BUTTON_ORDER == tuple(dict.fromkeys(spec.block_type for spec in BLOCK_SUBTYPE_BUTTON_ORDER))
+    assert all(2 <= len(specs) <= 4 for _title, specs in BLOCK_TYPE_BUTTON_GROUPS)
+    assert {
+        "text",
+        "paragraph_title",
+        "doc_title",
+        "abstract",
+        "header",
+        "footer",
+        "number",
+        "footnote",
+        "display_formula",
+        "inline_formula",
+        "formula_number",
+        "table",
+        "figure",
+        "chart",
+        "figure_title",
+        "table_title",
+        "reference_content",
+        "vision_footnote",
+    } == {spec.source_label for spec in BLOCK_SUBTYPE_BUTTON_ORDER}
+
+    panel = LayoutPanel()
+    try:
+        titles = [
+            label.text()
+            for label in panel.findChildren(QLabel)
+            if label.objectName() == "blockTypeGroupTitle"
+        ]
+        expected_titles = [title for title, _specs in BLOCK_TYPE_BUTTON_GROUPS]
+        assert titles == expected_titles
+        assert set(panel._new_type_buttons) == set(BLOCK_TYPE_BUTTON_ORDER)
+        assert set(panel._selected_type_buttons) == set(BLOCK_TYPE_BUTTON_ORDER)
+        expected_source_labels = {spec.source_label for spec in BLOCK_SUBTYPE_BUTTON_ORDER}
+        assert set(panel._new_subtype_buttons) == expected_source_labels
+        assert set(panel._selected_subtype_buttons) == expected_source_labels
+        assert panel._new_subtype_buttons is panel._selected_subtype_buttons
+        button_labels = [
+            button.text()
+            for button in panel.findChildren(QPushButton)
+            if button.objectName() == "blockTypeButton"
+        ]
+        assert "其他" not in button_labels
+        assert panel._type_context_title.text() == "新建框类型"
+        assert "新建：正文 / text" == panel._selection_type_status.text()
+    finally:
+        panel.close()
+
+    print("test_layout_panel_type_buttons_are_grouped PASSED")
+
+
+def test_layout_panel_subtype_buttons_write_paddle_source_label():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, BlockSource, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(image_path=str(image_path), width=120, height=80)
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._new_subtype_buttons["inline_formula"].click()
+
+            panel._on_block_created(BBox(10, 10, 20, 10))
+
+            assert len(page.blocks) == 1
+            block = page.blocks[0]
+            assert block.block_type == BlockType.EQUATION
+            assert block.source_label == "inline_formula"
+            assert block.source == BlockSource.MANUAL_DRAW
+            assert block.recognizable is False
+            assert panel._type_context_title.text() == "选中框类型"
+            assert panel._selection_type_status.text() == "选中：行内公式 / inline_formula"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_subtype_buttons_write_paddle_source_label PASSED")
 
 
 def test_layout_panel_undo_restores_block_edits():
@@ -7241,7 +7332,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
     print("test_layout_panel_manual_formula_writes_paddle_binding_payload PASSED")
 
 
-def test_layout_analyzer_reads_formula_geometry_records_for_routes():
+def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.models import Page
@@ -7253,7 +7344,7 @@ def test_layout_analyzer_reads_formula_geometry_records_for_routes():
                 {
                     "prunedResult": {
                         "layout_det_res": {
-                            "formula": [
+                            "boxes": [
                                 {"label": "inline_formula", "coordinate": [50, 10, 80, 32]},
                             ],
                         },
@@ -7275,7 +7366,7 @@ def test_layout_analyzer_reads_formula_geometry_records_for_routes():
     ]
     assert [label for label, _bbox in overlays] == ["text", "inline_formula"]
 
-    print("test_layout_analyzer_reads_formula_geometry_records_for_routes PASSED")
+    print("test_layout_analyzer_reads_formula_geometry_boxes_for_routes PASSED")
 
 
 def test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result():
@@ -9876,7 +9967,7 @@ def test_proof_stats_service():
 
 
 def test_api_model_profile_helpers():
-    from app.ui.widgets.api_settings_dialog import (
+    from app.core.api_profiles import (
         get_api_model_profile_options,
         get_api_model_profile_url,
         match_api_model_profile_from_url,
@@ -9885,14 +9976,11 @@ def test_api_model_profile_helpers():
     options = get_api_model_profile_options()
     assert [label for _, label in options] == [
         "PP-OCRv5",
-        "PP-StructureV3",
-        "PaddleOCR-VL",
-        "PaddleOCR-VL-1.5",
         "PaddleOCR-VL-1.6",
     ]
     assert get_api_model_profile_url("pp-ocrv5").endswith("/ocr")
-    assert get_api_model_profile_url("pp-structurev3").endswith("/layout-parsing")
     assert get_api_model_profile_url("paddleocr-vl-1.6").endswith("/api/v2/ocr/jobs")
+    assert get_api_model_profile_url("unknown-profile").endswith("/api/v2/ocr/jobs")
     assert match_api_model_profile_from_url("https://n6z9feddjca4l7b5.aistudio-app.com/ocr") == "pp-ocrv5"
     assert match_api_model_profile_from_url("https://example.com/custom-layout") is None
 
@@ -9902,9 +9990,9 @@ def test_api_model_profile_helpers():
 def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
     """Layout role 已全面切到 PaddleOCR-VL-1.6；OCR proof role 仍走 PP-OCRv5。
 
-    所有官方预设 (pp-ocrv5 / pp-structurev3 / paddleocr-vl) 在 role="layout"
-    下都被 strong-redirect 到 paddleocr-vl-1.6 预设 URL。
-    自托管根 URL 按 role 自动补 /api/v2/ocr/jobs 或 /ocr。
+    官方 PP-OCRv5 / PaddleOCR-VL-1.6 根地址按 role 映射到固定链路；
+    自托管根 URL 按 role 自动补 /api/v2/ocr/jobs 或 /ocr。旧
+    /layout-parsing 只作为历史配置后缀剥离，不再作为请求端点。
     """
     from app.core.api_profiles import (
         get_api_model_profile_url,
@@ -9914,29 +10002,23 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
 
     vl16_url = get_api_model_profile_url("paddleocr-vl-1.6")
     ocr_url = get_api_model_profile_url("pp-ocrv5")
-    structure_url = get_api_model_profile_url("pp-structurev3")
-    structure_root = structure_url.removesuffix("/layout-parsing")
     vl16_root = vl16_url.removesuffix("/api/v2/ocr/jobs")
     ocr_root = ocr_url.removesuffix("/ocr")
+    legacy_structure_url = "https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing"
+    legacy_vl_url = "https://c92fu3s8m4y5i0je.aistudio-app.com/layout-parsing"
+    legacy_vl15_root = "https://15j75bd0964dzbwe.aistudio-app.com"
 
-    assert normalize_api_base_url(structure_url) == structure_root
     assert normalize_api_base_url(ocr_url) == ocr_root
     assert normalize_api_base_url(vl16_url) == vl16_root
+    assert normalize_api_base_url("https://self-hosted.example.com/layout-parsing") == "https://self-hosted.example.com"
+    assert normalize_api_base_url(legacy_structure_url) == vl16_root
+    assert normalize_api_base_url(legacy_vl_url) == vl16_root
+    assert normalize_api_base_url(legacy_vl15_root) == vl16_root
 
-    # Layout role: 任何官方 PP-* / 旧 VL 预设 -> VL-1.6
-    assert resolve_api_endpoint_for_role(
-        structure_url,
-        profile="pp-structurev3",
-        role="layout",
-    ) == vl16_url
+    # Layout role: 官方 PP-OCRv5 预设 -> VL-1.6
     assert resolve_api_endpoint_for_role(
         ocr_url,
         profile="pp-ocrv5",
-        role="layout",
-    ) == vl16_url
-    assert resolve_api_endpoint_for_role(
-        structure_root,
-        profile="pp-structurev3",
         role="layout",
     ) == vl16_url
     assert resolve_api_endpoint_for_role(
@@ -9944,44 +10026,40 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
         profile="pp-ocrv5",
         role="layout",
     ) == vl16_url
-    # 旧 paddleocr-vl 预设也归入 VL-1.6
-    old_vl_url = get_api_model_profile_url("paddleocr-vl")
     assert resolve_api_endpoint_for_role(
-        old_vl_url,
-        profile="paddleocr-vl",
+        legacy_structure_url,
+        profile="",
         role="layout",
     ) == vl16_url
-    # VL-1.5 自身也升级到 VL-1.6
-    vl15_url = get_api_model_profile_url("paddleocr-vl-1.5")
     assert resolve_api_endpoint_for_role(
-        vl15_url,
-        profile="paddleocr-vl-1.5",
+        legacy_vl_url,
+        profile="",
+        role="layout",
+    ) == vl16_url
+    assert resolve_api_endpoint_for_role(
+        legacy_vl15_root,
+        profile="",
         role="layout",
     ) == vl16_url
 
-    # OCR role: 任何 layout 预设 -> PP-OCRv5；PP-OCRv5 自身保持
-    assert resolve_api_endpoint_for_role(
-        structure_url,
-        profile="pp-structurev3",
-        role="ocr",
-    ) == ocr_url
+    # OCR role: VL1.6 预设 -> PP-OCRv5；PP-OCRv5 自身保持
     assert resolve_api_endpoint_for_role(
         vl16_url,
         profile="paddleocr-vl-1.6",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        structure_root,
-        profile="",
-        role="layout",
-    ) == vl16_url
-    assert resolve_api_endpoint_for_role(
         vl16_root,
         profile="",
         role="ocr",
     ) == ocr_url
     assert resolve_api_endpoint_for_role(
-        structure_root,
+        ocr_root,
+        profile="",
+        role="ocr",
+    ) == ocr_url
+    assert resolve_api_endpoint_for_role(
+        legacy_structure_url,
         profile="",
         role="ocr",
     ) == ocr_url
@@ -10004,6 +10082,11 @@ def test_api_endpoint_role_resolution_keeps_layout_and_proof_separate():
     # 自托管根 URL: 不做 host 跳转，仅按 VL1.6 jobs suffix 补全
     assert resolve_api_endpoint_for_role(
         "https://self-hosted.example.com",
+        profile="",
+        role="layout",
+    ) == "https://self-hosted.example.com/api/v2/ocr/jobs"
+    assert resolve_api_endpoint_for_role(
+        "https://self-hosted.example.com/layout-parsing",
         profile="",
         role="layout",
     ) == "https://self-hosted.example.com/api/v2/ocr/jobs"
@@ -10107,7 +10190,7 @@ def test_api_settings_dialog_syncs_model_and_url():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
-    update_config(mode="local", api_model_profile="pp-structurev3", api_url="https://example.com/root", api_token="old")
+    update_config(mode="local", api_model_profile="", api_url="https://example.com/root", api_token="old")
 
     dialog = ApiSettingsDialog()
     assert dialog._radio_hanwang.isChecked()
@@ -10222,6 +10305,29 @@ def test_api_settings_dialog_saves_base_url_from_endpoint_suffix():
         AppConfig._instance = None
 
     print("test_api_settings_dialog_saves_base_url_from_endpoint_suffix PASSED")
+
+
+def test_api_settings_dialog_migrates_legacy_official_layout_url():
+    from app.core.app_config import AppConfig
+    from app.core.app_config import get_config
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    _get_qapp()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _reset_app_config_for_test(tmpdir)
+        dialog = ApiSettingsDialog()
+        dialog._url_edit.setText("https://fbv8f7s7v9u9hbk7.aistudio-app.com/layout-parsing")
+        dialog._save_and_accept()
+
+        cfg = get_config()
+        assert cfg["api_url"] == "https://paddleocr.aistudio-app.com"
+
+        dialog.close()
+        AppConfig.instance().reset_to_defaults()
+        AppConfig._instance = None
+
+    print("test_api_settings_dialog_migrates_legacy_official_layout_url PASSED")
 
 
 def test_api_settings_dialog_collapses_mode_to_hanwang_when_saving():
@@ -10400,7 +10506,7 @@ def test_layout_analyzer_extracts_api_polygon_bbox():
     print("test_layout_analyzer_extracts_api_polygon_bbox PASSED")
 
 
-def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
+def test_layout_analyzer_extracts_api_blocks_from_v16_schema():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BlockType, Page
 
@@ -10414,27 +10520,21 @@ def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
                         "layout_det_res": {
                             "boxes": [
                                 {
-                                    "category_name": "section_title",
-                                    "polygon": [10, 20, 210, 20, 210, 120, 10, 120],
-                                    "cls_score": 0.91,
+                                    "label": "paragraph_title",
+                                    "coordinate": [10, 20, 210, 120],
+                                    "score": 0.91,
                                 },
                                 {
-                                    "type": "table_caption_text",
-                                    "bbox": {"x": 240, "y": 40, "w": 160, "h": 60},
-                                    "confidence": 0.88,
-                                },
-                                {
-                                    "layout_label": "graphic",
-                                    "points": [[420, 60], [560, 60], [560, 180], [420, 180]],
-                                    "layout_score": "0.75",
+                                    "label": "chart",
+                                    "polygon_points": [[420, 60], [560, 60], [560, 180], [420, 180]],
+                                    "score": 0.75,
                                 },
                             ],
                         },
                         "parsing_res_list": [
                             {
-                                "block_label": "bibliography",
+                                "block_label": "reference_content",
                                 "block_bbox": [600, 80, 760, 150],
-                                "block_score": 0.81,
                                 "block_content": "参考文献",
                             }
                         ],
@@ -10451,9 +10551,13 @@ def test_layout_analyzer_extracts_api_blocks_from_varied_schema():
     ]
     assert blocks[0].bbox.x == 600 and blocks[0].bbox.y == 80
     assert "参考文献" in blocks[0].note
-    assert len(overlays) == 4
+    assert [label for label, _bbox in overlays] == [
+        "reference_content",
+        "paragraph_title",
+        "chart",
+    ]
 
-    print("test_layout_analyzer_extracts_api_blocks_from_varied_schema PASSED")
+    print("test_layout_analyzer_extracts_api_blocks_from_v16_schema PASSED")
 
 
 def test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere():
@@ -10617,9 +10721,9 @@ def test_layout_analyzer_persists_raw_parsing_res_list():
     print("test_layout_analyzer_persists_raw_parsing_res_list PASSED")
 
 
-def test_layout_analyzer_falls_back_to_ocr_results():
+def test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
-    from app.models import BBox, BlockType, Page
+    from app.models import Page
 
     analyzer = LayoutAnalyzer()
     page = Page(image_path="/tmp/test.png", width=1000, height=2000)
@@ -10644,29 +10748,11 @@ def test_layout_analyzer_falls_back_to_ocr_results():
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
 
-    assert len(blocks) == 2
-    assert all(block.block_type == BlockType.TEXT for block in blocks)
-    assert blocks[0].bbox == BBox(10, 20, 200, 50)
-    assert "第一行" in blocks[0].note
-    assert "score=0.950" in blocks[0].note
-    assert len(overlays) == 2
+    assert blocks == []
+    assert overlays == []
+    assert page.ppvl_parsing_res_list == []
 
-    print("test_layout_analyzer_falls_back_to_ocr_results PASSED")
-
-
-def test_layout_analyzer_builds_api_payload():
-    from app.core.layout_analyzer import LayoutAnalyzer
-
-    analyzer = LayoutAnalyzer()
-    payload = analyzer._build_api_payload("abc123", 1, "PP-DocLayout-L")
-    assert payload["file"] == "abc123"
-    assert payload["fileType"] == 1
-    assert payload["model_name"] == "PP-DocLayout-L"
-
-    payload_without_model = analyzer._build_api_payload("abc123", 1, "")
-    assert "model_name" not in payload_without_model
-
-    print("test_layout_analyzer_builds_api_payload PASSED")
+    print("test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks PASSED")
 
 
 # =====================================================================
@@ -10918,7 +11004,6 @@ def test_api_ocr_engine_parses_paddle_coordinate_variants():
 
 
 def test_api_request_builders_split_profile_params():
-    from app.core.layout_analyzer import LayoutAnalyzer
     from app.engines.real_ocr_adapter import ApiOcrEngine
 
     ocr_body = ApiOcrEngine()._build_request_body(
@@ -10933,8 +11018,8 @@ def test_api_request_builders_split_profile_params():
 
     vl_body = ApiOcrEngine()._build_request_body(
         "abc",
-        profile="paddleocr-vl",
-        endpoint_url="https://example.com/layout-parsing",
+        profile="paddleocr-vl-1.6",
+        endpoint_url="https://example.com/api/v2/ocr/jobs",
     )
     assert vl_body["file"] == "abc"
     assert vl_body["fileType"] == 1
@@ -10942,24 +11027,6 @@ def test_api_request_builders_split_profile_params():
     assert vl_body["useDocOrientationClassify"] is False
     assert "returnWordBox" not in vl_body
     assert "textDetLimitType" not in vl_body
-
-    layout_body = LayoutAnalyzer()._build_api_request_body(
-        "abc",
-        1,
-        profile="pp-structurev3",
-        endpoint_url="https://example.com/layout-parsing",
-    )
-    assert "returnWordBox" not in layout_body
-    assert layout_body["textDetLimitType"] == "max"
-
-    vl_layout_body = LayoutAnalyzer()._build_api_request_body(
-        "abc",
-        1,
-        profile="paddleocr-vl-1.5",
-        endpoint_url="https://example.com/layout-parsing",
-    )
-    assert "returnWordBox" not in vl_layout_body
-    assert vl_layout_body["useDocUnwarping"] is False
 
     print("test_api_request_builders_split_profile_params PASSED")
 
@@ -10984,6 +11051,13 @@ def test_layout_analyzer_uses_datainfo_canvas_scale():
                                 },
                             ],
                         },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "text",
+                                "block_bbox": [10, 20, 110, 70],
+                                "block_content": "缩放测试",
+                            },
+                        ],
                     },
                 },
             ],
@@ -11018,6 +11092,13 @@ def test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space():
                                 },
                             ],
                         },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "text",
+                                "block_bbox": [800, 1500, 900, 1600],
+                                "block_content": "原图坐标",
+                            },
+                        ],
                     },
                 },
             ],
@@ -11052,6 +11133,13 @@ def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_spac
                                 },
                             ],
                         },
+                        "parsing_res_list": [
+                            {
+                                "block_label": "text",
+                                "block_bbox": [800, 1500, 900, 1600],
+                                "block_content": "原图坐标",
+                            },
+                        ],
                     },
                 },
             ],
@@ -11081,6 +11169,8 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     captured = {}
 
     class SubmitResponse:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -11174,10 +11264,9 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         assert optional_payload["useDocOrientationClassify"] is False
         assert optional_payload["useDocUnwarping"] is False
         assert optional_payload["useChartRecognition"] is False
-        filename, image_bytes, mime = captured["files"]["file"]
-        assert filename == "page.png"
-        assert image_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-        assert mime == "image/png"
+        file_obj = captured["files"]["file"]
+        assert file_obj.name == "page.png"
+        assert file_obj.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
         assert captured["gets"][0]["url"] == "https://example.com/root/api/v2/ocr/jobs/job-1"
         assert captured["gets"][0]["headers"]["Authorization"] == "bearer demo"
         assert captured["gets"][0]["proxies"] == {"http": None, "https": None, "all": None}
@@ -11193,75 +11282,38 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
     print("test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected PASSED")
 
 
-def test_layout_analyzer_legacy_json_request_helper_preserves_png_payload():
-    import base64
-    import tempfile
-
-    import cv2
-    import numpy as np
+def test_paddle_v16_submit_error_includes_response_body():
     import requests
 
-    from app.core.api_profiles import resolve_api_endpoint
-    from app.core.app_config import AppConfig, update_config
-    from app.core.layout_analyzer import LayoutAnalyzer
-    from app.models import Page
+    from app.core.paddle_v16_client import PaddleV16LayoutClient
 
-    captured = {}
+    class BadResponse:
+        status_code = 400
+        text = '{"errorMsg":"invalid multipart"}'
 
-    class DummyResponse:
         def raise_for_status(self):
-            return None
+            raise requests.HTTPError("400 Client Error")
 
-        def json(self):
-            return {"result": {"layoutParsingResults": []}}
-
-    def fake_post(url, json, headers, timeout, **kwargs):
-        captured["url"] = url
-        captured["json"] = json
-        captured["timeout"] = timeout
-        captured["proxies"] = kwargs.get("proxies")
-        return DummyResponse()
+    def fake_post(url, data, files, headers, timeout, **kwargs):
+        return BadResponse()
 
     original_post = requests.post
     requests.post = fake_post
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(mode="api", api_url="https://legacy.example.com", api_timeout=12)
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        page_path = f.name
     try:
-        cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
-        page = Page(image_path=page_path, width=200, height=120)
-        analyzer = LayoutAnalyzer()
-        legacy_url = resolve_api_endpoint(
-            "https://legacy.example.com",
-            default_suffix="/layout-parsing",
-            profile="pp-structurev3",
-        )
-        assert legacy_url == "https://legacy.example.com/layout-parsing"
-        # Directly exercise the legacy JSON request shape; main role resolution is VL1.6-first.
-        import app.core.api_profiles as profiles
-
-        original_fixed = profiles.FIXED_LAYOUT_PROFILE
-        original_default = profiles.LAYOUT_DEFAULT_PROFILE
-        profiles.FIXED_LAYOUT_PROFILE = "pp-structurev3"
-        profiles.LAYOUT_DEFAULT_PROFILE = "pp-structurev3"
+        client = PaddleV16LayoutClient(jobs_url="https://example.com/api/v2/ocr/jobs")
         try:
-            analyzer._api_analyze(page)
-        finally:
-            profiles.FIXED_LAYOUT_PROFILE = original_fixed
-            profiles.LAYOUT_DEFAULT_PROFILE = original_default
-        assert captured["timeout"] == 180
-        assert captured["proxies"] == {"http": None, "https": None, "all": None}
-        assert base64.b64decode(captured["json"]["file"]).startswith(b"\x89PNG\r\n\x1a\n")
-        assert captured["json"]["useDocUnwarping"] is False
-        assert "returnWordBox" not in captured["json"]
+            client.submit_image_bytes(b"\x89PNG\r\n\x1a\nfake")
+        except RuntimeError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected RuntimeError")
+
+        assert "HTTP 400" in message
+        assert "invalid multipart" in message
     finally:
         requests.post = original_post
-        cfg.reset_to_defaults()
-        os.unlink(page_path)
 
-    print("test_layout_analyzer_legacy_json_request_helper_preserves_png_payload PASSED")
+    print("test_paddle_v16_submit_error_includes_response_body PASSED")
 
 
 def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
@@ -12170,6 +12222,7 @@ def test_image_viewer_char_boxes_update_char_bbox():
     viewer.show_char_boxes([char])
     item, _ = viewer._char_items[0]
 
+    assert item.pen().widthF() <= 1.0
     item.setPos(14, 16)
     app.processEvents()
 
@@ -12408,6 +12461,26 @@ def test_hanwang_concurrency_evaluation_script_help():
     print("test_hanwang_concurrency_evaluation_script_help PASSED")
 
 
+def test_ppocr_v5_v6_compare_script_help():
+    import subprocess
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "compare_ppocr_v5_v6.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "PP-OCRv5" in result.stdout
+    assert "PP-OCRv6" in result.stdout
+    assert "--poll-timeout" in result.stdout
+
+    print("test_ppocr_v5_v6_compare_script_help PASSED")
+
+
 if __name__ == "__main__":
     test_models()
     test_workflow_state_keeps_project_and_page_ocr_state_separate()
@@ -12472,7 +12545,9 @@ if __name__ == "__main__":
     test_layout_panel_readonly_char_boxes_do_not_block_formula_delete()
     test_layout_panel_hides_empty_and_invalidated_char_boxes()
     test_layout_panel_excludes_inline_formula_carriers_from_char_boxes()
-    test_layout_panel_type_combo_changes_unlocked_block_type()
+    test_layout_panel_type_buttons_change_unlocked_block_type()
+    test_layout_panel_type_buttons_are_grouped()
+    test_layout_panel_subtype_buttons_write_paddle_source_label()
     test_layout_panel_undo_restores_block_edits()
     test_layout_panel_undo_preserves_view_transform()
     test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
@@ -12536,7 +12611,7 @@ if __name__ == "__main__":
     test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth()
     test_paddle_artifact_index_binds_parent_table_and_empty_formula_review()
     test_layout_panel_manual_formula_writes_paddle_binding_payload()
-    test_layout_analyzer_reads_formula_geometry_records_for_routes()
+    test_layout_analyzer_reads_formula_geometry_boxes_for_routes()
     test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result()
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()
     test_hanwang_formula_style_footer_bypasses_hanwang()
@@ -12578,6 +12653,7 @@ if __name__ == "__main__":
     test_api_settings_dialog_keeps_model_preset_sync()
     test_api_settings_dialog_reverse_matches_url_and_persists_profile()
     test_api_settings_dialog_saves_base_url_from_endpoint_suffix()
+    test_api_settings_dialog_migrates_legacy_official_layout_url()
     test_api_settings_dialog_collapses_mode_to_hanwang_when_saving()
     test_api_settings_dialog_persists_hanwang_mode_with_api_runtime()
     test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
@@ -12592,16 +12668,17 @@ if __name__ == "__main__":
     test_api_request_builders_split_profile_params()
     test_layout_analyzer_rescales_suspicious_blocks()
     test_layout_analyzer_extracts_api_polygon_bbox()
-    test_layout_analyzer_extracts_api_blocks_from_varied_schema()
+    test_layout_analyzer_extracts_api_blocks_from_v16_schema()
     test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere()
     test_layout_parsing_semantics_override_layout_det_when_both_exist()
     test_layout_analyzer_forwards_route_subblocks_from_layout_det_res()
     test_layout_analyzer_persists_raw_parsing_res_list()
-    test_layout_analyzer_falls_back_to_ocr_results()
+    test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks()
     test_layout_analyzer_uses_datainfo_canvas_scale()
     test_layout_analyzer_ignores_conflicting_datainfo_when_bbox_is_page_space()
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
+    test_paddle_v16_submit_error_includes_response_body()
     test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout()
     test_hanwang_assets_env_accepts_bin_dir()
     test_hanwang_native_bridge_writes_multi_recblocks()
@@ -12633,7 +12710,7 @@ if __name__ == "__main__":
     test_image_viewer_right_drag_selects_blocks_without_creating_bbox()
     test_ui_block_labels_use_structured_semantic_label()
     test_hanwang_concurrency_evaluation_script_help()
-    test_layout_analyzer_builds_api_payload()
+    test_ppocr_v5_v6_compare_script_help()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
     test_char_index_hides_fallback_units_by_default()

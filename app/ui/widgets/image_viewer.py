@@ -164,9 +164,18 @@ class BBoxItem(QGraphicsRectItem):
     sceneBoundingRect() 返回的就是 block.bbox 在场景中的真实位置。
     """
 
-    def __init__(self, rect: QRectF, color: QColor, label: str = "", parent=None):
+    def __init__(
+        self,
+        rect: QRectF,
+        color: QColor,
+        label: str = "",
+        parent=None,
+        *,
+        pen_width: float = 2.0,
+    ):
         super().__init__(rect, parent)
-        pen = QPen(color, 2)
+        pen = QPen(color)
+        pen.setWidthF(pen_width)
         self.setPen(pen)
         self._label = label
         self._color = color
@@ -404,7 +413,12 @@ class ImageViewer(QGraphicsView):
             if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
                 continue
             bb = char.bbox
-            item = BBoxItem(QRectF(0, 0, bb.w, bb.h), color, f"[char] {char.char or char.token_text}")
+            item = BBoxItem(
+                QRectF(0, 0, bb.w, bb.h),
+                color,
+                f"[char] {char.char or char.token_text}",
+                pen_width=1.0,
+            )
             item.setPos(bb.x, bb.y)
             item.set_block(char)
             item.set_selectable(editable)

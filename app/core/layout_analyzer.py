@@ -1,10 +1,10 @@
 """Layout analysis wrapper. Supports local / api modes.
 
-主链的 layout 角色已全面切换到 PaddleOCR-VL-1.6（替代 VL1.5 / PP-StructureV3）：
+主链的 layout 角色固定使用 PaddleOCR-VL-1.6：
   resolve_api_endpoint_for_role(api_url, role="layout")
     -> https://paddleocr.aistudio-app.com/api/v2/ocr/jobs  (官方预置)
 
-VL 响应与 Structure 在这里采用的抽取路径兑现上兼容：
+VL1.6 响应在这里采用固定抽取路径：
   result.layoutParsingResults[0].prunedResult:
     layout_det_res.boxes[]:                    # 版面 bbox（供主程序块提取）
       label:      str  (e.g. "text", "paragraph_title", "display_formula",
@@ -26,11 +26,8 @@ from PySide6.QtCore import QThread, Signal
 
 from app.core.api_profiles import (
     FIXED_LAYOUT_PROFILE,
-    get_api_request_options,
-    infer_api_model_profile_from_endpoint,
     resolve_api_endpoint_for_role,
 )
-from app.core.api_image_codec import encode_image_b64_for_paddle
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.block_payload import split_legacy_raw_payload
@@ -52,8 +49,6 @@ from app.core.paddle_labels import (
     normalize_paddle_label,
 )
 from app.core.paddle_response import (
-    iter_layout_records_from_item,
-    iter_ocr_records_from_item,
     layout_geometry_records_from_item,
     parsing_records_from_item,
     pruned_result,
@@ -158,7 +153,7 @@ class LayoutAnalyzer:
         max_x = 0.0
         max_y = 0.0
         found = False
-        for record in self._iter_layout_records_from_item(item) + self._iter_ocr_records_from_item(item):
+        for record in parsing_records_from_item(item) + layout_geometry_records_from_item(item):
             max_xy = raw_bbox_max_from_record(record)
             if max_xy is None:
                 continue
@@ -166,12 +161,6 @@ class LayoutAnalyzer:
             max_y = max(max_y, max_xy[1])
             found = True
         return (max_x, max_y) if found else None
-
-    def _iter_layout_records_from_item(self, item: dict) -> List[dict]:
-        return iter_layout_records_from_item(item)
-
-    def _iter_ocr_records_from_item(self, item: dict) -> List[dict]:
-        return iter_ocr_records_from_item(item)
 
     def _append_api_block(
         self,
@@ -379,8 +368,7 @@ class LayoutAnalyzer:
                 )
             page.ppvl_parsing_res_list.extend(parsing_records)
 
-            records_for_blocks = parsing_records or self._iter_layout_records_from_item(item)
-            for record in records_for_blocks:
+            for record in parsing_records:
                 order = self._append_api_block(
                     page=page,
                     record=record,
@@ -391,55 +379,16 @@ class LayoutAnalyzer:
                     page_blocks=page_blocks,
                     raw_overlay_items=raw_overlay_items,
                 )
-            if parsing_records:
-                for record in geometry_records:
-                    self._append_overlay_record(
-                        page=page,
-                        record=record,
-                        scale_x=scale_x,
-                        scale_y=scale_y,
-                        raw_overlay_items=raw_overlay_items,
-                    )
-
-        if page_blocks:
-            return page_blocks, raw_overlay_items
-
-        ocr_results = result_items(data, "ocrResults")
-        for item in ocr_results:
-            scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
-            for record in self._iter_ocr_records_from_item(item):
-                order = self._append_api_block(
+            for record in geometry_records:
+                self._append_overlay_record(
                     page=page,
                     record=record,
                     scale_x=scale_x,
                     scale_y=scale_y,
-                    order=order,
-                    seen=seen,
-                    page_blocks=page_blocks,
                     raw_overlay_items=raw_overlay_items,
-                    default_label="text",
                 )
 
         return page_blocks, raw_overlay_items
-
-    def _build_api_payload(self, file_b64: str, file_type: int, model_name: str = "") -> dict:
-        payload = {"file": file_b64, "fileType": file_type}
-        if model_name:
-            payload["model_name"] = model_name
-        return payload
-
-    def _build_api_request_body(
-        self,
-        file_b64: str,
-        file_type: int,
-        model_name: str = "",
-        *,
-        profile: str | None = None,
-        endpoint_url: str | None = None,
-    ) -> dict:
-        body = self._build_api_payload(file_b64, file_type, model_name)
-        body.update(get_api_request_options(profile, endpoint_url))
-        return body
 
     def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:
         if not isinstance(data_info, dict):
@@ -476,8 +425,7 @@ class LayoutAnalyzer:
         优先级：
           1) result.dataInfo.width/height（AIStudio 上传图像尺寸）
           2) prunedResult.input_img_shape / doc_preprocessor_res 实际尺寸（若有）
-          3) overall_ocr_res.rec_boxes 的最大坐标外推
-          4) layout_det_res.boxes 的最大坐标外推
+          3) parsing_res_list / layout_det_res.boxes 的最大坐标外推
           5) (1.0, 1.0)
         """
         pruned = pruned_result(item)
@@ -705,7 +653,6 @@ class LayoutAnalyzer:
     def _api_analyze(self, page: Page) -> Page:
         """Call the configured AiStudio model endpoint; raises on network/auth errors."""
         import cv2
-        from app.core.api_http import post_json_without_env_proxy
         from app.core.app_config import get_config
 
         cfg = get_config()
@@ -714,57 +661,27 @@ class LayoutAnalyzer:
             profile=FIXED_LAYOUT_PROFILE,
             role="layout",
         )
-        # 主链 layout 已被 strong-redirect 到 VL-1.6；但配置里仍可能是旧
-        # profile (pp-structurev3 / pp-ocrv5)。这里按最终 endpoint 重推
-        # profile，保证 _build_api_request_body 选出正确的 request_family
-        # (vl-layout vs ocr-text)，不会把 OCR detector/recognizer 参数误发
-        # 到 VL 端点。与 Inspector 处理保持一致。
-        effective_profile = (
-            infer_api_model_profile_from_endpoint(url)
-            or cfg.get("api_model_profile", "")
-        )
         timeout = max(int(cfg["api_timeout"]), LAYOUT_API_TIMEOUT_FLOOR)
         token = cfg.get("api_token", "")
-        layout_model_name = cfg.get("api_layout_model_name", "").strip()
 
         img = cv2.imread(page.display_image_path)
         if img is None:
             raise RuntimeError(f"Cannot read image: {page.display_image_path}")
         page.height, page.width = img.shape[:2]
-        if is_paddle_v16_endpoint(url):
-            client = PaddleV16LayoutClient(
-                jobs_url=url,
-                token=token,
-                request_timeout=timeout,
-                poll_timeout=timeout,
-            )
-            data = client.analyze_image(
-                img,
-                optional_payload=build_paddle_v16_optional_payload(),
-            )
-        else:
-            file_b64 = encode_image_b64_for_paddle(img)
-            if not file_b64:
-                raise RuntimeError(f"Cannot encode image: {page.display_image_path}")
-
-            headers: dict = {"Content-Type": "application/json"}
-            if token:
-                headers["Authorization"] = f"token {token}"
-
-            resp = post_json_without_env_proxy(
-                url,
-                json=self._build_api_request_body(
-                    file_b64,
-                    1,
-                    layout_model_name,
-                    profile=effective_profile,
-                    endpoint_url=url,
-                ),
-                headers=headers,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        if not url:
+            raise RuntimeError("PaddleOCR-VL-1.6 版面分析 API 地址未配置")
+        if not is_paddle_v16_endpoint(url):
+            raise RuntimeError(f"版面分析只支持 PaddleOCR-VL-1.6 jobs API: {url}")
+        client = PaddleV16LayoutClient(
+            jobs_url=url,
+            token=token,
+            request_timeout=timeout,
+            poll_timeout=timeout,
+        )
+        data = client.analyze_image(
+            img,
+            optional_payload=build_paddle_v16_optional_payload(),
+        )
         self._write_api_debug_response(page, data)
 
         page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)

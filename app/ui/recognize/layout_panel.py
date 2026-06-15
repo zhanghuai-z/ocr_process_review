@@ -1,14 +1,14 @@
 """版面分析面板：图像 + BBox 叠加可视化，块信息内嵌底部栏。"""
 from __future__ import annotations
 import copy
+from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
+    QPushButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
 )
 
 from app.core.bbox_extraction import bbox_from_variant
@@ -43,7 +43,7 @@ from app.core.paddle_line_routing import (
 )
 from app.core.ocr_ir import is_formula_marker_token
 from app.models import BBox, Block, BlockSource, BlockType, Page
-from app.ui.widgets.image_viewer import ImageViewer
+from app.ui.widgets.image_viewer import BLOCK_COLORS, ImageViewer
 from app.ui.widgets.block_inspector import BlockInspector
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -51,11 +51,126 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 STATUS_LABEL_MAX_CHARS = 96
 
 
+@dataclass(frozen=True)
+class LayoutSubtypeSpec:
+    """UI button spec for one Paddle layout label."""
+
+    label: str
+    source_label: str
+    block_type: BlockType
+    note: str = ""
+
+    @property
+    def normalized_source_label(self) -> str:
+        return normalize_paddle_label(self.source_label)
+
+
+BLOCK_TYPE_BUTTON_GROUPS = (
+    ("文本", (
+        LayoutSubtypeSpec("正文", "text", BlockType.TEXT, "普通正文段落"),
+        LayoutSubtypeSpec("段落标题", "paragraph_title", BlockType.TITLE, "章节/小节标题"),
+        LayoutSubtypeSpec("文档标题", "doc_title", BlockType.TITLE, "页面或文档主标题"),
+        LayoutSubtypeSpec("摘要", "abstract", BlockType.TEXT, "摘要内容"),
+    )),
+    ("页边", (
+        LayoutSubtypeSpec("页眉", "header", BlockType.TEXT, "页眉区域，通常不进入正文校对"),
+        LayoutSubtypeSpec("页脚", "footer", BlockType.TEXT, "页脚区域，通常不进入正文校对"),
+        LayoutSubtypeSpec("页码", "number", BlockType.TEXT, "页码/编号类位置元素"),
+        LayoutSubtypeSpec("脚注", "footnote", BlockType.TEXT, "脚注文本"),
+    )),
+    ("公式表格", (
+        LayoutSubtypeSpec("公式", "display_formula", BlockType.EQUATION, "独立公式块"),
+        LayoutSubtypeSpec("行内公式", "inline_formula", BlockType.EQUATION, "正文行内公式"),
+        LayoutSubtypeSpec("公式序号", "formula_number", BlockType.EQUATION, "公式右侧或附近的编号"),
+        LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
+    )),
+    ("图像图表", (
+        LayoutSubtypeSpec("图片", "figure", BlockType.FIGURE, "图片/插图区域"),
+        LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
+        LayoutSubtypeSpec("图题", "figure_title", BlockType.FIGURE_CAPTION, "图片或图表标题"),
+        LayoutSubtypeSpec("表题", "table_title", BlockType.TABLE_CAPTION, "表格标题"),
+    )),
+    ("引用注释", (
+        LayoutSubtypeSpec("参考内容", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
+        LayoutSubtypeSpec("视觉脚注", "vision_footnote", BlockType.TEXT, "Paddle 视觉模型判定的脚注区域"),
+    )),
+)
+BLOCK_SUBTYPE_BUTTON_ORDER = tuple(
+    spec
+    for _group_title, specs in BLOCK_TYPE_BUTTON_GROUPS
+    for spec in specs
+)
+BLOCK_TYPE_BUTTON_ORDER = tuple(dict.fromkeys(spec.block_type for spec in BLOCK_SUBTYPE_BUTTON_ORDER))
+DEFAULT_SUBTYPE_BY_SOURCE_LABEL = {
+    spec.normalized_source_label: spec
+    for spec in BLOCK_SUBTYPE_BUTTON_ORDER
+}
+DEFAULT_SUBTYPE_BY_BLOCK_TYPE: dict[BlockType, LayoutSubtypeSpec] = {}
+for _spec in BLOCK_SUBTYPE_BUTTON_ORDER:
+    DEFAULT_SUBTYPE_BY_BLOCK_TYPE.setdefault(_spec.block_type, _spec)
+BLOCK_TYPE_LABELS = {
+    BlockType.TEXT: "正文",
+    BlockType.TITLE: "标题",
+    BlockType.EQUATION: "公式",
+    BlockType.TABLE: "表格",
+    BlockType.FIGURE: "图片",
+    BlockType.FIGURE_CAPTION: "图注",
+    BlockType.TABLE_CAPTION: "表注",
+    BlockType.REFERENCE: "引用",
+    BlockType.UNKNOWN: "其他",
+}
+
+
 def _compact_status_text(text: str) -> str:
     value = " ".join(str(text or "").split())
     if len(value) <= STATUS_LABEL_MAX_CHARS:
         return value
     return value[: STATUS_LABEL_MAX_CHARS - 1] + "…"
+
+
+def _block_type_label(block_type: BlockType) -> str:
+    return BLOCK_TYPE_LABELS.get(block_type, block_type.value)
+
+
+def _block_type_button_stylesheet(block_type: BlockType) -> str:
+    color = BLOCK_COLORS.get(block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+    border = color.name()
+    return f"""
+        QPushButton {{
+            min-height: 24px;
+            padding: 3px 6px;
+            border-radius: 6px;
+            border: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 150);
+            background: rgba({color.red()}, {color.green()}, {color.blue()}, 28);
+            color: #202124;
+        }}
+        QPushButton:checked {{
+            border: 2px solid {border};
+            background: rgba({color.red()}, {color.green()}, {color.blue()}, 76);
+            font-weight: 600;
+        }}
+        QPushButton:disabled {{
+            border: 1px solid #dfe3e7;
+            background: #f5f6f7;
+            color: #9aa0a6;
+            font-weight: 400;
+        }}
+    """
+
+
+def _block_type_group_stylesheet() -> str:
+    return """
+        QFrame#blockTypeGroup {
+            border: 1px solid #e5e8ec;
+            border-radius: 6px;
+            background: #fbfcfd;
+        }
+        QLabel#blockTypeGroupTitle {
+            color: #5f6b7a;
+            font-size: 12px;
+            font-weight: 600;
+        }
+    """
 
 
 class LayoutPanel(QWidget):
@@ -83,6 +198,13 @@ class LayoutPanel(QWidget):
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._undo_stack: list[tuple[int, list[Block]]] = []
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
+        self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
+        self._new_block_type: BlockType = self._new_subtype.block_type
+        self._new_type_buttons: dict[BlockType, QPushButton] = {}
+        self._new_subtype_buttons: dict[str, QPushButton] = {}
+        self._selected_type_buttons: dict[BlockType, QPushButton] = {}
+        self._selected_subtype_buttons: dict[str, QPushButton] = {}
+        self._type_group: QButtonGroup | None = None
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -157,6 +279,11 @@ class LayoutPanel(QWidget):
         vtl.addWidget(self._prop_bbox)
         vtl.addWidget(self._prop_conf)
         vtl.addStretch(1)
+        self._selection_type_status = QLabel("")
+        self._selection_type_status.setObjectName("selectionTypeStatus")
+        self._selection_type_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._selection_type_status.setMinimumWidth(190)
+        vtl.addWidget(self._selection_type_status)
         vw_lay.addWidget(viewer_tb)
 
         self._viewer = ImageViewer()
@@ -187,21 +314,20 @@ class LayoutPanel(QWidget):
         tool_title.setObjectName("sectionTitle")
         tool_lay.addWidget(tool_title)
 
-        tool_lay.addWidget(QLabel("新建框类型"))
-        self._new_type_combo = QComboBox()
-        self._new_type_combo.setMinimumWidth(120)
-        for bt in BlockType:
-            self._new_type_combo.addItem(bt.value, bt)
-        tool_lay.addWidget(self._new_type_combo)
-
-        tool_lay.addWidget(QLabel("选中框类型"))
-        self._type_combo = QComboBox()
-        self._type_combo.setEnabled(False)
-        self._type_combo.setMinimumWidth(120)
-        for bt in BlockType:
-            self._type_combo.addItem(bt.value, bt)
-        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
-        tool_lay.addWidget(self._type_combo)
+        self._type_context_title = QLabel("新建框类型")
+        tool_lay.addWidget(self._type_context_title)
+        self._type_group = QButtonGroup(self)
+        self._type_group.setExclusive(True)
+        self._new_type_group = self._type_group
+        self._selected_type_group = self._type_group
+        self._new_type_buttons, self._new_subtype_buttons = self._create_type_button_grid(
+            tool_lay,
+            group=self._type_group,
+            callback=self._on_type_button_clicked,
+        )
+        self._selected_type_buttons = self._new_type_buttons
+        self._selected_subtype_buttons = self._new_subtype_buttons
+        self._sync_type_buttons(None)
 
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
@@ -359,7 +485,7 @@ class LayoutPanel(QWidget):
         self._set_status_text("请先导入文件并运行版面分析")
         self._btn_run.setEnabled(False)
         self._btn_undo.setEnabled(False)
-        self._type_combo.setEnabled(False)
+        self._set_selected_type_buttons_enabled(False)
         self._sync_lock_button(None)
         self._prop_bbox.setText("")
         self._prop_conf.hide()
@@ -434,6 +560,135 @@ class LayoutPanel(QWidget):
         self._status_lbl.setText(compact)
         self._status_lbl.setToolTip(full if compact != full else "")
 
+    def _create_type_button_grid(
+        self,
+        parent_layout: QVBoxLayout,
+        *,
+        group: QButtonGroup,
+        callback,
+    ) -> tuple[dict[BlockType, QPushButton], dict[str, QPushButton]]:
+        type_buttons: dict[BlockType, QPushButton] = {}
+        subtype_buttons: dict[str, QPushButton] = {}
+        wrap = QWidget()
+        column = QVBoxLayout(wrap)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(6)
+        for group_title, subtype_specs in BLOCK_TYPE_BUTTON_GROUPS:
+            group_frame = QFrame()
+            group_frame.setObjectName("blockTypeGroup")
+            group_frame.setStyleSheet(_block_type_group_stylesheet())
+            group_lay = QVBoxLayout(group_frame)
+            group_lay.setContentsMargins(8, 6, 8, 8)
+            group_lay.setSpacing(5)
+
+            title = QLabel(group_title)
+            title.setObjectName("blockTypeGroupTitle")
+            group_lay.addWidget(title)
+
+            grid_wrap = QWidget()
+            grid = QGridLayout(grid_wrap)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(6)
+            for index, spec in enumerate(subtype_specs):
+                button = QPushButton(spec.label)
+                button.setObjectName("blockTypeButton")
+                button.setCheckable(True)
+                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                button.setStyleSheet(_block_type_button_stylesheet(spec.block_type))
+                tooltip = f"{group_title} · {spec.label} / {spec.source_label} → {spec.block_type.value}"
+                if spec.note:
+                    tooltip = f"{tooltip}\n{spec.note}"
+                button.setToolTip(tooltip)
+                button.clicked.connect(lambda _checked=False, value=spec: callback(value))
+                group.addButton(button)
+                subtype_buttons[spec.normalized_source_label] = button
+                type_buttons.setdefault(spec.block_type, button)
+                grid.addWidget(button, index // 2, index % 2)
+            group_lay.addWidget(grid_wrap)
+            column.addWidget(group_frame)
+        parent_layout.addWidget(wrap)
+        return type_buttons, subtype_buttons
+
+    @staticmethod
+    def _set_type_button_checked(
+        group: QButtonGroup,
+        buttons: dict[str, QPushButton],
+        source_label: str | None,
+    ) -> None:
+        normalized_source_label = normalize_paddle_label(source_label)
+        group.setExclusive(False)
+        for current_label, button in buttons.items():
+            button.blockSignals(True)
+            button.setChecked(bool(normalized_source_label) and current_label == normalized_source_label)
+            button.blockSignals(False)
+        group.setExclusive(True)
+
+    def _set_type_buttons_enabled(self, enabled: bool) -> None:
+        for button in self._new_subtype_buttons.values():
+            button.setEnabled(enabled)
+
+    def _set_selected_type_buttons_enabled(self, enabled: bool) -> None:
+        self._set_type_buttons_enabled(enabled)
+
+    def _sync_type_buttons(self, block: Block | None) -> None:
+        if block is None:
+            self._set_type_buttons_enabled(True)
+            self._type_context_title.setText("新建框类型")
+            self._set_type_button_checked(
+                self._type_group,
+                self._new_subtype_buttons,
+                self._new_subtype.source_label,
+            )
+            self._update_selection_type_status(None)
+            return
+        enabled = not bool(getattr(block, "is_locked", False))
+        self._set_type_buttons_enabled(enabled)
+        self._type_context_title.setText("选中框类型")
+        self._set_type_button_checked(
+            self._type_group,
+            self._new_subtype_buttons,
+            self._button_source_label_for_block(block),
+        )
+        self._update_selection_type_status(block)
+
+    def _sync_selected_type_buttons(self, block: Block | None) -> None:
+        self._sync_type_buttons(block)
+
+    def _set_new_block_type(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
+        self._new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
+        self._new_block_type = self._new_subtype.block_type
+        if self._selected_block is None:
+            self._sync_type_buttons(None)
+
+    def _on_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
+        if self._selected_block is not None:
+            self._on_selected_type_button_clicked(subtype)
+            return
+        self._set_new_block_type(subtype)
+
+    def _update_selection_type_status(self, block: Block | None) -> None:
+        if block is None:
+            spec = self._new_subtype
+            text = f"新建：{spec.label} / {spec.source_label}"
+            self._selection_type_status.setText(text)
+            self._selection_type_status.setToolTip(f"当前新建框类型：{spec.label} / {spec.source_label} → {spec.block_type.value}")
+            return
+        label = self._button_source_label_for_block(block)
+        spec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL.get(normalize_paddle_label(label))
+        if spec is not None:
+            text = f"选中：{spec.label} / {spec.source_label}"
+            tooltip = f"当前选中框属性：{spec.label} / {spec.source_label} → {spec.block_type.value}"
+        else:
+            raw_label = block.source_label or block.block_type.value
+            text = f"选中：{_block_type_label(block.block_type)} / {raw_label}"
+            tooltip = f"当前选中框属性：{raw_label} → {block.block_type.value}"
+        if getattr(block, "is_locked", False):
+            text = f"{text} · 已锁定"
+            tooltip = f"{tooltip}\n该框已锁定，不能修改属性"
+        self._selection_type_status.setText(text)
+        self._selection_type_status.setToolTip(tooltip)
+
     # ------------------------------------------------------------------ private
 
     def _request_analysis(self) -> None:
@@ -458,7 +713,7 @@ class LayoutPanel(QWidget):
         elif page.error_message:
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
-        self._type_combo.setEnabled(False)
+        self._sync_selected_type_buttons(None)
         self._btn_lock.setEnabled(False)
         self._btn_lock.setChecked(False)
         self._btn_lock.setText("锁定框")
@@ -482,7 +737,7 @@ class LayoutPanel(QWidget):
 
     def _clear_selection_ui(self, page: Page) -> None:
         self._selected_block = None
-        self._type_combo.setEnabled(False)
+        self._sync_selected_type_buttons(None)
         self._btn_lock.setEnabled(False)
         self._btn_lock.setChecked(False)
         self._btn_lock.setText("锁定框")
@@ -497,15 +752,8 @@ class LayoutPanel(QWidget):
             return
         self._selected_block = block
         bb = block.bbox
-        self._type_combo.setEnabled(True)
         self._sync_lock_button(block)
-        # 同步类型下拉到当前块
-        self._type_combo.blockSignals(True)
-        for i in range(self._type_combo.count()):
-            if self._coerce_block_type(self._type_combo.itemData(i), BlockType.UNKNOWN) == block.block_type:
-                self._type_combo.setCurrentIndex(i)
-                break
-        self._type_combo.blockSignals(False)
+        self._sync_selected_type_buttons(block)
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._prop_conf.set_score(block.avg_confidence)
         self._prop_conf.show()
@@ -531,10 +779,11 @@ class LayoutPanel(QWidget):
         if bbox.area <= 0:
             return
         self._push_undo_snapshot()
-        bt = self._coerce_block_type(self._new_type_combo.currentData(), BlockType.TEXT)
+        subtype = self._new_subtype
+        bt = self._coerce_block_type(subtype.block_type, BlockType.TEXT)
         intersecting = self._blocks_intersecting_bbox(page, bbox)
         if intersecting:
-            merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt)
+            merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, subtype.source_label)
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
             self._set_status_text("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
@@ -545,7 +794,9 @@ class LayoutPanel(QWidget):
             block_type=bt,
             bbox=bbox,
             source=BlockSource.MANUAL_DRAW,
+            source_label=subtype.source_label,
         )
+        new_block.recognizable = is_text_ocr_candidate(new_block)
         self._bind_manual_block_to_paddle(page, new_block)
         page.blocks.append(new_block)
         self._show_page_layers(page)
@@ -566,7 +817,7 @@ class LayoutPanel(QWidget):
         page.blocks = [b for b in page.blocks if b is not block]
         if self._selected_block is block:
             self._selected_block = None
-            self._type_combo.setEnabled(False)
+            self._sync_selected_type_buttons(None)
             self._prop_bbox.setText("")
             self._prop_conf.hide()
             self._inspector.clear()
@@ -628,28 +879,34 @@ class LayoutPanel(QWidget):
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "blocks_merged")
 
-    def _on_type_changed(self, _index: int) -> None:
+    def _on_selected_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
         if self._selected_block is None:
             return
         if getattr(self._selected_block, "is_locked", False):
             self._set_status_text("该框已锁定；如需修改属性，请先解除本页锁定")
+            self._sync_selected_type_buttons(self._selected_block)
             return
-        new_type = self._coerce_block_type(self._type_combo.currentData(), BlockType.UNKNOWN)
-        if new_type:
-            if self._selected_block.block_type == new_type:
-                return
-            self._push_undo_snapshot()
-            self._selected_block.block_type = new_type
-            self._selected_block.source = BlockSource.USER_EDITED
-            self._bind_manual_block_to_paddle(
-                self._pages[self._current_page_idx],
-                self._selected_block,
-            )
-            self._show_page_layers(self._pages[self._current_page_idx])
-            self._viewer.select_block(self._selected_block)
-            self._sync_lock_button(self._selected_block)
-            self.geometry_changed.emit()
-            self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
+        new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
+        new_label = new_subtype.normalized_source_label
+        current_label = normalize_paddle_label(self._selected_block.source_label)
+        if self._selected_block.block_type == new_subtype.block_type and current_label == new_label:
+            self._sync_selected_type_buttons(self._selected_block)
+            return
+        self._push_undo_snapshot()
+        self._selected_block.block_type = new_subtype.block_type
+        self._selected_block.source_label = new_subtype.source_label
+        self._selected_block.source = BlockSource.USER_EDITED
+        self._selected_block.recognizable = is_text_ocr_candidate(self._selected_block)
+        self._bind_manual_block_to_paddle(
+            self._pages[self._current_page_idx],
+            self._selected_block,
+        )
+        self._show_page_layers(self._pages[self._current_page_idx])
+        self._viewer.select_block(self._selected_block)
+        self._sync_lock_button(self._selected_block)
+        self._sync_selected_type_buttons(self._selected_block)
+        self.geometry_changed.emit()
+        self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
 
     def _on_char_bbox_moved(self, char) -> None:
         bb = char.bbox
@@ -705,8 +962,12 @@ class LayoutPanel(QWidget):
     def _bind_manual_block_to_paddle(self, page: Page, block: Block) -> None:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             return
+        explicit_source_label = block.source_label
         binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
         apply_paddle_binding_to_block(block, binding)
+        if normalize_paddle_label(explicit_source_label) in DEFAULT_SUBTYPE_BY_SOURCE_LABEL:
+            block.source_label = explicit_source_label
+            set_payload_entries(block, {PADDLE_BLOCK_LABEL_KEY: explicit_source_label})
         if binding.status == BINDING_EMPTY_REVIEW:
             self._set_status_text("已创建空校验框；Paddle 父框没有可直接召回的真值")
         elif binding.status == BINDING_AMBIGUOUS:
@@ -719,7 +980,7 @@ class LayoutPanel(QWidget):
             self._btn_lock.setEnabled(False)
             self._btn_lock.setChecked(False)
             self._btn_lock.setText("锁定框")
-            self._type_combo.setEnabled(False)
+            self._sync_selected_type_buttons(None)
             return
         locked = bool(getattr(block, "is_locked", False))
         self._btn_lock.setEnabled(True)
@@ -727,7 +988,7 @@ class LayoutPanel(QWidget):
         self._btn_lock.setChecked(locked)
         self._btn_lock.setText("解锁框" if locked else "锁定框")
         self._btn_lock.blockSignals(False)
-        self._type_combo.setEnabled(not locked)
+        self._sync_selected_type_buttons(block)
 
     def _toggle_selected_lock(self) -> None:
         block = self._selected_block
@@ -1045,12 +1306,34 @@ class LayoutPanel(QWidget):
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _coerce_subtype_spec(
+        value: object,
+        default: LayoutSubtypeSpec,
+    ) -> LayoutSubtypeSpec:
+        if isinstance(value, LayoutSubtypeSpec):
+            return value
+        normalized_label = normalize_paddle_label(value)
+        if normalized_label in DEFAULT_SUBTYPE_BY_SOURCE_LABEL:
+            return DEFAULT_SUBTYPE_BY_SOURCE_LABEL[normalized_label]
+        block_type = LayoutPanel._coerce_block_type(value, BlockType.UNKNOWN)
+        return DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block_type, default)
+
+    @staticmethod
+    def _button_source_label_for_block(block: Block) -> str:
+        normalized = normalize_paddle_label(block.source_label)
+        if normalized in DEFAULT_SUBTYPE_BY_SOURCE_LABEL:
+            return normalized
+        spec = DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block.block_type)
+        return spec.source_label if spec is not None else ""
+
     def _merge_blocks_into_bbox(
         self,
         page: Page,
         blocks: list[Block],
         bbox: BBox,
         block_type: BlockType,
+        source_label: str = "",
     ) -> Block:
         blocks.sort(key=lambda block: (block.order, block.bbox.y, block.bbox.x))
         primary = blocks[0]
@@ -1060,6 +1343,7 @@ class LayoutPanel(QWidget):
         y2 = max([bbox.y2, *(block.bbox.y2 for block in blocks)])
         primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
         primary.block_type = block_type
+        primary.source_label = source_label
         primary.lines = []
         primary.source = BlockSource.USER_EDITED
         primary.is_locked = False

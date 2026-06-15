@@ -1,8 +1,6 @@
 """Shared Paddle/AiStudio response unpacking helpers."""
 from __future__ import annotations
 
-from typing import Any
-
 
 def result_dict(data: dict) -> dict:
     result = data.get("result", {}) if isinstance(data, dict) else {}
@@ -45,71 +43,18 @@ def overall_ocr_res(item: dict) -> dict:
 
 def parsing_records_from_item(item: dict) -> list[dict]:
     pruned = pruned_result(item)
-    records: list[dict] = []
-    for container in (pruned, item):
-        values = container.get("parsing_res_list", {}) if isinstance(container, dict) else {}
-        if isinstance(values, list):
-            records.extend(value for value in values if isinstance(value, dict))
-    return records
+    values = pruned.get("parsing_res_list", {}) if isinstance(pruned, dict) else {}
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, dict)]
 
 
 def layout_geometry_records_from_item(item: dict) -> list[dict]:
     pruned = pruned_result(item)
-    candidates: list[dict] = []
-    for container in (
-        item,
-        pruned,
-        pruned.get("layout_det_res", {}),
-        item.get("layout_det_res", {}) if isinstance(item, dict) else {},
-    ):
-        if not isinstance(container, dict):
-            continue
-        for key in ("boxes", "layout_boxes", "regions", "blocks", "formula"):
-            values = container.get(key)
-            if isinstance(values, list):
-                candidates.extend(value for value in values if isinstance(value, dict))
-    return candidates
-
-
-def iter_layout_records_from_item(item: dict) -> list[dict]:
-    parsing_records = parsing_records_from_item(item)
-    if parsing_records:
-        return parsing_records
-    return layout_geometry_records_from_item(item)
-
-
-def _as_sequence(value: Any) -> list:
-    return value if isinstance(value, list) else []
-
-
-def iter_ocr_records_from_item(item: dict) -> list[dict]:
-    pruned = pruned_result(item)
-    ocr_res = overall_ocr_res(item) or pruned or item
-    if not isinstance(ocr_res, dict):
+    layout_det_res = pruned.get("layout_det_res", {}) if isinstance(pruned, dict) else {}
+    if not isinstance(layout_det_res, dict):
         return []
-
-    texts = _as_sequence(ocr_res.get("rec_texts") or ocr_res.get("texts") or [])
-    scores = _as_sequence(ocr_res.get("rec_scores") or ocr_res.get("scores") or [])
-    boxes = _as_sequence(
-        ocr_res.get("rec_boxes")
-        or ocr_res.get("rec_polys")
-        or ocr_res.get("rec_polygons")
-        or ocr_res.get("boxes")
-        or ocr_res.get("polys")
-        or ocr_res.get("dt_polys")
-        or []
-    )
-
-    records: list[dict] = []
-    count = max(len(boxes), len(texts))
-    for index in range(count):
-        record = {
-            "label": "text",
-            "text": texts[index] if index < len(texts) else "",
-        }
-        if index < len(boxes):
-            record["bbox"] = boxes[index]
-        if index < len(scores):
-            record["score"] = scores[index]
-        records.append(record)
-    return records
+    values = layout_det_res.get("boxes")
+    if not isinstance(values, list):
+        return []
+    return [value for value in values if isinstance(value, dict)]
