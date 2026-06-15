@@ -5,12 +5,11 @@ from typing import List
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QVBoxLayout,
 )
 
-from app.export.settings import ExportSettings, MarkdownExportSettings
 from app.models import OcrProject
 from app.services.export_service import build_export_path
 
@@ -58,18 +57,11 @@ class ExportWorker(QThread):
     progress = Signal(str, int, int)
     completed = Signal(object)
 
-    def __init__(
-        self,
-        project: OcrProject,
-        formats: List[str],
-        out_dir: str,
-        settings: ExportSettings | None = None,
-    ):
+    def __init__(self, project: OcrProject, formats: List[str], out_dir: str):
         super().__init__()
         self._project = project
         self._formats = formats
         self._out_dir = out_dir
-        self._settings = settings or ExportSettings()
 
     def run(self) -> None:
         from app.export import get_exporter
@@ -80,7 +72,7 @@ class ExportWorker(QThread):
             out_path = ""
             try:
                 out_path = str(build_export_path(self._out_dir, self._project.name, fmt))
-                exporter = get_exporter(fmt, self._settings)
+                exporter = get_exporter(fmt)
                 exporter.export(self._project, out_path)
                 results.append(ExportFormatResult(fmt=fmt, out_path=out_path, ok=True))
                 self.progress.emit(f"{fmt.upper()} 导出完成", index, total)
@@ -127,22 +119,6 @@ class ExportDialog(QDialog):
             self._checkboxes[fmt] = cb
             fmt_layout.addWidget(cb)
         layout.addWidget(fmt_group)
-
-        settings_group = QGroupBox("导出设置")
-        settings_layout = QVBoxLayout(settings_group)
-        md_row = QHBoxLayout()
-        md_row.addWidget(QLabel("Markdown 表格："))
-        self._md_table_style = QComboBox()
-        self._md_table_style.addItem("三线表 HTML", "three_line_html")
-        self._md_table_style.addItem("原始 HTML", "source_html")
-        self._md_table_style.addItem("普通 HTML", "plain_html")
-        self._md_table_style.addItem("图片兜底", "image_fallback")
-        md_row.addWidget(self._md_table_style, 1)
-        settings_layout.addLayout(md_row)
-        self._settings_placeholder = QLabel("其他格式使用默认设置")
-        self._settings_placeholder.setObjectName("muted")
-        settings_layout.addWidget(self._settings_placeholder)
-        layout.addWidget(settings_group)
 
         # 输出目录
         dir_layout = QHBoxLayout()
@@ -196,18 +172,11 @@ class ExportDialog(QDialog):
         if self._btn_start is not None:
             self._btn_start.setEnabled(False)
 
-        self._worker = ExportWorker(self._project, selected, out_dir, self._build_export_settings())
+        self._worker = ExportWorker(self._project, selected, out_dir)
         self._worker.progress.connect(self._on_progress)
         self._worker.completed.connect(self._on_finished)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
-
-    def _build_export_settings(self) -> ExportSettings:
-        return ExportSettings(
-            markdown=MarkdownExportSettings(
-                table_style=str(self._md_table_style.currentData() or "three_line_html"),
-            ),
-        )
 
     def _on_progress(self, message: str, current: int, total: int) -> None:
         self._progress_lbl.setText(message)
