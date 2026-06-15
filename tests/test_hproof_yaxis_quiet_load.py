@@ -116,6 +116,52 @@ def test_line_pair_slot_width_keeps_narrow_punctuation_inside_visual_slot():
     pair.deleteLater()
 
 
+def test_line_pair_punctuation_visual_slots_do_not_overlap_neighbors():
+    """标点视觉槽可以放宽，但不能压到相邻字的视觉槽。"""
+    from app.models import Block, BBox, Char, Line, Page, ProofStatus
+    from app.models.project import BlockType
+    from app.core.page_image_cache import PageImageCache
+    from app.ui.proof.h_proof import _LinePair, TEXT_SLOT_MIN_W
+
+    bboxes = [
+        BBox(0, 0, 8, 20),
+        BBox(8, 0, 2, 20),
+        BBox(12, 0, 8, 20),
+    ]
+    line = Line(
+        text="甲，乙",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 24),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=bboxes[0]),
+            Char(char="，", confidence=0.9, bbox=bboxes[1]),
+            Char(char="乙", confidence=0.9, bbox=bboxes[2]),
+        ],
+        proof_status=ProofStatus.UNCHECKED,
+        ocr_text="甲，乙",
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 24), lines=[line])
+    page = Page(image_path="", width=40, height=24, blocks=[block])
+    pair = _LinePair(0, block, line, page, 1, PageImageCache.instance())
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+
+    pair._sync_editor_slot_geometry()
+
+    centers = pair._editor._slot_x_centers
+    widths = pair._editor._slot_widths
+    assert centers is not None and widths is not None
+    bounds = []
+    for center, width in zip(centers, widths):
+        assert center is not None
+        half = max(TEXT_SLOT_MIN_W, width) / 2.0
+        bounds.append((center - half, center + half))
+    for left_right, next_left_right in zip(bounds, bounds[1:]):
+        assert left_right[1] <= next_left_right[0]
+    assert [ch.bbox for ch in line.chars] == bboxes
+    pair.deleteLater()
+
+
 def test_line_pair_uses_slot_line_editor_for_visible_hproof_text():
     """横校可见文本层应是 slot editor，而不是 QPlainTextEdit 原生布局。"""
     from PySide6.QtCore import Qt

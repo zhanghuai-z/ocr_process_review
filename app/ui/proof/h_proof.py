@@ -78,6 +78,7 @@ TEXT_LINE_HEIGHT_PX = 28
 TEXT_EDITOR_MAX_H = 32
 TEXT_SLOT_MIN_W = 10.0
 TEXT_SLOT_GUTTER_W = 4.0
+TEXT_SLOT_GAP_W = 1.0
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
 LINE_PAIR_H = 70
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
@@ -113,17 +114,94 @@ _DEBUG_TABLE_LABEL_TOKENS = ("table",)
 def _slot_visual_width(
     text_char: str,
     font_metrics: QFontMetrics,
-    *,
-    bbox_width: float | None = None,
 ) -> float:
     """Return the visual slot width used by HProof's painted text layer.
 
-    The data identity is still ``Char.bbox``; this only prevents narrow bbox
-    punctuation/digits from drawing outside their visual slot.
+    This deliberately does not use ``Char.bbox.w``. OCR bbox is data identity
+    for crop/highlight/export; the HProof text layer only needs enough visual
+    room for the rendered glyph.
     """
     glyph_width = float(font_metrics.horizontalAdvance(text_char or " ")) + TEXT_SLOT_GUTTER_W
-    bbox_width = 0.0 if bbox_width is None else float(bbox_width) + TEXT_SLOT_GUTTER_W
-    return max(TEXT_SLOT_MIN_W, glyph_width, bbox_width)
+    return max(TEXT_SLOT_MIN_W, glyph_width)
+
+
+def _resolve_non_overlapping_slot_centers(
+    x_centers: List[Optional[float]],
+    widths: List[float],
+    *,
+    gap: float = TEXT_SLOT_GAP_W,
+) -> List[Optional[float]]:
+    """Return display-only slot centers whose visual cells do not overlap.
+
+    Raw centers still come from ``Char.bbox``. When a narrow punctuation bbox
+    needs a wider rendered glyph slot, this resolves the text-layer centers
+    without mutating any OCR geometry.
+    """
+    resolved: List[Optional[float]] = list(x_centers)
+    i = 0
+    n = min(len(x_centers), len(widths))
+    while i < n:
+        while i < n and x_centers[i] is None:
+            i += 1
+        start = i
+        while i < n and x_centers[i] is not None:
+            i += 1
+        if start >= i:
+            continue
+        indices = list(range(start, i))
+        raw = [float(x_centers[idx]) for idx in indices if x_centers[idx] is not None]
+        seg_widths = [max(TEXT_SLOT_MIN_W, float(widths[idx])) for idx in indices]
+        for idx, center in zip(indices, _resolve_slot_center_segment(raw, seg_widths, gap=gap)):
+            resolved[idx] = center
+    return resolved
+
+
+def _resolve_slot_center_segment(
+    raw_centers: List[float],
+    widths: List[float],
+    *,
+    gap: float,
+) -> List[float]:
+    if len(raw_centers) <= 1:
+        if not raw_centers:
+            return []
+        return [max(raw_centers[0], widths[0] / 2.0)]
+
+    offsets = [0.0]
+    for idx in range(1, len(raw_centers)):
+        min_step = (widths[idx - 1] + widths[idx]) / 2.0 + gap
+        offsets.append(offsets[-1] + min_step)
+
+    targets = [center - offset for center, offset in zip(raw_centers, offsets)]
+    blocks: list[dict[str, float | int]] = []
+    for idx, value in enumerate(targets):
+        blocks.append({"start": idx, "end": idx, "sum": value, "count": 1, "avg": value})
+        while len(blocks) >= 2 and float(blocks[-2]["avg"]) > float(blocks[-1]["avg"]):
+            right = blocks.pop()
+            left = blocks.pop()
+            total = float(left["sum"]) + float(right["sum"])
+            count = int(left["count"]) + int(right["count"])
+            blocks.append(
+                {
+                    "start": int(left["start"]),
+                    "end": int(right["end"]),
+                    "sum": total,
+                    "count": count,
+                    "avg": total / count,
+                }
+            )
+
+    base = [0.0] * len(raw_centers)
+    for block in blocks:
+        for idx in range(int(block["start"]), int(block["end"]) + 1):
+            base[idx] = float(block["avg"])
+
+    centers = [base[idx] + offsets[idx] for idx in range(len(raw_centers))]
+    first_left = centers[0] - widths[0] / 2.0
+    if first_left < 0:
+        shift = -first_left
+        centers = [center + shift for center in centers]
+    return centers
 
 
 def _debug_block_labels(block: Block) -> set[str]:
@@ -1679,14 +1757,11 @@ class _LinePair(QFrame):
             cx_src = (ch.bbox.x + ch.bbox.x2) / 2.0 - float(ox)
             x_centers.append(cx_src * scale)
             text_char = text[idx] if idx < len(text) else ch.char
-            widths.append(
-                _slot_visual_width(
-                    text_char,
-                    fm,
-                    bbox_width=float(ch.bbox.w) * scale,
-                )
-            )
-        editor.set_slot_geometry(x_centers, widths)
+            widths.append(_slot_visual_width(text_char, fm))
+        editor.set_slot_geometry(
+            _resolve_non_overlapping_slot_centers(x_centers, widths),
+            widths,
+        )
 
     def refresh_text(self) -> None:
         """外部（VProof / probe 切换）更新 final_text 后同步 editor 文本。
