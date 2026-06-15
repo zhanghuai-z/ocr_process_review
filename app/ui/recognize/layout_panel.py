@@ -265,19 +265,14 @@ class LayoutPanel(QWidget):
         self._btn_char_boxes.clicked.connect(self._refresh_current_page_layers)
         vtl.addWidget(self._btn_char_boxes)
 
-        vtl.addSpacing(10)
-        self._viewer_hint = QLabel("编辑：拖动/缩放框；Shift+拖拽添加或合并；按住空格移动画布")
-        self._viewer_hint.setObjectName("muted")
-        vtl.addWidget(self._viewer_hint)
-
-        # bbox / conf 标签随选中状态填充
-        self._prop_bbox = QLabel("")
-        self._prop_bbox.setObjectName("muted")
-        self._prop_conf = ConfidenceBadge(1.0)
+        # Debug-only fields are intentionally not mounted in the toolbar.  The
+        # human-facing top bar should stay compact; detailed geometry remains in
+        # the inspector/export IR.
+        self._prop_bbox = QLabel("", self)
+        self._prop_bbox.hide()
+        self._prop_conf = ConfidenceBadge(1.0, self)
         self._prop_conf.hide()
-        vtl.addSpacing(8)
-        vtl.addWidget(self._prop_bbox)
-        vtl.addWidget(self._prop_conf)
+
         vtl.addStretch(1)
         self._selection_type_status = QLabel("")
         self._selection_type_status.setObjectName("selectionTypeStatus")
@@ -756,7 +751,6 @@ class LayoutPanel(QWidget):
         self._sync_selected_type_buttons(block)
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._prop_conf.set_score(block.avg_confidence)
-        self._prop_conf.show()
         self._inspector.set_block(block)
 
     def _on_block_edit_started(self, block: Block) -> None:

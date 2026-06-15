@@ -1980,6 +1980,102 @@ def test_export_markdown_structure():
         print("test_export_markdown_structure PASSED")
 
 
+def test_markdown_fallback_assets_are_cropped_regions():
+    from PIL import Image
+
+    from app.export.markdown import MarkdownExporter
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        Image.new("RGB", (120, 90), "white").save(image_path)
+        out_path = os.path.join(tmpdir, "out.md")
+        page = Page(
+            image_path=image_path,
+            width=120,
+            height=90,
+            page_number=1,
+            blocks=[
+                Block(block_type=BlockType.TABLE, bbox=BBox(10, 20, 30, 15), order=0),
+                Block(block_type=BlockType.EQUATION, bbox=BBox(50, 30, 20, 10), order=1),
+            ],
+        )
+        project = OcrProject(name="MdCrop", pages=[page])
+
+        MarkdownExporter().export(project, out_path)
+
+        content = open(out_path, encoding="utf-8").read()
+        assert "image_fallback" not in content
+        assert "../page.png" not in content
+        assert "![table](out_assets/asset-el-p1-0001_table_crop.png)" in content
+        assert "![equation](out_assets/asset-el-p1-0002_equation_crop.png)" in content
+        table_crop = os.path.join(tmpdir, "out_assets", "asset-el-p1-0001_table_crop.png")
+        equation_crop = os.path.join(tmpdir, "out_assets", "asset-el-p1-0002_equation_crop.png")
+        assert os.path.exists(table_crop)
+        assert os.path.exists(equation_crop)
+        assert Image.open(table_crop).size == (30, 15)
+        assert Image.open(equation_crop).size == (20, 10)
+
+    print("test_markdown_fallback_assets_are_cropped_regions PASSED")
+
+
+def test_markdown_export_settings_filter_and_merge_layout_fragments():
+    from app.export.markdown import MarkdownExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        open(image_path, "wb").write(b"not-a-real-image")
+        out_path = os.path.join(tmpdir, "out.md")
+        page = Page(
+            image_path=image_path,
+            width=800,
+            height=600,
+            page_number=197,
+            blocks=[
+                Block(block_type=BlockType.TEXT, source_label="header", bbox=BBox(0, 0, 200, 20), order=0, lines=[
+                    Line(text="魏薇等：页眉", confidence=0.9, bbox=BBox(0, 0, 200, 20)),
+                ]),
+                Block(block_type=BlockType.TEXT, bbox=BBox(10, 80, 200, 40), order=1, lines=[
+                    Line(text="正文内容", confidence=0.9, bbox=BBox(10, 80, 200, 40)),
+                ]),
+                Block(block_type=BlockType.TABLE_CAPTION, source_label="table_title", bbox=BBox(10, 130, 200, 20), order=2, lines=[
+                    Line(text="表3", confidence=0.9, bbox=BBox(10, 130, 200, 20)),
+                ]),
+                Block(block_type=BlockType.TABLE_CAPTION, source_label="table_title", bbox=BBox(10, 154, 300, 20), order=3, lines=[
+                    Line(text="内生性检验一工具变量回归与剥离同期政策影响", confidence=0.9, bbox=BBox(10, 154, 300, 20)),
+                ]),
+                Block(block_type=BlockType.TABLE, source_label="table", bbox=BBox(10, 180, 300, 80), order=4, lines=[
+                    Line(text="<table><tr><td>A</td></tr></table>", confidence=0.9, bbox=BBox(10, 180, 300, 80)),
+                ]),
+                Block(block_type=BlockType.EQUATION, source_label="display_formula", bbox=BBox(10, 280, 300, 40), order=5, lines=[
+                    Line(text="$$ \\begin{aligned}x=y\\end{aligned} $$", confidence=0.9, bbox=BBox(10, 280, 300, 40)),
+                ]),
+                Block(block_type=BlockType.EQUATION, source_label="formula_number", bbox=BBox(330, 280, 40, 20), order=6, lines=[
+                    Line(text="（9）", confidence=0.9, bbox=BBox(330, 280, 40, 20)),
+                ]),
+                Block(block_type=BlockType.TEXT, source_label="number", bbox=BBox(380, 560, 40, 20), order=7, lines=[
+                    Line(text="197", confidence=0.9, bbox=BBox(380, 560, 40, 20)),
+                ]),
+            ],
+        )
+        project = OcrProject(name="MdPolicy", pages=[page])
+
+        MarkdownExporter().export(project, out_path)
+
+        content = open(out_path, encoding="utf-8").read()
+        assert "魏薇等：页眉" not in content
+        assert "\n197\n" not in f"\n{content}\n"
+        assert "*表3 内生性检验一工具变量回归与剥离同期政策影响*" in content
+        assert "*表3*\n\n*内生性检验" not in content
+        assert "<table><tr><td>A</td></tr></table>" in content
+        assert "&lt;table&gt;" not in content
+        assert "$$\n\\begin{aligned}x=y\\end{aligned} \\tag{9}\n$$" in content
+        assert "$$\n$$" not in content
+
+    print("test_markdown_export_settings_filter_and_merge_layout_fragments PASSED")
+
+
 def test_export_formats_share_structured_blocks():
     from app.export import get_exporter
     from app.export.markdown import MarkdownExporter
@@ -12511,6 +12607,8 @@ if __name__ == "__main__":
     test_export_xml()
     test_export_html()
     test_export_markdown_structure()
+    test_markdown_fallback_assets_are_cropped_regions()
+    test_markdown_export_settings_filter_and_merge_layout_fragments()
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
