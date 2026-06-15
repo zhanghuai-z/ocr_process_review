@@ -121,7 +121,7 @@ def test_line_pair_punctuation_visual_slots_do_not_overlap_neighbors():
     from app.models import Block, BBox, Char, Line, Page, ProofStatus
     from app.models.project import BlockType
     from app.core.page_image_cache import PageImageCache
-    from app.ui.proof.h_proof import _LinePair, TEXT_SLOT_MIN_W
+    from app.ui.proof.h_proof import _LinePair, TEXT_SLOT_CLIPPED_MIN_W
 
     bboxes = [
         BBox(0, 0, 8, 20),
@@ -151,10 +151,11 @@ def test_line_pair_punctuation_visual_slots_do_not_overlap_neighbors():
     centers = pair._editor._slot_x_centers
     widths = pair._editor._slot_widths
     assert centers is not None and widths is not None
+    assert centers == [4.0, 9.0, 16.0]
     bounds = []
     for center, width in zip(centers, widths):
         assert center is not None
-        half = max(TEXT_SLOT_MIN_W, width) / 2.0
+        half = max(TEXT_SLOT_CLIPPED_MIN_W, width) / 2.0
         bounds.append((center - half, center + half))
     for left_right, next_left_right in zip(bounds, bounds[1:]):
         assert left_right[1] <= next_left_right[0]

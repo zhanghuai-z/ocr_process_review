@@ -79,6 +79,7 @@ TEXT_EDITOR_MAX_H = 32
 TEXT_SLOT_MIN_W = 10.0
 TEXT_SLOT_GUTTER_W = 4.0
 TEXT_SLOT_GAP_W = 1.0
+TEXT_SLOT_CLIPPED_MIN_W = 1.0
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
 LINE_PAIR_H = 70
 # Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
@@ -125,19 +126,19 @@ def _slot_visual_width(
     return max(TEXT_SLOT_MIN_W, glyph_width)
 
 
-def _resolve_non_overlapping_slot_centers(
+def _clip_slot_widths_to_centers(
     x_centers: List[Optional[float]],
     widths: List[float],
     *,
     gap: float = TEXT_SLOT_GAP_W,
-) -> List[Optional[float]]:
-    """Return display-only slot centers whose visual cells do not overlap.
+) -> List[float]:
+    """Return display-only slot widths that do not overlap neighbor centers.
 
-    Raw centers still come from ``Char.bbox``. When a narrow punctuation bbox
-    needs a wider rendered glyph slot, this resolves the text-layer centers
-    without mutating any OCR geometry.
+    Raw centers still come from ``Char.bbox`` and remain unchanged. When a
+    punctuation glyph wants a wider visual slot than the OCR spacing allows,
+    clip the hover/selection block width instead of moving the glyph.
     """
-    resolved: List[Optional[float]] = list(x_centers)
+    clipped: List[float] = list(widths)
     i = 0
     n = min(len(x_centers), len(widths))
     while i < n:
@@ -150,58 +151,15 @@ def _resolve_non_overlapping_slot_centers(
             continue
         indices = list(range(start, i))
         raw = [float(x_centers[idx]) for idx in indices if x_centers[idx] is not None]
-        seg_widths = [max(TEXT_SLOT_MIN_W, float(widths[idx])) for idx in indices]
-        for idx, center in zip(indices, _resolve_slot_center_segment(raw, seg_widths, gap=gap)):
-            resolved[idx] = center
-    return resolved
-
-
-def _resolve_slot_center_segment(
-    raw_centers: List[float],
-    widths: List[float],
-    *,
-    gap: float,
-) -> List[float]:
-    if len(raw_centers) <= 1:
-        if not raw_centers:
-            return []
-        return [max(raw_centers[0], widths[0] / 2.0)]
-
-    offsets = [0.0]
-    for idx in range(1, len(raw_centers)):
-        min_step = (widths[idx - 1] + widths[idx]) / 2.0 + gap
-        offsets.append(offsets[-1] + min_step)
-
-    targets = [center - offset for center, offset in zip(raw_centers, offsets)]
-    blocks: list[dict[str, float | int]] = []
-    for idx, value in enumerate(targets):
-        blocks.append({"start": idx, "end": idx, "sum": value, "count": 1, "avg": value})
-        while len(blocks) >= 2 and float(blocks[-2]["avg"]) > float(blocks[-1]["avg"]):
-            right = blocks.pop()
-            left = blocks.pop()
-            total = float(left["sum"]) + float(right["sum"])
-            count = int(left["count"]) + int(right["count"])
-            blocks.append(
-                {
-                    "start": int(left["start"]),
-                    "end": int(right["end"]),
-                    "sum": total,
-                    "count": count,
-                    "avg": total / count,
-                }
-            )
-
-    base = [0.0] * len(raw_centers)
-    for block in blocks:
-        for idx in range(int(block["start"]), int(block["end"]) + 1):
-            base[idx] = float(block["avg"])
-
-    centers = [base[idx] + offsets[idx] for idx in range(len(raw_centers))]
-    first_left = centers[0] - widths[0] / 2.0
-    if first_left < 0:
-        shift = -first_left
-        centers = [center + shift for center in centers]
-    return centers
+        for offset, idx in enumerate(indices):
+            limits: list[float] = []
+            if offset > 0:
+                limits.append(max(TEXT_SLOT_CLIPPED_MIN_W, raw[offset] - raw[offset - 1] - gap))
+            if offset + 1 < len(raw):
+                limits.append(max(TEXT_SLOT_CLIPPED_MIN_W, raw[offset + 1] - raw[offset] - gap))
+            if limits:
+                clipped[idx] = min(max(TEXT_SLOT_CLIPPED_MIN_W, float(widths[idx])), min(limits))
+    return clipped
 
 
 def _debug_block_labels(block: Block) -> set[str]:
@@ -446,6 +404,7 @@ class _RowEditor(QPlainTextEdit):
         centers = self._slot_x_centers or []
         if not centers:
             return -1
+        explicit_widths = self._slot_widths is not None
         widths = self._slot_widths or [TEXT_SLOT_MIN_W] * len(centers)
         best_idx = -1
         best_dist = float("inf")
@@ -455,7 +414,8 @@ class _RowEditor(QPlainTextEdit):
             if center is None:
                 continue
             width = widths[idx] if idx < len(widths) else TEXT_SLOT_MIN_W
-            half = max(TEXT_SLOT_MIN_W / 2.0, float(width) / 2.0)
+            min_half = TEXT_SLOT_CLIPPED_MIN_W / 2.0 if explicit_widths else TEXT_SLOT_MIN_W / 2.0
+            half = max(min_half, float(width) / 2.0)
             left = float(center) - half
             right = float(center) + half
             first_left = left if first_left is None else min(first_left, left)
@@ -1004,6 +964,7 @@ class _SlotLineEditor(QWidget):
                 _slot_visual_width(ch, fm)
                 for ch in text
             ]
+            explicit_widths = self._slot_widths is not None
             fg_color, bg_color = self._selection_colors()
             selected_start, selected_end = self._selection_bounds_for_paint() if self._active_visual else (-1, -1)
             y_baseline = (self.height() + fm.ascent() - fm.descent()) // 2
@@ -1013,7 +974,8 @@ class _SlotLineEditor(QWidget):
                 if center is None:
                     continue
                 width = widths[i] if i < len(widths) else TEXT_SLOT_MIN_W
-                slot_w = max(TEXT_SLOT_MIN_W, float(width))
+                min_slot_w = TEXT_SLOT_CLIPPED_MIN_W if explicit_widths else TEXT_SLOT_MIN_W
+                slot_w = max(min_slot_w, float(width))
                 left = int(round(float(center) - slot_w / 2.0))
                 cell = QRect(left, 2, max(1, int(round(slot_w))), self.height() - 4)
                 if i == self._last_hover_idx:
@@ -1075,6 +1037,7 @@ class _SlotLineEditor(QWidget):
         pos = self._cursor.selectionStart() if self._cursor.hasSelection() else self._cursor.position()
         centers = self._slot_x_centers or self._fallback_slot_centers(self.toPlainText())
         fm = QFontMetrics(self.font())
+        explicit_widths = self._slot_widths is not None
         widths = self._slot_widths or [
             _slot_visual_width(ch, fm)
             for ch in self.toPlainText()
@@ -1083,7 +1046,9 @@ class _SlotLineEditor(QWidget):
             center = centers[pos]
             if center is not None:
                 width = widths[pos] if pos < len(widths) else TEXT_SLOT_MIN_W
-                left = int(round(float(center) - max(TEXT_SLOT_MIN_W, float(width)) / 2.0))
+                min_slot_w = TEXT_SLOT_CLIPPED_MIN_W if explicit_widths else TEXT_SLOT_MIN_W
+                width = max(min_slot_w, float(width))
+                left = int(round(float(center) - width / 2.0))
                 return QRect(left, 2, max(1, int(round(width))), self.height() - 4)
         return QRect(0, 0, 1, self.height())
 
@@ -1758,10 +1723,7 @@ class _LinePair(QFrame):
             x_centers.append(cx_src * scale)
             text_char = text[idx] if idx < len(text) else ch.char
             widths.append(_slot_visual_width(text_char, fm))
-        editor.set_slot_geometry(
-            _resolve_non_overlapping_slot_centers(x_centers, widths),
-            widths,
-        )
+        editor.set_slot_geometry(x_centers, _clip_slot_widths_to_centers(x_centers, widths))
 
     def refresh_text(self) -> None:
         """外部（VProof / probe 切换）更新 final_text 后同步 editor 文本。
