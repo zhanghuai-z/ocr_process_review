@@ -1,7 +1,7 @@
 """Markdown light semantic reflow export."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 import os
 import re
 from html import escape as html_escape, unescape as html_unescape
@@ -11,6 +11,7 @@ from app.export.base import ExporterBase
 from app.export.ir import ExportAsset, ExportElement
 from app.export.ir_builder import build_export_ir
 from app.export.rendering import element_lines, join_reflow_text_lines
+from app.export.settings import MarkdownExportSettings
 from app.models import OcrProject
 
 
@@ -35,21 +36,6 @@ class MarkdownExporter(ExporterBase):
                     parts.append("")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(parts).rstrip() + ("\n" if parts else ""))
-
-
-@dataclass(frozen=True)
-class MarkdownExportSettings:
-    """Format-local export policy before these choices are promoted globally."""
-
-    filtered_source_labels: frozenset[str] = field(default_factory=lambda: frozenset({
-        "header",
-        "page_number",
-        "number",
-    }))
-    merge_adjacent_captions: bool = True
-    merge_equation_numbers: bool = True
-    unwrap_math_delimiters: bool = True
-    render_raw_html_tables: bool = True
 
 
 def _prepare_markdown_elements(
@@ -253,17 +239,24 @@ def _render_table(
     settings: MarkdownExportSettings,
 ) -> list[str]:
     rows = element_lines(element)
-    html_table = _raw_html_table(rows) if settings.render_raw_html_tables else ""
-    if html_table:
-        return [html_table]
+    asset = assets.get(str(element.payload.get("asset_ref") or ""))
+    if settings.table_style == "image_fallback":
+        if asset:
+            return [_render_asset_image(asset, out_dir, asset_dir, "table")]
+        return _render_plain_html_table(rows)
+    source_table = _raw_html_table(rows)
+    if settings.table_style == "three_line_html":
+        html_table = source_table or "\n".join(_render_plain_html_table(rows))
+        styled = _render_three_line_table(html_table, settings)
+        if styled:
+            return [styled]
+        if source_table:
+            return [source_table]
+    if source_table:
+        return [source_table]
     if not rows:
-        asset = assets.get(str(element.payload.get("asset_ref") or ""))
         return [_render_asset_image(asset, out_dir, asset_dir, "table")]
-    rendered = ["<table>"]
-    for row in rows:
-        rendered.append(f"  <tr><td>{html_escape(_one_line(row), quote=True)}</td></tr>")
-    rendered.append("</table>")
-    return rendered
+    return _render_plain_html_table(rows)
 
 
 def _render_equation(
@@ -290,6 +283,106 @@ def _raw_html_table(rows: list[str]) -> str:
     if re.match(r"(?is)^<table\b.*</table>$", candidate):
         return candidate
     return ""
+
+
+def _render_plain_html_table(rows: list[str]) -> list[str]:
+    if not rows:
+        return []
+    rendered = ["<table>"]
+    for row in rows:
+        rendered.append(f"  <tr><td>{html_escape(_one_line(row), quote=True)}</td></tr>")
+    rendered.append("</table>")
+    return rendered
+
+
+def _render_three_line_table(table_html: str, settings: MarkdownExportSettings) -> str:
+    if not table_html.strip():
+        return ""
+    try:
+        from lxml import html
+
+        table = html.fragment_fromstring(table_html, create_parent=False)
+        if getattr(table, "tag", "").lower() != "table":
+            tables = table.xpath(".//table")
+            table = tables[0] if tables else table
+        if getattr(table, "tag", "").lower() != "table":
+            return ""
+
+        _append_class(table, "ocr-three-line-table")
+        _append_style(
+            table,
+            "border-collapse: collapse; margin: 16px auto; width: auto;",
+        )
+        rows = table.xpath(".//tr")
+        if not rows:
+            return html.tostring(table, encoding="unicode", method="html")
+
+        for cell in table.xpath(".//th|.//td"):
+            _append_style(
+                cell,
+                "border: none; padding: 4px 10px; text-align: center; vertical-align: middle;",
+            )
+
+        header_rows = _table_header_row_count(rows, settings)
+        first_row = rows[0]
+        header_row = rows[min(header_rows - 1, len(rows) - 1)]
+        last_row = rows[-1]
+        for cell in _row_cells(first_row):
+            _append_style(cell, "border-top: 1.5px solid #000;")
+        for cell in _row_cells(header_row):
+            _append_style(cell, "border-bottom: 1px solid #000;")
+        for row_index, row in enumerate(rows[:header_rows]):
+            for cell in _row_cells(row):
+                rowspan = _positive_int(cell.get("rowspan"), 1)
+                if row_index < header_rows - 1 and row_index + rowspan >= header_rows:
+                    _append_style(cell, "border-bottom: 1px solid #000;")
+        for cell in _row_cells(last_row):
+            _append_style(cell, "border-bottom: 1.5px solid #000;")
+        return html.tostring(table, encoding="unicode", method="html")
+    except Exception:
+        return ""
+
+
+def _append_class(element, class_name: str) -> None:
+    current = str(element.get("class") or "").split()
+    if class_name not in current:
+        current.append(class_name)
+    element.set("class", " ".join(current))
+
+
+def _append_style(element, style: str) -> None:
+    current = str(element.get("style") or "").strip()
+    if current and not current.endswith(";"):
+        current += ";"
+    element.set("style", f"{current} {style}".strip())
+
+
+def _row_cells(row) -> list:
+    return list(row.xpath("./th|./td"))
+
+
+def _table_header_row_count(rows: list, settings: MarkdownExportSettings) -> int:
+    if not rows:
+        return 0
+    if settings.table_header_rows is not None:
+        return max(1, min(int(settings.table_header_rows), len(rows)))
+    header_rows = 1
+    for row_index, row in enumerate(rows):
+        if row_index >= max(1, settings.max_auto_table_header_rows):
+            break
+        for cell in _row_cells(row):
+            colspan = _positive_int(cell.get("colspan"), 1)
+            rowspan = _positive_int(cell.get("rowspan"), 1)
+            if colspan > 1 or rowspan > 1:
+                header_rows = max(header_rows, row_index + rowspan)
+    return max(1, min(header_rows, len(rows), max(1, settings.max_auto_table_header_rows)))
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def _render_unknown(

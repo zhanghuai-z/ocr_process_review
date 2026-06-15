@@ -1969,8 +1969,9 @@ def test_export_markdown_structure():
         assert "1\\) Ref not list" in content
         assert "![Figure Alt](assets/figure.png)" in content
         assert "*1\\. 图一 \\*示例\\**" in content
-        assert "<table>" in content
-        assert "<td>Cell &lt;1&gt;</td>" in content
+        assert 'class="ocr-three-line-table"' in content
+        assert "border-top: 1.5px solid #000" in content
+        assert "Cell &lt;1&gt;" in content
         assert "*表一*" in content
         assert "$$\nE = mc^2\n$$" in content
         assert "![equation](assets/figure.png)" in content
@@ -2046,7 +2047,15 @@ def test_markdown_export_settings_filter_and_merge_layout_fragments():
                     Line(text="内生性检验一工具变量回归与剥离同期政策影响", confidence=0.9, bbox=BBox(10, 154, 300, 20)),
                 ]),
                 Block(block_type=BlockType.TABLE, source_label="table", bbox=BBox(10, 180, 300, 80), order=4, lines=[
-                    Line(text="<table><tr><td>A</td></tr></table>", confidence=0.9, bbox=BBox(10, 180, 300, 80)),
+                    Line(
+                        text=(
+                            '<table><tr><td rowspan="3">变量</td><td>(1)</td></tr>'
+                            '<tr><td colspan="1">工具变量</td></tr>'
+                            '<tr><td>GGF</td></tr><tr><td>样本量</td><td>1156</td></tr></table>'
+                        ),
+                        confidence=0.9,
+                        bbox=BBox(10, 180, 300, 80),
+                    ),
                 ]),
                 Block(block_type=BlockType.EQUATION, source_label="display_formula", bbox=BBox(10, 280, 300, 40), order=5, lines=[
                     Line(text="$$ \\begin{aligned}x=y\\end{aligned} $$", confidence=0.9, bbox=BBox(10, 280, 300, 40)),
@@ -2068,12 +2077,49 @@ def test_markdown_export_settings_filter_and_merge_layout_fragments():
         assert "\n197\n" not in f"\n{content}\n"
         assert "*表3 内生性检验一工具变量回归与剥离同期政策影响*" in content
         assert "*表3*\n\n*内生性检验" not in content
-        assert "<table><tr><td>A</td></tr></table>" in content
+        assert 'class="ocr-three-line-table"' in content
+        assert 'rowspan="3"' in content
+        assert "border-top: 1.5px solid #000" in content
+        assert "border-bottom: 1.5px solid #000" in content
+        assert "border-bottom: 1px solid #000" in content
+        assert ">GGF</td>" in content
         assert "&lt;table&gt;" not in content
         assert "$$\n\\begin{aligned}x=y\\end{aligned} \\tag{9}\n$$" in content
         assert "$$\n$$" not in content
 
     print("test_markdown_export_settings_filter_and_merge_layout_fragments PASSED")
+
+
+def test_markdown_table_style_can_keep_source_html():
+    from app.export.markdown import MarkdownExporter
+    from app.export.settings import MarkdownExportSettings
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, "out.md")
+        bb = BBox(0, 0, 200, 80)
+        page = Page(
+            image_path="/tmp/table-style.png",
+            width=200,
+            height=80,
+            blocks=[
+                Block(block_type=BlockType.TABLE, source_label="table", bbox=bb, order=0, lines=[
+                    Line(
+                        text='<table><tr><td colspan="2">A</td></tr><tr><td>B</td><td>C</td></tr></table>',
+                        confidence=0.9,
+                        bbox=bb,
+                    ),
+                ]),
+            ],
+        )
+        project = OcrProject(name="MdSourceTable", pages=[page])
+
+        MarkdownExporter(MarkdownExportSettings(table_style="source_html")).export(project, out_path)
+
+        content = open(out_path, encoding="utf-8").read()
+        assert content.strip() == '<table><tr><td colspan="2">A</td></tr><tr><td>B</td><td>C</td></tr></table>'
+
+    print("test_markdown_table_style_can_keep_source_html PASSED")
 
 
 def test_export_formats_share_structured_blocks():
@@ -2637,7 +2683,9 @@ def test_ir_based_exporters_and_pdf_profiles():
     import tempfile
 
     from app.export import get_exporter
+    from app.export.markdown import MarkdownExporter
     from app.export.pdf import PdfExporter
+    from app.export.settings import ExportSettings, MarkdownExportSettings
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.services.export_service import build_export_path
 
@@ -2684,6 +2732,12 @@ def test_ir_based_exporters_and_pdf_profiles():
     assert isinstance(get_exporter("pdf"), PdfExporter)
     assert get_exporter("pdf").profile == "pdf-single"
     assert get_exporter("pdf-dual").profile == "pdf-dual"
+    markdown_exporter = get_exporter(
+        "md",
+        ExportSettings(markdown=MarkdownExportSettings(table_style="source_html")),
+    )
+    assert isinstance(markdown_exporter, MarkdownExporter)
+    assert markdown_exporter.settings.table_style == "source_html"
 
     print("test_ir_based_exporters_and_pdf_profiles PASSED")
 
@@ -2704,6 +2758,8 @@ def test_export_dialog_offers_markdown():
         assert dialog._checkboxes["pdf-dual"].text() == "PDF 原图+可搜索文本 (.pdf)"
         assert dialog._checkboxes["md"].isChecked()
         assert dialog._checkboxes["json"].isChecked()
+        assert dialog._md_table_style.currentData() == "three_line_html"
+        assert dialog._build_export_settings().markdown.table_style == "three_line_html"
     finally:
         dialog.close()
 
@@ -2966,7 +3022,7 @@ def test_export_worker_keeps_formats_independent_when_one_fails():
             raise RuntimeError("pdf failed")
 
     original_get_exporter = export_module.get_exporter
-    export_module.get_exporter = lambda fmt: FailingExporter() if fmt == "pdf" else WritingExporter(fmt)
+    export_module.get_exporter = lambda fmt, settings=None: FailingExporter() if fmt == "pdf" else WritingExporter(fmt)
     try:
         bb = BBox(0, 0, 100, 20)
         project = OcrProject(name="IndependentExport", pages=[
@@ -12609,6 +12665,7 @@ if __name__ == "__main__":
     test_export_markdown_structure()
     test_markdown_fallback_assets_are_cropped_regions()
     test_markdown_export_settings_filter_and_merge_layout_fragments()
+    test_markdown_table_style_can_keep_source_html()
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
