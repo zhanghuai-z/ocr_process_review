@@ -20,7 +20,6 @@ PADDLE_HANWANG_TEXT_LABELS = {
     "header",
     "footer",
     "footnote",
-    "vision_footnote",
     "number",
     "page_number",
     "reference",
@@ -34,6 +33,11 @@ PADDLE_HANWANG_TEXT_LABELS = {
     "table_caption",
     "table_title",
     "table_note",
+}
+
+PADDLE_LABEL_ALIASES = {
+    # Legacy Paddle/VL wording. The product/UI concept is simply "footnote".
+    "vision_footnote": "footnote",
 }
 
 PADDLE_HANWANG_SKIP_LABELS = {
@@ -74,7 +78,8 @@ def authoritative_paddle_label(record: dict[str, Any] | None, default: str = "")
 
 
 def normalize_paddle_label(label: object) -> str:
-    return str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = str(label or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return PADDLE_LABEL_ALIASES.get(normalized, normalized)
 
 
 def is_hanwang_text_label(label: object) -> bool:

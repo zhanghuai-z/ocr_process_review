@@ -76,6 +76,8 @@ GALLERY_THUMB   = 56
 GALLERY_ITEMS_PER_ROW = 6
 GALLERY_MAX_ROWS = 3
 LOW_CONF        = 0.80
+PROOF_TEXT_FONT_FAMILY = "'SimHei','Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
+PROOF_TEXT_FONT_CSS = f"font-family:{PROOF_TEXT_FONT_FAMILY};"
 DEFAULT_CONFUSABLE_CANDIDATES = {
     # 田/由/甲/申 系
     "田": ["由", "甲", "申", "曲"],
@@ -768,7 +770,10 @@ class VProofPanel(QWidget):
         self._char_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self._char_list.setStyleSheet("QListWidget { background:#ffffff; } QListWidget::item { background:#ffffff; }")
+        self._char_list.setStyleSheet(
+            f"QListWidget {{ background:#ffffff; {PROOF_TEXT_FONT_CSS} }} "
+            "QListWidget::item { background:#ffffff; }"
+        )
         self._char_list.itemClicked.connect(self._on_char_clicked)
         # proof-crosschar-batch 第 1 任务：多选/取消都走这个路径
         self._char_list.itemSelectionChanged.connect(self._on_char_selection_changed)
@@ -886,6 +891,7 @@ class VProofPanel(QWidget):
         self._slot_info_lbl = QLabel("当前槽位：—")
         self._slot_info_lbl.setStyleSheet("color:#555;font-size:11px;")
         self._slot_edit_input = QLineEdit()
+        self._slot_edit_input.setStyleSheet(PROOF_TEXT_FONT_CSS)
         self._slot_edit_input.setPlaceholderText("改当前槽位为…（Enter 应用）")
         self._slot_edit_input.setMaxLength(8)
         self._slot_edit_input.setClearButtonEnabled(True)
@@ -911,6 +917,7 @@ class VProofPanel(QWidget):
         batch_row = QHBoxLayout()
         batch_row.setSpacing(4)
         self._batch_input = QLineEdit()
+        self._batch_input.setStyleSheet(PROOF_TEXT_FONT_CSS)
         self._batch_input.setPlaceholderText("批量改为…（多选时生效）")
         self._batch_input.setMaxLength(8)  # 允许 token-粒度多字符
         self._batch_input.setClearButtonEnabled(True)
@@ -1079,7 +1086,9 @@ class VProofPanel(QWidget):
         # 让 Backspace / Delete / Ctrl+X 对槽位填空白而不是真删除。
         self._text_edit = _SlotAwareTextEdit()
         self._text_edit.set_slot_owner(self)
-        self._text_edit.setStyleSheet("font-size:16px; padding:8px; background:#fafafa;")
+        self._text_edit.setStyleSheet(
+            f"{PROOF_TEXT_FONT_CSS} font-size:16px; padding:8px; background:#fafafa;"
+        )
         self._text_edit.document().contentsChanged.connect(self._on_text_changed)
         layout.addWidget(self._text_edit)
 

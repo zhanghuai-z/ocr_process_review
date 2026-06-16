@@ -35,6 +35,12 @@ class BlockType(str, Enum):
             "text_title": cls.TITLE,
             "heading": cls.TITLE,
             "headline": cls.TITLE,
+            "heading_1": cls.TITLE,
+            "heading_2": cls.TITLE,
+            "heading_3": cls.TITLE,
+            "heading_4": cls.TITLE,
+            "heading_5": cls.TITLE,
+            "heading_6": cls.TITLE,
             "paragraph": cls.TEXT,
             "plain_text": cls.TEXT,
             "doc_text": cls.TEXT,
@@ -93,7 +99,7 @@ class BlockType(str, Enum):
         if normalized in mapping:
             return mapping[normalized]
 
-        if "title" in normalized:
+        if "title" in normalized or normalized.startswith("heading_"):
             return cls.TITLE
         if "caption" in normalized and "table" in normalized:
             return cls.TABLE_CAPTION

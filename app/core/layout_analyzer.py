@@ -209,7 +209,7 @@ class LayoutAnalyzer:
             "footnote",
             "sidebar_text",
         }:
-            note_parts.append(f"source_label={raw_type}")
+            note_parts.append(f"source_label={normalized_type}")
 
         raw_overlay_items.append((raw_type, bbox))
         raw_payload, app_payload = split_legacy_raw_payload(normalized.raw)
@@ -218,7 +218,7 @@ class LayoutAnalyzer:
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
-            source_label=raw_type,
+            source_label=normalized_type,
             raw_payload=raw_payload,
             app_payload=app_payload,
         )

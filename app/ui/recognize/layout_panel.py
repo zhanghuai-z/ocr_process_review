@@ -1,14 +1,17 @@
 """版面分析面板：图像 + BBox 叠加可视化，块信息内嵌底部栏。"""
 from __future__ import annotations
 import copy
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
+    QScrollArea, QSizePolicy, QSplitter, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from app.core.bbox_extraction import bbox_from_variant
@@ -66,33 +69,36 @@ class LayoutSubtypeSpec:
 
 
 BLOCK_TYPE_BUTTON_GROUPS = (
+    ("标题", (
+        LayoutSubtypeSpec("H1", "heading_1", BlockType.TITLE, "一级标题"),
+        LayoutSubtypeSpec("H2", "heading_2", BlockType.TITLE, "二级标题"),
+        LayoutSubtypeSpec("H3", "heading_3", BlockType.TITLE, "三级标题"),
+        LayoutSubtypeSpec("H4", "heading_4", BlockType.TITLE, "四级标题"),
+        LayoutSubtypeSpec("H5", "heading_5", BlockType.TITLE, "五级标题"),
+        LayoutSubtypeSpec("H6", "heading_6", BlockType.TITLE, "六级标题"),
+    )),
     ("文本", (
         LayoutSubtypeSpec("正文", "text", BlockType.TEXT, "普通正文段落"),
-        LayoutSubtypeSpec("段落标题", "paragraph_title", BlockType.TITLE, "章节/小节标题"),
-        LayoutSubtypeSpec("文档标题", "doc_title", BlockType.TITLE, "页面或文档主标题"),
         LayoutSubtypeSpec("摘要", "abstract", BlockType.TEXT, "摘要内容"),
     )),
-    ("页边", (
+    ("公式", (
+        LayoutSubtypeSpec("公式", "formula", BlockType.EQUATION, "自动判断行内公式/独立公式"),
+    )),
+    ("图像表格", (
+        LayoutSubtypeSpec("图片", "figure", BlockType.FIGURE, "图片/插图区域"),
+        LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
+        LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
+    )),
+    ("题注参考", (
+        LayoutSubtypeSpec("图题", "figure_title", BlockType.FIGURE_CAPTION, "图片或图表标题"),
+        LayoutSubtypeSpec("表题", "table_title", BlockType.TABLE_CAPTION, "表格标题"),
+        LayoutSubtypeSpec("参考文献", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
+    )),
+    ("页边脚注", (
         LayoutSubtypeSpec("页眉", "header", BlockType.TEXT, "页眉区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页脚", "footer", BlockType.TEXT, "页脚区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页码", "number", BlockType.TEXT, "页码/编号类位置元素"),
         LayoutSubtypeSpec("脚注", "footnote", BlockType.TEXT, "脚注文本"),
-    )),
-    ("公式表格", (
-        LayoutSubtypeSpec("公式", "display_formula", BlockType.EQUATION, "独立公式块"),
-        LayoutSubtypeSpec("行内公式", "inline_formula", BlockType.EQUATION, "正文行内公式"),
-        LayoutSubtypeSpec("公式序号", "formula_number", BlockType.EQUATION, "公式右侧或附近的编号"),
-        LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
-    )),
-    ("图像图表", (
-        LayoutSubtypeSpec("图片", "figure", BlockType.FIGURE, "图片/插图区域"),
-        LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
-        LayoutSubtypeSpec("图题", "figure_title", BlockType.FIGURE_CAPTION, "图片或图表标题"),
-        LayoutSubtypeSpec("表题", "table_title", BlockType.TABLE_CAPTION, "表格标题"),
-    )),
-    ("引用注释", (
-        LayoutSubtypeSpec("参考内容", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
-        LayoutSubtypeSpec("视觉脚注", "vision_footnote", BlockType.TEXT, "Paddle 视觉模型判定的脚注区域"),
     )),
 )
 BLOCK_SUBTYPE_BUTTON_ORDER = tuple(
@@ -161,9 +167,9 @@ def _block_type_button_stylesheet(block_type: BlockType) -> str:
 def _block_type_group_stylesheet() -> str:
     return """
         QFrame#blockTypeGroup {
-            border: 1px solid #e5e8ec;
+            border: 1px solid #eef1f5;
             border-radius: 6px;
-            background: #fbfcfd;
+            background: #ffffff;
         }
         QLabel#blockTypeGroupTitle {
             color: #5f6b7a;
@@ -205,6 +211,7 @@ class LayoutPanel(QWidget):
         self._selected_type_buttons: dict[BlockType, QPushButton] = {}
         self._selected_subtype_buttons: dict[str, QPushButton] = {}
         self._type_group: QButtonGroup | None = None
+        self._block_search_matches: list[tuple[int, Block]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -238,11 +245,19 @@ class LayoutPanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter = splitter
 
-        # 左：页面目录——宍依设计稿的带缩略图 + 状态徽章的 PageDirectoryList。
+        # 左：页面目录 / 标题目录切换。
         from app.ui.widgets.page_directory import PageDirectoryList
         self._page_list = PageDirectoryList()
         self._page_list.currentRowChanged.connect(self._on_page_selected)
-        splitter.addWidget(self._page_list)
+        self._outline_tree = QTreeWidget()
+        self._outline_tree.setObjectName("headingOutlineTree")
+        self._outline_tree.setHeaderHidden(True)
+        self._outline_tree.itemClicked.connect(self._on_outline_item_clicked)
+        self._left_tabs = QTabWidget()
+        self._left_tabs.setObjectName("layoutLeftTabs")
+        self._left_tabs.addTab(self._page_list, "页面")
+        self._left_tabs.addTab(self._outline_tree, "标题")
+        splitter.addWidget(self._left_tabs)
 
         # 中：图像查看器 + 上方编辑工具条
         viewer_wrap = QWidget()
@@ -308,6 +323,43 @@ class LayoutPanel(QWidget):
         tool_title = QLabel("工具")
         tool_title.setObjectName("sectionTitle")
         tool_lay.addWidget(tool_title)
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("查找块文本，支持正则")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.textChanged.connect(self._refresh_block_search)
+        tool_lay.addWidget(self._search_input)
+
+        search_opts = QHBoxLayout()
+        search_opts.setContentsMargins(0, 0, 0, 0)
+        search_opts.setSpacing(8)
+        self._search_regex = QCheckBox("正则")
+        self._search_regex.toggled.connect(self._refresh_block_search)
+        self._search_case = QCheckBox("区分大小写")
+        self._search_case.toggled.connect(self._refresh_block_search)
+        search_opts.addWidget(self._search_regex)
+        search_opts.addWidget(self._search_case)
+        search_opts.addStretch(1)
+        tool_lay.addLayout(search_opts)
+
+        self._search_results = QListWidget()
+        self._search_results.setObjectName("layoutSearchResults")
+        self._search_results.setMaximumHeight(118)
+        self._search_results.itemClicked.connect(self._on_search_result_clicked)
+        tool_lay.addWidget(self._search_results)
+
+        search_actions = QHBoxLayout()
+        search_actions.setContentsMargins(0, 0, 0, 0)
+        search_actions.setSpacing(6)
+        self._btn_apply_filter_type = QPushButton("应用当前类型")
+        self._btn_apply_filter_type.setObjectName("secondaryBtn")
+        self._btn_apply_filter_type.setToolTip("把当前选中的属性按钮批量应用到查找结果")
+        self._btn_apply_filter_type.clicked.connect(self._apply_current_type_to_search_matches)
+        search_actions.addWidget(self._btn_apply_filter_type)
+        self._search_count_lbl = QLabel("0")
+        self._search_count_lbl.setObjectName("muted")
+        search_actions.addWidget(self._search_count_lbl)
+        tool_lay.addLayout(search_actions)
 
         self._type_context_title = QLabel("新建框类型")
         tool_lay.addWidget(self._type_context_title)
@@ -461,6 +513,8 @@ class LayoutPanel(QWidget):
         self._pages = pages
         self._ink_mask_cache.clear()
         self._page_list.set_pages(pages)
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self._btn_run.setEnabled(bool(pages))
         if pages:
             self._page_list.set_current_index(0)
@@ -476,6 +530,10 @@ class LayoutPanel(QWidget):
         self._undo_stack.clear()
         self._ink_mask_cache.clear()
         self._page_list.set_pages([])
+        self._outline_tree.clear()
+        self._search_results.clear()
+        self._block_search_matches.clear()
+        self._search_count_lbl.setText("0")
         self._viewer.clear()
         self._set_status_text("请先导入文件并运行版面分析")
         self._btn_run.setEnabled(False)
@@ -492,6 +550,8 @@ class LayoutPanel(QWidget):
         self.finish_analysis_progress()
         self._pages = pages
         self._ink_mask_cache.clear()
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
         self._update_page_nav()
@@ -554,6 +614,153 @@ class LayoutPanel(QWidget):
         compact = _compact_status_text(full)
         self._status_lbl.setText(compact)
         self._status_lbl.setToolTip(full if compact != full else "")
+
+    @staticmethod
+    def _payload_strings(value: object):
+        if isinstance(value, dict):
+            for item in value.values():
+                yield from LayoutPanel._payload_strings(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from LayoutPanel._payload_strings(item)
+        elif value is not None:
+            text = str(value).strip()
+            if text:
+                yield text
+
+    @staticmethod
+    def _block_search_fields(block: Block) -> list[str]:
+        parts: list[str] = [
+            block.source_label,
+            getattr(block.block_type, "value", str(block.block_type)),
+            block.note,
+        ]
+        for line in block.lines:
+            parts.extend([line.display_text, line.final_text, line.text, line.ocr_text])
+        parts.extend(LayoutPanel._payload_strings(block.raw_payload))
+        parts.extend(LayoutPanel._payload_strings(block.app_payload))
+        return [str(part or "").strip() for part in parts if str(part or "").strip()]
+
+    @staticmethod
+    def _block_display_text(block: Block) -> str:
+        return " ".join(LayoutPanel._block_search_fields(block))
+
+    @staticmethod
+    def _block_preview_text(block: Block) -> str:
+        for line in block.lines:
+            text = line.display_text or line.final_text or line.text or line.ocr_text
+            if text:
+                return _compact_status_text(text)
+        if block.note:
+            return _compact_status_text(block.note.split("|", 1)[0])
+        return block.source_label or getattr(block.block_type, "value", str(block.block_type))
+
+    def _refresh_block_search(self) -> None:
+        if not hasattr(self, "_search_results"):
+            return
+        query = self._search_input.text() if hasattr(self, "_search_input") else ""
+        query = str(query or "")
+        self._search_results.clear()
+        self._block_search_matches.clear()
+        if not query.strip() or not self._pages:
+            self._search_count_lbl.setText("0")
+            return
+
+        matcher = None
+        if self._search_regex.isChecked():
+            flags = 0 if self._search_case.isChecked() else re.IGNORECASE
+            try:
+                matcher = re.compile(query, flags)
+            except re.error as exc:
+                self._search_count_lbl.setText("正则错误")
+                self._set_status_text(f"正则表达式错误：{exc}")
+                return
+        else:
+            needle = query if self._search_case.isChecked() else query.lower()
+
+        for page_idx, page in enumerate(self._pages):
+            for block in page.blocks:
+                fields = self._block_search_fields(block)
+                if matcher is not None:
+                    matched = any(bool(matcher.search(field)) for field in fields)
+                else:
+                    matched = any(
+                        needle in (field if self._search_case.isChecked() else field.lower())
+                        for field in fields
+                    )
+                if not matched:
+                    continue
+                match_idx = len(self._block_search_matches)
+                self._block_search_matches.append((page_idx, block))
+                label = normalize_paddle_label(block.source_label or block.block_type.value)
+                item = QListWidgetItem(
+                    f"第 {page.page_number} 页 · {label} · {self._block_preview_text(block)}"
+                )
+                item.setData(Qt.ItemDataRole.UserRole, match_idx)
+                self._search_results.addItem(item)
+
+        count = len(self._block_search_matches)
+        self._search_count_lbl.setText(f"{count} 个")
+        if count:
+            self._set_status_text(f"查找到 {count} 个版面块")
+
+    def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
+        match_idx = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(match_idx, int) or not (0 <= match_idx < len(self._block_search_matches)):
+            return
+        page_idx, block = self._block_search_matches[match_idx]
+        self._focus_block(page_idx, block)
+
+    def _focus_block(self, page_idx: int, block: Block) -> None:
+        if not (0 <= page_idx < len(self._pages)):
+            return
+        self._current_page_idx = page_idx
+        self._page_list.set_current_index(page_idx)
+        self._update_viewer(page_idx)
+        if self._viewer.select_block(block):
+            self._on_block_clicked(block)
+        else:
+            self._viewer.highlight_bbox(block.bbox, zoom=True)
+            self._selected_block = block
+            self._inspector.set_block(block)
+            self._sync_lock_button(block)
+            self._sync_selected_type_buttons(block)
+
+    def _current_checked_subtype(self) -> LayoutSubtypeSpec:
+        for source_label, button in self._new_subtype_buttons.items():
+            if button.isChecked():
+                spec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL.get(source_label)
+                if spec is not None:
+                    return spec
+        return self._new_subtype
+
+    def _apply_current_type_to_search_matches(self) -> None:
+        if not self._block_search_matches:
+            self._set_status_text("没有可应用的查找结果")
+            return
+        subtype = self._current_checked_subtype()
+        affected: dict[int, list[Block]] = {}
+        for page_idx, block in self._block_search_matches:
+            if 0 <= page_idx < len(self._pages):
+                affected.setdefault(page_idx, []).append(block)
+        if not affected:
+            return
+        for page_idx in affected:
+            self._push_undo_snapshot_for_page(page_idx)
+        changed = 0
+        for page_idx, blocks in affected.items():
+            page = self._pages[page_idx]
+            for block in blocks:
+                if self._apply_subtype_to_block(page, block, subtype):
+                    changed += 1
+            for order, block in enumerate(page.blocks):
+                block.order = order
+            self.block_contract_changed.emit(page.page_number, "block_type_changed")
+        self._show_page_layers(self._pages[self._current_page_idx])
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
+        self.geometry_changed.emit()
+        self._set_status_text(f"已将 {changed} 个查找结果设为 {subtype.label}")
 
     def _create_type_button_grid(
         self,
@@ -684,6 +891,65 @@ class LayoutPanel(QWidget):
         self._selection_type_status.setText(text)
         self._selection_type_status.setToolTip(tooltip)
 
+    @staticmethod
+    def _heading_level_for_block(block: Block) -> int:
+        label = normalize_paddle_label(block.source_label)
+        match = re.fullmatch(r"heading_([1-6])", label)
+        if match:
+            return int(match.group(1))
+        if label == "doc_title":
+            return 1
+        if label in {"paragraph_title", "section_title", "chapter_title", "title"}:
+            return 0
+        return 0
+
+    @staticmethod
+    def _is_title_like_block(block: Block) -> bool:
+        label = normalize_paddle_label(block.source_label)
+        return block.block_type == BlockType.TITLE or label in {
+            "doc_title",
+            "paragraph_title",
+            "section_title",
+            "chapter_title",
+            "title",
+        } or bool(re.fullmatch(r"heading_[1-6]", label))
+
+    def _rebuild_heading_outline(self) -> None:
+        if not hasattr(self, "_outline_tree"):
+            return
+        self._outline_tree.clear()
+        for page_idx, page in enumerate(self._pages):
+            heading_blocks = [block for block in page.blocks if self._is_title_like_block(block)]
+            if not heading_blocks:
+                continue
+            page_item = QTreeWidgetItem([f"第 {page.page_number} 页"])
+            page_item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, -1))
+            self._outline_tree.addTopLevelItem(page_item)
+            for block in sorted(heading_blocks, key=lambda item: (item.bbox.y, item.bbox.x, item.order)):
+                level = self._heading_level_for_block(block)
+                level_text = f"H{level}" if level else "标题"
+                text = self._block_preview_text(block)
+                item = QTreeWidgetItem([f"{level_text}  {text}"])
+                item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, id(block)))
+                page_item.addChild(item)
+            page_item.setExpanded(True)
+
+    def _on_outline_item_clicked(self, item: QTreeWidgetItem) -> None:
+        payload = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, tuple) or len(payload) != 2:
+            return
+        page_idx, block_identity = payload
+        if not isinstance(page_idx, int) or not (0 <= page_idx < len(self._pages)):
+            return
+        if block_identity == -1:
+            self._page_list.set_current_index(page_idx)
+            self._current_page_idx = page_idx
+            self._update_viewer(page_idx)
+            return
+        block = next((candidate for candidate in self._pages[page_idx].blocks if id(candidate) == block_identity), None)
+        if block is not None:
+            self._focus_block(page_idx, block)
+
     # ------------------------------------------------------------------ private
 
     def _request_analysis(self) -> None:
@@ -775,12 +1041,15 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         subtype = self._new_subtype
         bt = self._coerce_block_type(subtype.block_type, BlockType.TEXT)
+        source_label = self._source_label_for_bbox_subtype(page, bbox, subtype)
         intersecting = self._blocks_intersecting_bbox(page, bbox)
         if intersecting:
-            merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, subtype.source_label)
+            merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, source_label)
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
             self._set_status_text("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
+            self._rebuild_heading_outline()
+            self._refresh_block_search()
             self.geometry_changed.emit()
             self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
@@ -788,13 +1057,15 @@ class LayoutPanel(QWidget):
             block_type=bt,
             bbox=bbox,
             source=BlockSource.MANUAL_DRAW,
-            source_label=subtype.source_label,
+            source_label=source_label,
         )
         new_block.recognizable = is_text_ocr_candidate(new_block)
         self._bind_manual_block_to_paddle(page, new_block)
         page.blocks.append(new_block)
         self._show_page_layers(page)
         self._select_block_for_edit(new_block)
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_created")
 
@@ -815,6 +1086,8 @@ class LayoutPanel(QWidget):
             self._prop_bbox.setText("")
             self._prop_conf.hide()
             self._inspector.clear()
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_deleted")
 
@@ -870,6 +1143,8 @@ class LayoutPanel(QWidget):
         self._select_block_for_edit(primary)
         self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
         self._set_status_text("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "blocks_merged")
 
@@ -882,23 +1157,22 @@ class LayoutPanel(QWidget):
             return
         new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
         new_label = new_subtype.normalized_source_label
-        current_label = normalize_paddle_label(self._selected_block.source_label)
+        current_label = self._button_source_label_for_block(self._selected_block)
         if self._selected_block.block_type == new_subtype.block_type and current_label == new_label:
             self._sync_selected_type_buttons(self._selected_block)
             return
         self._push_undo_snapshot()
-        self._selected_block.block_type = new_subtype.block_type
-        self._selected_block.source_label = new_subtype.source_label
-        self._selected_block.source = BlockSource.USER_EDITED
-        self._selected_block.recognizable = is_text_ocr_candidate(self._selected_block)
-        self._bind_manual_block_to_paddle(
+        self._apply_subtype_to_block(
             self._pages[self._current_page_idx],
             self._selected_block,
+            new_subtype,
         )
         self._show_page_layers(self._pages[self._current_page_idx])
         self._viewer.select_block(self._selected_block)
         self._sync_lock_button(self._selected_block)
         self._sync_selected_type_buttons(self._selected_block)
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
 
@@ -959,7 +1233,11 @@ class LayoutPanel(QWidget):
         explicit_source_label = block.source_label
         binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
         apply_paddle_binding_to_block(block, binding)
-        if normalize_paddle_label(explicit_source_label) in DEFAULT_SUBTYPE_BY_SOURCE_LABEL:
+        if normalize_paddle_label(explicit_source_label) in DEFAULT_SUBTYPE_BY_SOURCE_LABEL or normalize_paddle_label(explicit_source_label) in {
+            "display_formula",
+            "inline_formula",
+            "formula_number",
+        }:
             block.source_label = explicit_source_label
             set_payload_entries(block, {PADDLE_BLOCK_LABEL_KEY: explicit_source_label})
         if binding.status == BINDING_EMPTY_REVIEW:
@@ -1030,8 +1308,13 @@ class LayoutPanel(QWidget):
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
             return
-        page = self._pages[self._current_page_idx]
-        self._undo_stack.append((self._current_page_idx, copy.deepcopy(page.blocks)))
+        self._push_undo_snapshot_for_page(self._current_page_idx)
+
+    def _push_undo_snapshot_for_page(self, page_idx: int) -> None:
+        if not (0 <= page_idx < len(self._pages)):
+            return
+        page = self._pages[page_idx]
+        self._undo_stack.append((page_idx, copy.deepcopy(page.blocks)))
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
         self._btn_undo.setEnabled(True)
@@ -1059,6 +1342,8 @@ class LayoutPanel(QWidget):
             self._update_viewer(page_idx)
         self._update_page_nav()
         self._set_status_text("已撤销上一步版面编辑")
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "layout_undo")
 
@@ -1291,6 +1576,42 @@ class LayoutPanel(QWidget):
             if bbox.to_xyxy() == origin_tuple:
                 subblock[UI_DELETED_INLINE_FORMULA_KEY] = True
 
+    def _apply_subtype_to_block(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> bool:
+        source_label = self._source_label_for_subtype(page, block, subtype)
+        changed = (
+            block.block_type != subtype.block_type
+            or normalize_paddle_label(block.source_label) != normalize_paddle_label(source_label)
+        )
+        block.block_type = subtype.block_type
+        block.source_label = source_label
+        block.source = BlockSource.USER_EDITED
+        if block.block_type != BlockType.TEXT:
+            block.is_locked = False
+        block.recognizable = is_text_ocr_candidate(block)
+        self._bind_manual_block_to_paddle(page, block)
+        return changed
+
+    def _source_label_for_subtype(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> str:
+        if normalize_paddle_label(subtype.source_label) == "formula":
+            return self._infer_formula_source_label_for_bbox(page, block.bbox, exclude=block)
+        return subtype.source_label
+
+    def _source_label_for_bbox_subtype(self, page: Page, bbox: BBox, subtype: LayoutSubtypeSpec) -> str:
+        if normalize_paddle_label(subtype.source_label) == "formula":
+            return self._infer_formula_source_label_for_bbox(page, bbox)
+        return subtype.source_label
+
+    def _infer_formula_source_label_for_bbox(self, page: Page, bbox: BBox, *, exclude: Block | None = None) -> str:
+        cx = (bbox.x1 + bbox.x2) / 2.0
+        cy = (bbox.y1 + bbox.y2) / 2.0
+        for block in page.blocks:
+            if block is exclude or block.block_type != BlockType.TEXT:
+                continue
+            if not (block.bbox.x1 <= cx <= block.bbox.x2 and block.bbox.y1 <= cy <= block.bbox.y2):
+                continue
+            return "inline_formula"
+        return "display_formula"
+
     @staticmethod
     def _coerce_block_type(value: object, default: BlockType) -> BlockType:
         if isinstance(value, BlockType):
@@ -1316,8 +1637,18 @@ class LayoutPanel(QWidget):
     @staticmethod
     def _button_source_label_for_block(block: Block) -> str:
         normalized = normalize_paddle_label(block.source_label)
+        if normalized in {
+            "display_formula",
+            "inline_formula",
+            "formula_number",
+            "equation",
+            "formula",
+        }:
+            return "formula"
         if normalized in DEFAULT_SUBTYPE_BY_SOURCE_LABEL:
             return normalized
+        if block.block_type == BlockType.TITLE:
+            return ""
         spec = DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block.block_type)
         return spec.source_label if spec is not None else ""
 

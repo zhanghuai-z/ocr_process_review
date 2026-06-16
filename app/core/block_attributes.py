@@ -71,9 +71,11 @@ def block_attributes(block: Block) -> BlockAttributes:
     binding_label = ""
     if isinstance(binding, dict):
         binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
-    source_label = block.source_label or binding_label or raw_label
+    source_label = normalize_source_label(block.source_label or binding_label or raw_label)
     user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
-    semantic_label = (source_label if user_authored_label else raw_label) or source_label or block.block_type.value
+    semantic_label = normalize_source_label(
+        (source_label if user_authored_label else raw_label) or source_label or block.block_type.value
+    )
     semantic_block_type = BlockType.from_paddle(semantic_label)
     if semantic_block_type == BlockType.UNKNOWN:
         semantic_block_type = block.block_type

@@ -243,6 +243,40 @@ QListWidget#pageDirectoryList::item {{
 QListWidget#pageDirectoryList::item:hover    {{ background: {bg_hover}; }}
 QListWidget#pageDirectoryList::item:selected {{ background: {bg_selected}; border-left: 3px solid {brand}; }}
 
+QTabWidget#layoutLeftTabs::pane {{
+    border: none;
+    border-right: 1px solid {border};
+    background: {bg_panel};
+}}
+QTabWidget#layoutLeftTabs QTabBar::tab {{
+    background: {bg_panel};
+    color: {text_secondary};
+    padding: 7px 12px;
+    border: none;
+    border-bottom: 2px solid transparent;
+}}
+QTabWidget#layoutLeftTabs QTabBar::tab:selected {{
+    color: {brand};
+    border-bottom: 2px solid {brand};
+}}
+QTreeWidget#headingOutlineTree,
+QListWidget#layoutSearchResults {{
+    background: {bg_panel};
+    border: 1px solid {border_subtle};
+    border-radius: {radius_sm};
+    outline: 0;
+}}
+QTreeWidget#headingOutlineTree::item,
+QListWidget#layoutSearchResults::item {{
+    min-height: 22px;
+    padding: 2px 4px;
+}}
+QTreeWidget#headingOutlineTree::item:selected,
+QListWidget#layoutSearchResults::item:selected {{
+    background: {bg_selected};
+    color: {brand};
+}}
+
 QWidget#pageRow {{ background: transparent; }}
 QLabel#pageThumb {{
     background: {bg_root};

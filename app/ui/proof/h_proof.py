@@ -73,7 +73,7 @@ ROW_PAD_Y    = 4     # 裁图上下各加 4px
 IMAGE_ROW_H  = 32    # 行图像显示高度（px）
 # 脚注、数字、标点的 Hanwang 字符框通常比正文窄。字号按较小文本优先，
 # 避免按 slot center 自绘时把标点和数字挤在一起。
-TEXT_FONT_PX = 20
+TEXT_FONT_PX = 22
 TEXT_LINE_HEIGHT_PX = 28
 TEXT_EDITOR_MAX_H = 32
 TEXT_SLOT_MIN_W = 10.0
@@ -87,7 +87,7 @@ LINE_PAIR_H = 70
 # Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
 # 上下 padding(8) = 112 px。
 CELL_PAIR_H = 112
-TEXT_FONT_FAMILY = "'Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
+TEXT_FONT_FAMILY = "'SimHei','Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
 LABEL_W      = 88    # 左侧行号列宽
 STATUS_W     = 80    # 右侧状态列宽
 LOW_CONF     = 0.80

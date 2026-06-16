@@ -461,10 +461,13 @@ def test_component_matcher_extracts_and_classifies_cjk_tokens():
 
 def test_block_type_mapping():
     from app.models import BlockType
+    from app.core.paddle_labels import normalize_paddle_label
 
     assert BlockType.from_paddle("paragraph") == BlockType.TEXT
     assert BlockType.from_paddle("doc_title") == BlockType.TITLE
     assert BlockType.from_paddle("section_title") == BlockType.TITLE
+    assert BlockType.from_paddle("heading_1") == BlockType.TITLE
+    assert BlockType.from_paddle("heading_6") == BlockType.TITLE
     assert BlockType.from_paddle("image_caption") == BlockType.FIGURE_CAPTION
     assert BlockType.from_paddle("table_caption_text") == BlockType.TABLE_CAPTION
     assert BlockType.from_paddle("table_body") == BlockType.TABLE
@@ -472,6 +475,7 @@ def test_block_type_mapping():
     assert BlockType.from_paddle("isolated_formula") == BlockType.EQUATION
     assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
     assert BlockType.from_paddle("vision_footnote") == BlockType.TEXT
+    assert normalize_paddle_label("vision_footnote") == "footnote"
 
     print("test_block_type_mapping PASSED")
 
@@ -3402,7 +3406,7 @@ def test_layout_panel_draw_ignores_locked_text_targets():
             assert len(page.blocks) == 2
             assert page.blocks[0] is text_block
             assert page.blocks[1].block_type == BlockType.EQUATION
-            assert page.blocks[1].source_label == "display_formula"
+            assert page.blocks[1].source_label == "inline_formula"
             assert page.blocks[1].bbox == BBox(25, 22, 20, 12)
         finally:
             panel.close()
@@ -3755,26 +3759,27 @@ def test_layout_panel_type_buttons_are_grouped():
     flat_specs = tuple(spec for _title, specs in BLOCK_TYPE_BUTTON_GROUPS for spec in specs)
     assert flat_specs == BLOCK_SUBTYPE_BUTTON_ORDER
     assert BLOCK_TYPE_BUTTON_ORDER == tuple(dict.fromkeys(spec.block_type for spec in BLOCK_SUBTYPE_BUTTON_ORDER))
-    assert all(2 <= len(specs) <= 4 for _title, specs in BLOCK_TYPE_BUTTON_GROUPS)
+    assert all(1 <= len(specs) <= 6 for _title, specs in BLOCK_TYPE_BUTTON_GROUPS)
     assert {
+        "heading_1",
+        "heading_2",
+        "heading_3",
+        "heading_4",
+        "heading_5",
+        "heading_6",
         "text",
-        "paragraph_title",
-        "doc_title",
         "abstract",
         "header",
         "footer",
         "number",
         "footnote",
-        "display_formula",
-        "inline_formula",
-        "formula_number",
+        "formula",
         "table",
         "figure",
         "chart",
         "figure_title",
         "table_title",
         "reference_content",
-        "vision_footnote",
     } == {spec.source_label for spec in BLOCK_SUBTYPE_BUTTON_ORDER}
 
     panel = LayoutPanel()
@@ -3825,22 +3830,107 @@ def test_layout_panel_subtype_buttons_write_paddle_source_label():
         try:
             panel.set_pages([page])
             app.processEvents()
-            panel._new_subtype_buttons["inline_formula"].click()
+            panel._new_subtype_buttons["formula"].click()
 
             panel._on_block_created(BBox(10, 10, 20, 10))
 
             assert len(page.blocks) == 1
             block = page.blocks[0]
             assert block.block_type == BlockType.EQUATION
-            assert block.source_label == "inline_formula"
+            assert block.source_label == "display_formula"
             assert block.source == BlockSource.MANUAL_DRAW
             assert block.recognizable is False
             assert panel._type_context_title.text() == "选中框类型"
-            assert panel._selection_type_status.text() == "选中：行内公式 / inline_formula"
+            assert panel._selection_type_status.text() == "选中：公式 / formula"
         finally:
             panel.close()
 
     print("test_layout_panel_subtype_buttons_write_paddle_source_label PASSED")
+
+
+def test_layout_panel_formula_button_infers_inline_formula_inside_text_block():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
+        text_block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 40), source_label="text")
+        text_block.is_locked = True
+        page = Page(image_path=str(image_path), width=160, height=100, blocks=[text_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._new_subtype_buttons["formula"].click()
+            panel._on_block_created(BBox(40, 20, 20, 10))
+
+            formula = page.blocks[-1]
+            assert formula.block_type == BlockType.EQUATION
+            assert formula.source_label == "inline_formula"
+            assert panel._selection_type_status.text() == "选中：公式 / formula"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_formula_button_infers_inline_formula_inside_text_block PASSED")
+
+
+def test_layout_panel_search_results_can_batch_apply_heading_level():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
+        target = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 120, 20),
+            source_label="paragraph_title",
+            lines=[Line(text="一、引言", confidence=0.9, bbox=BBox(10, 10, 120, 20))],
+        )
+        other = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 50, 120, 20),
+            source_label="text",
+            lines=[Line(text="普通正文", confidence=0.9, bbox=BBox(10, 50, 120, 20))],
+        )
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[target, other])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._search_regex.setChecked(True)
+            panel._search_input.setText("^一、")
+            assert len(panel._block_search_matches) == 1
+
+            panel._new_subtype_buttons["heading_1"].click()
+            panel._apply_current_type_to_search_matches()
+
+            assert target.block_type == BlockType.TITLE
+            assert target.source_label == "heading_1"
+            assert other.block_type == BlockType.TEXT
+            assert panel._outline_tree.topLevelItemCount() == 1
+            first_page = panel._outline_tree.topLevelItem(0)
+            assert first_page.childCount() == 1
+            assert first_page.child(0).text(0).startswith("H1")
+        finally:
+            panel.close()
+
+    print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
 
 
 def test_layout_panel_undo_restores_block_edits():
@@ -4008,7 +4098,7 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
     )
     blocks, _raw_overlays = LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
     page.blocks = blocks
-    footnote = next(block for block in page.blocks if block.source_label == "vision_footnote")
+    footnote = next(block for block in page.blocks if block.source_label == "footnote")
     assert footnote.block_type == BlockType.TEXT
 
     panel = LayoutPanel()
@@ -7693,7 +7783,7 @@ def test_hanwang_footnote_labels_route_through_hanwang():
 
         assert captured_recblocks == [(10, 10, 250, 40), (10, 50, 280, 90)]
         assert [row.source for row in rows] == ["hanwang", "hanwang"]
-        assert [row.block_label for row in rows] == ["vision_footnote", "footnote"]
+        assert [row.block_label for row in rows] == ["footnote", "footnote"]
         assert [row.text for row in rows] == ["注", "注"]
         assert [row.lines[0].chars[0].text for row in rows] == ["注", "注"]
         assert stats.n_blocks_hanwang == 2
@@ -12289,8 +12379,9 @@ def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
     assert h_proof.IMAGE_ROW_H <= 32
-    # 脚注/数字/标点的 Hanwang 字符框更窄，横校文本字号不能再按正文 24px 硬挤。
-    assert h_proof.TEXT_FONT_PX == 20
+    # 脚注/数字/标点的 Hanwang 字符框更窄，横校文本字号只能小幅放大。
+    assert h_proof.TEXT_FONT_PX == 22
+    assert h_proof.TEXT_FONT_PX <= 22
     assert h_proof.TEXT_LINE_HEIGHT_PX <= 28
     assert h_proof.TEXT_EDITOR_MAX_H <= 32
     assert h_proof.LINE_PAIR_H == 70
@@ -12298,6 +12389,7 @@ def test_hproof_visual_size_is_compact():
         h_proof.LINE_PAIR_H
         >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H + 2
     )
+    assert "SimHei" in h_proof.TEXT_FONT_FAMILY
     assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
     assert h_proof.TEXT_SLOT_MIN_W >= 10.0
     assert h_proof.TEXT_SLOT_GUTTER_W >= 2.0
