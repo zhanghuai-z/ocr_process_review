@@ -188,6 +188,9 @@ class RunStats:
     recog_crop_pixels: int = 0
     recog_probe_calls: int = 0
     recog_group_failures: int = 0
+    recog_group_retry_attempts: int = 0
+    recog_group_retry_successes: int = 0
+    recog_group_retry_failures: int = 0
     recog_batch_chunks: int = 0
     recog_batch_failures: int = 0
     recog_batch_disabled: bool = False
@@ -817,6 +820,7 @@ LATIN_REVERSE_OCCUPY_CONFIDENCE = 0.50
 LATIN_CANDIDATE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./&+-")
 RECOG_GROUP_CROP_PAD_X = 2
 RECOG_GROUP_CROP_PAD_Y = 2
+RECOG_GROUP_RETRY_TOP_TRIM = 3
 ENGCUT_LINE_CROP_PAD_X = 2
 ENGCUT_LINE_CROP_PAD_Y = 2
 
@@ -1535,14 +1539,12 @@ def run_micro_recblock(
             group_area_indices.append(group["_area_idx"])
             recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
 
-        def mark_recog_group_failure(placement: _GroupPlacement, error: Exception) -> None:
-            stats.recog_group_failures += 1
+        def update_recog_group_audit(placement: _GroupPlacement, values: dict[str, Any]) -> None:
             route = text_routes[placement.area_idx]
             audits = segimg_group_audits_by_route.setdefault(route.key, [])
             for item in audits:
                 if item.get("recog_group_bbox") == list(placement.page_bbox):
-                    item["recog_failed"] = True
-                    item["recog_error"] = str(error)
+                    item.update(values)
                     return
             audits.append({
                 "route_text_slice_bbox": list(route.bbox),
@@ -1550,15 +1552,67 @@ def run_micro_recblock(
                 "recog_group_bbox": list(placement.page_bbox),
                 "clipped": False,
                 "dropped": False,
+                **values,
+            })
+
+        def mark_recog_group_failure(
+            placement: _GroupPlacement,
+            error: Exception,
+            *,
+            retry_bbox: tuple[int, int, int, int] | None = None,
+            retry_error: Exception | None = None,
+        ) -> None:
+            stats.recog_group_failures += 1
+            values: dict[str, Any] = {
                 "recog_failed": True,
                 "recog_error": str(error),
-            })
+            }
+            if retry_bbox is not None:
+                values.update({
+                    "recog_retry_attempted": True,
+                    "recog_retry_strategy": f"trim_top_{RECOG_GROUP_RETRY_TOP_TRIM}px",
+                    "recog_retry_bbox": list(retry_bbox),
+                    "recog_retry_succeeded": False,
+                })
+            if retry_error is not None:
+                values["recog_retry_error"] = str(retry_error)
+            update_recog_group_audit(placement, values)
+
+        def mark_recog_group_retry_success(
+            placement: _GroupPlacement,
+            *,
+            original_error: Exception,
+            retry_bbox: tuple[int, int, int, int],
+        ) -> None:
+            update_recog_group_audit(
+                placement,
+                {
+                    "recog_retry_attempted": True,
+                    "recog_retry_strategy": f"trim_top_{RECOG_GROUP_RETRY_TOP_TRIM}px",
+                    "recog_retry_original_error": str(original_error),
+                    "recog_retry_bbox": list(retry_bbox),
+                    "recog_retry_succeeded": True,
+                },
+            )
+
+        def retry_bbox_after_top_trim(
+            bbox: tuple[int, int, int, int],
+        ) -> tuple[int, int, int, int] | None:
+            left, top, right, bottom = bbox
+            if bottom - top <= RECOG_GROUP_RETRY_TOP_TRIM + 8:
+                return None
+            retry_top = min(bottom - 1, top + RECOG_GROUP_RETRY_TOP_TRIM)
+            if bottom - retry_top < 8:
+                return None
+            return left, retry_top, right, bottom
 
         def recognize_individually(placements: list[_GroupPlacement]) -> None:
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
                 crop = image_bgr[top:bottom, left:right].copy()
                 crop_h, crop_w = crop.shape[:2]
+                offset_left = left
+                offset_top = top
                 try:
                     stats.recog_probe_calls += 1
                     raw = native_bridge.run_linecut_recog(
@@ -1568,16 +1622,60 @@ def run_micro_recblock(
                         timeout=recog_timeout,
                     )
                 except Exception as exc:
-                    logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
-                    mark_recog_group_failure(placement, exc)
-                    raw = {}
+                    retry_bbox = retry_bbox_after_top_trim(placement.page_bbox)
+                    if retry_bbox is not None:
+                        retry_left, retry_top, retry_right, retry_bottom = retry_bbox
+                        retry_crop = image_bgr[retry_top:retry_bottom, retry_left:retry_right].copy()
+                        try:
+                            stats.recog_group_retry_attempts += 1
+                            stats.recog_probe_calls += 1
+                            raw = native_bridge.run_linecut_recog(
+                                retry_crop,
+                                recblock_xyxy=None,
+                                with_charrcg=True,
+                                timeout=recog_timeout,
+                            )
+                        except Exception as retry_exc:
+                            stats.recog_group_retry_failures += 1
+                            logger.warning(
+                                "Hanwang micro_recblock group failed bbox=%s retry_bbox=%s: %s; retry: %s",
+                                placement.page_bbox,
+                                retry_bbox,
+                                exc,
+                                retry_exc,
+                            )
+                            mark_recog_group_failure(
+                                placement,
+                                exc,
+                                retry_bbox=retry_bbox,
+                                retry_error=retry_exc,
+                            )
+                            raw = {}
+                        else:
+                            stats.recog_group_retry_successes += 1
+                            logger.info(
+                                "Hanwang micro_recblock group retry succeeded bbox=%s retry_bbox=%s",
+                                placement.page_bbox,
+                                retry_bbox,
+                            )
+                            mark_recog_group_retry_success(
+                                placement,
+                                original_error=exc,
+                                retry_bbox=retry_bbox,
+                            )
+                            offset_left, offset_top = retry_left, retry_top
+                            crop_h, crop_w = retry_crop.shape[:2]
+                    else:
+                        logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
+                        mark_recog_group_failure(placement, exc)
+                        raw = {}
                 local_lines = _line_results_from_recog(
                     raw,
                     fallback_bbox=(0, 0, crop_w, crop_h),
                     include_chars=include_chars,
                 )
                 grouped_lines[text_routes[placement.area_idx].key].extend(
-                    _offset_line_results(local_lines, dx=left, dy=top)
+                    _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
                 )
 
         batch_enabled = not _BATCH_DISABLED_FOR_SESSION and not has_layout_routes

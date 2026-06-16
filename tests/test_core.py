@@ -6925,6 +6925,99 @@ def test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
     print("test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback PASSED")
 
 
+def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {"bbox": {"left": 10, "top": 10, "right": 80, "bottom": 40}},
+                    ]
+                }
+            ]
+        }
+
+    calls = []
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        calls.append(tuple(image_bgr.shape[:2]))
+        if len(calls) == 1:
+            raise RuntimeError("native recog access violation")
+        assert calls[-1] == (31, 74)
+        return {
+            "lines": [
+                {
+                    "groups": [
+                        {
+                            "bbox": {"left": 0, "top": 0, "right": 30, "bottom": 20},
+                            "chars": [
+                                {
+                                    "codes": [code("补")],
+                                    "scores": [8],
+                                    "bbox": {"left": 2, "top": 3, "right": 22, "bottom": 19},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((60, 120, 3), dtype=np.uint8),
+            [
+                {
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 100, 50],
+                    "block_content": "补",
+                }
+            ],
+            include_chars=True,
+        )
+
+        assert calls == [(34, 74), (31, 74)]
+        assert rows[0].text == "补"
+        assert rows[0].lines[0].bbox == (8, 11, 38, 31)
+        assert rows[0].lines[0].chars[0].bbox == (10, 14, 30, 30)
+        assert stats.recog_probe_calls == 2
+        assert stats.recog_group_failures == 0
+        assert stats.recog_group_retry_attempts == 1
+        assert stats.recog_group_retry_successes == 1
+        assert stats.recog_group_retry_failures == 0
+        audit = rows[0].raw_block["_hanwang_bbox_audit"]
+        assert audit["hanwang_recog_group_failed_count"] == 0
+        group_audit = audit["hanwang_segimg_groups"][0]
+        assert group_audit["recog_group_bbox"] == [8, 8, 82, 42]
+        assert group_audit["recog_retry_attempted"] is True
+        assert group_audit["recog_retry_succeeded"] is True
+        assert group_audit["recog_retry_bbox"] == [8, 11, 82, 42]
+        assert "native recog access violation" in group_audit["recog_retry_original_error"]
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+
+    print("test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line PASSED")
+
+
 def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
     import os
     import tempfile
@@ -13450,6 +13543,7 @@ if __name__ == "__main__":
     test_hanwang_footnote_labels_route_through_hanwang()
     test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit()
     test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
+    test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_width_guard_skips_risky_batch()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()

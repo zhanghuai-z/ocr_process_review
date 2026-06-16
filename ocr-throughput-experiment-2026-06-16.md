@@ -184,6 +184,13 @@
 - 推荐 fallback 顺序：原 crop 失败 -> 同 crop 上边界下移 3px 重试 -> 仍失败再标记该 line/block 进入人工 review，不应静默丢行。
 - 该 fallback 应只在 native exception/timeout 后触发，并记录状态栏非阻塞警告和 debug audit，避免把数据错误误判为新逻辑错误。
 
+2026-06-16 追加落地验证：
+
+- 已在主路径实现 native group failure retry：原 crop 失败后，仅将同 group 上边界下移 3px 重试。
+- 真实 `120183` 复跑：`recog_group_failures=0`，`recog_group_retry_attempts=1`，`recog_group_retry_successes=1`。
+- 30 页 workers=4 复跑：`209.43s`，`group_fail=0`，`retry_attempts=1`，`retry_successes=1`，`retry_failures=0`。
+- 对比旧 workers=4：`213.47s` 且 `group_fail=1`。补丁没有引入可见耗时回退，并修复了固定丢行风险。
+
 百页粗估：
 
 - 串行：约 27 分钟。
@@ -204,12 +211,16 @@
 - 设置窗口新增“Paddle 网络”选项，版面请求并发上限从 4 提到 10。
 - `LayoutWorker` 为同一批版面分析 job 生成统一 `batchId`，便于后续接入 batch status 批量轮询。
 - `PaddleV16LayoutClient.get_batch_status(batch_id)` 已准备好；当前主链仍按单 job 轮询，后续可以基于它减少百页项目的 GET 轮询风暴。
+- Hanwang micro-recblock 增加 native group retry：
+  - 原 group crop 失败后，上边界下移 3px 重试。
+  - retry 成功不计入 `recog_group_failures`，但写入 bbox audit。
+  - retry 失败才计入 group failure，并保留原错误和 retry 错误。
 
 1. 短期接入 Hanwang 页级并发：
    - 新增 `ocr_page_concurrency` 配置，默认 2，上限 4；workers=6/8 可以保留为实验档，不建议默认开放。
    - 仅对 Hanwang hybrid/page-block OCR 启用。
    - 进度、错误、保存必须按 page index 回填，不能依赖完成顺序。
-   - 必须先实现 native group failure retry：原 crop 失败后，对同一 group 上边界下移 3px 重试；仍失败则生成 review/warning，不应静默丢行。
+   - native group failure retry 已完成；下一步是把页级并发配置接入主程序 worker，并把 retry warning 显示为非阻塞状态栏提示。
 
 2. 保持 Hanwang collage batch 关闭：
    - 已复现 native AccessViolation。
