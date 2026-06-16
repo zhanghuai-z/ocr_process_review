@@ -33,6 +33,12 @@
 | 2 TIF, repeated `files` field | 400KB | 0 | - | - | - | HTTP 400 | 服务端返回“空文件” |
 | 5 TIF as 5 separate jobs, 5 workers | 896KB | 5 | varies | varies | varies | 23.44s | 并发能压缩总耗时，但不是常数级 |
 | 10 TIF as 10 separate jobs, 10 workers | 1.68MB | 10 | varies | varies | varies | 28.54s | 无失败；仍远超 5s |
+| Official demo URL, lean output | remote URL | 1 | 3.51s | 44.79s | 1.91s | 50.21s | 无本地上传仍慢，主要卡在 pending |
+| `120186.tif`, lean output | 200KB | 1 | 13.81s | 2.38s | 1.21s | 17.40s | 关闭结果图片/美化没有提速 |
+| `120186.tif`, env proxy | 200KB | 1 | 4.86s | 0.48s | 1.28s | 6.61s | 当前代理路径比强制绕代理快 |
+| 10 TIF as 10 separate jobs, 10 workers, env proxy | 1.68MB | 10 | varies | varies | varies | 21.01s | 比无代理 28.54s 更快 |
+| 30 TIF as 30 separate jobs, 10 workers, env proxy | 5.36MB | 30 | varies | varies | varies | 73.06s | 无失败；出现 40s+ 服务端长尾 |
+| 5 TIF as 5 separate jobs, 5 workers, env proxy, `batchId` | 896KB | 5 | varies | varies | varies | 11.10s | `batchId` 可用，但只是批量查询/归组 |
 | 30-page multi-page TIFF | 3.9MB | 1 | 184.76s | 5.28s | 1.21s | 191.25s | TIFF 多页被当作单页，不能用 |
 | 5-page PDF | 5.4MB | 5 | 196.30s | 12.92s | 2.40s | 211.63s | PDF 多页可识别，但上传/提交极慢 |
 
@@ -41,6 +47,11 @@
 - “Paddle 完成百页版面分析 5s 内”不可行；当前环境下单页总耗时已约 10s，10 个单页 job 并发也需要约 28.5s。
 - 用户关于“时间不应完全线性累加”的判断是对的：10 个 job 的单 job 累计耗时约 135.9s，被 10 并发压缩到 28.5s。但这不是“同批只增加 20%”，而是被最慢提交、服务端排队、下载结果共同限制。
 - multipart 多本地文件上传在已测字段下不可用：`file`/`file[]` 只返回 1 页，`files` 被服务端判为空文件。
+- 官方文档也只把 `file` 和 `fileUrl` 定义为二选一输入；`batchId` 是批量查询任务状态的归组字段，不是多文件合并提交。
+- 官方 jobs 状态中的 `pending` 明确定义为排队中。本轮 fileUrl 样本无本地上传，仍等待约 45s，证明慢点不只是客户端上传。
+- 30 页/10 workers/代理样本总耗时 73.06s，无 429/队列满错误；单页总耗时 median 15.68s、P90 25.67s、max 58.55s。长尾主要来自 40s+ wait。
+- 当前环境下代理路径反而更快：单页从无代理约 10-17s 降到 6.61s；10 页从无代理 28.54s 降到 21.01s。主程序当前强制绕过环境代理，可能不是最快路径。
+- `returnMarkdownImages=false`、`visualize=false`、`prettifyMarkdown=false` 对单页总耗时没有正向效果，说明结果图片/Markdown 美化不是主瓶颈。
 - PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题；本轮生成的 5 页 PDF 上传/提交极慢，不能直接替换当前策略。
 - 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
 - 当前主程序的“逐页 jobs + 并发”方向是可用的短期策略；需要把并发上限作为可调参数继续压测，而不是切到 multipart 多文件。
@@ -55,6 +66,8 @@
 
 - 原始导入 PDF job：记录总页数、每页平均耗时、服务端页序和坐标空间。
 - 对比 `layout_concurrency=1/2/4/6/8/10` 的远端限流、失败率、平均耗时、P95 耗时。
+- 主程序增加 Paddle API 代理策略开关或自动探测：`direct`、`env_proxy`，记录 submit/wait/download 三段耗时。
+- 用 `batchId` 改造百页轮询：仍逐页提交 job，但用 `/api/v2/ocr/jobs/batch/{batchId}` 批量查询状态，减少 GET 风暴和线程等待。
 - 测试 URL 模式：若文件已在对象存储，`fileUrl` 可能绕过本地上传瓶颈，但这只是把上传成本转移到前置存储链路。
 
 ## Hanwang OCR Experiments

@@ -13201,6 +13201,10 @@ def test_paddle_v16_jobs_benchmark_script_help():
     assert "PaddleOCR-VL jobs API timing" in result.stdout
     assert "--poll-interval" in result.stdout
     assert "--file-field" in result.stdout
+    assert "--optional-payload-json" in result.stdout
+    assert "--batch-id" in result.stdout
+    assert "--lean-output" in result.stdout
+    assert "--use-env-proxy" in result.stdout
     assert "--separate-jobs" in result.stdout
     assert "--workers" in result.stdout
 

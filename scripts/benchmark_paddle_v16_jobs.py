@@ -1,4 +1,4 @@
-"""Benchmark PaddleOCR-VL jobs API timing for single or multi-page files.
+"""Benchmark PaddleOCR-VL jobs API timing for files or file URLs.
 
 Examples:
     PYTHONPATH=. python scripts/benchmark_paddle_v16_jobs.py /tmp/pages.pdf \
@@ -27,6 +27,10 @@ DEFAULT_JOBS_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
 DEFAULT_MODEL = "PaddleOCR-VL-1.6"
 
 
+def _is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
 def _token_from_sample_script(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -52,12 +56,32 @@ def _resolve_token(*, token: str, token_from_sample_script: bool) -> str:
     return ""
 
 
-def _optional_payload() -> dict[str, bool]:
+def _default_optional_payload() -> dict[str, Any]:
     return {
         "useDocOrientationClassify": False,
         "useDocUnwarping": False,
         "useChartRecognition": False,
     }
+
+
+def _build_optional_payload(args: argparse.Namespace) -> dict[str, Any]:
+    payload = _default_optional_payload()
+    if args.lean_output:
+        payload.update({
+            "returnMarkdownImages": False,
+            "visualize": False,
+            "prettifyMarkdown": False,
+            "outputFormats": [],
+        })
+    if args.optional_payload_json:
+        try:
+            override = json.loads(args.optional_payload_json)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"invalid --optional-payload-json: {exc}") from exc
+        if not isinstance(override, dict):
+            raise SystemExit("--optional-payload-json must decode to an object")
+        payload.update(override)
+    return payload
 
 
 def _submit_files(
@@ -68,12 +92,16 @@ def _submit_files(
     file_paths: list[Path],
     file_field: str,
     model: str,
+    optional_payload: dict[str, Any],
+    batch_id: str,
     timeout: int,
 ) -> tuple[str, dict[str, Any], float]:
     data = {
         "model": model,
-        "optionalPayload": json.dumps(_optional_payload(), ensure_ascii=False),
+        "optionalPayload": json.dumps(optional_payload, ensure_ascii=False),
     }
+    if batch_id:
+        data["batchId"] = batch_id
     headers = {"Authorization": f"bearer {token}"}
     started = time.perf_counter()
     with ExitStack() as stack:
@@ -82,6 +110,39 @@ def _submit_files(
             for file_path in file_paths
         ]
         resp = session.post(jobs_url, data=data, files=files, headers=headers, timeout=timeout)
+    elapsed = time.perf_counter() - started
+    if getattr(resp, "status_code", 200) >= 400:
+        raise RuntimeError(f"submit failed: HTTP {resp.status_code}: {resp.text[:1000]}")
+    resp.raise_for_status()
+    body = resp.json()
+    try:
+        job_id = body["data"]["jobId"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(f"submit response missing jobId: {body!r}") from exc
+    return str(job_id), body, elapsed
+
+
+def _submit_file_url(
+    session: requests.Session,
+    *,
+    jobs_url: str,
+    token: str,
+    file_url: str,
+    model: str,
+    optional_payload: dict[str, Any],
+    batch_id: str,
+    timeout: int,
+) -> tuple[str, dict[str, Any], float]:
+    payload = {
+        "fileUrl": file_url,
+        "model": model,
+        "optionalPayload": optional_payload,
+    }
+    if batch_id:
+        payload["batchId"] = batch_id
+    headers = {"Authorization": f"bearer {token}"}
+    started = time.perf_counter()
+    resp = session.post(jobs_url, json=payload, headers=headers, timeout=timeout)
     elapsed = time.perf_counter() - started
     if getattr(resp, "status_code", 200) >= 400:
         raise RuntimeError(f"submit failed: HTTP {resp.status_code}: {resp.text[:1000]}")
@@ -182,29 +243,56 @@ def _safe_job_data(data: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _input_size(input_ref: str) -> int | None:
+    if _is_url(input_ref):
+        return None
+    return Path(input_ref).stat().st_size
+
+
+def _sum_local_input_sizes(inputs: list[str]) -> int:
+    return sum(Path(value).stat().st_size for value in inputs if not _is_url(value))
+
+
 def _run_one_job(
-    file_path: Path,
+    input_ref: str,
     *,
     jobs_url: str,
     token: str,
     file_field: str,
     model: str,
+    optional_payload: dict[str, Any],
+    batch_id: str,
     request_timeout: int,
     poll_timeout: int,
     poll_interval: float,
+    use_env_proxy: bool,
 ) -> dict[str, Any]:
     total_started = time.perf_counter()
     with requests.Session() as session:
-        session.trust_env = False
-        job_id, submit_body, submit_seconds = _submit_files(
-            session,
-            jobs_url=jobs_url,
-            token=token,
-            file_paths=[file_path],
-            file_field=file_field,
-            model=model,
-            timeout=request_timeout,
-        )
+        session.trust_env = bool(use_env_proxy)
+        if _is_url(input_ref):
+            job_id, submit_body, submit_seconds = _submit_file_url(
+                session,
+                jobs_url=jobs_url,
+                token=token,
+                file_url=input_ref,
+                model=model,
+                optional_payload=optional_payload,
+                batch_id=batch_id,
+                timeout=request_timeout,
+            )
+        else:
+            job_id, submit_body, submit_seconds = _submit_files(
+                session,
+                jobs_url=jobs_url,
+                token=token,
+                file_paths=[Path(input_ref)],
+                file_field=file_field,
+                model=model,
+                optional_payload=optional_payload,
+                batch_id=batch_id,
+                timeout=request_timeout,
+            )
         json_url, job_data, polls, wait_seconds = _wait_done(
             session,
             jobs_url=jobs_url,
@@ -221,8 +309,9 @@ def _run_one_job(
         )
     raw_pages, layout_results, parse_seconds = _parse_jsonl(jsonl_text)
     return {
-        "file": str(file_path),
-        "file_size_bytes": file_path.stat().st_size,
+        "input": input_ref,
+        "input_kind": "url" if _is_url(input_ref) else "file",
+        "file_size_bytes": _input_size(input_ref),
         "job_id": job_id,
         "submit_seconds": submit_seconds,
         "wait_seconds": wait_seconds,
@@ -241,10 +330,14 @@ def _run_one_job(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark PaddleOCR-VL jobs API timing.")
-    parser.add_argument("files", type=Path, nargs="+")
+    parser.add_argument("inputs", nargs="+", help="Local files or HTTP(S) file URLs.")
     parser.add_argument("--jobs-url", default=DEFAULT_JOBS_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--file-field", default="file", help="Multipart field name repeated for every local file.")
+    parser.add_argument("--optional-payload-json", default="", help="JSON object merged into optionalPayload.")
+    parser.add_argument("--batch-id", default="", help="Optional batchId sent with submitted jobs.")
+    parser.add_argument("--lean-output", action="store_true", help="Disable optional result images/docs where supported.")
+    parser.add_argument("--use-env-proxy", action="store_true", help="Use HTTP(S)_PROXY environment variables.")
     parser.add_argument("--token", default="")
     parser.add_argument("--token-from-sample-script", action="store_true")
     parser.add_argument("--request-timeout", type=int, default=180)
@@ -255,49 +348,58 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    file_paths = list(args.files)
-    missing = [str(file_path) for file_path in file_paths if not file_path.is_file()]
+    input_refs = [str(value) for value in args.inputs]
+    missing = [value for value in input_refs if not _is_url(value) and not Path(value).is_file()]
     if missing:
         raise SystemExit(f"file not found: {', '.join(missing)}")
+    if any(_is_url(value) for value in input_refs) and not args.separate_jobs and len(input_refs) > 1:
+        raise SystemExit("URL inputs can only be mixed with multiple inputs when --separate-jobs is enabled.")
     token = _resolve_token(token=args.token, token_from_sample_script=bool(args.token_from_sample_script))
     if not token:
         raise SystemExit("Paddle token not found. Set OCR_API_TOKEN/PADDLE_API_TOKEN or pass --token-from-sample-script.")
+    optional_payload = _build_optional_payload(args)
 
     if args.separate_jobs:
         total_started = time.perf_counter()
         results: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
-        max_workers = max(1, min(len(file_paths), int(args.workers)))
+        max_workers = max(1, min(len(input_refs), int(args.workers)))
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paddle-job") as executor:
             futures = {
                 executor.submit(
                     _run_one_job,
-                    file_path,
+                    input_ref,
                     jobs_url=args.jobs_url,
                     token=token,
                     file_field=args.file_field,
                     model=args.model,
+                    optional_payload=optional_payload,
+                    batch_id=str(args.batch_id or ""),
                     request_timeout=args.request_timeout,
                     poll_timeout=args.poll_timeout,
                     poll_interval=args.poll_interval,
-                ): file_path
-                for file_path in file_paths
+                    use_env_proxy=bool(args.use_env_proxy),
+                ): input_ref
+                for input_ref in input_refs
             }
             for future in as_completed(futures):
-                file_path = futures[future]
+                input_ref = futures[future]
                 try:
                     results.append(future.result())
                 except Exception as exc:
-                    errors.append({"file": str(file_path), "error": str(exc)})
-        results.sort(key=lambda item: item["file"])
+                    errors.append({"input": input_ref, "error": str(exc)})
+        results.sort(key=lambda item: item["input"])
         payload = {
             "mode": "paddle_v16_separate_jobs_timing",
-            "files": [str(file_path) for file_path in file_paths],
-            "file_count": len(file_paths),
+            "inputs": input_refs,
+            "input_count": len(input_refs),
             "file_field": args.file_field,
-            "file_size_bytes": sum(file_path.stat().st_size for file_path in file_paths),
+            "file_size_bytes": _sum_local_input_sizes(input_refs),
             "jobs_url": args.jobs_url,
             "model": args.model,
+            "optional_payload": optional_payload,
+            "batch_id": str(args.batch_id or ""),
+            "use_env_proxy": bool(args.use_env_proxy),
             "workers": max_workers,
             "total_seconds": time.perf_counter() - total_started,
             "sum_job_total_seconds": sum(float(item.get("total_seconds", 0)) for item in results),
@@ -314,16 +416,30 @@ def main() -> int:
 
     total_started = time.perf_counter()
     with requests.Session() as session:
-        session.trust_env = False
-        job_id, submit_body, submit_seconds = _submit_files(
-            session,
-            jobs_url=args.jobs_url,
-            token=token,
-            file_paths=file_paths,
-            file_field=args.file_field,
-            model=args.model,
-            timeout=args.request_timeout,
-        )
+        session.trust_env = bool(args.use_env_proxy)
+        if len(input_refs) == 1 and _is_url(input_refs[0]):
+            job_id, submit_body, submit_seconds = _submit_file_url(
+                session,
+                jobs_url=args.jobs_url,
+                token=token,
+                file_url=input_refs[0],
+                model=args.model,
+                optional_payload=optional_payload,
+                batch_id=str(args.batch_id or ""),
+                timeout=args.request_timeout,
+            )
+        else:
+            job_id, submit_body, submit_seconds = _submit_files(
+                session,
+                jobs_url=args.jobs_url,
+                token=token,
+                file_paths=[Path(value) for value in input_refs],
+                file_field=args.file_field,
+                model=args.model,
+                optional_payload=optional_payload,
+                batch_id=str(args.batch_id or ""),
+                timeout=args.request_timeout,
+            )
         json_url, job_data, polls, wait_seconds = _wait_done(
             session,
             jobs_url=args.jobs_url,
@@ -342,12 +458,16 @@ def main() -> int:
     total_seconds = time.perf_counter() - total_started
     payload = {
         "mode": "paddle_v16_jobs_timing",
-        "files": [str(file_path) for file_path in file_paths],
-        "file_count": len(file_paths),
+        "inputs": input_refs,
+        "input_count": len(input_refs),
+        "input_kind": "url" if len(input_refs) == 1 and _is_url(input_refs[0]) else "file",
         "file_field": args.file_field,
-        "file_size_bytes": sum(file_path.stat().st_size for file_path in file_paths),
+        "file_size_bytes": _sum_local_input_sizes(input_refs),
         "jobs_url": args.jobs_url,
         "model": args.model,
+        "optional_payload": optional_payload,
+        "batch_id": str(args.batch_id or ""),
+        "use_env_proxy": bool(args.use_env_proxy),
         "job_id": job_id,
         "submit_seconds": submit_seconds,
         "wait_seconds": wait_seconds,
