@@ -21,6 +21,23 @@
 - 上传图片使用 PNG lossless，不是 JPEG，不会因上传编码损失 OCR 精度。
 - 官方示例脚本的 jobs API 会返回 `extractProgress.totalPages/extractedPages`，说明单 job 处理多页文件是 API 形态上支持的。
 
+### Live Jobs API Timing
+
+2026-06-16 追加实测，使用 `scripts/benchmark_paddle_v16_jobs.py`，请求禁用环境代理并复用 `requests.Session`。
+
+| Input | File size | Paddle pages | Submit | Poll/wait | Download | Total | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `120186.tif` | 200KB | 1 | 8.78s | 0.39s | 1.14s | 10.32s | 单页已超过 5s |
+| 30-page multi-page TIFF | 3.9MB | 1 | 184.76s | 5.28s | 1.21s | 191.25s | TIFF 多页被当作单页，不能用 |
+| 5-page PDF | 5.4MB | 5 | 196.30s | 12.92s | 2.40s | 211.63s | PDF 多页可识别，但上传/提交极慢 |
+
+结论：
+
+- “Paddle 完成百页版面分析 5s 内”不可行；当前环境下单页总耗时已约 10s。
+- 如果只谈通信/提交阶段，也不可行：单页 submit 约 8.8s，5 页 PDF submit 约 196s。
+- PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题。
+- 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
+
 主要风险：
 
 - 百页 PDF 当前会被导入服务渲染成 100 张 PNG，然后主程序提交 100 个 jobs。
@@ -29,9 +46,9 @@
 
 待做 live benchmark：
 
-- 单页 PNG job：记录 submit、pending、running、download、parse 分段耗时。
-- 原始多页 PDF job：记录总页数、每页平均耗时、服务端页序和坐标空间。
+- 原始导入 PDF job：记录总页数、每页平均耗时、服务端页序和坐标空间。
 - 对比 `layout_concurrency=1/2/3/4` 的远端限流和失败率。
+- 测试 URL 模式：若文件已在对象存储，`fileUrl` 可能绕过本地上传瓶颈，但这只是把上传成本转移到前置存储链路。
 
 ## Hanwang OCR Experiments
 

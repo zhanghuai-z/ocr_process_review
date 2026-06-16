@@ -13185,6 +13185,25 @@ def test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper():
     print("test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper PASSED")
 
 
+def test_paddle_v16_jobs_benchmark_script_help():
+    import subprocess
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_paddle_v16_jobs.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "PaddleOCR-VL jobs API timing" in result.stdout
+    assert "--poll-interval" in result.stdout
+
+    print("test_paddle_v16_jobs_benchmark_script_help PASSED")
+
+
 def test_ppocr_v5_v6_compare_script_help():
     import subprocess
 
@@ -13443,6 +13462,7 @@ if __name__ == "__main__":
     test_ui_block_labels_use_structured_semantic_label()
     test_hanwang_concurrency_evaluation_script_help()
     test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper()
+    test_paddle_v16_jobs_benchmark_script_help()
     test_ppocr_v5_v6_compare_script_help()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
