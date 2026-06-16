@@ -47,6 +47,12 @@
 | 30-page PDF split into 4 PDFs, 4 workers, env proxy | 3.8MB | 30 | 19.80-40.34s | 25.15-30.31s | 1.83-2.42s | 67.33s | 无错误；比整包 PDF 快，但慢于高并发单页 |
 | 30-page PDF split into 4 PDFs, 4 workers, env proxy, 4 runs | 3.8MB | 30/run | varies | varies | varies | 28.96-67.33s | 四轮全成功；mean 43.48s，median 38.81s，submit 波动很大 |
 | 30-page PDF split into 8 PDFs, 8 workers, env proxy | 3.8MB | 30 | 3.28-19.36s | 17.40-30.44s | 1.28-2.37s | 47.95s | 无错误；比 4 份首轮快，但仍慢于高并发单页成功页 |
+| 30-page PDF split into 3 PDFs, 3 workers, env proxy | 3.8MB | 30 | 79.44-86.71s | 29.76-51.51s | 2.80-3.44s | 138.96s | 无错误；10 页包 submit 长尾太重 |
+| 30-page PDF split into 5 PDFs, 5 workers, env proxy | 3.8MB | 30 | 30.94-58.02s | 26.16-46.22s | 1.53-2.19s | 106.44s | 无错误；第 3 包拖尾明显 |
+| 30-page PDF split into 6 PDFs, 6 workers, env proxy | 3.8MB | 30 | 48.10-67.53s | 22.40-29.92s | 1.60-1.84s | 99.14s | 无错误；submit 普遍偏重 |
+| 30-page PDF split into 8 PDFs, 8 workers, env proxy, rerun | 3.8MB | 30 | 25.43-56.88s | 0.39-0.96s | 1.45-1.84s | 58.96s | 无错误；多数处理发生在 submit 请求返回前 |
+| 30-page PDF split into 8 PDFs, 2 workers, env proxy | 3.8MB | 30 | 14.55-52.03s | 0.48-1.44s | varies | 174.43s | 无错误；worker 太少导致多轮排队 |
+| 30-page PDF split into 10 PDFs, 10 workers, env proxy | 3.8MB | 30 | 14.67-42.83s | 16.15-22.08s | varies | 62.76s | 无错误；job 数更多，未优于 8 份 |
 
 结论：
 
@@ -62,6 +68,9 @@
 - PDF 拆分为 4 份后总耗时降到 67s，无 429；这是稳定性更好的批量策略候选，但仍明显慢于单页 15 并发的 13.9s。单页 15 并发会触发 429，必须加退避重试才能工程化。
 - 4 份 PDF 多轮波动很大：`67.33s / 35.77s / 28.96s / 41.85s`。第 2-4 轮首次 poll 基本已 done，说明 submit 返回前服务端可能已经完成解析，结果受远端缓存/短期队列/上传链路影响很大。
 - 8 份 PDF 首轮 `47.95s`，比 4 份首轮快，但还不能证明长期稳定优于 4 份；它只是说明“适度分包”能降低单个 submit 长尾。
+- 追加矩阵后，3/5/6 份 PDF 都慢于 8 份；10 份无 429，但没有比 8 份更快。当前最稳妥的 PDF 分包候选是每包约 3-4 页、8 workers 左右。
+- PDF jobs 的 `submit_seconds` 不能简单理解为纯上传：8 份复测中 `wait_seconds` 只有 0.39-0.96s，但 submit 花 25.43-56.88s，说明服务端可能在 submit 阶段已经完成了大部分解析/排队/处理。
+- PDF 分包和多并发不冲突：分包决定每个 job 内有多少页，多并发决定同时提交多少个 job。工程接入时必须保存 manifest：`package_index/page_start/page_count/original_page_uid`，不能依赖文件名字典序。
 - 单页 30 并发结果不可采信为成功性能：10.9s 内只有 16 页成功，14 页在 submit 阶段被 `12002 请求频率过高` 拒绝。
 - 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
 - 当前主程序的“逐页 jobs + 并发 + 429 退避重试”仍是最快短期策略；“PDF 分包 jobs”适合做稳定兜底或低失败率模式。
@@ -99,27 +108,35 @@
 | default | 21.85s | 5.39s | 9.55s | 35 | batch disabled |
 | batch env enabled | 20.63s | 5.35s | 8.40s | 35 | 34/35 chunks still guarded |
 | no chars diagnostic | 13.15s | 4.92s | 8.23s | 35 | skips char/EngCut use; not acceptable for proof UI |
+| 120170 default | 18.15s | 4.70s | 7.66s | 36 | batch disabled, EngCut 29 calls |
+| 120170 batch env enabled | 18.19s | 4.59s | 7.86s | 36 | 35/36 chunks guarded, no real batch |
+| 120170 no chars diagnostic | 12.35s | 4.56s | 7.79s | 36 | saves EngCut/char geometry cost, not acceptable for proof UI |
 
 结论：
 
 - 默认链路每页约 35 个 group，每个 group 触发一次 `linecut_recogimg_probe.exe`。
 - `no chars` 只用于诊断；纵校需要字符框，不能作为产品路径。
 - default 与 no-chars 差值提示 EngCut/字符精修链路有明显成本，后续应做缓存和更精确的调用条件，而不是粗暴关闭。
+- 120170 的 `default` vs `no chars` 差值约 5.8s/页，其中 `recog_seconds` 基本不变，说明主要节省来自 EngCut/字符几何增强，而不是中文识别 probe 本身。
 
 ### Collage Batch Risk
 
-实验设置：临时放宽 `MAX_RECOG_COLLAGE_WIDTH=2400`、`MAX_RECOG_COLLAGE_ASPECT=30`。
+实验设置：临时放宽 `MAX_RECOG_COLLAGE_WIDTH` 与 `MAX_RECOG_COLLAGE_ASPECT`，并通过 `HANWANG_MICRO_RECBLOCK_BATCH=1` 打开 native batch。
 
 | Groups per batch | Result |
 |---:|---|
 | 6 | `System.AccessViolationException` |
 | 2 | `System.AccessViolationException` |
+| 120170, 4 | `System.AccessViolationException` on first chunk `1852x239`; fallback to single, total 20.82s |
+| 120170, 2 | `System.AccessViolationException` on first chunk `1852x120`; fallback to single, total 20.42s |
 
 结论：
 
 - Hanwang `linecut_recogimg_probe.exe` 的多 recblock/collage batch 仍不稳定。
 - 不建议把 `HANWANG_MICRO_RECBLOCK_BATCH=1` 作为主线优化。
 - 当前保守阈值虽然导致 batch 基本无效，但避免了 native 崩溃。
+- 当前正文行宽约 1850px，默认 `MAX_RECOG_COLLAGE_WIDTH=1600` 和 `MAX_RECOG_COLLAGE_ASPECT=4.5` 会把绝大多数单行 chunk 直接 guard 掉；30 页 workers=4 样本中 892 个 batch chunk 有 839 个被 guard。
+- 放宽 guard 后 native batch 在真实宽行上崩溃，因此速度优化不应从“打开 batch 阈值”入手。
 
 ### Page-Level Concurrency
 
@@ -191,6 +208,36 @@
 - 30 页 workers=4 复跑：`209.43s`，`group_fail=0`，`retry_attempts=1`，`retry_successes=1`，`retry_failures=0`。
 - 对比旧 workers=4：`213.47s` 且 `group_fail=1`。补丁没有引入可见耗时回退，并修复了固定丢行风险。
 
+### Hanwang Bottleneck Breakdown
+
+基于 30 页 workers=4 retry patch 样本：
+
+- 总墙钟：`209.43s`，页级 elapsed 累计 `796.94s`，平均 `26.56s/page`。
+- `SegImg` 累计 `227.27s`，平均 `7.58s/page`。
+- `Recog` 累计 `337.73s`，平均 `11.26s/page`。
+- `linecut_recogimg_probe.exe` 调用 `916` 次，平均 `30.53/page`。
+- `eng20_probe.exe` 调用 `713` 次，平均 `23.77/page`。
+- EngCut 绑定结果：`617` 个 exact token，`12` 个 review token。
+- 页面耗时相关性：`recog_seconds=0.946`，`EngCut calls=0.902`，`group count=0.882`，`crop pixels=0.749`，`SegImg=0.427`。
+
+最慢页：
+
+| Page | Elapsed | Groups | SegImg | Recog | EngCut calls | Exact/review |
+|---|---:|---:|---:|---:|---:|---:|
+| 120184 | 35.58s | 37 | 7.85s | 14.26s | 37 | 44/1 |
+| 120185 | 34.53s | 37 | 7.80s | 14.09s | 34 | 19/0 |
+| 120180 | 33.32s | 39 | 7.95s | 14.00s | 39 | 148/0 |
+| 120186 | 33.21s | 35 | 8.32s | 14.75s | 33 | 28/2 |
+| 120176 | 32.81s | 36 | 7.69s | 13.99s | 33 | 6/0 |
+
+阻塞点判断：
+
+- 第一阻塞点是 native probe 次数，不是单次识别特别慢。每个 group 目前基本会启动一次 `linecut_recogimg_probe.exe`，每个需要拉丁/数字几何的行又启动一次 `eng20_probe.exe`。
+- 第二阻塞点是 WSL/临时文件通信：每次 probe 都要写 PNG、写 TSV、启动 exe、读 JSON、删除临时文件。这个成本会被 900+ 次调用放大。
+- 第三阻塞点是并发竞争。单页 120170 默认约 `18.15s`，但 30 页 workers=4 中同页约 `30.89s`；页级并发压缩了墙钟时间，但会抬高单页耗时。
+- `SegImg` 是固定成本但不是主瓶颈；它每页约 6-8s，和总耗时相关性较低。
+- EngCut 有真实价值，不能简单关闭；但它是可优化点，后续应做缓存、减少重复探针，或把 EngCut 纳入常驻 bridge。
+
 百页粗估：
 
 - 串行：约 27 分钟。
@@ -237,7 +284,10 @@
 4. Paddle 下一步做多页 job 实验：
    - 原始 PDF 单 job vs 当前每页 PNG 多 job。
    - 必须确认坐标空间、页序、失败回填和缓存文件策略。
+   - 当前 PDF 稳定路径候选是每包约 3-4 页、8 workers 左右；接入前必须保存分包 manifest，并验证失败重试后能按原始 page UID 回填。
+   - 逐页 jobs 仍保留为快速路径；PDF 分包更适合作为“低 429、低失败率”的稳定模式。
 
 5. 中长期降低 Hanwang 通信损耗：
    - 目前每次 probe 都是子进程 + PNG/TSV/JSON 临时文件。
    - 更彻底的方案是常驻 native bridge/daemon，或更直接的 DLL 调用层。
+   - native collage batch 已在真实宽行上复现崩溃，不能作为主加速线；daemon 的目标应是减少进程启动和临时文件往返，而不是复用不稳定的多 recblock batch。
