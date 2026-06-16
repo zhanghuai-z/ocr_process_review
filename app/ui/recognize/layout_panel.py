@@ -125,14 +125,13 @@ BLOCK_TYPE_LABELS = {
     BlockType.REFERENCE: "引用",
     BlockType.UNKNOWN: "其他",
 }
+LAYOUT_SEARCH_TEXT_ONLY_ROLE = Qt.ItemDataRole.UserRole + 1
 LAYOUT_SEARCH_PRESETS = (
-    ("手动输入", ""),
-    (
-        "中文编号标题：一、/（一）",
-        r"^(?:[一二三四五六七八九十百千万零〇]+[、.．]|[（(][一二三四五六七八九十百千万零〇]+[）)])",
-    ),
-    ("章节标题：第一章/第1节", r"^第[一二三四五六七八九十百千万零〇\d]+[章节篇]"),
-    ("数字标题：1./1.1", r"^\d+(?:[.．]\d+)*[、.．]?"),
+    ("手动输入", "", False),
+    ("中文序号标题：一、", r"^\s*[一二三四五六七八九十百千万零〇]+[、.．]", True),
+    ("括号中文标题：（一）", r"^\s*[（(][一二三四五六七八九十百千万零〇]+[）)]", True),
+    ("章节标题：第一章/第1节", r"^\s*第[一二三四五六七八九十百千万零〇\d]+[章节篇]", True),
+    ("数字标题：1./1.1", r"^\s*\d+(?:[.．]\d+)*(?:[、.．)\)]|\s+)", True),
 )
 
 
@@ -238,6 +237,7 @@ class LayoutPanel(QWidget):
         self._selected_subtype_buttons: dict[str, QPushButton] = {}
         self._type_group: QButtonGroup | None = None
         self._block_search_matches: list[tuple[int, Block]] = []
+        self._search_text_fields_only = False
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -530,6 +530,7 @@ class LayoutPanel(QWidget):
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText("输入文本或正则，例如：^一、")
         self._search_input.setClearButtonEnabled(True)
+        self._search_input.textEdited.connect(self._on_search_text_edited)
         self._search_input.textChanged.connect(self._refresh_block_search)
         body_lay.addWidget(self._search_input)
 
@@ -539,8 +540,13 @@ class LayoutPanel(QWidget):
         self._search_preset = QComboBox()
         self._search_preset.setObjectName("layoutSearchPreset")
         self._search_preset.setMinimumWidth(170)
-        for label, pattern in LAYOUT_SEARCH_PRESETS:
+        for label, pattern, text_fields_only in LAYOUT_SEARCH_PRESETS:
             self._search_preset.addItem(label, pattern)
+            self._search_preset.setItemData(
+                self._search_preset.count() - 1,
+                bool(text_fields_only),
+                LAYOUT_SEARCH_TEXT_ONLY_ROLE,
+            )
         self._search_preset.currentIndexChanged.connect(self._on_search_preset_changed)
         option_row.addWidget(self._search_preset, 1)
 
@@ -812,6 +818,15 @@ class LayoutPanel(QWidget):
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod
+    def _block_text_search_fields(block: Block) -> list[str]:
+        parts: list[str] = []
+        for line in block.lines:
+            parts.extend([line.display_text, line.final_text, line.text, line.ocr_text])
+        if block.note:
+            parts.append(block.note.split("|", 1)[0])
+        return [str(part or "").strip() for part in parts if str(part or "").strip()]
+
+    @staticmethod
     def _block_display_text(block: Block) -> str:
         return " ".join(LayoutPanel._block_search_fields(block))
 
@@ -882,7 +897,11 @@ class LayoutPanel(QWidget):
             for block in page.blocks:
                 if not self._block_matches_search_source_filter(block, str(source_filter or "any")):
                     continue
-                fields = self._block_search_fields(block)
+                fields = (
+                    self._block_text_search_fields(block)
+                    if self._search_text_fields_only
+                    else self._block_search_fields(block)
+                )
                 if matcher is not None:
                     matched = any(bool(matcher.search(field)) for field in fields)
                 else:
@@ -935,12 +954,22 @@ class LayoutPanel(QWidget):
         if not hasattr(self, "_search_preset"):
             return
         pattern = self._search_preset.itemData(index)
+        self._search_text_fields_only = bool(
+            self._search_preset.itemData(index, LAYOUT_SEARCH_TEXT_ONLY_ROLE)
+        )
         if not pattern:
+            self._search_text_fields_only = False
+            self._refresh_block_search()
             return
         self._search_regex.setChecked(True)
         if self._search_input.text() != pattern:
             self._search_input.setText(pattern)
+        else:
+            self._refresh_block_search()
         self._search_input.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _on_search_text_edited(self, _text: str) -> None:
+        self._search_text_fields_only = False
 
     def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
         match_idx = item.data(Qt.ItemDataRole.UserRole)

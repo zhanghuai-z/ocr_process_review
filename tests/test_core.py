@@ -4003,8 +4003,21 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
                 source_label="text",
                 lines=[Line(text="普通正文", confidence=0.9, bbox=BBox(10, 80, 120, 20))],
             ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 115, 120, 20),
+                source_label="text",
+                lines=[Line(text="1. 数字标题", confidence=0.9, bbox=BBox(10, 115, 120, 20))],
+            ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 150, 120, 20),
+                source_label="text",
+                lines=[Line(text="正文包含2024数字", confidence=0.9, bbox=BBox(10, 150, 120, 20))],
+                raw_payload={"bbox": [2024, 10, 120, 20]},
+            ),
         ]
-        page = Page(image_path=str(image_path), width=180, height=160, blocks=blocks)
+        page = Page(image_path=str(image_path), width=180, height=200, blocks=blocks)
 
         panel = LayoutPanel()
         try:
@@ -4016,13 +4029,29 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
 
             preset_index = next(
                 idx for idx in range(panel._search_preset.count())
-                if "中文编号标题" in panel._search_preset.itemText(idx)
+                if "中文序号标题" in panel._search_preset.itemText(idx)
             )
             panel._search_preset.setCurrentIndex(preset_index)
 
             assert panel._search_regex.isChecked()
-            assert len(panel._block_search_matches) == 2
-            assert [match[1] for match in panel._block_search_matches] == blocks[:2]
+            assert len(panel._block_search_matches) == 1
+            assert [match[1] for match in panel._block_search_matches] == [blocks[0]]
+
+            preset_index = next(
+                idx for idx in range(panel._search_preset.count())
+                if "括号中文标题" in panel._search_preset.itemText(idx)
+            )
+            panel._search_preset.setCurrentIndex(preset_index)
+            assert len(panel._block_search_matches) == 1
+            assert [match[1] for match in panel._block_search_matches] == [blocks[1]]
+
+            preset_index = next(
+                idx for idx in range(panel._search_preset.count())
+                if "数字标题" in panel._search_preset.itemText(idx)
+            )
+            panel._search_preset.setCurrentIndex(preset_index)
+            assert len(panel._block_search_matches) == 1
+            assert [match[1] for match in panel._block_search_matches] == [blocks[3]]
         finally:
             panel.close()
 
@@ -10592,7 +10621,13 @@ def test_api_settings_dialog_syncs_model_and_url():
 
     cfg = AppConfig.instance()
     cfg.reset_to_defaults()
-    update_config(mode="local", api_model_profile="", api_url="https://example.com/root", api_token="old")
+    update_config(
+        mode="local",
+        api_model_profile="",
+        api_url="https://example.com/root",
+        api_token="old",
+        layout_concurrency=4,
+    )
 
     dialog = ApiSettingsDialog()
     assert dialog._radio_hanwang.isChecked()
@@ -10606,6 +10641,8 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._api_form_panel.isEnabled() is True
     assert not dialog._timeout_row.isHidden()
     assert dialog._timeout_spin.maximum() >= 600
+    assert dialog._layout_concurrency_spin.value() == 4
+    assert dialog._layout_concurrency_spin.maximum() == 4
 
     cfg.reset_to_defaults()
 

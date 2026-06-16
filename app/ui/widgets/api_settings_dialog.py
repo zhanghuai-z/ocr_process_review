@@ -487,6 +487,19 @@ class ApiSettingsDialog(QDialog):
         self._timeout_row = timeout_row
         api_form.addLayout(_form_row("请求超时", self._timeout_row))
 
+        concurrency_row = QWidget()
+        concurrency_layout = QHBoxLayout(concurrency_row)
+        concurrency_layout.setContentsMargins(0, 0, 0, 0)
+        concurrency_layout.setSpacing(0)
+        self._layout_concurrency_spin = QSpinBox()
+        self._layout_concurrency_spin.setRange(1, 4)
+        self._layout_concurrency_spin.setSuffix(" 路")
+        self._layout_concurrency_spin.setFixedWidth(140)
+        self._layout_concurrency_spin.setToolTip("多页版面分析时同时提交的 Paddle jobs 数；过高可能触发服务端限流。")
+        concurrency_layout.addWidget(self._layout_concurrency_spin)
+        concurrency_layout.addStretch()
+        api_form.addLayout(_form_row("版面请求并发", concurrency_row))
+
         test_row = QHBoxLayout()
         test_row.setContentsMargins(0, 4, 0, 0)
         test_row.addSpacing(96)
@@ -637,6 +650,7 @@ class ApiSettingsDialog(QDialog):
 
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
+        self._layout_concurrency_spin.setValue(int(cfg.get("layout_concurrency", 2)))
         self._btn_show_token.setChecked(False)
         self._llm_url_edit.setText(cfg.get("llm_endpoint", ""))
         self._llm_key_edit.setText(cfg.get("llm_api_key", ""))
@@ -742,6 +756,7 @@ class ApiSettingsDialog(QDialog):
             api_token=self._token_edit.text().strip(),
             api_timeout=self._timeout_spin.value(),
             api_layout_model_name="",
+            layout_concurrency=self._layout_concurrency_spin.value(),
             llm_endpoint=self._llm_url_edit.text().strip(),
             llm_api_key=self._llm_key_edit.text().strip(),
             llm_rules_path=self._llm_rules_edit.text().strip(),
