@@ -227,7 +227,7 @@ class LayoutPanel(QWidget):
         self._selected_block: Optional[Block] = None
         self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
-        self._undo_stack: list[tuple[int, list[Block]]] = []
+        self._undo_stack: list[list[tuple[int, list[Block]]]] = []
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
         self._new_block_type: BlockType = self._new_subtype.block_type
@@ -913,10 +913,7 @@ class LayoutPanel(QWidget):
                     continue
                 match_idx = len(self._block_search_matches)
                 self._block_search_matches.append((page_idx, block))
-                label = normalize_paddle_label(block.source_label or block.block_type.value)
-                item = QListWidgetItem(
-                    f"第 {page.page_number} 页 · {label} · {self._block_preview_text(block)}"
-                )
+                item = QListWidgetItem(self._block_preview_text(block))
                 item.setData(Qt.ItemDataRole.UserRole, match_idx)
                 self._search_results.addItem(item)
 
@@ -1010,8 +1007,7 @@ class LayoutPanel(QWidget):
                 affected.setdefault(page_idx, []).append(block)
         if not affected:
             return
-        for page_idx in affected:
-            self._push_undo_snapshot_for_page(page_idx)
+        self._push_undo_snapshot_for_pages(affected.keys())
         changed = 0
         for page_idx, blocks in affected.items():
             page = self._pages[page_idx]
@@ -1452,10 +1448,24 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot_for_page(self._current_page_idx)
 
     def _push_undo_snapshot_for_page(self, page_idx: int) -> None:
-        if not (0 <= page_idx < len(self._pages)):
+        self._push_undo_snapshot_for_pages([page_idx])
+
+    def _push_undo_snapshot_for_pages(self, page_indices) -> None:
+        if not self._pages:
             return
-        page = self._pages[page_idx]
-        self._undo_stack.append((page_idx, copy.deepcopy(page.blocks)))
+        snapshots: list[tuple[int, list[Block]]] = []
+        seen: set[int] = set()
+        for page_idx in page_indices:
+            if not isinstance(page_idx, int) or page_idx in seen:
+                continue
+            if not (0 <= page_idx < len(self._pages)):
+                continue
+            seen.add(page_idx)
+            page = self._pages[page_idx]
+            snapshots.append((page_idx, copy.deepcopy(page.blocks)))
+        if not snapshots:
+            return
+        self._undo_stack.append(snapshots)
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
         self._btn_undo.setEnabled(True)
@@ -1463,30 +1473,38 @@ class LayoutPanel(QWidget):
     def _undo_last_edit(self) -> None:
         if not self._undo_stack or not self._pages:
             return
-        page_idx, blocks = self._undo_stack.pop()
-        if not (0 <= page_idx < len(self._pages)):
-            return
+        snapshots = self._undo_stack.pop()
         previous_idx = self._current_page_idx
-        page = self._pages[page_idx]
-        page.blocks = copy.deepcopy(blocks)
+        restored_page_indices: list[int] = []
+        for page_idx, blocks in snapshots:
+            if not (0 <= page_idx < len(self._pages)):
+                continue
+            self._pages[page_idx].blocks = copy.deepcopy(blocks)
+            restored_page_indices.append(page_idx)
+        if not restored_page_indices:
+            self._btn_undo.setEnabled(bool(self._undo_stack))
+            return
         self._btn_undo.setEnabled(bool(self._undo_stack))
-        if page_idx == previous_idx:
+        focus_idx = previous_idx if previous_idx in restored_page_indices else restored_page_indices[-1]
+        page = self._pages[focus_idx]
+        if focus_idx == previous_idx:
             self._show_page_layers(page)
             self._clear_selection_ui(page)
         else:
-            self._current_page_idx = page_idx
+            self._current_page_idx = focus_idx
             self._page_list.blockSignals(True)
             try:
-                self._page_list.set_current_index(page_idx)
+                self._page_list.set_current_index(focus_idx)
             finally:
                 self._page_list.blockSignals(False)
-            self._update_viewer(page_idx)
+            self._update_viewer(focus_idx)
         self._update_page_nav()
         self._set_status_text("已撤销上一步版面编辑")
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "layout_undo")
+        for page_idx in restored_page_indices:
+            self.block_contract_changed.emit(self._pages[page_idx].page_number, "layout_undo")
 
     @staticmethod
     def _bbox_hits_frame(a: BBox, b: BBox, tolerance: int = 6) -> bool:

@@ -40,19 +40,41 @@ def _load_ppvl_blocks(path: Path | None, width: int, height: int) -> list[dict[s
             "block_bbox": [0, 0, width, height],
             "block_content": "",
         }]
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(data, list):
-        return [dict(item) for item in data if isinstance(item, dict)]
-    if isinstance(data, dict):
+
+    def extract_records(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+        if not isinstance(value, dict):
+            return []
         for key in ("parsing_res_list", "ppvl_parsing_res_list"):
-            value = data.get(key)
-            if isinstance(value, list):
-                return [dict(item) for item in value if isinstance(item, dict)]
-        result = data.get("result")
+            records = value.get(key)
+            if isinstance(records, list):
+                return [dict(item) for item in records if isinstance(item, dict)]
+        response_records = extract_records(value.get("response"))
+        if response_records:
+            return response_records
+        result = value.get("result")
         if isinstance(result, dict):
-            value = result.get("parsing_res_list")
-            if isinstance(value, list):
-                return [dict(item) for item in value if isinstance(item, dict)]
+            direct = extract_records(result)
+            if direct:
+                return direct
+            layout_results = result.get("layoutParsingResults")
+            if isinstance(layout_results, list):
+                extracted: list[dict[str, Any]] = []
+                for item in layout_results:
+                    if isinstance(item, dict):
+                        extracted.extend(extract_records(item.get("prunedResult")))
+                if extracted:
+                    return extracted
+        pruned = value.get("prunedResult")
+        if isinstance(pruned, dict):
+            return extract_records(pruned)
+        return []
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    records = extract_records(data)
+    if records:
+        return records
     raise SystemExit(f"Cannot find parsing_res_list in {path}")
 
 
@@ -109,6 +131,11 @@ def main() -> int:
             "recog_max_collage_pixels": stats.recog_max_collage_pixels,
             "recog_full_page_pixels": stats.recog_full_page_pixels,
             "recog_crop_pixels": stats.recog_crop_pixels,
+            "latin_engcut_probe_calls": stats.latin_engcut_probe_calls,
+            "latin_engcut_probe_failures": stats.latin_engcut_probe_failures,
+            "latin_engcut_exact_tokens": stats.latin_engcut_exact_tokens,
+            "latin_engcut_review_tokens": stats.latin_engcut_review_tokens,
+            "latin_engcut_disabled": stats.latin_engcut_disabled,
         },
         "rows": [
             {

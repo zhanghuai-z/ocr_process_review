@@ -3971,6 +3971,60 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
     print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
 
 
+def test_layout_panel_search_batch_apply_undo_restores_all_pages():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        pages = []
+        blocks = []
+        for page_no in (1, 2):
+            image_path = tmp / f"page-{page_no}.png"
+            QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
+            block = Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 10, 120, 20),
+                source_label="paragraph_title",
+                lines=[Line(text=f"一、标题{page_no}", confidence=0.9, bbox=BBox(10, 10, 120, 20))],
+            )
+            blocks.append(block)
+            pages.append(Page(image_path=str(image_path), width=160, height=120, page_number=page_no, blocks=[block]))
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages(pages)
+            app.processEvents()
+            panel._search_regex.setChecked(True)
+            panel._search_input.setText("^一、")
+            assert len(panel._block_search_matches) == 2
+
+            target_idx = panel._search_target_combo.findData("heading_1")
+            assert target_idx >= 0
+            panel._search_target_combo.setCurrentIndex(target_idx)
+            panel._apply_search_target_to_matches()
+
+            assert [block.block_type for block in blocks] == [BlockType.TITLE, BlockType.TITLE]
+            assert [block.source_label for block in blocks] == ["heading_1", "heading_1"]
+            assert panel._btn_undo.isEnabled()
+
+            panel._undo_last_edit()
+            restored = [page.blocks[0] for page in pages]
+            assert [block.block_type for block in restored] == [BlockType.TEXT, BlockType.TEXT]
+            assert [block.source_label for block in restored] == ["paragraph_title", "paragraph_title"]
+            assert not panel._btn_undo.isEnabled()
+        finally:
+            panel.close()
+
+    print("test_layout_panel_search_batch_apply_undo_restores_all_pages PASSED")
+
+
 def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
     from pathlib import Path
     import tempfile
@@ -4036,6 +4090,7 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
             assert panel._search_regex.isChecked()
             assert len(panel._block_search_matches) == 1
             assert [match[1] for match in panel._block_search_matches] == [blocks[0]]
+            assert panel._search_results.item(0).text() == "一、研究背景"
 
             preset_index = next(
                 idx for idx in range(panel._search_preset.count())
@@ -13090,6 +13145,46 @@ def test_hanwang_concurrency_evaluation_script_help():
     print("test_hanwang_concurrency_evaluation_script_help PASSED")
 
 
+def test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper():
+    from scripts.benchmark_hanwang_micro_recblock import _load_ppvl_blocks
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "page.layout-api.json"
+        path.write_text(
+            json.dumps({
+                "page": {"width": 100, "height": 200},
+                "response": {
+                    "result": {
+                        "layoutParsingResults": [
+                            {
+                                "prunedResult": {
+                                    "parsing_res_list": [
+                                        {
+                                            "block_label": "text",
+                                            "block_bbox": [1, 2, 30, 40],
+                                            "block_content": "正文",
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                },
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        records = _load_ppvl_blocks(path, 100, 200)
+
+    assert records == [{
+        "block_label": "text",
+        "block_bbox": [1, 2, 30, 40],
+        "block_content": "正文",
+    }]
+
+    print("test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper PASSED")
+
+
 def test_ppocr_v5_v6_compare_script_help():
     import subprocess
 
@@ -13180,6 +13275,9 @@ if __name__ == "__main__":
     test_layout_panel_type_buttons_change_unlocked_block_type()
     test_layout_panel_type_buttons_are_grouped()
     test_layout_panel_subtype_buttons_write_paddle_source_label()
+    test_layout_panel_search_results_can_batch_apply_heading_level()
+    test_layout_panel_search_batch_apply_undo_restores_all_pages()
+    test_layout_panel_find_dialog_preset_matches_chinese_heading_forms()
     test_layout_panel_undo_restores_block_edits()
     test_layout_panel_undo_preserves_view_transform()
     test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
@@ -13344,6 +13442,7 @@ if __name__ == "__main__":
     test_image_viewer_frame_selection_ignores_box_interior()
     test_ui_block_labels_use_structured_semantic_label()
     test_hanwang_concurrency_evaluation_script_help()
+    test_hanwang_micro_recblock_benchmark_loads_v16_response_wrapper()
     test_ppocr_v5_v6_compare_script_help()
     test_char_index_vertical_split()
     test_char_index_horizontal_split()
