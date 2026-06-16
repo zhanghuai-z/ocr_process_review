@@ -51,7 +51,7 @@ class WorkflowController(QObject):
     step_enabled_changed = Signal(int)     # 允许的最大步骤
     step_requested = Signal(int)           # 请求跳转步骤
     layout_finished = Signal(object)       # List[Page]
-    layout_progress = Signal(int, int)     # current_index, total
+    layout_progress = Signal(int, int)     # completed_index, total
     ocr_finished = Signal(object)          # List[Page]
     ocr_progress = Signal(object)          # OcrProgress
     worker_error = Signal(str)             # 错误消息
@@ -875,10 +875,10 @@ class WorkflowController(QObject):
             phase="layout",
             current=current,
             total=total,
-            message=f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页",
+            message=f"{self._layout_status_label()}中… 已完成 {current + 1}/{total} 页",
         ))
         self.layout_progress.emit(current, total)
-        self.status_message.emit(f"{self._layout_status_label()}中… 第 {current + 1}/{total} 页")
+        self.status_message.emit(f"{self._layout_status_label()}中… 已完成 {current + 1}/{total} 页")
 
     def start_ocr(
         self,

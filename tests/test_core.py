@@ -4187,7 +4187,7 @@ def test_workflow_controller_layout_progress_signal():
     controller._on_layout_progress(1, 3)
 
     assert events == [(1, 3)]
-    assert statuses[-1] == "Paddle 版面分析中… 第 2/3 页"
+    assert statuses[-1] == "Paddle 版面分析中… 已完成 2/3 页"
 
     print("test_workflow_controller_layout_progress_signal PASSED")
 
@@ -10402,6 +10402,7 @@ def test_app_config_tracks_api_model_profile():
     defaults = get_config()
     assert defaults["mode"] == "local"
     assert defaults["api_model_profile"] == ""
+    assert defaults["layout_concurrency"] == 2
 
     update_config(
         mode="api",
@@ -10410,6 +10411,7 @@ def test_app_config_tracks_api_model_profile():
         api_token="demo",
         api_timeout=12,
         api_layout_model_name="",
+        layout_concurrency=3,
     )
     current = get_config()
     assert current["api_model_profile"] == "paddleocr-vl-1.6"
@@ -10417,6 +10419,7 @@ def test_app_config_tracks_api_model_profile():
     assert current["api_timeout"] == 12
     assert current["api_token"] == "demo"
     assert current["api_layout_model_name"] == ""
+    assert current["layout_concurrency"] == 3
     cfg.reset_to_defaults()
 
     print("test_app_config_tracks_api_model_profile PASSED")
@@ -11712,6 +11715,58 @@ def test_layout_worker_continues_after_single_page_failure():
     assert len(pages[2].blocks) == 1
 
     print("test_layout_worker_continues_after_single_page_failure PASSED")
+
+
+def test_layout_worker_runs_api_pages_with_bounded_concurrency():
+    import threading
+    import time
+    from unittest.mock import patch
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.layout_analyzer import LayoutAnalyzer, LayoutWorker
+    from app.models import BBox, Block, BlockType, Page
+
+    pages = [
+        Page(image_path=f"/tmp/layout-api-{idx}.png", width=100, height=100, page_number=idx)
+        for idx in range(1, 5)
+    ]
+    done = []
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_analyze(_self, page):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.03)
+            page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+        finally:
+            with lock:
+                active -= 1
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(
+        mode="api",
+        api_url="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+        layout_concurrency=2,
+    )
+    try:
+        with patch.object(LayoutAnalyzer, "analyze", fake_analyze):
+            worker = LayoutWorker(pages)
+            worker.page_done.connect(lambda idx, total: done.append((idx, total)))
+            worker.run()
+    finally:
+        cfg.reset_to_defaults()
+
+    assert done == [(0, 4), (1, 4), (2, 4), (3, 4)]
+    assert max_active == 2
+    assert all(len(page.blocks) == 1 for page in pages)
+
+    print("test_layout_worker_runs_api_pages_with_bounded_concurrency PASSED")
 
 
 def test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages():

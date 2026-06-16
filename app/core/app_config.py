@@ -18,6 +18,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "api_token": "",
     "api_layout_model_name": "",
     "api_model_profile": "",       # 历史配置字段；固定链路会按 endpoint 推断
+    "layout_concurrency": 2,        # 远端版面分析 job 并发数；本地 Paddle 仍保持串行
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -106,6 +107,10 @@ def get_config() -> dict[str, Any]:
     from app.core.api_profiles import normalize_api_base_url
 
     cfg = AppConfig.instance()
+    try:
+        layout_concurrency = int(cfg.get("layout_concurrency", 2))
+    except (TypeError, ValueError):
+        layout_concurrency = 2
     return {
         "mode": cfg.get("ocr_mode", "local"),
         "api_url": normalize_api_base_url(cfg.get("api_url", "")),
@@ -113,6 +118,7 @@ def get_config() -> dict[str, Any]:
         "api_token": cfg.get("api_token", ""),
         "api_layout_model_name": cfg.get("api_layout_model_name", ""),
         "api_model_profile": cfg.get("api_model_profile", ""),
+        "layout_concurrency": layout_concurrency,
         "llm_endpoint": cfg.get("llm_endpoint", ""),
         "llm_api_key": cfg.get("llm_api_key", ""),
         "llm_rules_path": cfg.get("llm_rules_path", ""),
@@ -129,6 +135,7 @@ def update_config(**kwargs: Any) -> None:
         "api_timeout": "api_timeout",
         "api_token": "api_token",
         "api_layout_model_name": "api_layout_model_name",
+        "layout_concurrency": "layout_concurrency",
         "llm_endpoint": "llm_endpoint",
         "llm_api_key": "llm_api_key",
         "llm_rules_path": "llm_rules_path",

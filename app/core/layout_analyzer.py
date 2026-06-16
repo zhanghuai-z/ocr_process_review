@@ -18,6 +18,7 @@ VL1.6 响应在这里采用固定抽取路径：
 PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 from typing import Iterable, List
@@ -66,11 +67,31 @@ logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
 LOCAL_LAYOUT_CANVAS_H = 608
 LAYOUT_API_TIMEOUT_FLOOR = 180
+LAYOUT_API_CONCURRENCY_CAP = 4
+
+
+def _layout_worker_max_workers(total_pages: int) -> int:
+    if total_pages <= 1:
+        return 1
+    try:
+        from app.core.app_config import get_config
+
+        cfg = get_config()
+    except Exception:
+        return 1
+    mode = str(cfg.get("mode", "local") or "local").lower()
+    if mode not in {"api", "hanwang"}:
+        return 1
+    try:
+        configured = int(cfg.get("layout_concurrency", 2))
+    except (TypeError, ValueError):
+        configured = 2
+    return max(1, min(total_pages, LAYOUT_API_CONCURRENCY_CAP, configured))
 
 
 class LayoutWorker(QThread):
     """版面分析 Worker 线程，避免阻塞 UI。"""
-    page_done = Signal(int, int)   # (current_index, total)
+    page_done = Signal(int, int)   # (completed_index, total)
     all_done  = Signal(list)       # List[Page]
     error     = Signal(str)
 
@@ -78,23 +99,55 @@ class LayoutWorker(QThread):
         super().__init__(parent)
         self._pages = pages
 
-    def run(self) -> None:
+    def _analyze_page(self, index: int, page: Page) -> tuple[int, str | None]:
         analyzer = LayoutAnalyzer()
+        try:
+            analyzer.analyze(page)
+            page.error_message = ""
+            return index, None
+        except Exception as e:
+            logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
+            page.blocks = []
+            page.error_message = f"版面分析失败：{e}"
+            return index, f"第 {page.page_number} 页：{e}"
+
+    def run(self) -> None:
         total = len(self._pages)
-        fatal_errors: list[str] = []
-        for i, page in enumerate(self._pages):
-            try:
-                analyzer.analyze(page)
-                page.error_message = ""
-            except Exception as e:
-                logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
-                page.blocks = []
-                page.error_message = f"版面分析失败：{e}"
-                fatal_errors.append(f"第 {page.page_number} 页：{e}")
-            finally:
-                self.page_done.emit(i, total)
+        fatal_errors: list[tuple[int, str]] = []
+        completed = 0
+        max_workers = _layout_worker_max_workers(total)
+
+        if max_workers <= 1:
+            for i, page in enumerate(self._pages):
+                page_idx, error_message = self._analyze_page(i, page)
+                if error_message:
+                    fatal_errors.append((page_idx, error_message))
+                completed += 1
+                self.page_done.emit(completed - 1, total)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="layout-api") as executor:
+                futures = {
+                    executor.submit(self._analyze_page, i, page): i
+                    for i, page in enumerate(self._pages)
+                }
+                for future in as_completed(futures):
+                    page_idx = futures[future]
+                    try:
+                        page_idx, error_message = future.result()
+                    except Exception as exc:
+                        page = self._pages[page_idx]
+                        logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
+                        page.blocks = []
+                        page.error_message = f"版面分析失败：{exc}"
+                        error_message = f"第 {page.page_number} 页：{exc}"
+                    if error_message:
+                        fatal_errors.append((page_idx, error_message))
+                    completed += 1
+                    self.page_done.emit(completed - 1, total)
+
         if len(fatal_errors) == total and total > 0:
-            self.error.emit("所有页面版面分析失败：\n" + "\n".join(fatal_errors[:5]))
+            messages = [message for _idx, message in sorted(fatal_errors, key=lambda item: item[0])]
+            self.error.emit("所有页面版面分析失败：\n" + "\n".join(messages[:5]))
             return
         self.all_done.emit(self._pages)
 
