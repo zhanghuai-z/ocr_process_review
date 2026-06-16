@@ -21,6 +21,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
+import time
 from typing import Iterable, List
 
 from PySide6.QtCore import QThread, Signal
@@ -67,7 +68,7 @@ logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
 LOCAL_LAYOUT_CANVAS_H = 608
 LAYOUT_API_TIMEOUT_FLOOR = 180
-LAYOUT_API_CONCURRENCY_CAP = 4
+LAYOUT_API_CONCURRENCY_CAP = 10
 
 
 def _layout_worker_max_workers(total_pages: int) -> int:
@@ -98,9 +99,10 @@ class LayoutWorker(QThread):
     def __init__(self, pages: List[Page], parent=None):
         super().__init__(parent)
         self._pages = pages
+        self._batch_id = f"ocr-process-layout-{int(time.time() * 1000)}"
 
     def _analyze_page(self, index: int, page: Page) -> tuple[int, str | None]:
-        analyzer = LayoutAnalyzer()
+        analyzer = LayoutAnalyzer(layout_batch_id=self._batch_id)
         try:
             analyzer.analyze(page)
             page.error_message = ""
@@ -154,9 +156,10 @@ class LayoutWorker(QThread):
 
 class LayoutAnalyzer:
 
-    def __init__(self) -> None:
+    def __init__(self, *, layout_batch_id: str = "") -> None:
         self._engine = None
         self._hanwang_layout_engine = None
+        self._layout_batch_id = layout_batch_id
 
     # ── local mode ─────────────────────────────────────────────
 
@@ -730,11 +733,29 @@ class LayoutAnalyzer:
             token=token,
             request_timeout=timeout,
             poll_timeout=timeout,
+            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
         )
         data = client.analyze_image(
             img,
             optional_payload=build_paddle_v16_optional_payload(),
+            batch_id=self._layout_batch_id,
         )
+        telemetry = (
+            data.get("paddle_v16", {})
+            .get("job", {})
+            .get("clientTelemetry", {})
+        )
+        if telemetry:
+            logger.info(
+                "Paddle VL1.6 page %s timing: total=%.2fs submit=%.2fs wait=%.2fs download=%.2fs network=%s batch=%s",
+                page.display_image_path,
+                float(telemetry.get("total_seconds") or 0.0),
+                float(telemetry.get("submit_seconds") or 0.0),
+                float(telemetry.get("wait_seconds") or 0.0),
+                float(telemetry.get("download_seconds") or 0.0),
+                telemetry.get("submit_network_mode") or telemetry.get("network_mode") or "",
+                telemetry.get("batch_id") or "",
+            )
         self._write_api_debug_response(page, data)
 
         page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)

@@ -129,6 +129,15 @@
 
 ## Engineering Recommendations
 
+### Implemented After Follow-up
+
+- 主程序新增 `paddle_api_network_mode`：`auto` / `env_proxy` / `direct`。
+  - 默认 `auto`：有系统代理时先走代理；连接类失败会退回 direct。
+  - Paddle VL1.6 client 会记录 `submit_seconds`、`wait_seconds`、`download_seconds`、`poll_count`、实际网络路径。
+- 设置窗口新增“Paddle 网络”选项，版面请求并发上限从 4 提到 10。
+- `LayoutWorker` 为同一批版面分析 job 生成统一 `batchId`，便于后续接入 batch status 批量轮询。
+- `PaddleV16LayoutClient.get_batch_status(batch_id)` 已准备好；当前主链仍按单 job 轮询，后续可以基于它减少百页项目的 GET 轮询风暴。
+
 1. 短期接入 Hanwang 页级并发：
    - 新增 `ocr_page_concurrency` 配置，默认 2，上限 4。
    - 仅对 Hanwang hybrid/page-block OCR 启用。

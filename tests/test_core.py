@@ -4668,6 +4668,7 @@ def test_api_ocr_engine_does_not_request_return_word_box():
         api_url="https://example.com",
         api_token="demo",
         api_timeout=12,
+        paddle_api_network_mode="direct",
     )
 
     original_post = requests.post
@@ -10643,6 +10644,7 @@ def test_app_config_tracks_api_model_profile():
     assert defaults["mode"] == "local"
     assert defaults["api_model_profile"] == ""
     assert defaults["layout_concurrency"] == 2
+    assert defaults["paddle_api_network_mode"] == "auto"
 
     update_config(
         mode="api",
@@ -10652,6 +10654,7 @@ def test_app_config_tracks_api_model_profile():
         api_timeout=12,
         api_layout_model_name="",
         layout_concurrency=3,
+        paddle_api_network_mode="env_proxy",
     )
     current = get_config()
     assert current["api_model_profile"] == "paddleocr-vl-1.6"
@@ -10660,6 +10663,7 @@ def test_app_config_tracks_api_model_profile():
     assert current["api_token"] == "demo"
     assert current["api_layout_model_name"] == ""
     assert current["layout_concurrency"] == 3
+    assert current["paddle_api_network_mode"] == "env_proxy"
     cfg.reset_to_defaults()
 
     print("test_app_config_tracks_api_model_profile PASSED")
@@ -10682,6 +10686,7 @@ def test_api_settings_dialog_syncs_model_and_url():
         api_url="https://example.com/root",
         api_token="old",
         layout_concurrency=4,
+        paddle_api_network_mode="direct",
     )
 
     dialog = ApiSettingsDialog()
@@ -10697,7 +10702,8 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert not dialog._timeout_row.isHidden()
     assert dialog._timeout_spin.maximum() >= 600
     assert dialog._layout_concurrency_spin.value() == 4
-    assert dialog._layout_concurrency_spin.maximum() == 4
+    assert dialog._layout_concurrency_spin.maximum() == 10
+    assert dialog._paddle_network_combo.currentData() == "direct"
 
     cfg.reset_to_defaults()
 
@@ -11742,6 +11748,7 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         api_url="https://example.com/root",
         api_token="demo",
         api_timeout=12,
+        paddle_api_network_mode="direct",
     )
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         page_path = f.name
@@ -11808,6 +11815,75 @@ def test_paddle_v16_submit_error_includes_response_body():
         requests.post = original_post
 
     print("test_paddle_v16_submit_error_includes_response_body PASSED")
+
+
+def test_paddle_v16_client_supports_env_proxy_and_batch_id():
+    import requests
+
+    from app.core.paddle_v16_client import PaddleV16LayoutClient
+
+    captured = {}
+
+    class SubmitResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"jobId": "job-1"}}
+
+    class BatchResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"batchId": "batch-1", "jobs": []}}
+
+    def fake_post(url, data, files, headers, timeout, **kwargs):
+        captured["post_url"] = url
+        captured["data"] = data
+        captured["files"] = files
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        captured["post_proxies"] = kwargs.get("proxies")
+        return SubmitResponse()
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        captured["get_url"] = url
+        captured["get_headers"] = headers or {}
+        captured["get_timeout"] = timeout
+        captured["get_proxies"] = kwargs.get("proxies")
+        return BatchResponse()
+
+    original_post = requests.post
+    original_get = requests.get
+    requests.post = fake_post
+    requests.get = fake_get
+    try:
+        client = PaddleV16LayoutClient(
+            jobs_url="https://example.com/api/v2/ocr/jobs",
+            token="demo",
+            network_mode="env_proxy",
+        )
+        job_id = client.submit_image_bytes(b"\x89PNG\r\n\x1a\nfake", batch_id="batch-1")
+        assert job_id == "job-1"
+        assert captured["data"]["batchId"] == "batch-1"
+        assert captured["post_proxies"] is None
+        assert captured["headers"]["Authorization"] == "bearer demo"
+        assert client.telemetry["submit_network_mode"] == "env_proxy"
+
+        body = client.get_batch_status("batch-1")
+        assert body["data"]["batchId"] == "batch-1"
+        assert captured["get_url"] == "https://example.com/api/v2/ocr/jobs/batch/batch-1"
+        assert captured["get_proxies"] is None
+    finally:
+        requests.post = original_post
+        requests.get = original_get
+
+    print("test_paddle_v16_client_supports_env_proxy_and_batch_id PASSED")
 
 
 def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
@@ -13435,6 +13511,7 @@ if __name__ == "__main__":
     test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_space()
     test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected()
     test_paddle_v16_submit_error_includes_response_body()
+    test_paddle_v16_client_supports_env_proxy_and_batch_id()
     test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout()
     test_hanwang_assets_env_accepts_bin_dir()
     test_hanwang_native_bridge_writes_multi_recblocks()

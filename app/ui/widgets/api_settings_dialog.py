@@ -492,13 +492,27 @@ class ApiSettingsDialog(QDialog):
         concurrency_layout.setContentsMargins(0, 0, 0, 0)
         concurrency_layout.setSpacing(0)
         self._layout_concurrency_spin = QSpinBox()
-        self._layout_concurrency_spin.setRange(1, 4)
+        self._layout_concurrency_spin.setRange(1, 10)
         self._layout_concurrency_spin.setSuffix(" 路")
         self._layout_concurrency_spin.setFixedWidth(140)
-        self._layout_concurrency_spin.setToolTip("多页版面分析时同时提交的 Paddle jobs 数；过高可能触发服务端限流。")
+        self._layout_concurrency_spin.setToolTip("多页版面分析时同时提交的 Paddle jobs 数；建议按失败率在 4-10 间调节。")
         concurrency_layout.addWidget(self._layout_concurrency_spin)
         concurrency_layout.addStretch()
         api_form.addLayout(_form_row("版面请求并发", concurrency_row))
+
+        network_row = QWidget()
+        network_layout = QHBoxLayout(network_row)
+        network_layout.setContentsMargins(0, 0, 0, 0)
+        network_layout.setSpacing(0)
+        self._paddle_network_combo = QComboBox()
+        self._paddle_network_combo.addItem("自动（优先系统代理）", "auto")
+        self._paddle_network_combo.addItem("使用系统代理", "env_proxy")
+        self._paddle_network_combo.addItem("直连（禁用代理）", "direct")
+        self._paddle_network_combo.setFixedWidth(180)
+        self._paddle_network_combo.setToolTip("PaddleOCR-VL jobs API 网络路径；自动模式会先试系统代理，连接类失败再直连。")
+        network_layout.addWidget(self._paddle_network_combo)
+        network_layout.addStretch()
+        api_form.addLayout(_form_row("Paddle 网络", network_row))
 
         test_row = QHBoxLayout()
         test_row.setContentsMargins(0, 4, 0, 0)
@@ -651,6 +665,9 @@ class ApiSettingsDialog(QDialog):
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
         self._layout_concurrency_spin.setValue(int(cfg.get("layout_concurrency", 2)))
+        network_mode = str(cfg.get("paddle_api_network_mode", "auto") or "auto")
+        network_index = self._paddle_network_combo.findData(network_mode)
+        self._paddle_network_combo.setCurrentIndex(network_index if network_index >= 0 else 0)
         self._btn_show_token.setChecked(False)
         self._llm_url_edit.setText(cfg.get("llm_endpoint", ""))
         self._llm_key_edit.setText(cfg.get("llm_api_key", ""))
@@ -757,6 +774,7 @@ class ApiSettingsDialog(QDialog):
             api_timeout=self._timeout_spin.value(),
             api_layout_model_name="",
             layout_concurrency=self._layout_concurrency_spin.value(),
+            paddle_api_network_mode=str(self._paddle_network_combo.currentData() or "auto"),
             llm_endpoint=self._llm_url_edit.text().strip(),
             llm_api_key=self._llm_key_edit.text().strip(),
             llm_rules_path=self._llm_rules_edit.text().strip(),
@@ -800,6 +818,7 @@ class ApiSettingsDialog(QDialog):
                 token=token,
                 request_timeout=timeout,
                 poll_timeout=timeout,
+                network_mode=str(self._paddle_network_combo.currentData() or "auto"),
             )
             body = client.analyze_image(
                 img,
