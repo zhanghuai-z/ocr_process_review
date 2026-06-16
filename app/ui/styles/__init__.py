@@ -18,31 +18,31 @@ from typing import Any
 
 LIGHT_TOKENS: dict[str, str] = {
     # 背景层级
-    "bg_root":      "#f5f7fb",
+    "bg_root":      "#f3f4f6",
     "bg_panel":     "#ffffff",
     "bg_card":      "#ffffff",
-    "bg_hover":     "#f0f6ff",
-    "bg_selected":  "#e3f0ff",
+    "bg_hover":     "#f3f4f6",
+    "bg_selected":  "#eff6ff",
     "bg_input":     "#ffffff",
-    "bg_input_dis": "#f1f3f6",
-    "bg_status":    "#f5f7fb",
+    "bg_input_dis": "#f3f4f6",
+    "bg_status":    "#f3f4f6",
     # 边框
-    "border":         "#e3e8ef",
-    "border_input":   "#d6dde6",
-    "border_focus":   "#1a73e8",
-    "border_subtle":  "#edf0f5",
+    "border":         "#e5e7eb",
+    "border_input":   "#e5e7eb",
+    "border_focus":   "#2563eb",
+    "border_subtle":  "#e5e7eb",
     # 文本
-    "text_primary":   "#222222",
-    "text_secondary": "#555555",
-    "text_muted":     "#888888",
-    "text_disabled":  "#aaaaaa",
+    "text_primary":   "#111827",
+    "text_secondary": "#4b5563",
+    "text_muted":     "#9ca3af",
+    "text_disabled":  "#9ca3af",
     "text_on_brand":  "#ffffff",
     # 品牌
-    "brand":            "#1a73e8",
-    "brand_hover":      "#1666cf",
-    "brand_pressed":    "#1357a8",
-    "brand_disabled":   "#c7d4ea",
-    "brand_border_lt":  "#b8d4ff",
+    "brand":            "#2563eb",
+    "brand_hover":      "#1d4ed8",
+    "brand_pressed":    "#1e40af",
+    "brand_disabled":   "#93c5fd",
+    "brand_border_lt":  "#93c5fd",
     # 状态色
     "accent_green":         "#34a853",
     "accent_green_hover":   "#2d9248",
@@ -52,20 +52,20 @@ LIGHT_TOKENS: dict[str, str] = {
     "danger_bg":      "#fff0f0",
     "danger_border":  "#f4c4c4",
     # 滚动条
-    "scroll_handle":   "#c8d0db",
-    "scroll_handle_h": "#1a73e8",
+    "scroll_handle":   "#d1d5db",
+    "scroll_handle_h": "#9ca3af",
     # 进度条轨道
     "progress_track": "#e9eef5",
     # ToolTip
     "tooltip_bg":   "#2c3e50",
     "tooltip_text": "#ffffff",
     # GraphicsView
-    "canvas_bg": "#fafbfc",
+    "canvas_bg": "#f3f4f6",
     # 状态徽章 pill（done/running/warn 三档）
     "pill_done_bg":     "#e6f4ea",
     "pill_done_text":   "#137333",
-    "pill_running_bg":  "#e8f0fe",
-    "pill_running_text":"#1a73e8",
+    "pill_running_bg":  "#eff6ff",
+    "pill_running_text":"#2563eb",
     "pill_warn_bg":     "#fef7e0",
     "pill_warn_text":   "#b06000",
     "pill_idle_bg":     "#eef1f5",
@@ -161,7 +161,8 @@ QWidget {{
     font-size: {font_size};
 }}
 
-QMainWindow, QDialog {{ background: {bg_root}; }}
+QMainWindow {{ background: {bg_root}; }}
+QDialog {{ background: {bg_panel}; }}
 
 QMenuBar {{
     background: {bg_panel};
@@ -208,6 +209,8 @@ QFrame#blockTypeDivider {{
 }}
 QDialog#layoutFindDialog {{
     background: {bg_panel};
+    border: 1px solid {border};
+    border-radius: {radius_lg};
 }}
 QFrame#layoutFindHeader {{
     background: {bg_panel};
@@ -237,23 +240,22 @@ QLabel#statusPill[kind="idle"]    {{ background: {pill_idle_bg};    color: {pill
 
 /* ---------- PageDir 行（页面目录） ---------- */
 QListWidget#pageDirectoryList {{
-    background: {bg_panel};
+    background: #fafafa;
     border: none;
-    border-right: 1px solid {border};
     outline: 0;
-    padding: 4px 0;
+    padding: 0;
 }}
 QListWidget#pageDirectoryList::item {{
     border: none;
     padding: 0;
+    margin: 0;
     background: transparent;
 }}
-QListWidget#pageDirectoryList::item:hover    {{ background: {bg_hover}; }}
+QListWidget#pageDirectoryList::item:hover    {{ background: {bg_root}; }}
 QListWidget#pageDirectoryList::item:selected {{ background: {bg_selected}; border-left: 3px solid {brand}; }}
 
 QTabWidget#layoutLeftTabs::pane {{
     border: none;
-    border-right: 1px solid {border};
     background: {bg_panel};
 }}
 QTabWidget#layoutLeftTabs QTabBar::tab {{
@@ -273,8 +275,8 @@ QComboBox#layoutSearchPreset {{
 QTreeWidget#headingOutlineTree,
 QListWidget#layoutSearchResults {{
     background: {bg_panel};
-    border: 1px solid {border_subtle};
-    border-radius: {radius_sm};
+    border: 1px solid {border};
+    border-radius: {radius_md};
     outline: 0;
 }}
 QTreeWidget#headingOutlineTree::item,
@@ -331,7 +333,7 @@ QWidget#headerBar {{
 }}
 QWidget#sidebarBar {{
     background: {bg_panel};
-    border-right: 1px solid {border};
+    border: none;
 }}
 QWidget#toolbar {{
     background: {bg_panel};
@@ -382,7 +384,11 @@ QPushButton#toolToggle:checked {{ background: {bg_selected}; color: {brand}; bor
 /* viewer 顶部小工具条（字框 / 新建 / 选中） */
 QFrame#viewerToolbar {{
     background: {bg_panel};
-    border-bottom: 1px solid {border_subtle};
+    border-bottom: 1px solid {border};
+}}
+QScrollArea#layoutToolScroll {{
+    background: {bg_panel};
+    border: none;
 }}
 
 /* 底栏翻页按钮 < > 与页码标签 */
@@ -406,7 +412,7 @@ QLabel#pageNavLabel {{
 QPushButton#secondaryBtn {{
     border: 1px solid {border_input};
     border-radius: {radius_md};
-    padding: 4px 14px;
+    padding: 6px 14px;
     background: {bg_panel};
     color: {text_primary};
 }}
@@ -430,8 +436,9 @@ QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
     background: {bg_input};
     border: 1px solid {border_input};
     border-radius: {radius_md};
-    padding: 4px 8px;
+    padding: 6px 12px;
     color: {text_primary};
+    min-height: 24px;
     selection-background-color: {bg_selected};
     selection-color: {brand};
 }}
@@ -441,7 +448,7 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdi
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
     background: {bg_input_dis}; color: {text_disabled};
 }}
-QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox::drop-down {{ border: none; width: 24px; }}
 QComboBox QAbstractItemView {{
     background: {bg_panel}; border: 1px solid {border_input};
     selection-background-color: {bg_selected}; selection-color: {brand};
@@ -483,8 +490,8 @@ QPushButton {{
     color: {text_primary};
     font-size: {font_size};
 }}
-QPushButton:hover    {{ border-color: {brand}; color: {brand}; }}
-QPushButton:pressed  {{ background: {bg_hover}; }}
+QPushButton:hover    {{ border-color: {border_input}; background: #f9fafb; color: {text_primary}; }}
+QPushButton:pressed  {{ background: {bg_root}; }}
 QPushButton:disabled {{ color: {text_disabled}; border-color: {border}; background: {bg_root}; }}
 
 QPushButton#primaryBtn {{
@@ -594,7 +601,7 @@ QToolTip {{
 }}
 
 /* ---------- GraphicsView 背景 ---------- */
-QGraphicsView {{ background: {canvas_bg}; border: 1px solid {border}; border-radius: {radius_md}; }}
+QGraphicsView {{ background: {canvas_bg}; border: none; }}
 """
 
 

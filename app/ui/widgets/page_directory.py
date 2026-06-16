@@ -50,6 +50,8 @@ class _PageRow(QWidget):
     def __init__(self, page: Page, thumbnail: QPixmap | None, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pageRow")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
         self.setFixedHeight(_ROW_H)
 
         row = QHBoxLayout(self)

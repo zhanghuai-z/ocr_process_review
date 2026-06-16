@@ -44,7 +44,7 @@ from app.core.paddle_line_routing import (
 )
 from app.core.ocr_ir import is_formula_marker_token
 from app.models import BBox, Block, BlockSource, BlockType, Page
-from app.ui.widgets.image_viewer import BLOCK_COLORS, ImageViewer
+from app.ui.widgets.image_viewer import ImageViewer
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -148,20 +148,23 @@ def _block_type_label(block_type: BlockType) -> str:
 
 
 def _block_type_button_stylesheet(block_type: BlockType) -> str:
-    color = BLOCK_COLORS.get(block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-    border = color.name()
-    return f"""
+    return """
         QPushButton {{
             min-height: 26px;
-            padding: 3px 6px;
+            padding: 4px 8px;
             border-radius: 4px;
-            border: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 150);
-            background: rgba({color.red()}, {color.green()}, {color.blue()}, 28);
-            color: #202124;
+            border: 1px solid #e5e7eb;
+            background: #ffffff;
+            color: #111827;
+        }}
+        QPushButton:hover {{
+            background: #f9fafb;
+            border-color: #d1d5db;
         }}
         QPushButton:checked {{
-            border: 2px solid {border};
-            background: rgba({color.red()}, {color.green()}, {color.blue()}, 76);
+            border: 2px solid #2563eb;
+            background: #eff6ff;
+            color: #2563eb;
             font-weight: 600;
         }}
         QPushButton:disabled {{
@@ -189,14 +192,13 @@ def _block_type_group_stylesheet() -> str:
 
 
 def _type_badge_stylesheet(block_type: BlockType) -> str:
-    color = BLOCK_COLORS.get(block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-    return f"""
+    return """
         QLabel#typeBadge {{
             padding: 2px 8px;
             border-radius: 4px;
-            border: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 170);
-            background: rgba({color.red()}, {color.green()}, {color.blue()}, 36);
-            color: rgb({max(color.red() - 70, 0)}, {max(color.green() - 70, 0)}, {max(color.blue() - 70, 0)});
+            border: 1px solid #93c5fd;
+            background: #eff6ff;
+            color: #2563eb;
             font-weight: 600;
             font-size: 13px;
         }}
@@ -496,7 +498,7 @@ class LayoutPanel(QWidget):
         dialog.setObjectName("layoutFindDialog")
         dialog.setWindowTitle("基于属性与文本过滤的批量赋值")
         dialog.setModal(True)
-        dialog.resize(560, 430)
+        dialog.resize(580, 450)
 
         root = QVBoxLayout(dialog)
         root.setContentsMargins(0, 0, 0, 0)
@@ -505,7 +507,7 @@ class LayoutPanel(QWidget):
         header = QFrame()
         header.setObjectName("layoutFindHeader")
         header_lay = QHBoxLayout(header)
-        header_lay.setContentsMargins(14, 10, 10, 10)
+        header_lay.setContentsMargins(24, 16, 18, 14)
         title = QLabel("基于属性与文本过滤的批量赋值")
         title.setObjectName("sidebarTitle")
         header_lay.addWidget(title)
@@ -519,8 +521,8 @@ class LayoutPanel(QWidget):
 
         body = QWidget()
         body_lay = QVBoxLayout(body)
-        body_lay.setContentsMargins(14, 12, 14, 12)
-        body_lay.setSpacing(10)
+        body_lay.setContentsMargins(24, 18, 24, 24)
+        body_lay.setSpacing(16)
 
         input_title = QLabel("包含文本特征")
         input_title.setObjectName("fieldLabel")
@@ -553,7 +555,7 @@ class LayoutPanel(QWidget):
 
         assign_row = QHBoxLayout()
         assign_row.setContentsMargins(0, 0, 0, 0)
-        assign_row.setSpacing(10)
+        assign_row.setSpacing(16)
 
         source_col = QVBoxLayout()
         source_col.setContentsMargins(0, 0, 0, 0)
@@ -598,13 +600,13 @@ class LayoutPanel(QWidget):
 
         action_col = QVBoxLayout()
         action_col.setContentsMargins(0, 0, 0, 0)
-        action_col.setSpacing(6)
+        action_col.setSpacing(8)
         self._btn_preview_matches = QPushButton("预览匹配块")
         self._btn_preview_matches.setObjectName("secondaryBtn")
         self._btn_preview_matches.clicked.connect(self._preview_first_search_match)
         action_col.addWidget(self._btn_preview_matches)
         self._btn_apply_filter_type = QPushButton("批量应用属性")
-        self._btn_apply_filter_type.setObjectName("secondaryBtn")
+        self._btn_apply_filter_type.setObjectName("primaryBtn")
         self._btn_apply_filter_type.setToolTip("把目标赋值分类批量应用到查找结果")
         self._btn_apply_filter_type.clicked.connect(self._apply_search_target_to_matches)
         action_col.addWidget(self._btn_apply_filter_type)
