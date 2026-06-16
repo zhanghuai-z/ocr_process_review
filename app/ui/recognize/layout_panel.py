@@ -252,6 +252,7 @@ class LayoutPanel(QWidget):
         self._outline_tree = QTreeWidget()
         self._outline_tree.setObjectName("headingOutlineTree")
         self._outline_tree.setHeaderHidden(True)
+        self._outline_tree.setIndentation(16)
         self._outline_tree.itemClicked.connect(self._on_outline_item_clicked)
         self._left_tabs = QTabWidget()
         self._left_tabs.setObjectName("layoutLeftTabs")
@@ -918,21 +919,27 @@ class LayoutPanel(QWidget):
         if not hasattr(self, "_outline_tree"):
             return
         self._outline_tree.clear()
+        stack: list[tuple[int, QTreeWidgetItem]] = []
         for page_idx, page in enumerate(self._pages):
             heading_blocks = [block for block in page.blocks if self._is_title_like_block(block)]
             if not heading_blocks:
                 continue
-            page_item = QTreeWidgetItem([f"第 {page.page_number} 页"])
-            page_item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, -1))
-            self._outline_tree.addTopLevelItem(page_item)
             for block in sorted(heading_blocks, key=lambda item: (item.bbox.y, item.bbox.x, item.order)):
                 level = self._heading_level_for_block(block)
-                level_text = f"H{level}" if level else "标题"
+                outline_level = level if 1 <= level <= 6 else 1
+                level_text = f"H{level}" if level else "标题候选"
                 text = self._block_preview_text(block)
-                item = QTreeWidgetItem([f"{level_text}  {text}"])
+                item = QTreeWidgetItem([text])
                 item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, id(block)))
-                page_item.addChild(item)
-            page_item.setExpanded(True)
+                item.setToolTip(0, f"级别：{level_text}\n第 {page.page_number} 页")
+                while stack and stack[-1][0] >= outline_level:
+                    stack.pop()
+                if stack:
+                    stack[-1][1].addChild(item)
+                else:
+                    self._outline_tree.addTopLevelItem(item)
+                stack.append((outline_level, item))
+        self._outline_tree.expandAll()
 
     def _on_outline_item_clicked(self, item: QTreeWidgetItem) -> None:
         payload = item.data(0, Qt.ItemDataRole.UserRole)
@@ -940,11 +947,6 @@ class LayoutPanel(QWidget):
             return
         page_idx, block_identity = payload
         if not isinstance(page_idx, int) or not (0 <= page_idx < len(self._pages)):
-            return
-        if block_identity == -1:
-            self._page_list.set_current_index(page_idx)
-            self._current_page_idx = page_idx
-            self._update_viewer(page_idx)
             return
         block = next((candidate for candidate in self._pages[page_idx].blocks if id(candidate) == block_identity), None)
         if block is not None:

@@ -3924,13 +3924,70 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
             assert target.source_label == "heading_1"
             assert other.block_type == BlockType.TEXT
             assert panel._outline_tree.topLevelItemCount() == 1
-            first_page = panel._outline_tree.topLevelItem(0)
-            assert first_page.childCount() == 1
-            assert first_page.child(0).text(0).startswith("H1")
+            heading_item = panel._outline_tree.topLevelItem(0)
+            assert heading_item.text(0) == "一、引言"
+            assert "H1" in heading_item.toolTip(0)
+            assert "第 1 页" in heading_item.toolTip(0)
+            assert heading_item.childCount() == 0
         finally:
             panel.close()
 
     print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
+
+
+def test_layout_panel_heading_outline_uses_nested_heading_levels():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    def heading(label: str, text: str, y: int) -> Block:
+        return Block(
+            block_type=BlockType.TITLE,
+            bbox=BBox(10, y, 120, 18),
+            source_label=label,
+            lines=[Line(text=text, confidence=0.9, bbox=BBox(10, y, 120, 18))],
+        )
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 160, QImage.Format.Format_RGB888).save(str(image_path))
+        page = Page(
+            image_path=str(image_path),
+            width=160,
+            height=160,
+            blocks=[
+                heading("heading_1", "第一章", 10),
+                heading("heading_2", "第一节", 40),
+                heading("heading_3", "一、背景", 70),
+            ],
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            assert panel._outline_tree.topLevelItemCount() == 1
+            h1 = panel._outline_tree.topLevelItem(0)
+            assert h1.text(0) == "第一章"
+            assert "H1" in h1.toolTip(0)
+            assert h1.childCount() == 1
+            h2 = h1.child(0)
+            assert h2.text(0) == "第一节"
+            assert "H2" in h2.toolTip(0)
+            assert h2.childCount() == 1
+            h3 = h2.child(0)
+            assert h3.text(0) == "一、背景"
+            assert "H3" in h3.toolTip(0)
+        finally:
+            panel.close()
+
+    print("test_layout_panel_heading_outline_uses_nested_heading_levels PASSED")
 
 
 def test_layout_panel_undo_restores_block_edits():
