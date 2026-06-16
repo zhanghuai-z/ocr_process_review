@@ -8,7 +8,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -125,6 +125,15 @@ BLOCK_TYPE_LABELS = {
     BlockType.REFERENCE: "引用",
     BlockType.UNKNOWN: "其他",
 }
+LAYOUT_SEARCH_PRESETS = (
+    ("手动输入", ""),
+    (
+        "中文编号标题：一、/（一）",
+        r"^(?:[一二三四五六七八九十百千万零〇]+[、.．]|[（(][一二三四五六七八九十百千万零〇]+[）)])",
+    ),
+    ("章节标题：第一章/第1节", r"^第[一二三四五六七八九十百千万零〇\d]+[章节篇]"),
+    ("数字标题：1./1.1", r"^\d+(?:[.．]\d+)*[、.．]?"),
+)
 
 
 def _compact_status_text(text: str) -> str:
@@ -297,6 +306,10 @@ class LayoutPanel(QWidget):
         vtl.addWidget(self._selection_type_status)
         vw_lay.addWidget(viewer_tb)
 
+        self._find_panel = self._build_find_panel()
+        self._find_panel.hide()
+        vw_lay.addWidget(self._find_panel)
+
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
         self._viewer.block_edit_started.connect(self._on_block_edit_started)
@@ -324,43 +337,6 @@ class LayoutPanel(QWidget):
         tool_title = QLabel("工具")
         tool_title.setObjectName("sectionTitle")
         tool_lay.addWidget(tool_title)
-
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("查找块文本，支持正则")
-        self._search_input.setClearButtonEnabled(True)
-        self._search_input.textChanged.connect(self._refresh_block_search)
-        tool_lay.addWidget(self._search_input)
-
-        search_opts = QHBoxLayout()
-        search_opts.setContentsMargins(0, 0, 0, 0)
-        search_opts.setSpacing(8)
-        self._search_regex = QCheckBox("正则")
-        self._search_regex.toggled.connect(self._refresh_block_search)
-        self._search_case = QCheckBox("区分大小写")
-        self._search_case.toggled.connect(self._refresh_block_search)
-        search_opts.addWidget(self._search_regex)
-        search_opts.addWidget(self._search_case)
-        search_opts.addStretch(1)
-        tool_lay.addLayout(search_opts)
-
-        self._search_results = QListWidget()
-        self._search_results.setObjectName("layoutSearchResults")
-        self._search_results.setMaximumHeight(118)
-        self._search_results.itemClicked.connect(self._on_search_result_clicked)
-        tool_lay.addWidget(self._search_results)
-
-        search_actions = QHBoxLayout()
-        search_actions.setContentsMargins(0, 0, 0, 0)
-        search_actions.setSpacing(6)
-        self._btn_apply_filter_type = QPushButton("应用当前类型")
-        self._btn_apply_filter_type.setObjectName("secondaryBtn")
-        self._btn_apply_filter_type.setToolTip("把当前选中的属性按钮批量应用到查找结果")
-        self._btn_apply_filter_type.clicked.connect(self._apply_current_type_to_search_matches)
-        search_actions.addWidget(self._btn_apply_filter_type)
-        self._search_count_lbl = QLabel("0")
-        self._search_count_lbl.setObjectName("muted")
-        search_actions.addWidget(self._search_count_lbl)
-        tool_lay.addLayout(search_actions)
 
         self._type_context_title = QLabel("新建框类型")
         tool_lay.addWidget(self._type_context_title)
@@ -507,6 +483,75 @@ class LayoutPanel(QWidget):
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.activated.connect(self._undo_last_edit)
         self._update_page_nav()
+
+    def _build_find_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("layoutFindPanel")
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
+
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(8)
+
+        title = QLabel("查找")
+        title.setObjectName("sectionTitle")
+        search_row.addWidget(title)
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("输入文本或选择标题模式")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.textChanged.connect(self._refresh_block_search)
+        search_row.addWidget(self._search_input, 1)
+
+        self._search_preset = QComboBox()
+        self._search_preset.setObjectName("layoutSearchPreset")
+        self._search_preset.setMinimumWidth(180)
+        for label, pattern in LAYOUT_SEARCH_PRESETS:
+            self._search_preset.addItem(label, pattern)
+        self._search_preset.currentIndexChanged.connect(self._on_search_preset_changed)
+        search_row.addWidget(self._search_preset)
+
+        self._search_regex = QCheckBox("正则")
+        self._search_regex.toggled.connect(self._refresh_block_search)
+        search_row.addWidget(self._search_regex)
+
+        self._search_case = QCheckBox("区分大小写")
+        self._search_case.toggled.connect(self._refresh_block_search)
+        search_row.addWidget(self._search_case)
+
+        self._btn_close_find = QPushButton("关闭")
+        self._btn_close_find.setObjectName("secondaryBtn")
+        self._btn_close_find.clicked.connect(self.hide_find_panel)
+        search_row.addWidget(self._btn_close_find)
+        root.addLayout(search_row)
+
+        result_row = QHBoxLayout()
+        result_row.setContentsMargins(0, 0, 0, 0)
+        result_row.setSpacing(8)
+        self._search_results = QListWidget()
+        self._search_results.setObjectName("layoutSearchResults")
+        self._search_results.setMaximumHeight(118)
+        self._search_results.itemClicked.connect(self._on_search_result_clicked)
+        result_row.addWidget(self._search_results, 1)
+
+        action_col = QVBoxLayout()
+        action_col.setContentsMargins(0, 0, 0, 0)
+        action_col.setSpacing(6)
+        self._btn_apply_filter_type = QPushButton("应用当前类型")
+        self._btn_apply_filter_type.setObjectName("secondaryBtn")
+        self._btn_apply_filter_type.setToolTip("把当前选中的属性按钮批量应用到查找结果")
+        self._btn_apply_filter_type.clicked.connect(self._apply_current_type_to_search_matches)
+        action_col.addWidget(self._btn_apply_filter_type)
+        self._search_count_lbl = QLabel("0")
+        self._search_count_lbl.setObjectName("muted")
+        action_col.addWidget(self._search_count_lbl)
+        action_col.addStretch(1)
+        result_row.addLayout(action_col)
+        root.addLayout(result_row)
+        return panel
+
     # ------------------------------------------------------------------ public
 
     def set_pages(self, pages: List[Page]) -> None:
@@ -535,6 +580,7 @@ class LayoutPanel(QWidget):
         self._search_results.clear()
         self._block_search_matches.clear()
         self._search_count_lbl.setText("0")
+        self._find_panel.hide()
         self._viewer.clear()
         self._set_status_text("请先导入文件并运行版面分析")
         self._btn_run.setEnabled(False)
@@ -609,6 +655,26 @@ class LayoutPanel(QWidget):
         if self._pages and self._pages[self._current_page_idx].page_number == page_number:
             self._btn_submit.setText(label)
             self._btn_submit.setEnabled(enabled)
+
+    def show_find_panel(self) -> None:
+        self._find_panel.show()
+        self._search_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search_input.selectAll()
+        self._refresh_block_search()
+
+    def hide_find_panel(self) -> None:
+        self._find_panel.hide()
+
+    def toggle_find_panel(self) -> None:
+        if self._find_panel.isVisible():
+            self.hide_find_panel()
+        else:
+            self.show_find_panel()
+
+    def refresh_text_indexes(self) -> None:
+        """Refresh derived text views after OCR/proof updates block lines."""
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
 
     def _set_status_text(self, text: str) -> None:
         full = str(text or "")
@@ -704,6 +770,17 @@ class LayoutPanel(QWidget):
         self._search_count_lbl.setText(f"{count} 个")
         if count:
             self._set_status_text(f"查找到 {count} 个版面块")
+
+    def _on_search_preset_changed(self, index: int) -> None:
+        if not hasattr(self, "_search_preset"):
+            return
+        pattern = self._search_preset.itemData(index)
+        if not pattern:
+            return
+        self._search_regex.setChecked(True)
+        if self._search_input.text() != pattern:
+            self._search_input.setText(pattern)
+        self._search_input.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_search_result_clicked(self, item: QListWidgetItem) -> None:
         match_idx = item.data(Qt.ItemDataRole.UserRole)

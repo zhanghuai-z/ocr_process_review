@@ -259,6 +259,13 @@ QTabWidget#layoutLeftTabs QTabBar::tab:selected {{
     color: {brand};
     border-bottom: 2px solid {brand};
 }}
+QFrame#layoutFindPanel {{
+    background: {bg_panel};
+    border-bottom: 1px solid {border};
+}}
+QComboBox#layoutSearchPreset {{
+    min-height: 26px;
+}}
 QTreeWidget#headingOutlineTree,
 QListWidget#layoutSearchResults {{
     background: {bg_panel};

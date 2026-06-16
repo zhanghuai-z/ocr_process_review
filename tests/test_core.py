@@ -3935,6 +3935,64 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
     print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
 
 
+def test_layout_panel_find_panel_preset_matches_chinese_heading_forms():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(180, 160, QImage.Format.Format_RGB888).save(str(image_path))
+        blocks = [
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 10, 120, 20),
+                source_label="text",
+                lines=[Line(text="一、研究背景", confidence=0.9, bbox=BBox(10, 10, 120, 20))],
+            ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 45, 120, 20),
+                source_label="text",
+                lines=[Line(text="（一）基本问题", confidence=0.9, bbox=BBox(10, 45, 120, 20))],
+            ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(10, 80, 120, 20),
+                source_label="text",
+                lines=[Line(text="普通正文", confidence=0.9, bbox=BBox(10, 80, 120, 20))],
+            ),
+        ]
+        page = Page(image_path=str(image_path), width=180, height=160, blocks=blocks)
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            assert panel._find_panel.isHidden()
+            panel.show_find_panel()
+            assert not panel._find_panel.isHidden()
+
+            preset_index = next(
+                idx for idx in range(panel._search_preset.count())
+                if "中文编号标题" in panel._search_preset.itemText(idx)
+            )
+            panel._search_preset.setCurrentIndex(preset_index)
+
+            assert panel._search_regex.isChecked()
+            assert len(panel._block_search_matches) == 2
+            assert [match[1] for match in panel._block_search_matches] == blocks[:2]
+        finally:
+            panel.close()
+
+    print("test_layout_panel_find_panel_preset_matches_chinese_heading_forms PASSED")
+
+
 def test_layout_panel_heading_outline_uses_nested_heading_levels():
     from pathlib import Path
     import tempfile
@@ -3988,6 +4046,45 @@ def test_layout_panel_heading_outline_uses_nested_heading_levels():
             panel.close()
 
     print("test_layout_panel_heading_outline_uses_nested_heading_levels PASSED")
+
+
+def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
+        heading = Block(
+            block_type=BlockType.TITLE,
+            bbox=BBox(10, 10, 120, 20),
+            source_label="heading_1",
+            note="Paddle 标题预览",
+        )
+        page = Page(image_path=str(image_path), width=160, height=100, blocks=[heading])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            assert panel._outline_tree.topLevelItem(0).text(0) == "Paddle 标题预览"
+
+            heading.lines = [
+                Line(text="Hanwang 标题文本", confidence=0.95, bbox=BBox(10, 10, 120, 20))
+            ]
+            panel.refresh_text_indexes()
+
+            assert panel._outline_tree.topLevelItem(0).text(0) == "Hanwang 标题文本"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives PASSED")
 
 
 def test_layout_panel_undo_restores_block_edits():
@@ -9136,6 +9233,30 @@ def test_main_window_ocr_finished_preserves_current_step():
         window.close()
 
     print("test_main_window_ocr_finished_preserves_current_step PASSED")
+
+
+def test_main_window_find_action_opens_layout_find_panel():
+    from app.controllers.workflow_controller import STEP_LAYOUT
+    from app.models import OcrProject, Page
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    window = MainWindow()
+    try:
+        page = Page(image_path="/tmp/find-page.png", width=100, height=100, page_number=1)
+        window._controller._project = OcrProject(name="Find", pages=[page])
+        window._layout_panel.set_pages([page])
+        assert window._layout_panel._find_panel.isHidden()
+
+        window._show_layout_find()
+
+        assert window._controller.current_step == STEP_LAYOUT
+        assert window._stack.currentWidget() is window._layout_panel
+        assert not window._layout_panel._find_panel.isHidden()
+    finally:
+        window.close()
+
+    print("test_main_window_find_action_opens_layout_find_panel PASSED")
 
 
 def test_empty_llm_config_does_not_block_ocr_done():

@@ -401,6 +401,12 @@ class MainWindow(QMainWindow):
         export_m.addAction(act_export)
 
         settings_m = menu.addMenu("设置(&T)")
+        act_find = QAction("查找版面块…", self)
+        act_find.setShortcut(QKeySequence.StandardKey.Find)
+        act_find.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        act_find.triggered.connect(self._show_layout_find)
+        settings_m.addAction(act_find)
+        settings_m.addSeparator()
         act_ocr_cfg = QAction("OCR 引擎设置…", self)
         act_ocr_cfg.triggered.connect(self._show_ocr_settings)
         settings_m.addAction(act_ocr_cfg)
@@ -548,6 +554,7 @@ class MainWindow(QMainWindow):
         controller 内部。OCR 完成只开放校对入口，不再强制把用户带到横校。"""
         self._ocr_placeholder.finish()
         self._controller.sync_proof_panels()
+        self._layout_panel.refresh_text_indexes()
 
     def _on_ocr_progress(self, progress) -> None:
         if progress.total_blocks > 0:
@@ -795,6 +802,13 @@ class MainWindow(QMainWindow):
             fn = getattr(panel, "refresh_quality_probe_state", None)
             if callable(fn):
                 fn()
+
+    def _show_layout_find(self) -> None:
+        if not self._controller.has_pages:
+            self._status_bar.showMessage("当前没有可查找的版面块", 3000)
+            return
+        self._go_to_step(STEP_LAYOUT)
+        self._layout_panel.show_find_panel()
 
     def _show_ocr_settings(self) -> None:
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
