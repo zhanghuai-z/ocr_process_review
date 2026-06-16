@@ -12,6 +12,8 @@ import os
 import re
 import sys
 import time
+from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -58,12 +60,13 @@ def _optional_payload() -> dict[str, bool]:
     }
 
 
-def _submit_file(
+def _submit_files(
     session: requests.Session,
     *,
     jobs_url: str,
     token: str,
-    file_path: Path,
+    file_paths: list[Path],
+    file_field: str,
     model: str,
     timeout: int,
 ) -> tuple[str, dict[str, Any], float]:
@@ -73,8 +76,11 @@ def _submit_file(
     }
     headers = {"Authorization": f"bearer {token}"}
     started = time.perf_counter()
-    with file_path.open("rb") as fh:
-        files = {"file": (file_path.name, fh)}
+    with ExitStack() as stack:
+        files = [
+            (file_field, (file_path.name, stack.enter_context(file_path.open("rb"))))
+            for file_path in file_paths
+        ]
         resp = session.post(jobs_url, data=data, files=files, headers=headers, timeout=timeout)
     elapsed = time.perf_counter() - started
     if getattr(resp, "status_code", 200) >= 400:
@@ -164,34 +170,157 @@ def _parse_jsonl(jsonl_text: str) -> tuple[int, int, float]:
     return raw_pages, layout_results, time.perf_counter() - started
 
 
+def _safe_job_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Keep timing output shareable by omitting signed result URLs."""
+    safe: dict[str, Any] = {}
+    for key in ("jobId", "state", "extractProgress", "errorMsg"):
+        if key in data:
+            safe[key] = data[key]
+    result_url = data.get("resultUrl")
+    if isinstance(result_url, dict):
+        safe["resultUrlKeys"] = sorted(str(key) for key in result_url.keys())
+    return safe
+
+
+def _run_one_job(
+    file_path: Path,
+    *,
+    jobs_url: str,
+    token: str,
+    file_field: str,
+    model: str,
+    request_timeout: int,
+    poll_timeout: int,
+    poll_interval: float,
+) -> dict[str, Any]:
+    total_started = time.perf_counter()
+    with requests.Session() as session:
+        session.trust_env = False
+        job_id, submit_body, submit_seconds = _submit_files(
+            session,
+            jobs_url=jobs_url,
+            token=token,
+            file_paths=[file_path],
+            file_field=file_field,
+            model=model,
+            timeout=request_timeout,
+        )
+        json_url, job_data, polls, wait_seconds = _wait_done(
+            session,
+            jobs_url=jobs_url,
+            token=token,
+            job_id=job_id,
+            request_timeout=request_timeout,
+            poll_timeout=poll_timeout,
+            poll_interval=poll_interval,
+        )
+        jsonl_text, download_seconds = _download_jsonl(
+            session,
+            json_url=json_url,
+            timeout=request_timeout,
+        )
+    raw_pages, layout_results, parse_seconds = _parse_jsonl(jsonl_text)
+    return {
+        "file": str(file_path),
+        "file_size_bytes": file_path.stat().st_size,
+        "job_id": job_id,
+        "submit_seconds": submit_seconds,
+        "wait_seconds": wait_seconds,
+        "download_seconds": download_seconds,
+        "parse_seconds": parse_seconds,
+        "total_seconds": time.perf_counter() - total_started,
+        "raw_jsonl_pages": raw_pages,
+        "layout_results": layout_results,
+        "poll_count": len(polls),
+        "last_poll": polls[-1] if polls else {},
+        "job_data": _safe_job_data(job_data),
+        "submit_response_keys": list(submit_body.keys()) if isinstance(submit_body, dict) else [],
+        "jsonl_bytes": len(jsonl_text.encode("utf-8")),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark PaddleOCR-VL jobs API timing.")
-    parser.add_argument("file", type=Path)
+    parser.add_argument("files", type=Path, nargs="+")
     parser.add_argument("--jobs-url", default=DEFAULT_JOBS_URL)
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--file-field", default="file", help="Multipart field name repeated for every local file.")
     parser.add_argument("--token", default="")
     parser.add_argument("--token-from-sample-script", action="store_true")
     parser.add_argument("--request-timeout", type=int, default=180)
     parser.add_argument("--poll-timeout", type=int, default=1200)
     parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--separate-jobs", action="store_true", help="Submit each input file as its own job.")
+    parser.add_argument("--workers", type=int, default=4, help="Worker count for --separate-jobs.")
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    file_path = args.file
-    if not file_path.is_file():
-        raise SystemExit(f"file not found: {file_path}")
+    file_paths = list(args.files)
+    missing = [str(file_path) for file_path in file_paths if not file_path.is_file()]
+    if missing:
+        raise SystemExit(f"file not found: {', '.join(missing)}")
     token = _resolve_token(token=args.token, token_from_sample_script=bool(args.token_from_sample_script))
     if not token:
         raise SystemExit("Paddle token not found. Set OCR_API_TOKEN/PADDLE_API_TOKEN or pass --token-from-sample-script.")
 
+    if args.separate_jobs:
+        total_started = time.perf_counter()
+        results: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+        max_workers = max(1, min(len(file_paths), int(args.workers)))
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paddle-job") as executor:
+            futures = {
+                executor.submit(
+                    _run_one_job,
+                    file_path,
+                    jobs_url=args.jobs_url,
+                    token=token,
+                    file_field=args.file_field,
+                    model=args.model,
+                    request_timeout=args.request_timeout,
+                    poll_timeout=args.poll_timeout,
+                    poll_interval=args.poll_interval,
+                ): file_path
+                for file_path in file_paths
+            }
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    errors.append({"file": str(file_path), "error": str(exc)})
+        results.sort(key=lambda item: item["file"])
+        payload = {
+            "mode": "paddle_v16_separate_jobs_timing",
+            "files": [str(file_path) for file_path in file_paths],
+            "file_count": len(file_paths),
+            "file_field": args.file_field,
+            "file_size_bytes": sum(file_path.stat().st_size for file_path in file_paths),
+            "jobs_url": args.jobs_url,
+            "model": args.model,
+            "workers": max_workers,
+            "total_seconds": time.perf_counter() - total_started,
+            "sum_job_total_seconds": sum(float(item.get("total_seconds", 0)) for item in results),
+            "layout_results": sum(int(item.get("layout_results", 0)) for item in results),
+            "raw_jsonl_pages": sum(int(item.get("raw_jsonl_pages", 0)) for item in results),
+            "results": results,
+            "errors": errors,
+        }
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.output:
+            args.output.write_text(text, encoding="utf-8")
+        print(text)
+        return 1 if errors else 0
+
     total_started = time.perf_counter()
     with requests.Session() as session:
         session.trust_env = False
-        job_id, submit_body, submit_seconds = _submit_file(
+        job_id, submit_body, submit_seconds = _submit_files(
             session,
             jobs_url=args.jobs_url,
             token=token,
-            file_path=file_path,
+            file_paths=file_paths,
+            file_field=args.file_field,
             model=args.model,
             timeout=args.request_timeout,
         )
@@ -213,8 +342,10 @@ def main() -> int:
     total_seconds = time.perf_counter() - total_started
     payload = {
         "mode": "paddle_v16_jobs_timing",
-        "file": str(file_path),
-        "file_size_bytes": file_path.stat().st_size,
+        "files": [str(file_path) for file_path in file_paths],
+        "file_count": len(file_paths),
+        "file_field": args.file_field,
+        "file_size_bytes": sum(file_path.stat().st_size for file_path in file_paths),
         "jobs_url": args.jobs_url,
         "model": args.model,
         "job_id": job_id,
@@ -227,7 +358,7 @@ def main() -> int:
         "layout_results": layout_results,
         "poll_count": len(polls),
         "polls": polls,
-        "job_data": job_data,
+        "job_data": _safe_job_data(job_data),
         "submit_response_keys": list(submit_body.keys()) if isinstance(submit_body, dict) else [],
         "jsonl_bytes": len(jsonl_text.encode("utf-8")),
     }

@@ -13200,6 +13200,9 @@ def test_paddle_v16_jobs_benchmark_script_help():
     assert result.returncode == 0
     assert "PaddleOCR-VL jobs API timing" in result.stdout
     assert "--poll-interval" in result.stdout
+    assert "--file-field" in result.stdout
+    assert "--separate-jobs" in result.stdout
+    assert "--workers" in result.stdout
 
     print("test_paddle_v16_jobs_benchmark_script_help PASSED")
 

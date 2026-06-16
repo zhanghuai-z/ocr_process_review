@@ -4,7 +4,7 @@
 
 目标是评估百页级项目的版面分析与汉王 OCR 吞吐风险，并找出可以工程化接入的加速方向。
 
-本轮已实测 Hanwang native 链路；Paddle live API 未直接上传调用，避免未经确认消耗外部 token/额度。
+本轮已实测 Hanwang native 链路与 PaddleOCR-VL-1.6 live jobs API。Paddle 结论只针对当前账号、当前网络、当前官方 jobs API 表现。
 
 ## Search UI Changes
 
@@ -19,7 +19,7 @@
 - 当前主程序在 `LayoutWorker` 中按 `Page.display_image_path` 逐页提交 PaddleOCR-VL-1.6 jobs。
 - `layout_concurrency` 已接入，默认 2，上限 4；设置窗口已有入口。
 - 上传图片使用 PNG lossless，不是 JPEG，不会因上传编码损失 OCR 精度。
-- 官方示例脚本的 jobs API 会返回 `extractProgress.totalPages/extractedPages`，说明单 job 处理多页文件是 API 形态上支持的。
+- 官方示例脚本只展示单个本地 `file` 或单个 `fileUrl` 输入；jobs API 会返回 `extractProgress.totalPages/extractedPages`，说明“单个多页文件”是 API 形态上支持的，但不等价于“一个 multipart job 传多个本地文件”。
 
 ### Live Jobs API Timing
 
@@ -28,26 +28,33 @@
 | Input | File size | Paddle pages | Submit | Poll/wait | Download | Total | Conclusion |
 |---|---:|---:|---:|---:|---:|---:|---|
 | `120186.tif` | 200KB | 1 | 8.78s | 0.39s | 1.14s | 10.32s | 单页已超过 5s |
+| 2 TIF, repeated `file` field | 400KB | 1 | 35.68s | 0.48s | 1.61s | 37.77s | 只处理 1 页，不能作为多文件 job |
+| 2 TIF, repeated `file[]` field | 400KB | 1 | 9.46s | 1.09s | 1.21s | 11.76s | 只处理 1 页，不能作为多文件 job |
+| 2 TIF, repeated `files` field | 400KB | 0 | - | - | - | HTTP 400 | 服务端返回“空文件” |
+| 5 TIF as 5 separate jobs, 5 workers | 896KB | 5 | varies | varies | varies | 23.44s | 并发能压缩总耗时，但不是常数级 |
+| 10 TIF as 10 separate jobs, 10 workers | 1.68MB | 10 | varies | varies | varies | 28.54s | 无失败；仍远超 5s |
 | 30-page multi-page TIFF | 3.9MB | 1 | 184.76s | 5.28s | 1.21s | 191.25s | TIFF 多页被当作单页，不能用 |
 | 5-page PDF | 5.4MB | 5 | 196.30s | 12.92s | 2.40s | 211.63s | PDF 多页可识别，但上传/提交极慢 |
 
 结论：
 
-- “Paddle 完成百页版面分析 5s 内”不可行；当前环境下单页总耗时已约 10s。
-- 如果只谈通信/提交阶段，也不可行：单页 submit 约 8.8s，5 页 PDF submit 约 196s。
-- PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题。
+- “Paddle 完成百页版面分析 5s 内”不可行；当前环境下单页总耗时已约 10s，10 个单页 job 并发也需要约 28.5s。
+- 用户关于“时间不应完全线性累加”的判断是对的：10 个 job 的单 job 累计耗时约 135.9s，被 10 并发压缩到 28.5s。但这不是“同批只增加 20%”，而是被最慢提交、服务端排队、下载结果共同限制。
+- multipart 多本地文件上传在已测字段下不可用：`file`/`file[]` 只返回 1 页，`files` 被服务端判为空文件。
+- PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题；本轮生成的 5 页 PDF 上传/提交极慢，不能直接替换当前策略。
 - 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
+- 当前主程序的“逐页 jobs + 并发”方向是可用的短期策略；需要把并发上限作为可调参数继续压测，而不是切到 multipart 多文件。
 
 主要风险：
 
 - 百页 PDF 当前会被导入服务渲染成 100 张 PNG，然后主程序提交 100 个 jobs。
-- 这会放大 job 提交、排队、轮询、下载 JSONL 的固定开销。
-- 后续更优路线是按原始 `source_path` 聚合同一个 PDF，尝试一次提交原 PDF 或多页文件，再按 JSONL 页序映射回 `Page`。
+- 这会放大 job 提交、排队、轮询、下载 JSONL 的固定开销；并发可以压缩墙钟时间，但会受远端排队和网络波动影响。
+- 后续更优路线之一是按原始 `source_path` 聚合同一个 PDF，尝试一次提交原始 PDF，再按 JSONL 页序映射回 `Page`。但这必须拿真实原始 PDF 重测，不能用本轮 PIL 重新封装 PDF 的慢结果直接下结论。
 
 待做 live benchmark：
 
 - 原始导入 PDF job：记录总页数、每页平均耗时、服务端页序和坐标空间。
-- 对比 `layout_concurrency=1/2/3/4` 的远端限流和失败率。
+- 对比 `layout_concurrency=1/2/4/6/8/10` 的远端限流、失败率、平均耗时、P95 耗时。
 - 测试 URL 模式：若文件已在对象存储，`fileUrl` 可能绕过本地上传瓶颈，但这只是把上传成本转移到前置存储链路。
 
 ## Hanwang OCR Experiments
