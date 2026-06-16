@@ -1,4 +1,4 @@
-"""版面分析面板：图像 + BBox 叠加可视化，块信息内嵌底部栏。"""
+"""版面分析面板：图像 + BBox 叠加可视化，右侧提供框类型与项目统计。"""
 from __future__ import annotations
 import copy
 import re
@@ -21,12 +21,10 @@ from app.core.block_payload import (
     OCR_TEXT_INVALIDATED_KEY,
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
-    UI_DEFAULT_LOCKED_KEY,
     UI_DELETED_INLINE_FORMULA_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,
-    UI_LOCK_OVERRIDDEN_KEY,
     payload_bool,
     payload_get,
     set_payload_entries,
@@ -47,7 +45,6 @@ from app.core.paddle_line_routing import (
 from app.core.ocr_ir import is_formula_marker_token
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.ui.widgets.image_viewer import BLOCK_COLORS, ImageViewer
-from app.ui.widgets.block_inspector import BlockInspector
 from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -191,7 +188,7 @@ def _block_type_group_stylesheet() -> str:
 class LayoutPanel(QWidget):
     """
     步骤2: 版面分析结果可视化。
-    左侧：页面缩略图列表；中间：图像+BBox；右侧：块属性。
+    左侧：页面缩略图列表；中间：图像+BBox；右侧：框类型与项目统计。
     analysis_confirmed 信号由 show_analysis_result() 自动发出，触发 OCR 识别。
     """
     analysis_confirmed = Signal()
@@ -290,6 +287,12 @@ class LayoutPanel(QWidget):
         self._btn_char_boxes.clicked.connect(self._refresh_current_page_layers)
         vtl.addWidget(self._btn_char_boxes)
 
+        self._btn_delete = QPushButton("删除框")
+        self._btn_delete.setObjectName("secondaryBtn")
+        self._btn_delete.setToolTip("删除右键框选中的框（Delete）")
+        self._btn_delete.clicked.connect(self._delete_selected)
+        vtl.addWidget(self._btn_delete)
+
         # Debug-only fields are intentionally not mounted in the toolbar.  The
         # human-facing top bar should stay compact; detailed geometry remains in
         # the inspector/export IR.
@@ -316,7 +319,6 @@ class LayoutPanel(QWidget):
         self._viewer.block_moved.connect(self._on_block_moved)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted.connect(self._on_block_deleted)
-        self._viewer.edit_blocked.connect(self._on_viewer_edit_blocked)
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
         self._viewer.set_bbox_snapper(self._snap_current_draw_bbox)
         vw_lay.addWidget(self._viewer, 1)
@@ -353,58 +355,34 @@ class LayoutPanel(QWidget):
         self._selected_subtype_buttons = self._new_subtype_buttons
         self._sync_type_buttons(None)
 
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(6)
-
-        self._btn_lock = QPushButton("锁定框")
-        self._btn_lock.setObjectName("secondaryBtn")
-        self._btn_lock.setCheckable(True)
-        self._btn_lock.setEnabled(False)
-        self._btn_lock.setToolTip("锁定后不可拖动、缩放或删除；再次点击解锁")
-        self._btn_lock.clicked.connect(self._toggle_selected_lock)
-        action_row.addWidget(self._btn_lock)
-
         self._btn_undo = QPushButton("撤销")
         self._btn_undo.setObjectName("secondaryBtn")
         self._btn_undo.setEnabled(False)
         self._btn_undo.setToolTip("撤销上一步版面编辑（Ctrl+Z）")
         self._btn_undo.clicked.connect(self._undo_last_edit)
-        action_row.addWidget(self._btn_undo)
-        tool_lay.addLayout(action_row)
+        tool_lay.addWidget(self._btn_undo)
 
-        action_row_2 = QHBoxLayout()
-        action_row_2.setContentsMargins(0, 0, 0, 0)
-        action_row_2.setSpacing(6)
-
-        self._btn_merge = QPushButton("合并选中框")
-        self._btn_merge.setObjectName("secondaryBtn")
-        self._btn_merge.setToolTip("合并当前多选框；合并后清空旧 OCR 文本，提交时重新识别")
-        self._btn_merge.clicked.connect(self._merge_selected_blocks)
-        action_row_2.addWidget(self._btn_merge)
-
-        self._btn_delete = QPushButton("删除选中")
-        self._btn_delete.setObjectName("secondaryBtn")
-        self._btn_delete.setToolTip("删除当前选中的非锁定框（Delete）")
-        self._btn_delete.clicked.connect(self._delete_selected)
-        action_row_2.addWidget(self._btn_delete)
-        tool_lay.addLayout(action_row_2)
-
-        self._btn_unlock_page = QPushButton("解除本页锁定")
-        self._btn_unlock_page.setObjectName("secondaryBtn")
-        self._btn_unlock_page.setToolTip("需要修改正文框时，先解除本页锁定")
-        self._btn_unlock_page.clicked.connect(self._unlock_page_blocks)
-        tool_lay.addWidget(self._btn_unlock_page)
-
-        tool_hint = QLabel("Shift+拖拽：添加框；覆盖非锁定框时自动合并为大框。\nSpace 长按：只移动画布，不编辑框。")
+        tool_hint = QLabel("Shift+左键拖拽：添加框；覆盖框线时自动合并为大框。\nSpace 长按：只移动画布，不编辑框。")
         tool_hint.setObjectName("muted")
         tool_hint.setWordWrap(True)
         tool_lay.addWidget(tool_hint)
 
         right_lay.addWidget(tool_panel)
 
-        self._inspector = BlockInspector()
-        right_lay.addWidget(self._inspector, 1)
+        stats_panel = QFrame()
+        stats_panel.setObjectName("layoutStatsPanel")
+        stats_lay = QVBoxLayout(stats_panel)
+        stats_lay.setContentsMargins(12, 10, 12, 10)
+        stats_lay.setSpacing(6)
+        stats_title = QLabel("项目统计")
+        stats_title.setObjectName("sectionTitle")
+        stats_lay.addWidget(stats_title)
+        self._project_stats_lbl = QLabel("暂无项目")
+        self._project_stats_lbl.setObjectName("muted")
+        self._project_stats_lbl.setWordWrap(True)
+        stats_lay.addWidget(self._project_stats_lbl)
+        stats_lay.addStretch(1)
+        right_lay.addWidget(stats_panel, 1)
 
         right_scroll = QScrollArea()
         right_scroll.setObjectName("layoutToolScroll")
@@ -482,6 +460,12 @@ class LayoutPanel(QWidget):
         main_layout.addWidget(bottom)
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.activated.connect(self._undo_last_edit)
+        self._page_up_shortcut = QShortcut(QKeySequence("PageUp"), self)
+        self._page_up_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._page_up_shortcut.activated.connect(lambda: self._goto_relative(-1))
+        self._page_down_shortcut = QShortcut(QKeySequence("PageDown"), self)
+        self._page_down_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._page_down_shortcut.activated.connect(lambda: self._goto_relative(1))
         self._update_page_nav()
 
     def _build_find_panel(self) -> QFrame:
@@ -561,6 +545,7 @@ class LayoutPanel(QWidget):
         self._page_list.set_pages(pages)
         self._rebuild_heading_outline()
         self._refresh_block_search()
+        self._update_project_stats()
         self._btn_run.setEnabled(bool(pages))
         if pages:
             self._page_list.set_current_index(0)
@@ -586,10 +571,9 @@ class LayoutPanel(QWidget):
         self._btn_run.setEnabled(False)
         self._btn_undo.setEnabled(False)
         self._set_selected_type_buttons_enabled(False)
-        self._sync_lock_button(None)
         self._prop_bbox.setText("")
         self._prop_conf.hide()
-        self._inspector.clear()
+        self._update_project_stats()
         self._update_page_nav()
 
     def show_analysis_result(self, pages: List[Page]) -> None:
@@ -599,6 +583,7 @@ class LayoutPanel(QWidget):
         self._ink_mask_cache.clear()
         self._rebuild_heading_outline()
         self._refresh_block_search()
+        self._update_project_stats()
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
         self._update_page_nav()
@@ -681,6 +666,38 @@ class LayoutPanel(QWidget):
         compact = _compact_status_text(full)
         self._status_lbl.setText(compact)
         self._status_lbl.setToolTip(full if compact != full else "")
+
+    def _update_project_stats(self) -> None:
+        if not hasattr(self, "_project_stats_lbl"):
+            return
+        if not self._pages:
+            self._project_stats_lbl.setText("暂无项目")
+            return
+        total_pages = len(self._pages)
+        analyzed_pages = sum(1 for page in self._pages if page.is_analyzed)
+        failed_pages = sum(1 for page in self._pages if page.error_message)
+        total_blocks = sum(len(page.blocks) for page in self._pages)
+        text_ocr_blocks = sum(len(page.text_ocr_blocks) for page in self._pages)
+        total_lines = sum(page.total_lines for page in self._pages)
+        counts: dict[str, int] = {}
+        for page in self._pages:
+            for block in page.blocks:
+                label = _block_type_label(block.block_type)
+                counts[label] = counts.get(label, 0) + 1
+        count_text = "，".join(
+            f"{label} {count}"
+            for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ) or "无"
+        self._project_stats_lbl.setText(
+            "\n".join([
+                f"页面：{analyzed_pages}/{total_pages} 已分析"
+                + (f"，失败 {failed_pages}" if failed_pages else ""),
+                f"框：{total_blocks} 个",
+                f"文字 OCR 框：{text_ocr_blocks} 个",
+                f"OCR 行：{total_lines} 行",
+                f"类型：{count_text}",
+            ])
+        )
 
     @staticmethod
     def _payload_strings(value: object):
@@ -800,8 +817,6 @@ class LayoutPanel(QWidget):
         else:
             self._viewer.highlight_bbox(block.bbox, zoom=True)
             self._selected_block = block
-            self._inspector.set_block(block)
-            self._sync_lock_button(block)
             self._sync_selected_type_buttons(block)
 
     def _current_checked_subtype(self) -> LayoutSubtypeSpec:
@@ -922,8 +937,7 @@ class LayoutPanel(QWidget):
             )
             self._update_selection_type_status(None)
             return
-        enabled = not bool(getattr(block, "is_locked", False))
-        self._set_type_buttons_enabled(enabled)
+        self._set_type_buttons_enabled(True)
         self._type_context_title.setText("选中框类型")
         self._set_type_button_checked(
             self._type_group,
@@ -963,9 +977,6 @@ class LayoutPanel(QWidget):
             raw_label = block.source_label or block.block_type.value
             text = f"选中：{_block_type_label(block.block_type)} / {raw_label}"
             tooltip = f"当前选中框属性：{raw_label} → {block.block_type.value}"
-        if getattr(block, "is_locked", False):
-            text = f"{text} · 已锁定"
-            tooltip = f"{tooltip}\n该框已锁定，不能修改属性"
         self._selection_type_status.setText(text)
         self._selection_type_status.setToolTip(tooltip)
 
@@ -1046,7 +1057,6 @@ class LayoutPanel(QWidget):
         if not self._pages:
             return
         page = self._pages[idx]
-        self._apply_default_locks(page)
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._show_page_layers(page)
@@ -1054,13 +1064,9 @@ class LayoutPanel(QWidget):
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
         self._sync_selected_type_buttons(None)
-        self._btn_lock.setEnabled(False)
-        self._btn_lock.setChecked(False)
-        self._btn_lock.setText("锁定框")
         self._prop_bbox.setText("")
         self._prop_conf.hide()
-        self._inspector.clear()
-        self._inspector.set_page_stats(page)
+        self._update_project_stats()
         gate = self._page_gate_states.get(page.page_number)
         if gate is not None:
             self._set_status_text(gate[3])
@@ -1078,35 +1084,24 @@ class LayoutPanel(QWidget):
     def _clear_selection_ui(self, page: Page) -> None:
         self._selected_block = None
         self._sync_selected_type_buttons(None)
-        self._btn_lock.setEnabled(False)
-        self._btn_lock.setChecked(False)
-        self._btn_lock.setText("锁定框")
         self._prop_bbox.setText("")
         self._prop_conf.hide()
-        self._inspector.clear()
-        self._inspector.set_page_stats(page)
+        self._update_project_stats()
 
     def _on_block_clicked(self, block: Block) -> None:
-        if getattr(block, "is_locked", False):
-            self._set_status_text("该框已锁定；如需编辑，请先解除本页锁定")
-            return
         self._selected_block = block
         bb = block.bbox
-        self._sync_lock_button(block)
         self._sync_selected_type_buttons(block)
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._prop_conf.set_score(block.avg_confidence)
-        self._inspector.set_block(block)
 
     def _on_block_edit_started(self, block: Block) -> None:
-        if getattr(block, "is_locked", False):
-            return
         self._push_undo_snapshot()
 
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
         self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
-        self._inspector.set_block(block)
+        self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
 
@@ -1129,6 +1124,7 @@ class LayoutPanel(QWidget):
             self._set_status_text("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
             self._rebuild_heading_outline()
             self._refresh_block_search()
+            self._update_project_stats()
             self.geometry_changed.emit()
             self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
@@ -1145,15 +1141,13 @@ class LayoutPanel(QWidget):
         self._select_block_for_edit(new_block)
         self._rebuild_heading_outline()
         self._refresh_block_search()
+        self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_created")
 
     def _on_block_deleted(self, block: Block) -> None:
         """viewer 键盘 Delete 已删除框 → 从 page 数据中移除。"""
         if not self._pages:
-            return
-        if getattr(block, "is_locked", False):
-            self._set_status_text("选中框已锁定，需先解锁后删除")
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
@@ -1164,75 +1158,21 @@ class LayoutPanel(QWidget):
             self._sync_selected_type_buttons(None)
             self._prop_bbox.setText("")
             self._prop_conf.hide()
-            self._inspector.clear()
         self._rebuild_heading_outline()
         self._refresh_block_search()
+        self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_deleted")
 
     def _delete_selected(self) -> None:
-        """底部栏 ✕ 删除框 按钮。"""
+        """顶部栏删除框按钮。"""
         if not self._viewer.selected_blocks():
-            self._set_status_text("请先选择要删除的非锁定框")
+            self._set_status_text("请先用右键拉框选中要删除的框")
             return
         self._viewer.delete_selected()
 
-    def _merge_selected_blocks(self) -> None:
-        if not self._pages:
-            return
-        selected = [block for block in self._viewer.selected_blocks() if block in self._pages[self._current_page_idx].blocks]
-        if len(selected) < 2:
-            self._set_status_text("请先在画布中多选至少两个框再合并")
-            return
-
-        page = self._pages[self._current_page_idx]
-        self._push_undo_snapshot()
-        selected.sort(key=lambda block: (block.order, block.bbox.y, block.bbox.x))
-        primary = selected[0]
-        x1 = min(block.bbox.x1 for block in selected)
-        y1 = min(block.bbox.y1 for block in selected)
-        x2 = max(block.bbox.x2 for block in selected)
-        y2 = max(block.bbox.y2 for block in selected)
-        primary.bbox = BBox.from_xyxy(x1, y1, x2, y2)
-        primary.lines = []
-        primary.source = BlockSource.USER_EDITED
-        primary.recognizable = is_text_ocr_candidate(primary)
-        primary.note = "manual_merge_requires_ocr_rerun"
-        set_payload_entries(primary, {
-            MANUAL_MERGE_FROM_KEY: [
-                {
-                    "block_type": getattr(block.block_type, "value", str(block.block_type)),
-                    "bbox": list(block.bbox.to_xyxy()),
-                    "source_label": block.source_label,
-                }
-                for block in selected
-            ],
-            OCR_TEXT_INVALIDATED_KEY: True,
-        })
-
-        for block in selected[1:]:
-            self._mark_generated_inline_formula_handled(page, block)
-        remove_ids = {id(block) for block in selected[1:]}
-        page.blocks = [block for block in page.blocks if id(block) not in remove_ids]
-        for order, block in enumerate(page.blocks):
-            block.order = order
-
-        self._selected_block = primary
-        self._show_page_layers(page)
-        self._select_block_for_edit(primary)
-        self._prop_bbox.setText(f"x={primary.bbox.x} y={primary.bbox.y} w={primary.bbox.w} h={primary.bbox.h}")
-        self._set_status_text("已合并选中框；旧 OCR 文本已清空，提交后会按新框重新识别")
-        self._rebuild_heading_outline()
-        self._refresh_block_search()
-        self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "blocks_merged")
-
     def _on_selected_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
         if self._selected_block is None:
-            return
-        if getattr(self._selected_block, "is_locked", False):
-            self._set_status_text("该框已锁定；如需修改属性，请先解除本页锁定")
-            self._sync_selected_type_buttons(self._selected_block)
             return
         new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
         new_label = new_subtype.normalized_source_label
@@ -1248,10 +1188,10 @@ class LayoutPanel(QWidget):
         )
         self._show_page_layers(self._pages[self._current_page_idx])
         self._viewer.select_block(self._selected_block)
-        self._sync_lock_button(self._selected_block)
         self._sync_selected_type_buttons(self._selected_block)
         self._rebuild_heading_outline()
         self._refresh_block_search()
+        self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
 
@@ -1283,28 +1223,14 @@ class LayoutPanel(QWidget):
 
     def _show_page_layers(self, page: Page) -> None:
         self._ensure_inline_formula_blocks(page)
-        self._apply_default_locks(page)
         self._viewer.show_blocks(page.blocks)
         self._viewer.show_readonly_overlays(self._collect_readonly_layout_overlays(page))
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)
 
     def _select_block_for_edit(self, block: Block) -> None:
-        if getattr(block, "is_locked", False):
-            return
         self._viewer.select_block(block)
         self._on_block_clicked(block)
-
-    def _apply_default_locks(self, page: Page) -> None:
-        """初始锁定自动版面分析生成的 text 框，避免行内公式校正时误拖正文框。"""
-        for block in page.blocks:
-            if block.block_type != BlockType.TEXT:
-                continue
-            if payload_bool(block, UI_LOCK_OVERRIDDEN_KEY):
-                continue
-            if block.source == BlockSource.AUTO_LAYOUT:
-                block.is_locked = True
-                set_payload_entries(block, {UI_DEFAULT_LOCKED_KEY: True})
 
     def _bind_manual_block_to_paddle(self, page: Page, block: Block) -> None:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
@@ -1325,64 +1251,6 @@ class LayoutPanel(QWidget):
             self._set_status_text("已创建校验框；Paddle 父框存在多个候选，需要人工确认")
         elif binding.text:
             self._set_status_text("已绑定 Paddle 父框真值，提交后不会交给 Hanwang 强识别")
-
-    def _sync_lock_button(self, block: Optional[Block]) -> None:
-        if block is None:
-            self._btn_lock.setEnabled(False)
-            self._btn_lock.setChecked(False)
-            self._btn_lock.setText("锁定框")
-            self._sync_selected_type_buttons(None)
-            return
-        locked = bool(getattr(block, "is_locked", False))
-        self._btn_lock.setEnabled(True)
-        self._btn_lock.blockSignals(True)
-        self._btn_lock.setChecked(locked)
-        self._btn_lock.setText("解锁框" if locked else "锁定框")
-        self._btn_lock.blockSignals(False)
-        self._sync_selected_type_buttons(block)
-
-    def _toggle_selected_lock(self) -> None:
-        block = self._selected_block
-        if block is None:
-            return
-        self._push_undo_snapshot()
-        block.is_locked = not block.is_locked
-        set_payload_entries(block, {UI_LOCK_OVERRIDDEN_KEY: True})
-        if block.is_locked:
-            set_payload_entries(block, {UI_DEFAULT_LOCKED_KEY: block.block_type == BlockType.TEXT})
-        block.source = BlockSource.USER_EDITED
-        self._sync_lock_button(block)
-        self._show_page_layers(self._pages[self._current_page_idx])
-        self._inspector.set_block(block)
-        self.geometry_changed.emit()
-        self.block_contract_changed.emit(
-            self._pages[self._current_page_idx].page_number,
-            "block_lock_changed",
-        )
-
-    def _on_viewer_edit_blocked(self, block: Block, reason: str) -> None:
-        if reason == "locked":
-            self._set_status_text("选中框已锁定，需先解锁后编辑")
-
-    def _unlock_page_blocks(self) -> None:
-        if not self._pages:
-            return
-        page = self._pages[self._current_page_idx]
-        locked = [block for block in page.blocks if getattr(block, "is_locked", False)]
-        if not locked:
-            self._set_status_text("本页没有锁定框")
-            return
-        self._push_undo_snapshot()
-        for block in locked:
-            block.is_locked = False
-            set_payload_entries(block, {UI_LOCK_OVERRIDDEN_KEY: True})
-        self._show_page_layers(page)
-        self._sync_lock_button(None)
-        self._selected_block = None
-        self._inspector.set_page_stats(page)
-        self._set_status_text(f"已解除本页 {len(locked)} 个锁定框")
-        self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "block_lock_changed")
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
@@ -1427,8 +1295,18 @@ class LayoutPanel(QWidget):
         self.block_contract_changed.emit(page.page_number, "layout_undo")
 
     @staticmethod
-    def _bbox_intersects(a: BBox, b: BBox) -> bool:
-        return a.x1 < b.x2 and b.x1 < a.x2 and a.y1 < b.y2 and b.y1 < a.y2
+    def _bbox_hits_frame(a: BBox, b: BBox, tolerance: int = 6) -> bool:
+        if not (a.x1 < b.x2 and b.x1 < a.x2 and a.y1 < b.y2 and b.y1 < a.y2):
+            return False
+        if b.w <= tolerance * 2 or b.h <= tolerance * 2:
+            return True
+        bands = (
+            BBox(b.x, b.y, b.w, tolerance),
+            BBox(b.x, b.y2 - tolerance, b.w, tolerance),
+            BBox(b.x, b.y, tolerance, b.h),
+            BBox(b.x2 - tolerance, b.y, tolerance, b.h),
+        )
+        return any(a.x1 < band.x2 and band.x1 < a.x2 and a.y1 < band.y2 and band.y1 < a.y2 for band in bands)
 
     def _snap_drawn_bbox(self, page: Page, bbox: BBox) -> BBox:
         bbox = bbox.clamp(page.width, page.height)
@@ -1542,8 +1420,7 @@ class LayoutPanel(QWidget):
     def _blocks_intersecting_bbox(self, page: Page, bbox: BBox) -> list[Block]:
         return [
             block for block in page.blocks
-            if not getattr(block, "is_locked", False)
-            and self._bbox_intersects(bbox, block.bbox)
+            if self._bbox_hits_frame(bbox, block.bbox)
         ]
 
     def _ensure_inline_formula_blocks(self, page: Page) -> None:
@@ -1664,8 +1541,6 @@ class LayoutPanel(QWidget):
         block.block_type = subtype.block_type
         block.source_label = source_label
         block.source = BlockSource.USER_EDITED
-        if block.block_type != BlockType.TEXT:
-            block.is_locked = False
         block.recognizable = is_text_ocr_candidate(block)
         self._bind_manual_block_to_paddle(page, block)
         return changed
@@ -1750,7 +1625,6 @@ class LayoutPanel(QWidget):
         primary.source_label = source_label
         primary.lines = []
         primary.source = BlockSource.USER_EDITED
-        primary.is_locked = False
         primary.recognizable = is_text_ocr_candidate(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
         set_payload_entries(primary, {
@@ -1759,7 +1633,6 @@ class LayoutPanel(QWidget):
                     "block_type": getattr(block.block_type, "value", str(block.block_type)),
                     "bbox": list(block.bbox.to_xyxy()),
                     "source_label": block.source_label,
-                    "was_locked": bool(block.is_locked),
                 }
                 for block in blocks
             ],
@@ -1774,8 +1647,6 @@ class LayoutPanel(QWidget):
         for order, block in enumerate(page.blocks):
             block.order = order
         self._selected_block = primary
-        self._sync_lock_button(primary)
-        self._inspector.set_block(primary)
         return primary
 
     def _collect_readonly_layout_overlays(self, page: Page) -> List[tuple[str, BBox]]:

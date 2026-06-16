@@ -14,8 +14,6 @@ OCR_INVALIDATION_KIND_KEY = "ocr_invalidation_kind"
 MANUAL_MERGE_FROM_KEY = "manual_merge_from"
 MANUAL_DRAW_BBOX_KEY = "manual_draw_bbox"
 
-UI_LOCK_OVERRIDDEN_KEY = "ui_lock_overridden"
-UI_DEFAULT_LOCKED_KEY = "ui_default_locked"
 UI_GENERATED_INLINE_FORMULA_BLOCK_KEY = "ui_generated_inline_formula_block"
 UI_INLINE_FORMULA_ORIGIN_BBOX_KEY = "ui_inline_formula_origin_bbox"
 UI_INLINE_FORMULA_PARENT_LABEL_KEY = "ui_inline_formula_parent_label"
@@ -29,8 +27,6 @@ APP_PAYLOAD_KEYS = frozenset({
     OCR_INVALIDATION_KIND_KEY,
     MANUAL_MERGE_FROM_KEY,
     MANUAL_DRAW_BBOX_KEY,
-    UI_LOCK_OVERRIDDEN_KEY,
-    UI_DEFAULT_LOCKED_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,

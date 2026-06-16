@@ -192,18 +192,10 @@ QLabel#pageTitle    {{ color: {brand}; font-size: {font_size_xl}; font-weight: b
 QLabel#muted        {{ color: {text_muted}; font-size: {font_size_sm}; }}
 QLabel#stepInfo     {{ color: {brand}; font-size: {font_size_sm}; font-weight: 500; }}
 
-/* ---------- Inspector 统计区 ---------- */
-QFrame#inspectorSep {{ background: {border}; border: none; }}
-QLabel#statsLabel   {{ color: {text_secondary}; font-size: {font_size_sm}; }}
-QLabel#statsCount   {{ color: {text_primary};   font-size: {font_size_sm}; font-weight: 500; }}
-QProgressBar#statsBar {{
-    background: {bg_root};
-    border: none;
-    border-radius: 3px;
-}}
-QProgressBar#statsBar::chunk {{
-    background: {brand};
-    border-radius: 3px;
+/* ---------- 版面分析项目统计 ---------- */
+QFrame#layoutStatsPanel {{
+    background: {bg_panel};
+    border-top: 1px solid {border};
 }}
 
 /* ---------- 面包屑（TopBar） ---------- */

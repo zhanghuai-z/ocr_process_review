@@ -188,7 +188,6 @@ class Block:
 
     # --- Phase 1 新增字段 ---
     source: BlockSource = BlockSource.AUTO_LAYOUT  # 块来源
-    is_locked: bool = False                         # 锁定后自动分析不覆盖
     recognizable: bool = True                       # 是否送 OCR
     note: str = ""                                  # 用户备注或系统说明
     source_label: str = ""                          # 原始 PP-VL/Paddle label

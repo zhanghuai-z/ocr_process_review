@@ -65,7 +65,6 @@ CREATE TABLE IF NOT EXISTS block (
     w INTEGER NOT NULL, h INTEGER NOT NULL,
     block_order     INTEGER NOT NULL DEFAULT 0,
     source          TEXT    NOT NULL DEFAULT 'auto_layout',
-    is_locked       INTEGER NOT NULL DEFAULT 0,
     recognizable    INTEGER NOT NULL DEFAULT 1,
     note            TEXT    NOT NULL DEFAULT '',
     source_label    TEXT    NOT NULL DEFAULT '',
@@ -142,7 +141,6 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE page ADD COLUMN error_message TEXT NOT NULL DEFAULT '';",
         # block table additions
         "ALTER TABLE block ADD COLUMN source TEXT NOT NULL DEFAULT 'auto_layout';",
-        "ALTER TABLE block ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE block ADD COLUMN recognizable INTEGER NOT NULL DEFAULT 1;",
         "ALTER TABLE block ADD COLUMN note TEXT NOT NULL DEFAULT '';",
         # line table additions
@@ -703,7 +701,7 @@ class ProjectStore:
         bb = block.bbox
         values = (
             page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
-            block.source.value, int(block.is_locked), int(block.recognizable),
+            block.source.value, int(block.recognizable),
             block.note, block.source_label,
             json.dumps(block.raw_payload, ensure_ascii=False),
             json.dumps(block.app_payload, ensure_ascii=False),
@@ -711,16 +709,16 @@ class ProjectStore:
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
-                "source, is_locked, recognizable, note, source_label, raw_payload_json, "
+                "source, recognizable, note, source_label, raw_payload_json, "
                 "app_payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
             )
             block.id = cur.lastrowid
         else:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
-                "block_order=?, source=?, is_locked=?, recognizable=?, note=?, "
+                "block_order=?, source=?, recognizable=?, note=?, "
                 "source_label=?, raw_payload_json=?, app_payload_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
@@ -974,7 +972,6 @@ class ProjectStore:
                 id=r["id"],
                 uid=r["uid"],
                 source=BlockSource(r["source"]),
-                is_locked=bool(r["is_locked"]),
                 recognizable=bool(r["recognizable"]),
                 note=r["note"],
                 source_label=r["source_label"],

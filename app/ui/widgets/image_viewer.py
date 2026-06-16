@@ -2,14 +2,17 @@
 
 模式：
 - edit 模式（默认）：BBox 可拖动/缩放；Shift+左键拖拽画出新矩形。
-- 右键拖拽：框选非锁定 BBox。
+- 右键拖拽：按框线选中 BBox；框内部是镂空区域，不触发选中。
 - pan 模式：按住 Space 临时进入平移，期间 BBox 不可编辑。
 """
 from __future__ import annotations
 from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QCursor
+from PySide6.QtGui import (
+    QColor, QImage, QPainter, QPainterPath, QPainterPathStroker,
+    QPen, QPixmap, QCursor,
+)
 from PySide6.QtWidgets import (
     QApplication, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
     QGraphicsScene, QGraphicsView,
@@ -61,6 +64,7 @@ _HANDLE_CURSORS = {
     _MR: Qt.CursorShape.SizeHorCursor,
 }
 _HS = 7  # handle half-size in pixels
+_FRAME_HIT_TOLERANCE = 6.0
 
 
 class _ResizeHandle(QGraphicsRectItem):
@@ -271,6 +275,16 @@ class BBoxItem(QGraphicsRectItem):
         self._edit_started_for_drag = True
         self.signals.edit_started.emit(self._block)
 
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        path.addRect(self.rect())
+        stroker = QPainterPathStroker()
+        stroker.setWidth(max(_FRAME_HIT_TOLERANCE * 2, self.pen().widthF() * 4))
+        return stroker.createStroke(path)
+
+    def contains(self, point: QPointF) -> bool:
+        return self.shape().contains(point)
+
     def paint(self, painter: QPainter, option, widget=None):
         if self.isSelected():
             fill = QColor(self._color)
@@ -287,7 +301,6 @@ class ImageViewer(QGraphicsView):
     block_moved    = Signal(object)  # Block
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted  = Signal(object)  # Block — Delete 键删除选中框
-    edit_blocked   = Signal(object, str)  # Block, reason
     char_bbox_moved = Signal(object)  # Char
 
     def __init__(self, parent=None):
@@ -371,7 +384,7 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)
-            item.set_selectable(not getattr(block, "is_locked", False))
+            item.set_selectable(True)
             item.set_editable(self._block_is_editable(block))
             item.setZValue(self._block_z_value(block))
             item.setData(0, block)
@@ -432,12 +445,9 @@ class ImageViewer(QGraphicsView):
         """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
         to_remove = [
             (item, block) for item, block in self._block_items
-            if item.isSelected() and not getattr(block, "is_locked", False)
+            if item.isSelected()
         ]
         for item, block in to_remove:
-            if getattr(block, "is_locked", False):
-                self.edit_blocked.emit(block, "locked")
-                continue
             self._scene.removeItem(item)
             self._block_items.remove((item, block))
             self.block_deleted.emit(block)
@@ -445,7 +455,7 @@ class ImageViewer(QGraphicsView):
     def selected_blocks(self) -> List[Block]:
         return [
             block for item, block in self._block_items
-            if item.isSelected() and not getattr(block, "is_locked", False)
+            if item.isSelected()
         ]
 
     def set_bbox_snapper(self, snapper: Optional[Callable[[BBox], BBox]]) -> None:
@@ -456,7 +466,7 @@ class ImageViewer(QGraphicsView):
         """Select one visible, editable layout block after overlays are rebuilt."""
         selected = False
         for item, block in self._block_items:
-            should_select = block is target and not getattr(block, "is_locked", False)
+            should_select = block is target
             item.setSelected(should_select)
             selected = selected or should_select
         return selected
@@ -523,12 +533,23 @@ class ImageViewer(QGraphicsView):
         mods = event.modifiers()
         dy = event.angleDelta().y()
         dx = event.angleDelta().x()
-        if mods & Qt.KeyboardModifier.ShiftModifier:
+        delta = dy or dx
+        if mods & Qt.KeyboardModifier.ControlModifier:
             bar = self.horizontalScrollBar()
-            bar.setValue(bar.value() - (dy or dx))
+            bar.setValue(bar.value() - delta)
+            event.accept()
+        elif mods & Qt.KeyboardModifier.AltModifier:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+        elif mods & Qt.KeyboardModifier.ShiftModifier:
+            bar = self.horizontalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
         else:
             factor = 1.15 if dy > 0 else 1 / 1.15
             self.scale(factor, factor)
+            event.accept()
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
@@ -566,7 +587,7 @@ class ImageViewer(QGraphicsView):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self.mapToScene(event.pos())
             for item, block in self._block_items:
-                if item.sceneBoundingRect().contains(pos) and item.isSelected():
+                if item.contains(item.mapFromScene(pos)) and item.isSelected():
                     self.block_clicked.emit(block)
                     break
 
@@ -652,13 +673,28 @@ class ImageViewer(QGraphicsView):
             return
         selected_blocks: list[Block] = []
         for item, block in self._block_items:
-            selectable = not getattr(block, "is_locked", False)
-            selected = selectable and rect.intersects(item.sceneBoundingRect())
+            selected = self._selection_rect_hits_frame(rect, item)
             item.setSelected(selected)
             if selected:
                 selected_blocks.append(block)
         if len(selected_blocks) == 1:
             self.block_clicked.emit(selected_blocks[0])
+
+    @staticmethod
+    def _selection_rect_hits_frame(selection: QRectF, item: BBoxItem) -> bool:
+        outer = item.sceneBoundingRect()
+        if not selection.intersects(outer):
+            return False
+        tol = max(_FRAME_HIT_TOLERANCE, item.pen().widthF() * 2)
+        if outer.width() <= tol * 2 or outer.height() <= tol * 2:
+            return selection.intersects(outer)
+        bands = (
+            QRectF(outer.left(), outer.top(), outer.width(), tol),
+            QRectF(outer.left(), outer.bottom() - tol, outer.width(), tol),
+            QRectF(outer.left(), outer.top(), tol, outer.height()),
+            QRectF(outer.right() - tol, outer.top(), tol, outer.height()),
+        )
+        return any(selection.intersects(band) for band in bands)
 
     def _snap_draw_rect(self, rect: QRectF) -> QRectF:
         if self._bbox_snapper is None or rect.width() <= 0 or rect.height() <= 0:
@@ -695,12 +731,10 @@ class ImageViewer(QGraphicsView):
         self.viewport().unsetCursor()
 
     def _block_is_editable(self, block: Block) -> bool:
-        return self._edit_mode and not self._space_pan_active and not getattr(block, "is_locked", False)
+        return self._edit_mode and not self._space_pan_active
 
     @staticmethod
     def _block_z_value(block: Block) -> int:
-        if getattr(block, "is_locked", False):
-            return 2
         attrs = block_attributes(block)
         if attrs.semantic_block_type == BlockType.EQUATION:
             return 14
@@ -712,7 +746,7 @@ class ImageViewer(QGraphicsView):
 
     def _refresh_item_editability(self, *, force: Optional[bool] = None) -> None:
         for item, block in self._block_items:
-            item.set_selectable(not getattr(block, "is_locked", False))
+            item.set_selectable(True)
             item.set_editable(force if force is not None else self._block_is_editable(block))
             item.setZValue(self._block_z_value(block))
         char_editable = force if force is not None else (self._edit_mode and not self._space_pan_active)

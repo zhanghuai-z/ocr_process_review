@@ -91,11 +91,10 @@ def test_models():
     # Block new fields
     block2 = Block(
         block_type=BlockType.TABLE, bbox=bb,
-        source=BlockSource.MANUAL_DRAW, is_locked=True,
+        source=BlockSource.MANUAL_DRAW,
         recognizable=False, note="测试备注",
     )
     assert block2.source == BlockSource.MANUAL_DRAW
-    assert block2.is_locked is True
     assert block2.recognizable is False
     assert block2.note == "测试备注"
 
@@ -3143,52 +3142,59 @@ def test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench():
     print("test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench PASSED")
 
 
-def test_layout_panel_merges_selected_blocks_for_ocr_rerun():
+def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspector():
     from pathlib import Path
     import tempfile
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
     with tempfile.TemporaryDirectory() as tmpdir:
-        image_path = Path(tmpdir) / "page.png"
-        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
-        page = Page(image_path=str(image_path), width=120, height=80)
-        page.blocks = [
-            Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 10), lines=[
-                Line(text="x", confidence=0.9, bbox=BBox(10, 10, 20, 10)),
-            ], order=0),
-            Block(block_type=BlockType.EQUATION, bbox=BBox(40, 10, 20, 10), lines=[
-                Line(text="(1)", confidence=0.9, bbox=BBox(40, 10, 20, 10)),
-            ], order=1),
+        image_a = Path(tmpdir) / "page-a.png"
+        image_b = Path(tmpdir) / "page-b.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_a))
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_b))
+        pages = [
+            Page(
+                image_path=str(image_a),
+                width=120,
+                height=80,
+                blocks=[
+                    Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 20, 10)),
+                    Block(block_type=BlockType.EQUATION, bbox=BBox(40, 10, 20, 10)),
+                ],
+            ),
+            Page(
+                image_path=str(image_b),
+                width=120,
+                height=80,
+                blocks=[Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 20, 10))],
+            ),
         ]
         panel = LayoutPanel()
         try:
-            panel.set_pages([page])
+            panel.set_pages(pages)
             app.processEvents()
-            for item, _block in panel._viewer._block_items:
-                item.setSelected(True)
 
-            changed = []
-            panel.geometry_changed.connect(lambda: changed.append(True))
-            panel._merge_selected_blocks()
-
-            assert len(page.blocks) == 1
-            assert page.blocks[0].bbox == BBox(10, 10, 50, 10)
-            assert page.blocks[0].lines == []
-            assert page.blocks[0].source == BlockSource.USER_EDITED
-            assert page.blocks[0].app_payload["ocr_text_invalidated"] is True
-            assert changed
+            assert not hasattr(panel, "_inspector")
+            assert not hasattr(panel, "_btn_merge")
+            assert not hasattr(panel, "_btn_lock")
+            stats = panel._project_stats_lbl.text()
+            assert "页面：2/2 已分析" in stats
+            assert "框：3 个" in stats
+            assert "正文 1" in stats
+            assert "公式 1" in stats
+            assert "表格 1" in stats
         finally:
             panel.close()
 
-    print("test_layout_panel_merges_selected_blocks_for_ocr_rerun PASSED")
+    print("test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspector PASSED")
 
 
-def test_layout_panel_defaults_auto_text_blocks_locked():
+def test_layout_panel_auto_text_blocks_are_editable_frames():
     from pathlib import Path
     import tempfile
 
@@ -3219,25 +3225,58 @@ def test_layout_panel_defaults_auto_text_blocks_locked():
             panel.set_pages([page])
             app.processEvents()
 
-            assert text_block.is_locked is True
-            assert formula_block.is_locked is False
             text_item = next(item for item, block in panel._viewer._block_items if block is text_block)
             formula_item = next(item for item, block in panel._viewer._block_items if block is formula_block)
-            assert not bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-            assert not bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+            assert bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            assert bool(text_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
             assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
             assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
 
             panel._on_block_clicked(text_block)
-            assert panel._selected_block is None
-            assert "锁定" in panel._status_lbl.text()
-            panel._unlock_page_blocks()
-            assert text_block.is_locked is False
-            assert text_block.app_payload["ui_lock_overridden"] is True
+            assert panel._selected_block is text_block
         finally:
             panel.close()
 
-    print("test_layout_panel_defaults_auto_text_blocks_locked PASSED")
+    print("test_layout_panel_auto_text_blocks_are_editable_frames PASSED")
+
+
+def test_layout_panel_pageup_pagedown_shortcuts_change_page():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_a = Path(tmpdir) / "page-a.png"
+        image_b = Path(tmpdir) / "page-b.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_a))
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_b))
+        pages = [
+            Page(image_path=str(image_a), width=120, height=80, page_number=1),
+            Page(image_path=str(image_b), width=120, height=80, page_number=2),
+        ]
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages(pages)
+            app.processEvents()
+            assert panel._current_page_idx == 0
+
+            panel._page_down_shortcut.activated.emit()
+            assert panel._current_page_idx == 1
+            assert panel._lbl_page_no.text() == "2 / 2"
+
+            panel._page_up_shortcut.activated.emit()
+            assert panel._current_page_idx == 0
+            assert panel._lbl_page_no.text() == "1 / 2"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_pageup_pagedown_shortcuts_change_page PASSED")
 
 
 def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
@@ -3304,20 +3343,12 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
 
-            panel._inspector.set_block(text_block)
-            summary = panel._inspector._lbl_hanwang_audit.text()
-            assert "route=2" in summary
-            assert "recog=2" in summary
-            assert "clipped=1" in summary
-            panel._inspector.set_block(skip_block)
-            assert "未进入 Hanwang text-slice 路由" in panel._inspector._lbl_hanwang_audit.text()
+            assert not hasattr(panel, "_inspector")
 
             text_block.app_payload["ocr_text_invalidated"] = True
             page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
-            panel._inspector.set_block(text_block)
-            assert "已失效，需要重新进入 OCR" in panel._inspector._lbl_hanwang_audit.text()
         finally:
             panel.close()
 
@@ -3367,7 +3398,7 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
     print("test_layout_panel_draw_merge_uses_large_box_and_removes_overlap PASSED")
 
 
-def test_layout_panel_draw_ignores_locked_text_targets():
+def test_layout_panel_draw_inside_text_frame_does_not_merge_parent():
     from pathlib import Path
     import tempfile
 
@@ -3379,20 +3410,22 @@ def test_layout_panel_draw_ignores_locked_text_targets():
     app = _get_qapp()
     with tempfile.TemporaryDirectory() as tmpdir:
         image_path = Path(tmpdir) / "page.png"
-        QImage(140, 90, QImage.Format.Format_RGB888).save(str(image_path))
+        image = QImage(160, 120, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
         text_block = Block(
             block_type=BlockType.TEXT,
-            bbox=BBox(20, 20, 80, 20),
+            bbox=BBox(20, 20, 100, 60),
             lines=[Line(
                 text="abc",
                 confidence=0.9,
-                bbox=BBox(20, 20, 80, 20),
+                bbox=BBox(20, 20, 100, 60),
                 chars=[Char(char="a", confidence=0.9, bbox=BBox(20, 20, 18, 10))],
             )],
             source=BlockSource.AUTO_LAYOUT,
             order=0,
         )
-        page = Page(image_path=str(image_path), width=140, height=90, blocks=[text_block])
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[text_block])
 
         panel = LayoutPanel()
         try:
@@ -3400,18 +3433,17 @@ def test_layout_panel_draw_ignores_locked_text_targets():
             app.processEvents()
             panel._new_type_buttons[BlockType.EQUATION].click()
 
-            panel._on_block_created(BBox(25, 22, 20, 12))
+            panel._on_block_created(BBox(55, 45, 20, 12))
 
-            assert text_block.is_locked is True
             assert len(page.blocks) == 2
             assert page.blocks[0] is text_block
             assert page.blocks[1].block_type == BlockType.EQUATION
             assert page.blocks[1].source_label == "inline_formula"
-            assert page.blocks[1].bbox == BBox(25, 22, 20, 12)
+            assert page.blocks[1].bbox == BBox(55, 45, 20, 12)
         finally:
             panel.close()
 
-    print("test_layout_panel_draw_ignores_locked_text_targets PASSED")
+    print("test_layout_panel_draw_inside_text_frame_does_not_merge_parent PASSED")
 
 
 def test_layout_panel_drawn_block_is_selected_and_type_editable():
@@ -3610,7 +3642,6 @@ def test_layout_panel_readonly_char_boxes_do_not_block_formula_delete():
         try:
             panel.set_pages([page])
             app.processEvents()
-            assert text_block.is_locked is True
             assert len(panel._viewer._char_items) == 1
             char_item, _ = panel._viewer._char_items[0]
             formula_item = next(item for item, block in panel._viewer._block_items if block is formula_block)
@@ -3622,7 +3653,6 @@ def test_layout_panel_readonly_char_boxes_do_not_block_formula_delete():
             panel._delete_selected()
 
             assert page.blocks == [text_block]
-            assert text_block.is_locked is True
         finally:
             panel.close()
 
@@ -3862,7 +3892,6 @@ def test_layout_panel_formula_button_infers_inline_formula_inside_text_block():
         image_path = Path(tmpdir) / "page.png"
         QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
         text_block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 40), source_label="text")
-        text_block.is_locked = True
         page = Page(image_path=str(image_path), width=160, height=100, blocks=[text_block])
 
         panel = LayoutPanel()
@@ -4207,7 +4236,6 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
         inline_blocks = [block for block in page.blocks if block.source_label == "inline_formula"]
         assert len(inline_blocks) == 7
         assert all(block.block_type == BlockType.EQUATION for block in inline_blocks)
-        assert all(not block.is_locked for block in inline_blocks)
         assert len(panel._viewer._readonly_overlay_items) == 0
         assert len(panel._viewer._block_items) == len(page.blocks)
         inline_items = [
@@ -12783,6 +12811,58 @@ def test_image_viewer_draw_uses_snapper_only_for_created_bbox():
     print("test_image_viewer_draw_uses_snapper_only_for_created_bbox PASSED")
 
 
+def test_image_viewer_ctrl_alt_wheel_scrolls_axes_without_zooming():
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QImage, QWheelEvent
+
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.resize(160, 120)
+    viewer.set_image_from_qimage(QImage(400, 300, QImage.Format.Format_RGB888))
+    viewer.scale(4, 4)
+    initial_scale = viewer.transform().m11()
+
+    hbar = viewer.horizontalScrollBar()
+    vbar = viewer.verticalScrollBar()
+    hbar.setValue(min(80, hbar.maximum()))
+    vbar.setValue(min(80, vbar.maximum()))
+    h_before = hbar.value()
+    v_before = vbar.value()
+
+    viewer.wheelEvent(QWheelEvent(
+        QPointF(20, 20),
+        QPointF(20, 20),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    ))
+    assert hbar.value() != h_before
+    assert vbar.value() == v_before
+    assert viewer.transform().m11() == initial_scale
+
+    v_before = vbar.value()
+    viewer.wheelEvent(QWheelEvent(
+        QPointF(20, 20),
+        QPointF(20, 20),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.AltModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    ))
+    assert vbar.value() != v_before
+    assert viewer.transform().m11() == initial_scale
+    viewer.close()
+
+    print("test_image_viewer_ctrl_alt_wheel_scrolls_axes_without_zooming PASSED")
+
+
 def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
     from PySide6.QtCore import QEvent, QPointF, Qt
     from PySide6.QtGui import QImage, QMouseEvent
@@ -12796,8 +12876,8 @@ def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
     viewer.set_image_from_qimage(QImage(120, 80, QImage.Format.Format_RGB888))
     first = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))
     second = Block(block_type=BlockType.TABLE, bbox=BBox(45, 10, 20, 20))
-    locked = Block(block_type=BlockType.TEXT, bbox=BBox(78, 10, 20, 20), is_locked=True)
-    viewer.show_blocks([first, second, locked])
+    third = Block(block_type=BlockType.TEXT, bbox=BBox(78, 10, 20, 20))
+    viewer.show_blocks([first, second, third])
     created = []
     viewer.block_created.connect(lambda bbox: created.append(bbox))
 
@@ -12826,11 +12906,95 @@ def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
     ))
 
     assert created == []
-    assert viewer.selected_blocks() == [first, second]
-    assert not viewer._block_items[2][0].isSelected()
+    assert viewer.selected_blocks() == [first, second, third]
     viewer.close()
 
     print("test_image_viewer_right_drag_selects_blocks_without_creating_bbox PASSED")
+
+
+def test_image_viewer_frame_selection_ignores_box_interior():
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QImage, QMouseEvent
+
+    from app.models import BBox, Block, BlockType
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.resize(300, 240)
+    viewer.set_image_from_qimage(QImage(160, 120, QImage.Format.Format_RGB888))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(20, 20, 100, 70))
+    viewer.show_blocks([block])
+
+    inside = QPointF(viewer.mapFromScene(QPointF(70, 55)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        inside,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        inside,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert viewer.selected_blocks() == []
+
+    start = QPointF(viewer.mapFromScene(QPointF(60, 45)))
+    end = QPointF(viewer.mapFromScene(QPointF(80, 65)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        start,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove,
+        end,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        end,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert viewer.selected_blocks() == []
+
+    edge_start = QPointF(viewer.mapFromScene(QPointF(18, 18)))
+    edge_end = QPointF(viewer.mapFromScene(QPointF(42, 28)))
+    viewer.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        edge_start,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseMoveEvent(QMouseEvent(
+        QEvent.Type.MouseMove,
+        edge_end,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    viewer.mouseReleaseEvent(QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        edge_end,
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert viewer.selected_blocks() == [block]
+    viewer.close()
+
+    print("test_image_viewer_frame_selection_ignores_box_interior PASSED")
 
 
 def test_ui_block_labels_use_structured_semantic_label():
@@ -12956,11 +13120,12 @@ if __name__ == "__main__":
     test_layout_panel_analysis_progress_lifecycle()
     test_layout_panel_workbench_height_is_not_forced_by_sidebar()
     test_layout_panel_splitter_keeps_sidebar_width_on_large_workbench()
-    test_layout_panel_merges_selected_blocks_for_ocr_rerun()
-    test_layout_panel_defaults_auto_text_blocks_locked()
+    test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspector()
+    test_layout_panel_auto_text_blocks_are_editable_frames()
+    test_layout_panel_pageup_pagedown_shortcuts_change_page()
     test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle()
     test_layout_panel_draw_merge_uses_large_box_and_removes_overlap()
-    test_layout_panel_draw_ignores_locked_text_targets()
+    test_layout_panel_draw_inside_text_frame_does_not_merge_parent()
     test_layout_panel_drawn_block_is_selected_and_type_editable()
     test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks()
     test_layout_panel_ink_snap_reuses_cached_image_mask()
@@ -13130,7 +13295,9 @@ if __name__ == "__main__":
     test_image_viewer_space_pan_temporarily_disables_box_editing()
     test_image_viewer_shift_left_drag_creates_block_bbox()
     test_image_viewer_draw_uses_snapper_only_for_created_bbox()
+    test_image_viewer_ctrl_alt_wheel_scrolls_axes_without_zooming()
     test_image_viewer_right_drag_selects_blocks_without_creating_bbox()
+    test_image_viewer_frame_selection_ignores_box_interior()
     test_ui_block_labels_use_structured_semantic_label()
     test_hanwang_concurrency_evaluation_script_help()
     test_ppocr_v5_v6_compare_script_help()
