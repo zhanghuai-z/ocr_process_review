@@ -39,8 +39,12 @@
 | 10 TIF as 10 separate jobs, 10 workers, env proxy | 1.68MB | 10 | varies | varies | varies | 21.01s | 比无代理 28.54s 更快 |
 | 30 TIF as 30 separate jobs, 10 workers, env proxy | 5.36MB | 30 | varies | varies | varies | 73.06s | 无失败；出现 40s+ 服务端长尾 |
 | 5 TIF as 5 separate jobs, 5 workers, env proxy, `batchId` | 896KB | 5 | varies | varies | varies | 11.10s | `batchId` 可用，但只是批量查询/归组 |
+| 30 TIF as 30 separate jobs, 15 workers, env proxy | 5.36MB | 27 | varies | varies | varies | 13.93s | 3 个 429；速度很快但失败率不可接受，必须有退避重试 |
+| 30 TIF as 30 separate jobs, 30 workers, env proxy | 5.36MB | 16 | varies | varies | varies | 10.92s | 14 个 429；请求被服务端拒绝，不是处理完成 |
 | 30-page multi-page TIFF | 3.9MB | 1 | 184.76s | 5.28s | 1.21s | 191.25s | TIFF 多页被当作单页，不能用 |
 | 5-page PDF | 5.4MB | 5 | 196.30s | 12.92s | 2.40s | 211.63s | PDF 多页可识别，但上传/提交极慢 |
+| 30-page PDF, PyMuPDF embeds original TIFs | 3.8MB | 30 | 65.40s | 31.65s | 6.14s | 103.19s | 服务端解析约 32s，主要瓶颈在 submit/upload |
+| 30-page PDF split into 4 PDFs, 4 workers, env proxy | 3.8MB | 30 | 19.80-40.34s | 25.15-30.31s | 1.83-2.42s | 67.33s | 无错误；比整包 PDF 快，但慢于高并发单页 |
 
 结论：
 
@@ -52,9 +56,19 @@
 - 30 页/10 workers/代理样本总耗时 73.06s，无 429/队列满错误；单页总耗时 median 15.68s、P90 25.67s、max 58.55s。长尾主要来自 40s+ wait。
 - 当前环境下代理路径反而更快：单页从无代理约 10-17s 降到 6.61s；10 页从无代理 28.54s 降到 21.01s。主程序当前强制绕过环境代理，可能不是最快路径。
 - `returnMarkdownImages=false`、`visualize=false`、`prettifyMarkdown=false` 对单页总耗时没有正向效果，说明结果图片/Markdown 美化不是主瓶颈。
-- PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题；本轮生成的 5 页 PDF 上传/提交极慢，不能直接替换当前策略。
+- PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题。用 PyMuPDF 将 30 张原始 TIF 封装为 3.8MB PDF 后，服务端解析 30 页只约 32s，但 submit/upload 花 65s，总耗时 103s。
+- PDF 拆分为 4 份后总耗时降到 67s，无 429；这是稳定性更好的批量策略候选，但仍明显慢于单页 15 并发的 13.9s。单页 15 并发会触发 429，必须加退避重试才能工程化。
+- 单页 30 并发结果不可采信为成功性能：10.9s 内只有 16 页成功，14 页在 submit 阶段被 `12002 请求频率过高` 拒绝。
 - 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
-- 当前主程序的“逐页 jobs + 并发”方向是可用的短期策略；需要把并发上限作为可调参数继续压测，而不是切到 multipart 多文件。
+- 当前主程序的“逐页 jobs + 并发 + 429 退避重试”仍是最快短期策略；“PDF 分包 jobs”适合做稳定兜底或低失败率模式。
+
+### Official Docs Check
+
+- `PaddleOCR-VL_API` 文档描述的是同步 JSON `/layout-parsing` 接口：请求体放 base64/URL，`fileType=0` 表示 PDF，`fileType=1` 表示图像。
+- `异步API使用文档` 描述的是当前主程序使用的 `/api/v2/ocr/jobs`：本地文件走 multipart，URL 文件走 JSON，`batchId` 仅用于 `/api/v2/ocr/jobs/batch/{batchId}` 批量查询。
+- 异步 API 文档给出的限制是：单次请求最大支持 1000 页 PDF，URL 文件不超过 200MB，本地上传文件不超过 50MB。
+- 异步 API 文档明确 `12002` 为请求频率过高，对应本轮 15/30 并发的 429 结果。
+- 同步 `/layout-parsing` 在本地 120186 单页 base64 探针中超过 90s 未返回，暂不作为主路线；后续除非拿到官方当前 VL1.6 专属同步 URL 并复测，否则主线继续使用 jobs API。
 
 主要风险：
 
