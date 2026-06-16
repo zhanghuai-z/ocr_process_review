@@ -45,6 +45,8 @@
 | 5-page PDF | 5.4MB | 5 | 196.30s | 12.92s | 2.40s | 211.63s | PDF 多页可识别，但上传/提交极慢 |
 | 30-page PDF, PyMuPDF embeds original TIFs | 3.8MB | 30 | 65.40s | 31.65s | 6.14s | 103.19s | 服务端解析约 32s，主要瓶颈在 submit/upload |
 | 30-page PDF split into 4 PDFs, 4 workers, env proxy | 3.8MB | 30 | 19.80-40.34s | 25.15-30.31s | 1.83-2.42s | 67.33s | 无错误；比整包 PDF 快，但慢于高并发单页 |
+| 30-page PDF split into 4 PDFs, 4 workers, env proxy, 4 runs | 3.8MB | 30/run | varies | varies | varies | 28.96-67.33s | 四轮全成功；mean 43.48s，median 38.81s，submit 波动很大 |
+| 30-page PDF split into 8 PDFs, 8 workers, env proxy | 3.8MB | 30 | 3.28-19.36s | 17.40-30.44s | 1.28-2.37s | 47.95s | 无错误；比 4 份首轮快，但仍慢于高并发单页成功页 |
 
 结论：
 
@@ -58,6 +60,8 @@
 - `returnMarkdownImages=false`、`visualize=false`、`prettifyMarkdown=false` 对单页总耗时没有正向效果，说明结果图片/Markdown 美化不是主瓶颈。
 - PDF 单 job 能返回多页结果，说明产品设计上可以研究“整份 PDF 单 job”，但它解决的是 job 数量和状态管理问题，不是 5s 级速度问题。用 PyMuPDF 将 30 张原始 TIF 封装为 3.8MB PDF 后，服务端解析 30 页只约 32s，但 submit/upload 花 65s，总耗时 103s。
 - PDF 拆分为 4 份后总耗时降到 67s，无 429；这是稳定性更好的批量策略候选，但仍明显慢于单页 15 并发的 13.9s。单页 15 并发会触发 429，必须加退避重试才能工程化。
+- 4 份 PDF 多轮波动很大：`67.33s / 35.77s / 28.96s / 41.85s`。第 2-4 轮首次 poll 基本已 done，说明 submit 返回前服务端可能已经完成解析，结果受远端缓存/短期队列/上传链路影响很大。
+- 8 份 PDF 首轮 `47.95s`，比 4 份首轮快，但还不能证明长期稳定优于 4 份；它只是说明“适度分包”能降低单个 submit 长尾。
 - 单页 30 并发结果不可采信为成功性能：10.9s 内只有 16 页成功，14 页在 submit 阶段被 `12002 请求频率过高` 拒绝。
 - 30 页多页 TIFF 被 Paddle 视为 1 页，不能作为多页方案。
 - 当前主程序的“逐页 jobs + 并发 + 429 退避重试”仍是最快短期策略；“PDF 分包 jobs”适合做稳定兜底或低失败率模式。
@@ -126,20 +130,69 @@
 | 3 | 3 | 27.81s | 9.27s | 0 |
 | 4 | 4 | 32.51s | 8.13s | 0 |
 
+2026-06-16 追加枚举，使用真实 `file/244771纵校` 样本和已保存的 Paddle layout JSON：
+
+| Pages | Workers | Total | Page avg | Page max | Groups | EngCut calls | Latin exact/review | Group failures |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8 | 1 | 127.26s | 15.82s | 18.84s | 240 | 180 | 75/2 | 0 |
+| 8 | 2 | 74.41s | 18.25s | 21.72s | 240 | 180 | 75/2 | 0 |
+| 8 | 4 | 55.62s | 26.80s | 31.59s | 240 | 180 | 75/2 | 0 |
+| 8 | 6 | 52.62s | 31.86s | 40.12s | 240 | 180 | 75/2 | 0 |
+| 8 | 8 | 46.50s | 42.23s | 46.35s | 240 | 180 | 75/2 | 0 |
+| 8 | 4, no chars | 37.64s | 18.56s | 20.87s | 240 | 0 | 0/0 | 0 |
+| 30 | 1 | 485.26s | 16.15s | 20.31s | 915 | 713 | 617/12 | 1 |
+| 30 | 2 | 290.61s | 19.26s | 24.35s | 915 | 713 | 617/12 | 1 |
+| 30 | 4 | 213.47s | 27.14s | 35.12s | 915 | 713 | 617/12 | 1 |
+| 30 | 6 | 187.61s | 36.14s | 46.03s | 915 | 713 | 617/12 | 1 |
+| 30 | 8 | 180.89s | 44.65s | 61.06s | 915 | 713 | 617/12 | 1 |
+
 结论：
 
 - 页级并发是当前 Hanwang 最可靠的短期加速方向。
 - 并发越高，单页内部耗时会变慢，说明 CPU/WSL interop/磁盘临时文件存在竞争。
 - 但总吞吐仍显著改善，4 workers 小样本无 native 错误。
+- 8 页样本里 workers=8 最快且无错误，但 30 页全量里 workers=1/2/4/6/8 都出现同一个 native group failure。因此当前不能简单把并发当作唯一风险源。
+- 30 页全量 workers=8 只比 workers=6 快约 6.72s，且单页平均耗时放大到 44.65s；从工程上看，workers=4 是更平衡的高性能档，workers=2 是更温和的保守档。
+- `--no-chars` 在 8 页 workers=4 下从 55.62s 降到 37.64s，说明字符框/EngCut 几何约增加 18s/8页。但纵校需要字符框，不能作为产品路径，只能用于诊断。
+- EngCut 对拉丁/数字兼容有明确收益：30 页得到 713 次 EngCut 行探针，617 个 exact token，12 个 review token；这说明当前“Paddle token + EngCut exact”为主路径是有效的。
+
+### Native Failure Probe
+
+固定失败点：
+
+- page: `120183`
+- block label: `doc_title`
+- route text slice bbox: `[284, 560, 2001, 796]`
+- SegImg group bbox: `[284, 567, 1991, 659]`
+- padded recog crop: `[282, 565, 1993, 661]`
+- error: `System.AccessViolationException` inside `LinecutRecogNative.Recog`
+
+追加枚举：
+
+- 重复跑 120183 共 7 次，7/7 都在同一个 `doc_title` group 失败。
+- 直接测试 crop 参数共 96 组：
+  - `padded`、`raw_group`、`route_block`：全部失败。
+  - `padded_shrink_y`、`padded_left_half`、`padded_right_half`：各 8/16 成功。
+  - 成功组合均要求 `postprocess=1`；`postprocess=0` 全失败。
+  - `with_charrcg`、简体/繁体 mode、split_mode 不决定是否崩。
+- y 裁剪网格 100 组里 70 组成功。最小稳定修改是只把上边界下移 3px：`[282,565,1993,661] -> [282,568,1993,661]`。
+- 上边界下移 3px 后文本识别为 `政府引导基金、产业集聚与制造业企业`，比左右半切更可靠。底部裁剪过多会把 `、` 识别成 `＼`，不宜做对称大裁剪。
+
+工程含义：
+
+- Hanwang 加速不能只靠提高页并发；必须对 native group failure 做局部 retry。
+- 推荐 fallback 顺序：原 crop 失败 -> 同 crop 上边界下移 3px 重试 -> 仍失败再标记该 line/block 进入人工 review，不应静默丢行。
+- 该 fallback 应只在 native exception/timeout 后触发，并记录状态栏非阻塞警告和 debug audit，避免把数据错误误判为新逻辑错误。
 
 百页粗估：
 
-- 串行：约 31 分钟。
-- 2 workers：约 22 分钟。
-- 3 workers：约 15 分钟。
-- 4 workers：约 14 分钟。
+- 串行：约 27 分钟。
+- 2 workers：约 16 分钟。
+- 4 workers：约 12 分钟。
+- 6 workers：约 10.4 分钟。
+- 8 workers：约 10.0 分钟。
 
-以上只是按本样本线性估算；真实百页需要至少 30 页连续跑验证失败率和内存峰值。
+以上按 30 页实测线性估算。注意：本轮 30 页在 workers=1/2/4/6/8 下均有同一个 group native failure；没有 group retry 前，任何并发档都不能视为完整可靠路径。
 
 ## Engineering Recommendations
 
@@ -153,9 +206,10 @@
 - `PaddleV16LayoutClient.get_batch_status(batch_id)` 已准备好；当前主链仍按单 job 轮询，后续可以基于它减少百页项目的 GET 轮询风暴。
 
 1. 短期接入 Hanwang 页级并发：
-   - 新增 `ocr_page_concurrency` 配置，默认 2，上限 4。
+   - 新增 `ocr_page_concurrency` 配置，默认 2，上限 4；workers=6/8 可以保留为实验档，不建议默认开放。
    - 仅对 Hanwang hybrid/page-block OCR 启用。
    - 进度、错误、保存必须按 page index 回填，不能依赖完成顺序。
+   - 必须先实现 native group failure retry：原 crop 失败后，对同一 group 上边界下移 3px 重试；仍失败则生成 review/warning，不应静默丢行。
 
 2. 保持 Hanwang collage batch 关闭：
    - 已复现 native AccessViolation。
