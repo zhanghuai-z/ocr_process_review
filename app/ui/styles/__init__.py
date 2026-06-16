@@ -191,11 +191,27 @@ QLabel#noteLabel    {{ color: {text_muted}; font-size: {font_size_sm}; }}
 QLabel#pageTitle    {{ color: {brand}; font-size: {font_size_xl}; font-weight: bold; }}
 QLabel#muted        {{ color: {text_muted}; font-size: {font_size_sm}; }}
 QLabel#stepInfo     {{ color: {brand}; font-size: {font_size_sm}; font-weight: 500; }}
+QLabel#sidebarTitle {{ color: {text_primary}; font-size: {font_size}; font-weight: 600; }}
 
 /* ---------- 版面分析项目统计 ---------- */
 QFrame#layoutStatsPanel {{
     background: {bg_panel};
     border-top: 1px solid {border};
+}}
+QFrame#layoutSidebarHeader {{
+    background: {bg_panel};
+    border-bottom: 1px solid {border};
+}}
+QFrame#blockTypeDivider {{
+    background: {border_subtle};
+    border: none;
+}}
+QDialog#layoutFindDialog {{
+    background: {bg_panel};
+}}
+QFrame#layoutFindHeader {{
+    background: {bg_panel};
+    border-bottom: 1px solid {border};
 }}
 
 /* ---------- 面包屑（TopBar） ---------- */
@@ -250,10 +266,6 @@ QTabWidget#layoutLeftTabs QTabBar::tab {{
 QTabWidget#layoutLeftTabs QTabBar::tab:selected {{
     color: {brand};
     border-bottom: 2px solid {brand};
-}}
-QFrame#layoutFindPanel {{
-    background: {bg_panel};
-    border-bottom: 1px solid {border};
 }}
 QComboBox#layoutSearchPreset {{
     min-height: 26px;
@@ -400,6 +412,18 @@ QPushButton#secondaryBtn {{
 }}
 QPushButton#secondaryBtn:hover    {{ border-color: {brand}; color: {brand}; }}
 QPushButton#secondaryBtn:disabled {{ color: {text_disabled}; background: {bg_input_dis}; }}
+QPushButton#iconBtn {{
+    border: none;
+    border-radius: {radius_sm};
+    background: transparent;
+    color: {text_muted};
+    font-size: {font_size_lg};
+    padding: 0;
+}}
+QPushButton#iconBtn:hover {{
+    background: {bg_hover};
+    color: {text_primary};
+}}
 
 /* ---------- 输入控件 ---------- */
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{

@@ -3834,7 +3834,8 @@ def test_layout_panel_type_buttons_are_grouped():
         ]
         assert "其他" not in button_labels
         assert panel._type_context_title.text() == "新建框类型"
-        assert "新建：正文 / text" == panel._selection_type_status.text()
+        assert panel._selection_mode_lbl.text() == "新建模式:"
+        assert panel._selection_type_status.text() == "正文"
     finally:
         panel.close()
 
@@ -3871,7 +3872,8 @@ def test_layout_panel_subtype_buttons_write_paddle_source_label():
             assert block.source == BlockSource.MANUAL_DRAW
             assert block.recognizable is False
             assert panel._type_context_title.text() == "选中框类型"
-            assert panel._selection_type_status.text() == "选中：公式 / formula"
+            assert panel._selection_mode_lbl.text() == "选中类型:"
+            assert panel._selection_type_status.text() == "公式"
         finally:
             panel.close()
 
@@ -3904,7 +3906,7 @@ def test_layout_panel_formula_button_infers_inline_formula_inside_text_block():
             formula = page.blocks[-1]
             assert formula.block_type == BlockType.EQUATION
             assert formula.source_label == "inline_formula"
-            assert panel._selection_type_status.text() == "选中：公式 / formula"
+            assert panel._selection_type_status.text() == "公式"
         finally:
             panel.close()
 
@@ -3944,10 +3946,15 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
             app.processEvents()
             panel._search_regex.setChecked(True)
             panel._search_input.setText("^一、")
+            source_idx = panel._search_source_filter.findData("title")
+            assert source_idx >= 0
+            panel._search_source_filter.setCurrentIndex(source_idx)
             assert len(panel._block_search_matches) == 1
 
-            panel._new_subtype_buttons["heading_1"].click()
-            panel._apply_current_type_to_search_matches()
+            target_idx = panel._search_target_combo.findData("heading_1")
+            assert target_idx >= 0
+            panel._search_target_combo.setCurrentIndex(target_idx)
+            panel._apply_search_target_to_matches()
 
             assert target.block_type == BlockType.TITLE
             assert target.source_label == "heading_1"
@@ -3964,7 +3971,7 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
     print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
 
 
-def test_layout_panel_find_panel_preset_matches_chinese_heading_forms():
+def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
     from pathlib import Path
     import tempfile
 
@@ -4003,9 +4010,9 @@ def test_layout_panel_find_panel_preset_matches_chinese_heading_forms():
         try:
             panel.set_pages([page])
             app.processEvents()
-            assert panel._find_panel.isHidden()
-            panel.show_find_panel()
-            assert not panel._find_panel.isHidden()
+            assert panel._find_dialog.isHidden()
+            panel.show_find_dialog()
+            assert not panel._find_dialog.isHidden()
 
             preset_index = next(
                 idx for idx in range(panel._search_preset.count())
@@ -4019,7 +4026,7 @@ def test_layout_panel_find_panel_preset_matches_chinese_heading_forms():
         finally:
             panel.close()
 
-    print("test_layout_panel_find_panel_preset_matches_chinese_heading_forms PASSED")
+    print("test_layout_panel_find_dialog_preset_matches_chinese_heading_forms PASSED")
 
 
 def test_layout_panel_heading_outline_uses_nested_heading_levels():
@@ -9263,7 +9270,7 @@ def test_main_window_ocr_finished_preserves_current_step():
     print("test_main_window_ocr_finished_preserves_current_step PASSED")
 
 
-def test_main_window_find_action_opens_layout_find_panel():
+def test_main_window_find_action_opens_layout_find_dialog():
     from app.controllers.workflow_controller import STEP_LAYOUT
     from app.models import OcrProject, Page
     from app.ui.main_window import MainWindow
@@ -9274,17 +9281,17 @@ def test_main_window_find_action_opens_layout_find_panel():
         page = Page(image_path="/tmp/find-page.png", width=100, height=100, page_number=1)
         window._controller._project = OcrProject(name="Find", pages=[page])
         window._layout_panel.set_pages([page])
-        assert window._layout_panel._find_panel.isHidden()
+        assert window._layout_panel._find_dialog.isHidden()
 
         window._show_layout_find()
 
         assert window._controller.current_step == STEP_LAYOUT
         assert window._stack.currentWidget() is window._layout_panel
-        assert not window._layout_panel._find_panel.isHidden()
+        assert not window._layout_panel._find_dialog.isHidden()
     finally:
         window.close()
 
-    print("test_main_window_find_action_opens_layout_find_panel PASSED")
+    print("test_main_window_find_action_opens_layout_find_dialog PASSED")
 
 
 def test_empty_llm_config_does_not_block_ocr_done():

@@ -808,7 +808,7 @@ class MainWindow(QMainWindow):
             self._status_bar.showMessage("当前没有可查找的版面块", 3000)
             return
         self._go_to_step(STEP_LAYOUT)
-        self._layout_panel.show_find_panel()
+        self._layout_panel.show_find_dialog()
 
     def _show_ocr_settings(self) -> None:
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog

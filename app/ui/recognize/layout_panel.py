@@ -8,7 +8,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -66,7 +66,12 @@ class LayoutSubtypeSpec:
 
 
 BLOCK_TYPE_BUTTON_GROUPS = (
-    ("标题", (
+    ("核心文本", (
+        LayoutSubtypeSpec("正文", "text", BlockType.TEXT, "普通正文段落"),
+        LayoutSubtypeSpec("摘要", "abstract", BlockType.TEXT, "摘要内容"),
+        LayoutSubtypeSpec("公式", "formula", BlockType.EQUATION, "自动判断行内公式/独立公式"),
+    )),
+    ("标题层级", (
         LayoutSubtypeSpec("H1", "heading_1", BlockType.TITLE, "一级标题"),
         LayoutSubtypeSpec("H2", "heading_2", BlockType.TITLE, "二级标题"),
         LayoutSubtypeSpec("H3", "heading_3", BlockType.TITLE, "三级标题"),
@@ -74,30 +79,28 @@ BLOCK_TYPE_BUTTON_GROUPS = (
         LayoutSubtypeSpec("H5", "heading_5", BlockType.TITLE, "五级标题"),
         LayoutSubtypeSpec("H6", "heading_6", BlockType.TITLE, "六级标题"),
     )),
-    ("文本", (
-        LayoutSubtypeSpec("正文", "text", BlockType.TEXT, "普通正文段落"),
-        LayoutSubtypeSpec("摘要", "abstract", BlockType.TEXT, "摘要内容"),
-    )),
-    ("公式", (
-        LayoutSubtypeSpec("公式", "formula", BlockType.EQUATION, "自动判断行内公式/独立公式"),
-    )),
-    ("图像表格", (
+    ("图表与浮动", (
         LayoutSubtypeSpec("图片", "figure", BlockType.FIGURE, "图片/插图区域"),
-        LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
-        LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
-    )),
-    ("题注参考", (
         LayoutSubtypeSpec("图题", "figure_title", BlockType.FIGURE_CAPTION, "图片或图表标题"),
+        LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
         LayoutSubtypeSpec("表题", "table_title", BlockType.TABLE_CAPTION, "表格标题"),
-        LayoutSubtypeSpec("参考文献", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
+        LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
     )),
-    ("页边脚注", (
+    ("边注与引用", (
         LayoutSubtypeSpec("页眉", "header", BlockType.TEXT, "页眉区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页脚", "footer", BlockType.TEXT, "页脚区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页码", "number", BlockType.TEXT, "页码/编号类位置元素"),
         LayoutSubtypeSpec("脚注", "footnote", BlockType.TEXT, "脚注文本"),
+        LayoutSubtypeSpec("参考文献", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
     )),
 )
+TYPE_BUTTON_GROUP_COLUMNS = {
+    "核心文本": 3,
+    "标题层级": 3,
+    "图表与浮动": 2,
+    "边注与引用": 2,
+}
+TYPE_BUTTON_FULL_ROW_LABELS = frozenset({"chart", "reference_content"})
 BLOCK_SUBTYPE_BUTTON_ORDER = tuple(
     spec
     for _group_title, specs in BLOCK_TYPE_BUTTON_GROUPS
@@ -149,9 +152,9 @@ def _block_type_button_stylesheet(block_type: BlockType) -> str:
     border = color.name()
     return f"""
         QPushButton {{
-            min-height: 24px;
+            min-height: 26px;
             padding: 3px 6px;
-            border-radius: 6px;
+            border-radius: 4px;
             border: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 150);
             background: rgba({color.red()}, {color.green()}, {color.blue()}, 28);
             color: #202124;
@@ -173,8 +176,8 @@ def _block_type_button_stylesheet(block_type: BlockType) -> str:
 def _block_type_group_stylesheet() -> str:
     return """
         QFrame#blockTypeGroup {
-            border: 1px solid #eef1f5;
-            border-radius: 6px;
+            border: none;
+            border-radius: 0;
             background: #ffffff;
         }
         QLabel#blockTypeGroupTitle {
@@ -182,6 +185,21 @@ def _block_type_group_stylesheet() -> str:
             font-size: 12px;
             font-weight: 600;
         }
+    """
+
+
+def _type_badge_stylesheet(block_type: BlockType) -> str:
+    color = BLOCK_COLORS.get(block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+    return f"""
+        QLabel#typeBadge {{
+            padding: 2px 8px;
+            border-radius: 4px;
+            border: 1px solid rgba({color.red()}, {color.green()}, {color.blue()}, 170);
+            background: rgba({color.red()}, {color.green()}, {color.blue()}, 36);
+            color: rgb({max(color.red() - 70, 0)}, {max(color.green() - 70, 0)}, {max(color.blue() - 70, 0)});
+            font-weight: 600;
+            font-size: 13px;
+        }}
     """
 
 
@@ -302,16 +320,17 @@ class LayoutPanel(QWidget):
         self._prop_conf.hide()
 
         vtl.addStretch(1)
+        self._selection_mode_lbl = QLabel("新建模式:")
+        self._selection_mode_lbl.setObjectName("muted")
+        vtl.addWidget(self._selection_mode_lbl)
         self._selection_type_status = QLabel("")
-        self._selection_type_status.setObjectName("selectionTypeStatus")
-        self._selection_type_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._selection_type_status.setMinimumWidth(190)
+        self._selection_type_status.setObjectName("typeBadge")
+        self._selection_type_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._selection_type_status.setMinimumWidth(64)
         vtl.addWidget(self._selection_type_status)
         vw_lay.addWidget(viewer_tb)
 
-        self._find_panel = self._build_find_panel()
-        self._find_panel.hide()
-        vw_lay.addWidget(self._find_panel)
+        self._find_dialog = self._build_find_dialog()
 
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
@@ -324,11 +343,21 @@ class LayoutPanel(QWidget):
         vw_lay.addWidget(self._viewer, 1)
         splitter.addWidget(viewer_wrap)
 
-        # 右：工具栏 + Inspector（选中块详情）
+        # 右：工具栏 + 项目统计
         right_wrap = QWidget()
         right_lay = QVBoxLayout(right_wrap)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
+
+        sidebar_header = QFrame()
+        sidebar_header.setObjectName("layoutSidebarHeader")
+        sidebar_header.setFixedHeight(44)
+        sidebar_header_lay = QHBoxLayout(sidebar_header)
+        sidebar_header_lay.setContentsMargins(12, 0, 12, 0)
+        self._type_context_title = QLabel("新建框类型")
+        self._type_context_title.setObjectName("sidebarTitle")
+        sidebar_header_lay.addWidget(self._type_context_title)
+        right_lay.addWidget(sidebar_header)
 
         tool_panel = QFrame()
         tool_panel.setObjectName("sidebarBar")
@@ -336,12 +365,6 @@ class LayoutPanel(QWidget):
         tool_lay.setContentsMargins(12, 12, 12, 10)
         tool_lay.setSpacing(8)
 
-        tool_title = QLabel("工具")
-        tool_title.setObjectName("sectionTitle")
-        tool_lay.addWidget(tool_title)
-
-        self._type_context_title = QLabel("新建框类型")
-        tool_lay.addWidget(self._type_context_title)
         self._type_group = QButtonGroup(self)
         self._type_group.setExclusive(True)
         self._new_type_group = self._type_group
@@ -468,73 +491,131 @@ class LayoutPanel(QWidget):
         self._page_down_shortcut.activated.connect(lambda: self._goto_relative(1))
         self._update_page_nav()
 
-    def _build_find_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("layoutFindPanel")
-        root = QVBoxLayout(panel)
-        root.setContentsMargins(10, 8, 10, 8)
-        root.setSpacing(6)
+    def _build_find_dialog(self) -> QDialog:
+        dialog = QDialog(self)
+        dialog.setObjectName("layoutFindDialog")
+        dialog.setWindowTitle("基于属性与文本过滤的批量赋值")
+        dialog.setModal(True)
+        dialog.resize(560, 430)
 
-        search_row = QHBoxLayout()
-        search_row.setContentsMargins(0, 0, 0, 0)
-        search_row.setSpacing(8)
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title = QLabel("查找")
-        title.setObjectName("sectionTitle")
-        search_row.addWidget(title)
+        header = QFrame()
+        header.setObjectName("layoutFindHeader")
+        header_lay = QHBoxLayout(header)
+        header_lay.setContentsMargins(14, 10, 10, 10)
+        title = QLabel("基于属性与文本过滤的批量赋值")
+        title.setObjectName("sidebarTitle")
+        header_lay.addWidget(title)
+        header_lay.addStretch(1)
+        self._btn_close_find = QPushButton("×")
+        self._btn_close_find.setObjectName("iconBtn")
+        self._btn_close_find.setFixedSize(28, 28)
+        self._btn_close_find.clicked.connect(self.hide_find_dialog)
+        header_lay.addWidget(self._btn_close_find)
+        root.addWidget(header)
 
+        body = QWidget()
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(14, 12, 14, 12)
+        body_lay.setSpacing(10)
+
+        input_title = QLabel("包含文本特征")
+        input_title.setObjectName("fieldLabel")
+        body_lay.addWidget(input_title)
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("输入文本或选择标题模式")
+        self._search_input.setPlaceholderText("输入文本或正则，例如：^一、")
         self._search_input.setClearButtonEnabled(True)
         self._search_input.textChanged.connect(self._refresh_block_search)
-        search_row.addWidget(self._search_input, 1)
+        body_lay.addWidget(self._search_input)
 
+        option_row = QHBoxLayout()
+        option_row.setContentsMargins(0, 0, 0, 0)
+        option_row.setSpacing(8)
         self._search_preset = QComboBox()
         self._search_preset.setObjectName("layoutSearchPreset")
-        self._search_preset.setMinimumWidth(180)
+        self._search_preset.setMinimumWidth(170)
         for label, pattern in LAYOUT_SEARCH_PRESETS:
             self._search_preset.addItem(label, pattern)
         self._search_preset.currentIndexChanged.connect(self._on_search_preset_changed)
-        search_row.addWidget(self._search_preset)
+        option_row.addWidget(self._search_preset, 1)
 
         self._search_regex = QCheckBox("正则")
         self._search_regex.toggled.connect(self._refresh_block_search)
-        search_row.addWidget(self._search_regex)
+        option_row.addWidget(self._search_regex)
 
         self._search_case = QCheckBox("区分大小写")
         self._search_case.toggled.connect(self._refresh_block_search)
-        search_row.addWidget(self._search_case)
+        option_row.addWidget(self._search_case)
+        body_lay.addLayout(option_row)
 
-        self._btn_close_find = QPushButton("关闭")
-        self._btn_close_find.setObjectName("secondaryBtn")
-        self._btn_close_find.clicked.connect(self.hide_find_panel)
-        search_row.addWidget(self._btn_close_find)
-        root.addLayout(search_row)
+        assign_row = QHBoxLayout()
+        assign_row.setContentsMargins(0, 0, 0, 0)
+        assign_row.setSpacing(10)
+
+        source_col = QVBoxLayout()
+        source_col.setContentsMargins(0, 0, 0, 0)
+        source_col.setSpacing(4)
+        source_label = QLabel("原分类限制")
+        source_label.setObjectName("fieldLabel")
+        source_col.addWidget(source_label)
+        self._search_source_filter = QComboBox()
+        self._search_source_filter.addItem("不限分类", "any")
+        self._search_source_filter.addItem("标题", "title")
+        self._search_source_filter.addItem("正文/文字", "text")
+        self._search_source_filter.addItem("公式", "equation")
+        self._search_source_filter.addItem("图像/图表", "figure")
+        self._search_source_filter.addItem("表格", "table")
+        self._search_source_filter.addItem("参考文献", "reference")
+        self._search_source_filter.currentIndexChanged.connect(self._refresh_block_search)
+        source_col.addWidget(self._search_source_filter)
+        assign_row.addLayout(source_col, 1)
+
+        target_col = QVBoxLayout()
+        target_col.setContentsMargins(0, 0, 0, 0)
+        target_col.setSpacing(4)
+        target_label = QLabel("目标赋值分类")
+        target_label.setObjectName("fieldLabel")
+        target_col.addWidget(target_label)
+        self._search_target_combo = QComboBox()
+        for spec in BLOCK_SUBTYPE_BUTTON_ORDER:
+            self._search_target_combo.addItem(spec.label, spec.normalized_source_label)
+        self._search_target_combo.setCurrentIndex(0)
+        target_col.addWidget(self._search_target_combo)
+        assign_row.addLayout(target_col, 1)
+        body_lay.addLayout(assign_row)
 
         result_row = QHBoxLayout()
         result_row.setContentsMargins(0, 0, 0, 0)
         result_row.setSpacing(8)
         self._search_results = QListWidget()
         self._search_results.setObjectName("layoutSearchResults")
-        self._search_results.setMaximumHeight(118)
+        self._search_results.setMinimumHeight(130)
         self._search_results.itemClicked.connect(self._on_search_result_clicked)
         result_row.addWidget(self._search_results, 1)
 
         action_col = QVBoxLayout()
         action_col.setContentsMargins(0, 0, 0, 0)
         action_col.setSpacing(6)
-        self._btn_apply_filter_type = QPushButton("应用当前类型")
+        self._btn_preview_matches = QPushButton("预览匹配块")
+        self._btn_preview_matches.setObjectName("secondaryBtn")
+        self._btn_preview_matches.clicked.connect(self._preview_first_search_match)
+        action_col.addWidget(self._btn_preview_matches)
+        self._btn_apply_filter_type = QPushButton("批量应用属性")
         self._btn_apply_filter_type.setObjectName("secondaryBtn")
-        self._btn_apply_filter_type.setToolTip("把当前选中的属性按钮批量应用到查找结果")
-        self._btn_apply_filter_type.clicked.connect(self._apply_current_type_to_search_matches)
+        self._btn_apply_filter_type.setToolTip("把目标赋值分类批量应用到查找结果")
+        self._btn_apply_filter_type.clicked.connect(self._apply_search_target_to_matches)
         action_col.addWidget(self._btn_apply_filter_type)
         self._search_count_lbl = QLabel("0")
         self._search_count_lbl.setObjectName("muted")
         action_col.addWidget(self._search_count_lbl)
         action_col.addStretch(1)
         result_row.addLayout(action_col)
-        root.addLayout(result_row)
-        return panel
+        body_lay.addLayout(result_row)
+        root.addWidget(body)
+        return dialog
 
     # ------------------------------------------------------------------ public
 
@@ -565,7 +646,7 @@ class LayoutPanel(QWidget):
         self._search_results.clear()
         self._block_search_matches.clear()
         self._search_count_lbl.setText("0")
-        self._find_panel.hide()
+        self._find_dialog.hide()
         self._viewer.clear()
         self._set_status_text("请先导入文件并运行版面分析")
         self._btn_run.setEnabled(False)
@@ -641,20 +722,23 @@ class LayoutPanel(QWidget):
             self._btn_submit.setText(label)
             self._btn_submit.setEnabled(enabled)
 
-    def show_find_panel(self) -> None:
-        self._find_panel.show()
+    def show_find_dialog(self) -> None:
+        self._sync_search_target_combo()
+        self._find_dialog.show()
+        self._find_dialog.raise_()
+        self._find_dialog.activateWindow()
         self._search_input.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self._search_input.selectAll()
         self._refresh_block_search()
 
-    def hide_find_panel(self) -> None:
-        self._find_panel.hide()
+    def hide_find_dialog(self) -> None:
+        self._find_dialog.hide()
 
-    def toggle_find_panel(self) -> None:
-        if self._find_panel.isVisible():
-            self.hide_find_panel()
+    def toggle_find_dialog(self) -> None:
+        if self._find_dialog.isVisible():
+            self.hide_find_dialog()
         else:
-            self.show_find_panel()
+            self.show_find_dialog()
 
     def refresh_text_indexes(self) -> None:
         """Refresh derived text views after OCR/proof updates block lines."""
@@ -739,11 +823,41 @@ class LayoutPanel(QWidget):
             return _compact_status_text(block.note.split("|", 1)[0])
         return block.source_label or getattr(block.block_type, "value", str(block.block_type))
 
+    @staticmethod
+    def _block_matches_search_source_filter(block: Block, filter_key: str) -> bool:
+        if filter_key == "any":
+            return True
+        label = normalize_paddle_label(block.source_label or block.block_type.value)
+        if filter_key == "title":
+            return LayoutPanel._is_title_like_block(block)
+        if filter_key == "text":
+            return block.block_type == BlockType.TEXT and label not in {"header", "footer", "number", "footnote"}
+        if filter_key == "equation":
+            return block.block_type == BlockType.EQUATION or label in {
+                "formula", "inline_formula", "display_formula", "equation",
+            }
+        if filter_key == "figure":
+            return block.block_type in {BlockType.FIGURE, BlockType.FIGURE_CAPTION} or label in {
+                "figure", "chart", "figure_title",
+            }
+        if filter_key == "table":
+            return block.block_type in {BlockType.TABLE, BlockType.TABLE_CAPTION} or label in {
+                "table", "table_title",
+            }
+        if filter_key == "reference":
+            return block.block_type == BlockType.REFERENCE or label == "reference_content"
+        return True
+
     def _refresh_block_search(self) -> None:
         if not hasattr(self, "_search_results"):
             return
         query = self._search_input.text() if hasattr(self, "_search_input") else ""
         query = str(query or "")
+        source_filter = (
+            self._search_source_filter.currentData()
+            if hasattr(self, "_search_source_filter")
+            else "any"
+        )
         self._search_results.clear()
         self._block_search_matches.clear()
         if not query.strip() or not self._pages:
@@ -764,6 +878,8 @@ class LayoutPanel(QWidget):
 
         for page_idx, page in enumerate(self._pages):
             for block in page.blocks:
+                if not self._block_matches_search_source_filter(block, str(source_filter or "any")):
+                    continue
                 fields = self._block_search_fields(block)
                 if matcher is not None:
                     matched = any(bool(matcher.search(field)) for field in fields)
@@ -787,6 +903,31 @@ class LayoutPanel(QWidget):
         self._search_count_lbl.setText(f"{count} 个")
         if count:
             self._set_status_text(f"查找到 {count} 个版面块")
+
+    def _preview_first_search_match(self) -> None:
+        self._refresh_block_search()
+        if not self._block_search_matches:
+            self._set_status_text("没有匹配的版面块")
+            return
+        page_idx, block = self._block_search_matches[0]
+        self._focus_block(page_idx, block)
+        self._set_status_text(f"已预览第 1 个匹配块，共 {len(self._block_search_matches)} 个")
+
+    def _sync_search_target_combo(self) -> None:
+        if not hasattr(self, "_search_target_combo"):
+            return
+        label = self._current_checked_subtype().normalized_source_label
+        index = self._search_target_combo.findData(label)
+        if index >= 0:
+            self._search_target_combo.setCurrentIndex(index)
+
+    def _apply_search_target_to_matches(self) -> None:
+        label = self._search_target_combo.currentData() if hasattr(self, "_search_target_combo") else ""
+        subtype = DEFAULT_SUBTYPE_BY_SOURCE_LABEL.get(normalize_paddle_label(label))
+        if subtype is None:
+            self._set_status_text("目标赋值分类无效")
+            return
+        self._apply_current_type_to_search_matches(subtype)
 
     def _on_search_preset_changed(self, index: int) -> None:
         if not hasattr(self, "_search_preset"):
@@ -827,11 +968,11 @@ class LayoutPanel(QWidget):
                     return spec
         return self._new_subtype
 
-    def _apply_current_type_to_search_matches(self) -> None:
+    def _apply_current_type_to_search_matches(self, subtype: LayoutSubtypeSpec | None = None) -> None:
         if not self._block_search_matches:
             self._set_status_text("没有可应用的查找结果")
             return
-        subtype = self._current_checked_subtype()
+        subtype = subtype or self._current_checked_subtype()
         affected: dict[int, list[Block]] = {}
         for page_idx, block in self._block_search_matches:
             if 0 <= page_idx < len(self._pages):
@@ -873,8 +1014,8 @@ class LayoutPanel(QWidget):
             group_frame.setObjectName("blockTypeGroup")
             group_frame.setStyleSheet(_block_type_group_stylesheet())
             group_lay = QVBoxLayout(group_frame)
-            group_lay.setContentsMargins(8, 6, 8, 8)
-            group_lay.setSpacing(5)
+            group_lay.setContentsMargins(0, 0, 0, 0)
+            group_lay.setSpacing(6)
 
             title = QLabel(group_title)
             title.setObjectName("blockTypeGroupTitle")
@@ -885,11 +1026,15 @@ class LayoutPanel(QWidget):
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(6)
             grid.setVerticalSpacing(6)
-            for index, spec in enumerate(subtype_specs):
+            columns = TYPE_BUTTON_GROUP_COLUMNS.get(group_title, 2)
+            row = 0
+            col = 0
+            for spec in subtype_specs:
                 button = QPushButton(spec.label)
                 button.setObjectName("blockTypeButton")
                 button.setCheckable(True)
                 button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                button.setMinimumHeight(28)
                 button.setStyleSheet(_block_type_button_stylesheet(spec.block_type))
                 tooltip = f"{group_title} · {spec.label} / {spec.source_label} → {spec.block_type.value}"
                 if spec.note:
@@ -899,9 +1044,22 @@ class LayoutPanel(QWidget):
                 group.addButton(button)
                 subtype_buttons[spec.normalized_source_label] = button
                 type_buttons.setdefault(spec.block_type, button)
-                grid.addWidget(button, index // 2, index % 2)
+                span = columns if spec.normalized_source_label in TYPE_BUTTON_FULL_ROW_LABELS else 1
+                if span > 1 and col != 0:
+                    row += 1
+                    col = 0
+                grid.addWidget(button, row, col, 1, min(span, columns))
+                col += span
+                if col >= columns:
+                    row += 1
+                    col = 0
             group_lay.addWidget(grid_wrap)
             column.addWidget(group_frame)
+            if group_title != BLOCK_TYPE_BUTTON_GROUPS[-1][0]:
+                divider = QFrame()
+                divider.setObjectName("blockTypeDivider")
+                divider.setFixedHeight(1)
+                column.addWidget(divider)
         parent_layout.addWidget(wrap)
         return type_buttons, subtype_buttons
 
@@ -964,20 +1122,25 @@ class LayoutPanel(QWidget):
     def _update_selection_type_status(self, block: Block | None) -> None:
         if block is None:
             spec = self._new_subtype
-            text = f"新建：{spec.label} / {spec.source_label}"
-            self._selection_type_status.setText(text)
+            self._selection_mode_lbl.setText("新建模式:")
+            self._selection_type_status.setText(spec.label)
+            self._selection_type_status.setStyleSheet(_type_badge_stylesheet(spec.block_type))
             self._selection_type_status.setToolTip(f"当前新建框类型：{spec.label} / {spec.source_label} → {spec.block_type.value}")
             return
         label = self._button_source_label_for_block(block)
         spec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL.get(normalize_paddle_label(label))
         if spec is not None:
-            text = f"选中：{spec.label} / {spec.source_label}"
+            badge = spec.label
+            badge_type = spec.block_type
             tooltip = f"当前选中框属性：{spec.label} / {spec.source_label} → {spec.block_type.value}"
         else:
             raw_label = block.source_label or block.block_type.value
-            text = f"选中：{_block_type_label(block.block_type)} / {raw_label}"
+            badge = _block_type_label(block.block_type)
+            badge_type = block.block_type
             tooltip = f"当前选中框属性：{raw_label} → {block.block_type.value}"
-        self._selection_type_status.setText(text)
+        self._selection_mode_lbl.setText("选中类型:")
+        self._selection_type_status.setText(badge)
+        self._selection_type_status.setStyleSheet(_type_badge_stylesheet(badge_type))
         self._selection_type_status.setToolTip(tooltip)
 
     @staticmethod
