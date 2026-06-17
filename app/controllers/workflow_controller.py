@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import copy
+import time
 from threading import Lock
 from typing import Callable, List, Optional
 
@@ -42,6 +43,7 @@ from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
 PARALLEL_PROOF_PAGE_KEY_ATTR = "_parallel_proof_page_key"
+OCR_PROGRESS_MIN_EMIT_INTERVAL_SECONDS = 0.08
 
 
 class WorkflowController(QObject):
@@ -86,6 +88,7 @@ class WorkflowController(QObject):
         # proof 面板同步状态（供 sync_proof_panels 使用）
         self._proof_loaded_line_count: int = 0
         self._proof_loaded_signature: tuple = ()
+        self._last_ocr_progress_completed_pages: int = 0
         self._hproof_panel = None
         self._vproof_panel = None
         # view-state ownership: 哪个 step 激活、哪个 page_number 激活、版面按钮可用性
@@ -928,6 +931,7 @@ class WorkflowController(QObject):
         pipeline = OcrPipeline(engine=engine, page_concurrency=page_concurrency)
 
         self._ocr_target_page_numbers = target_page_numbers
+        self._last_ocr_progress_completed_pages = 0
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
         self._connect_worker_cleanup("_ocr_worker", self._ocr_worker)
         self._ocr_worker.progress_state.connect(self._on_ocr_progress)
@@ -956,6 +960,7 @@ class WorkflowController(QObject):
             return False
         proof_pages = self._clone_pages_for_parallel_proof(pages)
         pipeline = OcrPipeline(engine=engine)
+        self._last_ocr_progress_completed_pages = 0
         self._proof_ocr_worker = OcrPipelineWorker(pipeline, proof_pages)
         self._connect_worker_cleanup("_proof_ocr_worker", self._proof_ocr_worker)
         self._proof_ocr_worker.progress_state.connect(self._on_ocr_progress)
@@ -1053,15 +1058,16 @@ class WorkflowController(QObject):
         self.on_ocr_done(layout_pages)
 
     def _on_ocr_progress(self, progress: OcrProgress) -> None:
-        if self._project:
+        completed_pages = max(0, int(progress.completed_pages))
+        if completed_pages != self._last_ocr_progress_completed_pages and self._project:
             for page in self._project.pages:
                 page.reconcile_ocr_done_from_result()
-        if self._project and self._project.has_any_ocr_done_page:
-            if self._max_step < STEP_VPROOF:
+            if self._project.has_any_ocr_done_page and self._max_step < STEP_VPROOF:
                 self._update_max_step()
+            self._last_ocr_progress_completed_pages = completed_pages
         self.progress_state_changed.emit(WorkflowProgressState(
             phase="ocr",
-            completed_pages=int(progress.completed_pages),
+            completed_pages=completed_pages,
             total_pages=int(progress.total_pages),
             message=progress.message or "",
         ))
@@ -1150,11 +1156,23 @@ class OcrPipelineWorker(QThread):
             project = OcrProject(name="_ocr_worker_", pages=self._pages)
             completed_pages = 0
             progress_lock = Lock()
+            last_progress_emit = 0.0
 
             def on_progress(progress: OcrProgress):
-                nonlocal completed_pages
+                nonlocal completed_pages, last_progress_emit
                 with progress_lock:
-                    self.progress_state.emit(progress)
+                    now = time.monotonic()
+                    message = progress.message or ""
+                    page_advanced = progress.completed_pages > completed_pages
+                    important = (
+                        page_advanced
+                        or progress.current_block <= 0
+                        or "失败" in message
+                        or "警告" in message
+                    )
+                    if important or now - last_progress_emit >= OCR_PROGRESS_MIN_EMIT_INTERVAL_SECONDS:
+                        self.progress_state.emit(progress)
+                        last_progress_emit = now
                     while completed_pages < progress.completed_pages:
                         self.progress_update.emit(completed_pages, total)
                         self.page_done.emit(completed_pages, total)

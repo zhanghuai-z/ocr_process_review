@@ -9852,10 +9852,11 @@ def test_main_window_ocr_finished_preserves_current_step():
             message="Hanwang micro-recblock 已完成 group 2/4",
         ))
         assert not window._ocr_placeholder.isHidden()
+        assert synced == []
 
         window._on_ocr_finished([Page(image_path="/tmp/ocr-finished.png", width=10, height=10)])
 
-        assert synced == [True, True]
+        assert synced == [True]
         assert window._controller.current_step == STEP_OCR
         assert window._stack.currentIndex() == STEP_LAYOUT
         assert window._stack.currentWidget() is window._layout_panel

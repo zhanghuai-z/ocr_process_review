@@ -195,6 +195,26 @@ class _CurrentPageStack(QStackedWidget):
         return current.minimumSizeHint() if current is not None else super().minimumSizeHint()
 
 
+class ImportWorker(QThread):
+    """Render/import files off the UI thread."""
+
+    all_done = Signal(object)
+    error = Signal(str)
+
+    def __init__(self, paths: List[str], cache_dir: Path, parent=None):
+        super().__init__(parent)
+        self._paths = list(paths)
+        self._cache_dir = cache_dir
+
+    def run(self) -> None:
+        try:
+            importer = ImportService(cache_dir=self._cache_dir)
+            self.all_done.emit(importer.import_paths(self._paths))
+        except Exception as exc:
+            logger.error("Import worker failed: %s", exc)
+            self.error.emit(str(exc))
+
+
 # ── 主窗口 ─────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
 
@@ -206,6 +226,8 @@ class MainWindow(QMainWindow):
         # WorkflowViewState typed signal 同步 UI。
         self._last_workflow_view_state: Optional[WorkflowViewState] = None
         self._workbench_initial_resize_done = False
+        self._last_proof_sync_completed_pages = 0
+        self._import_worker: ImportWorker | None = None
 
         self.setWindowTitle("OCR 后处理")
         self._build_ui()
@@ -553,6 +575,7 @@ class MainWindow(QMainWindow):
         proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
         controller 内部。OCR 完成只开放校对入口，不再强制把用户带到横校。"""
         self._ocr_placeholder.finish()
+        self._last_proof_sync_completed_pages = len(pages)
         self._controller.sync_proof_panels()
         self._layout_panel.refresh_text_indexes()
 
@@ -568,8 +591,14 @@ class MainWindow(QMainWindow):
         elif progress.total_pages > 0:
             current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
             self._ocr_placeholder.update_progress(current, progress.total_pages)
-        # proof 同步 ownership 在 controller；这里只发触发
-        self._controller.sync_proof_panels()
+        completed_pages = max(0, int(getattr(progress, "completed_pages", 0) or 0))
+        if completed_pages == 0 and int(getattr(progress, "current_page", 0) or 0) <= 1:
+            self._last_proof_sync_completed_pages = 0
+        if completed_pages <= self._last_proof_sync_completed_pages:
+            return
+        self._last_proof_sync_completed_pages = completed_pages
+        if self._controller.current_step in (STEP_HPROOF, STEP_VPROOF):
+            self._controller.sync_proof_panels()
 
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
@@ -651,7 +680,7 @@ class MainWindow(QMainWindow):
         if not self._controller.project:
             self._status_bar.showMessage("当前没有打开的项目")
             return
-        if self._controller.has_running_workers():
+        if self._controller.has_running_workers() or self._import_worker_is_running():
             QMessageBox.warning(self, "关闭项目", "后台任务仍在运行，请等待完成后再关闭项目。")
             return
         if not self._confirm_close_project_save():
@@ -678,48 +707,70 @@ class MainWindow(QMainWindow):
 
     def _on_images_ready(self, paths: List[str]) -> None:
         """导入文件 → 使用 ImportService 创建 Page 对象 → 交给 controller。"""
+        if self._import_worker_is_running():
+            self._status_bar.showMessage("文件仍在导入中…")
+            return
         project = self._controller.project
         if not project:
             self._controller.ensure_transient_project("未命名项目")
 
         try:
-            # 用 controller.cache_dir 取代 self._controller._project.db_path 私有访问
             cache_dir = self._controller.cache_dir
-            importer = ImportService(cache_dir=cache_dir)
-            result = importer.import_paths(paths)
-
-            if not result.pages:
-                QMessageBox.warning(
-                    self, "导入失败",
-                    "所有文件导入失败，详见日志。\n" +
-                    "\n".join(f"• {p}: {r}" for p, r in result.failed[:5])
-                )
-                return
-
-            self._controller.on_images_ready(result.pages)
-            self._controller.reset_proof_sync_state()
-            self._controller.set_layout_run_enabled(True)
-
-            if result.failed:
-                fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
-                self._status_bar.showMessage(
-                    f"导入完成：{result.success_count} 页成功，{result.failed_count} 个失败"
-                )
-                QMessageBox.information(
-                    self, "导入完成",
-                    f"成功导入 {result.success_count} 页。\n"
-                    f"{result.failed_count} 个文件失败：\n{fail_msg}"
-                )
-            else:
-                self._status_bar.showMessage(f"导入 {result.success_count} 页")
-
+            self._import_panel.setEnabled(False)
+            self._status_bar.showMessage(f"正在导入 {len(paths)} 个文件…")
+            self._import_worker = ImportWorker(paths, cache_dir, self)
+            self._import_worker.all_done.connect(self._on_import_done)
+            self._import_worker.error.connect(self._on_import_error)
+            self._import_worker.finished.connect(self._on_import_finished)
+            self._import_worker.start()
         except Exception as e:
             logger.error("Import failed: %s", e)
+            self._import_panel.setEnabled(True)
             QMessageBox.critical(self, "导入错误", f"导入过程出错：{e}")
+
+    def _import_worker_is_running(self) -> bool:
+        worker = self._import_worker
+        if worker is None:
+            return False
+        try:
+            return bool(worker.isRunning())
+        except RuntimeError:
+            return False
+
+    def _on_import_done(self, result) -> None:
+        if not result.pages:
+            QMessageBox.warning(
+                self, "导入失败",
+                "所有文件导入失败，详见日志。\n" +
+                "\n".join(f"• {p}: {r}" for p, r in result.failed[:5])
+            )
             return
 
+        self._controller.on_images_ready(result.pages)
+        self._controller.reset_proof_sync_state()
+        self._controller.set_layout_run_enabled(True)
         self._layout_panel.set_pages(result.pages)
         self._go_to_step(STEP_LAYOUT)
+
+        if result.failed:
+            fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
+            self._status_bar.showMessage(
+                f"导入完成：{result.success_count} 页成功，{result.failed_count} 个失败"
+            )
+            QMessageBox.information(
+                self, "导入完成",
+                f"成功导入 {result.success_count} 页。\n"
+                f"{result.failed_count} 个文件失败：\n{fail_msg}"
+            )
+        else:
+            self._status_bar.showMessage(f"导入 {result.success_count} 页")
+
+    def _on_import_error(self, message: str) -> None:
+        QMessageBox.critical(self, "导入错误", f"导入过程出错：{message}")
+
+    def _on_import_finished(self) -> None:
+        self._import_panel.setEnabled(True)
+        self._import_worker = None
 
     def _start_layout_analysis(self) -> None:
         if not self._controller.has_pages:
@@ -745,6 +796,7 @@ class MainWindow(QMainWindow):
         if self._controller.get_recognizable_block_count() == 0:
             return  # 无可识别块，静默跳过
         self._ocr_placeholder.reset()
+        self._last_proof_sync_completed_pages = 0
         self._go_to_step(STEP_OCR)
         self._status_bar.showMessage("正在 OCR 识别…")
         self._controller.start_ocr(pages, notify_page_callback=self._ocr_placeholder.update_progress)
