@@ -1,6 +1,7 @@
 from app.core.latin_span_recovery import (
     LATIN_ENGCUT_EXACT_STATUS,
     LATIN_ENGCUT_NOT_FOUND_STATUS,
+    LATIN_ENGCUT_WORD_FALLBACK_STATUS,
     bind_latin_tokens_to_engcut_chars,
     engcut_chars_from_payload,
     latin_token_spans,
@@ -24,6 +25,31 @@ def _payload_for_text(text: str) -> dict:
                                 },
                             }
                             for idx, ch in enumerate(text)
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+
+def _payload_for_chars(chars):
+    return {
+        "lines": [
+            {
+                "groups": [
+                    {
+                        "chars": [
+                            {
+                                "codes": [ord(ch)],
+                                "bbox": {
+                                    "left": left,
+                                    "top": top,
+                                    "right": right,
+                                    "bottom": bottom,
+                                },
+                            }
+                            for ch, (left, top, right, bottom) in chars
                         ]
                     }
                 ]
@@ -80,3 +106,30 @@ def test_engcut_binding_uses_formula_tokens_only_as_source_order_blockers():
     assert len(bindings) == 1
     assert bindings[0].status == LATIN_ENGCUT_EXACT_STATUS
     assert bindings[0].engcut_start == 11
+
+
+def test_engcut_binding_degrades_overlapped_exact_chars_to_word():
+    chars = engcut_chars_from_payload(_payload_for_chars([
+        ("o", (0, 0, 10, 12)),
+        ("f", (6, 0, 18, 12)),
+    ]))
+
+    bindings = bind_latin_tokens_to_engcut_chars("of", chars)
+
+    assert len(bindings) == 1
+    binding = bindings[0]
+    assert binding.status == LATIN_ENGCUT_WORD_FALLBACK_STATUS
+    assert binding.bbox == (0, 0, 18, 12)
+    assert binding.reason == "adjacent_char_overlap"
+
+
+def test_engcut_binding_degrades_internal_noise_word_to_word_fallback():
+    chars = engcut_chars_from_payload(_payload_for_text("Secon.d"))
+
+    bindings = bind_latin_tokens_to_engcut_chars("Second", chars)
+
+    assert len(bindings) == 1
+    binding = bindings[0]
+    assert binding.status == LATIN_ENGCUT_WORD_FALLBACK_STATUS
+    assert binding.token.text == "Second"
+    assert binding.bbox == (0, 0, 68, 12)

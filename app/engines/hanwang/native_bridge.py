@@ -9,9 +9,7 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +19,7 @@ import numpy as np
 
 from app.core.logging import get_logger
 from app.engines.hanwang.paths import get_hanwang_bin_dir
+from app.engines.hanwang import native_cache
 
 logger = get_logger(__name__)
 
@@ -123,12 +122,28 @@ def run_linecut_segimg(
     exe = bin_dir / "linecut_segimg_probe.exe"
     if not exe.is_file():
         raise HanwangNativeError(f"linecut_segimg_probe.exe 缺失：{exe}")
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.segimg.json"
-    rb_path = bin_dir / f"{img_path.stem}.segrb.tsv"
     h, w = image_bgr.shape[:2]
     if not recblocks_xyxy:
         recblocks_xyxy = [(0, 0, w, h)]
+    recblocks_xyxy = [
+        (int(l), int(t), int(r), int(b))
+        for (l, t, r, b) in recblocks_xyxy
+    ]
+    key_payload = {
+        "schema": native_cache.CACHE_SCHEMA,
+        "probe": "linecut_segimg",
+        "image": native_cache.image_fingerprint(image_bgr),
+        "recblocks_xyxy": [list(item) for item in recblocks_xyxy],
+        "native": native_cache.native_fingerprint([exe, bin_dir / "linecut.dll"]),
+    }
+    cache_key = native_cache.cache_key(key_payload)
+    cached = native_cache.read_json("linecut_segimg", cache_key)
+    if cached is not None:
+        return cached
+
+    img_path = _save_temp_image(image_bgr, bin_dir)
+    out_path = bin_dir / f"{img_path.stem}.segimg.json"
+    rb_path = bin_dir / f"{img_path.stem}.segrb.tsv"
     rb_path.write_text(
         "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in recblocks_xyxy) + "\n",
         encoding="utf-8",
@@ -145,7 +160,9 @@ def run_linecut_segimg(
                 f"linecut_segimg_probe 失败 (rc={run.returncode}): "
                 f"{run.stderr.strip() or run.stdout.strip()}"
             )
-        return json.loads(out_path.read_text(encoding="utf-8"))
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        native_cache.write_json("linecut_segimg", cache_key, payload)
+        return payload
     finally:
         for p in (img_path, out_path, rb_path):
             try:
@@ -179,27 +196,22 @@ def run_linecut_recog(
         raise ValueError("recblock_xyxy and recblocks_xyxy are mutually exclusive")
     bin_dir = get_hanwang_bin_dir()
     exe = bin_dir / "linecut_recogimg_probe.exe"
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.linecut.json"
-    rb_path = bin_dir / f"{img_path.stem}.rb.tsv"
     h, w = image_bgr.shape[:2]
     if recblocks_xyxy:
-        rb_lines = [
-            f"{int(l)}\t{int(t)}\t{int(r)}\t{int(b)}"
+        normalized_recblocks = [
+            (int(l), int(t), int(r), int(b))
             for (l, t, r, b) in recblocks_xyxy
         ]
-        rb_path.write_text("\n".join(rb_lines) + "\n", encoding="utf-8")
     elif recblock_xyxy is None:
-        rb_l, rb_t, rb_r, rb_b = 0, 0, w, h
-        rb_path.write_text(f"{rb_l}\t{rb_t}\t{rb_r}\t{rb_b}\n", encoding="utf-8")
+        normalized_recblocks = [(0, 0, w, h)]
     else:
         rb_l, rb_t, rb_r, rb_b = recblock_xyxy
-        rb_path.write_text(f"{rb_l}\t{rb_t}\t{rb_r}\t{rb_b}\n", encoding="utf-8")
+        normalized_recblocks = [(int(rb_l), int(rb_t), int(rb_r), int(rb_b))]
 
     args = [
-        img_path.name,
-        out_path.name,
-        rb_path.name,
+        "",  # filled after temporary files are created
+        "",
+        "",
         str(mode),
         str(postprocess),
         str(split_mode),
@@ -207,6 +219,37 @@ def run_linecut_recog(
     ]
     if with_charrcg:
         args.append("with-charrcg")
+    key_payload = {
+        "schema": native_cache.CACHE_SCHEMA,
+        "probe": "linecut_recog",
+        "image": native_cache.image_fingerprint(image_bgr),
+        "recblocks_xyxy": [list(item) for item in normalized_recblocks],
+        "with_charrcg": bool(with_charrcg),
+        "mode": int(mode),
+        "postprocess": int(postprocess),
+        "split_mode": int(split_mode),
+        "via_seg": True,
+        "native": native_cache.native_fingerprint([
+            exe,
+            bin_dir / "linecut.dll",
+            bin_dir / "IntegratRcg.dll",
+        ]),
+    }
+    cache_key = native_cache.cache_key(key_payload)
+    cached = native_cache.read_json("linecut_recog", cache_key)
+    if cached is not None:
+        return cached
+
+    img_path = _save_temp_image(image_bgr, bin_dir)
+    out_path = bin_dir / f"{img_path.stem}.linecut.json"
+    rb_path = bin_dir / f"{img_path.stem}.rb.tsv"
+    rb_path.write_text(
+        "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in normalized_recblocks) + "\n",
+        encoding="utf-8",
+    )
+    args[0] = img_path.name
+    args[1] = out_path.name
+    args[2] = rb_path.name
 
     try:
         run = _run_exe(exe, args, cwd=bin_dir, timeout=timeout)
@@ -215,7 +258,9 @@ def run_linecut_recog(
                 f"linecut_recogimg_probe 失败 (rc={run.returncode}): "
                 f"{run.stderr.strip() or run.stdout.strip()}"
             )
-        return json.loads(out_path.read_text(encoding="utf-8"))
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        native_cache.write_json("linecut_recog", cache_key, payload)
+        return payload
     finally:
         for p in (img_path, out_path, rb_path):
             try:
@@ -240,6 +285,27 @@ def run_eng20_recogline(
     if not exe.is_file():
         raise HanwangNativeError(f"eng20_probe.exe 缺失：{exe}")
 
+    key_payload = {
+        "schema": native_cache.CACHE_SCHEMA,
+        "probe": "eng20_recogline",
+        "image": native_cache.image_fingerprint(image_bgr),
+        "mode": "recogline_engstr",
+        "packing": "packed",
+        "direction": "tbrl",
+        "native": native_cache.native_fingerprint([
+            exe,
+            bin_dir / "Eng20.dll",
+            bin_dir / "CutEng.dll",
+            bin_dir / "EngDigital.dll",
+            bin_dir / "HWEng20.db",
+            bin_dir / "ENWList.db",
+        ]),
+    }
+    cache_key = native_cache.cache_key(key_payload)
+    cached = native_cache.read_json("eng20_recogline", cache_key)
+    if cached is not None:
+        return cached
+
     img_path = _save_temp_image(image_bgr, bin_dir)
     out_path = bin_dir / f"{img_path.stem}.eng20.json"
     try:
@@ -261,7 +327,9 @@ def run_eng20_recogline(
                 f"eng20_probe 失败 (rc={run.returncode}): "
                 f"{run.stderr.strip() or run.stdout.strip()}"
             )
-        return json.loads(out_path.read_text(encoding="utf-8"))
+        payload = json.loads(out_path.read_text(encoding="utf-8"))
+        native_cache.write_json("eng20_recogline", cache_key, payload)
+        return payload
     finally:
         for p in (img_path, out_path):
             try:

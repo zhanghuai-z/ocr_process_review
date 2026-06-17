@@ -844,6 +844,27 @@ def test_v_proof_save_page_text_resyncs_loaded_text():
     v.deleteLater()
 
 
+def test_v_proof_save_page_text_preserves_trailing_space_slot():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("甲乙")
+    line = proj.pages[0].blocks[0].lines[0]
+    line.chars = [
+        Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 20, 20)),
+        Char(char="乙", confidence=0.9, bbox=BBox(20, 0, 20, 20)),
+    ]
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    v._text_edit.setPlainText("甲 ")
+    v._save_page_text()
+
+    assert line.final_text == "甲 "
+    assert line.display_text == "甲 "
+    assert len(line.chars) == 2
+    assert [char.char for char in line.chars] == ["甲", " "]
+    v.deleteLater()
+
+
 def test_v_proof_no_double_flush_after_save():
     """Phase 23 blocker：保存后立刻收到外部同事件，应被识别为非 dirty，
     不再走 _save_page_text 重复落盘。"""

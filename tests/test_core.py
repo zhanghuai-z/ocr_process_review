@@ -694,7 +694,14 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         line.final_text = "最终真值"
         assert line.text == "直接兼容写入"
         line.final_text = ""
+        line.final_text_set = False
         assert line.display_text == "直接兼容写入"
+        line.update_final_text("最终真值")
+        line.update_final_text("")
+        line.ensure_text_contract()
+        assert line.final_text == ""
+        assert line.final_text_set is True
+        assert line.display_text == ""
         line.update_final_text("最终真值")
 
         line_without_text = Line(
@@ -729,9 +736,42 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             loaded = store.load_project(project_id=1)
             loaded_line = loaded.pages[0].blocks[0].lines[0]
             assert loaded_line.final_text == "最终真值"
+            assert loaded_line.final_text_set is True
             assert loaded_line.text == "直接兼容写入"
 
         print("test_line_final_text_contract_and_project_store_roundtrip PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+def test_project_store_preserves_empty_final_text_roundtrip():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line = Line(text="OCR原文", confidence=0.9, bbox=bb)
+        line.update_final_text("")
+        line.ensure_text_contract()
+        assert line.final_text == ""
+        assert line.display_text == ""
+
+        project = OcrProject(
+            name="empty-final-text",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
+                        blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
+        )
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            assert loaded_line.text == "OCR原文"
+            assert loaded_line.final_text == ""
+            assert loaded_line.final_text_set is True
+            assert loaded_line.display_text == ""
     finally:
         os.unlink(db_path)
 
@@ -1730,6 +1770,7 @@ def test_project_store_schema_migration():
         assert int(ver[0]) >= 4
         final_text_col = conn2.execute("PRAGMA table_info(line)").fetchall()
         assert any(col[1] == "final_text" for col in final_text_col)
+        assert any(col[1] == "final_text_set" for col in final_text_col)
         page_cols = conn2.execute("PRAGMA table_info(page)").fetchall()
         assert any(col[1] == "ocr_invalidated_reason" for col in page_cols)
         operation_cols = conn2.execute("PRAGMA table_info(operation_log)").fetchall()
@@ -2173,6 +2214,9 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     page = Page(
         image_path="/tmp/page.png",
         cache_image_path="/tmp/cache.png",
+        source_path="/tmp/source.pdf",
+        source_type="pdf",
+        source_page_index=1,
         width=100,
         height=200,
         blocks=[
@@ -2213,9 +2257,56 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     assert table["fallback"]["reason"] == "json_controlled_missing_structure"
     assert any(d["code"] == "table_fallback_to_image" for d in data["diagnostics"])
     assert any(asset["kind"] == "json_controlled_table_crop" for asset in data["assets"])
-    assert data["pages"][0]["source_image"] == "/tmp/cache.png"
+    assert data["pages"][0]["source_image"] == "cache.png"
+    assert data["pages"][0]["source_meta"]["source_path"] == "source.pdf"
+    assert all(asset["path"] == "cache.png" for asset in data["assets"])
 
     print("test_project_to_export_ir_builder_maps_final_text_and_fallbacks PASSED")
+
+
+def test_export_ir_keeps_render_paths_only_for_rendering_formats(tmp_path):
+    from app.export.ir_builder import build_export_ir
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    image_path = tmp_path / "cache" / "page.png"
+    source_path = tmp_path / "source" / "book.pdf"
+    image_path.parent.mkdir()
+    source_path.parent.mkdir()
+    image_path.write_bytes(b"fake")
+    source_path.write_bytes(b"fake")
+    page = Page(
+        image_path=str(image_path),
+        cache_image_path=str(image_path),
+        source_path=str(source_path),
+        source_type="pdf",
+        source_page_index=1,
+        width=100,
+        height=200,
+        blocks=[Block(block_type=BlockType.FIGURE, bbox=BBox(1, 2, 30, 40), order=1)],
+    )
+    project = OcrProject(name="private-paths", pages=[page])
+
+    json_data = build_export_ir(project, "json").to_dict()
+    xml_data = build_export_ir(project, "xml").to_dict()
+    html_data = build_export_ir(project, "html").to_dict()
+    md_data = build_export_ir(project, "md").to_dict()
+
+    assert str(tmp_path) not in json.dumps(json_data, ensure_ascii=False)
+    assert str(tmp_path) not in json.dumps(xml_data, ensure_ascii=False)
+    assert str(tmp_path) not in json.dumps(html_data, ensure_ascii=False)
+    assert json_data["pages"][0]["source_image"] == "page.png"
+    assert json_data["pages"][0]["source_meta"]["source_path"] == "book.pdf"
+    assert md_data["pages"][0]["source_image"] == str(image_path)
+    assert md_data["pages"][0]["source_meta"]["source_path"] == str(source_path)
+
+    page.cache_image_path = r"D:\project\ocr_process\.cache\images\page.png"
+    page.source_path = r"D:\project\ocr_process\file\book.pdf"
+    windows_data = build_export_ir(project, "json").to_dict()
+    assert windows_data["pages"][0]["source_image"] == "page.png"
+    assert windows_data["pages"][0]["source_meta"]["source_path"] == "book.pdf"
+    assert "D:" not in json.dumps(windows_data, ensure_ascii=False)
+
+    print("test_export_ir_keeps_render_paths_only_for_rendering_formats PASSED")
 
 
 def test_export_ir_char_source_fallbacks_are_unique_across_lines():
@@ -5208,6 +5299,38 @@ def test_ocr_pipeline_normalizes_proof_geometry():
         os.unlink(img_path)
 
 
+def test_ocr_pipeline_process_block_normalizes_proof_geometry():
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.models import BBox, Block, BlockType, Line
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class LooseBlockEngine:
+        bbox_space = "crop"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="甲乙", confidence=0.96, bbox=BBox(10, 12, 80, 24), chars=[])]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        img = np.full((80, 140, 3), 255, dtype=np.uint8)
+        cv2.imwrite(img_path, img)
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(20, 10, 100, 40))
+        result = OcrPipeline(engine=LooseBlockEngine()).process_block(block, img_path)
+        line = result.lines[0]
+
+        assert line.bbox == BBox(30, 22, 80, 24)
+        assert len(line.chars) == 2
+        assert [char.char for char in line.chars] == ["甲", "乙"]
+        assert [char.bbox_source for char in line.chars] == ["fallback", "fallback"]
+        assert [char.bbox_granularity for char in line.chars] == ["fallback", "fallback"]
+    finally:
+        os.unlink(img_path)
+
+
 def test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers():
     import tempfile
     import cv2
@@ -6273,6 +6396,84 @@ def test_hanwang_latin_engcut_failure_is_line_local():
         micro_module.native_bridge.run_eng20_recogline = original_eng20
 
     print("test_hanwang_latin_engcut_failure_is_line_local PASSED")
+
+
+def test_hanwang_latin_engcut_targets_token_lines_without_chinese_only_probe():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    lines = [
+        micro_module.LineResult(
+            text="纯中文",
+            bbox=(0, 0, 80, 30),
+            chars=[
+                micro_module.CharResult(text=ch, bbox=(idx * 18, 0, idx * 18 + 16, 26))
+                for idx, ch in enumerate("纯中文")
+            ],
+        ),
+        micro_module.LineResult(
+            text="PE/VC",
+            bbox=(0, 40, 90, 72),
+            chars=[
+                micro_module.CharResult(text=ch, bbox=(idx * 14, 40, idx * 14 + 10, 68))
+                for idx, ch in enumerate("PE/VC")
+            ],
+        ),
+        micro_module.LineResult(
+            text="2026",
+            bbox=(0, 80, 90, 112),
+            chars=[
+                micro_module.CharResult(text=ch, bbox=(idx * 14, 80, idx * 14 + 10, 108))
+                for idx, ch in enumerate("2026")
+            ],
+        ),
+    ]
+    engcut_texts = ["PE/VC", "2026"]
+    calls = []
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        calls.append(image_bgr.shape[:2])
+        text = engcut_texts.pop(0)
+        return {
+            "lines": [{
+                "groups": [{
+                    "chars": [
+                        {
+                            "codes": [ord(ch)],
+                            "bbox": {
+                                "left": idx * 14,
+                                "top": 2,
+                                "right": idx * 14 + 10,
+                                "bottom": 28,
+                            },
+                        }
+                        for idx, ch in enumerate(text)
+                    ]
+                }]
+            }]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        stats = micro_module.RunStats()
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((120, 120, 3), dtype=np.uint8),
+            lines,
+            stats,
+            timeout=1.0,
+            block_text="纯中文 PE/VC 2026",
+        )
+
+        assert calls == [(36, 92), (36, 92)]
+        assert stats.latin_engcut_probe_calls == 2
+        assert [char.source for char in lines[0].chars] == ["hanwang:micro_recblock"] * 3
+        assert [char.source for char in lines[1].chars] == ["hanwang:EngCut:latin_exact"] * 5
+        assert [char.source for char in lines[2].chars] == ["hanwang:EngCut:latin_exact"] * 4
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_targets_token_lines_without_chinese_only_probe PASSED")
 
 
 def test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span():
@@ -8981,7 +9182,8 @@ def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
 
         controller.handle_block_contract_changed(1, "block_moved")
 
-        assert page1.total_lines == 0
+        assert page1.total_lines == 1
+        assert page1.blocks[0].lines[0].text == "第一页"
         assert page1.status == PageStatus.LAYOUT_DONE
         assert page1.needs_ocr_rerun is True
         assert page1.ocr_invalidated_reason == "block_moved"
@@ -8991,6 +9193,28 @@ def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
         workflow_module.get_config = original_get_config
 
     print("test_workflow_controller_hanwang_block_edit_invalidates_only_that_page PASSED")
+
+
+def test_pdf_import_cache_name_includes_source_path_hash(tmp_path):
+    from app.services import ImportService
+
+    first = tmp_path / "a" / "same.pdf"
+    second = tmp_path / "b" / "same.pdf"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"%PDF-1.4\n")
+    second.write_bytes(b"%PDF-1.4\n")
+
+    first_name = ImportService._pdf_page_cache_name(first, 0)
+    second_name = ImportService._pdf_page_cache_name(second, 0)
+
+    assert first_name != second_name
+    assert first_name.startswith("same_")
+    assert first_name.endswith("_p0001.png")
+    assert second_name.startswith("same_")
+    assert second_name.endswith("_p0001.png")
+
+    print("test_pdf_import_cache_name_includes_source_path_hash PASSED")
 
 
 def test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect():
@@ -12186,6 +12410,51 @@ def test_layout_worker_runs_api_pages_with_bounded_concurrency():
     print("test_layout_worker_runs_api_pages_with_bounded_concurrency PASSED")
 
 
+def test_layout_worker_keeps_local_pages_serial_even_with_concurrency_config():
+    import threading
+    import time
+    from unittest.mock import patch
+
+    from app.core.app_config import AppConfig, update_config
+    from app.core.layout_analyzer import LayoutAnalyzer, LayoutWorker
+    from app.models import BBox, Block, BlockType, Page
+
+    pages = [
+        Page(image_path=f"/tmp/layout-local-{idx}.png", width=100, height=100, page_number=idx)
+        for idx in range(1, 5)
+    ]
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_analyze(_self, page):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.01)
+            page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 40))]
+        finally:
+            with lock:
+                active -= 1
+
+    cfg = AppConfig.instance()
+    cfg.reset_to_defaults()
+    update_config(mode="local", layout_concurrency=4)
+    try:
+        with patch.object(LayoutAnalyzer, "analyze", fake_analyze):
+            worker = LayoutWorker(pages)
+            worker.run()
+    finally:
+        cfg.reset_to_defaults()
+
+    assert max_active == 1
+    assert all(len(page.blocks) == 1 for page in pages)
+
+    print("test_layout_worker_keeps_local_pages_serial_even_with_concurrency_config PASSED")
+
+
 def test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages():
     from app.controllers.workflow_controller import WorkflowController
     from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
@@ -13409,7 +13678,8 @@ if __name__ == "__main__":
     test_paddle_layout_schema_normalizes_record_fields()
     test_project_store()
     test_project_store_persists_ppvl_parsing_res_list()
-    test_line_final_text_alias_and_project_store_roundtrip()
+    test_line_final_text_contract_and_project_store_roundtrip()
+    test_project_store_preserves_empty_final_text_roundtrip()
     test_project_store_clean_on_resave()
     test_project_store_save_project_preserves_child_rowids()
     test_project_store_upsert_rejects_foreign_parent_rowids()
@@ -13435,6 +13705,7 @@ if __name__ == "__main__":
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
+    test_export_ir_keeps_render_paths_only_for_rendering_formats(Path(tempfile.mkdtemp()))
     test_export_ir_char_source_fallbacks_are_unique_across_lines()
     test_export_ir_preserves_structured_block_attributes()
     test_pdf_page_faithful_plans_use_image_and_char_layer()
@@ -13500,6 +13771,7 @@ if __name__ == "__main__":
     test_ocr_pipeline_offsets_crop_relative_boxes()
     test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_chars()
     test_ocr_pipeline_normalizes_proof_geometry()
+    test_ocr_pipeline_process_block_normalizes_proof_geometry()
     test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers()
     test_ocr_pipeline_reports_real_page_progress()
     test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once()
@@ -13573,6 +13845,7 @@ if __name__ == "__main__":
     test_export_service()
     test_import_service()
     test_import_service_sequential_page_numbers()
+    test_pdf_import_cache_name_includes_source_path_hash(Path(tempfile.mkdtemp()))
     test_proof_state_bus()
     test_proof_state_bus_typed_contracts()
     test_workflow_controller_emits_typed_view_state()
@@ -13609,6 +13882,8 @@ if __name__ == "__main__":
     test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout()
     test_hanwang_assets_env_accepts_bin_dir()
     test_hanwang_native_bridge_writes_multi_recblocks()
+    test_layout_worker_runs_api_pages_with_bounded_concurrency()
+    test_layout_worker_keeps_local_pages_serial_even_with_concurrency_config()
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()

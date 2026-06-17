@@ -431,7 +431,12 @@ class OcrPipeline:
             logger.warning("Cannot read image: %s", page_image_path)
             return block
 
-        page = Page(image_path=page_image_path, width=0, height=0)
+        page = Page(
+            image_path=page_image_path,
+            width=img.shape[1],
+            height=img.shape[0],
+            blocks=[block],
+        )
         lines = self._process_block(img, block, page, 0)
         block.lines = lines
         self._normalize_proof_crops(

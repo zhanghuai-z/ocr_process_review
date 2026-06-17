@@ -208,7 +208,7 @@ class LayoutPanel(QWidget):
     """
     步骤2: 版面分析结果可视化。
     左侧：页面缩略图列表；中间：图像+BBox；右侧：框类型与项目统计。
-    analysis_confirmed 信号由 show_analysis_result() 自动发出，触发 OCR 识别。
+    OCR 入口由用户提交当前版面后发出，不在结果展示时自动触发。
     """
     analysis_confirmed = Signal()
     page_selected = Signal(int)   # payload: page_number
@@ -666,7 +666,7 @@ class LayoutPanel(QWidget):
         self._update_page_nav()
 
     def show_analysis_result(self, pages: List[Page]) -> None:
-        """版面分析完成后，更新显示（保持当前选中页）并自动触发 OCR 流程。"""
+        """版面分析完成后，更新显示并保持当前选中页。"""
         self.finish_analysis_progress()
         self._pages = pages
         self._ink_mask_cache.clear()

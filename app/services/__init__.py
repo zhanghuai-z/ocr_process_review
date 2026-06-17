@@ -140,7 +140,6 @@ class ImportService:
         import fitz  # PyMuPDF
 
         doc = fitz.open(pdf_path)
-        stem = p.stem
 
         for index in range(len(doc)):
             try:
@@ -148,7 +147,7 @@ class ImportService:
                 # Matrix(2, 2) ≈ 144 DPI 清晰度可调
                 pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
 
-                out_name = f"{stem}_p{index + 1:04d}.png"
+                out_name = self._pdf_page_cache_name(p, index)
                 out_path = self._get_cache_path() / out_name
 
                 pix.save(str(out_path))
@@ -177,6 +176,11 @@ class ImportService:
         doc.close()
         return result
 
+    @classmethod
+    def _pdf_page_cache_name(cls, src: Path, page_index: int) -> str:
+        digest = cls._source_digest(src)
+        return f"{src.stem}_{digest}_p{page_index + 1:04d}.png"
+
     def _materialize_image(self, src_path: str, src: Path) -> str:
         """生成统一工作图，消除 EXIF/格式差异带来的坐标漂移。"""
         if not self._cache_dir:
@@ -184,7 +188,7 @@ class ImportService:
 
         from PIL import Image, ImageOps
 
-        digest = hashlib.sha1(str(src.resolve()).encode("utf-8")).hexdigest()[:10]
+        digest = self._source_digest(src)
         dst = self._get_cache_path() / f"{src.stem}_{digest}.png"
         if not dst.exists():
             with Image.open(src_path) as img:
@@ -195,6 +199,14 @@ class ImportService:
                     normalized = normalized.convert("RGB")
                 normalized.save(str(dst), "PNG")
         return str(dst)
+
+    @staticmethod
+    def _source_digest(src: Path) -> str:
+        try:
+            source_key = str(src.resolve())
+        except OSError:
+            source_key = str(src.absolute())
+        return hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:10]
 
     def _generate_thumbnail(self, src_path: str, src: Path) -> Optional[str]:
         """生成缩略图。"""

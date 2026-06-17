@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS line (
     block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
     text              TEXT    NOT NULL DEFAULT '',
     final_text        TEXT    NOT NULL DEFAULT '',
+    final_text_set    INTEGER NOT NULL DEFAULT 0,
     original_text     TEXT    NOT NULL DEFAULT '',
     confidence        REAL    NOT NULL DEFAULT 0.0,
     proof_status      TEXT    NOT NULL DEFAULT 'unchecked',
@@ -189,6 +190,10 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     10: [
         "ALTER TABLE operation_log ADD COLUMN object_uid TEXT NOT NULL DEFAULT '';",
+    ],
+    11: [
+        "ALTER TABLE line ADD COLUMN final_text_set INTEGER NOT NULL DEFAULT 0;",
+        "UPDATE line SET final_text_set = 1 WHERE final_text <> '' AND final_text <> text;",
     ],
 }
 
@@ -770,7 +775,8 @@ class ProjectStore:
         bb = line.bbox
         line.ensure_text_contract()
         values = (
-            block_id, line.text, line.final_text, line.original_text, line.confidence,
+            block_id, line.text, line.final_text, int(line.final_text_set),
+            line.original_text, line.confidence,
             line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
             line.ocr_text, line.llm_suggestion, line.llm_reason,
             line.llm_review_status.value,
@@ -778,16 +784,16 @@ class ProjectStore:
         )
         if line.id is None:
             cur.execute(
-                "INSERT INTO line (uid, block_id, text, final_text, original_text, confidence, proof_status, "
+                "INSERT INTO line (uid, block_id, text, final_text, final_text_set, original_text, confidence, proof_status, "
                 "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
                 "review_flags_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (line.uid, *values),
             )
             line.id = cur.lastrowid
         else:
             cur.execute(
-                "UPDATE line SET block_id=?, text=?, final_text=?, original_text=?, "
+                "UPDATE line SET block_id=?, text=?, final_text=?, final_text_set=?, original_text=?, "
                 "confidence=?, proof_status=?, x=?, y=?, w=?, h=?, ocr_text=?, "
                 "llm_suggestion=?, llm_reason=?, llm_review_status=?, review_flags_json=? "
                 "WHERE id=? AND uid=?",
@@ -883,10 +889,10 @@ class ProjectStore:
         bb = line.bbox
         line.ensure_text_contract()
         cur = self.conn.execute(
-            "UPDATE line SET text=?, final_text=?, original_text=?, proof_status=?, "
+            "UPDATE line SET text=?, final_text=?, final_text_set=?, original_text=?, proof_status=?, "
             "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
             "review_flags_json=? WHERE id=? AND uid=?",
-            (line.text, line.final_text, line.original_text, line.proof_status.value,
+            (line.text, line.final_text, int(line.final_text_set), line.original_text, line.proof_status.value,
              line.ocr_text, line.llm_suggestion, line.llm_reason,
              line.llm_review_status.value,
              _review_flags_to_json(line.review_flags), line.id, line.uid),
@@ -990,7 +996,8 @@ class ProjectStore:
         for r in rows:
             line = Line(
                 text=r["text"],
-                final_text=r["final_text"] or r["text"],
+                final_text=r["final_text"],
+                final_text_set=bool(r["final_text_set"]) if "final_text_set" in r.keys() else False,
                 original_text=r["original_text"],
                 confidence=r["confidence"],
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),

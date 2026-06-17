@@ -121,6 +121,7 @@ class Line:
 
     # --- Phase 1 新增字段 ---
     final_text: str = ""                  # 人工最终文本
+    final_text_set: bool = False          # final_text 是否为显式人工终稿，可为空串
     ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
     llm_suggestion: str = ""              # LLM 预审建议文本
     llm_reason: str = ""                  # LLM 修改原因
@@ -130,7 +131,7 @@ class Line:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "line")
-        if not self.final_text:
+        if not self.final_text and not self.final_text_set:
             self.final_text = self.text
         if not self.ocr_text:
             self.ocr_text = self.text
@@ -144,6 +145,7 @@ class Line:
         if self.original_text == "":
             self.original_text = self.ocr_text or self.text or self.final_text
         self.final_text = new_text
+        self.final_text_set = True
         self.proof_status = ProofStatus.MODIFIED
 
     def ensure_text_contract(self, *, fill_original: bool = False) -> None:
@@ -151,7 +153,13 @@ class Line:
         ocr_text = self.ocr_text or self.text
         if not self.text:
             self.text = ocr_text
-        final_text = self.final_text or self.text or ocr_text
+        if self.final_text_set:
+            final_text = self.final_text
+        elif self.final_text and self.final_text != self.text:
+            self.final_text_set = True
+            final_text = self.final_text
+        else:
+            final_text = self.final_text or self.text or ocr_text
         if fill_original and not self.original_text:
             self.original_text = ocr_text or self.text
         self.final_text = final_text
@@ -159,6 +167,8 @@ class Line:
 
     @property
     def display_text(self) -> str:
+        if self.final_text_set:
+            return self.final_text
         return self.final_text or self.text or ""
 
     def to_dict(self) -> dict:
@@ -166,6 +176,7 @@ class Line:
             "text": self.text,
             "uid": self.uid,
             "final_text": self.final_text,
+            "final_text_set": self.final_text_set,
             "confidence": self.confidence,
             "bbox": self.bbox.to_dict(),
             "proof_status": self.proof_status.value,

@@ -1,7 +1,7 @@
 """Project-model to Export IR v1 builder."""
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from app.core.block_attributes import block_attributes
@@ -31,7 +31,9 @@ def build_export_ir(
 ) -> ExportDocument:
     """Build typed Export IR from the internal project model."""
     export_rules = rules or load_export_rules()
-    profile = export_rules.profile_for(normalize_export_format(fmt))
+    normalized_format = normalize_export_format(fmt)
+    profile = export_rules.profile_for(normalized_format)
+    private_paths = normalized_format in {"json", "xml", "html"}
     assets: list[ExportAsset] = []
     diagnostics: list[ExportDiagnostic] = []
     pages: list[ExportPage] = []
@@ -55,15 +57,16 @@ def build_export_ir(
                 rules=export_rules,
                 assets=assets,
                 diagnostics=diagnostics,
+                private_paths=private_paths,
             )
             elements.append(element)
 
         pages.append(ExportPage(
             page_number=page.page_number,
-            source_image=page.display_image_path,
+            source_image=_export_path(page.display_image_path, private_paths=private_paths),
             size={"w": int(page.width), "h": int(page.height)},
             source_meta={
-                "source_path": page.source_path,
+                "source_path": _export_path(page.source_path, private_paths=private_paths),
                 "source_type": page.source_type,
                 "source_page_index": page.source_page_index,
             },
@@ -101,6 +104,7 @@ def _build_element(
     rules: ExportRules,
     assets: list[ExportAsset],
     diagnostics: list[ExportDiagnostic],
+    private_paths: bool,
 ) -> ExportElement:
     attrs = block_attributes(block)
     kind = rules.kind_for_block_type(attrs.semantic_block_type.value)
@@ -123,7 +127,9 @@ def _build_element(
             "keep_linebreaks": bool(rule.get("keep_linebreaks", kind == "reference")),
         }
     elif payload_type == "asset":
-        asset_ref = _append_region_asset(profile, assets, page, block, element_id, asset_kind)
+        asset_ref = _append_region_asset(
+            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+        )
         if kind == "figure":
             payload = {"asset_ref": asset_ref, "alt_text": block.note}
         else:
@@ -143,7 +149,9 @@ def _build_element(
         if not asset_ref and kind == "figure":
             fallback = _fallback_from_rule(fallback_rule, reason="missing_asset")
     elif payload_type == "table":
-        asset_ref = _append_region_asset(profile, assets, page, block, element_id, asset_kind)
+        asset_ref = _append_region_asset(
+            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+        )
         payload = {
             "mode": str(fallback_rule.get("mode") or "image_fallback"),
             "asset_ref": asset_ref,
@@ -166,7 +174,9 @@ def _build_element(
                 "lines": line_payloads,
             }
         else:
-            asset_ref = _append_region_asset(profile, assets, page, block, element_id, asset_kind)
+            asset_ref = _append_region_asset(
+                profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+            )
             payload = {"mode": str(fallback_rule.get("mode") or "image_fallback"), "asset_ref": asset_ref}
             fallback = _fallback_from_rule(fallback_rule, reason="missing_equation_text", asset_ref=asset_ref)
             diagnostics.append(_diagnostic(
@@ -177,7 +187,9 @@ def _build_element(
                 {"block_attributes": attrs.to_export_dict()},
             ))
     else:
-        asset_ref = _append_region_asset(profile, assets, page, block, element_id, asset_kind)
+        asset_ref = _append_region_asset(
+            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+        )
         payload = {
             "asset_ref": asset_ref,
             "text": text,
@@ -304,6 +316,8 @@ def _append_region_asset(
     block: Block,
     element_id: str,
     asset_kind: str,
+    *,
+    private_paths: bool = False,
 ) -> str | None:
     if not profile.include_assets:
         return None
@@ -313,10 +327,21 @@ def _append_region_asset(
         kind=asset_kind,
         page_number=page.page_number,
         bbox=_bbox_to_dict(block.bbox),
-        path=page.display_image_path,
+        path=_export_path(page.display_image_path, private_paths=private_paths),
         mime=_mime_for_path(page.display_image_path),
     ))
     return asset_id
+
+
+def _export_path(path: str, *, private_paths: bool) -> str:
+    if not private_paths or not path:
+        return path
+    raw = str(path)
+    posix_name = Path(raw).name
+    windows_name = PureWindowsPath(raw).name
+    if "\\" in raw or ":" in raw:
+        return windows_name or posix_name
+    return posix_name
 
 
 def _mime_for_path(path: str) -> str:

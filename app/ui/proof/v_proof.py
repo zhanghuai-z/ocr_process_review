@@ -2227,7 +2227,7 @@ class VProofPanel(QWidget):
                 idx += 1  # 跳过 block 间空行
             last_block = block
             if idx < len(lines_text):
-                new_displayed = lines_text[idx].rstrip()
+                new_displayed = lines_text[idx]
                 # 走 quality_probe 桥：如有 probe，显示空间 → 真实空间转换 + observation 落地
                 if _vproof_save_displayed_line(page, block, line, new_displayed):
                     changed = True

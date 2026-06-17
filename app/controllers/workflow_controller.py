@@ -626,7 +626,6 @@ class WorkflowController(QObject):
             return
         had_ocr = page.has_ocr_result or page.is_ocr_done
         for block in page.blocks:
-            block.lines = []
             mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:
             page.invalidate_ocr(change_kind)
