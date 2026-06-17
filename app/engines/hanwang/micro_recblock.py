@@ -1134,6 +1134,71 @@ def _char_center_inside_binding(
     return (x1 - 2) <= cx <= (x2 + 2) and (y1 - 4) <= cy <= (y2 + 4)
 
 
+def _span_text_for_chars(chars: list[CharResult], start: int, end: int) -> str:
+    return "".join(char.text for char in chars[start:end])
+
+
+def _span_matches_binding_text(span_text: str, token: str, matched_text: str) -> bool:
+    if not span_text:
+        return False
+    for candidate in (token, matched_text):
+        if not candidate:
+            continue
+        if span_text == candidate:
+            return True
+        if span_text in token_variants(candidate) or candidate in token_variants(span_text):
+            return True
+    return False
+
+
+def _binding_span_score(
+    line: LineResult,
+    span: tuple[int, int],
+    binding_bbox: tuple[int, int, int, int],
+) -> int:
+    start, end = span
+    return sum(
+        1
+        for char in line.chars[start:end]
+        if _char_center_inside_binding(char, binding_bbox)
+    )
+
+
+def _find_text_span_for_binding(
+    line: LineResult,
+    binding_bbox: tuple[int, int, int, int],
+    token: str,
+    matched_text: str,
+) -> tuple[int, int] | None:
+    offset_map = _line_char_offset_map(line)
+    best: tuple[int, int, int] | None = None
+    for candidate in (token, matched_text):
+        if not candidate:
+            continue
+        cursor = 0
+        while True:
+            pos = line.text.find(candidate, cursor)
+            if pos < 0:
+                break
+            cursor = pos + 1
+            if offset_map is not None and pos + len(candidate) <= len(offset_map):
+                mapped = offset_map[pos:pos + len(candidate)]
+                if not mapped:
+                    continue
+                span = (min(mapped), max(mapped) + 1)
+            else:
+                span = (pos, pos + len(candidate))
+            start, end = span
+            if start < 0 or end > len(line.chars) or start >= end:
+                continue
+            score = _binding_span_score(line, span, binding_bbox)
+            if best is None or score > best[0] or (score == best[0] and start < best[1]):
+                best = (score, start, end)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
 def _span_for_binding(
     line: LineResult,
     binding_bbox: tuple[int, int, int, int],
@@ -1147,19 +1212,21 @@ def _span_for_binding(
         if 0 <= start < end:
             if offset_map is not None and end <= len(offset_map):
                 mapped = offset_map[start:end]
-                if mapped:
+                if mapped and _span_matches_binding_text(
+                    _span_text_for_chars(line.chars, min(mapped), max(mapped) + 1),
+                    token,
+                    matched_text,
+                ):
                     return min(mapped), max(mapped) + 1
-            if end <= len(line.chars):
+            if end <= len(line.chars) and _span_matches_binding_text(
+                _span_text_for_chars(line.chars, start, end),
+                token,
+                matched_text,
+            ):
                 return start, end
-    for candidate in (token, matched_text):
-        if not candidate:
-            continue
-        pos = line.text.find(candidate)
-        if pos < 0:
-            continue
-        if offset_map is not None and pos + len(candidate) <= len(offset_map):
-            mapped = offset_map[pos:pos + len(candidate)]
-            return min(mapped), max(mapped) + 1
+    text_span = _find_text_span_for_binding(line, binding_bbox, token, matched_text)
+    if text_span is not None:
+        return text_span
     indices = [
         idx
         for idx, char in enumerate(line.chars)
@@ -2488,6 +2555,34 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
     ]
 
 
+def _routed_manual_structure_blocks(page: Page) -> list[Block]:
+    """Manual structural boxes consumed by parent routing must survive OCR writeback."""
+    entries: list[tuple[Block, dict[str, Any]]] = [
+        (block, _layout_row_from_block(page, block))
+        for block in page.blocks
+    ]
+    parent_rows: dict[int, dict[str, Any]] = {}
+    for _block, row in entries:
+        parent_index = _int_value(row.get("_layout_paddle_parent_index"))
+        if parent_index >= 0 and parent_index not in parent_rows:
+            parent_rows[parent_index] = row
+
+    preserved: list[Block] = []
+    for block, row in entries:
+        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
+            continue
+        if block.source not in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
+            continue
+        binding = _binding_payload_from_block(block)
+        if binding is None:
+            continue
+        parent_row = parent_rows.get(_int_value(binding.get("parent_index")))
+        if parent_row is None or parent_row is row:
+            continue
+        preserved.append(block)
+    return preserved
+
+
 class HanwangMicroRecBlockEngine:
     """OcrPipeline page-level engine for PP-VL layout + Hanwang text OCR."""
 
@@ -2512,6 +2607,7 @@ class HanwangMicroRecBlockEngine:
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> RunStats:
+        preserved_manual_blocks = _routed_manual_structure_blocks(page)
         ppvl_blocks = (
             _page_blocks_from_layout(page)
             if _page_layout_has_user_edits(page)
@@ -2590,6 +2686,10 @@ class HanwangMicroRecBlockEngine:
                 )
             )
 
+        if preserved_manual_blocks:
+            new_blocks.extend(preserved_manual_blocks)
+        for order, block in enumerate(new_blocks):
+            block.order = order
         page.blocks = new_blocks
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "

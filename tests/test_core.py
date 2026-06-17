@@ -5977,6 +5977,103 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
     print("test_hanwang_layout_injects_manual_formula_binding_into_parent_route PASSED")
 
 
+def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+    from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    captured = {}
+
+    def fake_runner(
+        image_bgr,
+        ppvl_blocks,
+        *,
+        seg_timeout=0,
+        recog_timeout=0,
+        include_chars=True,
+        page_ocr_lines=None,
+        progress_callback=None,
+    ):
+        captured["blocks"] = ppvl_blocks
+        return [
+            micro_module.BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 200, 40),
+                source="hanwang",
+                text="甲乙丙",
+                ppvl_text="甲 $ B $ 乙",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[
+                    micro_module.LineResult(
+                        text="甲乙丙",
+                        bbox=(0, 0, 200, 40),
+                        confidence=0.9,
+                    )
+                ],
+            )
+        ], micro_module.RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    manual_formula = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(110, 0, 140, 30),
+        source=BlockSource.MANUAL_DRAW,
+        source_label="inline_formula",
+        lines=[Line(text="$ B $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
+        app_payload={
+            "paddle_binding": {
+                "status": BINDING_PARENT_FORMULA_INFERRED,
+                "block_type": "equation",
+                "source_label": "inline_formula",
+                "text": "$ B $",
+                "parent_index": 0,
+                "manual_bbox": [110, 0, 140, 30],
+            },
+        },
+    )
+    page = Page(
+        image_path="/tmp/manual-formula-preserve.png",
+        width=220,
+        height=60,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 200, 40],
+                "block_content": "甲 $ B $ 乙",
+                ROUTE_SUBBLOCKS_FIELD: [],
+            }
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 200, 40),
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 200, 40],
+                    "block_content": "甲 $ B $ 乙",
+                },
+            ),
+            manual_formula,
+        ],
+    )
+
+    micro_module.HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
+        np.zeros((60, 220, 3), dtype=np.uint8),
+        page,
+    )
+
+    assert len(captured["blocks"]) == 1
+    assert captured["blocks"][0][ROUTE_SUBBLOCKS_FIELD][0]["block_bbox"] == [110, 0, 140, 30]
+    assert [block.block_type for block in page.blocks] == [BlockType.TEXT, BlockType.EQUATION]
+    assert page.blocks[1] is manual_formula
+    assert page.blocks[1].source == BlockSource.MANUAL_DRAW
+    assert page.blocks[1].app_payload["paddle_binding"]["text"] == "$ B $"
+
+    print("test_hanwang_recognize_preserves_parent_bound_manual_formula_block PASSED")
+
+
 def test_hanwang_inline_formula_text_slices_keep_chars():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -6318,6 +6415,54 @@ def test_hanwang_latin_engcut_updates_geometry_without_changing_text():
         micro_module.native_bridge.run_eng20_recogline = original_eng20
 
     print("test_hanwang_latin_engcut_updates_geometry_without_changing_text PASSED")
+
+
+def test_hanwang_latin_engcut_rejects_engcut_stream_span_for_line_chars():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def chars_for(text):
+        return [
+            micro_module.CharResult(
+                text=ch,
+                confidence=0.9,
+                bbox=(idx * 10, 0, idx * 10 + 8, 20),
+            )
+            for idx, ch in enumerate(text)
+        ]
+
+    line = micro_module.LineResult(
+        text="综合2016年增值税",
+        bbox=(0, 0, 130, 20),
+        confidence=0.9,
+        chars=chars_for("综合2016年增值税"),
+    )
+    record = micro_module._EngcutLine(
+        line=line,
+        bbox=(0, 0, 130, 20),
+        chars=[],
+        text="",
+        order=0,
+    )
+    binding = micro_module._TokenBinding(
+        token=micro_module.LatinToken(text="2016", start=0, end=4),
+        status=micro_module.LATIN_ENGCUT_EXACT_STATUS,
+        matched_text="2016",
+        chars=[
+            micro_module.EngcutChar(text=ch, bbox=((idx + 2) * 10, 1, (idx + 2) * 10 + 7, 19))
+            for idx, ch in enumerate("2016")
+        ],
+        line_records=[record],
+        line_span=(0, 4),
+    )
+
+    assert micro_module._replace_line_span_with_binding(line, binding)
+    assert line.text == "综合2016年增值税"
+    assert [char.source for char in line.chars[:2]] == ["hanwang:micro_recblock"] * 2
+    assert [char.source for char in line.chars[2:6]] == ["hanwang:EngCut:latin_exact"] * 4
+    assert [char.text for char in line.chars[2:6]] == list("2016")
+    assert [char.source for char in line.chars[6:]] == ["hanwang:micro_recblock"] * 4
+
+    print("test_hanwang_latin_engcut_rejects_engcut_stream_span_for_line_chars PASSED")
 
 
 def test_hanwang_latin_engcut_failure_is_line_local():
