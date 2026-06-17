@@ -557,7 +557,9 @@ class MainWindow(QMainWindow):
         self._layout_panel.refresh_text_indexes()
 
     def _on_ocr_progress(self, progress) -> None:
-        if progress.total_blocks > 0:
+        if progress.total_blocks <= 0 and progress.completed_pages <= 0:
+            self._ocr_placeholder.reset()
+        elif progress.total_blocks > 0:
             current = max(0, min(progress.current_block - 1, progress.total_blocks - 1))
             self._ocr_placeholder.update_progress(current, progress.total_blocks)
         elif progress.total_pages > 0:

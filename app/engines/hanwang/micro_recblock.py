@@ -2595,6 +2595,7 @@ class HanwangMicroRecBlockEngine:
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
             "batch_failures=%d batch_disabled=%s "
+            "seg=%.2fs recog=%.2fs "
             "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d "
             "latin_engcut_calls=%d latin_engcut_failures=%d latin_engcut_exact=%d "
             "latin_engcut_review=%d latin_engcut_disabled=%s",
@@ -2610,6 +2611,8 @@ class HanwangMicroRecBlockEngine:
             stats.recog_batch_guarded_chunks,
             stats.recog_batch_failures,
             stats.recog_batch_disabled,
+            stats.seg_seconds,
+            stats.recog_seconds,
             stats.recog_max_collage_width,
             stats.recog_max_collage_height,
             stats.recog_probe_calls,

@@ -83,6 +83,15 @@ class OcrPipeline:
         try:
             for page_idx, page in enumerate(project.pages):
                 self._clear_ocr_error(page)
+                if progress_callback:
+                    progress_callback(OcrProgress(
+                        current_page=page_idx + 1,
+                        total_pages=total_pages,
+                        current_block=0,
+                        total_blocks=0,
+                        completed_pages=page_idx,
+                        message=f"OCR 识别准备中… 第 {page_idx + 1}/{total_pages} 页",
+                    ))
                 img = cv2.imread(page.display_image_path)
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)

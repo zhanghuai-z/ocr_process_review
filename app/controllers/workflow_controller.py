@@ -604,6 +604,16 @@ class WorkflowController(QObject):
         pending = self._pending_hanwang_pages()
         return pending[0] if pending else None
 
+    def _pending_hanwang_pages_from(self, first_page: Page) -> list[Page]:
+        """Return pending Hanwang OCR pages with the submitted page first."""
+        pending = self._pending_hanwang_pages()
+        if not pending:
+            return [first_page]
+        first_number = first_page.page_number
+        ordered = [page for page in pending if page.page_number == first_number]
+        ordered.extend(page for page in pending if page.page_number != first_number)
+        return ordered or [first_page]
+
     def _emit_page_gate_state(self, page: Page) -> None:
         gate = page_gate_info(page)
         reason_code = gate.reason_code
@@ -671,7 +681,8 @@ class WorkflowController(QObject):
             self._emit_page_gate_state(target)
             self.status_message.emit(gate.reason_text)
             return
-        self.start_ocr([target], target_page_numbers={target.page_number})
+        targets = self._pending_hanwang_pages_from(target)
+        self.start_ocr(targets, target_page_numbers={page.page_number for page in targets})
 
     def _layout_status_label(self) -> str:
         return {
@@ -911,6 +922,14 @@ class WorkflowController(QObject):
             self._ocr_worker.progress_update.connect(notify_page_callback)
         self._ocr_worker.all_done.connect(self.on_ocr_done)
         self._ocr_worker.error.connect(self._on_worker_error)
+        self._on_ocr_progress(OcrProgress(
+            current_page=1 if pages else 0,
+            total_pages=len(pages),
+            current_block=0,
+            total_blocks=0,
+            completed_pages=0,
+            message=f"{self._ocr_status_label()} 准备中… 共 {len(pages)} 页",
+        ))
         self._ocr_worker.start()
         self.step_requested.emit(STEP_OCR)
         self.status_message.emit(f"{self._ocr_status_label()} 识别中…")

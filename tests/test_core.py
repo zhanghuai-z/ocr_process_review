@@ -9083,7 +9083,7 @@ def test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page():
     print("test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page PASSED")
 
 
-def test_workflow_controller_hanwang_layout_submit_merges_only_target_page():
+def test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_target():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
@@ -9133,22 +9133,27 @@ def test_workflow_controller_hanwang_layout_submit_merges_only_target_page():
         page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
         page2.status = PageStatus.LAYOUT_DONE
         page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        processed_page1 = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
+        processed_page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
+            Line(text="第一页完成", bbox=BBox(0, 0, 50, 20), confidence=0.98)
+        ])]
         processed_page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
         processed_page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20), lines=[
             Line(text="第二页完成", bbox=BBox(0, 30, 50, 20), confidence=0.99)
         ])]
         FakeOcrWorker.created_pages = []
-        FakeOcrWorker.result_pages = [processed_page2]
+        FakeOcrWorker.result_pages = [processed_page2, processed_page1]
 
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page1, page2])
 
         controller.handle_ocr_entry_requested("layout_submit", 2)
 
-        assert FakeOcrWorker.created_pages == [[page2]]
+        assert FakeOcrWorker.created_pages == [[page2, page1]]
         assert len(controller._project.pages) == 2
-        assert controller._project.pages[0] is page1
-        assert controller._project.pages[0].status == PageStatus.LAYOUT_DONE
+        assert controller._project.pages[0] is processed_page1
+        assert controller._project.pages[0].status == PageStatus.OCR_DONE
+        assert controller._project.pages[0].blocks[0].lines[0].text == "第一页完成"
         assert controller._project.pages[1] is processed_page2
         assert controller._project.pages[1].status == PageStatus.OCR_DONE
         assert controller._project.pages[1].blocks[0].lines[0].text == "第二页完成"
@@ -9157,7 +9162,7 @@ def test_workflow_controller_hanwang_layout_submit_merges_only_target_page():
         workflow_module.create_engine = original_create_engine
         workflow_module.OcrPipelineWorker = original_worker
 
-    print("test_workflow_controller_hanwang_layout_submit_merges_only_target_page PASSED")
+    print("test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_target PASSED")
 
 
 def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
@@ -9566,8 +9571,10 @@ def test_workflow_controller_emits_ocr_progress_and_navigation():
 
         assert ok is True
         assert steps[-1] == workflow_module.STEP_OCR
-        assert len(progress_payloads) == 1
-        assert progress_payloads[0].completed_pages == 1
+        assert len(progress_payloads) == 2
+        assert progress_payloads[0].completed_pages == 0
+        assert "准备中" in progress_payloads[0].message
+        assert progress_payloads[1].completed_pages == 1
         assert page_progress == [(0, 1)]
         assert finished and finished[0] == [page]
     finally:
