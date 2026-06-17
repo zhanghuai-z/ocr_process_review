@@ -8713,6 +8713,89 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
 
 
+def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
+    import os
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.engines.hanwang.micro_recblock import (
+        BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
+    )
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    calls = []
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        calls.append(kwargs)
+        line_hints = kwargs["page_ocr_lines"]
+        assert len(line_hints) == 1
+        assert line_hints[0].text == "已有行框"
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(10, 20, 110, 60),
+                source="hanwang",
+                text="重跑结果",
+                ppvl_text="PPVL文本",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[
+                    LineResult(
+                        text="重跑结果",
+                        bbox=(12, 24, 90, 58),
+                        confidence=0.93,
+                        chars=[CharResult(text="重", confidence=0.95, bbox=(12, 24, 38, 58))],
+                    )
+                ],
+            )
+        ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    class ExplodingPrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            raise AssertionError("PP-OCRv5 prepass should not run when line hints are reusable")
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        cv2.imwrite(img_path, np.ones((90, 140, 3), dtype=np.uint8) * 255)
+
+    try:
+        page = Page(
+            image_path=img_path,
+            width=140,
+            height=90,
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(10, 20, 110, 60),
+                    lines=[Line(text="已有行框", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)],
+                )
+            ],
+            ppvl_parsing_res_list=[
+                {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"}
+            ],
+        )
+        progress_events = []
+        result = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            hybrid_prepass_engine=ExplodingPrepassEngine(),
+        ).process_project(
+            OcrProject(name="hybrid-skip-prepass", pages=[page]),
+            progress_callback=progress_events.append,
+        )
+
+        assert len(calls) == 1
+        assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
+        assert any("prepass skipped: reused 1 existing lines" in event.message for event in progress_events)
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable PASSED")
+
+
 def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
     import os
     import tempfile

@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
+from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY
 from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,
     should_dispatch_to_text_ocr,
@@ -531,20 +532,29 @@ class OcrPipeline:
         page_idx: int = 0,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> None:
-        prepass_engine = self._hybrid_page_ocr_prepass_engine()
-        if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
-            raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
-        if progress_callback:
-            progress_callback(0, max(1, len(page.blocks)), "PP-OCRv5 page-line prepass 中…")
-        self._process_page_with_page_ocr(
-            img,
-            page,
-            page_idx,
-            engine=prepass_engine,
-        )
-        if progress_callback:
-            line_count = sum(len(block.lines) for block in page.blocks)
-            progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
+        if self._has_reusable_page_line_hints(page):
+            if progress_callback:
+                line_count = sum(len(block.lines) for block in page.blocks)
+                progress_callback(
+                    0,
+                    max(1, len(page.blocks)),
+                    f"PP-OCRv5 page-line prepass skipped: reused {line_count} existing lines",
+                )
+        else:
+            prepass_engine = self._hybrid_page_ocr_prepass_engine()
+            if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
+                raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
+            if progress_callback:
+                progress_callback(0, max(1, len(page.blocks)), "PP-OCRv5 page-line prepass 中…")
+            self._process_page_with_page_ocr(
+                img,
+                page,
+                page_idx,
+                engine=prepass_engine,
+            )
+            if progress_callback:
+                line_count = sum(len(block.lines) for block in page.blocks)
+                progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")
         self._engine.recognize_page_blocks(
@@ -552,6 +562,18 @@ class OcrPipeline:
             page,
             progress_callback=progress_callback,
         )
+
+    def _has_reusable_page_line_hints(self, page: Page) -> bool:
+        """Return whether current text blocks already carry usable page-line boxes."""
+        text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
+        if not text_blocks:
+            return True
+        for block in text_blocks:
+            if bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY)):
+                return False
+            if not any(line.bbox is not None and line.bbox.area > 0 for line in block.lines):
+                return False
+        return True
 
     def _normalize_engine_lines(
         self,
