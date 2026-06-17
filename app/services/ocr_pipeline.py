@@ -11,7 +11,9 @@
 - 发出进度
 """
 from __future__ import annotations
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Callable, List, Optional
 
 import cv2
@@ -34,6 +36,7 @@ from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
+OCR_PAGE_CONCURRENCY_CAP = 4
 
 @dataclass
 class OcrProgress:
@@ -53,10 +56,25 @@ class OcrResult:
     failed_blocks: List[tuple[int, int, str]] = field(default_factory=list)  # (page_idx, block_idx, error)
 
 
+@dataclass
+class _PageOcrWorkResult:
+    page_idx: int
+    page: Page
+    total_blocks: int = 0
+    failed_blocks: List[tuple[int, int, str]] = field(default_factory=list)
+    completion_message: str = ""
+
+
 class OcrPipeline:
     """OCR 管线。"""
 
-    def __init__(self, engine: Optional[object] = None, hybrid_prepass_engine: Optional[object] = None):
+    def __init__(
+        self,
+        engine: Optional[object] = None,
+        hybrid_prepass_engine: Optional[object] = None,
+        *,
+        page_concurrency: int = 1,
+    ):
         """初始化 OCR 管线。
 
         Args:
@@ -65,6 +83,11 @@ class OcrPipeline:
         self._engine = engine or FakeOcrEngine()
         self._hybrid_prepass_engine = hybrid_prepass_engine
         self._proof_crop_service = ProofCropService()
+        try:
+            configured_concurrency = int(page_concurrency)
+        except (TypeError, ValueError):
+            configured_concurrency = 1
+        self._page_concurrency = max(1, min(OCR_PAGE_CONCURRENCY_CAP, configured_concurrency))
 
     def close(self) -> None:
         engine = self._engine
@@ -81,6 +104,9 @@ class OcrPipeline:
         total_pages = len(project.pages)
 
         try:
+            if self._should_parallelize_page_hybrid(total_pages):
+                return self._process_project_page_hybrid_parallel(project, progress_callback)
+
             for page_idx, page in enumerate(project.pages):
                 self._clear_ocr_error(page)
                 if progress_callback:
@@ -244,6 +270,171 @@ class OcrPipeline:
 
         return result
 
+    def _should_parallelize_page_hybrid(self, total_pages: int) -> bool:
+        if total_pages <= 1 or self._page_concurrency <= 1:
+            return False
+        if not self._prefers_page_hybrid_blocks():
+            return False
+        # Keep shared prepass engines serial until they have an explicit thread-safety contract.
+        return self._hybrid_prepass_engine is None
+
+    def _process_project_page_hybrid_parallel(
+        self,
+        project: OcrProject,
+        progress_callback: Optional[Callable[[OcrProgress], None]],
+    ) -> OcrResult:
+        total_pages = len(project.pages)
+        result = OcrResult(pages=[None] * total_pages)  # type: ignore[list-item]
+        completed_pages = 0
+        completed_lock = Lock()
+        emit_lock = Lock()
+
+        def current_completed_pages() -> int:
+            with completed_lock:
+                return completed_pages
+
+        def emit(progress: OcrProgress) -> None:
+            if progress_callback is None:
+                return
+            with emit_lock:
+                progress_callback(progress)
+
+        workers = min(self._page_concurrency, total_pages)
+        logger.info("OCR page-hybrid parallel start: pages=%d workers=%d", total_pages, workers)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="charocr-page") as executor:
+            futures = {
+                executor.submit(
+                    self._process_page_hybrid_work,
+                    page_idx,
+                    page,
+                    total_pages,
+                    current_completed_pages,
+                    emit,
+                ): page_idx
+                for page_idx, page in enumerate(project.pages)
+            }
+            for future in as_completed(futures):
+                page_idx = futures[future]
+                try:
+                    work = future.result()
+                except Exception as exc:
+                    page = project.pages[page_idx]
+                    logger.error("Page hybrid OCR worker crashed: page=%d: %s", page_idx, exc)
+                    page.error_message = f"OCR 失败：{exc}"
+                    work = _PageOcrWorkResult(
+                        page_idx=page_idx,
+                        page=page,
+                        failed_blocks=[(page_idx, -1, str(exc))],
+                        completion_message=f"OCR 失败：第 {page_idx + 1}/{total_pages} 页：{exc}",
+                    )
+
+                result.pages[work.page_idx] = work.page
+                result.failed_blocks.extend(work.failed_blocks)
+                with completed_lock:
+                    completed_pages += 1
+                    done = completed_pages
+                emit(OcrProgress(
+                    current_page=work.page_idx + 1,
+                    total_pages=total_pages,
+                    current_block=max(1, work.total_blocks),
+                    total_blocks=max(1, work.total_blocks),
+                    completed_pages=done,
+                    message=work.completion_message
+                    or f"OCR 识别中… 第 {work.page_idx + 1}/{total_pages} 页，CharOCR 已写回版面块",
+                ))
+
+        logger.info("OCR page-hybrid parallel done: pages=%d workers=%d", total_pages, workers)
+        return result
+
+    def _process_page_hybrid_work(
+        self,
+        page_idx: int,
+        page: Page,
+        total_pages: int,
+        completed_pages_getter: Callable[[], int],
+        emit: Callable[[OcrProgress], None],
+    ) -> _PageOcrWorkResult:
+        self._clear_ocr_error(page)
+        emit(OcrProgress(
+            current_page=page_idx + 1,
+            total_pages=total_pages,
+            current_block=0,
+            total_blocks=0,
+            completed_pages=completed_pages_getter(),
+            message=f"CharOCR 准备中… 第 {page_idx + 1}/{total_pages} 页",
+        ))
+
+        img = cv2.imread(page.display_image_path)
+        if img is None:
+            logger.warning("Cannot read image: %s", page.display_image_path)
+            page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
+            failed = [
+                (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
+                for block in page.blocks
+                if should_dispatch_to_text_ocr(block)
+            ]
+            return _PageOcrWorkResult(
+                page_idx=page_idx,
+                page=page,
+                failed_blocks=failed,
+                completion_message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页图像读取失败",
+            )
+
+        total_blocks = len([b for b in page.blocks if should_dispatch_to_text_ocr(b)])
+
+        def emit_hybrid_progress(current: int, total: int, message: str) -> None:
+            stage_message = message.replace("Hanwang micro-recblock", "CharOCR")
+            emit(OcrProgress(
+                current_page=page_idx + 1,
+                total_pages=total_pages,
+                current_block=current,
+                total_blocks=total,
+                completed_pages=completed_pages_getter(),
+                message=f"第 {page_idx + 1}/{total_pages} 页：{stage_message}",
+            ))
+
+        failed: list[tuple[int, int, str]] = []
+        try:
+            self._process_page_with_hybrid_blocks(
+                img,
+                page,
+                page_idx=page_idx,
+                progress_callback=emit_hybrid_progress,
+            )
+        except Exception as exc:
+            logger.error("Page hybrid OCR failed: page=%d: %s", page_idx, exc)
+            page.error_message = f"OCR 失败：{exc}"
+            failed.append((page_idx, -1, str(exc)))
+
+        stats = self._proof_crop_service.normalize_pages([page])
+        fallback_total = stats.fallback_chars + stats.unavailable_chars
+        if fallback_total > 0:
+            message = (
+                f"警告：第 {page_idx + 1}/{total_pages} 页触发 proof fallback，"
+                f"{stats.fallback_lines} 行/{fallback_total} 字使用估算或不可用字框"
+            )
+            logger.warning(message)
+            emit(OcrProgress(
+                current_page=page_idx + 1,
+                total_pages=total_pages,
+                current_block=0,
+                total_blocks=0,
+                completed_pages=completed_pages_getter(),
+                message=message,
+            ))
+
+        if failed:
+            completion = f"OCR 失败：第 {page_idx + 1}/{total_pages} 页，CharOCR 处理失败"
+        else:
+            completion = f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，CharOCR 已写回版面块"
+        return _PageOcrWorkResult(
+            page_idx=page_idx,
+            page=page,
+            total_blocks=total_blocks,
+            failed_blocks=failed,
+            completion_message=completion,
+        )
+
     @staticmethod
     def _clear_ocr_error(page: Page) -> None:
         """Clear stale OCR-owned errors before retrying OCR on a page."""
@@ -343,6 +534,8 @@ class OcrPipeline:
         prepass_engine = self._hybrid_page_ocr_prepass_engine()
         if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
             raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
+        if progress_callback:
+            progress_callback(0, max(1, len(page.blocks)), "PP-OCRv5 page-line prepass 中…")
         self._process_page_with_page_ocr(
             img,
             page,

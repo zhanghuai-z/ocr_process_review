@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 import copy
+from threading import Lock
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -701,6 +702,13 @@ class WorkflowController(QObject):
             return self._ocr_status_label()
         return "PP-OCRv5 proof OCR"
 
+    def _ocr_page_concurrency(self) -> int:
+        try:
+            value = int(get_config().get("ocr_page_concurrency", 2))
+        except (TypeError, ValueError):
+            value = 2
+        return max(1, min(4, value))
+
     # ------------------------------------------------------------------ workflow actions
 
     def on_images_ready(self, pages: List[Page]) -> None:
@@ -912,7 +920,12 @@ class WorkflowController(QObject):
 
         # 根据配置创建引擎
         engine = create_engine()
-        pipeline = OcrPipeline(engine=engine)
+        page_concurrency = (
+            self._ocr_page_concurrency()
+            if bool(getattr(engine, "prefer_page_hybrid_blocks", False))
+            else 1
+        )
+        pipeline = OcrPipeline(engine=engine, page_concurrency=page_concurrency)
 
         self._ocr_target_page_numbers = target_page_numbers
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
@@ -1136,14 +1149,16 @@ class OcrPipelineWorker(QThread):
             total = len(self._pages)
             project = OcrProject(name="_ocr_worker_", pages=self._pages)
             completed_pages = 0
+            progress_lock = Lock()
 
             def on_progress(progress: OcrProgress):
                 nonlocal completed_pages
-                self.progress_state.emit(progress)
-                while completed_pages < progress.completed_pages:
-                    self.progress_update.emit(completed_pages, total)
-                    self.page_done.emit(completed_pages, total)
-                    completed_pages += 1
+                with progress_lock:
+                    self.progress_state.emit(progress)
+                    while completed_pages < progress.completed_pages:
+                        self.progress_update.emit(completed_pages, total)
+                        self.page_done.emit(completed_pages, total)
+                        completed_pages += 1
 
             result = self._pipeline.process_project(project, progress_callback=on_progress)
 

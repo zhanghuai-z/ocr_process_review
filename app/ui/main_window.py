@@ -560,8 +560,11 @@ class MainWindow(QMainWindow):
         if progress.total_blocks <= 0 and progress.completed_pages <= 0:
             self._ocr_placeholder.reset()
         elif progress.total_blocks > 0:
-            current = max(0, min(progress.current_block - 1, progress.total_blocks - 1))
-            self._ocr_placeholder.update_progress(current, progress.total_blocks)
+            if progress.current_block <= 0:
+                self._ocr_placeholder.reset()
+            else:
+                current = max(0, min(progress.current_block - 1, progress.total_blocks - 1))
+                self._ocr_placeholder.update_progress(current, progress.total_blocks)
         elif progress.total_pages > 0:
             current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
             self._ocr_placeholder.update_progress(current, progress.total_pages)

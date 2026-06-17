@@ -500,6 +500,19 @@ class ApiSettingsDialog(QDialog):
         concurrency_layout.addStretch()
         api_form.addLayout(_form_row("版面请求并发", concurrency_row))
 
+        ocr_concurrency_row = QWidget()
+        ocr_concurrency_layout = QHBoxLayout(ocr_concurrency_row)
+        ocr_concurrency_layout.setContentsMargins(0, 0, 0, 0)
+        ocr_concurrency_layout.setSpacing(0)
+        self._ocr_page_concurrency_spin = QSpinBox()
+        self._ocr_page_concurrency_spin.setRange(1, 4)
+        self._ocr_page_concurrency_spin.setSuffix(" 页")
+        self._ocr_page_concurrency_spin.setFixedWidth(140)
+        self._ocr_page_concurrency_spin.setToolTip("CharOCR/Hanwang 多页文字识别并发数；默认 2，超过 4 容易放大 native 竞争。")
+        ocr_concurrency_layout.addWidget(self._ocr_page_concurrency_spin)
+        ocr_concurrency_layout.addStretch()
+        api_form.addLayout(_form_row("CharOCR 页并发", ocr_concurrency_row))
+
         network_row = QWidget()
         network_layout = QHBoxLayout(network_row)
         network_layout.setContentsMargins(0, 0, 0, 0)
@@ -665,6 +678,7 @@ class ApiSettingsDialog(QDialog):
         self._token_edit.setText(cfg.get("api_token", ""))
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
         self._layout_concurrency_spin.setValue(int(cfg.get("layout_concurrency", 2)))
+        self._ocr_page_concurrency_spin.setValue(int(cfg.get("ocr_page_concurrency", 2)))
         network_mode = str(cfg.get("paddle_api_network_mode", "auto") or "auto")
         network_index = self._paddle_network_combo.findData(network_mode)
         self._paddle_network_combo.setCurrentIndex(network_index if network_index >= 0 else 0)
@@ -774,6 +788,7 @@ class ApiSettingsDialog(QDialog):
             api_timeout=self._timeout_spin.value(),
             api_layout_model_name="",
             layout_concurrency=self._layout_concurrency_spin.value(),
+            ocr_page_concurrency=self._ocr_page_concurrency_spin.value(),
             paddle_api_network_mode=str(self._paddle_network_combo.currentData() or "auto"),
             llm_endpoint=self._llm_url_edit.text().strip(),
             llm_api_key=self._llm_key_edit.text().strip(),

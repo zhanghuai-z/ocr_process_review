@@ -8713,6 +8713,111 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
 
 
+def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
+    import os
+    import tempfile
+    import threading
+    import cv2
+    import numpy as np
+    from app.engines.hanwang.micro_recblock import (
+        BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
+    )
+    from app.models import OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    barrier = threading.Barrier(2, timeout=5)
+    seen_pages: list[str] = []
+    seen_lock = threading.Lock()
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        page_name = ppvl_blocks[0]["block_content"]
+        with seen_lock:
+            seen_pages.append(page_name)
+        barrier.wait()
+        kwargs["progress_callback"](1, 2, f"Hanwang micro-recblock SegImg done {page_name}")
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 80, 40),
+                source="hanwang",
+                text=f"完成{page_name}",
+                ppvl_text=page_name,
+                lines=[
+                    LineResult(
+                        text=f"完成{page_name}",
+                        bbox=(0, 0, 80, 40),
+                        chars=[CharResult(text="完", confidence=0.9, bbox=(0, 0, 20, 40))],
+                    )
+                ],
+                raw_block=dict(ppvl_blocks[0]),
+            )
+        ], RunStats(n_blocks_total=1, n_blocks_hanwang=1, n_groups=2)
+
+    class FakePrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return []
+
+    paths = []
+    try:
+        for _ in range(2):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                path = f.name
+            cv2.imwrite(path, np.ones((80, 100, 3), dtype=np.uint8) * 255)
+            paths.append(path)
+
+        pages = [
+            Page(
+                image_path=paths[0],
+                width=100,
+                height=80,
+                page_number=1,
+                ppvl_parsing_res_list=[
+                    {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p1"}
+                ],
+            ),
+            Page(
+                image_path=paths[1],
+                width=100,
+                height=80,
+                page_number=2,
+                ppvl_parsing_res_list=[
+                    {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p2"}
+                ],
+            ),
+        ]
+        progress_events = []
+
+        pipeline = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            page_concurrency=2,
+        )
+        pipeline._hybrid_page_ocr_prepass_engine = lambda: FakePrepassEngine()
+        result = pipeline.process_project(
+            OcrProject(name="parallel-hanwang", pages=pages),
+            progress_callback=progress_events.append,
+        )
+
+        assert sorted(seen_pages) == ["p1", "p2"]
+        assert [page.page_number for page in result.pages] == [1, 2]
+        assert result.failed_blocks == []
+        assert result.pages[0].blocks[0].lines[0].text == "完成p1"
+        assert result.pages[1].blocks[0].lines[0].text == "完成p2"
+        assert any("第 1/2 页：CharOCR SegImg done p1" == event.message for event in progress_events)
+        assert any(event.completed_pages == 2 for event in progress_events)
+    finally:
+        for path in paths:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    print("test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass PASSED")
+
+
 def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockType, Page
@@ -10968,6 +11073,7 @@ def test_app_config_tracks_api_model_profile():
     assert defaults["mode"] == "local"
     assert defaults["api_model_profile"] == ""
     assert defaults["layout_concurrency"] == 2
+    assert defaults["ocr_page_concurrency"] == 2
     assert defaults["paddle_api_network_mode"] == "auto"
 
     update_config(
@@ -10978,6 +11084,7 @@ def test_app_config_tracks_api_model_profile():
         api_timeout=12,
         api_layout_model_name="",
         layout_concurrency=3,
+        ocr_page_concurrency=4,
         paddle_api_network_mode="env_proxy",
     )
     current = get_config()
@@ -10987,6 +11094,7 @@ def test_app_config_tracks_api_model_profile():
     assert current["api_token"] == "demo"
     assert current["api_layout_model_name"] == ""
     assert current["layout_concurrency"] == 3
+    assert current["ocr_page_concurrency"] == 4
     assert current["paddle_api_network_mode"] == "env_proxy"
     cfg.reset_to_defaults()
 
@@ -11010,6 +11118,7 @@ def test_api_settings_dialog_syncs_model_and_url():
         api_url="https://example.com/root",
         api_token="old",
         layout_concurrency=4,
+        ocr_page_concurrency=3,
         paddle_api_network_mode="direct",
     )
 
@@ -11027,6 +11136,8 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._timeout_spin.maximum() >= 600
     assert dialog._layout_concurrency_spin.value() == 4
     assert dialog._layout_concurrency_spin.maximum() == 10
+    assert dialog._ocr_page_concurrency_spin.value() == 3
+    assert dialog._ocr_page_concurrency_spin.maximum() == 4
     assert dialog._paddle_network_combo.currentData() == "direct"
 
     cfg.reset_to_defaults()
