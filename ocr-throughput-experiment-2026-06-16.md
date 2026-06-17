@@ -238,6 +238,49 @@
 - `SegImg` 是固定成本但不是主瓶颈；它每页约 6-8s，和总耗时相关性较低。
 - EngCut 有真实价值，不能简单关闭；但它是可优化点，后续应做缓存、减少重复探针，或把 EngCut 纳入常驻 bridge。
 
+### Token-Targeted EngCut Probe
+
+2026-06-17 追加实验，目标是验证“Paddle token 定向 fallback + linecut 低置信 span 小 crop EngCut”能否替代当前整行 EngCut。
+
+输入样本：
+
+- 页面：`debug/engcut_line_binding_batch_v2` 中已有的 22 页。
+- 当前整行 EngCut 行数：`365`。
+- Paddle token 数：`332`。
+- 已知 EngCut exact 真值 token：`180`。
+- linecut 低置信/ASCII 可疑 span：`534`。
+- 与 Paddle token 真值命中的可疑 span：`163`。
+
+规则：
+
+- linecut ASCII 字符直接视为候选。
+- linecut 置信度 `< 0.30` 的非占用字符也进入候选；这能覆盖 `Guariglia -> Gua吨lia` 这类误识别。
+- 高置信中文/中文标点作为占用区。
+- 只有和 Paddle token 建立定向关系的小 span 才送 EngCut；盲扫全部低置信 span 不作为产品路线。
+
+120186 单页验证：
+
+- 初版“低置信且候选含 Latin”规则：`14` 次小 crop，`12` exact，`Guariglia` 失败。
+- 改为“低置信非占用字符也进入候选”：`13` 次小 crop，`13/13` exact。
+- 关键修复：`Gua吨lia -> Guariglia`。
+
+22 页 native 计时：
+
+| Mode | Workers | Calls | Wall time | Result |
+|---|---:|---:|---:|---|
+| token-targeted small crop | 1 | 163 | 27.44s | 139 exact, 23 variant, 1 compound miss |
+| token-targeted small crop | 4 | 163 | 11.66s | same result |
+| token-targeted small crop | 8 | 163 | 9.11s | same result |
+| current full-line EngCut | 4 | 365 | 38.23s | baseline |
+
+结论：
+
+- EngCut 子阶段从当前整行模式改为 token 定向小 crop，在 4 workers 下约 `38.23s -> 11.66s`，减少约 `69.5%`。
+- 8 workers 可继续降到 `9.11s`，但单调用平均耗时上升，说明 native/WSL 临时文件仍有竞争；8 workers 可作为实验档，不宜直接默认。
+- 唯一 miss 是 `OtherPE/VCFunds` vs `Other/PE/VC/Funds` 的 token 粒度差异，属于 compound variant/review，不是小 crop OCR 失败。
+- 如果盲扫全部低置信 span，需要 `534` 次调用，调用量会超过当前整行 `365` 次；因此必须坚持 Paddle token 定向触发。
+- 按 30 页 workers=4 样本粗估，EngCut 子阶段可节省约 `50s` 量级；折算到完整 Hanwang OCR 墙钟，预期总耗时下降约 `15%-25%`。实际收益取决于页级并发、token 密度和 native I/O 竞争。
+
 百页粗估：
 
 - 串行：约 27 分钟。
