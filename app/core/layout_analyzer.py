@@ -71,6 +71,20 @@ LAYOUT_API_TIMEOUT_FLOOR = 180
 LAYOUT_API_CONCURRENCY_CAP = 10
 
 
+def _truthy_config(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _display_image_path(page: Page) -> Path:
+    image_path = Path(page.display_image_path)
+    if image_path.is_file():
+        return image_path
+    normalized = Path(str(page.display_image_path).replace("\\", "/"))
+    return normalized
+
+
 def _layout_worker_max_workers(total_pages: int) -> int:
     if total_pages <= 1:
         return 1
@@ -708,7 +722,6 @@ class LayoutAnalyzer:
 
     def _api_analyze(self, page: Page) -> Page:
         """Call the configured AiStudio model endpoint; raises on network/auth errors."""
-        import cv2
         from app.core.app_config import get_config
 
         cfg = get_config()
@@ -720,10 +733,20 @@ class LayoutAnalyzer:
         timeout = max(int(cfg["api_timeout"]), LAYOUT_API_TIMEOUT_FLOOR)
         token = cfg.get("api_token", "")
 
-        img = cv2.imread(page.display_image_path)
-        if img is None:
+        image_path = _display_image_path(page)
+        try:
+            image_bytes = image_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read image: {page.display_image_path}") from exc
+        if not image_bytes:
             raise RuntimeError(f"Cannot read image: {page.display_image_path}")
-        page.height, page.width = img.shape[:2]
+        if page.width <= 0 or page.height <= 0:
+            import cv2
+
+            img = cv2.imread(str(image_path))
+            if img is None:
+                raise RuntimeError(f"Cannot decode image dimensions: {page.display_image_path}")
+            page.height, page.width = img.shape[:2]
         if not url:
             raise RuntimeError("PaddleOCR-VL-1.6 版面分析 API 地址未配置")
         if not is_paddle_v16_endpoint(url):
@@ -735,10 +758,11 @@ class LayoutAnalyzer:
             poll_timeout=timeout,
             network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
         )
-        data = client.analyze_image(
-            img,
+        data = client.analyze_image_bytes(
+            image_bytes,
             optional_payload=build_paddle_v16_optional_payload(),
             batch_id=self._layout_batch_id,
+            filename=image_path.name or "page.png",
         )
         telemetry = (
             data.get("paddle_v16", {})
@@ -756,24 +780,24 @@ class LayoutAnalyzer:
                 telemetry.get("submit_network_mode") or telemetry.get("network_mode") or "",
                 telemetry.get("batch_id") or "",
             )
-        self._write_api_debug_response(page, data)
-
         page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)
-        self._write_bbox_overlay(
-            page,
-            items=raw_overlay_items,
-            suffix=".layout-api-raw.png",
-            color=(0, 165, 255),
-        )
         # 注意：不再调用 _rescale_blocks_if_suspicious()——
         # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，
         # 再走通用启发式只会引入二次缩放。
-        self._write_bbox_overlay(
-            page,
-            items=[(block.block_type.value, block.bbox) for block in page.blocks],
-            suffix=".layout-app-overlay.png",
-            color=(80, 220, 80),
-        )
+        if _truthy_config(cfg.get("layout_debug_artifacts", False)):
+            self._write_api_debug_response(page, data)
+            self._write_bbox_overlay(
+                page,
+                items=raw_overlay_items,
+                suffix=".layout-api-raw.png",
+                color=(0, 165, 255),
+            )
+            self._write_bbox_overlay(
+                page,
+                items=[(block.block_type.value, block.bbox) for block in page.blocks],
+                suffix=".layout-app-overlay.png",
+                color=(80, 220, 80),
+            )
         return page
 
     def _hanwang_analyze(self, page: Page) -> Page:

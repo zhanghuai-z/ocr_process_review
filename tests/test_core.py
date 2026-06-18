@@ -11493,6 +11493,7 @@ def test_app_config_tracks_api_model_profile():
     assert defaults["layout_concurrency"] == 2
     assert defaults["ocr_page_concurrency"] == 2
     assert defaults["paddle_api_network_mode"] == "auto"
+    assert defaults["layout_debug_artifacts"] is False
 
     update_config(
         mode="api",
@@ -11504,6 +11505,7 @@ def test_app_config_tracks_api_model_profile():
         layout_concurrency=3,
         ocr_page_concurrency=4,
         paddle_api_network_mode="env_proxy",
+        layout_debug_artifacts="true",
     )
     current = get_config()
     assert current["api_model_profile"] == "paddleocr-vl-1.6"
@@ -11514,6 +11516,7 @@ def test_app_config_tracks_api_model_profile():
     assert current["layout_concurrency"] == 3
     assert current["ocr_page_concurrency"] == 4
     assert current["paddle_api_network_mode"] == "env_proxy"
+    assert current["layout_debug_artifacts"] is True
     cfg.reset_to_defaults()
 
     print("test_app_config_tracks_api_model_profile PASSED")
@@ -12607,6 +12610,7 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         page_path = f.name
     try:
         cv2.imwrite(page_path, np.full((120, 200, 3), 255, dtype=np.uint8))
+        original_bytes = Path(page_path).read_bytes()
         page = Page(image_path=page_path, width=200, height=120)
         LayoutAnalyzer()._api_analyze(page)
         assert captured["url"] == "https://example.com/root/api/v2/ocr/jobs"
@@ -12619,14 +12623,17 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         assert optional_payload["useDocUnwarping"] is False
         assert optional_payload["useChartRecognition"] is False
         file_obj = captured["files"]["file"]
-        assert file_obj.name == "page.png"
-        assert file_obj.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
+        assert file_obj.name == Path(page_path).name
+        assert file_obj.getvalue() == original_bytes
         assert captured["gets"][0]["url"] == "https://example.com/root/api/v2/ocr/jobs/job-1"
         assert captured["gets"][0]["headers"]["Authorization"] == "bearer demo"
         assert captured["gets"][0]["proxies"] == {"http": None, "https": None, "all": None}
         assert len(page.blocks) == 1
         assert page.blocks[0].block_type == BlockType.TEXT
         assert "OCR行" in page.blocks[0].note
+        assert not Path(page_path).with_suffix(".layout-api.json").exists()
+        assert not Path(page_path).with_suffix(".layout-api-raw.png").exists()
+        assert not Path(page_path).with_suffix(".layout-app-overlay.png").exists()
     finally:
         requests.post = original_post
         requests.get = original_get

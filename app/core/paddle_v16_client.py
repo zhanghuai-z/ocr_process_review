@@ -321,3 +321,33 @@ class PaddleV16LayoutClient:
             job_id=job_id,
             job_data=job_with_telemetry,
         )
+
+    def analyze_image_bytes(
+        self,
+        image_bytes: bytes,
+        *,
+        optional_payload: dict[str, object] | None = None,
+        batch_id: str = "",
+        filename: str = "page.png",
+    ) -> dict[str, Any]:
+        self.telemetry.clear()
+        self.telemetry["network_mode"] = normalize_paddle_v16_network_mode(self.network_mode)
+        if batch_id:
+            self.telemetry["batch_id"] = batch_id
+        total_started = time.perf_counter()
+        job_id = self.submit_image_bytes(
+            image_bytes,
+            optional_payload=optional_payload,
+            batch_id=batch_id,
+            filename=filename,
+        )
+        json_url, job_data = self.wait_for_result_json_url(job_id)
+        jsonl_text = self.download_jsonl(json_url)
+        self.telemetry["total_seconds"] = time.perf_counter() - total_started
+        job_with_telemetry = dict(job_data)
+        job_with_telemetry["clientTelemetry"] = dict(self.telemetry)
+        return normalize_paddle_v16_jsonl_response(
+            jsonl_text,
+            job_id=job_id,
+            job_data=job_with_telemetry,
+        )

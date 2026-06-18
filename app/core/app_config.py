@@ -21,6 +21,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "layout_concurrency": 2,        # 远端版面分析 job 并发数；本地 Paddle 仍保持串行
     "ocr_page_concurrency": 2,      # Hanwang/CharOCR 页级 OCR 并发；高性能机器可压力测试到 20
     "paddle_api_network_mode": "auto",  # "auto" | "env_proxy" | "direct"
+    "layout_debug_artifacts": False, # 开发调试时才写 Paddle raw json / overlay 图片
 
     # LLM 预审
     "llm_pre_review_enabled": False,
@@ -104,6 +105,12 @@ class AppConfig:
         self._settings.clear()
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
 def get_config() -> dict[str, Any]:
     """Return the runtime OCR/LLM config snapshot used by engines and UI."""
     from app.core.api_profiles import normalize_api_base_url
@@ -131,6 +138,7 @@ def get_config() -> dict[str, Any]:
         "layout_concurrency": layout_concurrency,
         "ocr_page_concurrency": ocr_page_concurrency,
         "paddle_api_network_mode": network_mode,
+        "layout_debug_artifacts": _as_bool(cfg.get("layout_debug_artifacts", False)),
         "llm_endpoint": cfg.get("llm_endpoint", ""),
         "llm_api_key": cfg.get("llm_api_key", ""),
         "llm_rules_path": cfg.get("llm_rules_path", ""),
@@ -150,6 +158,7 @@ def update_config(**kwargs: Any) -> None:
         "layout_concurrency": "layout_concurrency",
         "ocr_page_concurrency": "ocr_page_concurrency",
         "paddle_api_network_mode": "paddle_api_network_mode",
+        "layout_debug_artifacts": "layout_debug_artifacts",
         "llm_endpoint": "llm_endpoint",
         "llm_api_key": "llm_api_key",
         "llm_rules_path": "llm_rules_path",
