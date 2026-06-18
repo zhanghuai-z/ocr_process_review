@@ -66,10 +66,11 @@ class LayoutSubtypeSpec:
 
 
 BLOCK_TYPE_BUTTON_GROUPS = (
-    ("核心文本", (
+    ("核心与结构", (
         LayoutSubtypeSpec("正文", "text", BlockType.TEXT, "普通正文段落"),
         LayoutSubtypeSpec("摘要", "abstract", BlockType.TEXT, "摘要内容"),
         LayoutSubtypeSpec("公式", "formula", BlockType.EQUATION, "自动判断行内公式/独立公式"),
+        LayoutSubtypeSpec("参考文献", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
     )),
     ("标题层级", (
         LayoutSubtypeSpec("H1", "heading_1", BlockType.TITLE, "一级标题"),
@@ -79,28 +80,27 @@ BLOCK_TYPE_BUTTON_GROUPS = (
         LayoutSubtypeSpec("H5", "heading_5", BlockType.TITLE, "五级标题"),
         LayoutSubtypeSpec("H6", "heading_6", BlockType.TITLE, "六级标题"),
     )),
-    ("图表与浮动", (
+    ("图表元素", (
         LayoutSubtypeSpec("图片", "figure", BlockType.FIGURE, "图片/插图区域"),
         LayoutSubtypeSpec("图题", "figure_title", BlockType.FIGURE_CAPTION, "图片或图表标题"),
         LayoutSubtypeSpec("表格", "table", BlockType.TABLE, "表格主体区域"),
         LayoutSubtypeSpec("表题", "table_title", BlockType.TABLE_CAPTION, "表格标题"),
         LayoutSubtypeSpec("图表", "chart", BlockType.FIGURE, "统计图、坐标图等图表区域"),
     )),
-    ("边注与引用", (
+    ("页边元素", (
         LayoutSubtypeSpec("页眉", "header", BlockType.TEXT, "页眉区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页脚", "footer", BlockType.TEXT, "页脚区域，通常不进入正文校对"),
         LayoutSubtypeSpec("页码", "number", BlockType.TEXT, "页码/编号类位置元素"),
         LayoutSubtypeSpec("脚注", "footnote", BlockType.TEXT, "脚注文本"),
-        LayoutSubtypeSpec("参考文献", "reference_content", BlockType.REFERENCE, "参考文献或引用条目"),
     )),
 )
 TYPE_BUTTON_GROUP_COLUMNS = {
-    "核心文本": 3,
+    "核心与结构": 2,
     "标题层级": 3,
-    "图表与浮动": 2,
-    "边注与引用": 2,
+    "图表元素": 2,
+    "页边元素": 2,
 }
-TYPE_BUTTON_FULL_ROW_LABELS = frozenset({"chart", "reference_content"})
+TYPE_BUTTON_FULL_ROW_LABELS = frozenset({"chart"})
 BLOCK_SUBTYPE_BUTTON_ORDER = tuple(
     spec
     for _group_title, specs in BLOCK_TYPE_BUTTON_GROUPS
@@ -149,27 +149,28 @@ def _block_type_label(block_type: BlockType) -> str:
 def _block_type_button_stylesheet(block_type: BlockType) -> str:
     return """
         QPushButton {{
-            min-height: 26px;
-            padding: 4px 8px;
-            border-radius: 4px;
-            border: 1px solid #e5e7eb;
+            min-height: 32px;
+            padding: 0 8px;
+            border-radius: 6px;
+            border: 1px solid #d9d9d9;
             background: #ffffff;
-            color: #111827;
+            color: #4b5563;
+            font-size: 13px;
         }}
         QPushButton:hover {{
-            background: #f9fafb;
-            border-color: #d1d5db;
+            border-color: #4096ff;
+            color: #4096ff;
         }}
         QPushButton:checked {{
-            border: 2px solid #2563eb;
-            background: #eff6ff;
-            color: #2563eb;
+            border: 1px solid #1677ff;
+            background: #e6f7ff;
+            color: #1677ff;
             font-weight: 600;
         }}
         QPushButton:disabled {{
-            border: 1px solid #dfe3e7;
+            border: 1px solid #d9d9d9;
             background: #f5f6f7;
-            color: #9aa0a6;
+            color: #bfbfbf;
             font-weight: 400;
         }}
     """
@@ -183,7 +184,7 @@ def _block_type_group_stylesheet() -> str:
             background: #ffffff;
         }
         QLabel#blockTypeGroupTitle {
-            color: #5f6b7a;
+            color: #8c8c8c;
             font-size: 12px;
             font-weight: 600;
         }
@@ -193,13 +194,13 @@ def _block_type_group_stylesheet() -> str:
 def _type_badge_stylesheet(block_type: BlockType) -> str:
     return """
         QLabel#typeBadge {{
-            padding: 2px 8px;
-            border-radius: 4px;
-            border: 1px solid #93c5fd;
-            background: #eff6ff;
-            color: #2563eb;
+            padding: 2px 10px;
+            border-radius: 12px;
+            border: 1px solid #91caff;
+            background: #e6f7ff;
+            color: #1677ff;
             font-weight: 600;
-            font-size: 13px;
+            font-size: 12px;
         }}
     """
 
@@ -294,9 +295,9 @@ class LayoutPanel(QWidget):
 
         viewer_tb = QFrame()
         viewer_tb.setObjectName("viewerToolbar")
-        viewer_tb.setFixedHeight(34)
+        viewer_tb.setFixedHeight(44)
         vtl = QHBoxLayout(viewer_tb)
-        vtl.setContentsMargins(10, 0, 10, 0)
+        vtl.setContentsMargins(16, 0, 16, 0)
         vtl.setSpacing(8)
 
         self._btn_char_boxes = QPushButton("\u2318 \u5b57\u6846")
@@ -355,7 +356,7 @@ class LayoutPanel(QWidget):
         sidebar_header.setObjectName("layoutSidebarHeader")
         sidebar_header.setFixedHeight(44)
         sidebar_header_lay = QHBoxLayout(sidebar_header)
-        sidebar_header_lay.setContentsMargins(12, 0, 12, 0)
+        sidebar_header_lay.setContentsMargins(16, 0, 16, 0)
         self._type_context_title = QLabel("新建框类型")
         self._type_context_title.setObjectName("sidebarTitle")
         sidebar_header_lay.addWidget(self._type_context_title)
@@ -364,8 +365,8 @@ class LayoutPanel(QWidget):
         tool_panel = QFrame()
         tool_panel.setObjectName("sidebarBar")
         tool_lay = QVBoxLayout(tool_panel)
-        tool_lay.setContentsMargins(12, 12, 12, 10)
-        tool_lay.setSpacing(8)
+        tool_lay.setContentsMargins(0, 0, 0, 0)
+        tool_lay.setSpacing(0)
 
         self._type_group = QButtonGroup(self)
         self._type_group.setExclusive(True)
@@ -385,12 +386,17 @@ class LayoutPanel(QWidget):
         self._btn_undo.setEnabled(False)
         self._btn_undo.setToolTip("撤销上一步版面编辑（Ctrl+Z）")
         self._btn_undo.clicked.connect(self._undo_last_edit)
-        tool_lay.addWidget(self._btn_undo)
 
         tool_hint = QLabel("Shift+左键拖拽：添加框；覆盖框线时自动合并为大框。\nSpace 长按：只移动画布，不编辑框。")
         tool_hint.setObjectName("muted")
         tool_hint.setWordWrap(True)
-        tool_lay.addWidget(tool_hint)
+        action_wrap = QWidget()
+        action_lay = QVBoxLayout(action_wrap)
+        action_lay.setContentsMargins(16, 8, 16, 16)
+        action_lay.setSpacing(8)
+        action_lay.addWidget(self._btn_undo)
+        action_lay.addWidget(tool_hint)
+        tool_lay.addWidget(action_wrap)
 
         right_lay.addWidget(tool_panel)
 
@@ -428,15 +434,15 @@ class LayoutPanel(QWidget):
         # 底栏（设计稿语义：翻页 + 状态 + 完成 / 提交 / 取消）
         bottom = QFrame()
         bottom.setObjectName("toolbar")
-        bottom.setFixedHeight(46)
+        bottom.setFixedHeight(56)
         bl = QHBoxLayout(bottom)
-        bl.setContentsMargins(12, 0, 12, 0)
+        bl.setContentsMargins(24, 0, 24, 0)
         bl.setSpacing(8)
 
-        # 左：翻页 < n/N >  ＋  状态
-        self._btn_prev = QPushButton("<")
+        # 左：翻页 ‹ n/N ›  ＋  状态
+        self._btn_prev = QPushButton("‹")
         self._btn_prev.setObjectName("pageNavBtn")
-        self._btn_prev.setFixedSize(30, 30)
+        self._btn_prev.setFixedSize(32, 32)
         self._btn_prev.setToolTip("上一页")
         self._btn_prev.clicked.connect(lambda: self._goto_relative(-1))
         bl.addWidget(self._btn_prev)
@@ -447,9 +453,9 @@ class LayoutPanel(QWidget):
         self._lbl_page_no.setAlignment(Qt.AlignmentFlag.AlignCenter)
         bl.addWidget(self._lbl_page_no)
 
-        self._btn_next = QPushButton(">")
+        self._btn_next = QPushButton("›")
         self._btn_next.setObjectName("pageNavBtn")
-        self._btn_next.setFixedSize(30, 30)
+        self._btn_next.setFixedSize(32, 32)
         self._btn_next.setToolTip("下一页")
         self._btn_next.clicked.connect(lambda: self._goto_relative(+1))
         bl.addWidget(self._btn_next)
@@ -466,19 +472,19 @@ class LayoutPanel(QWidget):
         # 右：取消 / 完成 / 提交
         self._btn_cancel = QPushButton("取消")
         self._btn_cancel.setObjectName("secondaryBtn")
-        self._btn_cancel.setMinimumHeight(30)
+        self._btn_cancel.setFixedHeight(32)
         self._btn_cancel.clicked.connect(self._on_cancel_clicked)
         bl.addWidget(self._btn_cancel)
 
         self._btn_done = QPushButton("完成本页")
         self._btn_done.setObjectName("secondaryBtn")
-        self._btn_done.setMinimumHeight(30)
+        self._btn_done.setFixedHeight(32)
         self._btn_done.clicked.connect(self._on_done_clicked)
         bl.addWidget(self._btn_done)
 
         self._btn_submit = QPushButton("提交并进入 OCR")
         self._btn_submit.setObjectName("primaryBtn")
-        self._btn_submit.setMinimumHeight(30)
+        self._btn_submit.setFixedHeight(32)
         self._btn_submit.clicked.connect(self._on_submit_clicked)
         bl.addWidget(self._btn_submit)
 
@@ -1035,14 +1041,13 @@ class LayoutPanel(QWidget):
         wrap = QWidget()
         column = QVBoxLayout(wrap)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(6)
+        column.setSpacing(0)
         for group_title, subtype_specs in BLOCK_TYPE_BUTTON_GROUPS:
             group_frame = QFrame()
             group_frame.setObjectName("blockTypeGroup")
-            group_frame.setStyleSheet(_block_type_group_stylesheet())
             group_lay = QVBoxLayout(group_frame)
-            group_lay.setContentsMargins(0, 0, 0, 0)
-            group_lay.setSpacing(6)
+            group_lay.setContentsMargins(16, 8, 16, 16)
+            group_lay.setSpacing(8)
 
             title = QLabel(group_title)
             title.setObjectName("blockTypeGroupTitle")
@@ -1051,8 +1056,8 @@ class LayoutPanel(QWidget):
             grid_wrap = QWidget()
             grid = QGridLayout(grid_wrap)
             grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(6)
-            grid.setVerticalSpacing(6)
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(8)
             columns = TYPE_BUTTON_GROUP_COLUMNS.get(group_title, 2)
             row = 0
             col = 0
@@ -1061,8 +1066,7 @@ class LayoutPanel(QWidget):
                 button.setObjectName("blockTypeButton")
                 button.setCheckable(True)
                 button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-                button.setMinimumHeight(28)
-                button.setStyleSheet(_block_type_button_stylesheet(spec.block_type))
+                button.setFixedHeight(32)
                 tooltip = f"{group_title} · {spec.label} / {spec.source_label} → {spec.block_type.value}"
                 if spec.note:
                     tooltip = f"{tooltip}\n{spec.note}"
@@ -1150,8 +1154,7 @@ class LayoutPanel(QWidget):
         if block is None:
             spec = self._new_subtype
             self._selection_mode_lbl.setText("新建模式:")
-            self._selection_type_status.setText(spec.label)
-            self._selection_type_status.setStyleSheet(_type_badge_stylesheet(spec.block_type))
+            self._selection_type_status.setText(_block_type_label(spec.block_type))
             self._selection_type_status.setToolTip(f"当前新建框类型：{spec.label} / {spec.source_label} → {spec.block_type.value}")
             return
         label = self._button_source_label_for_block(block)
@@ -1166,8 +1169,7 @@ class LayoutPanel(QWidget):
             badge_type = block.block_type
             tooltip = f"当前选中框属性：{raw_label} → {block.block_type.value}"
         self._selection_mode_lbl.setText("选中类型:")
-        self._selection_type_status.setText(badge)
-        self._selection_type_status.setStyleSheet(_type_badge_stylesheet(badge_type))
+        self._selection_type_status.setText(_block_type_label(badge_type))
         self._selection_type_status.setToolTip(tooltip)
 
     @staticmethod
@@ -1311,7 +1313,7 @@ class LayoutPanel(QWidget):
             merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, source_label)
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
-            self._set_status_text("已按拖拽范围合并框；旧 OCR 文本已清空，提交后会重新识别")
+            self._set_status_text("已合并框，需重新识别")
             self._rebuild_heading_outline()
             self._refresh_block_search()
             self._update_project_stats()
@@ -1436,11 +1438,11 @@ class LayoutPanel(QWidget):
             block.source_label = explicit_source_label
             set_payload_entries(block, {PADDLE_BLOCK_LABEL_KEY: explicit_source_label})
         if binding.status == BINDING_EMPTY_REVIEW:
-            self._set_status_text("已创建空校验框；Paddle 父框没有可直接召回的真值")
+            self._set_status_text("已创建校验框")
         elif binding.status == BINDING_AMBIGUOUS:
-            self._set_status_text("已创建校验框；Paddle 父框存在多个候选，需要人工确认")
+            self._set_status_text("已创建校验框，需确认")
         elif binding.text:
-            self._set_status_text("已绑定 Paddle 父框真值，提交后不会交给 Hanwang 强识别")
+            self._set_status_text("已绑定识别结果")
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:

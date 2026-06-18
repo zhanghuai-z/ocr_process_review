@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 
 
 CACHE_SCHEMA = "hanwang-native-probe-cache-v1"
+_runtime_cache_dir: Path | None = None
 
 
 def cache_enabled() -> bool:
@@ -24,7 +26,29 @@ def cache_dir() -> Path:
     configured = os.environ.get("HANWANG_NATIVE_CACHE_DIR", "").strip()
     if configured:
         return Path(configured)
+    if _runtime_cache_dir is not None:
+        return _runtime_cache_dir
     return Path.cwd() / ".cache" / "hanwang_native"
+
+
+def set_runtime_cache_dir(path: str | Path | None) -> None:
+    """Set the process-local cache dir used when no env override is present."""
+    global _runtime_cache_dir
+    _runtime_cache_dir = Path(path) if path else None
+
+
+def reset_runtime_cache_dir() -> None:
+    set_runtime_cache_dir(None)
+
+
+def clear_cache() -> Path:
+    """Remove the active native cache directory if it exists; return its path."""
+    path = cache_dir()
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+    return path
 
 
 def _sha256_file(path: Path) -> str:
@@ -119,6 +143,7 @@ def write_json(kind: str, key: str, value: dict[str, Any]) -> None:
 
 __all__ = [
     "CACHE_SCHEMA",
+    "clear_cache",
     "cache_enabled",
     "cache_key",
     "cache_path",
@@ -126,5 +151,7 @@ __all__ = [
     "image_fingerprint",
     "native_fingerprint",
     "read_json",
+    "reset_runtime_cache_dir",
+    "set_runtime_cache_dir",
     "write_json",
 ]

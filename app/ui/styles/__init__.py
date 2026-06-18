@@ -18,31 +18,31 @@ from typing import Any
 
 LIGHT_TOKENS: dict[str, str] = {
     # 背景层级
-    "bg_root":      "#f3f4f6",
+    "bg_root":      "#f0f2f5",
     "bg_panel":     "#ffffff",
     "bg_card":      "#ffffff",
-    "bg_hover":     "#f3f4f6",
-    "bg_selected":  "#eff6ff",
+    "bg_hover":     "#f5f5f5",
+    "bg_selected":  "#e6f7ff",
     "bg_input":     "#ffffff",
-    "bg_input_dis": "#f3f4f6",
-    "bg_status":    "#f3f4f6",
+    "bg_input_dis": "#f5f5f5",
+    "bg_status":    "#f0f2f5",
     # 边框
-    "border":         "#e5e7eb",
-    "border_input":   "#e5e7eb",
-    "border_focus":   "#2563eb",
-    "border_subtle":  "#e5e7eb",
+    "border":         "#e8e8e8",
+    "border_input":   "#d9d9d9",
+    "border_focus":   "#1677ff",
+    "border_subtle":  "#f0f0f0",
     # 文本
-    "text_primary":   "#111827",
+    "text_primary":   "#1f2937",
     "text_secondary": "#4b5563",
-    "text_muted":     "#9ca3af",
-    "text_disabled":  "#9ca3af",
+    "text_muted":     "#8c8c8c",
+    "text_disabled":  "#bfbfbf",
     "text_on_brand":  "#ffffff",
     # 品牌
-    "brand":            "#2563eb",
-    "brand_hover":      "#1d4ed8",
-    "brand_pressed":    "#1e40af",
-    "brand_disabled":   "#93c5fd",
-    "brand_border_lt":  "#93c5fd",
+    "brand":            "#1677ff",
+    "brand_hover":      "#4096ff",
+    "brand_pressed":    "#0958d9",
+    "brand_disabled":   "#69b1ff",
+    "brand_border_lt":  "#91caff",
     # 状态色
     "accent_green":         "#34a853",
     "accent_green_hover":   "#2d9248",
@@ -51,6 +51,9 @@ LIGHT_TOKENS: dict[str, str] = {
     "danger":         "#d93025",
     "danger_bg":      "#fff0f0",
     "danger_border":  "#f4c4c4",
+    "success":        "#52c41a",
+    "warning":        "#faad14",
+    "error":          "#ff4d4f",
     # 滚动条
     "scroll_handle":   "#d1d5db",
     "scroll_handle_h": "#9ca3af",
@@ -60,7 +63,7 @@ LIGHT_TOKENS: dict[str, str] = {
     "tooltip_bg":   "#2c3e50",
     "tooltip_text": "#ffffff",
     # GraphicsView
-    "canvas_bg": "#f3f4f6",
+    "canvas_bg": "#f0f2f5",
     # 状态徽章 pill（done/running/warn 三档）
     "pill_done_bg":     "#e6f4ea",
     "pill_done_text":   "#137333",
@@ -71,7 +74,7 @@ LIGHT_TOKENS: dict[str, str] = {
     "pill_idle_bg":     "#eef1f5",
     "pill_idle_text":   "#5f6368",
     # 字体
-    "font_family": '"Microsoft YaHei UI", "PingFang SC", "Source Han Sans CN", sans-serif',
+    "font_family": '"Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Source Han Sans CN", sans-serif',
     "font_size":   "13px",
     "font_size_sm":"12px",
     "font_size_lg":"14px",
@@ -203,6 +206,25 @@ QFrame#layoutSidebarHeader {{
     background: {bg_panel};
     border-bottom: 1px solid {border};
 }}
+QFrame#blockTypeGroup {{
+    background: {bg_panel};
+    border: none;
+    border-radius: 0;
+}}
+QLabel#blockTypeGroupTitle {{
+    color: {text_muted};
+    font-size: {font_size_sm};
+    font-weight: 600;
+}}
+QLabel#typeBadge {{
+    padding: 2px 10px;
+    border-radius: 12px;
+    border: 1px solid {brand_border_lt};
+    background: {bg_selected};
+    color: {brand};
+    font-weight: 600;
+    font-size: {font_size_sm};
+}}
 QFrame#blockTypeDivider {{
     background: {border_subtle};
     border: none;
@@ -240,7 +262,7 @@ QLabel#statusPill[kind="idle"]    {{ background: {pill_idle_bg};    color: {pill
 
 /* ---------- PageDir 行（页面目录） ---------- */
 QListWidget#pageDirectoryList {{
-    background: #fafafa;
+    background: {bg_panel};
     border: none;
     outline: 0;
     padding: 0;
@@ -251,17 +273,18 @@ QListWidget#pageDirectoryList::item {{
     margin: 0;
     background: transparent;
 }}
-QListWidget#pageDirectoryList::item:hover    {{ background: {bg_root}; }}
+QListWidget#pageDirectoryList::item:hover    {{ background: {bg_hover}; }}
 QListWidget#pageDirectoryList::item:selected {{ background: {bg_selected}; border-left: 3px solid {brand}; }}
 
 QTabWidget#layoutLeftTabs::pane {{
     border: none;
+    border-top: 1px solid {border};
     background: {bg_panel};
 }}
 QTabWidget#layoutLeftTabs QTabBar::tab {{
-    background: {bg_panel};
+    background: transparent;
     color: {text_secondary};
-    padding: 7px 12px;
+    padding: 8px 16px;
     border: none;
     border-bottom: 2px solid transparent;
 }}
@@ -331,6 +354,16 @@ QWidget#headerBar {{
     background: {bg_panel};
     border-bottom: 1px solid {border};
 }}
+QFrame#topBarLeft,
+QFrame#topBarActions {{
+    background: transparent;
+    border: none;
+}}
+QFrame#workflowSegment {{
+    background: {bg_status};
+    border: 1px solid {border};
+    border-radius: 16px;
+}}
 QWidget#sidebarBar {{
     background: {bg_panel};
     border: none;
@@ -339,36 +372,45 @@ QWidget#toolbar {{
     background: {bg_panel};
     border-bottom: 1px solid {border};
 }}
-QWidget#navRail {{
-    background: {bg_panel};
-    border-right: 1px solid {border};
-}}
 
 /* ---------- 步骤 / 导航按钮 ---------- */
-QPushButton#stepBtn {{
+QPushButton#workflowStepBtn {{
     border: none;
-    border-radius: {radius_md};
-    padding: 8px 14px;
+    border-radius: 14px;
+    padding: 4px 16px;
     color: {text_secondary};
     background: transparent;
-    text-align: left;
+    font-size: {font_size};
+    font-weight: 500;
+}}
+QPushButton#workflowStepBtn:hover    {{ background: {bg_hover}; color: {brand}; }}
+QPushButton#workflowStepBtn:checked  {{
+    background: {bg_panel};
+    color: {brand};
+    border: 1px solid {border_input};
+    font-weight: 600;
+}}
+QPushButton#workflowStepBtn:disabled {{ color: {text_disabled}; }}
+
+/* 右侧框类型按钮 */
+QPushButton#blockTypeButton {{
+    background: {bg_panel};
+    border: 1px solid {border_input};
+    border-radius: {radius_md};
+    padding: 0 8px;
+    color: {text_secondary};
     font-size: {font_size};
 }}
-QPushButton#stepBtn:hover    {{ background: {bg_hover}; color: {brand}; }}
-QPushButton#stepBtn:checked  {{ background: {bg_selected}; color: {brand}; font-weight: bold; }}
-QPushButton#stepBtn:disabled {{ color: {text_disabled}; }}
-
-/* navRail 中的图标按钮 */
-QPushButton#navIcon {{
-    border: none;
-    border-radius: {radius_md};
-    padding: 6px;
-    color: {text_secondary};
-    background: transparent;
+QPushButton#blockTypeButton:hover {{
+    border-color: {brand_hover};
+    color: {brand_hover};
 }}
-QPushButton#navIcon:hover    {{ background: {bg_hover}; color: {brand}; }}
-QPushButton#navIcon:checked  {{ background: {bg_selected}; color: {brand}; }}
-QPushButton#navIcon:disabled {{ color: {text_disabled}; }}
+QPushButton#blockTypeButton:checked {{
+    background: {bg_selected};
+    border-color: {brand};
+    color: {brand};
+    font-weight: 600;
+}}
 
 /* 切换型工具按钮（如 ⊞ 字框） */
 QPushButton#toolToggle {{
@@ -418,6 +460,16 @@ QPushButton#secondaryBtn {{
 }}
 QPushButton#secondaryBtn:hover    {{ border-color: {brand}; color: {brand}; }}
 QPushButton#secondaryBtn:disabled {{ color: {text_disabled}; background: {bg_input_dis}; }}
+QPushButton#defaultBtn {{
+    border: 1px solid {border_input};
+    border-radius: {radius_md};
+    padding: 6px 14px;
+    background: {bg_panel};
+    color: {text_primary};
+}}
+QPushButton#defaultBtn:hover    {{ border-color: {brand_hover}; color: {brand_hover}; }}
+QPushButton#defaultBtn:pressed  {{ border-color: {brand_pressed}; color: {brand_pressed}; background: #fafafa; }}
+QPushButton#defaultBtn:disabled {{ color: {text_disabled}; background: {bg_input_dis}; }}
 QPushButton#iconBtn {{
     border: none;
     border-radius: {radius_sm};
@@ -443,7 +495,7 @@ QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {{
     selection-color: {brand};
 }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPlainTextEdit:focus, QTextEdit:focus {{
-    border: 1px solid {border_focus};
+    border: 1px solid {brand};
 }}
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
     background: {bg_input_dis}; color: {text_disabled};
@@ -452,6 +504,19 @@ QComboBox::drop-down {{ border: none; width: 24px; }}
 QComboBox QAbstractItemView {{
     background: {bg_panel}; border: 1px solid {border_input};
     selection-background-color: {bg_selected}; selection-color: {brand};
+}}
+
+/* QDialog 内部独立覆盖 */
+QDialog#layoutFindDialog QLineEdit, QDialog#layoutFindDialog QComboBox {{
+    background: {bg_input};
+    border: 1px solid {border_input};
+    border-radius: {radius_md};
+    padding: 6px 12px;
+    color: {text_primary};
+    min-height: 24px;
+}}
+QDialog#layoutFindDialog QLineEdit:focus, QDialog#layoutFindDialog QComboBox:focus {{
+    border: 1px solid {brand};
 }}
 
 QRadioButton, QCheckBox {{
@@ -503,7 +568,7 @@ QPushButton#primaryBtn:pressed  {{ background: {brand_pressed}; }}
 QPushButton#primaryBtn:disabled {{ background: {brand_disabled}; border-color: {brand_disabled}; color: {text_on_brand}; }}
 
 QPushButton#ghostBtn {{
-    background: {bg_hover}; color: {brand};
+    background: {bg_panel}; color: {brand};
     border: 1px solid {brand_border_lt};
 }}
 QPushButton#ghostBtn:hover    {{ background: {bg_selected}; }}
@@ -583,6 +648,7 @@ QLabel#pageSep {{
 QSplitter::handle {{ background: {border}; }}
 QSplitter::handle:horizontal {{ width: 1px; }}
 QSplitter::handle:vertical {{ height: 1px; }}
+QSplitter::handle:hover {{ background: {brand_hover}; }}
 
 /* ---------- Tab ---------- */
 QTabWidget::pane {{ border: 1px solid {border}; border-radius: {radius_md}; background: {bg_panel}; }}

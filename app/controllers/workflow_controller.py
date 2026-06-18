@@ -34,6 +34,7 @@ from app.core.workflow_state import (
     pending_ocr_pages,
 )
 from app.core import quality_probe as qp
+from app.engines.hanwang import native_cache
 from app.engines.real_ocr_adapter import create_engine
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page, PageStatus, ProofStatus,
@@ -119,6 +120,7 @@ class WorkflowController(QObject):
         """确保存在一个临时项目对象，便于未保存状态下也能走通工作流。"""
         if self._project is None:
             self._project = OcrProject(name=name)
+            self._sync_native_cache_dir()
             self.project_changed.emit(self._project)
         return self._project
 
@@ -190,6 +192,24 @@ class WorkflowController(QObject):
         from pathlib import Path as _Path
         db_path = self._project.db_path if self._project else None
         return _Path(db_path or ".").parent / ".cache"
+
+    @property
+    def charocr_cache_dir(self) -> "Path":
+        return self.cache_dir / "hanwang_native"
+
+    @property
+    def active_charocr_cache_dir(self) -> "Path":
+        self._sync_native_cache_dir()
+        return native_cache.cache_dir()
+
+    def _sync_native_cache_dir(self) -> None:
+        native_cache.set_runtime_cache_dir(self.charocr_cache_dir)
+
+    def clear_charocr_cache(self) -> "Path":
+        self._sync_native_cache_dir()
+        path = native_cache.clear_cache()
+        self.status_message.emit(f"CharOCR 缓存已清空：{path}")
+        return path
 
     def page_number_at(self, idx: int) -> Optional[int]:
         """按位置返回 page_number；越界或无项目时 None。"""
@@ -383,28 +403,6 @@ class WorkflowController(QObject):
         self.layout_run_enabled_changed.emit(enabled)
         self._emit_view_state()
 
-    def new_project(self, name: str, db_path: str) -> bool:
-        """创建新项目。"""
-        try:
-            if self._store:
-                self._store.close()
-            self._store = ProjectStore(db_path)
-            self._store.open()
-            self._project = OcrProject(name=name, db_path=db_path)
-            self._project = self._store.save_project(self._project)
-            self._max_step = STEP_IMPORT
-            # 切换项目：必须清空全局评测状态，避免旧项目的 probe 串到新项目
-            qp.reset_active_store()
-            self.project_changed.emit(self._project)
-            self.step_enabled_changed.emit(self._max_step)
-            self._emit_view_state()
-            self.status_message.emit(f"新建项目：{db_path}")
-            return True
-        except Exception as e:
-            logger.error("Failed to create project: %s", e)
-            self.worker_error.emit(f"创建项目失败：{e}")
-            return False
-
     def open_project(self, db_path: str) -> bool:
         """打开项目。"""
         try:
@@ -416,6 +414,7 @@ class WorkflowController(QObject):
             if not self._project:
                 self.worker_error.emit("项目文件无效或为空")
                 return False
+            self._sync_native_cache_dir()
             proof_stats = self._proof_crop_service.normalize_project(self._project)
 
             # 切换项目：先清空全局评测状态，再尝试从 sidecar 恢复
@@ -440,6 +439,26 @@ class WorkflowController(QObject):
         except Exception as e:
             logger.error("Failed to open project: %s", e)
             self.worker_error.emit(f"打开项目失败：{e}")
+            return False
+
+    def save_project_as(self, db_path: str) -> bool:
+        """Save the current in-memory project to a project database path."""
+        if not self._project:
+            return False
+        try:
+            if self._store:
+                self._store.close()
+            self._store = ProjectStore(db_path)
+            self._store.open()
+            self._project.db_path = db_path
+            self._project = self._store.save_project(self._project)
+            self._sync_native_cache_dir()
+            self.project_changed.emit(self._project)
+            self.status_message.emit(f"项目已保存：{db_path}")
+            return True
+        except Exception as e:
+            logger.error("Save as failed: %s", e)
+            self.worker_error.emit(f"保存失败：{e}")
             return False
 
     def save_project(self) -> bool:
@@ -487,6 +506,7 @@ class WorkflowController(QObject):
         self._ocr_target_page_numbers = None
         self._auto_start_ocr_after_layout = True
         self._queued_ocr_progress_callback = None
+        native_cache.reset_runtime_cache_dir()
         self.reset_proof_sync_state()
         self._max_step = STEP_IMPORT
         self._current_step = STEP_IMPORT
@@ -565,6 +585,7 @@ class WorkflowController(QObject):
     def close(self) -> None:
         if self._store:
             self._store.close()
+        native_cache.reset_runtime_cache_dir()
         # 进程退出：清空全局评测状态
         qp.reset_active_store()
 
@@ -604,19 +625,27 @@ class WorkflowController(QObject):
     def _pending_hanwang_pages(self) -> list[Page]:
         return pending_ocr_pages(self._project)
 
+    def _actionable_hanwang_pages(self) -> list[Page]:
+        if self._project is None:
+            return []
+        return [
+            page for page in self._project.pages
+            if page_gate_info(page).action_enabled
+        ]
+
     def _first_pending_hanwang_page(self) -> Page | None:
         pending = self._pending_hanwang_pages()
         return pending[0] if pending else None
 
-    def _pending_hanwang_pages_from(self, first_page: Page) -> list[Page]:
-        """Return pending Hanwang OCR pages with the submitted page first."""
-        pending = self._pending_hanwang_pages()
-        if not pending:
+    def _actionable_hanwang_pages_from(self, first_page: Page) -> list[Page]:
+        """Return directly runnable Hanwang OCR pages with the submitted page first."""
+        actionable = self._actionable_hanwang_pages()
+        if not actionable and page_gate_info(first_page).action_enabled:
             return [first_page]
         first_number = first_page.page_number
-        ordered = [page for page in pending if page.page_number == first_number]
-        ordered.extend(page for page in pending if page.page_number != first_number)
-        return ordered or [first_page]
+        ordered = [page for page in actionable if page.page_number == first_number]
+        ordered.extend(page for page in actionable if page.page_number != first_number)
+        return ordered
 
     def _emit_page_gate_state(self, page: Page) -> None:
         gate = page_gate_info(page)
@@ -658,8 +687,15 @@ class WorkflowController(QObject):
             return
         pending_page = self._first_pending_hanwang_page()
         if source != "layout_submit":
+            current = self.page_by_number(page_number)
+            actionable = self._actionable_hanwang_pages()
+            if actionable:
+                target = current if current in actionable else actionable[0]
+                targets = self._actionable_hanwang_pages_from(target)
+                self.start_ocr(targets, target_page_numbers={page.page_number for page in targets})
+                return
             if pending_page is None:
-                current = self.page_by_number(page_number) or self._project.pages[0]
+                current = current or self._project.pages[0]
                 self._emit_page_gate_state(current)
                 self.status_message.emit("全部已完成 OCR")
                 return
@@ -676,6 +712,12 @@ class WorkflowController(QObject):
             return
         gate = page_gate_info(target)
         if not gate.action_enabled:
+            actionable = self._actionable_hanwang_pages()
+            if gate.reason_code == "ocr_complete" and actionable:
+                next_target = actionable[0]
+                targets = self._actionable_hanwang_pages_from(next_target)
+                self.start_ocr(targets, target_page_numbers={page.page_number for page in targets})
+                return
             self._emit_page_gate_state(target)
             self.status_message.emit("全部已完成 OCR" if gate.reason_code == "ocr_complete" else gate.reason_text)
             return
@@ -685,32 +727,49 @@ class WorkflowController(QObject):
             self._emit_page_gate_state(target)
             self.status_message.emit(gate.reason_text)
             return
-        targets = self._pending_hanwang_pages_from(target)
+        targets = self._actionable_hanwang_pages_from(target)
+        if not targets:
+            self.status_message.emit("当前没有可 OCR 的页面")
+            return
         self.start_ocr(targets, target_page_numbers={page.page_number for page in targets})
 
     def _layout_status_label(self) -> str:
-        return {
-            "api": "API 版面分析",
-            "hanwang": "VL1.6 版面分析（汉王混合）",
-        }.get(self._current_ocr_mode(), "Paddle 版面分析")
+        return "版面分析"
 
     def _ocr_status_label(self) -> str:
-        return {
-            "api": "API OCR",
-            "hanwang": "汉王 micro-recblock OCR",
-        }.get(self._current_ocr_mode(), "Paddle OCR")
+        return "文字识别"
 
     def _proof_ocr_status_label(self, engine: object | None = None) -> str:
-        if engine is not None and not bool(getattr(engine, "prefer_page_ocr", False)):
-            return self._ocr_status_label()
-        return "PP-OCRv5 proof OCR"
+        return self._ocr_status_label()
 
     def _ocr_page_concurrency(self) -> int:
         try:
             value = int(get_config().get("ocr_page_concurrency", 2))
         except (TypeError, ValueError):
             value = 2
-        return max(1, min(4, value))
+        return max(1, min(20, value))
+
+    def _effective_ocr_page_concurrency(self, pages: List[Page], engine: object) -> int:
+        if not bool(getattr(engine, "prefer_page_hybrid_blocks", False)):
+            return 1
+        return max(1, min(len(pages), self._ocr_page_concurrency()))
+
+    @staticmethod
+    def _ocr_public_progress_message(progress: OcrProgress) -> str:
+        raw = progress.message or ""
+        total = max(0, int(progress.total_pages))
+        current = max(0, int(progress.current_page))
+        completed = max(0, int(progress.completed_pages))
+        if "失败" in raw:
+            if total and current:
+                return f"文字识别失败：第 {current}/{total} 页"
+            return "文字识别失败"
+        if "警告" in raw or "fallback" in raw.lower():
+            return "文字识别完成，部分字框需要检查"
+        if total:
+            done = min(completed, total)
+            return f"文字识别中… 已完成 {done}/{total} 页"
+        return "文字识别中…"
 
     # ------------------------------------------------------------------ workflow actions
 
@@ -747,7 +806,7 @@ class WorkflowController(QObject):
             self.status_message.emit(
                 f"版面分析完成：{success_count}/{len(pages)} 页成功"
                 + (f"，{len(failed_pages)} 页失败" if failed_pages else "")
-                + f"，正在启动 {self._ocr_status_label()}…"
+                + "，正在启动文字识别…"
             )
         else:
             self.status_message.emit(
@@ -773,11 +832,11 @@ class WorkflowController(QObject):
             self._queued_ocr_progress_callback = None
             if self.get_recognizable_block_count() == 0:
                 self.status_message.emit(
-                    f"版面分析完成，但 {self._proof_ocr_status_label()} 失败且没有可识别文字块"
+                    "版面分析完成，但文字识别未获得可用文本"
                 )
                 return
             self.status_message.emit(
-                f"{self._proof_ocr_status_label()} 失败，改用版面块 OCR 继续"
+                "文字识别继续处理中…"
             )
             self.start_ocr(pages, notify_page_callback=queued_callback)
             return
@@ -788,7 +847,7 @@ class WorkflowController(QObject):
                 self._finish_parallel_proof_ocr()
             else:
                 self.status_message.emit(
-                    f"版面分析完成：{len(pages)} 页，等待 {self._proof_ocr_status_label()}…"
+                    f"版面分析完成：{len(pages)} 页，等待文字识别…"
                 )
             return
 
@@ -842,8 +901,7 @@ class WorkflowController(QObject):
         ]
         fallback_warning = self._proof_fallback_warning(proof_stats, processed_pages)
         self.status_message.emit(
-            f"{self._ocr_status_label()}完成，自动标记 {flagged} 行低置信度内容；"
-            f"横向/纵向校对已可进入"
+            f"文字识别完成：自动标记 {flagged} 行；可进入校对"
             + (f"（{len(failed_pages)} 页失败）" if failed_pages else "")
             + (f"；{fallback_warning}" if fallback_warning else "")
         )
@@ -864,10 +922,10 @@ class WorkflowController(QObject):
             self.status_message.emit("版面分析仍在进行中…")
             return False
         if self._ocr_worker and self._ocr_worker.isRunning():
-            self.status_message.emit("OCR 识别仍在进行中…")
+            self.status_message.emit("文字识别仍在进行中…")
             return False
         if self._proof_ocr_worker and self._proof_ocr_worker.isRunning():
-            self.status_message.emit("OCR 识别仍在进行中…")
+            self.status_message.emit("文字识别仍在进行中…")
             return False
         from app.core.layout_analyzer import LayoutWorker
         self._pending_layout_pages = None
@@ -884,7 +942,7 @@ class WorkflowController(QObject):
         self._layout_worker.start()
         if parallel_started:
             self.status_message.emit(
-                f"{self._layout_status_label()}与 {self._proof_ocr_status_label()} 同步执行中…"
+                "版面分析与文字识别同步执行中…"
             )
         else:
             self.status_message.emit(f"{self._layout_status_label()}中…")
@@ -909,10 +967,10 @@ class WorkflowController(QObject):
     ) -> bool:
         """启动 OCR worker（使用 OcrPipeline + engine adapter）。"""
         if self._ocr_worker and self._ocr_worker.isRunning():
-            self.status_message.emit("OCR 识别仍在进行中…")
+            self.status_message.emit("文字识别仍在进行中…")
             return False
         if self._proof_ocr_worker and self._proof_ocr_worker.isRunning():
-            self.status_message.emit(f"{self._proof_ocr_status_label()} 仍在进行中…")
+            self.status_message.emit("文字识别仍在进行中…")
             return False
 
         text_ocr_block_count = sum(len(page.text_ocr_blocks) for page in pages)
@@ -923,11 +981,7 @@ class WorkflowController(QObject):
 
         # 根据配置创建引擎
         engine = create_engine()
-        page_concurrency = (
-            self._ocr_page_concurrency()
-            if bool(getattr(engine, "prefer_page_hybrid_blocks", False))
-            else 1
-        )
+        page_concurrency = self._effective_ocr_page_concurrency(pages, engine)
         pipeline = OcrPipeline(engine=engine, page_concurrency=page_concurrency)
 
         self._ocr_target_page_numbers = target_page_numbers
@@ -945,11 +999,11 @@ class WorkflowController(QObject):
             current_block=0,
             total_blocks=0,
             completed_pages=0,
-            message=f"{self._ocr_status_label()} 准备中… 共 {len(pages)} 页",
+            message=f"文字识别准备中… 共 {len(pages)} 页",
         ))
         self._ocr_worker.start()
         self.step_requested.emit(STEP_OCR)
-        self.status_message.emit(f"{self._ocr_status_label()} 识别中…")
+        self.status_message.emit("文字识别中…")
         return True
 
     def _start_parallel_proof_ocr(self, pages: List[Page]) -> bool:
@@ -1069,11 +1123,11 @@ class WorkflowController(QObject):
             phase="ocr",
             completed_pages=completed_pages,
             total_pages=int(progress.total_pages),
-            message=progress.message or "",
+            message=self._ocr_public_progress_message(progress),
         ))
         self.ocr_progress.emit(progress)
         if progress.message:
-            self.status_message.emit(progress.message)
+            self.status_message.emit(self._ocr_public_progress_message(progress))
 
     @staticmethod
     def _proof_fallback_warning(stats, pages: list[Page] | None = None) -> str:

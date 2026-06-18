@@ -40,9 +40,10 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize, 兼容旧 "dark_teal"
 
 ### 容器
 - `headerBar` — 面板顶栏（白底，下边框）
+- `workflowSegment` — 顶部流程分段按钮容器
+- `topBarLeft` / `topBarActions` — 顶部栏左右透明分区
 - `sidebarBar` — 左侧侧栏（白底，右边框）
 - `toolbar` — 面板内工具条（白底，下边框）
-- `navRail` — 左侧 56 宽竖向导航栏
 - `card` — 浮起卡片（白底 + radius_lg + border）；属性 `selected="true"` 切换高亮
 - `linePair` — 横校原文/校对行对容器；属性 `active="true"` 切换高亮
 
@@ -61,8 +62,7 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize, 兼容旧 "dark_teal"
 - `ghostBtn` — 次操作（浅蓝底蓝字）；支持 `:checked`
 - `dangerBtn` — 危险操作（白底红字红边）
 - `runBtn` — 圆形启动按钮（绿色）
-- `stepBtn` — 步骤按钮；支持 `:checked` / `:disabled`
-- `navIcon` — NavRail 内图标按钮；支持 `:checked`
+- `workflowStepBtn` — 顶部流程步骤按钮；支持 `:checked` / `:disabled`
 - `toolToggle` — 切换型工具按钮（如 `⊞ 字框`）；支持 `:checked`
 
 ### 默认控件

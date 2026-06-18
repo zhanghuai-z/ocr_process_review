@@ -4494,9 +4494,58 @@ def test_workflow_controller_layout_progress_signal():
     controller._on_layout_progress(1, 3)
 
     assert events == [(1, 3)]
-    assert statuses[-1] == "Paddle 版面分析中… 已完成 2/3 页"
+    assert statuses[-1] == "版面分析中… 已完成 2/3 页"
 
     print("test_workflow_controller_layout_progress_signal PASSED")
+
+
+def test_workflow_controller_abstracts_internal_ocr_progress_messages():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.services.ocr_pipeline import OcrProgress
+
+    controller = WorkflowController()
+    statuses = []
+    progress_states = []
+    raw_progress = []
+    controller.status_message.connect(statuses.append)
+    controller.progress_state_changed.connect(progress_states.append)
+    controller.ocr_progress.connect(raw_progress.append)
+
+    controller._on_ocr_progress(OcrProgress(
+        current_page=1,
+        total_pages=2,
+        current_block=1,
+        total_blocks=8,
+        completed_pages=0,
+        message="Hanwang micro-recblock SegImg 分块中…",
+    ))
+
+    assert statuses[-1] == "文字识别中… 已完成 0/2 页"
+    assert progress_states[-1].message == "文字识别中… 已完成 0/2 页"
+    assert raw_progress[-1].message == "Hanwang micro-recblock SegImg 分块中…"
+
+    print("test_workflow_controller_abstracts_internal_ocr_progress_messages PASSED")
+
+
+def test_workflow_controller_clamps_ocr_page_concurrency_to_page_count():
+    from app.controllers.workflow_controller import WorkflowController
+    from app.models import Page
+
+    class PageHybridEngine:
+        prefer_page_hybrid_blocks = True
+
+    controller = WorkflowController()
+    pages = [
+        Page(image_path="/tmp/concurrency-1.png", width=10, height=10),
+        Page(image_path="/tmp/concurrency-2.png", width=10, height=10),
+    ]
+    controller._ocr_page_concurrency = lambda: 20  # type: ignore[method-assign]
+
+    assert controller._effective_ocr_page_concurrency(pages, PageHybridEngine()) == 2
+    assert controller._effective_ocr_page_concurrency(pages[:1], PageHybridEngine()) == 1
+    assert controller._effective_ocr_page_concurrency(pages, object()) == 1
+
+    print("test_workflow_controller_clamps_ocr_page_concurrency_to_page_count PASSED")
 
 
 def test_main_window_layout_error_is_status_only():
@@ -4550,17 +4599,19 @@ def test_main_window_centered_resize_expands_from_current_center():
     app = _get_qapp()
     window = MainWindow()
     try:
-        window.setGeometry(200, 180, 300, 240)
+        window.setGeometry(40, 180, 300, 240)
         window.show()
         app.processEvents()
         before = window.frameGeometry().center()
 
-        window._set_centered_window_size(500, 400)
+        window._set_centered_window_size(700, 400)
         app.processEvents()
 
         after = window.frameGeometry().center()
-        assert window.width() == 500
-        assert window.height() == 400
+        assert window.width() >= 700
+        assert window.height() >= 400
+        assert window.width() <= max(700, window.minimumSizeHint().width())
+        assert window.height() <= max(400, window.minimumSizeHint().height())
         assert abs(after.x() - before.x()) <= 1
         assert abs(after.y() - before.y()) <= 1
     finally:
@@ -4610,6 +4661,7 @@ def test_main_window_file_menu_uses_close_project_action():
         actions = [action for action in file_menu.actions() if not action.isSeparator()]
         action_texts = [action.text() for action in actions]
         assert any("关闭项目" in text for text in action_texts)
+        assert not any("新建项目" in text for text in action_texts)
         assert not any("退出" in text for text in action_texts)
         close_action = next(action for action in actions if "关闭项目" in action.text())
         assert close_action.shortcut().toString(QKeySequence.SequenceFormat.PortableText) == "Ctrl+W"
@@ -8858,7 +8910,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
 
 
-def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
+def test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable():
     import os
     import tempfile
     import cv2
@@ -8866,6 +8918,7 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
     from app.engines.hanwang.micro_recblock import (
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
@@ -8874,8 +8927,8 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
         line_hints = kwargs["page_ocr_lines"]
-        assert len(line_hints) == 1
-        assert line_hints[0].text == "已有行框"
+        assert line_hints == []
+        assert ppvl_blocks[0][LAYOUT_LINE_ROUTES_FIELD][0]["bbox"] == [10, 20, 110, 60]
         return [
             BlockResult(
                 block_idx=0,
@@ -8917,10 +8970,28 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(10, 20, 110, 60),
                     lines=[Line(text="已有行框", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)],
+                    app_payload={
+                        LAYOUT_LINE_ROUTES_FIELD: [
+                            {
+                                "bbox": [10, 20, 110, 60],
+                                "segments": [{"kind": "text", "bbox": [10, 20, 110, 60], "text": ""}],
+                            }
+                        ]
+                    },
                 )
             ],
             ppvl_parsing_res_list=[
-                {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"}
+                {
+                    "block_label": "text",
+                    "block_bbox": [10, 20, 110, 60],
+                    "block_content": "PPVL文本",
+                    LAYOUT_LINE_ROUTES_FIELD: [
+                        {
+                            "bbox": [10, 20, 110, 60],
+                            "segments": [{"kind": "text", "bbox": [10, 20, 110, 60], "text": ""}],
+                        }
+                    ],
+                }
             ],
         )
         progress_events = []
@@ -8934,11 +9005,90 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable():
 
         assert len(calls) == 1
         assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
-        assert any("prepass skipped: reused 1 existing lines" in event.message for event in progress_events)
+        assert any(
+            "prepass skipped: reused cached layout routes for 1 blocks" in event.message
+            for event in progress_events
+        )
     finally:
         os.unlink(img_path)
 
-    print("test_ocr_pipeline_skips_hanwang_prepass_when_line_hints_reusable PASSED")
+    print("test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable PASSED")
+
+
+def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
+    import os
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.engines.hanwang.micro_recblock import (
+        BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
+    )
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    calls = []
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        calls.append(kwargs)
+        line_hints = kwargs["page_ocr_lines"]
+        assert len(line_hints) == 1
+        assert line_hints[0].text == "PP行"
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(10, 20, 110, 60),
+                source="hanwang",
+                text="重跑结果",
+                ppvl_text="PPVL文本",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[LineResult(text="重跑结果", bbox=(10, 20, 110, 60), confidence=0.93)],
+            )
+        ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    class PrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [Line(text="PP行", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.91)]
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img_path = f.name
+        cv2.imwrite(img_path, np.ones((90, 140, 3), dtype=np.uint8) * 255)
+
+    try:
+        page = Page(
+            image_path=img_path,
+            width=140,
+            height=90,
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(10, 20, 110, 60),
+                    lines=[Line(text="旧CharOCR行", bbox=BBox.from_xyxy(12, 24, 90, 58), confidence=0.9)],
+                )
+            ],
+            ppvl_parsing_res_list=[
+                {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"}
+            ],
+        )
+        progress_events = []
+        result = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            hybrid_prepass_engine=PrepassEngine(),
+        ).process_project(
+            OcrProject(name="hybrid-no-stale-line-hints", pages=[page]),
+            progress_callback=progress_events.append,
+        )
+
+        assert len(calls) == 1
+        assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
+        assert any("PP-OCRv5 page-line prepass complete: 1 lines" in event.message for event in progress_events)
+    finally:
+        os.unlink(img_path)
+
+    print("test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints PASSED")
 
 
 def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
@@ -9280,7 +9430,7 @@ def test_workflow_controller_hanwang_layout_stays_on_block_ocr_path():
         assert controller._proof_ocr_worker is None
         assert started == []
         assert controller._auto_start_ocr_after_layout is False
-        assert any("VL1.6 版面分析（汉王混合）中" in message for message in messages)
+        assert any("版面分析中" in message for message in messages)
         assert not any("PP-OCRv5" in message for message in messages)
     finally:
         workflow_module.get_config = original_get_config
@@ -9307,7 +9457,6 @@ def test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
             Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
         ])]
         page_pending = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
-        page_pending.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page_done, page_pending])
         controller._current_page_number = 1
@@ -9328,6 +9477,49 @@ def test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
         workflow_module.get_config = original_get_config
 
     print("test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page PASSED")
+
+
+def test_workflow_controller_hanwang_main_entry_starts_all_actionable_pages():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    original_get_config = workflow_module.get_config
+    workflow_module.get_config = lambda: {"mode": "hanwang"}
+    try:
+        page_done = Page(
+            image_path="/tmp/p1.png",
+            width=100,
+            height=100,
+            page_number=1,
+            status=PageStatus.OCR_DONE,
+        )
+        page_done.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
+            Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
+        ])]
+        page_ready_2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
+        page_ready_2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        page_ready_3 = Page(image_path="/tmp/p3.png", width=100, height=100, page_number=3)
+        page_ready_3.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 60, 50, 20))]
+        page_layout_pending = Page(image_path="/tmp/p4.png", width=100, height=100, page_number=4)
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(
+            name="Gate",
+            pages=[page_done, page_ready_2, page_ready_3, page_layout_pending],
+        )
+        controller._current_page_number = 1
+        started = []
+        controller.start_ocr = (
+            lambda pages, notify_page_callback=None, target_page_numbers=None:
+            started.append((pages, target_page_numbers)) or True
+        )
+
+        controller.handle_ocr_entry_requested("main_window", 1)
+
+        assert started == [([page_ready_2, page_ready_3], {2, 3})]
+    finally:
+        workflow_module.get_config = original_get_config
+
+    print("test_workflow_controller_hanwang_main_entry_starts_all_actionable_pages PASSED")
 
 
 def test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready():
@@ -9369,19 +9561,15 @@ def test_workflow_controller_hanwang_retries_ocr_error_page_from_main_entry():
         page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page])
-        messages = []
-        steps = []
-        focused = []
-        controller.status_message.connect(messages.append)
-        controller.step_requested.connect(steps.append)
-        controller.focus_page.connect(focused.append)
+        started = []
+        controller.start_ocr = (
+            lambda pages, notify_page_callback=None, target_page_numbers=None:
+            started.append((pages, target_page_numbers)) or True
+        )
 
         controller.handle_ocr_entry_requested("main_window", 1)
 
-        assert focused == [1]
-        assert steps == [workflow_module.STEP_LAYOUT]
-        assert messages[-1].startswith("当前页 OCR 失败，可重新进入 OCR")
-        assert messages[-1] != "全部已完成 OCR"
+        assert started == [([page], {1})]
     finally:
         workflow_module.get_config = original_get_config
 
@@ -9940,7 +10128,7 @@ def test_workflow_controller_ocr_done_does_not_force_hproof_step():
 
     assert STEP_HPROOF not in steps
     assert controller.can_enter_step(STEP_HPROOF)
-    assert any("校对已可进入" in message for message in messages)
+    assert any("可进入校对" in message for message in messages)
 
     print("test_workflow_controller_ocr_done_does_not_force_hproof_step PASSED")
 
@@ -10032,6 +10220,7 @@ def test_main_window_find_action_opens_layout_find_dialog():
         assert window._stack.currentWidget() is window._layout_panel
         assert not window._layout_panel._find_dialog.isHidden()
     finally:
+        window._controller._project = None
         window.close()
 
     print("test_main_window_find_action_opens_layout_find_dialog PASSED")
@@ -11366,7 +11555,7 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._layout_concurrency_spin.value() == 4
     assert dialog._layout_concurrency_spin.maximum() == 10
     assert dialog._ocr_page_concurrency_spin.value() == 3
-    assert dialog._ocr_page_concurrency_spin.maximum() == 4
+    assert dialog._ocr_page_concurrency_spin.maximum() == 20
     assert dialog._paddle_network_combo.currentData() == "direct"
 
     cfg.reset_to_defaults()
@@ -13175,6 +13364,82 @@ def test_vproof_merge_pages_preserves_current_page_text():
     print("test_vproof_merge_pages_preserves_current_page_text PASSED")
 
 
+def test_vproof_save_refreshes_current_page_index_incrementally():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line1 = Line(
+        text="甲",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page1 = Page(image_path="/tmp/vproof-incremental-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    line2 = Line(
+        text="乙",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="乙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page2 = Page(image_path="/tmp/vproof-incremental-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+
+    panel = VProofPanel()
+    panel.load_pages([page1, page2])
+
+    def fail_full_build(_pages):
+        raise AssertionError("VProof save should refresh the current page, not rebuild every page")
+
+    panel._char_svc.build = fail_full_build  # type: ignore[method-assign]
+    panel._text_edit.setPlainText("丙")
+
+    assert panel._save_page_text() is True
+    assert not panel._char_svc.query("甲")
+    assert panel._char_svc.query("丙")
+    assert panel._char_svc.query("乙")
+    panel.close()
+
+    print("test_vproof_save_refreshes_current_page_index_incrementally PASSED")
+
+
+def test_char_index_service_replace_pages_preserves_other_page_entries():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.services.char_index_service import CharIndexService
+
+    line1 = Line(
+        text="甲",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="甲", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page1 = Page(image_path="/tmp/char-index-replace-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    line2 = Line(
+        text="乙",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="乙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    page2 = Page(image_path="/tmp/char-index-replace-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+
+    service = CharIndexService(include_non_cjk=True, include_fallback=True).build([page1, page2])
+    line1.update_final_text("丙")
+    line1.chars = [
+        Char(char="丙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
+    ]
+
+    service.replace_pages([page1])
+
+    assert not service.query("甲")
+    assert service.query("丙")
+    assert service.query("乙")
+
+    print("test_char_index_service_replace_pages_preserves_other_page_entries PASSED")
+
+
 def test_vproof_indexes_latin_digits_and_punctuation():
     from PySide6.QtCore import Qt
 
@@ -13260,20 +13525,29 @@ def test_vproof_indexes_line_fallback_when_chars_are_missing():
     print("test_vproof_indexes_line_fallback_when_chars_are_missing PASSED")
 
 
-def test_top_nav_moves_layout_run_button_and_removes_prev_next():
-    from app.ui.main_window import TopNavBar
+def test_top_bar_hosts_workflow_steps_and_layout_run():
+    from app.controllers.workflow_controller import STEP_HPROOF, STEP_LAYOUT
+    from app.ui.widgets.top_bar import TopBar
 
     _get_qapp()
-    nav = TopNavBar()
+    nav = TopBar()
 
     assert not hasattr(nav, "_btn_prev")
     assert not hasattr(nav, "_btn_next")
-    assert nav._btn_run_layout.text() == "▶"
+    assert nav._btn_run_layout.text() == "▶ 运行版面分析"
+    assert [btn.text() for btn in nav._step_buttons] == ["版面分析", "横校", "纵校"]
+    nav.set_enabled_up_to(STEP_LAYOUT)
+    assert nav._step_buttons[0].isEnabled()
+    assert not nav._step_buttons[1].isEnabled()
+    nav.set_enabled_up_to(STEP_HPROOF)
+    assert nav._step_buttons[1].isEnabled()
+    nav.set_active(STEP_LAYOUT)
+    assert nav._step_buttons[0].isChecked()
     nav.set_layout_run_enabled(True)
     assert nav._btn_run_layout.isEnabled()
     nav.close()
 
-    print("test_top_nav_moves_layout_run_button_and_removes_prev_next PASSED")
+    print("test_top_bar_hosts_workflow_steps_and_layout_run PASSED")
 
 
 def test_vproof_gallery_uses_wrapping_white_grid():
@@ -14096,6 +14370,8 @@ if __name__ == "__main__":
     test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
     test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169()
     test_workflow_controller_layout_progress_signal()
+    test_workflow_controller_abstracts_internal_ocr_progress_messages()
+    test_workflow_controller_clamps_ocr_page_concurrency_to_page_count()
     test_main_window_layout_error_is_status_only()
     test_layout_panel_status_label_elides_long_errors()
     test_main_window_centered_resize_expands_from_current_center()
@@ -14173,6 +14449,7 @@ if __name__ == "__main__":
     test_workflow_controller_auto_chains_ocr_after_layout()
     test_workflow_controller_hanwang_layout_stays_on_block_ocr_path()
     test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
+    test_workflow_controller_hanwang_main_entry_starts_all_actionable_pages()
     test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready()
     test_workflow_controller_hanwang_retries_ocr_error_page_from_main_entry()
     test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page()
@@ -14243,7 +14520,9 @@ if __name__ == "__main__":
     test_hproof_merge_pages_preserves_active_editor_text()
     test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans()
     test_vproof_merge_pages_preserves_current_page_text()
-    test_top_nav_moves_layout_run_button_and_removes_prev_next()
+    test_vproof_save_refreshes_current_page_index_incrementally()
+    test_char_index_service_replace_pages_preserves_other_page_entries()
+    test_top_bar_hosts_workflow_steps_and_layout_run()
     test_vproof_gallery_uses_wrapping_white_grid()
     test_vproof_text_highlight_targets_single_entry()
     test_vproof_highlight_can_repeat_without_losing_state()

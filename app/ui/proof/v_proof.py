@@ -620,6 +620,7 @@ class VProofPanel(QWidget):
         # empty index.  Verified Hanwang/EngCut char boxes still win whenever
         # they are present.
         self._char_svc = CharIndexService(include_non_cjk=True, include_fallback=True)
+        self._char_index_page_signatures: dict[tuple[object, ...], tuple] = {}
         self._text_map: List[Tuple[Line, int, int, int]] = []
         self._entry_pos_by_key: dict[tuple[int, int], int] = {}
         self._gallery_model = _GalleryModel(self._cache)
@@ -1112,8 +1113,7 @@ class VProofPanel(QWidget):
     def load_pages(self, pages: List[Page]) -> None:
         self._pages = pages
         self._current_page_idx = 0
-        self._char_svc.build(pages)
-        self._rebuild_char_list()
+        self._rebuild_full_char_index(pages)
         if pages:
             self._load_page(0)
 
@@ -1128,8 +1128,7 @@ class VProofPanel(QWidget):
         self._current_page_idx = self._find_page_index(current_page)
         if self._pages:
             self._rebuild_text_lookup(self._pages[self._current_page_idx])
-        self._char_svc.build(pages)
-        self._rebuild_char_list()
+        self._refresh_char_index_for_changed_pages(pages)
         if len(selected_tokens) > 1:
             merged: list[CharEntry] = []
             for tok in selected_tokens:
@@ -1180,6 +1179,7 @@ class VProofPanel(QWidget):
     def reset(self) -> None:
         self._pages = []
         self._char_svc = CharIndexService(include_non_cjk=True, include_fallback=True)
+        self._char_index_page_signatures = {}
         self._char_list.clear()
         self._text_edit.clear()
         self._gallery_model.set_entries([])
@@ -1210,6 +1210,83 @@ class VProofPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, tok)
             self._char_list.addItem(item)
         self._char_list.blockSignals(False)
+
+    @staticmethod
+    def _bbox_signature(bbox: Optional[BBox]) -> tuple[int, int, int, int] | None:
+        if bbox is None:
+            return None
+        return int(bbox.x), int(bbox.y), int(bbox.w), int(bbox.h)
+
+    @staticmethod
+    def _char_index_page_key(page: Page) -> tuple[object, ...]:
+        return CharIndexService._page_key(page)
+
+    def _char_index_page_signature(self, page: Page) -> tuple:
+        parts: list[tuple] = [(
+            "page",
+            page.uid,
+            page.id,
+            page.page_number,
+            page.display_image_path,
+            page.width,
+            page.height,
+        )]
+        for block, line, line_idx in iter_unique_page_text_lines(page):
+            parts.append((
+                "line",
+                block.uid,
+                block.id,
+                block.order,
+                block.block_type.value,
+                line.uid,
+                line.id,
+                line_idx,
+                line.display_text,
+                self._bbox_signature(line.bbox),
+                tuple(line.review_flags),
+            ))
+            for char_idx, char in enumerate(line.chars):
+                parts.append((
+                    "char",
+                    char.uid,
+                    char_idx,
+                    char.char,
+                    self._bbox_signature(char.bbox),
+                    char.bbox_source,
+                    char.bbox_granularity,
+                    char.token_text,
+                    round(float(char.confidence), 6),
+                ))
+        return tuple(parts)
+
+    def _rebuild_full_char_index(self, pages: List[Page]) -> None:
+        self._char_svc.build(pages)
+        self._char_index_page_signatures = {
+            self._char_index_page_key(page): self._char_index_page_signature(page)
+            for page in pages
+        }
+        self._rebuild_char_list()
+
+    def _refresh_char_index_for_pages(self, pages: List[Page]) -> bool:
+        changed_pages: list[Page] = []
+        for page in pages:
+            key = self._char_index_page_key(page)
+            signature = self._char_index_page_signature(page)
+            if self._char_index_page_signatures.get(key) != signature:
+                changed_pages.append(page)
+                self._char_index_page_signatures[key] = signature
+        if not changed_pages:
+            return False
+        self._char_svc.replace_pages(changed_pages)
+        self._rebuild_char_list()
+        return True
+
+    def _refresh_char_index_for_changed_pages(self, pages: List[Page]) -> bool:
+        current_keys = {self._char_index_page_key(page) for page in pages}
+        if set(self._char_index_page_signatures) - current_keys:
+            self._rebuild_full_char_index(pages)
+            return True
+        return self._refresh_char_index_for_pages(pages)
 
     def _filter_char_list(self, text: str) -> None:
         for i in range(self._char_list.count()):
@@ -1937,12 +2014,9 @@ class VProofPanel(QWidget):
             出来还是旧"也"。
           - 任务 4：改"也"→"好"以后"也"的计数不变 —— 同样因为 _char_svc 没
             重建，频次是冻结的。
-        debounce 120ms 走这里一次：保存 → 重建 _char_svc → 重建 _char_list →
+        debounce 120ms 走这里一次：保存 → 刷新当前页索引 → 重建 _char_list →
         恢复用户视角（之前选中的字 / gallery 行）。
-
-        诚实交代：走的是和 _do_external_refresh 同样的全量重建
-        (_char_svc.build(all pages))，没改成增量；超大工程上单次会有几百
-        ms 卡顿。本轮不动这一层。"""
+        """
         if not self._pages:
             return
         if self._text_edit.toPlainText() == self._loaded_text:
@@ -1955,13 +2029,9 @@ class VProofPanel(QWidget):
             else 0
         )
         prev_entry = self._current_candidate_entry
-        # 1) 落盘
+        # 1) 落盘；_save_page_text 内部会按当前页增量刷新字索引
         self._save_page_text()
-        # 2) 重建字索引
-        self._char_svc.build(self._pages)
-        # 3) 重建左侧字列表
-        self._rebuild_char_list()
-        # 4) 恢复字列表选中
+        # 2) 恢复字列表选中
         target_char = prev_char
         if prev_char:
             still_there = any(
@@ -1981,7 +2051,7 @@ class VProofPanel(QWidget):
                     self._char_list.blockSignals(False)
                     self._on_char_clicked(it)
                     break
-        # 5) 恢复 gallery 当前位置
+        # 3) 恢复 gallery 当前位置
         new_count = self._gallery_model.rowCount()
         if new_count > 0:
             row = max(0, min(prev_row, new_count - 1))
@@ -2213,9 +2283,9 @@ class VProofPanel(QWidget):
             self._status_lbl.setText("\u25cf \u672a\u4fdd\u5b58")
             self._status_lbl.setStyleSheet("color: #FF9800; font-size: 12px;")
 
-    def _save_page_text(self) -> None:
+    def _save_page_text(self) -> bool:
         if not self._pages:
-            return
+            return False
         page = self._pages[self._current_page_idx]
         flat = self._text_edit.toPlainText()
         lines_text = flat.split("\n")
@@ -2254,8 +2324,7 @@ class VProofPanel(QWidget):
         # 也避免在保存后强制 setPlainText 把光标位置打断。
         self._loaded_text = self._text_edit.toPlainText()
         if changed:
-            self._char_svc.build(self._pages)
-            self._rebuild_char_list()
+            self._refresh_char_index_for_pages([page])
         # Round 18：以文本为锚的最终兜底——保存之后扫一遍所有 probe，
         # 任何"final_text 不再持有 true_char"的位置都标 corrected 并广播。
         try:
@@ -2263,6 +2332,7 @@ class VProofPanel(QWidget):
             qp.detect_corrections(qp.get_active_store(), self._pages)
         except Exception:
             pass
+        return changed
 
     # Round 17：页级 OK 标记已删除（不属于纵校语义）。
 
@@ -2311,17 +2381,16 @@ class VProofPanel(QWidget):
         ``line.proof_changed``。每条进到这里都会做一次：
           (1) _save_page_text 把 V 侧本地 _text_edit 落盘；
           (2) _load_page 重建当前页文本 + viewer 图像；
-          (3) _char_svc.build(self._pages) —— 扫全部 page 重建字索引；
-          (4) _rebuild_char_list —— 整个 QListWidget 重建。
+          (3) 刷新当前页字符索引；
+          (4) 按需重建 QListWidget。
         N 行 × O(全工程字数) 的同步重建，主线程被占满，从外面看就是"卡死/无
         响应"。
 
         本轮做的是把这串重建动作 debounce 到 QTimer 单次延后：bus 收到 N 条
         事件只会把 line.id 累到 pending set 里 + 重启 80ms timer；timer 到点
         触发 _do_external_refresh，把"是否还要重建"做一次判断后只跑一次。这
-        样 N → 1。仍然是 best-effort 缓解，不是从根上让 char_svc.build 变成
-        增量；如果工程很大，单次重建本身仍会卡 ~几百毫秒，但不会再被 N 倍放
-        大。
+        样 N → 1。字符索引刷新也只覆盖当前页，避免多页项目在横纵联动时
+        反复扫全书。
         """
         request = ProofUpdateRequest.from_legacy(event, **kwargs)
         if request.origin == id(self):
@@ -2360,8 +2429,7 @@ class VProofPanel(QWidget):
         if self._text_edit.toPlainText() != self._loaded_text:
             self._save_page_text()
         self._load_page(self._current_page_idx)
-        self._char_svc.build(self._pages)
-        self._rebuild_char_list()
+        self._refresh_char_index_for_pages([self._pages[self._current_page_idx]])
 
     def refresh_quality_probe_state(self) -> None:
         """供 main_window 进入纵校步骤时调用：当前页若已加载，重新渲染让显示

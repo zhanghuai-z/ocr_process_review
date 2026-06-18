@@ -139,3 +139,38 @@ def test_native_cache_write_json_is_fail_open_when_cache_dir_is_unwritable(tmp_p
     monkeypatch.setenv("HANWANG_NATIVE_CACHE_DIR", str(blocked))
 
     native_cache.write_json("linecut_segimg", "cache-key", {"ok": True})
+
+
+def test_native_cache_runtime_dir_and_clear_cache(tmp_path, monkeypatch):
+    from app.engines.hanwang import native_cache
+
+    monkeypatch.delenv("HANWANG_NATIVE_CACHE_DIR", raising=False)
+    runtime_dir = tmp_path / "project" / ".cache" / "hanwang_native"
+    try:
+        native_cache.set_runtime_cache_dir(runtime_dir)
+
+        assert native_cache.cache_dir() == runtime_dir
+        native_cache.write_json("linecut_segimg", "cache-key", {"ok": True})
+        assert native_cache.read_json("linecut_segimg", "cache-key") == {"ok": True}
+
+        cleared = native_cache.clear_cache()
+
+        assert cleared == runtime_dir
+        assert not runtime_dir.exists()
+        assert native_cache.read_json("linecut_segimg", "cache-key") is None
+    finally:
+        native_cache.reset_runtime_cache_dir()
+
+
+def test_native_cache_env_dir_overrides_runtime_dir(tmp_path, monkeypatch):
+    from app.engines.hanwang import native_cache
+
+    runtime_dir = tmp_path / "runtime-cache"
+    env_dir = tmp_path / "env-cache"
+    try:
+        native_cache.set_runtime_cache_dir(runtime_dir)
+        monkeypatch.setenv("HANWANG_NATIVE_CACHE_DIR", str(env_dir))
+
+        assert native_cache.cache_dir() == env_dir
+    finally:
+        native_cache.reset_runtime_cache_dir()

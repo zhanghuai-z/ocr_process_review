@@ -25,7 +25,9 @@ from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,
     should_dispatch_to_text_ocr,
 )
+from app.core.ocr_line_hints import is_ppocr_page_line_hint, mark_ppocr_page_line_hint
 from app.core.page_errors import is_ocr_error_message
+from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
 from app.core.proof_status import apply_auto_flag
 from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
@@ -37,7 +39,7 @@ from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 
 logger = get_logger(__name__)
-OCR_PAGE_CONCURRENCY_CAP = 4
+OCR_PAGE_CONCURRENCY_CAP = 20
 
 @dataclass
 class OcrProgress:
@@ -491,6 +493,8 @@ class OcrPipeline:
         page: Page,
         page_idx: int,
         engine: object | None = None,
+        *,
+        mark_page_line_hints: bool = False,
     ) -> None:
         """Run PP-OCRv5 once on the page, then assign each line to one layout block.
 
@@ -517,6 +521,9 @@ class OcrPipeline:
         )
         lines = ocr_engine.recognize(img, context)
         self._normalize_engine_lines(lines, seam, bbox_space)
+        if mark_page_line_hints:
+            for line in lines:
+                mark_ppocr_page_line_hint(line)
         self._assign_page_ocr_lines_to_blocks(page, lines)
 
     def _hybrid_page_ocr_prepass_engine(self) -> object:
@@ -534,11 +541,11 @@ class OcrPipeline:
     ) -> None:
         if self._has_reusable_page_line_hints(page):
             if progress_callback:
-                line_count = sum(len(block.lines) for block in page.blocks)
                 progress_callback(
                     0,
                     max(1, len(page.blocks)),
-                    f"PP-OCRv5 page-line prepass skipped: reused {line_count} existing lines",
+                    "PP-OCRv5 page-line prepass skipped: "
+                    f"{self._reusable_page_line_hint_summary(page)}",
                 )
         else:
             prepass_engine = self._hybrid_page_ocr_prepass_engine()
@@ -551,6 +558,7 @@ class OcrPipeline:
                 page,
                 page_idx,
                 engine=prepass_engine,
+                mark_page_line_hints=True,
             )
             if progress_callback:
                 line_count = sum(len(block.lines) for block in page.blocks)
@@ -564,16 +572,60 @@ class OcrPipeline:
         )
 
     def _has_reusable_page_line_hints(self, page: Page) -> bool:
-        """Return whether current text blocks already carry usable page-line boxes."""
+        """Return whether routing already has trusted PP-OCRv5 line geometry.
+
+        CharOCR/Hanwang result lines are not reusable as page-line hints: they
+        are produced after formula/table slicing and may be narrower than the
+        original PP-OCRv5 row. Reusing them would feed derived geometry back
+        into the next OCR run and can make formula regions affect text crops.
+        """
         text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
         if not text_blocks:
             return True
         for block in text_blocks:
             if bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY)):
                 return False
-            if not any(line.bbox is not None and line.bbox.area > 0 for line in block.lines):
-                return False
+            if self._has_cached_layout_line_routes(block):
+                continue
+            if self._has_marked_page_line_hints(block):
+                continue
+            return False
         return True
+
+    @staticmethod
+    def _has_cached_layout_line_routes(block: Block) -> bool:
+        for payload in (block.app_payload, block.raw_payload):
+            routes = payload.get(LAYOUT_LINE_ROUTES_FIELD) if isinstance(payload, dict) else None
+            if isinstance(routes, list) and routes:
+                return True
+        return False
+
+    @staticmethod
+    def _has_marked_page_line_hints(block: Block) -> bool:
+        return any(
+            line.bbox is not None
+            and line.bbox.area > 0
+            and is_ppocr_page_line_hint(line)
+            for line in block.lines
+        )
+
+    def _reusable_page_line_hint_summary(self, page: Page) -> str:
+        text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
+        route_blocks = sum(1 for block in text_blocks if self._has_cached_layout_line_routes(block))
+        marked_lines = sum(
+            1
+            for block in text_blocks
+            for line in block.lines
+            if line.bbox is not None
+            and line.bbox.area > 0
+            and is_ppocr_page_line_hint(line)
+        )
+        parts: list[str] = []
+        if route_blocks:
+            parts.append(f"reused cached layout routes for {route_blocks} blocks")
+        if marked_lines:
+            parts.append(f"reused {marked_lines} PP-OCRv5 line hints")
+        return "; ".join(parts) if parts else "reused trusted line geometry"
 
     def _normalize_engine_lines(
         self,

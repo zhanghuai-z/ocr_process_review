@@ -107,6 +107,17 @@ def test_cache_dir_uses_db_path_parent(ctrl, tmp_path):
     assert ctrl.cache_dir == tmp_path / ".cache"
 
 
+def test_transient_project_binds_charocr_cache_to_project_cache(ctrl, monkeypatch):
+    from app.engines.hanwang import native_cache
+
+    monkeypatch.delenv("HANWANG_NATIVE_CACHE_DIR", raising=False)
+    ctrl.ensure_transient_project("demo")
+
+    assert ctrl.charocr_cache_dir == ctrl.cache_dir / "hanwang_native"
+    assert native_cache.cache_dir() == ctrl.charocr_cache_dir
+    assert ctrl.active_charocr_cache_dir == ctrl.charocr_cache_dir
+
+
 def test_has_any_ocr_result_matches_project_property(ctrl):
     p1 = _page(1, [_block([_line()])])
     ctrl._project = OcrProject(name="t", pages=[p1])

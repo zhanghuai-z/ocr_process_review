@@ -9,10 +9,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 from typing import Optional
 
 import numpy as np
@@ -44,10 +48,22 @@ class _ProbeRun:
 def _run_exe(exe: Path, args: list[str], *, cwd: Path, timeout: float) -> _ProbeRun:
     """同步运行 probe.exe，返回标准输出/错误。"""
     cmd = [str(exe), *args]
+    env = os.environ.copy()
+    env["PATH"] = str(cwd) + os.pathsep + env.get("PATH", "")
+    creationflags = 0
+    startupinfo = None
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(cwd),
+            env=env,
+            creationflags=creationflags,
+            startupinfo=startupinfo,
             capture_output=True,
             timeout=timeout,
             # probe 内部用 GBK 输出错误信息（中文乱码可读性差，但不影响 returncode 判断）
@@ -61,6 +77,30 @@ def _run_exe(exe: Path, args: list[str], *, cwd: Path, timeout: float) -> _Probe
     stderr = proc.stderr.decode("gbk", errors="replace") if proc.stderr else ""
     stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
     return _ProbeRun(stdout=stdout, stderr=stderr, returncode=proc.returncode)
+
+
+def _probe_work_base() -> Path:
+    configured = os.environ.get("HANWANG_NATIVE_WORK_DIR", "").strip()
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / "ocr_process_hanwang_native"
+
+
+@contextmanager
+def _probe_work_dir() -> Iterator[Path]:
+    """Create a writable per-call work dir for probe input/output files.
+
+    PyInstaller puts bundled data under ``_internal`` / ``_MEIPASS``. Treat that
+    location as read-only: it is for native assets only, not temporary OCR files.
+    """
+    try:
+        base = _probe_work_base()
+        base.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="probe_", dir=str(base)) as tmp:
+            yield Path(tmp)
+    except OSError:
+        with tempfile.TemporaryDirectory(prefix="ocr_hw_") as tmp:
+            yield Path(tmp)
 
 
 def _save_temp_image(image_bgr: np.ndarray, work_dir: Path) -> Path:
@@ -82,12 +122,12 @@ def run_docseg(image_bgr: np.ndarray, *, timeout: float = 60.0) -> dict:
     """
     bin_dir = get_hanwang_bin_dir()
     exe = bin_dir / "docseg_probe.exe"
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.docseg.json"
-    try:
+    with _probe_work_dir() as work_dir:
+        img_path = _save_temp_image(image_bgr, work_dir)
+        out_path = work_dir / f"{img_path.stem}.docseg.json"
         run = _run_exe(
             exe,
-            [img_path.name, out_path.name],
+            [str(img_path), str(out_path)],
             cwd=bin_dir,
             timeout=timeout,
         )
@@ -96,12 +136,6 @@ def run_docseg(image_bgr: np.ndarray, *, timeout: float = 60.0) -> dict:
                 f"docseg_probe 失败 (rc={run.returncode}): {run.stderr.strip() or run.stdout.strip()}"
             )
         return json.loads(out_path.read_text(encoding="utf-8"))
-    finally:
-        for p in (img_path, out_path):
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def run_linecut_segimg(
@@ -141,17 +175,17 @@ def run_linecut_segimg(
     if cached is not None:
         return cached
 
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.segimg.json"
-    rb_path = bin_dir / f"{img_path.stem}.segrb.tsv"
-    rb_path.write_text(
-        "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in recblocks_xyxy) + "\n",
-        encoding="utf-8",
-    )
-    try:
+    with _probe_work_dir() as work_dir:
+        img_path = _save_temp_image(image_bgr, work_dir)
+        out_path = work_dir / f"{img_path.stem}.segimg.json"
+        rb_path = work_dir / f"{img_path.stem}.segrb.tsv"
+        rb_path.write_text(
+            "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in recblocks_xyxy) + "\n",
+            encoding="utf-8",
+        )
         run = _run_exe(
             exe,
-            [img_path.name, out_path.name, rb_path.name],
+            [str(img_path), str(out_path), str(rb_path)],
             cwd=bin_dir,
             timeout=timeout,
         )
@@ -163,12 +197,6 @@ def run_linecut_segimg(
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         native_cache.write_json("linecut_segimg", cache_key, payload)
         return payload
-    finally:
-        for p in (img_path, out_path, rb_path):
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def run_linecut_recog(
@@ -240,18 +268,18 @@ def run_linecut_recog(
     if cached is not None:
         return cached
 
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.linecut.json"
-    rb_path = bin_dir / f"{img_path.stem}.rb.tsv"
-    rb_path.write_text(
-        "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in normalized_recblocks) + "\n",
-        encoding="utf-8",
-    )
-    args[0] = img_path.name
-    args[1] = out_path.name
-    args[2] = rb_path.name
+    with _probe_work_dir() as work_dir:
+        img_path = _save_temp_image(image_bgr, work_dir)
+        out_path = work_dir / f"{img_path.stem}.linecut.json"
+        rb_path = work_dir / f"{img_path.stem}.rb.tsv"
+        rb_path.write_text(
+            "\n".join(f"{l}\t{t}\t{r}\t{b}" for (l, t, r, b) in normalized_recblocks) + "\n",
+            encoding="utf-8",
+        )
+        args[0] = str(img_path)
+        args[1] = str(out_path)
+        args[2] = str(rb_path)
 
-    try:
         run = _run_exe(exe, args, cwd=bin_dir, timeout=timeout)
         if run.returncode != 0 or not out_path.is_file():
             raise HanwangNativeError(
@@ -261,12 +289,6 @@ def run_linecut_recog(
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         native_cache.write_json("linecut_recog", cache_key, payload)
         return payload
-    finally:
-        for p in (img_path, out_path, rb_path):
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def run_eng20_recogline(
@@ -306,14 +328,14 @@ def run_eng20_recogline(
     if cached is not None:
         return cached
 
-    img_path = _save_temp_image(image_bgr, bin_dir)
-    out_path = bin_dir / f"{img_path.stem}.eng20.json"
-    try:
+    with _probe_work_dir() as work_dir:
+        img_path = _save_temp_image(image_bgr, work_dir)
+        out_path = work_dir / f"{img_path.stem}.eng20.json"
         run = _run_exe(
             exe,
             [
-                img_path.name,
-                out_path.name,
+                str(img_path),
+                str(out_path),
                 "__missing_rb.tsv",
                 "recogline_engstr",
                 "packed",
@@ -330,9 +352,3 @@ def run_eng20_recogline(
         payload = json.loads(out_path.read_text(encoding="utf-8"))
         native_cache.write_json("eng20_recogline", cache_key, payload)
         return payload
-    finally:
-        for p in (img_path, out_path):
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass

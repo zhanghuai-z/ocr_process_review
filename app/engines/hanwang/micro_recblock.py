@@ -10,6 +10,7 @@ import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY, split_legacy_raw_payload
+from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
 from app.core.latin_span_recovery import (
     LATIN_ENGCUT_BBOX_GRANULARITY,
@@ -2551,7 +2552,9 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
         line
         for block in page.blocks
         for line in block.lines
-        if line.bbox is not None and line.bbox.area > 0
+        if line.bbox is not None
+        and line.bbox.area > 0
+        and is_ppocr_page_line_hint(line)
     ]
 
 

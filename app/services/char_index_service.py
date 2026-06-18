@@ -214,6 +214,62 @@ class CharIndexService:
     def build_index(self, project: OcrProject) -> "CharIndexService":
         return self.build(project.pages)
 
+    @staticmethod
+    def _page_key(page: Page) -> Tuple[object, ...]:
+        if page.uid:
+            return ("uid", page.uid)
+        if page.id is not None:
+            return ("id", page.id)
+        return ("path", page.display_image_path, page.page_number)
+
+    @staticmethod
+    def _entry_page_key(entry: CharEntry) -> Tuple[object, ...]:
+        if entry.page_uid:
+            return ("uid", entry.page_uid)
+        if entry.page_id is not None:
+            return ("id", entry.page_id)
+        return ("path", entry.page_path, entry.page_number)
+
+    def replace_pages(self, pages: List[Page]) -> "CharIndexService":
+        """Rebuild index entries only for the given pages.
+
+        VProof edits usually affect one page at a time. Rebuilding the whole
+        book on every local edit scales poorly, so this method removes stale
+        entries for the changed pages and merges freshly built page-local
+        entries back into the existing full-project index.
+        """
+        if not pages:
+            return self
+
+        page_keys = {self._page_key(page) for page in pages}
+        for glyph in list(self._index.keys()):
+            kept: List[CharEntry] = []
+            removed_count = 0
+            for entry in self._index[glyph]:
+                if self._entry_page_key(entry) in page_keys:
+                    removed_count += 1
+                else:
+                    kept.append(entry)
+            if removed_count:
+                self._freq[glyph] -= removed_count
+                if self._freq[glyph] <= 0:
+                    self._freq.pop(glyph, None)
+            if kept:
+                self._index[glyph] = kept
+            else:
+                self._index.pop(glyph, None)
+
+        page_service = CharIndexService(
+            include_fallback=self._include_fallback,
+            include_non_cjk=self._include_non_cjk,
+        ).build(pages)
+        for glyph, entries in page_service._index.items():
+            self._index.setdefault(glyph, []).extend(entries)
+            self._freq[glyph] += len(entries)
+        for entries in self._index.values():
+            entries.sort(key=lambda entry: entry._entry_sort_key)
+        return self
+
     def _index_line(
         self,
         *,

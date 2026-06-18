@@ -1,9 +1,9 @@
-"""主窗口：步骤导航栏 + QStackedWidget + 全局工作流控制。
+"""主窗口：顶部流程条 + QStackedWidget + 全局工作流控制。
 
 核心变更：
 - 业务逻辑委托给 WorkflowController
 - UI 只发出用户意图，不直接管理项目状态
-- 步骤按钮根据 controller 状态启用
+- 顶部流程按钮根据 controller 状态启用
 - OCR 完成事件与"进入校对"导航意图严格分离
 """
 from __future__ import annotations
@@ -14,8 +14,7 @@ from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QStackedWidget,
-    QStatusBar, QVBoxLayout, QWidget, QFrame,
+    QMessageBox, QProgressBar, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
 from app.controllers.workflow_controller import (
@@ -31,20 +30,9 @@ from app.ui.recognize.layout_panel import LayoutPanel
 from app.ui.proof.h_proof import HProofPanel
 from app.ui.proof.v_proof import VProofPanel
 from app.ui.export.export_dialog import ExportDialog
-from app.ui.widgets.nav_rail import NavRail
 from app.ui.widgets.top_bar import TopBar
 
 logger = get_logger(__name__)
-
-
-# ── 步骤导航按钮 ───────────────────────────────────────────────
-class StepButton(QPushButton):
-    def __init__(self, label: str, step: int, parent=None):
-        super().__init__(label, parent)
-        self.step = step
-        self.setObjectName("stepBtn")
-        self.setCheckable(True)
-        self.setMinimumHeight(32)
 
 
 # ── OCR 状态栏进度 ──────────────────────────────────────────────
@@ -91,13 +79,6 @@ class _OcrProgressWidget(QWidget):
             self.show()
 
 
-# (label, target_step, active_on_steps)  — 导入页不在导航栏内
-_NAV_ITEMS = [
-    ("①  版面分析",  STEP_LAYOUT, frozenset({STEP_LAYOUT, STEP_OCR})),
-    ("②  横向校对",  STEP_HPROOF, frozenset({STEP_HPROOF})),
-    ("③  纵向校对",  STEP_VPROOF, frozenset({STEP_VPROOF})),
-]
-
 # TopBar 面包屑用的步骤名（不含 ①②③ 前缀）
 _STEP_BREADCRUMB = {
     STEP_IMPORT: "导入",
@@ -106,77 +87,6 @@ _STEP_BREADCRUMB = {
     STEP_HPROOF: "横向校对",
     STEP_VPROOF: "纵向校对",
 }
-
-
-class TopNavBar(QWidget):
-    """顶部水平导航：步骤按钮 + 版面分析启动 + 项目名 + 导出按钮。"""
-    step_clicked   = Signal(int)
-    layout_run_clicked = Signal()
-    export_clicked = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("headerBar")
-        self.setFixedHeight(46)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 12, 0)
-        layout.setSpacing(4)
-
-        # 品牌 logo
-        brand = QLabel("OCR 后处理")
-        brand.setStyleSheet(
-            "color:#1a73e8; font-size:14px; font-weight:bold; margin-right:8px;"
-        )
-        layout.addWidget(brand)
-
-        # 步骤按钮
-        self._buttons: List[StepButton] = []
-        for label, target_step, _active in _NAV_ITEMS:
-            btn = StepButton(label, target_step)
-            btn.setMinimumWidth(100)
-            btn.clicked.connect(lambda _, s=target_step: self.step_clicked.emit(s))
-            self._buttons.append(btn)
-            layout.addWidget(btn)
-
-        self._btn_run_layout = QPushButton("▶")
-        self._btn_run_layout.setToolTip("运行版面分析")
-        self._btn_run_layout.setFixedSize(34, 30)
-        self._btn_run_layout.setEnabled(False)
-        self._btn_run_layout.setStyleSheet(
-            "QPushButton { background:#22c55e; color:white; border:0; border-radius:4px; "
-            "font-size:16px; font-weight:bold; }"
-            "QPushButton:disabled { background:#b8dec5; color:#f3fff6; }"
-        )
-        self._btn_run_layout.clicked.connect(self.layout_run_clicked)
-        layout.addWidget(self._btn_run_layout)
-
-        layout.addStretch()
-
-        # 项目名
-        self._project_lbl = QLabel("（无项目）")
-        self._project_lbl.setStyleSheet("color:#555; font-size:13px; margin-right:8px;")
-        layout.addWidget(self._project_lbl)
-
-        # 导出按钮
-        self._btn_export = QPushButton("⤓ 导出")
-        self._btn_export.setObjectName("ghostBtn")
-        self._btn_export.clicked.connect(self.export_clicked)
-        layout.addWidget(self._btn_export)
-
-    def set_active(self, step: int) -> None:
-        for i, (_, _, active_set) in enumerate(_NAV_ITEMS):
-            self._buttons[i].setChecked(step in active_set)
-
-    def set_enabled_up_to(self, max_step: int) -> None:
-        for i, (_, target_step, _) in enumerate(_NAV_ITEMS):
-            self._buttons[i].setEnabled(target_step <= max_step)
-
-    def set_layout_run_enabled(self, enabled: bool) -> None:
-        self._btn_run_layout.setEnabled(enabled)
-
-    def set_project_name(self, name: str) -> None:
-        self._project_lbl.setText(name)
 
 
 class _CurrentPageStack(QStackedWidget):
@@ -233,7 +143,7 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._connect_signals()
-        self._nav_rail.set_enabled_up_to(self._controller.max_step)
+        self._top_bar.set_enabled_up_to(self._controller.max_step)
         self._go_to_step(STEP_IMPORT)
         self._resize_for_initial_import_page()
 
@@ -267,6 +177,9 @@ class MainWindow(QMainWindow):
         self._workbench_initial_resize_done = True
 
     def _set_centered_window_size(self, target_w: int, target_h: int) -> None:
+        min_hint = self.minimumSizeHint()
+        target_w = max(target_w, min_hint.width())
+        target_h = max(target_h, min_hint.height())
         geometry = self.geometry()
         frame = self.frameGeometry()
         center = frame.center()
@@ -308,28 +221,17 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
 
-        # 根布局：左 NavRail | 右（TopBar / Stack）
-        outer = QHBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        # 根布局：TopBar / Stack。步骤入口统一收在顶部。
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 左：竖向导航栏
-        self._nav_rail = NavRail()
-        self._nav_rail.step_clicked.connect(self._on_step_clicked)
-        self._nav_rail.settings_clicked.connect(self._show_ocr_settings)
-        outer.addWidget(self._nav_rail)
-
-        # 右：内容列
-        right_col = QWidget()
-        right_v = QVBoxLayout(right_col)
-        right_v.setContentsMargins(0, 0, 0, 0)
-        right_v.setSpacing(0)
-
-        # 顶部 TopBar（项目名 + 运行 + 导出）
+        # 顶部 TopBar（项目名 + 流程入口 + 运行 + 导出）
         self._top_bar = TopBar()
+        self._top_bar.step_clicked.connect(self._on_step_clicked)
         self._top_bar.layout_run_clicked.connect(self._start_layout_analysis)
         self._top_bar.export_clicked.connect(self._show_export_dialog)
-        right_v.addWidget(self._top_bar)
+        root.addWidget(self._top_bar)
 
         # 中：QStackedWidget
         self._stack = _CurrentPageStack()
@@ -353,9 +255,7 @@ class MainWindow(QMainWindow):
             STEP_VPROOF: self._vproof_panel,
         }
 
-        right_v.addWidget(self._stack, 1)
-
-        outer.addWidget(right_col, 1)
+        root.addWidget(self._stack, 1)
 
         # 状态栏
         self._status_bar = QStatusBar()
@@ -402,16 +302,14 @@ class MainWindow(QMainWindow):
         menu = self.menuBar()
 
         file_m = menu.addMenu("文件(&F)")
-        act_new  = QAction("新建项目(&N)", self)
         act_open = QAction("打开项目(&O)…", self)
         act_save = QAction("保存项目(&S)", self)
         act_close_project = QAction("关闭项目(&W)", self)
         act_close_project.setShortcut(QKeySequence("Ctrl+W"))
-        act_new.triggered.connect(self._new_project)
         act_open.triggered.connect(self._open_project)
         act_save.triggered.connect(self._save_project)
         act_close_project.triggered.connect(self._close_project)
-        for a in (act_new, act_open, act_save, None, act_close_project):
+        for a in (act_open, act_save, None, act_close_project):
             if a is None:
                 file_m.addSeparator()
             else:
@@ -432,6 +330,9 @@ class MainWindow(QMainWindow):
         act_ocr_cfg = QAction("OCR 引擎设置…", self)
         act_ocr_cfg.triggered.connect(self._show_ocr_settings)
         settings_m.addAction(act_ocr_cfg)
+        act_clear_charocr_cache = QAction("清空 CharOCR 缓存", self)
+        act_clear_charocr_cache.triggered.connect(self._clear_charocr_cache)
+        settings_m.addAction(act_clear_charocr_cache)
         # Phase 11：原 h_proof 工具栏「评测开关 + 报告」入口迁移到这里。
         act_quality_stats = QAction("正确率统计…", self)
         act_quality_stats.triggered.connect(self._show_quality_stats)
@@ -497,22 +398,24 @@ class MainWindow(QMainWindow):
         """controller.current_step_changed → 同步 stack 和顶部栏激活态。"""
         widget = self._stack_widget_by_step.get(step, self._layout_panel)
         self._stack.setCurrentWidget(widget)
-        self._nav_rail.set_active(step)
+        self._top_bar.set_active(step)
         self._top_bar.set_step_name(_STEP_BREADCRUMB.get(step, ""))
         if step != STEP_IMPORT:
             self._resize_for_initial_workbench_page()
 
     def _on_current_page_number_changed(self, page_number: int) -> None:
-        """controller.current_page_number_changed → 同步两个相关面板。"""
-        # h_proof / layout 都需要知道当前页（v_proof 用自己的 gallery 选择）
-        self._hproof_panel.set_current_page_number(page_number)
-        self._layout_panel.set_current_page_number(page_number)
+        """controller.current_page_number_changed → 只同步当前可见重面板。"""
+        step = self._controller.current_step
+        if step == STEP_HPROOF:
+            self._hproof_panel.set_current_page_number(page_number)
+        elif step in (STEP_LAYOUT, STEP_OCR):
+            self._layout_panel.set_current_page_number(page_number)
 
     def _on_workflow_view_state_changed(self, state: WorkflowViewState) -> None:
         """controller WorkflowViewState → 同步 workflow 相关 UI。"""
         prev = self._last_workflow_view_state
         if prev is None or prev.max_step != state.max_step:
-            self._nav_rail.set_enabled_up_to(state.max_step)
+            self._top_bar.set_enabled_up_to(state.max_step)
         if prev is None or prev.current_step != state.current_step:
             self._on_current_step_changed(state.current_step)
         if prev is None or prev.current_page_number != state.current_page_number:
@@ -616,20 +519,6 @@ class MainWindow(QMainWindow):
 
     # ── 文件操作 ───────────────────────────────────────────────
 
-    def _new_project(self) -> None:
-        name, ok = self._prompt_project_name()
-        if not ok:
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存项目文件", f"{name}.ocrproj", "OCR 项目 (*.ocrproj)"
-        )
-        if not path:
-            return
-        if self._controller.new_project(name, path):
-            self._controller.reset_proof_sync_state()
-            self._go_to_step(STEP_IMPORT)
-            self._import_panel.reset()
-
     def _open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "打开项目文件", "", "OCR 项目 (*.ocrproj)"
@@ -651,9 +540,24 @@ class MainWindow(QMainWindow):
 
     def _save_project(self) -> None:
         if not self._controller.project:
-            QMessageBox.information(self, "提示", "当前无项目，请先新建或打开项目")
+            QMessageBox.information(self, "提示", "当前无项目，请先导入或打开项目")
+            return
+        if not self._controller.store:
+            self._save_project_as()
             return
         self._controller.save_project()
+
+    def _save_project_as(self) -> bool:
+        project = self._controller.project
+        if not project:
+            return False
+        default_name = f"{project.name or '未命名项目'}.ocrproj"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存项目文件", default_name, "OCR 项目 (*.ocrproj)"
+        )
+        if not path:
+            return False
+        return self._controller.save_project_as(path)
 
     def _confirm_close_project_save(self) -> bool:
         if not self._controller.project:
@@ -779,6 +683,7 @@ class MainWindow(QMainWindow):
         self._controller.set_layout_run_enabled(False)
         self._layout_panel.start_analysis_progress(len(self._controller.pages))
         self._top_bar.set_status("running", "运行中…")
+        QApplication.processEvents()
         if not self._controller.start_layout_analysis(self._controller.pages):
             self._layout_panel.finish_analysis_progress("版面分析未启动")
             self._layout_panel.run_button.setEnabled(True)
@@ -798,7 +703,8 @@ class MainWindow(QMainWindow):
         self._ocr_placeholder.reset()
         self._last_proof_sync_completed_pages = 0
         self._go_to_step(STEP_OCR)
-        self._status_bar.showMessage("正在 OCR 识别…")
+        self._status_bar.showMessage("正在文字识别…")
+        QApplication.processEvents()
         self._controller.start_ocr(pages, notify_page_callback=self._ocr_placeholder.update_progress)
 
     # ── 导出 ────────────────────────────────────────────────────
@@ -830,14 +736,47 @@ class MainWindow(QMainWindow):
 
     # ── 辅助 ───────────────────────────────────────────────────
 
-    def _prompt_project_name(self) -> tuple[str, bool]:
-        from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self, "新建项目", "项目名称：", text="新项目")
-        return name.strip() or "新项目", ok
-
     def closeEvent(self, event) -> None:
+        if self._controller.has_running_workers() or self._import_worker_is_running():
+            QMessageBox.warning(self, "关闭程序", "后台任务仍在运行，请等待完成后再关闭。")
+            event.ignore()
+            return
+        if self._controller.project:
+            if self._controller.store:
+                self._controller.save_project()
+            else:
+                result = QMessageBox.question(
+                    self,
+                    "保存项目",
+                    "当前项目尚未保存。退出前是否保存？",
+                    (
+                        QMessageBox.StandardButton.Save
+                        | QMessageBox.StandardButton.Discard
+                        | QMessageBox.StandardButton.Cancel
+                    ),
+                    QMessageBox.StandardButton.Save,
+                )
+                if result == QMessageBox.StandardButton.Cancel:
+                    event.ignore()
+                    return
+                if result == QMessageBox.StandardButton.Save and not self._save_project_as():
+                    event.ignore()
+                    return
         self._controller.close()
         super().closeEvent(event)
+
+    def _clear_charocr_cache(self) -> None:
+        path = self._controller.active_charocr_cache_dir
+        if QMessageBox.question(
+            self,
+            "清空 CharOCR 缓存",
+            f"将删除当前项目的 CharOCR 原生识别缓存：\n{path}\n\n继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        cleared = self._controller.clear_charocr_cache()
+        self._status_bar.showMessage(f"CharOCR 缓存已清空：{cleared}", 5000)
 
     def _show_quality_stats(self) -> None:
         """打开『正确率统计』对话框。

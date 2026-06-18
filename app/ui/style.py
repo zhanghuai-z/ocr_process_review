@@ -14,7 +14,7 @@
 - "noteLabel"     —— 注释/小字
 - "primaryBtn"    —— 主操作按钮（蓝底白字）
 - "ghostBtn"      —— 浅蓝 outlined 次要按钮
-- "stepBtn"       —— 顶部 / 侧栏步骤按钮（checked = 蓝）
+- "workflowStepBtn" —— 顶部流程步骤按钮（checked = 蓝）
 - "headerBar"     —— 顶部标题栏
 - "sidebarBar"    —— 左侧导航栏
 - "toolbar"       —— 面板内工具栏
@@ -82,20 +82,34 @@ QWidget#toolbar {
     background: #ffffff;
     border-bottom: 1px solid #e3e8ef;
 }
-
-/* ---------- 步骤 / 导航按钮 ---------- */
-QPushButton#stepBtn {
+QFrame#workflowSegment {
+    background: #f3f6fb;
+    border: 1px solid #e3e8ef;
+    border-radius: 19px;
+}
+QFrame#topBarLeft,
+QFrame#topBarActions {
+    background: transparent;
     border: none;
-    border-radius: 6px;
-    padding: 8px 14px;
+}
+
+/* ---------- 顶部流程按钮 ---------- */
+QPushButton#workflowStepBtn {
+    border: 1px solid transparent;
+    border-radius: 15px;
+    padding: 4px 10px;
     color: #555;
     background: transparent;
-    text-align: left;
     font-size: 13px;
 }
-QPushButton#stepBtn:hover { background: #f0f6ff; color: #1a73e8; }
-QPushButton#stepBtn:checked { background: #e3f0ff; color: #1a73e8; font-weight: bold; }
-QPushButton#stepBtn:disabled { color: #ccc; }
+QPushButton#workflowStepBtn:hover { background: #f0f6ff; color: #1a73e8; }
+QPushButton#workflowStepBtn:checked {
+    background: #ffffff;
+    color: #1a73e8;
+    border: 1px solid #e3e8ef;
+    font-weight: bold;
+}
+QPushButton#workflowStepBtn:disabled { color: #ccc; }
 
 /* ---------- 输入控件 ---------- */
 QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {
@@ -287,7 +301,8 @@ QGraphicsView { background: #fafbfc; border: 1px solid #e3e8ef; border-radius: 6
 """
 
 
+from app.ui.styles import apply_theme
+
 def apply_light_theme(app) -> None:
     """在 QApplication 上应用全局浅色主题。"""
-    app.setStyle("Fusion")
-    app.setStyleSheet(LIGHT_QSS)
+    apply_theme(app, "light")

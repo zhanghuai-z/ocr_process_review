@@ -19,7 +19,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "api_layout_model_name": "",
     "api_model_profile": "",       # 历史配置字段；固定链路会按 endpoint 推断
     "layout_concurrency": 2,        # 远端版面分析 job 并发数；本地 Paddle 仍保持串行
-    "ocr_page_concurrency": 2,      # Hanwang/CharOCR 页级 OCR 并发；保守上限 4
+    "ocr_page_concurrency": 2,      # Hanwang/CharOCR 页级 OCR 并发；高性能机器可压力测试到 20
     "paddle_api_network_mode": "auto",  # "auto" | "env_proxy" | "direct"
 
     # LLM 预审
@@ -117,7 +117,7 @@ def get_config() -> dict[str, Any]:
         ocr_page_concurrency = int(cfg.get("ocr_page_concurrency", 2))
     except (TypeError, ValueError):
         ocr_page_concurrency = 2
-    ocr_page_concurrency = max(1, min(4, ocr_page_concurrency))
+    ocr_page_concurrency = max(1, min(20, ocr_page_concurrency))
     network_mode = str(cfg.get("paddle_api_network_mode", "auto") or "auto").strip().lower()
     if network_mode not in {"auto", "env_proxy", "direct"}:
         network_mode = "auto"

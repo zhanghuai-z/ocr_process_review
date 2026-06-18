@@ -29,7 +29,7 @@ from collections.abc import Iterator
 from typing import List, Optional, Tuple
 
 import cv2
-from PySide6.QtCore import Qt, QRect, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QRect, QTimer, Signal
 from PySide6.QtGui import (
     QColor, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
@@ -1876,7 +1876,14 @@ class HProofPanel(QWidget):
             TOPIC_LINE_PROOF_CHANGED, self._on_external_line_changed,
         )
         self.destroyed.connect(lambda *_: self._teardown_bus())
+        self.destroyed.connect(lambda *_: self._teardown_ui_filters())
+        self._app_tooltip_filter_installed = False
         self._build_ui()
+        self._suppress_hover_tooltips(self)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._app_tooltip_filter_installed = True
 
     def _teardown_bus(self) -> None:
         """Phase 18 blocker 3：释放 ProofStateBus 订阅。
@@ -1889,6 +1896,46 @@ class HProofPanel(QWidget):
             except Exception:
                 pass
             self._bus_unsub = None
+
+    def _teardown_ui_filters(self) -> None:
+        if not getattr(self, "_app_tooltip_filter_installed", False):
+            return
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
+        self._app_tooltip_filter_installed = False
+
+    def _suppress_hover_tooltips(self, widget: QWidget) -> None:
+        """Disable hover tooltip popups inside HProof.
+
+        Page switching rebuilds row widgets. Any tooltip attached to row/image/
+        editor children becomes a rapid stream of small hover popups, so HProof
+        treats hover tips as non-essential UI noise.
+        """
+        try:
+            widget.setToolTip("")
+            widget.installEventFilter(self)
+        except Exception:
+            pass
+        for child in widget.findChildren(QWidget):
+            try:
+                child.setToolTip("")
+                child.installEventFilter(self)
+            except Exception:
+                pass
+
+    def _is_own_tooltip_target(self, obj) -> bool:
+        if isinstance(obj, QWidget):
+            return obj is self or self.isAncestorOf(obj)
+        return self.isVisible()
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if event is not None and event.type() == QEvent.Type.ToolTip:
+            return self._is_own_tooltip_target(obj)
+        return super().eventFilter(obj, event)
 
     # ── UI 构建 ────────────────────────────────────────────────
 
@@ -2180,7 +2227,7 @@ class HProofPanel(QWidget):
 
     def set_current_page_number(self, page_number: int) -> None:
         """外部联动调用：把过滤器切换到指定页。"""
-        self._selected_page_number = int(page_number)
+        page_number = int(page_number)
         # 同步左侧目录视觉
         if hasattr(self, "_page_dir"):
             usable_numbers = [
@@ -2189,6 +2236,9 @@ class HProofPanel(QWidget):
             ]
             if page_number in usable_numbers:
                 self._page_dir.set_current_index(usable_numbers.index(page_number))
+        if self._selected_page_number == page_number:
+            return
+        self._selected_page_number = page_number
         self._render_pages(self._filtered_pages())
 
     def _on_page_dir_selected(self, dir_idx: int) -> None:
@@ -2280,6 +2330,7 @@ class HProofPanel(QWidget):
         pair.flag_req.connect(self._toggle_flag)
         pair.skip_req.connect(self._next)
         self._pairs.append(pair)
+        self._suppress_hover_tooltips(pair)
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
 
     def _debug_enabled(self) -> bool:
@@ -2594,7 +2645,7 @@ class HProofPanel(QWidget):
 
     def _load_visible_images(self) -> None:
         """加载当前视口附近行的图像。"""
-        if not self._pairs:
+        if not self._pairs or not self.isVisible():
             return
         vp = self._scroll.viewport()
         vp_top = self._scroll.verticalScrollBar().value()
