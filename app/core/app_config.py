@@ -18,7 +18,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "api_token": "",
     "api_layout_model_name": "",
     "api_model_profile": "",       # 历史配置字段；固定链路会按 endpoint 推断
-    "layout_concurrency": 2,        # 远端版面分析 job 并发数；本地 Paddle 仍保持串行
+    "layout_concurrency": 8,        # 远端版面分析 job 并发数；本地 Paddle 仍保持串行
     "ocr_page_concurrency": 2,      # Hanwang/CharOCR 页级 OCR 并发；高性能机器可压力测试到 20
     "paddle_api_network_mode": "auto",  # "auto" | "env_proxy" | "direct"
     "layout_debug_artifacts": False, # 开发调试时才写 Paddle raw json / overlay 图片
@@ -117,9 +117,9 @@ def get_config() -> dict[str, Any]:
 
     cfg = AppConfig.instance()
     try:
-        layout_concurrency = int(cfg.get("layout_concurrency", 2))
+        layout_concurrency = int(cfg.get("layout_concurrency", 8))
     except (TypeError, ValueError):
-        layout_concurrency = 2
+        layout_concurrency = 8
     try:
         ocr_page_concurrency = int(cfg.get("ocr_page_concurrency", 2))
     except (TypeError, ValueError):

@@ -11490,7 +11490,7 @@ def test_app_config_tracks_api_model_profile():
     defaults = get_config()
     assert defaults["mode"] == "local"
     assert defaults["api_model_profile"] == ""
-    assert defaults["layout_concurrency"] == 2
+    assert defaults["layout_concurrency"] == 8
     assert defaults["ocr_page_concurrency"] == 2
     assert defaults["paddle_api_network_mode"] == "auto"
     assert defaults["layout_debug_artifacts"] is False
