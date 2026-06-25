@@ -1542,6 +1542,51 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
     h.deleteLater()
 
 
+def test_hproof_formula_visual_uses_experimental_pixmap(monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    from app.experimental import formula_rendering
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
+
+    calls: list[tuple[str, int]] = []
+
+    def fake_render_formula_pixmap(text: str, *, target_height: int, **_kwargs):
+        calls.append((text, target_height))
+        pixmap = QPixmap(64, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.setDevicePixelRatio(1.0)
+        return SimpleNamespace(
+            pixmap=pixmap,
+            logical_width=64,
+            logical_height=18,
+            device_pixel_ratio=1.0,
+        )
+
+    monkeypatch.setattr(formula_rendering, "render_formula_pixmap", fake_render_formula_pixmap)
+    line = Line(text="$$ E=mc^2 $$", confidence=0.9, bbox=BBox(0, 0, 90, 20))
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 90, 20),
+        lines=[line],
+        source_label="display_formula",
+        raw_payload={"block_label": "display_formula"},
+    )
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+    h._btn_debug_formula.setChecked(True)
+
+    pair = h._pairs[0]
+    assert pair._unit.kind == ProofUnitKind.FORMULA
+    assert calls == [("$$ E=mc^2 $$", 34)]
+    assert pair._editor.has_visual_text_override()
+    assert pair._editor._visual_pixmap_override is not None
+    assert pair._editor.visual_text_content_width() == 80
+    h.deleteLater()
+
+
 def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
     from app.ui.proof.h_proof import iter_unique_page_hproof_debug_lines
 

@@ -362,6 +362,30 @@ def _render_formula_display(text: str) -> str:
     return _compact_formula_spacing(s)
 
 
+def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual | None:
+    fallback_text = _render_formula_display(text)
+    try:
+        from app.experimental.formula_rendering import render_formula_pixmap
+
+        result = render_formula_pixmap(
+            text,
+            target_height=max(8, int(target_height)),
+            color="#2C2C2C",
+        )
+    except Exception:
+        result = None
+    if result is not None:
+        return _FormulaVisual(
+            text=fallback_text or text.strip(),
+            pixmap=result.pixmap,
+            logical_size=QSize(result.logical_width, result.logical_height),
+            kind="formula",
+        )
+    if fallback_text:
+        return _FormulaVisual(text=fallback_text, kind="formula")
+    return None
+
+
 def _clip_slot_widths_to_centers(
     x_centers: List[Optional[float]],
     widths: List[float],
@@ -1014,6 +1038,8 @@ class _SlotLineEditor(QWidget):
         self._last_hover_idx = -1
         self._active_visual = False
         self._visual_text_override: Optional[str] = None
+        self._visual_pixmap_override: Optional[QPixmap] = None
+        self._visual_pixmap_logical_size: QSize | None = None
         self._visual_text_kind: str = ""
         self._atom_visual_overlays: list[_AtomVisualOverlay] = []
         self._undo_stack: list[tuple[str, int, int]] = []
@@ -1058,15 +1084,28 @@ class _SlotLineEditor(QWidget):
         next_kind = kind if next_text else ""
         if (
             self._visual_text_override == next_text
+            and self._visual_pixmap_override is None
             and self._visual_text_kind == next_kind
         ):
             return
         self._visual_text_override = next_text
+        self._visual_pixmap_override = None
+        self._visual_pixmap_logical_size = None
         self._visual_text_kind = next_kind
         self.update()
 
+    def set_visual_formula_override(self, visual: _FormulaVisual | None) -> None:
+        if visual is None:
+            self.set_visual_text_override(None)
+            return
+        self._visual_text_override = visual.text or None
+        self._visual_pixmap_override = visual.pixmap
+        self._visual_pixmap_logical_size = visual.logical_size if visual.pixmap is not None else None
+        self._visual_text_kind = visual.kind
+        self.update()
+
     def has_visual_text_override(self) -> bool:
-        return bool(self._visual_text_override)
+        return bool(self._visual_text_override) or self._visual_pixmap_override is not None
 
     def set_atom_visual_overlays(self, overlays: list[_AtomVisualOverlay] | None) -> None:
         self._atom_visual_overlays = list(overlays or [])
@@ -1079,6 +1118,11 @@ class _SlotLineEditor(QWidget):
         return list(self._atom_visual_overlays)
 
     def visual_text_content_width(self) -> int:
+        if self._visual_pixmap_override is not None:
+            if self._visual_pixmap_logical_size is not None:
+                return self._visual_pixmap_logical_size.width() + 16
+            dpr = max(1.0, float(self._visual_pixmap_override.devicePixelRatio()))
+            return int(round(self._visual_pixmap_override.width() / dpr)) + 16
         if not self._visual_text_override:
             return 0
         font = QFont(self.font())
@@ -1331,6 +1375,9 @@ class _SlotLineEditor(QWidget):
         p = QPainter(self)
         try:
             p.fillRect(self.rect(), self.palette().base())
+            if self._visual_pixmap_override is not None:
+                self._paint_visual_pixmap_override(p, self._visual_pixmap_override)
+                return
             if self._visual_text_override:
                 self._paint_visual_text_override(p, self._visual_text_override)
                 return
@@ -1410,6 +1457,19 @@ class _SlotLineEditor(QWidget):
             text,
         )
 
+    def _paint_visual_pixmap_override(self, painter: QPainter, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        if self._visual_pixmap_logical_size is not None:
+            width = self._visual_pixmap_logical_size.width()
+            height = self._visual_pixmap_logical_size.height()
+        else:
+            dpr = max(1.0, float(pixmap.devicePixelRatio()))
+            width = int(round(pixmap.width() / dpr))
+            height = int(round(pixmap.height() / dpr))
+        target = QRect(6, max(0, (self.height() - height) // 2), max(1, width), max(1, height))
+        painter.drawPixmap(target, pixmap)
+
     def _paint_atom_visual_overlay(
         self,
         painter: QPainter,
@@ -1430,6 +1490,23 @@ class _SlotLineEditor(QWidget):
         if hovered or selected:
             painter.setPen(QPen(QColor("#9cc2ff"), 1))
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        if overlay.pixmap is not None and not overlay.pixmap.isNull():
+            pixmap = overlay.pixmap
+            max_w = max(1, rect.width() - 4)
+            max_h = max(1, rect.height() - 4)
+            target_w = overlay.logical_size.width() if overlay.logical_size is not None else max_w
+            target_h = overlay.logical_size.height() if overlay.logical_size is not None else max_h
+            scale = min(max_w / max(1, target_w), max_h / max(1, target_h), 1.0)
+            draw_w = max(1, int(round(target_w * scale)))
+            draw_h = max(1, int(round(target_h * scale)))
+            target = QRect(
+                rect.x() + max(0, (rect.width() - draw_w) // 2),
+                rect.y() + max(0, (rect.height() - draw_h) // 2),
+                draw_w,
+                draw_h,
+            )
+            painter.drawPixmap(target, pixmap)
+            return
         font = QFont(self.font())
         font.setWeight(TEXT_FONT_WEIGHT)
         if overlay.kind == "formula":
@@ -1678,12 +1755,22 @@ class _HProofSaveResult(Enum):
 
 
 @dataclass(frozen=True)
+class _FormulaVisual:
+    text: str
+    pixmap: QPixmap | None = None
+    logical_size: QSize | None = None
+    kind: str = "formula"
+
+
+@dataclass(frozen=True)
 class _AtomVisualOverlay:
     start: int
     end: int
     left: float
     right: float
     text: str
+    pixmap: QPixmap | None = None
+    logical_size: QSize | None = None
     kind: str = ""
 
 
@@ -1901,18 +1988,14 @@ class _LinePair(QFrame):
         )
 
     def _apply_editor_visual_override(self) -> None:
-        visual_text: str | None = None
-        visual_kind = ""
+        visual: _FormulaVisual | None = None
         if self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
             raw_formula = self._editor.toPlainText()
-            rendered = _render_formula_display(raw_formula)
-            if rendered:
-                visual_text = rendered
-                visual_kind = "formula"
-        self._editor.set_visual_text_override(visual_text, kind=visual_kind)
-        if visual_text:
+            visual = _render_formula_visual(raw_formula, target_height=max(12, self._editor_h - 6))
+        self._editor.set_visual_formula_override(visual)
+        if visual is not None:
             self._editor.set_atom_visual_overlays(None)
-        if visual_text:
+        if visual is not None:
             self._editor.set_slot_geometry(None, None)
             content_w = max(self._editor.visual_text_content_width(), int(self._line.bbox.w))
             self._editor.setMinimumWidth(content_w)
@@ -1970,7 +2053,8 @@ class _LinePair(QFrame):
                 continue
             raw = text[start:end]
             left, right = self._formula_atom_rect(atom, text, start, end)
-            visual_text = _render_formula_display(raw) or raw
+            visual = _render_formula_visual(raw, target_height=max(12, self._editor_h - 6))
+            visual_text = visual.text if visual is not None and visual.text else raw
             overlays.append(
                 _AtomVisualOverlay(
                     start=start,
@@ -1978,6 +2062,8 @@ class _LinePair(QFrame):
                     left=left,
                     right=right,
                     text=visual_text,
+                    pixmap=visual.pixmap if visual is not None else None,
+                    logical_size=visual.logical_size if visual is not None else None,
                     kind="formula",
                 )
             )
