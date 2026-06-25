@@ -1,6 +1,8 @@
 """Phase 11: 横/纵校对联动 + 正确率统计入口 回归。"""
 from __future__ import annotations
 
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+
 import os
 
 import pytest
@@ -8,6 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
+from app.core.proof_state import TOPIC_LINE_PROOF_CHANGED, ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
@@ -71,24 +74,14 @@ def test_v_proof_subscribes_to_bus_and_h_proof_publishes_with_origin():
     v = VProofPanel(); v.load_pages(proj.pages)
     bus = ProofStateBus.instance()
     # h 和 v 各自订阅 一次
-    assert bus.subscriber_count("line.proof_changed") >= 2
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) >= 2
 
-    # 模拟 v_proof 发起编辑：直接调用 v 的内部保存路径不易，在测试里
-    # 直接通过 publish 模拟一个外部事件
-    received = {"called": False}
-    h._on_external_line_changed = lambda **kw: received.update(  # type: ignore[method-assign]
-        called=True, kw=kw
-    )
-    bus.publish(
-        "line.proof_changed",
+    bus.publish_line_update(ProofUpdateRequest(
         page_id=proj.pages[0].id,
         line_id=proj.pages[0].blocks[0].lines[0].id,
         status="MODIFIED",
         origin=id(v),
-    )
-    # 由于 _on_external_line_changed 已被 monkey-patched (覆盖 instance attr 会
-    # 让 bus 中的旧绑定仍指向旧方法)。实际调用走旧绑定，但旧绑定本身就有 origin
-    # 过滤；为了确认订阅注册存在，比较 subscriber_count 已足够。
+    ))
     h.deleteLater(); v.deleteLater()
 
 
@@ -108,10 +101,12 @@ def test_h_proof_external_handler_skips_self_origin():
 
     # origin == id(self) → 完全跳过
     h._on_external_line_changed(
-        page_id=proj.pages[0].id,
-        line_id=proj.pages[0].blocks[0].lines[0].id,
-        status="OK",
-        origin=id(h),
+        ProofUpdateRequest(
+            page_id=proj.pages[0].id,
+            line_id=proj.pages[0].blocks[0].lines[0].id,
+            status="OK",
+            origin=id(h),
+        )
     )
     assert called["refresh"] == 0
     assert called["stats"] == 0
@@ -134,14 +129,103 @@ def test_h_proof_external_handler_refreshes_matching_line():
     h._update_stats = lambda _o=orig_us: (flags.__setitem__("stats", flags["stats"] + 1), _o())[1]  # type: ignore
 
     h._on_external_line_changed(
-        page_id=proj.pages[0].id,
-        line_id=target_line.id,
-        line_uid="",
-        status="MODIFIED",
-        origin=999,  # 假装别人发的
+        ProofUpdateRequest(
+            page_id=proj.pages[0].id,
+            line_id=target_line.id,
+            line_uid="",
+            status="MODIFIED",
+            origin=999,  # 假装别人发的
+        )
     )
+    assert flags["refresh"] == 0
+    h._do_external_refresh()
     assert flags["refresh"] >= 1
     assert flags["stats"] == 1
+    h.deleteLater()
+
+
+def test_h_proof_external_refresh_does_not_overwrite_dirty_current_line():
+    """HProof dirty editor must not be silently replaced by an external same-line edit."""
+    from app.models import ProofStatus
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("AAAA")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    page = proj.pages[0]
+    line = page.blocks[0].lines[0]
+    pair = h._pairs[0]
+
+    pair._editor.setPlainText("CCCC")
+    line.set_proof_text("DDDD")
+
+    h._on_external_line_changed(
+        ProofUpdateRequest(
+            page_id=page.id,
+            line_id=line.id,
+            line_uid=line.uid,
+            status=proof_status(line).value,
+            origin=999,
+        )
+    )
+    h._do_external_refresh()
+
+    assert pair._editor.toPlainText() == "CCCC"
+    assert proof_display_text(line) == "DDDD"
+    assert pair.has_external_conflict()
+    assert "冲突" in pair._status_lbl.text()
+
+    h._on_confirmed(0)
+
+    assert pair._editor.toPlainText() == "CCCC"
+    assert proof_display_text(line) == "DDDD"
+    assert proof_status(line) == ProofStatus.MODIFIED
+    h.deleteLater()
+
+
+def test_h_proof_save_current_rejects_stale_line_signature_before_external_refresh():
+    """Even before the bus refresh arrives, HProof must not overwrite a changed line."""
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("AAAA")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    line = proj.pages[0].blocks[0].lines[0]
+    pair = h._pairs[0]
+    changes: list = []
+    h.proof_changed.connect(changes.append)
+
+    pair._editor.setPlainText("CCCC")
+    line.set_proof_text("DDDD")
+
+    result = h._save_current(silent=True)
+
+    assert result.name == "CONFLICT"
+    assert pair._editor.toPlainText() == "CCCC"
+    assert proof_display_text(line) == "DDDD"
+    assert pair.has_external_conflict()
+    assert changes == []
+    h.deleteLater()
+
+
+def test_h_proof_flag_rejects_stale_line_signature_before_external_refresh():
+    """Status-only actions must share the same stale-line guard as text edits."""
+    from app.models import ProofStatus
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("AAAA")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    line = proj.pages[0].blocks[0].lines[0]
+    pair = h._pairs[0]
+    changes: list = []
+    h.proof_changed.connect(changes.append)
+
+    line.set_proof_text("DDDD")
+
+    h._toggle_flag()
+
+    assert proof_display_text(line) == "DDDD"
+    assert proof_status(line) == ProofStatus.MODIFIED
+    assert pair.has_external_conflict()
+    assert changes == []
     h.deleteLater()
 
 
@@ -161,15 +245,85 @@ def test_h_proof_external_handler_matches_line_uid_before_rowid():
     h._update_stats = lambda _o=orig_us: (flags.__setitem__("stats", flags["stats"] + 1), _o())[1]  # type: ignore
 
     h._on_external_line_changed(
-        page_uid=proj.pages[0].uid,
-        page_id=-1,
-        line_uid=target_line.uid,
-        line_id=-1,
-        status="MODIFIED",
-        origin=999,
+        ProofUpdateRequest(
+            page_uid=proj.pages[0].uid,
+            page_id=-1,
+            line_uid=target_line.uid,
+            line_id=-1,
+            status="MODIFIED",
+            origin=999,
+        )
     )
+    assert flags["refresh"] == 0
+    h._do_external_refresh()
     assert flags["refresh"] >= 1
     assert flags["stats"] == 1
+    h.deleteLater()
+
+
+def test_h_proof_external_handler_debounces_duplicate_line_updates():
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("xy")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    target_line = proj.pages[0].blocks[0].lines[0]
+
+    flags = {"refresh": 0, "stats": 0}
+    pair = h._pairs[0]
+    orig_refresh = pair.refresh_text
+    pair.refresh_text = lambda *a, _orig=orig_refresh, **kw: (flags.__setitem__("refresh", flags["refresh"] + 1), _orig(*a, **kw))[1]  # type: ignore
+    orig_stats = h._update_stats
+    h._update_stats = lambda _o=orig_stats: (flags.__setitem__("stats", flags["stats"] + 1), _o())[1]  # type: ignore
+
+    for _ in range(5):
+        h._on_external_line_changed(
+            ProofUpdateRequest(
+                page_id=proj.pages[0].id,
+                line_id=target_line.id,
+                line_uid=target_line.uid,
+                status="MODIFIED",
+                origin=999,
+            )
+        )
+
+    assert flags == {"refresh": 0, "stats": 0}
+    h._do_external_refresh()
+    assert flags["refresh"] == 1
+    assert flags["stats"] == 1
+    h.deleteLater()
+
+
+def test_h_proof_render_clears_pending_external_refresh_before_rebuild():
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project("xy")
+    h = HProofPanel(); h.load_pages(proj.pages)
+    target_line = proj.pages[0].blocks[0].lines[0]
+
+    h._on_external_line_changed(
+        ProofUpdateRequest(
+            page_id=proj.pages[0].id,
+            line_id=target_line.id,
+            line_uid="",
+            status="MODIFIED",
+            origin=999,
+        )
+    )
+    assert h._session.pending_external_requests
+
+    # Simulate a full view rebuild before the debounce timer flushes. The new
+    # page deliberately reuses the same rowid-only identity so a stale request
+    # would refresh the wrong row if the queue survived the rebuild.
+    next_proj = _make_project("ab")
+    h.load_pages(next_proj.pages)
+    assert h._session.pending_external_requests == []
+
+    flags = {"refresh": 0}
+    pair = h._pairs[0]
+    orig_refresh = pair.refresh_text
+    pair.refresh_text = lambda *a, _orig=orig_refresh, **kw: (flags.__setitem__("refresh", flags["refresh"] + 1), _orig(*a, **kw))[1]  # type: ignore
+    h._do_external_refresh()
+    assert flags["refresh"] == 0
     h.deleteLater()
 
 
@@ -183,9 +337,12 @@ def test_v_proof_external_handler_skips_self_origin():
     v._load_page = lambda i, _o=orig_load: (called.__setitem__("load", called["load"] + 1), _o(i))[1]  # type: ignore
 
     v._on_external_line_changed(
-        page_id=proj.pages[0].id,
-        line_id=proj.pages[0].blocks[0].lines[0].id,
-        origin=id(v),
+        ProofUpdateRequest(
+            page_id=proj.pages[0].id,
+            line_id=proj.pages[0].blocks[0].lines[0].id,
+            status="MODIFIED",
+            origin=id(v),
+        )
     )
     assert called["load"] == 0
     v.deleteLater()
@@ -201,10 +358,13 @@ def test_v_proof_external_handler_reloads_current_page_when_line_matches():
     v._load_page = lambda i, _o=orig_load: (called.__setitem__("load", called["load"] + 1), _o(i))[1]  # type: ignore
 
     v._on_external_line_changed(
-        page_id=proj.pages[0].id,
-        line_id=proj.pages[0].blocks[0].lines[0].id,
-        line_uid="",
-        origin=99999,
+        ProofUpdateRequest(
+            page_id=proj.pages[0].id,
+            line_id=proj.pages[0].blocks[0].lines[0].id,
+            line_uid="",
+            status="MODIFIED",
+            origin=99999,
+        )
     )
     # vproof-direct-overwrite-residual round 11: external refresh is debounced
     # via QTimer now; flush it synchronously to keep the assertion semantics.
@@ -226,14 +386,64 @@ def test_v_proof_external_handler_matches_line_uid_before_rowid():
     page = proj.pages[0]
     line = page.blocks[0].lines[0]
     v._on_external_line_changed(
-        page_uid=page.uid,
-        page_id=-1,
-        line_uid=line.uid,
-        line_id=-1,
-        origin=99999,
+        ProofUpdateRequest(
+            page_uid=page.uid,
+            page_id=-1,
+            line_uid=line.uid,
+            line_id=-1,
+            status="MODIFIED",
+            origin=99999,
+        )
     )
     v._do_external_refresh()
     assert called["load"] == 1
+    v.deleteLater()
+
+
+def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_reloading_current():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project_with_char_crops("AA", n_pages=2)
+    page1, page2 = proj.pages
+    page1.id = 9101
+    page2.id = 9102
+    page2.page_number = 2
+    line2 = page2.blocks[0].lines[0]
+    line2.set_proof_text("BB")
+    for char in line2.chars:
+        char.char = "B"
+        char.token_text = "B"
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    assert v._session.current_page_index() == 0
+    assert any(entry.page_uid == page2.uid for entry in v._char_svc.query("B"))
+
+    calls = {"load": 0}
+    orig_load = v._load_page
+    v._load_page = lambda i, _o=orig_load: (calls.__setitem__("load", calls["load"] + 1), _o(i))[1]  # type: ignore
+
+    line2.set_proof_text("CC")
+    for char in line2.chars:
+        char.char = "C"
+        char.token_text = "C"
+
+    v._on_external_line_changed(
+        ProofUpdateRequest(
+            page_uid=page2.uid,
+            page_id=page2.id,
+            line_uid=line2.uid,
+            line_id=line2.id,
+            status=proof_status(line2).value,
+            origin=99999,
+        )
+    )
+    v._do_external_refresh()
+
+    assert calls["load"] == 0
+    assert v._session.current_page_index() == 0
+    assert not any(entry.page_uid == page2.uid for entry in v._char_svc.query("B"))
+    assert any(entry.page_uid == page2.uid for entry in v._char_svc.query("C"))
     v.deleteLater()
 
 
@@ -321,428 +531,22 @@ def test_main_window_has_quality_stats_menu_action():
     assert "QualityStatsDialog" in src
 
 
-# ── CharCell 模式 (Phase 11 task 2) ──────────────────────────
-
-def _make_project_with_chars(chars="abc"):
-    from app.models import Char
-    line = Line(text=chars, confidence=0.9, bbox=BBox(0, 0, len(chars) * 20, 20))
-    line.id = 2001
-    line.chars = [
-        Char(char=c, confidence=0.9, bbox=BBox(i * 20, 0, 20, 20))
-        for i, c in enumerate(chars)
-    ]
-    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 200, 200), lines=[line])
-    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
-                width=200, height=200)
-    page.id = 9101
-    return OcrProject(name="cc", pages=[page])
-
-
-def test_char_cell_row_builds_one_cell_per_char():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert row.has_cells
-    assert len(row._cells) == 3
-    assert [c.text() for c in row._cells] == ["a", "b", "c"]
-    row.deleteLater()
-
-
-def test_char_cell_row_text_committed_signal_aggregates_text():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-
-    captured = []
-    row.text_committed.connect(captured.append)
-    # 模拟用户把第二个 cell 改成 'X'
-    row._cells[1].setText("X")
-    row._on_cell_changed()
-    assert captured and captured[-1] == "aXc"
-    row.deleteLater()
-
-
-def test_char_cell_row_no_chars_falls_back_to_tip():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project("hello")  # 不带 char-bbox
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert not row.has_cells
-    row.deleteLater()
-
-
-def test_char_cell_row_focus_changed_emits_idx():
-    """cell focusInEvent → CharCellRow.focus_changed(idx)。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    captured: list[int] = []
-    row.focus_changed.connect(captured.append)
-    row._cells[1].setFocus()
-    # 模拟 focusIn —— 直接发信号（FocusEvent 在 offscreen 下不一定触发）
-    row._cells[1].focus_in.emit()
-    assert captured and captured[-1] == 1
-    row.deleteLater()
-
-
-def test_char_cell_row_focus_cell_method_moves_focus():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abcd")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    row.focus_cell(2)
-    # offscreen 下 hasFocus() 不稳；用 selectAll 副作用判断
-    assert row._cells[2].hasSelectedText()
-    row.deleteLater()
-
-
-def test_char_cell_row_reseat_uses_final_text_when_differs_from_chars():
-    """final_text 已被普通模式改过，进入字格模式时 cells 应反映 final_text。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.update_text("aXc")   # 普通模式编辑过
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert [c.text() for c in row._cells] == ["a", "X", "c"]
-    row.deleteLater()
-
-
-def test_char_cell_low_confidence_uses_red_border():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from app.models import Char
-    line = Line(text="ab", confidence=0.9, bbox=BBox(0, 0, 40, 20))
-    line.id = 3001
-    line.chars = [
-        Char(char="a", confidence=0.40, bbox=BBox(0,  0, 20, 20)),  # 低
-        Char(char="b", confidence=0.95, bbox=BBox(20, 0, 20, 20)),  # 高
-    ]
-    block = Block(block_type=BlockType.TEXT, bbox=BBox(0,0,40,20), lines=[line])
-    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
-                width=40, height=20)
-    page.id = 9301
-    proj = OcrProject(name="conf", pages=[page])
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert "#d93025" in row._cells[0].styleSheet()    # 红
-    assert "#d93025" not in row._cells[1].styleSheet()
-    row.deleteLater()
-
-
-def test_char_cell_allows_multi_char_input():
-    """Phase 13: maxLength=1 移除后，单 cell 可放多字符；text_committed 反映之。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("ab")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert row._cells[0].maxLength() in (-1, 32767)  # Qt 默认无限或大值
-    captured = []
-    row.text_committed.connect(captured.append)
-    row._cells[0].setText("XY")
-    row._on_cell_changed()
-    assert captured[-1] == "XYb"
-    row.deleteLater()
-
-
-def test_align_text_to_chars_equal_replace_insert():
-    """SequenceMatcher 对齐：分别覆盖 equal / replace / insert / drop / overflow。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    inits, overflow = CharCellRow._align_text_to_chars(
-        text_chars=list("aXcde"),
-        ocr_chars=list("abc"),
-    )
-    # ocr "abc" vs text "aXcde"：a=equal, b→X=replace, c=equal, de→trailing
-    assert inits[0] == ("a", "equal")
-    assert inits[1] == ("X", "replace")
-    assert inits[2] == ("c", "equal")
-    assert overflow == "de"
-
-
-def test_align_text_to_chars_text_shorter_leaves_insert():
-    """text 比 chars 短时，对不上的 cell 留空 + kind=insert。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    inits, overflow = CharCellRow._align_text_to_chars(
-        text_chars=list("ab"),
-        ocr_chars=list("abcd"),
-    )
-    assert inits[0] == ("a", "equal")
-    assert inits[1] == ("b", "equal")
-    assert inits[2][1] == "insert" and inits[2][0] == ""
-    assert inits[3][1] == "insert" and inits[3][0] == ""
-    assert overflow == ""
-
-
-def test_char_cell_row_replace_kind_uses_red_border():
-    """final_text 与 chars 不一致的位置 → cell 加红边。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.update_text("aXc")     # 普通模式改过：第二位被替换
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert "#d93025" in row._cells[1].styleSheet()    # replace → 红
-    assert "#d93025" not in row._cells[0].styleSheet()
-    row.deleteLater()
-
-
-def test_char_cell_row_uses_row_uniform_scale():
-    """所有 cell 共享 _row_scale；单格的 OCR 字符大小不影响其他格。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from app.models import Char
-    line = Line(text="ab", confidence=0.9, bbox=BBox(0, 0, 40, 30))
-    line.id = 4001
-    line.chars = [
-        Char(char="a", confidence=0.9, bbox=BBox(0,  0, 20, 30)),
-        Char(char="b", confidence=0.9, bbox=BBox(20, 0, 20, 24)),  # 略矮
-    ]
-    block = Block(block_type=BlockType.TEXT, bbox=BBox(0,0,40,30), lines=[line])
-    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
-                width=40, height=30)
-    page.id = 9401
-    proj = OcrProject(name="bs", pages=[page])
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert hasattr(row, "_row_scale")
-    assert row._row_scale > 0
-    row.deleteLater()
-
-
-# ── Phase 14b：键盘流 + 特殊字符策略 ──────────────────────────
-
-def test_classify_char_kind_basic():
-    from app.ui.proof.char_cell_row import (
-        classify_char_kind, KIND_DIGIT, KIND_LETTER, KIND_CJK,
-        KIND_PUNCT, KIND_FORMULA,
-    )
-    assert classify_char_kind("3") == KIND_DIGIT
-    assert classify_char_kind("a") == KIND_LETTER
-    assert classify_char_kind("中") == KIND_CJK
-    assert classify_char_kind("，") == KIND_PUNCT
-    assert classify_char_kind("\\") == KIND_FORMULA
-    assert classify_char_kind("$") == KIND_FORMULA
-
-
-def test_line_looks_like_formula_detects_latex():
-    from app.ui.proof.char_cell_row import line_looks_like_formula
-    assert line_looks_like_formula(r"\begin{aligned} a &= b \end{aligned}")
-    assert line_looks_like_formula("$$ x = y $$")
-    assert not line_looks_like_formula("普通中文一行没有公式")
-
-
-def test_char_cell_row_formula_line_falls_back_to_tip():
-    """公式行：即使有 chars，也走 fallback 不构建 cells。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("ab")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.update_text(r"\begin{aligned} a = b \end{aligned}")
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert not row.has_cells
-    row.deleteLater()
-
-
-def test_char_cell_row_next_off_end_signal_emits_at_last_cell():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    captured = []
-    row.next_off_end.connect(lambda: captured.append(1))
-    row._focus_neighbor(2, +1)   # 在最后一格再 → → 越界
-    assert captured == [1]
-    row.deleteLater()
-
-
-def test_char_cell_row_focus_next_low_conf_skips_high():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from app.models import Char
-    line = Line(text="abc", confidence=0.9, bbox=BBox(0, 0, 60, 20))
-    line.id = 5001
-    line.chars = [
-        Char(char="a", confidence=0.99, bbox=BBox(0,  0, 20, 20)),
-        Char(char="b", confidence=0.40, bbox=BBox(20, 0, 20, 20)),  # 低
-        Char(char="c", confidence=0.99, bbox=BBox(40, 0, 20, 20)),
-    ]
-    block = Block(block_type=BlockType.TEXT, bbox=BBox(0,0,60,20), lines=[line])
-    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
-                width=60, height=20)
-    page.id = 9501
-    proj = OcrProject(name="lc", pages=[page])
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    found = row.focus_next_low_conf(from_idx=-1, threshold=0.85)
-    assert found
-    assert row._cells[1].hasSelectedText()
-    row.deleteLater()
-
-
-def test_char_cell_row_does_not_treat_missing_zero_conf_as_low():
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from app.models import Char
-
-    line = Line(text="abc", confidence=0.9, bbox=BBox(0, 0, 60, 20))
-    line.chars = [
-        Char(char="a", confidence=0.0, bbox=BBox(0, 0, 20, 20)),
-        Char(char="b", confidence=0.0, bbox=BBox(20, 0, 20, 20)),
-        Char(char="c", confidence=0.0, bbox=BBox(40, 0, 20, 20)),
-    ]
-    page = Page(page_number=1, blocks=[
-        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 60, 20), lines=[line])
-    ], image_path="/tmp/none.png", width=60, height=20)
-    row = CharCellRow(line, page, PageImageCache.instance())
-    assert row.focus_next_low_conf(from_idx=-1, threshold=0.85) is False
-    row.deleteLater()
-
-
-def test_align_text_to_chars_returns_trailing_overflow():
-    """text 末尾比 chars 长 → 多余字符进 trailing_overflow。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    cell_inits, overflow = CharCellRow._align_text_to_chars(list("ABCDE"), list("ABC"))
-    assert len(cell_inits) == 3
-    assert [t for t, _ in cell_inits] == ["A", "B", "C"]
-    assert overflow == "DE"
-
-
-def test_char_cell_row_commit_preserves_trailing_overflow():
-    """blocker 1：编辑某 cell 触发 text_committed 时，trailing_overflow 必须带回。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")  # chars=a,b,c
-    line = proj.pages[0].blocks[0].lines[0]
-    line.update_text("abcDE")  # 末尾 DE 是 trailing_overflow
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert row._trailing_overflow == "DE"
-    captured = []
-    row.text_committed.connect(captured.append)
-    # 模拟用户把第一格 a 改成 X
-    row._cells[0].setText("X")
-    row._cells[0].textEdited.emit("X")
-    # 拼回的文本必须含末尾 DE，不能丢
-    assert captured, "text_committed should fire"
-    assert captured[-1].endswith("DE"), f"got {captured[-1]!r}"
-    assert captured[-1] == "XbcDE"
-    row.deleteLater()
-
-
-def test_char_cell_row_commit_when_no_overflow_unchanged():
-    """无 overflow 时行为与之前一致，不引入额外尾巴。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.text = "abc"
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    assert row._trailing_overflow == ""
-    captured = []
-    row.text_committed.connect(captured.append)
-    row._cells[1].setText("Y")
-    row._cells[1].textEdited.emit("Y")
-    assert captured[-1] == "aYc"
-    row.deleteLater()
-
-
-def test_char_cell_row_tab_advances_to_next_cell():
-    """blocker 2：在中间 cell 按 Tab → 焦点到下一 cell。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QKeyEvent
-    from PySide6.QtCore import QEvent
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    row.show()
-    row._cells[0].setFocus()
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
-    row._cells[0].keyPressEvent(ev)
-    # 焦点应当转到 _cells[1]；用 hasSelectedText 做 proxy（focus_neighbor 没 selectAll，
-    # 但 setCursorPosition；这里直接断言 _cells[1] 拿到焦点）
-    assert row._cells[1].hasFocus() or row._cells[1] is row.focusWidget()
-    row.deleteLater()
-
-
-def test_char_cell_row_shift_tab_at_first_emits_prev_off_start():
-    """blocker 2：在首 cell 按 Shift+Tab (Backtab) → 越界发 prev_off_start。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from PySide6.QtCore import Qt, QEvent
-    from PySide6.QtGui import QKeyEvent
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    captured = []
-    row.prev_off_start.connect(lambda: captured.append(1))
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
-    row._cells[0].keyPressEvent(ev)
-    assert captured == [1]
-    row.deleteLater()
-
-
-def test_char_cell_row_tab_at_last_emits_next_off_end():
-    """blocker 2：在末 cell 按 Tab → 越界发 next_off_end。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    from PySide6.QtCore import Qt, QEvent
-    from PySide6.QtGui import QKeyEvent
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance())
-    captured = []
-    row.next_off_end.connect(lambda: captured.append(1))
-    last = len(row._cells) - 1
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
-    row._cells[last].keyPressEvent(ev)
-    assert captured == [1]
-    row.deleteLater()
-
-
-def test_char_cell_row_uses_display_text_when_provided():
-    """blocker 2: display_text 参数生效，覆盖 line.text。"""
-    from app.ui.proof.char_cell_row import CharCellRow
-    from app.core.page_image_cache import PageImageCache
-    proj = _make_project_with_chars("abc")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.text = "abc"
-    # 模拟 quality-probe 注入了 fake_char 的显示文本（与 line.text 不同）
-    row = CharCellRow(line, proj.pages[0], PageImageCache.instance(),
-                      display_text="aXc")
-    assert row._cells[1].text() == "X", "字格必须显示 display_text，而非 line.text"
-    # 编辑回送时，commit 出来的也是 display 空间
-    captured = []
-    row.text_committed.connect(captured.append)
-    row._cells[0].setText("Z")
-    row._cells[0].textEdited.emit("Z")
-    assert captured[-1] == "ZXc"
-    row.deleteLater()
-
-
 def test_h_proof_bus_unsubscribes_on_destroy():
     """blocker 3: HProofPanel 销毁后 ProofStateBus 应不再持有其订阅。"""
     from app.ui.proof.h_proof import HProofPanel
     from app.core.proof_state_bus import ProofStateBus
     bus = ProofStateBus.instance()
-    before = bus.subscriber_count("line.proof_changed")
+    before = bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED)
     h = HProofPanel()
-    after_sub = bus.subscriber_count("line.proof_changed")
+    after_sub = bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED)
     assert after_sub == before + 1
     # 显式调用 teardown（destroyed 信号在 deleteLater 后异步发出，offscreen 测试更稳的做法是直接调 _teardown_bus）
     h._teardown_bus()
-    after_unsub = bus.subscriber_count("line.proof_changed")
+    after_unsub = bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED)
     assert after_unsub == before, f"unsubscribe 后应回到 {before}，实得 {after_unsub}"
     # 幂等
     h._teardown_bus()
-    assert bus.subscriber_count("line.proof_changed") == before
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == before
     h.deleteLater()
 
 
@@ -751,23 +555,23 @@ def test_v_proof_bus_unsubscribes_on_teardown():
     from app.ui.proof.v_proof import VProofPanel
     from app.core.proof_state_bus import ProofStateBus
     bus = ProofStateBus.instance()
-    before = bus.subscriber_count("line.proof_changed")
+    before = bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED)
     v = VProofPanel()
-    assert bus.subscriber_count("line.proof_changed") == before + 1
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == before + 1
     v._teardown_bus()
-    assert bus.subscriber_count("line.proof_changed") == before
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == before
     v._teardown_bus()  # 幂等
-    assert bus.subscriber_count("line.proof_changed") == before
+    assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == before
     v.deleteLater()
 
 
-# ── Phase 19: editor in-flight 保活 + active cell_row 跟显示空间 ────────────
+# ── editor in-flight 保活 + 显示空间保存 ────────────────────────
 
 def test_save_button_in_normal_mode_still_persists():
     """Phase 21：普通模式（editor 可见）原有保存语义不能回退 ——
-    点"保存"仍然走 _save_displayed_edit 把 editor 文本落到 final_text。"""
+    点"保存"仍然走 ProofEditService 把 editor 文本落到 final_text。"""
     from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project_with_chars("ab")
+    proj = _make_project("ab")
     h = HProofPanel()
     h.load_pages(proj.pages)
     h._activate(0)
@@ -775,37 +579,20 @@ def test_save_button_in_normal_mode_still_persists():
     assert not pair0._editor.isHidden()
     pair0._editor.setPlainText("WW")
     h._btn_save.click()
-    assert pair0._line.final_text == "WW", \
-        f"普通模式按钮保存失败：final_text={pair0._line.final_text!r}"
+    assert proof_final_text(pair0._line) == "WW", \
+        f"普通模式按钮保存失败：final_text={proof_final_text(pair0._line)!r}"
     h.deleteLater()
 
 
-def test_v_proof_flushes_in_flight_text_before_external_sync():
-    """Phase 22 blocker 1：VProof 收到外部 line.proof_changed 时，
-    若 _text_edit 里有用户未保存的输入，必须先 flush 落盘，
-    再让 _load_page 用最新文本重渲染，否则覆盖。"""
+def test_v_proof_ocr_text_is_read_only_reference():
     from app.ui.proof.v_proof import VProofPanel
+
     proj = _make_project("hello")
     v = VProofPanel()
     v.load_pages(proj.pages)
-    page = proj.pages[0]
-    line0 = page.blocks[0].lines[0]
-    # 模拟用户在 _text_edit 改了一行
-    v._text_edit.setPlainText("HELLO_EDITED")
-    assert v._text_edit.toPlainText() != v._loaded_text  # 确实 dirty
-    # 模拟 HProof 改了同一行触发 line.proof_changed（origin 不等于 v）
-    v._bus.publish(
-        "line.proof_changed",
-        page_id=page.id, line_id=line0.id,
-        status=line0.proof_status.value if hasattr(line0.proof_status, "value") else line0.proof_status,
-        origin="h_proof_fake",
-    )
-    # vproof-direct-overwrite-residual round 11: external refresh is debounced
-    # via QTimer now; flush it synchronously so flush-on-external-sync still runs.
-    v._do_external_refresh()
-    # 用户的 in-flight 内容应已被持久化到 final_text
-    assert line0.final_text == "HELLO_EDITED", \
-        f"in-flight 文本未保住，final_text={line0.final_text!r}"
+
+    assert v._text_edit.isReadOnly()
+    assert v._text_edit.toPlainText() == "hello\n"
     v.deleteLater()
 
 
@@ -817,110 +604,375 @@ def test_v_proof_no_save_when_text_edit_unchanged():
     v.load_pages(proj.pages)
     page = proj.pages[0]
     line0 = page.blocks[0].lines[0]
-    saves: list = []
-    v.proof_saved.connect(lambda: saves.append(1))
+    changes: list = []
+    v.proof_changed.connect(changes.append)
     # _text_edit 未改
-    v._bus.publish(
-        "line.proof_changed",
+    v._bus.publish_line_update(ProofUpdateRequest(
         page_id=page.id, line_id=line0.id,
-        status=line0.proof_status.value if hasattr(line0.proof_status, "value") else line0.proof_status,
-        origin="h_proof_fake",
-    )
-    assert saves == [], f"未 dirty 时不应 emit proof_saved，got {saves}"
+        status=proof_status(line0).value if hasattr(proof_status(line0), "value") else proof_status(line0),
+        origin=999,
+    ))
+    assert changes == [], f"未 dirty 时不应 emit proof_changed，got {changes}"
     v.deleteLater()
 
 
-def test_v_proof_save_page_text_resyncs_loaded_text():
-    """Phase 23 blocker：_save_page_text 成功后，_loaded_text 必须等于
-    当前 _text_edit 内容，否则后续 dirty 检查永远为 True。"""
+def test_v_proof_refresh_reference_context_without_model_write():
     from app.ui.proof.v_proof import VProofPanel
+
     proj = _make_project("hi")
+    line0 = proj.pages[0].blocks[0].lines[0]
     v = VProofPanel()
     v.load_pages(proj.pages)
     v._text_edit.setPlainText("HI_EDITED")
-    v._save_page_text()
-    assert v._loaded_text == v._text_edit.toPlainText(), \
-        f"_loaded_text 未同步：{v._loaded_text!r} vs {v._text_edit.toPlainText()!r}"
-    v.deleteLater()
+    result = v._refresh_reference_context()
 
-
-def test_v_proof_save_page_text_preserves_trailing_space_slot():
-    from app.ui.proof.v_proof import VProofPanel
-
-    proj = _make_project("甲乙")
-    line = proj.pages[0].blocks[0].lines[0]
-    line.chars = [
-        Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 20, 20)),
-        Char(char="乙", confidence=0.9, bbox=BBox(20, 0, 20, 20)),
-    ]
-    v = VProofPanel()
-    v.load_pages(proj.pages)
-    v._text_edit.setPlainText("甲 ")
-    v._save_page_text()
-
-    assert line.final_text == "甲 "
-    assert line.display_text == "甲 "
-    assert len(line.chars) == 2
-    assert [char.char for char in line.chars] == ["甲", " "]
+    assert result is False
+    assert proof_display_text(line0) == "hi"
+    assert v._text_edit.toPlainText() == "hi\n"
+    assert v._session.loaded_text == "hi\n"
     v.deleteLater()
 
 
 def test_v_proof_no_double_flush_after_save():
-    """Phase 23 blocker：保存后立刻收到外部同事件，应被识别为非 dirty，
-    不再走 _save_page_text 重复落盘。"""
+    """VProof 参考文本刷新不应制造 proof_changed。"""
     from app.ui.proof.v_proof import VProofPanel
+
     proj = _make_project("hi")
     v = VProofPanel()
     v.load_pages(proj.pages)
     page = proj.pages[0]
     line0 = page.blocks[0].lines[0]
     v._text_edit.setPlainText("HI_EDITED")
-    v._save_page_text()
-    saves: list = []
-    v.proof_saved.connect(lambda: saves.append(1))
-    v._bus.publish(
-        "line.proof_changed",
+    v._refresh_reference_context()
+    changes: list = []
+    v.proof_changed.connect(changes.append)
+    v._bus.publish_line_update(ProofUpdateRequest(
         page_id=page.id, line_id=line0.id,
-        status=line0.proof_status.value if hasattr(line0.proof_status, "value") else line0.proof_status,
-        origin="h_proof_fake",
-    )
-    assert saves == [], \
-        f"保存后基线已同步，外部同步不应再触发 _save_page_text: {saves}"
+        status=proof_status(line0).value if hasattr(proof_status(line0), "value") else proof_status(line0),
+        origin=999,
+    ))
+    assert changes == [], \
+        f"刷新后基线已同步，外部同步不应触发持久化: {changes}"
     v.deleteLater()
 
 
-def test_v_proof_h_change_other_line_not_overwritten_by_stale_baseline():
-    """Phase 23 blocker 端到端：
-    1) VProof 保存了 line0 的修改
-    2) HProof 改 line1
-    3) line.proof_changed 进来 → VProof 不应把 line1 的旧文本回写覆盖 HProof 的新内容
-    """
+def test_v_proof_external_refresh_does_not_write_reference_text_to_model():
     from app.ui.proof.v_proof import VProofPanel
-    # 两行的 project
+
     proj = _make_project("L0_orig")
     page = proj.pages[0]
-    line2 = Line(text="L1_orig", confidence=0.9, bbox=BBox(0, 30, 80, 20))
-    line2.id = 2002
-    page.blocks[0].lines.append(line2)
+    line0 = page.blocks[0].lines[0]
+    line1 = Line(text="L1_orig", confidence=0.9, bbox=BBox(0, 30, 80, 20))
+    line1.id = 2002
+    page.blocks[0].lines.append(line1)
     v = VProofPanel()
     v.load_pages(proj.pages)
-    # 用户在 VProof 改 line0 → 保存
-    flat = v._text_edit.toPlainText()
-    new_flat = flat.replace("L0_orig", "L0_VEDIT")
-    v._text_edit.setPlainText(new_flat)
-    v._save_page_text()
-    assert page.blocks[0].lines[0].final_text == "L0_VEDIT"
-    # 模拟 HProof 改 line1 真实 final_text，并 publish
-    page.blocks[0].lines[1].update_text("L1_HEDIT")
-    v._bus.publish(
-        "line.proof_changed",
-        page_id=page.id, line_id=line2.id,
-        status=line2.proof_status.value if hasattr(line2.proof_status, "value") else line2.proof_status,
-        origin="h_proof_fake",
+    v._text_edit.setPlainText("STALE_PAGE_TEXT\n")
+
+    line1.set_proof_text("L1_HEDIT")
+    v._bus.publish_line_update(ProofUpdateRequest(
+        page_id=page.id,
+        line_id=line1.id,
+        status=proof_status(line1).value if hasattr(proof_status(line1), "value") else proof_status(line1),
+        origin=999,
+    ))
+    v._do_external_refresh()
+
+    assert proof_display_text(line0) == "L0_orig"
+    assert proof_final_text(line1) == "L1_HEDIT"
+    assert v._text_edit.toPlainText().startswith("L0_orig\nL1_HEDIT")
+    v.deleteLater()
+
+
+def test_v_proof_external_refresh_updates_reference_from_model():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("AAAA")
+    page = proj.pages[0]
+    line0 = page.blocks[0].lines[0]
+    line0.chars = [
+        Char(char="A", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
+        for i in range(4)
+    ]
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    changes: list = []
+    v.proof_changed.connect(changes.append)
+
+    line0.set_proof_text("DDDD")
+    for char in line0.chars:
+        char.char = "D"
+    v._bus.publish_line_update(ProofUpdateRequest(
+        page_id=page.id,
+        line_id=line0.id,
+        status=proof_status(line0).value if hasattr(proof_status(line0), "value") else proof_status(line0),
+        origin=999,
+    ))
+    v._do_external_refresh()
+
+    assert proof_final_text(line0) == "DDDD"
+    assert proof_display_text(line0) == "DDDD"
+    assert [char.char for char in line0.chars] == ["D", "D", "D", "D"]
+    assert v._text_edit.toPlainText().startswith("DDDD")
+    assert v._session.loaded_text == v._text_edit.toPlainText()
+    assert changes == []
+    v.deleteLater()
+
+
+def test_v_proof_cross_page_gallery_switch_ignores_reference_text_mutation():
+    from app.ui.proof.v_proof import VProofPanel
+
+    page1 = _make_project_with_char_crops("AAAA").pages[0]
+    page1.id = 9101
+    page2 = _make_project_with_char_crops("BBBB").pages[0]
+    page2.id = 9102
+    page2.page_number = 2
+    page2.image_path = "/tmp/vproof-cross-page-2.png"
+    page2.blocks[0].lines[0].id = 91002
+
+    v = VProofPanel()
+    v.load_pages([page1, page2])
+    line1 = page1.blocks[0].lines[0]
+    v._text_edit.setPlainText("CCCC\n")
+
+    entry = v._char_svc.query("B")[0]
+    v._highlight_char_in_viewer(entry)
+
+    assert proof_display_text(line1) == "AAAA"
+    assert v._session.current_page_index() == 1
+    assert v._text_edit.toPlainText().startswith("BBBB")
+    v.deleteLater()
+
+
+def test_v_proof_refresh_context_ignores_structural_reference_mutation():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("AAAA")
+    page = proj.pages[0]
+    line0 = page.blocks[0].lines[0]
+    line1 = Line(text="BBBB", confidence=0.9, bbox=BBox(0, 30, 80, 20))
+    line1.id = 93002
+    page.blocks[0].lines.append(line1)
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    v._text_edit.setPlainText("CC\nCC\nBBBB\n")
+
+    assert v._refresh_reference_context() is False
+    assert proof_display_text(line0) == "AAAA"
+    assert proof_display_text(line1) == "BBBB"
+    assert v._text_edit.toPlainText().startswith("AAAA\nBBBB")
+    v.deleteLater()
+
+
+def test_v_proof_refresh_context_restores_block_separators_from_model():
+    from app.ui.proof.v_proof import VProofPanel
+
+    line0 = Line(text="AAAA", confidence=0.9, bbox=BBox(0, 0, 80, 20))
+    line0.id = 94001
+    line1 = Line(text="BBBB", confidence=0.9, bbox=BBox(0, 40, 80, 20))
+    line1.id = 94002
+    block0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 30), lines=[line0])
+    block1 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 40, 100, 30), lines=[line1])
+    page = Page(
+        page_number=1,
+        blocks=[block0, block1],
+        image_path="/tmp/vproof-separator-slot.png",
+        width=120,
+        height=90,
     )
-    # line1 仍然是 HProof 的新值 —— 没有被 VProof 用 stale 整页文本回写
-    assert page.blocks[0].lines[1].final_text == "L1_HEDIT", \
-        f"VProof stale baseline 把 HProof 新内容覆盖了：{page.blocks[0].lines[1].final_text!r}"
+    page.id = 9401
+
+    v = VProofPanel()
+    v.load_pages([page])
+    assert v._text_edit.toPlainText() == "AAAA\n\nBBBB\n"
+
+    v._text_edit.setPlainText("AAAA\nBBBB\nCCCC\n")
+
+    assert v._refresh_reference_context() is False
+    assert proof_display_text(line0) == "AAAA"
+    assert proof_display_text(line1) == "BBBB"
+    assert v._text_edit.toPlainText() == "AAAA\n\nBBBB\n"
+    v.deleteLater()
+
+
+def test_v_proof_refresh_context_does_not_partially_write_stale_slots():
+    from app.ui.proof.v_proof import VProofPanel
+
+    line0 = Line(text="AAAA", confidence=0.9, bbox=BBox(0, 0, 80, 20))
+    line0.id = 95001
+    line1 = Line(text="BBBB", confidence=0.9, bbox=BBox(0, 40, 80, 20))
+    line1.id = 95002
+    line2 = Line(text="EEEE", confidence=0.9, bbox=BBox(0, 80, 80, 20))
+    line2.id = 95003
+    block0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 30), lines=[line0])
+    block1 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 40, 100, 30), lines=[line1])
+    block2 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 80, 100, 30), lines=[line2])
+    page = Page(
+        page_number=1,
+        blocks=[block0, block1, block2],
+        image_path="/tmp/vproof-stale-slot-owner.png",
+        width=120,
+        height=120,
+    )
+    page.id = 9501
+
+    v = VProofPanel()
+    v.load_pages([page])
+    assert v._text_edit.toPlainText() == "AAAA\n\nBBBB\n\nEEEE\n"
+
+    # 保持 line id 序列不变，但让最后一个 session slot 的 block owner 失效。
+    block2.lines.remove(line2)
+    block1.lines.append(line2)
+    v._text_edit.setPlainText("CCCC\n\nDDDD\n\nFFFF\n")
+    changes: list = []
+    v.proof_changed.connect(changes.append)
+
+    assert v._refresh_reference_context() is False
+    assert proof_display_text(line0) == "AAAA"
+    assert proof_display_text(line1) == "BBBB"
+    assert proof_display_text(line2) == "EEEE"
+    assert changes == []
+    assert v._text_edit.toPlainText() == "AAAA\n\nBBBB\nEEEE\n"
+    v.deleteLater()
+
+
+def test_v_proof_undo_action_cancels_atomically_when_line_owner_is_stale():
+    from app.ui.proof.v_proof import VProofPanel
+
+    line0 = Line(text="AAAA", confidence=0.9, bbox=BBox(0, 0, 80, 20))
+    line0.id = 96001
+    line1 = Line(text="BBBB", confidence=0.9, bbox=BBox(0, 40, 80, 20))
+    line1.id = 96002
+    line2 = Line(text="EEEE", confidence=0.9, bbox=BBox(0, 80, 80, 20))
+    line2.id = 96003
+    block0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 30), lines=[line0])
+    block1 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 40, 100, 30), lines=[line1])
+    block2 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 80, 100, 30), lines=[line2])
+    page = Page(
+        page_number=1,
+        blocks=[block0, block1, block2],
+        image_path="/tmp/vproof-undo-stale-slot-owner.png",
+        width=120,
+        height=120,
+    )
+    page.id = 9601
+
+    v = VProofPanel()
+    v.load_pages([page])
+    entry = v._char_svc.query("A")[0]
+    assert v._apply_replacement_to_selected("C", fallback_entry=entry) == 1
+    assert proof_display_text(line0) == "CAAA"
+    block0.lines.remove(line0)
+    changes: list = []
+    v.proof_changed.connect(changes.append)
+
+    assert v._undo_vproof_edit() is True
+    assert proof_final_text(line0) == "CAAA"
+    assert line0 not in block0.lines
+    assert line0 not in block1.lines
+    assert proof_display_text(line1) == "BBBB"
+    assert proof_display_text(line2) == "EEEE"
+    assert changes == []
+    assert "撤销已取消" in v._status_lbl.text()
+    v.deleteLater()
+
+
+def test_v_proof_undo_action_failure_preserves_current_page_and_editor_state():
+    from app.ui.proof.v_proof import VProofPanel
+
+    page1 = _make_project_with_char_crops("AAAA").pages[0]
+    page1.id = 9701
+    page1.image_path = "/tmp/vproof-restore-fail-page-1.png"
+    page1.blocks[0].lines[0].id = 97001
+    page2 = _make_project_with_char_crops("BBBB").pages[0]
+    page2.id = 9702
+    page2.page_number = 2
+    page2.image_path = "/tmp/vproof-restore-fail-page-2.png"
+    page2.blocks[0].lines[0].id = 97002
+
+    v = VProofPanel()
+    v.load_pages([page1, page2])
+    entry = v._char_svc.query("A")[0]
+    assert v._apply_replacement_to_selected("C", fallback_entry=entry) == 1
+    assert v._vproof_undo_stack
+    replacement = Line(text="CCCC", confidence=0.9, bbox=BBox(0, 0, 80, 20))
+    replacement.id = 97003
+    replacement.chars = [
+        Char(char="C", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
+        for i in range(4)
+    ]
+    page1.blocks[0].lines[0] = replacement
+
+    assert v._safe_load_page(1) is True
+    before_idx = v._session.current_page_index()
+    before_text = v._text_edit.toPlainText()
+    before_loaded_key = v._session.current_page_key
+
+    assert v._undo_vproof_edit() is True
+
+    assert v._session.current_page_index() == before_idx == 1
+    assert v._text_edit.toPlainText() == before_text == "BBBB\n"
+    assert v._session.current_page_key == before_loaded_key
+    assert "撤销已取消" in v._status_lbl.text()
+    v.deleteLater()
+
+
+def test_v_proof_text_edit_is_not_a_user_edit_surface():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("AAAA")
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+
+    assert v._text_edit.isReadOnly()
+    assert v._text_edit.toPlainText() == "AAAA\n"
+    v.deleteLater()
+
+
+def test_v_proof_edit_bubble_ctrl_z_stays_native_and_does_not_model_undo():
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("AAAA")
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    entry = v._char_svc.query("A")[0]
+    assert v._apply_replacement_to_selected("B", fallback_entry=entry) == 1
+    assert len(v._vproof_undo_stack) == 1
+    v._edit_bubble_input.setText("AB")
+
+    consumed = v.eventFilter(v._edit_bubble_input, QKeyEvent(
+        QEvent.Type.KeyPress,
+        int(Qt.Key.Key_Z),
+        Qt.KeyboardModifier.ControlModifier,
+        "z",
+    ))
+
+    assert consumed is False
+    assert len(v._vproof_undo_stack) == 1
+    assert v._vproof_redo_stack == []
+    v.deleteLater()
+
+
+def test_v_proof_refresh_quality_probe_state_reloads_reference_without_model_write():
+    from app.ui.proof.v_proof import VProofPanel
+
+    proj = _make_project("AAAA")
+    page = proj.pages[0]
+    line0 = page.blocks[0].lines[0]
+
+    v = VProofPanel()
+    v.load_pages(proj.pages)
+    v._text_edit.setPlainText("CCCC\n")
+
+    v.refresh_quality_probe_state()
+
+    assert proof_display_text(line0) == "AAAA"
+    assert v._text_edit.toPlainText().startswith("AAAA")
+    assert v._session.loaded_text == v._text_edit.toPlainText()
     v.deleteLater()
 
 
@@ -1126,16 +1178,74 @@ def test_phase25_save_button_text_is_just_save():
     h.deleteLater()
 
 
+def test_hproof_builds_text_proof_units_aligned_with_model_items():
+    from app.core.proof_atom import ProofAtomKind as AtomKind
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
+
+    proj = _make_project_with_char_crops("甲乙", lines_per_page=2)
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+
+    units = [pair._unit for pair in h._pairs]
+    assert [unit.kind for unit in units] == [
+        ProofUnitKind.TEXT,
+        ProofUnitKind.TEXT,
+    ]
+    assert [
+        (unit.block, unit.line, unit.page, unit.line_index)
+        for unit in units
+    ] == [
+        (projection.block, projection.line, projection.page, projection.line_index)
+        for projection in h._session.projections
+    ]
+    assert h._pairs[0]._unit is units[0]
+    assert h._session.projections[0].view_model(source="test").text == units[0].display_text
+    assert [atom.kind for atom in units[0].atoms] == [AtomKind.CHAR, AtomKind.CHAR]
+    h.deleteLater()
+
+
+def test_hproof_proof_unit_carries_word_atom_for_multichar_token():
+    from app.core.proof_atom import ProofAtomKind as AtomKind
+    from app.ui.proof.h_proof import HProofPanel
+
+    line = Line(
+        text="PE/VC",
+        confidence=0.9,
+        bbox=BBox(0, 0, 60, 20),
+        chars=[
+            Char(
+                char="PE/VC",
+                confidence=0.9,
+                bbox=BBox(0, 0, 60, 20),
+                bbox_source="engcut",
+                bbox_granularity="word",
+                token_text="PE/VC",
+            )
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=100, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+
+    units = [pair._unit for pair in h._pairs]
+    assert len(units) == 1
+    assert [atom.kind for atom in units[0].atoms] == [AtomKind.WORD]
+    assert units[0].atoms[0].text == "PE/VC"
+    h.deleteLater()
+
+
 def test_hproof_right_dock_updates_progress_and_status_counts():
     from app.models import ProofStatus
     from app.ui.proof.h_proof import HProofPanel
 
     proj = _make_project_with_char_crops("甲乙", lines_per_page=4)
     lines = proj.pages[0].blocks[0].lines
-    lines[0].proof_status = ProofStatus.OK
-    lines[1].proof_status = ProofStatus.MODIFIED
-    lines[2].proof_status = ProofStatus.AUTO_FLAGGED
-    lines[3].proof_status = ProofStatus.UNCHECKED
+    lines[0].set_proof_status(ProofStatus.OK)
+    lines[1].set_proof_status(ProofStatus.MODIFIED)
+    lines[2].set_proof_status(ProofStatus.AUTO_FLAGGED)
+    lines[3].set_proof_status(ProofStatus.UNCHECKED)
 
     h = HProofPanel()
     h.load_pages(proj.pages)
@@ -1177,18 +1287,57 @@ def test_hproof_active_pair_exposes_stronger_visual_state():
     first, second = h._pairs
 
     assert first.property("active") is True
-    assert "border-top" in first.styleSheet()
+    assert "border:1px solid #7A7368" in first.styleSheet()
+    assert "待" not in first._status_lbl.text()
+    assert "#AFC0D8" in first._active_bar.styleSheet()
 
     h._activate(1)
 
     assert first.property("active") is False
-    assert first.styleSheet() == ""
+    assert "border-bottom:1px solid #E7E2D8" in first.styleSheet()
     assert second.property("active") is True
+    assert "border:1px solid #7A7368" in second.styleSheet()
+    h.deleteLater()
+
+
+def test_hproof_focus_depth_compresses_context_rows():
+    from app.ui.proof.h_proof import (
+        FAR_LINE_PAIR_H,
+        HProofPanel,
+        LINE_PAIR_H,
+        NEAR_LINE_PAIR_H,
+    )
+
+    proj = _make_project_with_char_crops("甲乙", lines_per_page=4)
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+
+    assert [pair._focus_depth for pair in h._pairs] == [
+        "active",
+        "near",
+        "far",
+        "far",
+    ]
+    assert h._pairs[0].height() == LINE_PAIR_H
+    assert h._pairs[1].height() == NEAR_LINE_PAIR_H
+    assert h._pairs[2].height() == FAR_LINE_PAIR_H
+
+    h._activate(2)
+
+    assert [pair._focus_depth for pair in h._pairs] == [
+        "far",
+        "near",
+        "active",
+        "near",
+    ]
+    assert h._pairs[2].height() == LINE_PAIR_H
     h.deleteLater()
 
 
 def test_hproof_debug_buttons_filter_formula_and_table_lines():
-    from app.ui.proof.h_proof import HProofPanel
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
 
     normal_line = Line(text="正文", confidence=0.9, bbox=BBox(0, 0, 40, 12))
     inline_formula_line = Line(
@@ -1207,6 +1356,7 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
     )
     formula_number_line = Line(text="(1)", confidence=1.0, bbox=BBox(86, 32, 14, 12))
     formula_line = Line(text="$$ E=mc^2 $$", confidence=1.0, bbox=BBox(0, 48, 80, 12))
+    line_less_formula = r"$$ \\frac{a+b}{c+d} = \\sum_{i=1}^{n} x_i $$"
     table_line = Line(text="表格OCR", confidence=0.8, bbox=BBox(0, 64, 80, 12))
     route_table_line = Line(
         text="表格子区",
@@ -1236,6 +1386,16 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
             raw_payload={"block_label": "display_formula"},
         ),
         Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 58, 100, 12),
+            lines=[],
+            source_label="display_formula",
+            raw_payload={
+                "block_label": "display_formula",
+                "block_content": line_less_formula,
+            },
+        ),
+        Block(
             block_type=BlockType.TABLE,
             bbox=BBox(0, 64, 80, 12),
             lines=[table_line],
@@ -1251,30 +1411,71 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
 
     h = HProofPanel()
     h.load_pages([page])
-    assert [line.text for _block, line, _page, _idx in h._items] == [
+    assert [projection.line.text for projection in h._session.projections] == [
         "正文",
         "含$ A $公式",
     ]
 
     h._btn_debug_formula.setChecked(True)
-    assert [line.text for _block, line, _page, _idx in h._items] == [
+    assert [projection.line.text for projection in h._session.projections] == [
         "含$ A $公式",
         "$$ E=mc^2 $$",
+        line_less_formula,
     ]
-    assert [pair._debug_badge for pair in h._pairs] == ["公式", "公式"]
+    assert [pair._unit.kind for pair in h._pairs] == [
+        ProofUnitKind.FORMULA,
+        ProofUnitKind.FORMULA,
+        ProofUnitKind.FORMULA,
+    ]
+    assert [pair._debug_badge for pair in h._pairs] == ["公式", "公式", "公式"]
+    assert h._pairs[1]._editor.has_visual_text_override()
+    assert h._pairs[1]._editor.toPlainText() == "$$ E=mc^2 $$"
+    assert h._pairs[2]._editor.has_visual_text_override()
+    assert h._pairs[2].minimumWidth() > h._pairs[2]._line.bbox.w
+    formula_pair = h._pairs[1]
+    left_click = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(12, 10),
+        QPointF(12, 10),
+        QPointF(12, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    formula_pair._editor.mousePressEvent(left_click)
+    assert not formula_pair._editor.has_visual_text_override()
+    formula_pair._img_clicked_lookup(left_click)
+    assert formula_pair._editor.has_visual_text_override()
+    formula_pair._editor.mousePressEvent(left_click)
+    assert not formula_pair._editor.has_visual_text_override()
+    formula_pair._editor.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(12, 10),
+        QPointF(12, 10),
+        QPointF(12, 10),
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+    assert formula_pair._editor.has_visual_text_override()
 
     h._btn_debug_formula.setChecked(False)
     h._btn_debug_table.setChecked(True)
-    assert [line.text for _block, line, _page, _idx in h._items] == [
+    assert [projection.line.text for projection in h._session.projections] == [
         "表格OCR",
         "表格子区",
+    ]
+    assert [pair._unit.kind for pair in h._pairs] == [
+        ProofUnitKind.TABLE,
+        ProofUnitKind.TABLE,
     ]
     assert [pair._debug_badge for pair in h._pairs] == ["表格", "表格"]
 
     h._btn_debug_formula.setChecked(True)
-    assert [line.text for _block, line, _page, _idx in h._items] == [
+    assert [projection.line.text for projection in h._session.projections] == [
         "含$ A $公式",
         "$$ E=mc^2 $$",
+        line_less_formula,
         "表格OCR",
         "表格子区",
     ]
@@ -1336,17 +1537,59 @@ def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
     assert [line.text for _block, line, _idx in rows] == ["其中 $ \\beta_t $ 显著"]
 
 
-def test_phase25_editor_always_visible_and_weak_cursor():
-    """Phase 25：editor 始终可见，cursorWidth=0（弱光标）。"""
+def test_phase25_only_active_editor_visible_and_weak_cursor():
+    """横校只在当前行显示文本编辑层；上下文行只显示图像层。"""
     from app.ui.proof.h_proof import HProofPanel
-    proj = _make_project("ABCD")
+    proj = _make_project_with_char_crops("AB", lines_per_page=3)
     h = HProofPanel()
     h.load_pages(proj.pages)
+    assert not h._pairs[0]._editor.isHidden()
+    assert h._pairs[1]._editor.isHidden()
+    assert h._pairs[2]._editor.isHidden()
     for pair in h._pairs:
-        # editor 不再在 active 切换中 hide
-        assert not pair._editor.isHidden()
         assert pair._editor.cursorWidth() == 0
+
+    h._activate(1)
+
+    assert h._pairs[0]._editor.isHidden()
+    assert not h._pairs[1]._editor.isHidden()
+    assert h._pairs[2]._editor.isHidden()
     h.deleteLater()
+
+
+def test_slot_line_editor_ctrl_z_and_redo_restore_text():
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QKeyEvent
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    editor = _SlotLineEditor()
+    editor.setPlainText("abc")
+    editor._select_slot_index(1)
+
+    editor.keyPressEvent(QKeyEvent(
+        QKeyEvent.Type.KeyPress,
+        int(Qt.Key.Key_X),
+        Qt.KeyboardModifier.NoModifier,
+        "X",
+    ))
+    assert editor.toPlainText() == "aXc"
+
+    editor.keyPressEvent(QKeyEvent(
+        QKeyEvent.Type.KeyPress,
+        int(Qt.Key.Key_Z),
+        Qt.KeyboardModifier.ControlModifier,
+        "z",
+    ))
+    assert editor.toPlainText() == "abc"
+
+    editor.keyPressEvent(QKeyEvent(
+        QKeyEvent.Type.KeyPress,
+        int(Qt.Key.Key_Y),
+        Qt.KeyboardModifier.ControlModifier,
+        "y",
+    ))
+    assert editor.toPlainText() == "aXc"
+    editor.deleteLater()
 
 
 def test_phase25_no_image_text_headers():
@@ -1474,6 +1717,60 @@ def test_hproof_slot_editor_hit_testing_uses_painted_slot_geometry():
     assert cursor.selectionStart() == 1
     assert cursor.selectionEnd() == 2
     assert cursor.selectedText() == "b"
+    editor.deleteLater()
+
+
+def test_hproof_slot_editor_formula_visual_keeps_raw_text():
+    """公式渲染只影响横校显示层，不把可读公式回写进 editor 原始文本。"""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from app.ui.proof.h_proof import (
+        _SlotLineEditor,
+        _is_punctuation_slot_text,
+        _render_formula_display,
+    )
+
+    assert _render_formula_display(r"$$ E=mc^2 + \alpha_t $$") == "E = mc² + αₜ"
+    assert _render_formula_display(r"I n c e n t i v e_t + P o s t_t") == "Incentiveₜ + Postₜ"
+    assert _render_formula_display(r"$$ \frac{a+b}{c+d} $$") == "(a + b)⁄(c + d)"
+    assert _render_formula_display(r"X _ t") == "Xₜ"
+    assert _render_formula_display(r"X _ { t + 1 }") == "Xₜ₊₁"
+    assert _is_punctuation_slot_text("，")
+    assert not _is_punctuation_slot_text("甲")
+
+    raw = "$$ E=mc^2 $$"
+    editor = _SlotLineEditor()
+    editor.setPlainText(raw)
+    editor.set_visual_text_override(_render_formula_display(raw), kind="formula")
+
+    assert editor.has_visual_text_override()
+    assert editor.toPlainText() == raw
+
+    editor.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(12, 10),
+        QPointF(12, 10),
+        QPointF(12, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+
+    assert not editor.has_visual_text_override()
+    assert editor.textCursor().selectedText()
+    editor.deleteLater()
+
+
+def test_hproof_slot_editor_hit_testing_falls_back_without_bbox_slots():
+    """chars 不可对齐时仍应能按可见文本点击选中，不能失焦成不可编辑。"""
+    from app.ui.proof.h_proof import _SlotLineEditor
+
+    editor = _SlotLineEditor()
+    editor.setPlainText("abc")
+    assert editor._slot_index_for_x(20.0, nearest=True) >= 0
+
+    editor._select_slot_index(editor._slot_index_for_x(20.0, nearest=True))
+    assert editor.textCursor().selectedText()
     editor.deleteLater()
 
 

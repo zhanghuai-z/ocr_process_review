@@ -15,7 +15,14 @@ from app.core.char_bbox_utils import (
     split_line_bbox_into_char_bboxes,
 )
 from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
+from app.core.proof_char_text import chars_display_text
+from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_occurrence import (
+    line_signature,
+    proof_entry_page_identity_key,
+    proof_page_identity_key,
+)
 from app.models import BBox, Char, Line, OcrProject, Page
 
 try:
@@ -37,6 +44,8 @@ _KIND_OTHER = 5
 def _char_kind(char: str) -> int:
     if not char:
         return _KIND_OTHER
+    if len(char) != 1:
+        return _token_kind(char)
     cat = unicodedata.category(char)
     if cat.startswith("L"):
         return _KIND_LETTER
@@ -166,6 +175,9 @@ class CharEntry:
     bbox_granularity: str = ""
     token_text: str = ""
     collection_kind: str = "char"
+    block_uid: str = ""
+    line_uid: str = ""
+    line_signature: str = ""
 
     @property
     def _entry_sort_key(self) -> Tuple[int, int, int, int]:
@@ -188,20 +200,23 @@ class CharIndexService:
         self._include_non_cjk = include_non_cjk
         self._index: Dict[str, List[CharEntry]] = {}
         self._freq: Counter[str] = Counter()
+        self._image_cache: Dict[str, object] = {}
 
     def build(self, pages: List[Page]) -> "CharIndexService":
         self._index = {}
         self._freq = Counter()
+        self._image_cache = {}
         seen: Set[Tuple[int, int, str]] = set()
 
         for page_idx, page in enumerate(pages):
-            page_image = cv2.imread(page.display_image_path, cv2.IMREAD_COLOR)
+            page_image = self._load_page_image(page.display_image_path) if self._page_needs_image(page) else None
             for block, line, line_idx in iter_unique_page_text_lines(page):
                 self._index_line(
                     page_idx=page_idx,
                     page=page,
                     page_image=page_image,
                     block_order=block.order,
+                    block_uid=block.uid,
                     line_idx=line_idx,
                     line=line,
                     seen=seen,
@@ -214,21 +229,44 @@ class CharIndexService:
     def build_index(self, project: OcrProject) -> "CharIndexService":
         return self.build(project.pages)
 
+    def _load_page_image(self, path: str):
+        cached = self._image_cache.get(path)
+        if cached is not None:
+            return cached
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is not None:
+            self._image_cache[path] = image
+        return image
+
+    def _line_needs_image(self, line: Line) -> bool:
+        text = proof_display_text(line)
+        if not text:
+            return False
+        has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
+        if not line.chars or (len(line.chars) != len(text) and not has_tokenized_chars):
+            return True
+        return any(self._explicit_bbox_needs_validation(char.bbox) for char in line.chars)
+
+    def _page_needs_image(self, page: Page) -> bool:
+        return any(
+            self._line_needs_image(line)
+            for _block, line, _line_idx in iter_unique_page_text_lines(page)
+        )
+
+    @staticmethod
+    def _explicit_bbox_needs_validation(bbox: Optional[BBox]) -> bool:
+        if bbox is None:
+            return False
+        normalized = bbox.normalize()
+        return normalized.w <= 2 or normalized.h <= 2 or normalized.area <= 4
+
     @staticmethod
     def _page_key(page: Page) -> Tuple[object, ...]:
-        if page.uid:
-            return ("uid", page.uid)
-        if page.id is not None:
-            return ("id", page.id)
-        return ("path", page.display_image_path, page.page_number)
+        return proof_page_identity_key(page)
 
     @staticmethod
     def _entry_page_key(entry: CharEntry) -> Tuple[object, ...]:
-        if entry.page_uid:
-            return ("uid", entry.page_uid)
-        if entry.page_id is not None:
-            return ("id", entry.page_id)
-        return ("path", entry.page_path, entry.page_number)
+        return proof_entry_page_identity_key(entry)
 
     def replace_pages(self, pages: List[Page]) -> "CharIndexService":
         """Rebuild index entries only for the given pages.
@@ -280,40 +318,44 @@ class CharIndexService:
         line_idx: int,
         line: Line,
         seen: Set[Tuple[int, int, str]],
+        block_uid: str = "",
     ) -> None:
         if MISSING_LINE_BBOX_FLAG in line.review_flags:
             return
 
-        text = line.display_text
+        text = proof_display_text(line)
         if not text:
             return
 
-        if line.chars:
-            for char in line.chars:
-                if char.bbox is not None and char.bbox.area > 0 and not char.bbox_granularity:
-                    char.bbox_granularity = "char"
-
         has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
-        if not line.chars or (len(line.chars) != len(text) and not has_tokenized_chars):
+        if not line.chars:
             self._index_fallback_line(
                 text=text,
                 line=line,
                 page=page,
                 page_idx=page_idx,
                 block_order=block_order,
+                block_uid=block_uid,
                 line_idx=line_idx,
                 seen=seen,
                 page_image=page_image,
             )
             return
+        if has_tokenized_chars and chars_display_text(line.chars) != text:
+            return
+        if len(line.chars) != len(text) and not has_tokenized_chars:
+            return
 
         if not has_tokenized_chars and any((char.char or "") != text[idx] for idx, char in enumerate(line.chars)):
+            if self._mismatched_line_geometry_is_untrusted(line, text):
+                return
             self._index_positional_line(
                 text=text,
                 line=line,
                 page=page,
                 page_idx=page_idx,
                 block_order=block_order,
+                block_uid=block_uid,
                 line_idx=line_idx,
                 seen=seen,
                 page_image=page_image,
@@ -328,6 +370,7 @@ class CharIndexService:
                 page=page,
                 page_idx=page_idx,
                 block_order=block_order,
+                block_uid=block_uid,
                 line_idx=line_idx,
                 explicit_bbox=unit["bbox"],
                 confidence=float(unit["confidence"]),
@@ -339,6 +382,36 @@ class CharIndexService:
                 page_image=page_image,
             )
 
+    def _mismatched_line_geometry_is_untrusted(self, line: Line, text: str) -> bool:
+        """Return True when line geometry no longer proves the display text.
+
+        A small number of mismatches is a normal proofing edit: the glyph text
+        changes but the original char bbox is still the correct image location.
+        When most of a line is mismatched, or multiple mismatches sit on
+        fallback boxes, the line's text and geometry may belong to different
+        physical rows.  VProof should skip that line instead of showing
+        thumbnails from unrelated positions.
+        """
+        if not line.chars or len(line.chars) != len(text):
+            return True
+        mismatches = [
+            char for idx, char in enumerate(line.chars)
+            if (char.char or "") != text[idx]
+        ]
+        if not mismatches:
+            return False
+        if len(text) <= 2 and len(mismatches) == len(text):
+            return True
+        mismatch_threshold = max(3, int(len(text) * 0.35))
+        if len(mismatches) >= mismatch_threshold:
+            return True
+        if len(mismatches) >= 2 and any(
+            self._is_fallback_unit(char.bbox_source, char.bbox_granularity)
+            for char in mismatches
+        ):
+            return True
+        return False
+
     def _index_positional_line(
         self,
         *,
@@ -347,6 +420,7 @@ class CharIndexService:
         page: Page,
         page_idx: int,
         block_order: int,
+        block_uid: str,
         line_idx: int,
         seen: Set[Tuple[int, int, str]],
         page_image,
@@ -361,6 +435,7 @@ class CharIndexService:
                 page=page,
                 page_idx=page_idx,
                 block_order=block_order,
+                block_uid=block_uid,
                 line_idx=line_idx,
                 explicit_bbox=explicit_bbox,
                 confidence=float(char_obj.confidence),
@@ -380,6 +455,7 @@ class CharIndexService:
         page: Page,
         page_idx: int,
         block_order: int,
+        block_uid: str,
         line_idx: int,
         seen: Set[Tuple[int, int, str]],
         page_image,
@@ -397,6 +473,7 @@ class CharIndexService:
                 page=page,
                 page_idx=page_idx,
                 block_order=block_order,
+                block_uid=block_uid,
                 line_idx=line_idx,
                 explicit_bbox=boxes[char_idx] if char_idx < len(boxes) else (_estimate_char_bbox(line, char_idx, len(text)) or line.bbox),
                 confidence=float(line.confidence),
@@ -411,7 +488,7 @@ class CharIndexService:
     def _iter_index_units(self, line: Line) -> List[dict]:
         units: List[dict] = []
         chars = line.chars
-        text = line.display_text
+        text = proof_display_text(line)
         idx = 0
         display_idx = 0
         while idx < len(chars):
@@ -591,6 +668,7 @@ class CharIndexService:
         page: Page,
         page_idx: int,
         block_order: int,
+        block_uid: str,
         line_idx: int,
         explicit_bbox: Optional[BBox],
         confidence: float,
@@ -613,7 +691,15 @@ class CharIndexService:
         bbox = explicit_bbox or line.bbox
         if bbox is None:
             return
-        if not is_meaningful_text_bbox(page_image, bbox, token_text or glyph):
+        validation_image = (
+            page_image
+            if (
+                self._is_fallback_unit(bbox_source, bbox_granularity)
+                or self._explicit_bbox_needs_validation(bbox)
+            )
+            else None
+        )
+        if not is_meaningful_text_bbox(validation_image, bbox, token_text or glyph):
             return
         seen.add(key)
         entry = CharEntry(
@@ -633,6 +719,9 @@ class CharIndexService:
             bbox_granularity=bbox_granularity,
             token_text=token_text,
             collection_kind=collection_kind,
+            block_uid=block_uid,
+            line_uid=line.uid,
+            line_signature=line_signature(line),
         )
         self._index.setdefault(glyph, []).append(entry)
         self._freq[glyph] += 1

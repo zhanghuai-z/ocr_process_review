@@ -10,11 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QProgressBar, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
+    QMenu, QMessageBox, QProgressBar, QSizePolicy, QStackedWidget, QStatusBar, QVBoxLayout, QWidget,
 )
 
 from app.controllers.workflow_controller import (
@@ -31,52 +31,163 @@ from app.ui.proof.h_proof import HProofPanel
 from app.ui.proof.v_proof import VProofPanel
 from app.ui.export.export_dialog import ExportDialog
 from app.ui.widgets.top_bar import TopBar
+from app.services.export_service import build_export_summary
 
 logger = get_logger(__name__)
 
 
-# ── OCR 状态栏进度 ──────────────────────────────────────────────
-class _OcrProgressWidget(QWidget):
-    """状态栏边缘进度：不覆盖版面工作区。"""
+# ── 底部共享进度 ────────────────────────────────────────────────
+class _WorkflowProgressWidget(QWidget):
+    """底部共享进度：版面分析和 OCR 共用同一个槽位。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setMinimumWidth(480)
+        self.setMaximumWidth(540)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 0, 6, 0)
         layout.setSpacing(6)
 
-        self._title = QLabel("OCR")
-        self._title.setStyleSheet("font-size:12px; color:#555;")
+        self._active = False
+
+        self._title = QLabel("进度")
+        self._title.setStyleSheet("font-size:12px; color:#6B6B6B;")
+        self._title.setFixedWidth(62)
 
         self._bar = QProgressBar()
-        self._bar.setFixedWidth(140)
-        self._bar.setFixedHeight(6)
-        self._bar.setTextVisible(False)
-        self._bar.setRange(0, 0)  # 默认不确定模式
+        self._bar.setFixedWidth(170)
+        self._bar.setFixedHeight(16)
+        self._bar.setTextVisible(True)
+        self._bar.setFormat("%p%")
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self._detail = QLabel("")
+        self._detail.setStyleSheet("font-size:12px; color:#6B6B6B;")
+        self._detail.setMinimumWidth(145)
+        self._detail.setMaximumWidth(185)
 
         self._count = QLabel("")
-        self._count.setStyleSheet("font-size:12px; color:#888;")
+        self._count.setStyleSheet("font-size:12px; color:#A1A1A1;")
+        self._count.setFixedWidth(68)
+        self._count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         layout.addWidget(self._title)
+        layout.addWidget(self._detail)
         layout.addWidget(self._bar)
         layout.addWidget(self._count)
         self.hide()
 
-    def reset(self) -> None:
-        self._bar.setRange(0, 0)
-        self._count.setText("准备中")
+    def is_active(self) -> bool:
+        return self._active
+
+    def _activate(self, title: str, detail: str, count: str, value: int) -> None:
+        self._active = True
+        self._title.setText(title)
+        self._detail.setText(detail)
+        self._bar.setRange(0, 100)
+        self._bar.setValue(max(0, min(100, int(value))))
+        self._bar.setFormat("%p%")
+        self._count.setText(count)
         self.show()
 
+    def reset(self) -> None:
+        self.start_ocr(total_pages=0)
+
+    def start_layout(self, total_pages: int) -> None:
+        total = max(1, int(total_pages))
+        self._activate("版面分析", "提交请求", f"0/{total} 页", 4)
+
+    def update_layout(self, current: int, total: int) -> None:
+        total = max(1, int(total))
+        done = max(0, min(int(current) + 1, total))
+        pct = int(round(done / total * 100))
+        detail = "解析结果" if done >= total else "等待结果"
+        self._activate("版面分析", detail, f"{done}/{total} 页", pct)
+
+    def start_ocr(self, total_pages: int = 0) -> None:
+        total = max(1, int(total_pages or 1))
+        self._activate("OCR", "准备中", f"0/{total} 页", 0)
+
+    def update_ocr(self, progress) -> None:
+        total_pages = max(1, int(getattr(progress, "total_pages", 0) or 1))
+        completed = max(0, min(int(getattr(progress, "completed_pages", 0) or 0), total_pages))
+        current_page = int(getattr(progress, "current_page", 0) or 0)
+        if current_page <= 0:
+            current_page = min(total_pages, completed + 1)
+        current_page = max(1, min(current_page, total_pages))
+        value = self._ocr_stage_percent(progress)
+        detail = f"第 {current_page}/{total_pages} 页 · {self._ocr_stage_label(progress)}"
+        self._activate("OCR", detail, f"{completed}/{total_pages} 页", value)
+
+    @staticmethod
+    def _ocr_stage_label(progress) -> str:
+        message = str(getattr(progress, "message", "") or "")
+        lowered = message.lower()
+        if "失败" in message:
+            return "失败"
+        if "警告" in message or "fallback" in lowered:
+            return "字框检查"
+        if "prepass skipped" in lowered:
+            return "复用行框"
+        if "pp-ocrv5" in lowered and ("complete" in lowered or "完成" in message):
+            return "行框完成"
+        if "pp-ocrv5" in lowered or "prepass" in lowered:
+            return "行框定位"
+        if "segimg" in lowered or "分块" in message:
+            return "切分块"
+        if "recog 准备" in lowered:
+            return "识别准备"
+        if "hanwang ocr" in lowered or "识别中" in message:
+            return "字符识别"
+        if "已写回" in message or "已完成" in message:
+            return "写回结果"
+        if "准备" in message:
+            return "准备中"
+        return "处理中"
+
+    @staticmethod
+    def _ocr_stage_percent(progress) -> int:
+        message = str(getattr(progress, "message", "") or "")
+        lowered = message.lower()
+        current = max(0, int(getattr(progress, "current_block", 0) or 0))
+        total = max(0, int(getattr(progress, "total_blocks", 0) or 0))
+        if "失败" in message:
+            return 100
+        if "警告" in message or "fallback" in lowered:
+            return 100
+        if "已写回" in message:
+            return 100
+        if "pp-ocrv5" in lowered and "skipped" in lowered:
+            return 24
+        if "pp-ocrv5" in lowered and ("complete" in lowered or "完成" in message):
+            return 28
+        if "pp-ocrv5" in lowered or "prepass" in lowered:
+            return 12
+        if "segimg" in lowered or "分块" in message:
+            return 36
+        if "recog 准备" in lowered:
+            return 45
+        if total > 0 and current > 0:
+            return max(46, min(94, 45 + int(round(current / total * 45))))
+        if "准备" in message:
+            return 5
+        completed = int(getattr(progress, "completed_pages", 0) or 0)
+        current_page = int(getattr(progress, "current_page", 0) or 0)
+        if completed > 0 and current_page > 0:
+            return 100
+        return 8
+
     def finish(self) -> None:
+        self._active = False
         self.hide()
 
     @Slot(int, int)
     def update_progress(self, current: int, total: int) -> None:
-        if total > 0:
-            self._bar.setRange(0, total)
-            self._bar.setValue(current + 1)
-            self._count.setText(f"{current + 1}/{total}")
-            self.show()
+        total = max(1, int(total))
+        done = max(0, min(int(current) + 1, total))
+        self._activate("OCR", "页完成", f"{done}/{total} 页", 100)
 
 
 # TopBar 面包屑用的步骤名（不含 ①②③ 前缀）
@@ -138,6 +249,11 @@ class MainWindow(QMainWindow):
         self._workbench_initial_resize_done = False
         self._last_proof_sync_completed_pages = 0
         self._import_worker: ImportWorker | None = None
+        self._normal_geometry_before_maximize: QRect | None = None
+        self._normal_size_before_maximize: QSize | None = None
+        self._maximized_requested: bool | None = None
+        self._normal_restore_min_size: QSize | None = None
+        self._normal_restore_max_size: QSize | None = None
 
         self.setWindowTitle("OCR 后处理")
         self._build_ui()
@@ -147,14 +263,99 @@ class MainWindow(QMainWindow):
         self._go_to_step(STEP_IMPORT)
         self._resize_for_initial_import_page()
 
+    def showMaximized(self) -> None:  # type: ignore[override]
+        if not self.isMaximized() and not self.isFullScreen():
+            self._normal_geometry_before_maximize = QRect(self.geometry())
+            self._normal_size_before_maximize = QSize(self.size())
+        self._maximized_requested = True
+        super().showMaximized()
+        self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+
+    def showNormal(self) -> None:  # type: ignore[override]
+        saved = QRect(self._normal_geometry_before_maximize) if self._normal_geometry_before_maximize else None
+        saved_size = QSize(self._normal_size_before_maximize) if self._normal_size_before_maximize else None
+        actual_maximized = QMainWindow.isMaximized(self) or bool(
+            self.windowState() & Qt.WindowState.WindowMaximized
+        )
+        self._maximized_requested = False
+        if actual_maximized:
+            super().showNormal()
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+        if saved is not None:
+            self._restore_saved_normal_geometry(saved, saved_size, lock_size=True)
+            QTimer.singleShot(
+                0,
+                lambda rect=QRect(saved), size=QSize(saved_size) if saved_size is not None else None:
+                    self._restore_saved_normal_geometry(rect, size),
+            )
+
+    def isMaximized(self) -> bool:  # type: ignore[override]
+        if self._maximized_requested is not None:
+            return self._maximized_requested
+        return super().isMaximized()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        if self._maximized_requested is not False:
+            return
+        if not (self.windowState() & Qt.WindowState.WindowMaximized):
+            return
+        if self._normal_geometry_before_maximize is None:
+            return
+        self._cancel_late_maximize_restore()
+
+    def _cancel_late_maximize_restore(self) -> None:
+        if self._maximized_requested is not False:
+            return
+        if self._normal_geometry_before_maximize is None:
+            return
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMaximized)
+        saved = QRect(self._normal_geometry_before_maximize)
+        saved_size = (
+            QSize(self._normal_size_before_maximize)
+            if self._normal_size_before_maximize is not None
+            else None
+        )
+        self._restore_saved_normal_geometry(saved, saved_size, lock_size=True)
+
+    def _restore_saved_normal_geometry(
+        self,
+        rect: QRect,
+        size: QSize | None,
+        *,
+        lock_size: bool = False,
+    ) -> None:
+        self.setGeometry(rect)
+        if size is not None:
+            self.resize(size)
+            if lock_size:
+                self._normal_restore_min_size = QSize(self.minimumSize())
+                self._normal_restore_max_size = QSize(self.maximumSize())
+                self.setFixedSize(size)
+                QTimer.singleShot(0, self._release_normal_restore_size_lock)
+
+    def _release_normal_restore_size_lock(self) -> None:
+        min_size = self._normal_restore_min_size
+        max_size = self._normal_restore_max_size
+        self._normal_restore_min_size = None
+        self._normal_restore_max_size = None
+        if min_size is not None:
+            self.setMinimumSize(min_size)
+        if max_size is not None:
+            self.setMaximumSize(max_size)
+
     def _resize_for_initial_import_page(self) -> None:
-        target_w, target_h = 960, 540
         screen = QApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            target_w = min(target_w, max(320, available.width() - 80))
-            target_h = min(target_h, max(320, available.height() - 80))
-        self.resize(target_w, target_h)
+        if screen is None:
+            self._set_centered_window_size(1280, 720)
+            return
+        available = screen.availableGeometry()
+        self._set_centered_window_size(
+            max(640, int(available.width() * 0.80)),
+            max(420, int(available.height() * 0.80)),
+        )
 
     def _resize_for_initial_workbench_page(self) -> None:
         if self._workbench_initial_resize_done or self.isMaximized() or self.isFullScreen():
@@ -182,7 +383,9 @@ class MainWindow(QMainWindow):
         target_h = max(target_h, min_hint.height())
         geometry = self.geometry()
         frame = self.frameGeometry()
-        center = frame.center()
+        screen = self.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        center = available.center() if available is not None and not self.isVisible() else frame.center()
         left_frame = max(0, geometry.left() - frame.left())
         top_frame = max(0, geometry.top() - frame.top())
         right_frame = max(0, frame.right() - geometry.right())
@@ -192,9 +395,7 @@ class MainWindow(QMainWindow):
         frame_x = center.x() - frame_w // 2
         frame_y = center.y() - frame_h // 2
 
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
+        if available is not None:
             max_frame_x = available.right() - frame_w + 1
             max_frame_y = available.bottom() - frame_h + 1
             frame_x = (
@@ -214,6 +415,23 @@ class MainWindow(QMainWindow):
             target_w,
             target_h,
         )
+        if available is not None:
+            self._clamp_frame_to_available(available)
+
+    def _clamp_frame_to_available(self, available) -> None:
+        frame = self.frameGeometry()
+        dx = 0
+        dy = 0
+        if frame.left() < available.left():
+            dx = available.left() - frame.left()
+        elif frame.right() > available.right():
+            dx = available.right() - frame.right()
+        if frame.top() < available.top():
+            dy = available.top() - frame.top()
+        elif frame.bottom() > available.bottom():
+            dy = available.bottom() - frame.bottom()
+        if dx or dy:
+            self.move(self.x() + dx, self.y() + dy)
 
     # ── UI 构建 ────────────────────────────────────────────────
 
@@ -238,7 +456,7 @@ class MainWindow(QMainWindow):
 
         self._import_panel  = ImportPanel()
         self._layout_panel  = LayoutPanel()
-        self._ocr_placeholder = _OcrProgressWidget()
+        self._ocr_placeholder = _WorkflowProgressWidget()
         self._hproof_panel  = HProofPanel()
         self._vproof_panel  = VProofPanel()
 
@@ -260,8 +478,8 @@ class MainWindow(QMainWindow):
         # 状态栏
         self._status_bar = QStatusBar()
         self.setStatusBar(self._status_bar)
-        self._status_bar.addWidget(self._ocr_placeholder)
-        self._status_bar.showMessage("就绪")
+        self._status_bar.addPermanentWidget(self._ocr_placeholder, 0)
+        self._set_status_message("就绪")
 
     def _connect_signals(self) -> None:
         """连接所有信号，包括 controller 和面板之间的信号。"""
@@ -270,10 +488,11 @@ class MainWindow(QMainWindow):
 
         # 导入面板：图片/PDF 准备就绪
         self._import_panel.images_ready.connect(self._on_images_ready)
+        self._import_panel.open_project_requested.connect(self._open_project)
 
-        # 校对面板：保存修改
-        self._hproof_panel.proof_saved.connect(self._auto_save)
-        self._vproof_panel.proof_saved.connect(self._auto_save)
+        # 校对面板：内存变更后请求持久化；ProofChangeSet 是唯一保存契约。
+        self._hproof_panel.proof_changed.connect(self._auto_save_change)
+        self._vproof_panel.proof_changed.connect(self._auto_save_change)
 
         # ----- Controller 信号 -> UI -----
 
@@ -285,10 +504,10 @@ class MainWindow(QMainWindow):
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
-        self._controller.layout_progress.connect(self._layout_panel.update_analysis_progress)
+        self._controller.layout_progress.connect(self._on_layout_progress)
         self._controller.ocr_progress.connect(self._on_ocr_progress)
         self._controller.worker_error.connect(self._on_worker_error)
-        self._controller.status_message.connect(self._status_bar.showMessage)
+        self._controller.status_message.connect(self._set_status_message)
         self._layout_panel.geometry_changed.connect(self._controller.save_project)
         self._layout_panel.block_contract_changed.connect(self._controller.handle_block_contract_changed)
         self._layout_panel.ocr_entry_requested.connect(self._controller.handle_ocr_entry_requested)
@@ -300,78 +519,43 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         menu = self.menuBar()
+        menu.hide()
 
-        file_m = menu.addMenu("文件(&F)")
-        act_open = QAction("打开项目(&O)…", self)
+        file_m = QMenu("文件", self)
         act_save = QAction("保存项目(&S)", self)
         act_close_project = QAction("关闭项目(&W)", self)
         act_close_project.setShortcut(QKeySequence("Ctrl+W"))
-        act_open.triggered.connect(self._open_project)
         act_save.triggered.connect(self._save_project)
         act_close_project.triggered.connect(self._close_project)
-        for a in (act_open, act_save, None, act_close_project):
+        for a in (act_save, None, act_close_project):
             if a is None:
                 file_m.addSeparator()
             else:
                 file_m.addAction(a)
 
-        export_m = menu.addMenu("导出(&E)")
-        act_export = QAction("导出…", self)
-        act_export.triggered.connect(self._show_export_dialog)
-        export_m.addAction(act_export)
+        # 隐藏菜单栏后快捷键需绑定至窗口才能生效
+        self.addAction(act_save)
+        self.addAction(act_close_project)
 
-        settings_m = menu.addMenu("设置(&T)")
+        more_m = QMenu("更多", self)
         act_find = QAction("查找版面块…", self)
         act_find.setShortcut(QKeySequence.StandardKey.Find)
         act_find.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act_find.triggered.connect(self._show_layout_find)
-        settings_m.addAction(act_find)
-        settings_m.addSeparator()
-        act_ocr_cfg = QAction("OCR 引擎设置…", self)
+        more_m.addAction(act_find)
+        more_m.addSeparator()
+        act_ocr_cfg = QAction("设置…", self)
         act_ocr_cfg.triggered.connect(self._show_ocr_settings)
-        settings_m.addAction(act_ocr_cfg)
+        more_m.addAction(act_ocr_cfg)
         act_clear_charocr_cache = QAction("清空 CharOCR 缓存", self)
         act_clear_charocr_cache.triggered.connect(self._clear_charocr_cache)
-        settings_m.addAction(act_clear_charocr_cache)
+        more_m.addAction(act_clear_charocr_cache)
         # Phase 11：原 h_proof 工具栏「评测开关 + 报告」入口迁移到这里。
         act_quality_stats = QAction("正确率统计…", self)
         act_quality_stats.triggered.connect(self._show_quality_stats)
-        settings_m.addAction(act_quality_stats)
+        more_m.addAction(act_quality_stats)
 
-        help_m = menu.addMenu("帮助(&H)")
-        act_about = QAction("关于", self)
-        act_about.triggered.connect(lambda: QMessageBox.about(
-            self, "关于", "OCR 后处理软件 v0.2.0\n基于 PaddleOCR + PySide6"
-        ))
-        help_m.addAction(act_about)
-
-        # 视图：主题切换
-        view_m = menu.addMenu("视图(&V)")
-        from app.core.app_config import AppConfig
-        from app.ui.styles import apply_theme, available_themes
-        current_theme = str(AppConfig.instance().get("theme") or "light").lower()
-        if current_theme == "dark_teal":
-            current_theme = "dark"
-        from PySide6.QtGui import QActionGroup
-        theme_group = QActionGroup(self)
-        theme_group.setExclusive(True)
-        for name in available_themes():
-            label = {"light": "浅色主题", "dark": "深色主题"}.get(name, name)
-            act = QAction(label, self, checkable=True)
-            act.setChecked(name == current_theme)
-            act.triggered.connect(lambda _checked, n=name: self._switch_theme(n))
-            theme_group.addAction(act)
-            view_m.addAction(act)
-
-    def _switch_theme(self, name: str) -> None:
-        from app.core.app_config import AppConfig
-        from app.ui.styles import apply_theme
-        app = QApplication.instance()
-        if app is None:
-            return
-        actual = apply_theme(app, name)
-        AppConfig.instance().set("theme", actual)
-        self._status_bar.showMessage(f"已切换到 {actual} 主题", 3000)
+        self._top_bar.set_menus(file_m, more_m)
 
     # ── 步骤切换 ───────────────────────────────────────────────
 
@@ -384,6 +568,7 @@ class MainWindow(QMainWindow):
         controller.current_page_number，避免两边状态错位。
         """
         self._controller.set_current_step(step)
+        self._top_bar.setVisible(step != STEP_IMPORT)
         if step in (STEP_HPROOF, STEP_VPROOF):
             self._controller.ensure_quality_probe_sampled()
             if step == STEP_HPROOF:
@@ -398,8 +583,8 @@ class MainWindow(QMainWindow):
         """controller.current_step_changed → 同步 stack 和顶部栏激活态。"""
         widget = self._stack_widget_by_step.get(step, self._layout_panel)
         self._stack.setCurrentWidget(widget)
+        self._top_bar.setVisible(step != STEP_IMPORT)
         self._top_bar.set_active(step)
-        self._top_bar.set_step_name(_STEP_BREADCRUMB.get(step, ""))
         if step != STEP_IMPORT:
             self._resize_for_initial_workbench_page()
 
@@ -448,14 +633,26 @@ class MainWindow(QMainWindow):
 
     # ── Controller 回调 ─────────────────────────────────────────
 
+    def _set_status_message(self, message: str, timeout: int = 0) -> None:
+        if self._ocr_placeholder.is_active():
+            self._status_bar.clearMessage()
+            return
+        if timeout:
+            self._status_bar.showMessage(message, timeout)
+        else:
+            self._status_bar.showMessage(message)
+
     def _on_project_changed(self, project: Optional[OcrProject]) -> None:
         if project is None:
             self._top_bar.set_project_name("")
-            self._top_bar.set_status("hidden")
             return
         self._top_bar.set_project_name(project.name)
-        # 新项目载入：复位状态徽章为「未运行版面分析」
-        self._top_bar.set_status("idle", "未运行")
+
+    def _on_layout_progress(self, current: int, total: int) -> None:
+        if not self._ocr_placeholder.is_active():
+            self._ocr_placeholder.start_layout(total)
+        self._ocr_placeholder.update_layout(current, total)
+        self._status_bar.clearMessage()
 
     def _on_layout_finished(self, pages: List[Page]) -> None:
         """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
@@ -464,13 +661,13 @@ class MainWindow(QMainWindow):
         self._controller.set_layout_run_enabled(True)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
-            self._top_bar.set_status("warn", f"完成 {len(pages) - failed}/{len(pages)}")
-            self._status_bar.showMessage(
+            self._ocr_placeholder.finish()
+            self._set_status_message(
                 f"版面分析完成：{len(pages) - failed}/{len(pages)} 页成功，{failed} 页失败"
             )
         else:
-            self._top_bar.set_status("done", "已运行")
-            self._status_bar.showMessage(f"版面分析完成：{len(pages)} 页")
+            self._ocr_placeholder.finish()
+            self._set_status_message(f"版面分析完成：{len(pages)} 页")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。
@@ -478,22 +675,16 @@ class MainWindow(QMainWindow):
         proof 面板同步（merge vs load + line_count 维护）的 ownership 已收到
         controller 内部。OCR 完成只开放校对入口，不再强制把用户带到横校。"""
         self._ocr_placeholder.finish()
+        self._set_status_message(f"文字识别完成：{len(pages)} 页")
         self._last_proof_sync_completed_pages = len(pages)
         self._controller.sync_proof_panels()
         self._layout_panel.refresh_text_indexes()
 
     def _on_ocr_progress(self, progress) -> None:
-        if progress.total_blocks <= 0 and progress.completed_pages <= 0:
-            self._ocr_placeholder.reset()
-        elif progress.total_blocks > 0:
-            if progress.current_block <= 0:
-                self._ocr_placeholder.reset()
-            else:
-                current = max(0, min(progress.current_block - 1, progress.total_blocks - 1))
-                self._ocr_placeholder.update_progress(current, progress.total_blocks)
-        elif progress.total_pages > 0:
-            current = max(0, min(progress.completed_pages - 1, progress.total_pages - 1))
-            self._ocr_placeholder.update_progress(current, progress.total_pages)
+        if not self._ocr_placeholder.is_active():
+            self._ocr_placeholder.start_ocr(int(getattr(progress, "total_pages", 0) or 1))
+        self._ocr_placeholder.update_ocr(progress)
+        self._status_bar.clearMessage()
         completed_pages = max(0, int(getattr(progress, "completed_pages", 0) or 0))
         if completed_pages == 0 and int(getattr(progress, "current_page", 0) or 0) <= 1:
             self._last_proof_sync_completed_pages = 0
@@ -505,15 +696,14 @@ class MainWindow(QMainWindow):
 
     def _on_worker_error(self, msg: str) -> None:
         """Worker 出错时恢复所有按钮状态并显示错误。"""
+        self._ocr_placeholder.finish()
         self._layout_panel.run_button.setEnabled(True)
         self._controller.set_layout_run_enabled(True)
         if hasattr(self._layout_panel, '_btn_ocr'):
             self._layout_panel._btn_ocr.setEnabled(True)
         if self._controller.current_step in (STEP_LAYOUT, STEP_OCR) or "版面分析" in msg:
-            self._ocr_placeholder.finish()
             self._layout_panel.finish_analysis_progress(msg)
-            self._top_bar.set_status("warn", "失败")
-            self._status_bar.showMessage(f"处理失败：{msg}")
+            self._set_status_message(f"处理失败：{msg}")
             return
         QMessageBox.critical(self, "错误", f"处理失败：\n{msg}")
 
@@ -538,14 +728,16 @@ class MainWindow(QMainWindow):
                     self._controller.sync_proof_panels(force_load=True)
             self._go_to_step(self._controller.get_open_step())
 
-    def _save_project(self) -> None:
+    def _save_project(self) -> bool:
+        return self._save_project_interactive()
+
+    def _save_project_interactive(self) -> bool:
         if not self._controller.project:
             QMessageBox.information(self, "提示", "当前无项目，请先导入或打开项目")
-            return
+            return False
         if not self._controller.store:
-            self._save_project_as()
-            return
-        self._controller.save_project()
+            return self._save_project_as()
+        return self._controller.save_project()
 
     def _save_project_as(self) -> bool:
         project = self._controller.project
@@ -559,30 +751,50 @@ class MainWindow(QMainWindow):
             return False
         return self._controller.save_project_as(path)
 
+    def _ask_save_before_close(self, title: str, message: str) -> str:
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(message)
+        btn_save = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        btn_save.setObjectName("primaryBtn")
+        btn_discard.setObjectName("dangerBtn")
+        btn_cancel.setObjectName("secondaryBtn")
+        for btn in (btn_save, btn_discard, btn_cancel):
+            btn.setMinimumHeight(30)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+        box.setDefaultButton(btn_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_save:
+            return "save"
+        if clicked == btn_discard:
+            return "discard"
+        if clicked == btn_cancel:
+            return "cancel"
+        return "cancel"
+
     def _confirm_close_project_save(self) -> bool:
         if not self._controller.project:
             return True
-        result = QMessageBox.question(
-            self,
+        result = self._ask_save_before_close(
             "关闭项目",
             "关闭当前项目前是否保存？\n选择“取消”会保留当前项目。",
-            (
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel
-            ),
-            QMessageBox.StandardButton.Save,
         )
-        if result == QMessageBox.StandardButton.Cancel:
+        if result == "cancel":
             return False
-        if result == QMessageBox.StandardButton.Save and not self._controller.save_project():
+        if result == "save" and not self._save_project_interactive():
             QMessageBox.warning(self, "保存失败", "项目未保存，已取消关闭。")
             return False
         return True
 
     def _close_project(self) -> None:
         if not self._controller.project:
-            self._status_bar.showMessage("当前没有打开的项目")
+            self._set_status_message("当前没有打开的项目")
             return
         if self._controller.has_running_workers() or self._import_worker_is_running():
             QMessageBox.warning(self, "关闭项目", "后台任务仍在运行，请等待完成后再关闭项目。")
@@ -600,19 +812,22 @@ class MainWindow(QMainWindow):
         self._hproof_panel.reset()
         self._vproof_panel.reset()
         self._top_bar.set_project_name("")
-        self._top_bar.set_status("hidden")
+        self._top_bar.setVisible(False)
         self._stack.setCurrentWidget(self._import_panel)
-        self._status_bar.showMessage("项目已关闭")
+        self._set_status_message("项目已关闭")
 
     def _auto_save(self) -> None:
         self._controller.auto_save()
+
+    def _auto_save_change(self, change) -> None:
+        self._controller.auto_save(change)
 
     # ── 工作流事件处理 ──────────────────────────────────────────
 
     def _on_images_ready(self, paths: List[str]) -> None:
         """导入文件 → 使用 ImportService 创建 Page 对象 → 交给 controller。"""
         if self._import_worker_is_running():
-            self._status_bar.showMessage("文件仍在导入中…")
+            self._set_status_message("文件仍在导入中…")
             return
         project = self._controller.project
         if not project:
@@ -621,7 +836,7 @@ class MainWindow(QMainWindow):
         try:
             cache_dir = self._controller.cache_dir
             self._import_panel.setEnabled(False)
-            self._status_bar.showMessage(f"正在导入 {len(paths)} 个文件…")
+            self._set_status_message(f"正在导入 {len(paths)} 个文件…")
             self._import_worker = ImportWorker(paths, cache_dir, self)
             self._import_worker.all_done.connect(self._on_import_done)
             self._import_worker.error.connect(self._on_import_error)
@@ -658,7 +873,7 @@ class MainWindow(QMainWindow):
 
         if result.failed:
             fail_msg = "\n".join(f"• {Path(p).name}: {r}" for p, r in result.failed[:3])
-            self._status_bar.showMessage(
+            self._set_status_message(
                 f"导入完成：{result.success_count} 页成功，{result.failed_count} 个失败"
             )
             QMessageBox.information(
@@ -667,7 +882,7 @@ class MainWindow(QMainWindow):
                 f"{result.failed_count} 个文件失败：\n{fail_msg}"
             )
         else:
-            self._status_bar.showMessage(f"导入 {result.success_count} 页")
+            self._set_status_message(f"导入 {result.success_count} 页")
 
     def _on_import_error(self, message: str) -> None:
         QMessageBox.critical(self, "导入错误", f"导入过程出错：{message}")
@@ -681,14 +896,14 @@ class MainWindow(QMainWindow):
             return
         self._layout_panel.run_button.setEnabled(False)
         self._controller.set_layout_run_enabled(False)
-        self._layout_panel.start_analysis_progress(len(self._controller.pages))
-        self._top_bar.set_status("running", "运行中…")
+        self._ocr_placeholder.start_layout(len(self._controller.pages))
+        self._status_bar.clearMessage()
         QApplication.processEvents()
         if not self._controller.start_layout_analysis(self._controller.pages):
-            self._layout_panel.finish_analysis_progress("版面分析未启动")
+            self._ocr_placeholder.finish()
+            self._set_status_message("版面分析未启动")
             self._layout_panel.run_button.setEnabled(True)
             self._controller.set_layout_run_enabled(True)
-            self._top_bar.set_status("idle", "未运行")
 
     def _start_ocr(self) -> None:
         """OCR 启动（版面分析完成后自动触发）：保留版面工作区，仅在状态栏显示进度。"""
@@ -700,10 +915,11 @@ class MainWindow(QMainWindow):
         pages = self._controller.pages
         if self._controller.get_recognizable_block_count() == 0:
             return  # 无可识别块，静默跳过
-        self._ocr_placeholder.reset()
+        self._ocr_placeholder.start_ocr(len(pages))
+        self._status_bar.clearMessage()
         self._last_proof_sync_completed_pages = 0
         self._go_to_step(STEP_OCR)
-        self._status_bar.showMessage("正在文字识别…")
+        self._set_status_message("正在文字识别…")
         QApplication.processEvents()
         self._controller.start_ocr(pages, notify_page_callback=self._ocr_placeholder.update_progress)
 
@@ -716,7 +932,7 @@ class MainWindow(QMainWindow):
         project = self._controller.project
 
         # 导出前检查
-        summary = project.get_export_summary()
+        summary = build_export_summary(project)
         warnings = []
         if summary["unrecognized_blocks"] > 0:
             warnings.append(f"{summary['unrecognized_blocks']} 个块未识别")
@@ -745,21 +961,14 @@ class MainWindow(QMainWindow):
             if self._controller.store:
                 self._controller.save_project()
             else:
-                result = QMessageBox.question(
-                    self,
+                result = self._ask_save_before_close(
                     "保存项目",
                     "当前项目尚未保存。退出前是否保存？",
-                    (
-                        QMessageBox.StandardButton.Save
-                        | QMessageBox.StandardButton.Discard
-                        | QMessageBox.StandardButton.Cancel
-                    ),
-                    QMessageBox.StandardButton.Save,
                 )
-                if result == QMessageBox.StandardButton.Cancel:
+                if result == "cancel":
                     event.ignore()
                     return
-                if result == QMessageBox.StandardButton.Save and not self._save_project_as():
+                if result == "save" and not self._save_project_as():
                     event.ignore()
                     return
         self._controller.close()
@@ -776,7 +985,7 @@ class MainWindow(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
         cleared = self._controller.clear_charocr_cache()
-        self._status_bar.showMessage(f"CharOCR 缓存已清空：{cleared}", 5000)
+        self._set_status_message(f"CharOCR 缓存已清空：{cleared}", 5000)
 
     def _show_quality_stats(self) -> None:
         """打开『正确率统计』对话框。
@@ -788,6 +997,7 @@ class MainWindow(QMainWindow):
         dlg = QualityStatsDialog(
             project_provider=lambda: self._controller.project,
             refresh_panels_cb=self._refresh_proof_panels_after_quality_toggle,
+            proof_changed_cb=self._controller.auto_save,
             parent=self,
         )
         dlg.exec()
@@ -801,7 +1011,7 @@ class MainWindow(QMainWindow):
 
     def _show_layout_find(self) -> None:
         if not self._controller.has_pages:
-            self._status_bar.showMessage("当前没有可查找的版面块", 3000)
+            self._set_status_message("当前没有可查找的版面块", 3000)
             return
         self._go_to_step(STEP_LAYOUT)
         self._layout_panel.show_find_dialog()
@@ -813,4 +1023,4 @@ class MainWindow(QMainWindow):
         dlg = ApiSettingsDialog(self)
         if dlg.exec():
             cfg = get_config()
-            self._status_bar.showMessage(f"OCR 引擎：{get_engine_description(cfg['mode'])}")
+            self._set_status_message(f"OCR 引擎：{get_engine_description(cfg['mode'])}")

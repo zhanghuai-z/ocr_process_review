@@ -10,7 +10,6 @@
 
   - ``Char.confidence``        OCR 自评（每字一个 [0,1] 分数）
   - ``Line.ocr_text``          OCR 原始识别结果（用于判断"用户是否改过"）
-  - ``Line.llm_suggestion``    LLM 建议字符串（按位置）
   - ``Line.text``              当前显示的文本（可能已被用户编辑覆写）
 
 ** 缺失但用户期望存在的判定链 **（写在 handoff，不在本模块里造假）：
@@ -38,9 +37,7 @@
 绿 #2e7d32   ocr_conf >= 0.95                    likely_ok
 默认深灰     0.80 <= ocr_conf < 0.95              unverified
 橙 #e8801f   0.50 <= ocr_conf < 0.80              suspect
-            (或 ocr_conf < 0.95 且 llm 与文本不同)
 红 #c62828   ocr_conf < 0.50                     error
-            (或 ocr_conf < 0.80 且 llm 与文本不同)
 ============ ================================== ==========================
 
 `user_modified` 单独成一个 bool 字段：UI 在该字下方画一条细线提示"这字被改过"，
@@ -77,7 +74,6 @@ def classify_char(
     confidence: Optional[float],
     text_char: str,
     ocr_char: Optional[str],
-    llm_char: Optional[str],
 ) -> CharVerdict:
     """按上文表格分类。
 
@@ -86,20 +82,12 @@ def classify_char(
     confidence : Optional[float]
         ``Char.confidence``。None / 缺失时归入 ``unverified``，证据描述写明缺失。
     text_char : str
-        当前显示文本中该位置的字（用于和 ocr / llm 比较）。
+        当前显示文本中该位置的字（用于和 OCR 原文比较）。
     ocr_char : Optional[str]
         OCR 原始字（``Line.ocr_text[i]``）。None 表示未取到；
         ``user_modified`` 仅在拿得到时才可能为 True。
-    llm_char : Optional[str]
-        LLM 建议字（``Line.llm_suggestion[i]``）。None 表示未提供；
-        不参与颜色升级。
     """
     user_modified = ocr_char is not None and text_char != ocr_char
-    llm_disagrees = (
-        llm_char is not None
-        and text_char != ""
-        and llm_char != text_char
-    )
 
     if confidence is None:
         return CharVerdict(
@@ -114,22 +102,10 @@ def classify_char(
         return CharVerdict(COLOR_ERROR, SEVERITY_ERROR, ev, user_modified)
 
     if confidence < 0.80:
-        if llm_disagrees:
-            ev = (
-                f"ocr_conf={confidence:.2f} <0.80（可疑）；"
-                f"llm 建议 '{llm_char}' 与文本 '{text_char}' 不同 → 升级为错"
-            )
-            return CharVerdict(COLOR_ERROR, SEVERITY_ERROR, ev, user_modified)
         ev = f"ocr_conf={confidence:.2f} <0.80（可疑）"
         return CharVerdict(COLOR_SUSPECT, SEVERITY_SUSPECT, ev, user_modified)
 
     if confidence < 0.95:
-        if llm_disagrees:
-            ev = (
-                f"ocr_conf={confidence:.2f}（0.80~0.95）；"
-                f"llm 建议 '{llm_char}' 与文本 '{text_char}' 不同 → 标为可疑"
-            )
-            return CharVerdict(COLOR_SUSPECT, SEVERITY_SUSPECT, ev, user_modified)
         ev = (
             f"ocr_conf={confidence:.2f}（0.80~0.95）；"
             "无可用证据链可上升为'绝对正确'"

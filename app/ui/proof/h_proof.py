@@ -26,42 +26,53 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import re
+from typing import List, Optional
+import unicodedata
 
 import cv2
-from PySide6.QtCore import QEvent, Qt, QRect, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QRect, QTimer, Signal, QSize
 from PySide6.QtGui import (
-    QColor, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
+    QColor, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QProgressBar,
-    QScrollArea, QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
-from app.models import Block, BlockType, Line, OcrProject, Page, ProofStatus
+from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
+from app.core.proof_change import ProofChangeSet
+from app.core.proof_atom import ProofAtom
+from app.core.proof_line_facts import proof_block_text, proof_display_text, proof_ocr_text, proof_status
+from app.core.proof_occurrence import line_signature
+from app.core.proof_projection import ProofLineProjection, build_proof_line_projection
 from app.ui.widgets.page_directory import PageDirectoryList
+from app.utils.icon_manager import get_icon
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
 from app.core.proof_state import (
     TOPIC_LINE_PROOF_CHANGED,
-    ProofLineViewModel,
     ProofSelection,
     ProofUpdateRequest,
     proof_request_matches_line,
 )
 from app.core.proof_state_bus import ProofStateBus
-from app.core import quality_probe as qp
 from app.services.proof_probe_text_service import (
     displayed_text as _displayed_text,
-    save_displayed_edit as _save_displayed_edit,
-    resolve_block_line_index as _resolve_block_line_index,
+)
+from app.services.proof_edit_service import ProofEditService
+from app.services.proof_hproof_session import (
+    HProofLineEditSession,
+    HProofRuntimeSession,
 )
 from app.services.proof_image_service import clamp_line_box_pixels
 from app.ui.proof.confidence_utils import char_confidence
-from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.proof import char_verdict as _cv
 # NOTE: AlignmentRibbon 已从布局中移除（proof-layout-collections 第 1 任务）。
 # 用户原话：“既然已经做图字对应，就不要第三行文本行”。图字 y 轴对应
@@ -70,39 +81,91 @@ from app.ui.proof import char_verdict as _cv
 
 # ── 样式常量 ──────────────────────────────────────────────────
 ROW_PAD_Y    = 4     # 裁图上下各加 4px
-IMAGE_ROW_H  = 32    # 行图像显示高度（px）
+IMAGE_ROW_H  = 38    # 当前行图像显示高度（px）
+NEAR_IMAGE_ROW_H = 24
+FAR_IMAGE_ROW_H = 20
 # 脚注、数字、标点的 Hanwang 字符框通常比正文窄。字号按较小文本优先，
 # 避免按 slot center 自绘时把标点和数字挤在一起。
-TEXT_FONT_PX = 22
-TEXT_LINE_HEIGHT_PX = 28
-TEXT_EDITOR_MAX_H = 32
+TEXT_FONT_PX = 26
+TEXT_FONT_WEIGHT = QFont.Weight.Bold
+TEXT_FONT_WEIGHT_CSS = 700
+TEXT_LINE_HEIGHT_PX = 34
+TEXT_EDITOR_MAX_H = 40
+NEAR_TEXT_EDITOR_H = 25
+FAR_TEXT_EDITOR_H = 22
 TEXT_SLOT_MIN_W = 10.0
 TEXT_SLOT_GUTTER_W = 4.0
 TEXT_SLOT_GAP_W = 1.0
 TEXT_SLOT_CLIPPED_MIN_W = 1.0
+IMAGE_DIVIDER_COLOR = "#D8D2C8"
+TEXT_GUIDE_LINE_COLOR = "#AFC0D8"
+ROW_DIVIDER_COLOR = "#E7E2D8"
+FOCUS_BORDER_COLOR = "#7A7368"
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
-LINE_PAIR_H = 70
-# Phase 17 blocker：字格模式下需要为 CharCellRow 留够竖向空间。
-# CharCellRow 自身固定高 = IMG_H(36) + EDIT_H(26) + 6 内边距 = 68。
-# Phase 24（上图下字后）：image_row(32) + cell_row(68) + spacing(4) +
-# 上下 padding(8) = 112 px。
-CELL_PAIR_H = 112
-TEXT_FONT_FAMILY = "'SimHei','Microsoft YaHei UI','Noto Sans CJK SC','PingFang SC','SimSun',sans-serif"
+LINE_PAIR_H = 92
+NEAR_LINE_PAIR_H = 34
+FAR_LINE_PAIR_H = 28
+
+
+class _ProofProgressRing(QWidget):
+    """Clickable compact progress indicator for the proof status bar."""
+
+    clicked = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("proofProgressRing")
+        self.setFixedSize(38, 38)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._handled = 0
+        self._total = 0
+
+    def set_counts(self, handled: int, total: int) -> None:
+        self._handled = max(0, int(handled))
+        self._total = max(0, int(total))
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(5, 5, -5, -5)
+        painter.setPen(QPen(QColor("#E7E2D8"), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.drawArc(rect, 0, 360 * 16)
+        if self._total > 0 and self._handled > 0:
+            ratio = min(1.0, self._handled / max(1, self._total))
+            painter.setPen(QPen(QColor("#2C2C2C"), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawArc(rect, 90 * 16, int(-360 * 16 * ratio))
+        painter.setPen(QColor("#2C2C2C"))
+        font = painter.font()
+        font.setPixelSize(8)
+        font.setBold(True)
+        painter.setFont(font)
+        pct = int(round((self._handled / max(1, self._total)) * 100)) if self._total else 0
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"{pct}%")
+
+
+TEXT_FONT_FAMILY = "'Noto Serif CJK SC','Source Han Serif SC','SimSun','Songti SC','Times New Roman',serif"
 LABEL_W      = 88    # 左侧行号列宽
-STATUS_W     = 80    # 右侧状态列宽
+STATUS_W     = 24    # 右侧状态列宽
 LOW_CONF     = 0.80
 
 _STATUS_COLOR = {
     ProofStatus.OK:           "#4CAF50",
-    ProofStatus.MODIFIED:     "#1a73e8",
+    ProofStatus.MODIFIED:     "#5C6B58",
     ProofStatus.AUTO_FLAGGED: "#FF9800",
-    ProofStatus.UNCHECKED:    "#c8d0db",
+    ProofStatus.UNCHECKED:    TEXT_GUIDE_LINE_COLOR,
 }
-_STATUS_LABEL = {
-    ProofStatus.OK:           "已确认",
-    ProofStatus.MODIFIED:     "已修改",
-    ProofStatus.AUTO_FLAGGED: "⚑ 疑点",
-    ProofStatus.UNCHECKED:    "待确认",
+_STATUS_GLYPH = {
+    ProofStatus.OK: "●",
+    ProofStatus.MODIFIED: "◆",
+    ProofStatus.AUTO_FLAGGED: "▲",
+    ProofStatus.UNCHECKED: "○",
 }
 
 _DEBUG_FORMULA_LINE_FLAGS = {"hanwang_route_inline_formula"}
@@ -124,6 +187,178 @@ def _slot_visual_width(
     """
     glyph_width = float(font_metrics.horizontalAdvance(text_char or " ")) + TEXT_SLOT_GUTTER_W
     return max(TEXT_SLOT_MIN_W, glyph_width)
+
+
+def _is_punctuation_slot_text(text: str) -> bool:
+    """Whether a slot should draw text centered inside its visual cell."""
+    if not text:
+        return False
+    return all(unicodedata.category(ch).startswith("P") for ch in text)
+
+
+_LATEX_SYMBOLS = {
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "varepsilon": "ε",
+    "zeta": "ζ",
+    "eta": "η",
+    "theta": "θ",
+    "vartheta": "ϑ",
+    "iota": "ι",
+    "kappa": "κ",
+    "lambda": "λ",
+    "mu": "μ",
+    "nu": "ν",
+    "xi": "ξ",
+    "pi": "π",
+    "rho": "ρ",
+    "sigma": "σ",
+    "tau": "τ",
+    "upsilon": "υ",
+    "phi": "φ",
+    "varphi": "φ",
+    "chi": "χ",
+    "psi": "ψ",
+    "omega": "ω",
+    "Gamma": "Γ",
+    "Delta": "Δ",
+    "Theta": "Θ",
+    "Lambda": "Λ",
+    "Xi": "Ξ",
+    "Pi": "Π",
+    "Sigma": "Σ",
+    "Phi": "Φ",
+    "Psi": "Ψ",
+    "Omega": "Ω",
+    "times": "×",
+    "cdot": "·",
+    "pm": "±",
+    "le": "≤",
+    "leq": "≤",
+    "ge": "≥",
+    "geq": "≥",
+    "neq": "≠",
+    "approx": "≈",
+    "infty": "∞",
+    "sum": "∑",
+    "prod": "∏",
+    "int": "∫",
+    "partial": "∂",
+    "nabla": "∇",
+    "rightarrow": "→",
+    "to": "→",
+    "leftarrow": "←",
+}
+
+_SUPERSCRIPT = str.maketrans({
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+    "+": "⁺",
+    "-": "⁻",
+    "=": "⁼",
+    "(": "⁽",
+    ")": "⁾",
+    "i": "ⁱ",
+    "n": "ⁿ",
+})
+_SUBSCRIPT = str.maketrans({
+    "0": "₀",
+    "1": "₁",
+    "2": "₂",
+    "3": "₃",
+    "4": "₄",
+    "5": "₅",
+    "6": "₆",
+    "7": "₇",
+    "8": "₈",
+    "9": "₉",
+    "+": "₊",
+    "-": "₋",
+    "=": "₌",
+    "(": "₍",
+    ")": "₎",
+    "a": "ₐ",
+    "e": "ₑ",
+    "h": "ₕ",
+    "i": "ᵢ",
+    "j": "ⱼ",
+    "k": "ₖ",
+    "l": "ₗ",
+    "m": "ₘ",
+    "n": "ₙ",
+    "o": "ₒ",
+    "p": "ₚ",
+    "r": "ᵣ",
+    "s": "ₛ",
+    "t": "ₜ",
+    "u": "ᵤ",
+    "v": "ᵥ",
+    "x": "ₓ",
+})
+
+
+def _translate_script(text: str, table: dict[int, str], marker: str) -> str:
+    text = re.sub(r"\s+", "", text or "")
+    translated = text.translate(table)
+    if translated != text:
+        return translated
+    if len(text) == 1:
+        return f"{marker}{text}"
+    return f"{marker}{{{text}}}"
+
+
+def _compact_formula_spacing(text: str) -> str:
+    """Collapse OCR-spaced Latin formula tokens without touching prose spacing."""
+    s = text
+    latin = r"A-Za-zΑ-Ωα-ω"
+    sub_sup = "₀-₉₊₋₌₍₎ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾ⁱⁿ"
+    # OCR often returns formula words as "I n c e n t i v e _ t".
+    s = re.sub(rf"(?<=[{latin}])\s+(?=[{latin}_])", "", s)
+    s = re.sub(rf"(?<=[{latin}0-9])\s+(?=[{sub_sup}])", "", s)
+    s = re.sub(rf"(?<=[{sub_sup}])\s+(?=[{latin}0-9])", "", s)
+    s = re.sub(r"\s*([=+\-×·*/])\s*", r" \1 ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _render_formula_display(text: str) -> str:
+    """Best-effort visual text for HProof formula rows.
+
+    This is intentionally a display-only renderer. It handles the common
+    Paddle/Hanwang LaTeX fragments we see in proofreading, but keeps the raw
+    OCR text in the editor document so saving/export stays unchanged.
+    """
+    s = (text or "").strip()
+    if not s:
+        return ""
+    s = s.replace("\\(", "").replace("\\)", "")
+    s = s.replace("\\[", "").replace("\\]", "")
+    s = s.replace("$$", "").replace("$", "")
+    s = re.sub(r"\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}", r"(\1)⁄(\2)", s)
+    s = re.sub(r"\\sqrt\s*\{([^{}]+)\}", r"√\1", s)
+    s = re.sub(
+        r"\\([A-Za-z]+)",
+        lambda m: _LATEX_SYMBOLS.get(m.group(1), m.group(1)),
+        s,
+    )
+    s = re.sub(r"\^\s*\{\s*([^{}]+?)\s*\}", lambda m: _translate_script(m.group(1), _SUPERSCRIPT, "^"), s)
+    s = re.sub(r"_\s*\{\s*([^{}]+?)\s*\}", lambda m: _translate_script(m.group(1), _SUBSCRIPT, "_"), s)
+    s = re.sub(r"\^\s*([A-Za-z0-9+\-=()])", lambda m: _translate_script(m.group(1), _SUPERSCRIPT, "^"), s)
+    s = re.sub(r"_\s*([A-Za-z0-9+\-=()])", lambda m: _translate_script(m.group(1), _SUBSCRIPT, "_"), s)
+    s = s.replace("{", "").replace("}", "")
+    s = re.sub(r"\s+", " ", s).strip()
+    return _compact_formula_spacing(s)
 
 
 def _clip_slot_widths_to_centers(
@@ -189,12 +424,12 @@ def _line_has_formula_source(line: Line) -> bool:
     if formula_texts:
         return any(not is_formula_marker_token(text) for text in formula_texts)
     if has_formula_route:
-        return not is_formula_marker_token(line.display_text)
+        return not is_formula_marker_token(proof_display_text(line))
     return False
 
 
 def _line_is_formula_marker_only(line: Line) -> bool:
-    text = line.display_text
+    text = proof_display_text(line)
     if text and is_formula_marker_token(text):
         return True
     formula_texts = [
@@ -203,6 +438,35 @@ def _line_is_formula_marker_only(line: Line) -> bool:
         if normalize_source_label(getattr(char, "bbox_source", "")) == "paddle_inline_formula"
     ]
     return bool(formula_texts) and all(is_formula_marker_token(text) for text in formula_texts)
+
+
+def _block_debug_content(block: Block) -> str:
+    for payload in (block.raw_payload or {}, block.app_payload or {}):
+        for key in (
+            "block_content",
+            "content",
+            "text",
+            "latex",
+            "formula",
+            "formula_latex",
+        ):
+            value = payload.get(key)
+            if value:
+                return str(value)
+    return proof_block_text(block)
+
+
+def _synthetic_block_debug_line(block: Block) -> Line | None:
+    text = _block_debug_content(block).strip()
+    if not text:
+        return None
+    return Line(
+        text=text,
+        confidence=1.0,
+        bbox=block.bbox,
+        original_text=text,
+        ocr_text=text,
+    )
 
 
 def _line_has_table_source(line: Line) -> bool:
@@ -242,7 +506,7 @@ def _debug_line_kind(block: Block, line: Line) -> str:
 
 
 def _is_duplicate_debug_line(line: Line, seen: list[tuple[str, object]]) -> bool:
-    text = line.display_text
+    text = proof_display_text(line)
     bbox = line.bbox.normalize()
     for seen_text, seen_bbox in seen:
         if text == seen_text and bbox.iou(seen_bbox) >= 0.85:
@@ -264,6 +528,12 @@ def iter_unique_page_hproof_debug_lines(
     for block in page.blocks:
         formula_block = _is_debug_formula_block(block)
         table_block = _is_debug_table_block(block)
+        if formulas and formula_block and not block.lines:
+            synthetic = _synthetic_block_debug_line(block)
+            if synthetic is not None and not _line_is_formula_marker_only(synthetic):
+                if not _is_duplicate_debug_line(synthetic, seen):
+                    yield block, synthetic, -1
+            continue
         for line_idx, line in enumerate(block.lines):
             include_formula = formulas and (
                 (formula_block and not _line_is_formula_marker_only(line))
@@ -280,7 +550,7 @@ def iter_unique_page_hproof_debug_lines(
 
 
 # ─────────────────────────────────────────────────────────────
-# proof-slot-residual：固定槽位辅助函数
+# 固定槽位辅助函数
 # ─────────────────────────────────────────────────────────────
 
 def _chars_are_single_codepoint(chars) -> bool:
@@ -309,8 +579,8 @@ def _canonicalize_text_to_slots(text: str, chars) -> tuple[str, bool]:
     - ``len(text) > len(chars)`` → **不**自动截断（可能截掉 quality probe
       插入的 fake_char 或用户已写入的有效字）；保持自由编辑，``slot_locked=False``。
 
-    这就是 proof-slot-residual 第 1 任务要求的“OCR 元素数 = 槽位数，且
-    超短行自动补空白槽，超长行老老实实降级而不是悄悄删字”。
+    规则：OCR 元素数 = 槽位数，超短行自动补空白槽；超长行降级为自由编辑，
+    不能静默截断用户文本。
     """
     if not _chars_are_single_codepoint(chars):
         return text, False
@@ -331,8 +601,8 @@ def _canonicalize_text_to_slots(text: str, chars) -> tuple[str, bool]:
 class _RowEditor(QPlainTextEdit):
     """嵌入行内的单行文本编辑器，拦截专用快捷键。
 
-    Task #2（固定元素数下编辑限制）：当 ``self._fixed_length`` 不为 None 时
-    （= 行有 ``line.chars``，图像元素数固定），输入行为强制为"覆写模式"：
+    当 ``self._fixed_length`` 不为 None 时（= 行有 ``line.chars``，图像元素数固定），
+    输入行为强制为"覆写模式"：
 
     - 普通字符输入：若无 selection，自动选中光标处的下一字 → 由 super 替换；
       若有 selection，必须替换为等长文本（多了截断、少了不接受）。
@@ -349,11 +619,9 @@ class _RowEditor(QPlainTextEdit):
     flag_requested    = Signal()
     skip_requested    = Signal()
     revert_requested  = Signal()
-    length_violation  = Signal(str)  # 试图改变长度时发出原因字符串
-    # hproof-visual-marking 升级：鼠标悬停字符位置变化（-1 = 离开 editor 区域）
+    # 鼠标悬停字符位置变化（-1 = 离开 editor 区域）
     hover_char_changed = Signal(int)
-    # proof-direct-input-closure round 10 任务 1：编辑器获取焦点 / 点击 →
-    # 自动激活本行。signal 用 mouse + focus 两条路径覆盖，键盘 Tab 也算。
+    # 编辑器获取焦点 / 点击 → 自动激活本行。
     row_focus_requested = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -362,11 +630,9 @@ class _RowEditor(QPlainTextEdit):
         self._last_hover_idx: int = -1
         # 启用鼠标跟踪：无需按下也能收到 mouseMoveEvent，用于图字 hover 联动
         self.setMouseTracking(True)
-        # hproof-yaxis-quiet-load 本轮任务 1：图字 y 轴对应。
-        # 每个字的 x 坐标改为由 line.chars[i].bbox 映射到 editor 像素空间；
-        # _line_pair 在每次 _render_line_image 后调 set_slot_geometry()
-        # 把 x_centers / widths 推进来。set 为 None / 空列表 → 走原生
-        # QPlainTextEdit 渲染（降级，例如 chars 缺失 / 未对齐时）。
+        # 每个字的 x 坐标由 line.chars[i].bbox 映射到 editor 像素空间。
+        # _LinePair 在每次 _render_line_image 后推入 x_centers / widths。
+        # None / 空列表表示降级为 QPlainTextEdit 原生渲染。
         self._slot_x_centers: Optional[List[Optional[float]]] = None
         self._slot_widths: Optional[List[float]] = None
 
@@ -565,13 +831,8 @@ class _RowEditor(QPlainTextEdit):
             self.revert_requested.emit(); return
 
         if self._is_fixed():
-            # proof-interaction-slots 第 3 任务：固定槽位语义
-            #   - Backspace / Delete：不删字、不改长度，**将当前 / 邻位槽位
-            #     填充为空格**（line.chars 数量不变，文本对应字位置变成 " "）。
-            #   - 普通字符输入：仍按"自动选下一字 + 覆写"路径。
-            #   - 输入长度 > 选区长度：自动裁断到选区长度（不再拒绝，不再弹 tooltip）。
-            #   - Ctrl+X 剪切：把选区填空，而非拒绝。
-            #   注：blank 用 ASCII 空格 ' '；保存后 final_text 的相应字位置即为空。
+            # 固定槽位语义：删除/剪切只把槽位填空，普通输入覆写当前槽位，
+            # 所有路径都保持 line.chars 数量和文本槽位数量一致。
             blank = " "
             if key == Qt.Key.Key_Backspace:
                 cur = self.textCursor()
@@ -639,8 +900,8 @@ class _RowEditor(QPlainTextEdit):
     def insertFromMimeData(self, source) -> None:  # type: ignore[override]
         """粘贴：固定长度模式下保长度。
 
-        proof-interaction-slots 第 3 任务：不再因长度不匹配拒绝粘贴，
-        而是截断 / 用空格补足，与键盘输入语义一致。
+        固定长度模式下不因长度不匹配拒绝粘贴，而是截断或用空格补足，
+        与键盘输入语义一致。
         """
         if not self._is_fixed():
             super().insertFromMimeData(source)
@@ -691,9 +952,8 @@ class _RowEditor(QPlainTextEdit):
             self._last_hover_idx = -1
             self.hover_char_changed.emit(-1)
 
-    # proof-direct-input-closure round 10 任务 1：mousePressEvent / focusInEvent
-    # 都发 row_focus_requested。上层 _LinePair 用它激活本行（之前只有
-    # 点 _active_bar / _img_lbl 才切行，点文本不行——这与用户直觉相反）。
+    # mousePressEvent / focusInEvent 都发 row_focus_requested，由 _LinePair
+    # 统一激活当前行。
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         self.row_focus_requested.emit()
         if self._slot_x_centers:
@@ -728,9 +988,9 @@ class _SlotLineEditor(QWidget):
     flag_requested = Signal()
     skip_requested = Signal()
     revert_requested = Signal()
-    length_violation = Signal(str)
     hover_char_changed = Signal(int)
     row_focus_requested = Signal()
+    visual_edit_exit_requested = Signal()
     textChanged = Signal()
     selectionChanged = Signal()
     cursorPositionChanged = Signal()
@@ -752,9 +1012,16 @@ class _SlotLineEditor(QWidget):
         self._extra_selections: list = []
         self._last_hover_idx = -1
         self._active_visual = False
+        self._visual_text_override: Optional[str] = None
+        self._visual_pixmap_override: Optional[QPixmap] = None
+        self._visual_text_kind: str = ""
+        self._undo_stack: list[tuple[str, int, int]] = []
+        self._redo_stack: list[tuple[str, int, int]] = []
+        self._max_undo = 100
+        self._read_only = False
         self._apply_document_line_height()
 
-    # ── 兼容 QPlainTextEdit 调用面 ─────────────────────────────
+    # ── QPlainTextEdit-like API used by _LinePair ─────────────
 
     def document(self) -> QTextDocument:
         return self._document
@@ -778,6 +1045,49 @@ class _SlotLineEditor(QWidget):
         self._active_visual = bool(active)
         self.update()
 
+    def setReadOnly(self, read_only: bool) -> None:
+        self._read_only = bool(read_only)
+        self.setCursor(Qt.CursorShape.ArrowCursor if self._read_only else Qt.CursorShape.IBeamCursor)
+
+    def isReadOnly(self) -> bool:
+        return self._read_only
+
+    def set_visual_text_override(self, text: Optional[str], *, kind: str = "") -> None:
+        next_text = text or None
+        next_kind = kind if next_text else ""
+        if (
+            self._visual_text_override == next_text
+            and self._visual_pixmap_override is None
+            and self._visual_text_kind == next_kind
+        ):
+            return
+        self._visual_text_override = next_text
+        self._visual_pixmap_override = None
+        self._visual_text_kind = next_kind
+        self.update()
+
+    def set_visual_pixmap_override(self, pixmap: Optional[QPixmap], *, kind: str = "") -> None:
+        next_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else None
+        next_kind = kind if next_pixmap is not None else ""
+        self._visual_text_override = None
+        self._visual_pixmap_override = next_pixmap
+        self._visual_text_kind = next_kind
+        self.update()
+
+    def has_visual_text_override(self) -> bool:
+        return bool(self._visual_text_override) or self._visual_pixmap_override is not None
+
+    def visual_text_content_width(self) -> int:
+        if self._visual_pixmap_override is not None:
+            return self._visual_pixmap_override.width() + 16
+        if not self._visual_text_override:
+            return 0
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        if self._visual_text_kind == "formula":
+            font.setItalic(True)
+        return QFontMetrics(font).horizontalAdvance(self._visual_text_override) + 16
+
     def setPlainText(self, text: str) -> None:
         old = self.toPlainText()
         self._document.setPlainText(text or "")
@@ -788,6 +1098,8 @@ class _SlotLineEditor(QWidget):
             self._cursor.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
         if self.toPlainText() != old:
             self.textChanged.emit()
+        self._undo_stack.clear()
+        self._redo_stack.clear()
         self.selectionChanged.emit()
         self.cursorPositionChanged.emit()
         self.update()
@@ -849,10 +1161,17 @@ class _SlotLineEditor(QWidget):
     # ── slot 选择 / 文本修改 ───────────────────────────────────
 
     def _slot_index_for_x(self, x: float, *, nearest: bool = False) -> int:
-        centers = self._slot_x_centers or []
+        text = self.toPlainText()
+        centers = self._slot_x_centers or self._fallback_slot_centers(text)
         if not centers:
             return -1
-        widths = self._slot_widths or [TEXT_SLOT_MIN_W] * len(centers)
+        if self._slot_widths is not None:
+            widths = self._slot_widths
+        else:
+            font = QFont(self.font())
+            font.setWeight(TEXT_FONT_WEIGHT)
+            fm = QFontMetrics(font)
+            widths = [_slot_visual_width(ch, fm) for ch in text]
         best_idx = -1
         best_dist = float("inf")
         first_left: float | None = None
@@ -899,6 +1218,7 @@ class _SlotLineEditor(QWidget):
         current = self.toPlainText()
         if not current:
             return
+        before = self._snapshot()
         start, end = self._selected_range()
         start = max(0, min(start, len(current)))
         end = max(start, min(end, len(current)))
@@ -911,6 +1231,8 @@ class _SlotLineEditor(QWidget):
         if len(replacement) < width:
             replacement += " " * (width - len(replacement))
         new_text = current[:start] + replacement + current[end:]
+        if new_text != current:
+            self._push_undo_snapshot(before)
         self._document.setPlainText(new_text)
         self._apply_document_line_height()
         next_pos = min(len(new_text), start + max(1, len(replacement)))
@@ -924,6 +1246,49 @@ class _SlotLineEditor(QWidget):
         self.selectionChanged.emit()
         self.cursorPositionChanged.emit()
         self.update()
+
+    def _snapshot(self) -> tuple[str, int, int]:
+        return (
+            self.toPlainText(),
+            int(self._cursor.selectionStart()),
+            int(self._cursor.selectionEnd()),
+        )
+
+    def _push_undo_snapshot(self, snapshot: tuple[str, int, int]) -> None:
+        if self._undo_stack and self._undo_stack[-1] == snapshot:
+            return
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > self._max_undo:
+            self._undo_stack = self._undo_stack[-self._max_undo:]
+        self._redo_stack.clear()
+
+    def _restore_snapshot(self, snapshot: tuple[str, int, int]) -> None:
+        text, start, end = snapshot
+        self._document.setPlainText(text)
+        self._apply_document_line_height()
+        text_len = len(self.toPlainText())
+        start = max(0, min(int(start), text_len))
+        end = max(start, min(int(end), text_len))
+        self._cursor = QTextCursor(self._document)
+        self._cursor.setPosition(start)
+        if end != start:
+            self._cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        self.textChanged.emit()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.update()
+
+    def undo(self) -> None:
+        if not self._undo_stack:
+            return
+        self._redo_stack.append(self._snapshot())
+        self._restore_snapshot(self._undo_stack.pop())
+
+    def redo(self) -> None:
+        if not self._redo_stack:
+            return
+        self._undo_stack.append(self._snapshot())
+        self._restore_snapshot(self._redo_stack.pop())
 
     def insertFromMimeData(self, source) -> None:
         text = source.text() if source is not None else ""
@@ -956,9 +1321,17 @@ class _SlotLineEditor(QWidget):
         p = QPainter(self)
         try:
             p.fillRect(self.rect(), self.palette().base())
+            if self._visual_pixmap_override is not None:
+                self._paint_visual_pixmap_override(p, self._visual_pixmap_override)
+                return
+            if self._visual_text_override:
+                self._paint_visual_text_override(p, self._visual_text_override)
+                return
             text = self.toPlainText()
-            p.setFont(self.font())
-            fm = QFontMetrics(self.font())
+            font = QFont(self.font())
+            font.setWeight(TEXT_FONT_WEIGHT)
+            p.setFont(font)
+            fm = QFontMetrics(font)
             centers = self._slot_x_centers or self._fallback_slot_centers(text)
             widths = self._slot_widths or [
                 _slot_visual_width(ch, fm)
@@ -991,16 +1364,41 @@ class _SlotLineEditor(QWidget):
                 color = fg_color.get(i) or self.palette().text().color()
                 p.setPen(QPen(color, 1))
                 ch = text[i]
-                char_w = fm.horizontalAdvance(ch)
-                tx = int(round(float(center) - char_w / 2.0))
-                p.drawText(tx, y_baseline, ch)
+                if _is_punctuation_slot_text(ch):
+                    ink = fm.tightBoundingRect(ch)
+                    tx = float(center) - ink.width() / 2.0 - ink.left()
+                    p.drawText(int(round(tx)), y_baseline, ch)
+                else:
+                    char_w = fm.horizontalAdvance(ch)
+                    tx = int(round(float(center) - char_w / 2.0))
+                    p.drawText(tx, y_baseline, ch)
         finally:
             p.end()
+
+    def _paint_visual_text_override(self, painter: QPainter, text: str) -> None:
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        if self._visual_text_kind == "formula":
+            font.setItalic(True)
+        painter.setFont(font)
+        painter.setPen(QPen(self.palette().text().color(), 1))
+        rect = self.rect().adjusted(6, 0, -6, 0)
+        painter.drawText(
+            rect,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            text,
+        )
+
+    def _paint_visual_pixmap_override(self, painter: QPainter, pixmap: QPixmap) -> None:
+        y = max(0, (self.height() - pixmap.height()) // 2)
+        painter.drawPixmap(6, y, pixmap)
 
     def _fallback_slot_centers(self, text: str) -> list[Optional[float]]:
         if not text:
             return []
-        fm = QFontMetrics(self.font())
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        fm = QFontMetrics(font)
         x = max(6.0, TEXT_SLOT_MIN_W / 2.0)
         centers: list[Optional[float]] = []
         for ch in text:
@@ -1061,7 +1459,16 @@ class _SlotLineEditor(QWidget):
             return event.pos()
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.RightButton:
+            self.visual_edit_exit_requested.emit()
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
         self.row_focus_requested.emit()
+        if self.has_visual_text_override():
+            self.set_visual_text_override(None)
         pos = self._event_pos(event)
         idx = self._slot_index_for_x(float(pos.x()), nearest=True)
         if idx >= 0:
@@ -1092,8 +1499,36 @@ class _SlotLineEditor(QWidget):
         mod = event.modifiers()
         no_mod = mod == Qt.KeyboardModifier.NoModifier
         ctrl = bool(mod & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mod & Qt.KeyboardModifier.ShiftModifier)
+        if self._read_only:
+            if ctrl and key == Qt.Key.Key_C:
+                selected = self._cursor.selectedText() if self._cursor.hasSelection() else ""
+                QApplication.clipboard().setText(selected)
+                return
+            if ctrl and key == Qt.Key.Key_A:
+                cur = QTextCursor(self._document)
+                cur.setPosition(0)
+                cur.setPosition(len(self.toPlainText()), QTextCursor.MoveMode.KeepAnchor)
+                self.setTextCursor(cur)
+                return
+            if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                if key == Qt.Key.Key_Left:
+                    self._select_slot_index(max(0, self._cursor.selectionStart() - 1))
+                else:
+                    self._select_slot_index(min(max(0, len(self.toPlainText()) - 1), self._cursor.selectionEnd()))
+                return
+            return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and no_mod:
             self.confirm_requested.emit()
+            return
+        if ctrl and key == Qt.Key.Key_Z:
+            if shift:
+                self.redo()
+            else:
+                self.undo()
+            return
+        if ctrl and key == Qt.Key.Key_Y:
+            self.redo()
             return
         if key == Qt.Key.Key_Up and ctrl:
             self.prev_requested.emit()
@@ -1156,14 +1591,59 @@ class _SlotLineEditor(QWidget):
 
 # ─────────────────────────────────────────────────────────────
 # 评测位 (quality probe) 显示↔真实 桥接
-# 共享实现见 app.services.proof_probe_text_service；本文件保留同名局部别名
-# 以保持调用点不变（_displayed_text / _save_displayed_edit / _resolve_block_line_index）。
+# 显示文本仍由 app.services.proof_probe_text_service 提供；写入统一走
+# ProofEditService，避免横校绕过 proof change contract。
 # ─────────────────────────────────────────────────────────────
 
 
 # ─────────────────────────────────────────────────────────────
 # 单行对（图像行 + 识别文本行）控件
 # ─────────────────────────────────────────────────────────────
+
+class ProofUnitKind(str, Enum):
+    """横校画布中的可渲染校对单元类型。"""
+
+    TEXT = "text"
+    FORMULA = "formula"
+    TABLE = "table"
+    IMAGE = "image"
+    CAPTION = "caption"
+
+
+class _HProofSaveResult(Enum):
+    SAVED = "saved"
+    NOOP = "noop"
+    CONFLICT = "conflict"
+    READ_ONLY = "read_only"
+
+
+@dataclass(frozen=True)
+class ProofUnit:
+    """横校内部的稳定渲染输入。
+
+    当前只把正文行接入 renderer；公式、表格、图片先占位，后续可在不改
+    HProofPanel 保存/统计逻辑的前提下接入专用渲染器。
+    """
+
+    uid: str
+    kind: ProofUnitKind
+    page: Page
+    block: Block
+    line: Line
+    line_index: int
+    page_line_number: int
+    display_text: str
+    debug_badge: str = ""
+    atoms: tuple[ProofAtom, ...] = ()
+    editable: bool = True
+
+def _proof_unit_kind(debug_badge: str) -> ProofUnitKind:
+    if debug_badge == "公式":
+        return ProofUnitKind.FORMULA
+    if debug_badge == "表格":
+        return ProofUnitKind.TABLE
+    return ProofUnitKind.TEXT
+
 
 class _LinePair(QFrame):
     """显示一行的【扫描图像行 + OCR 识别文本】对。"""
@@ -1185,6 +1665,7 @@ class _LinePair(QFrame):
         line_in_page: int,   # 在页面内的行序号（1-based，用于显示）
         cache: PageImageCache,
         debug_badge: str = "",
+        unit: ProofUnit | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -1195,10 +1676,23 @@ class _LinePair(QFrame):
         self._line_in_page = line_in_page
         self._cache        = cache
         self._debug_badge  = debug_badge
+        self._unit         = unit
+        self._edit_session = HProofLineEditSession(
+            editable=True if unit is None else bool(unit.editable),
+            loaded_display_text="",
+            loaded_line_signature="",
+        )
         self._active       = False
         self._image_loaded = False
         self._line_crop = None
         self._line_crop_origin: tuple[int, int] = (0, 0)
+        self._focus_depth = "active"
+        self._image_row_h = IMAGE_ROW_H
+        self._editor_h = TEXT_EDITOR_MAX_H
+        self._pair_h = LINE_PAIR_H
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self._opacity_effect.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity_effect)
         # 最近一次行图像缩放比例，用于把 _img_lbl 上的点击位置反查回原图坐标
         self._render_scale: float = 1.0
         # hproof-visual-marking：editor 鼠标悬停的字符索引（-1 = 未悬停）。
@@ -1206,74 +1700,76 @@ class _LinePair(QFrame):
         self._hover_char_idx: int = -1
 
         self.setObjectName("linePair")
+        self.setStyleSheet(
+            "QFrame#linePair { background:#FFFFFF; border:1px solid transparent; "
+            f"border-bottom:1px solid {ROW_DIVIDER_COLOR}; border-radius:0; }}"
+        )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._build_ui()
 
     # ── 构建 ──────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self.setFixedHeight(LINE_PAIR_H)
-        # Phase 25：彻底取消字格模式 / 取消"图像/文本"hdr 标签 / 整行文本框
-        # 始终可见。布局保留 Phase 24 的"上图下字"骨架：
+        self.setFixedHeight(self._pair_h)
+        # 横校当前固定为“上图下字”：行图像在上，slot editor 始终可见。
         #   root QHBoxLayout = [active_bar | content_v(img_row, editor) | status]
         root = QHBoxLayout(self)
-        root.setContentsMargins(0, 1, 8, 1)
-        root.setSpacing(4)
+        root.setContentsMargins(6, 4, 8, 4)
+        root.setSpacing(6)
 
         # 蓝色激活条（左边框）
         self._active_bar = QWidget()
         self._active_bar.setFixedWidth(4)
-        self._active_bar.setStyleSheet("background: transparent;")
+        self._active_bar.setStyleSheet("background:transparent;")
         root.addWidget(self._active_bar)
         self._active_bar2 = self._active_bar
 
         # 中间内容容器：上图下字
         self._content = QWidget()
+        self._content.setStyleSheet("background:#FFFFFF;")
         content_v = QVBoxLayout(self._content)
         content_v.setContentsMargins(0, 0, 0, 0)
         content_v.setSpacing(0)
 
         # ── 上：行图像（去掉左侧"图像 N"hdr，直接占满宽度）──────
         self._img_lbl = QLabel()
-        self._img_lbl.setFixedHeight(IMAGE_ROW_H)
+        self._img_lbl.setFixedHeight(self._image_row_h)
         self._img_lbl.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._img_lbl.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        self._img_lbl.setStyleSheet("background:#fafbfc;")
+        self._img_lbl.setStyleSheet(
+            f"background:#FFFFFF; border-bottom:1px solid {IMAGE_DIVIDER_COLOR};"
+        )
         content_v.addWidget(self._img_lbl)
 
-        # proof-layout-collections 第 1 任务：AlignmentRibbon 已删除。
-        # 用户明确不要 “第三行文本行”。图字 y 轴对应改回只通过 editor↔image
-        # 的 hover/click 联动表达（_on_editor_hover_char / _img_clicked_lookup）。
+        # 不再额外渲染第三行文本；图字对应只通过 editor↔image hover/click 联动表达。
 
         # ── 下：整行文本框（永远可见；弱光标 + 等宽 + 与图像 y 对齐）──
         self._editor = _SlotLineEditor()
-        # proof-direct-input-closure round 10 任务 2：继续弱化"文本框感"。
-        # 之前的 border:1px solid #e3e8ef 让每行都像一个独立输入框，光
-        # 标心智依然强烈。去掉边框、底色随激活态走（激活 = #f0f6ff，
-        # 非激活 = transparent），让用户看到的是"一行可改的文字"，而
-        # 非"一个文本框"。
+        # 弱化“文本框感”：无边框，底色跟随激活态，让用户看到的是
+        # 一行可改文字，而不是一个独立输入框。
         self._editor.setStyleSheet(self._editor_style(active=False))
         self._editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
-        self._editor.setFixedHeight(TEXT_EDITOR_MAX_H)
+        self._editor.setFixedHeight(self._editor_h)
         self._editor.document().setDocumentMargin(0)
         self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._editor.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
-        # Phase 25：弱光标 —— cursor width 0，不显示插入符；逐字定位/高亮
-        # 通过 extraSelections + cursor.setPosition 体现。
+        # 弱光标：cursor width 0，通过 extraSelections + cursor.setPosition 表达当前位置。
         self._editor.setCursorWidth(0)
+        self._editor.setReadOnly(not self._edit_session.editable)
         # 初始填入显示空间文本
-        # proof-slot-residual 第 1 任务：加载时就把文本规范化到槽位数
-        # （仅在可锁定时补空；超长不动）。
+        # 加载时把文本规范化到槽位数；仅在可锁定时补空，超长不动。
         _initial_disp = _displayed_text(self._line, self._page, self._block)
         _canon, _ = _canonicalize_text_to_slots(_initial_disp, self._line.chars or [])
         self._editor.setPlainText(_canon)
+        self._edit_session.mark_saved(_canon, line_signature(self._line))
+        self._apply_editor_visual_override()
         self._editor.apply_inline_y_axis_metrics()
         # 信号转发
         self._editor.confirm_requested.connect(lambda: self.confirmed.emit(self._idx))
@@ -1282,8 +1778,7 @@ class _LinePair(QFrame):
         self._editor.flag_requested.connect(self.flag_req)
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
-        # Task #2: 长度违规 → 浮动 tooltip 提示（不弹模态）
-        self._editor.length_violation.connect(self._on_length_violation)
+        self._editor.visual_edit_exit_requested.connect(self._exit_formula_edit_mode)
         # hproof-visual-marking：鼠标悬停 editor → 在行图上高亮对应字
         self._editor.hover_char_changed.connect(self._on_editor_hover_char)
         self._editor.selectionChanged.connect(self._refresh_extra_selections)
@@ -1292,12 +1787,14 @@ class _LinePair(QFrame):
         self._editor.cursorPositionChanged.connect(self._render_line_image)
         # 编辑触发置信度高亮重绘（修过的字按 OK 颜色处理）
         self._editor.textChanged.connect(self._refresh_extra_selections)
-        # Task #1：编辑改变字数 → 重新评估图字是否对齐 → 刷新 ⚠ 标
+        # 文本变化后重新评估图字对齐和当前公式/文本显示模式。
         self._editor.textChanged.connect(self._sync_editor_slot_geometry)
+        self._editor.textChanged.connect(self._apply_editor_visual_override)
+        self._editor.textChanged.connect(self._clear_external_conflict_if_resolved)
         self._editor.textChanged.connect(self._refresh_status)
-        # proof-direct-input-closure round 10 任务 1：editor focus/click → 激活本行
+        # editor focus/click → 激活本行。
         self._editor.row_focus_requested.connect(self._on_editor_focus_in)
-        # Task #2：按 line.chars 锁定编辑器固定长度（图字一一对应不变）
+        # 有可靠 char boxes 时锁定编辑器长度，保持图字一一对应。
         self._apply_fixed_length_to_editor()
         content_v.addWidget(self._editor)
 
@@ -1326,31 +1823,189 @@ class _LinePair(QFrame):
 
     @staticmethod
     def _editor_style(*, active: bool) -> str:
-        bg = "#eaf3ff" if active else "transparent"
+        bg = "#F6F2EA" if active else "#FFFFFF"
         return (
             f"font-family:{TEXT_FONT_FAMILY}; font-size:{TEXT_FONT_PX}px; "
-            f"padding:0; background:{bg}; border:none;"
+            f"font-weight:{TEXT_FONT_WEIGHT_CSS}; padding:0 2px; background:{bg}; border:none;"
         )
+
+    def _apply_editor_visual_override(self) -> None:
+        visual_text: str | None = None
+        visual_pixmap: QPixmap | None = None
+        visual_kind = ""
+        if self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
+            raw_formula = self._editor.toPlainText()
+            rendered_formula = None
+            try:
+                from app.experimental.formula_rendering import render_formula_pixmap
+                rendered_formula = render_formula_pixmap(
+                    raw_formula,
+                    target_height=max(12, self._editor_h - 6),
+                    color="#2C2C2C",
+                )
+            except Exception:
+                rendered_formula = None
+            if rendered_formula is not None:
+                visual_pixmap = rendered_formula.pixmap
+                visual_kind = "formula"
+            rendered = _render_formula_display(raw_formula)
+            if rendered:
+                visual_text = rendered
+                visual_kind = "formula"
+        if visual_pixmap is not None:
+            self._editor.set_visual_pixmap_override(visual_pixmap, kind=visual_kind)
+        else:
+            self._editor.set_visual_text_override(visual_text, kind=visual_kind)
+        if visual_pixmap is not None or visual_text:
+            self._editor.set_slot_geometry(None, None)
+            content_w = max(self._editor.visual_text_content_width(), int(self._line.bbox.w))
+            self._editor.setMinimumWidth(content_w)
+            self._content.setMinimumWidth(content_w)
+            self.setMinimumWidth(content_w + STATUS_W + 36)
+        else:
+            self._editor.setMinimumWidth(0)
+            self._content.setMinimumWidth(0)
+            self.setMinimumWidth(0)
+
+    def _exit_formula_edit_mode(self) -> bool:
+        if self._unit is None or self._unit.kind != ProofUnitKind.FORMULA:
+            return False
+        if self._editor.has_visual_text_override():
+            return False
+        self._apply_editor_visual_override()
+        self._editor.clearFocus()
+        self._refresh_extra_selections()
+        self._render_line_image()
+        return True
+
+    @staticmethod
+    def _focus_metrics(depth: str) -> tuple[int, int, int, float]:
+        if depth == "active":
+            return LINE_PAIR_H, IMAGE_ROW_H, TEXT_EDITOR_MAX_H, 1.0
+        if depth == "near":
+            return NEAR_LINE_PAIR_H, NEAR_IMAGE_ROW_H, NEAR_TEXT_EDITOR_H, 0.42
+        return FAR_LINE_PAIR_H, FAR_IMAGE_ROW_H, FAR_TEXT_EDITOR_H, 0.28
+
+    def set_focus_depth(self, depth: str) -> None:
+        """Set visual focus depth without changing proofreading state.
+
+        active: 当前校对行，完整高度和不透明；
+        near: 上下相邻上下文，略缩小、略浅；
+        far: 远离当前行的上下文，压缩并浅化。
+        """
+        if depth not in {"active", "near", "far"}:
+            depth = "far"
+        pair_h, image_h, editor_h, opacity = self._focus_metrics(depth)
+        if (
+            self._focus_depth == depth
+            and self._pair_h == pair_h
+            and self._image_row_h == image_h
+            and self._editor_h == editor_h
+        ):
+            return
+        self._focus_depth = depth
+        self._pair_h = pair_h
+        self._image_row_h = image_h
+        self._editor_h = editor_h
+        self.setFixedHeight(pair_h)
+        self._img_lbl.setFixedHeight(image_h)
+        self._editor.setFixedHeight(editor_h)
+        self._editor.setVisible(depth == "active")
+        if depth == "active" and self._active:
+            self._editor.setFocus()
+        self._opacity_effect.setOpacity(opacity)
+        self._refresh_status()
+        if self._line_crop is not None:
+            self._render_line_image()
+        else:
+            self._sync_editor_slot_geometry()
+
+    def _canonical_model_display_text(self) -> str:
+        text = _displayed_text(self._line, self._page, self._block)
+        text, _ = _canonicalize_text_to_slots(text, self._line.chars or [])
+        return text
+
+    def _set_editor_text(self, text: str) -> None:
+        if self._editor.toPlainText() == text:
+            return
+        self._editor.blockSignals(True)
+        self._editor.setPlainText(text)
+        self._editor.apply_inline_y_axis_metrics()
+        self._editor.blockSignals(False)
+
+    def is_editor_dirty(self) -> bool:
+        return self._edit_session.is_dirty(self._editor.toPlainText())
+
+    def has_external_conflict(self) -> bool:
+        return self._edit_session.external_conflict
+
+    @property
+    def is_editable(self) -> bool:
+        return self._edit_session.editable
+
+    def loaded_line_signature(self) -> str:
+        return self._edit_session.loaded_line_signature
+
+    def mark_external_conflict(self) -> None:
+        self._edit_session.mark_external_conflict()
+        self._refresh_status()
+        self._refresh_extra_selections()
+        self._sync_editor_slot_geometry()
+
+    def mark_editor_saved(self) -> None:
+        self._edit_session.mark_saved(
+            self._canonical_model_display_text(),
+            line_signature(self._line),
+        )
+        self._refresh_status()
+        self._refresh_extra_selections()
+        self._sync_editor_slot_geometry()
+
+    def dirty_editor_snapshot(self) -> tuple[str, str]:
+        return self._edit_session.dirty_snapshot(self._editor.toPlainText())
+
+    def _clear_external_conflict_if_resolved(self) -> None:
+        current_model_text = self._canonical_model_display_text()
+        if self._edit_session.clear_conflict_if_editor_matches_model(
+            editor_text=self._editor.toPlainText(),
+            model_display_text=current_model_text,
+            model_line_signature=line_signature(self._line),
+        ):
+            self._refresh_status()
+            self._refresh_extra_selections()
+            self._sync_editor_slot_geometry()
+
+    def restore_dirty_editor_text(self, text: str, previous_loaded_text: str | None = None) -> None:
+        self._set_editor_text(text)
+        self._edit_session.restore_dirty_editor_text(
+            editor_text=text,
+            previous_loaded_text=previous_loaded_text,
+        )
+        self._apply_editor_visual_override()
+        self._apply_fixed_length_to_editor()
+        self._refresh_status()
+        self._refresh_extra_selections()
+        self._sync_editor_slot_geometry()
 
     def set_active(self, active: bool) -> None:
         if self._active == active:
             return
         self._active = active
-        blue = "#1a73e8"
+        active_color = FOCUS_BORDER_COLOR
+        accent_color = self._status_accent_color()
         if active:
-            bar_style = f"background:{blue}; border-radius:2px;"
+            bar_style = f"background:{accent_color}; border-radius:3px;"
             frame_style = (
-                "QFrame#linePair { background:#eaf3ff; "
-                "border-top:1px solid #c9ddff; border-bottom:1px solid #c9ddff; }"
+                f"QFrame#linePair {{ background:#FFFDF8; border:1px solid {active_color}; "
+                "border-radius:6px; }"
             )
-            content_bg = "#eaf3ff"
-            image_style = "background:#f8fbff; border-bottom:1px solid #d9e7ff;"
+            content_bg = "#FFFDF8"
+            image_style = f"background:#FFFFFF; border-bottom:1px solid {IMAGE_DIVIDER_COLOR};"
             self._editor.setFocus()
         else:
             # 切走前先把 in-flight 文本保存（编辑器始终可见）
             self._flush_editor_if_dirty()
-            # proof-interaction-slots 第 2 任务：切行时清掉本行 editor 里的选中状态
-            # 和高亮调用。不清会让用户看到“他行还有选中感”。
+            # 切行时清掉本行 editor 的选中状态和高亮，避免非焦点行仍有选中感。
             cur = self._editor.textCursor()
             if cur.hasSelection():
                 cur.clearSelection()
@@ -1358,9 +2013,12 @@ class _LinePair(QFrame):
             self._editor.setExtraSelections([])
             self._hover_char_idx = -1
             bar_style = "background:transparent;"
-            frame_style = ""
-            content_bg = "transparent"
-            image_style = "background:#fafbfc; border-bottom:1px solid #edf1f7;"
+            frame_style = (
+                "QFrame#linePair { background:#FFFFFF; border:1px solid transparent; "
+                f"border-bottom:1px solid {ROW_DIVIDER_COLOR}; border-radius:0; }}"
+            )
+            content_bg = "#FFFFFF"
+            image_style = f"background:#FFFFFF; border-bottom:1px solid {IMAGE_DIVIDER_COLOR};"
 
         self._active_bar.setStyleSheet(bar_style)
         self._active_bar2.setStyleSheet(bar_style)
@@ -1377,33 +2035,23 @@ class _LinePair(QFrame):
 
     def _flush_editor_if_dirty(self) -> None:
         """若 editor 当前文本与显示空间文本不一致，发 text_saved 让面板落盘。
-        Phase 25：editor 始终可见，不再判 isHidden。"""
+        editor 始终可见，不再判 isHidden。"""
+        if self._edit_session.external_conflict or not self._edit_session.editable:
+            return
         new_text = self._editor.toPlainText()
-        if new_text != _displayed_text(self._line, self._page, self._block):
+        if self._edit_session.is_dirty(new_text):
             self.text_saved.emit(self._idx, new_text)
 
     def _apply_fixed_length_to_editor(self) -> None:
         """按当前 line.chars 状态启用/关闭固定长度覆写模式。
 
-        proof-interaction-slots 第 1+3 任务：
-        - 彻底不再给 editor 设任何 tooltip。以前为了提示"固定 N 字"
-          会 setToolTip；反复设空会在 Qt 上重出空白 hover 框残影。
-        - 固定模式本身仍启用（控制 keyPressEvent 里 Backspace/Delete 走
-          "填空字"路径不是拒绝）。
+        不给 editor 设置 tooltip，避免空白 hover 框残影；固定模式本身仍启用，
+        Backspace/Delete 走“填空字”路径，而不是拒绝输入。
         """
         chars = self._line.chars or []
         text_len = len(self._editor.toPlainText())
         fixed = len(chars) if chars and text_len == len(chars) else None
         self._editor.set_fixed_length(fixed)
-
-    def _on_length_violation(self, reason: str) -> None:
-        """保留接口以免旧信号连接报错，但不再弹 tooltip。
-
-        proof-interaction-slots 第 1+3 任务：固定模式不再拒绝删除动作
-        （改为将槽位填空），也不再拒绝超长输入（裁断）。原"超长"、"禁删"
-        提示路径不再需要，也不再设 tooltip。
-        """
-        return
 
     def _on_editor_hover_char(self, idx: int) -> None:
         """editor 鼠标悬停字符 idx 变化 → 在行图上画 hover 框（图字对应升级）。
@@ -1419,22 +2067,15 @@ class _LinePair(QFrame):
         self._hover_char_idx = new_idx
         self._render_line_image()
 
-    # ── Phase 25：弱光标 + 逐字高亮（取代字格模式）──────────────
+    # ── 弱光标 + 逐字高亮 ───────────────
 
     def _chars_aligned(self) -> bool:
         """Editor 文本是否与 ``line.chars`` 严格一一对应。
 
-        proof UI clarity（Task #1）：图像 char.bbox 与文本下标的映射只有在
-        ``len(text) == len(chars)`` 时才可靠。一旦用户编辑增删字符、或 OCR
-        本身就给出错位的 chars 列表，**就不要**伪装成"第 i 字 ↔ 第 i 个
-        bbox"——而是改走降级路径。
-
-        proof-layout-collections（第 2 任务 “内容偏移”）重点加强：
-        即使 len(text) == len(chars)，只要任一 ``char.char`` 不是恰好 1 个
-        字符（word/token-granularity 的 char 可能是多字 token），“第 i 个
-        char ↔ 第 i 个文本字”也会被错位（OCR 给了 5 个 token 但文本 12 字
-        刷后成 12 个 glyph）。这是上一轮“坐标对了但内容偏移”的根因。
-        以后发现 chars 任一元素不是单字符 → 降级，不画逐字高亮。
+        图像 char.bbox 与文本下标的映射只有在 ``len(text) == len(chars)`` 且
+        每个 ``char.char`` 恰好一个字符时才可靠。word/token granularity 或
+        结构性编辑会让第 i 个文本字与第 i 个 bbox 错位，此时必须降级，不画
+        逐字高亮。
         """
         chars = self._line.chars
         if not chars:
@@ -1447,18 +2088,10 @@ class _LinePair(QFrame):
                 return False
         return True
 
-    # ── 文本颜色规则（hproof-yaxis-verdicts 第三任务）─────────
+    # ── 文本颜色规则 ─────────
     # 颜色 + 证据链由 :mod:`app.ui.proof.char_verdict` 集中负责，本文件只做调用。
     #
-    # 关键变更（vs hproof-visual-marking 旧版）：
-    #   · "用户修改过 → 黑色 = 再无置信度问题" 已删除。用户本轮 TASK 明确：
-    #     橙/红仍参与正确性判断，不能因人工改过自动洗白。颜色现在只读
-    #     OCR confidence + LLM 双源一致性。
-    #   · "黑 = 校对过绝对正确" 当前 codebase 没有可靠证据链来源（quality_probe
-    #     禁改、Line 无字级核验字段）。本控件因此 **不再** 把任何字标成黑色
-    #     "绝对正确"，默认 unverified 用普通深灰；handoff 写明缺什么。
-    #   · "用户改过" 单独成为 ``user_modified`` 标志，UI 在 AlignmentRibbon
-    #     上画细下划线提示，但不改变颜色。
+    # 颜色只读 OCR confidence；“用户修改过”不能自动洗白。
 
     def _classify_char_verdict(self, i: int) -> Optional[_cv.CharVerdict]:
         """返回第 i 个字的 verdict；下标越界 / 未对齐 → None。"""
@@ -1469,16 +2102,13 @@ class _LinePair(QFrame):
         if i >= len(text):
             return None
         conf = char_confidence(self._line, i)
-        ocr = self._line.ocr_text or self._line.original_text or ""
-        llm = self._line.llm_suggestion or ""
+        ocr = proof_ocr_text(self._line) or self._line.original_text or ""
         # 只在等长时取同下标字符；长度不一致时退回 None，避免错位比对
         ocr_ch = ocr[i] if len(ocr) == len(text) and i < len(ocr) else None
-        llm_ch = llm[i] if len(llm) == len(text) and i < len(llm) else None
         return _cv.classify_char(
             confidence=conf,
             text_char=text[i],
             ocr_char=ocr_ch,
-            llm_char=llm_ch,
         )
 
     def _refresh_extra_selections(self) -> None:
@@ -1486,7 +2116,7 @@ class _LinePair(QFrame):
         - 按 verdict 给每个字上前景色（绿/橙/红/灰）。
         - 当前光标所在/选中字：蓝色淡背景（"当前字"指示，配合弱光标）。
 
-        Phase 25 起 caret 宽度=0，弱光标完全靠这套 extraSelections 表达。
+        caret 宽度为 0，弱光标完全靠这套 extraSelections 表达。
         """
         try:
             from PySide6.QtWidgets import QTextEdit
@@ -1543,6 +2173,12 @@ class _LinePair(QFrame):
         """点击行图区域：先按 char.bbox 反查最近的字 → 把 editor 光标定到该字。
         若 chars 缺失 / 图字未严格一一对应，退回行级激活（不强行定位以免错位）。
         """
+        if self._exit_formula_edit_mode():
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
         if not self._chars_aligned():
             # 降级：不假装能定到某字，仅激活本行 + 提示原因
             self._on_click(event)
@@ -1624,9 +2260,8 @@ class _LinePair(QFrame):
             return
         crop = self._line_crop.copy()
         highlight_range: tuple[int, int] | None = None
-        # Phase 25：editor 始终可见，按光标/选区在行图上高亮对应 char.bbox。
-        # proof UI clarity（Task #1）：仅当文本与 chars 严格一一对应才画框，
-        # 否则不强行画——避免把"第 N 字"高亮到了别的字 bbox 上的假象。
+        # editor 始终可见，按光标/选区在行图上高亮对应 char.bbox。
+        # 只有文本与 chars 严格一一对应时才画框，避免把"第 N 字"高亮到错误 bbox。
         if self._active and self._chars_aligned():
             cursor = self._editor.textCursor()
             start = min(cursor.selectionStart(), cursor.selectionEnd())
@@ -1653,7 +2288,7 @@ class _LinePair(QFrame):
                     overlay = crop.copy()
                     cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 128, 255), -1)
                     crop = cv2.addWeighted(overlay, 0.18, crop, 0.82, 0)
-        # hproof-visual-marking：editor 鼠标悬停 → 在行图上画绿色细框
+        # editor 鼠标悬停 → 在行图上画绿色细框
         # （与"当前字"蓝框区分；当 hover idx 与当前字重叠时，蓝框已经画过，
         # 此处的绿框会叠在外侧 1px，仍能看出"鼠标正在指这个字"）。
         if (
@@ -1670,9 +2305,10 @@ class _LinePair(QFrame):
                 if x2 > x1 and y2 > y1:
                     cv2.rectangle(crop, (x1, y1), (x2, y2), (40, 167, 69), 1)
         h, w = crop.shape[:2]
-        # 缩放到 IMAGE_ROW_H 高度，同时限制最大宽度（避免超宽行撑开布局）。
+        # 缩放到当前视觉层级的行图高度，同时限制最大宽度（避免超宽行撑开布局）。
         # 严格保持宽高比：先按高度缩放；若超宽再按宽度缩放重算高度。
-        scale = IMAGE_ROW_H / h
+        target_h = max(1, int(self._image_row_h or IMAGE_ROW_H))
+        scale = target_h / h
         new_w = max(1, int(round(w * scale)))
         MAX_LINE_W = 1200
         if new_w > MAX_LINE_W:
@@ -1680,15 +2316,14 @@ class _LinePair(QFrame):
             new_h = max(1, int(round(h * scale)))
             crop = cv2.resize(crop, (MAX_LINE_W, new_h), interpolation=cv2.INTER_AREA)
         else:
-            crop = cv2.resize(crop, (new_w, IMAGE_ROW_H), interpolation=cv2.INTER_AREA)
+            crop = cv2.resize(crop, (new_w, target_h), interpolation=cv2.INTER_AREA)
         self._render_scale = scale
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         rh, rw = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), rw, rh, rw * 3, QImage.Format.Format_RGB888)
         self._img_lbl.setPixmap(QPixmap.fromImage(qimg))
-        # hproof-yaxis-quiet-load 本轮任务 1：把图像里每个字的 x 中心
-        # （editor 像素坐标系）推给 editor。editor.paintEvent 用这套坐标
-        # 自绘每字 —— 用户向正下方看，落到的文本字就是同一个字。
+        # 把图像里每个字的 x 中心推给 editor。editor.paintEvent 用这套坐标
+        # 自绘每字，让图像字和文本字在同一水平位置对齐。
         # editor 与 _img_lbl 同为 content_v 的 full-width 子控件，且 _img_lbl
         # 内 pixmap 左对齐 → editor x=0 == _img_lbl x=0 == 行图左边缘。
         self._sync_editor_slot_geometry()
@@ -1701,6 +2336,9 @@ class _LinePair(QFrame):
         """
         editor = getattr(self, "_editor", None)
         if editor is None:
+            return
+        if hasattr(editor, "has_visual_text_override") and editor.has_visual_text_override():
+            editor.set_slot_geometry(None, None)
             return
         if not self._chars_aligned():
             editor.set_slot_geometry(None, None)
@@ -1725,30 +2363,42 @@ class _LinePair(QFrame):
             widths.append(_slot_visual_width(text_char, fm))
         editor.set_slot_geometry(x_centers, _clip_slot_widths_to_centers(x_centers, widths))
 
-    def refresh_text(self) -> None:
+    def refresh_text(self, *, force: bool = False) -> str:
         """外部（VProof / probe 切换）更新 final_text 后同步 editor 文本。
 
-        Phase 25：editor 始终可见 → 直接 blockSignals + setPlainText 重写当前
-        文本，避免触发 dirty flush。active 行上若用户正在编辑，会被覆盖
-        （这是与 V 同步的既有行为；实时 dirty 已通过 _flush_editor_if_dirty
-        在 set_active 切走前落盘）。
+        返回值：
+        - "updated"/"merged": 已同步到新模型文本；
+        - "local_dirty": 本地有未保存改动，模型未变化，不覆盖；
+        - "conflict": 本地和外部同时改了同一行，不覆盖本地 editor。
         """
-        new_disp = _displayed_text(self._line, self._page, self._block)
-        # proof-slot-residual 第 1 任务：同步时也走槽位规范化，让 V/H
-        # 互同后本行的显示不会从“锁定”退回“自由”。
-        new_disp, _ = _canonicalize_text_to_slots(new_disp, self._line.chars or [])
-        if self._editor.toPlainText() != new_disp:
-            self._editor.blockSignals(True)
-            self._editor.setPlainText(new_disp)
-            self._editor.apply_inline_y_axis_metrics()
-            self._editor.blockSignals(False)
+        new_disp = self._canonical_model_display_text()
+        editor_text = self._editor.toPlainText()
+        dirty = self._edit_session.is_dirty(editor_text)
+        external_changed = new_disp != self._edit_session.loaded_display_text
+        if not force and dirty and external_changed and new_disp != editor_text:
+            self.mark_external_conflict()
+            return "conflict"
+        if not force and dirty and not external_changed:
+            self._refresh_status()
+            self._refresh_extra_selections()
+            self._sync_editor_slot_geometry()
+            return "local_dirty"
+        if dirty and external_changed and new_disp == editor_text:
+            self._edit_session.mark_saved(new_disp, line_signature(self._line))
+            self._refresh_status()
+            self._refresh_extra_selections()
+            self._sync_editor_slot_geometry()
+            return "merged"
+        self._set_editor_text(new_disp)
+        self._edit_session.mark_saved(new_disp, line_signature(self._line))
+        self._apply_editor_visual_override()
         # 显示文本变了 → 字数可能变 → 重新评估 fixed_length
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
-        # hproof-yaxis-quiet-load 本轮任务 1：文本/对齐状态变化 → 重算
-        # 图字 x 映射；当 _render_scale 还未就绪时 _sync 会自动清空进入降级。
+        # 文本/对齐状态变化后重算图字 x 映射；_render_scale 未就绪时会自动降级。
         self._sync_editor_slot_geometry()
+        return "updated"
 
     def rebind(
         self,
@@ -1757,20 +2407,30 @@ class _LinePair(QFrame):
         page: Page,
         line_in_page: int,
         debug_badge: str = "",
+        unit: ProofUnit | None = None,
     ) -> None:
         """Point this UI row at the current project Line without rebuilding it."""
+        editor_text = self._editor.toPlainText()
         self._block = block
         self._line = line
         self._page = page
         self._line_in_page = line_in_page
         self._debug_badge = debug_badge
+        self._unit = unit
         self._image_loaded = False
         self._line_crop = None
-        # Phase 25：editor 始终可见。rebind 不触碰 editor 内容，
-        # 与 Phase 24 之前 "isHidden() 才同步" 的行为等价 —— 这样用户在原行上
-        # 未提交的编辑（dirty 文本）不会被 merge_pages 路径上的 rebind 覆盖。
-        # 真正的"显示空间已变"由 refresh_text() 单独负责。
-        # Task #2：新行可能 chars 数不同 → 重新评估 fixed_length
+        self._apply_editor_visual_override()
+        new_loaded_text = self._canonical_model_display_text()
+        was_dirty = self._edit_session.rebind_to_model(
+            editor_text=editor_text,
+            model_display_text=new_loaded_text,
+            model_line_signature=line_signature(self._line),
+        )
+        if not was_dirty:
+            self._set_editor_text(self._edit_session.loaded_display_text)
+        # rebind 只在旧 editor clean 时同步新文本；dirty 文本保留。若后台同 key
+        # 新 Line 也变了，则标冲突，禁止静默覆盖。新行可能 chars 数不同，需要
+        # 重新评估 fixed_length。
         self._apply_fixed_length_to_editor()
         self._refresh_status()
         self._refresh_extra_selections()
@@ -1792,59 +2452,109 @@ class _LinePair(QFrame):
     # ── 私有 ──────────────────────────────────────────────────
 
     def _on_click(self, event) -> None:
+        if hasattr(event, "button") and event.button() == Qt.MouseButton.RightButton:
+            if self._exit_formula_edit_mode():
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                return
         self.clicked.emit(self._idx)
 
     def _on_editor_focus_in(self) -> None:
-        """proof-direct-input-closure round 10 任务 1：editor 内点击/取得焦点
-        即激活本行。不传 event；本行已经是 active 时静默忽略，避免对
-        cursor/focus 链路造成多余刷新。"""
+        """editor 内点击/取得焦点即激活本行。"""
         if self._active:
             return
         self.clicked.emit(self._idx)
 
     def _revert(self) -> None:
-        # 还原到 OCR 原始文本。Round 15 后评测不再修改显示文本，
-        # 所以直接用 original_true 即可，无需 apply_probes_to_display。
-        original_true = self._line.original_text or self._line.ocr_text or self._line.text or ""
+        # 还原到 OCR 原始文本。
+        original_true = self._line.original_text or proof_ocr_text(self._line) or self._line.text or ""
         self._editor.blockSignals(True)
-        # proof-slot-residual 第 1 任务：还原后也补空到槽位数
+        # 还原后也按槽位规则补空。
         _rev_canon, _ = _canonicalize_text_to_slots(
             original_true, self._line.chars or []
         )
         self._editor.setPlainText(_rev_canon)
         self._editor.apply_inline_y_axis_metrics()
         self._editor.blockSignals(False)
+        self._apply_editor_visual_override()
 
     def _refresh_status(self) -> None:
-        status = self._line.proof_status
-        color = _STATUS_COLOR.get(status, "#ccc")
-        label = _STATUS_LABEL.get(status, "")
-        # Task #1 升级：fixed_length 模式下 text_n 永远等于 char_n，aligned 一直成立。
-        # 这里只在真正异常时给 ⚠ 提示；正常情况下不再"为了诚实而提示"，避免
-        # 用户每行都看到一条空有解释、没有动作意义的 hover。
+        status = proof_status(self._line)
+        color = self._status_accent_color()
+        if self._edit_session.external_conflict:
+            color = "#c62828"
+            self._status_lbl.setText(
+                f"<span style='color:{color};font-size:11px;font-weight:700;'>冲突</span>"
+            )
+            self._status_lbl.setStyleSheet("background:transparent;")
+            if hasattr(self, "_active_bar"):
+                if self._active:
+                    self._active_bar.setStyleSheet(f"background:{color}; border-radius:3px;")
+                else:
+                    self._active_bar.setStyleSheet("background:transparent;")
+            return
+        # 这里只在真正异常时给 ⚠ 提示；正常情况下不显示额外 hover 文案。
         text_n = len(self._editor.toPlainText()) if hasattr(self, "_editor") else 0
         char_n = len(self._line.chars) if self._line.chars else 0
         unaligned = bool(self._line.chars) and text_n != char_n
-        warn = ""
+        glyph = _STATUS_GLYPH.get(status, "○")
         if unaligned:
-            warn = " <span style='color:#c62828;font-size:11px;'>⚠</span>"
+            color = "#c62828"
+            glyph = "!"
             tip = (
                 f"图字未对齐：文本 {text_n} 字 ≠ 图像字符 {char_n} 字\n"
                 f"已停用逐字高亮；请把文本改回 {char_n} 字以恢复图字一一对应"
             )
         else:
             tip = ""
-        badge = ""
-        if self._debug_badge:
-            badge = (
-                f"<span style='color:#555;font-size:10px;'>"
-                f"{self._debug_badge}</span><br/>"
-            )
-        self._status_lbl.setText(
-            f"{badge}<span style='color:{color};font-size:11px;'>● {label}</span>{warn}"
+        if hasattr(self, "_active_bar"):
+            if self._active:
+                self._active_bar.setStyleSheet(f"background:{color}; border-radius:3px;")
+            else:
+                self._active_bar.setStyleSheet("background:transparent;")
+        size = 15 if self._active or unaligned else 12
+        status_text = f"<span style='color:{color};font-size:{size}px;font-weight:700;'>{glyph}</span>"
+        self._status_lbl.setText(status_text)
+        self._status_lbl.setStyleSheet("background:transparent;")
+        # 不给 status_lbl 设 tooltip，避免 Qt 某些环境下出现空白 hover 框。
+
+    def _status_accent_color(self) -> str:
+        return _STATUS_COLOR.get(proof_status(self._line), TEXT_GUIDE_LINE_COLOR)
+
+
+class _ProofUnitRenderer:
+    """横校渲染器基类：把 ProofUnit 转成可插入列表的 QWidget。"""
+
+    def create_pair(
+        self,
+        idx: int,
+        unit: ProofUnit,
+        cache: PageImageCache,
+    ) -> _LinePair:
+        raise NotImplementedError
+
+
+class _TextProofUnitRenderer(_ProofUnitRenderer):
+    """正文行渲染器。当前复用既有 _LinePair，保证行为不变。"""
+
+    def create_pair(
+        self,
+        idx: int,
+        unit: ProofUnit,
+        cache: PageImageCache,
+    ) -> _LinePair:
+        return _LinePair(
+            idx,
+            unit.block,
+            unit.line,
+            unit.page,
+            unit.page_line_number,
+            cache,
+            debug_badge=unit.debug_badge,
+            unit=unit,
         )
-        # proof-interaction-slots 第 1 任务：彻底不给 status_lbl 设 tooltip（连空串都不设）
-        # 避免 Qt 某些环境下“空白 hover 框”。是否未对齐已经用 warn 图标表达。
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1854,24 +2564,29 @@ class _LinePair(QFrame):
 class HProofPanel(QWidget):
     """横校面板：滚动列表 + 工具栏，对照 ui-2.jpg 设计。"""
 
-    proof_saved = Signal()
+    proof_changed = Signal(object)
     page_selected = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._pages: List[Page] = []
-        self._items: List[Tuple[Block, Line, Page, int]] = []
+        self._session = HProofRuntimeSession()
         self._pairs: List[_LinePair] = []
-        self._line_view_models: List[ProofLineViewModel] = []
-        self._current_idx: int = 0
-        self._filter_updating = False
-        self._selected_page_number: int | None = None  # Phase 25：左侧目录唯一过滤源
-        self._show_formula_debug = False
-        self._show_table_debug = False
         self._cache = PageImageCache.instance()
+        self._external_refresh_timer = QTimer(self)
+        self._external_refresh_timer.setSingleShot(True)
+        self._external_refresh_timer.setInterval(80)
+        self._external_refresh_timer.timeout.connect(self._do_external_refresh)
+        text_renderer = _TextProofUnitRenderer()
+        self._renderers: dict[ProofUnitKind, _ProofUnitRenderer] = {
+            ProofUnitKind.TEXT: text_renderer,
+            ProofUnitKind.FORMULA: text_renderer,
+            ProofUnitKind.TABLE: text_renderer,
+            ProofUnitKind.IMAGE: text_renderer,
+            ProofUnitKind.CAPTION: text_renderer,
+        }
         self._bus = ProofStateBus.instance()
         # H/V 校对联动：订阅其他 panel 编辑事件；origin == id(self) 的事件忽略。
-        # Phase 18 blocker 3：保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
+        # 保留 unsubscribe 句柄，控件销毁时释放，避免长会话死订阅。
         self._bus_unsub = self._bus.subscribe(
             TOPIC_LINE_PROOF_CHANGED, self._on_external_line_changed,
         )
@@ -1886,7 +2601,7 @@ class HProofPanel(QWidget):
             self._app_tooltip_filter_installed = True
 
     def _teardown_bus(self) -> None:
-        """Phase 18 blocker 3：释放 ProofStateBus 订阅。
+        """释放 ProofStateBus 订阅。
 
         QObject.destroyed 信号在 Python 端仍可调用 unsubscribe；幂等，多次安全。"""
         unsub = getattr(self, "_bus_unsub", None)
@@ -1940,10 +2655,9 @@ class HProofPanel(QWidget):
     # ── UI 构建 ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Phase 24：横校改为三栏布局：
-        #   左：复用版面分析的页面目录（PageDirectoryList）
-        #   中：原滚动列表（_LinePair 已改为上图下字）
-        #   右：工具栏 + 快捷键说明（用户明确要求"放进界面"）
+        # 横校主视图仍由 _LinePair 承载；这里只调整 shell：
+        # 左侧导航 + 中央校对列表 + 底部状态/操作区。
+        self.setObjectName("proofRoot")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -1951,18 +2665,66 @@ class HProofPanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setObjectName("hproofSplitter")
 
-        # ── 左：页面目录 ────────────────────────────────────────
+        # ── 左：侧边栏轨道 + 页面目录 ───────────────────────────
+        left = QFrame()
+        left.setObjectName("proofLeftPane")
+        left.setMinimumWidth(250)
+        left.setMaximumWidth(322)
+        self._hproof_left_pane = left
+        self._hproof_sidebar_collapsed = False
+        left_lay = QHBoxLayout(left)
+        left_lay.setContentsMargins(10, 10, 10, 10)
+        left_lay.setSpacing(8)
+
+        rail = QFrame()
+        rail.setObjectName("proofNavRail")
+        rail_lay = QVBoxLayout(rail)
+        rail_lay.setContentsMargins(0, 0, 0, 0)
+        rail_lay.setSpacing(6)
+
+        self._btn_nav_toggle = QPushButton()
+        self._btn_nav_toggle.setObjectName("proofRailBtn")
+        self._btn_nav_toggle.setCheckable(True)
+        self._btn_nav_toggle.setFixedSize(34, 32)
+        self._btn_nav_toggle.setIcon(get_icon("sidebar", color="#6B6B6B"))
+        self._btn_nav_toggle.setIconSize(QSize(17, 17))
+        self._btn_nav_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        rail_lay.addWidget(self._btn_nav_toggle)
+
+        self._btn_nav_pages = QPushButton()
+        self._btn_nav_pages.setObjectName("proofRailBtn")
+        self._btn_nav_pages.setCheckable(True)
+        self._btn_nav_pages.setChecked(True)
+        self._btn_nav_pages.setFixedSize(34, 32)
+        self._btn_nav_pages.setIcon(get_icon("directory", color="#6B6B6B"))
+        self._btn_nav_pages.setIconSize(QSize(17, 17))
+        self._btn_nav_pages.setCursor(Qt.CursorShape.PointingHandCursor)
+        rail_lay.addWidget(self._btn_nav_pages)
+        rail_lay.addStretch(1)
+        left_lay.addWidget(rail)
+
+        page_pane = QWidget()
+        page_pane.setObjectName("proofLeftStackPage")
+        self._hproof_page_pane = page_pane
+        page_lay = QVBoxLayout(page_pane)
+        page_lay.setContentsMargins(0, 0, 0, 0)
+        page_lay.setSpacing(8)
         self._page_dir = PageDirectoryList()
         self._page_dir.page_selected.connect(self._on_page_dir_selected)
-        splitter.addWidget(self._page_dir)
+        page_lay.addWidget(self._page_dir, 1)
+        left_lay.addWidget(page_pane, 1)
+        splitter.addWidget(left)
+        self._hproof_splitter = splitter
 
         # ── 中：滚动列表 ────────────────────────────────────────
         center = QWidget()
+        center.setObjectName("proofCenterPane")
         center_v = QVBoxLayout(center)
-        center_v.setContentsMargins(0, 0, 0, 0)
+        center_v.setContentsMargins(10, 10, 10, 10)
         center_v.setSpacing(0)
 
         self._scroll = QScrollArea()
+        self._scroll.setObjectName("proofScroll")
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
@@ -1970,9 +2732,10 @@ class HProofPanel(QWidget):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         self._list_widget = QWidget()
+        self._list_widget.setObjectName("proofLineList")
         self._list_layout = QVBoxLayout(self._list_widget)
-        self._list_layout.setContentsMargins(0, 0, 0, 0)
-        self._list_layout.setSpacing(0)
+        self._list_layout.setContentsMargins(6, 4, 6, 4)
+        self._list_layout.setSpacing(2)
         self._list_layout.addStretch()
 
         # 空状态提示（无数据时显示）
@@ -1984,92 +2747,45 @@ class HProofPanel(QWidget):
 
         self._mode_banner = QLabel("")
         self._mode_banner.setObjectName("hproofModeBanner")
-        self._mode_banner.setStyleSheet(
-            "background:#fff7ed; color:#9a3412; border-bottom:1px solid #fed7aa; "
-            "padding:6px 10px; font-size:12px;"
-        )
         self._mode_banner.setVisible(False)
         center_v.addWidget(self._mode_banner)
         self._scroll.setWidget(self._list_widget)
         center_v.addWidget(self._scroll, 1)
         splitter.addWidget(center)
 
-        # ── 右：工具栏（垂直）+ 快捷键说明 ──────────────────────
-        right = QWidget()
-        right.setObjectName("hproofRightDock")
-        right.setMinimumWidth(220)
-        right.setMaximumWidth(300)
-        right_v = QVBoxLayout(right)
-        right_v.setContentsMargins(10, 10, 10, 10)
-        right_v.setSpacing(10)
-
-        # 操作按钮组（Phase 25：右栏精简，只剩保存 / 标记 / 跳过）
-        actions_lbl = QLabel("操作")
-        actions_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
-        right_v.addWidget(actions_lbl)
-
+        # 操作按钮保留原 slot，承载位置改到底部状态栏。
         self._btn_save = QPushButton("保存")
         self._btn_save.setObjectName("primaryBtn")
         self._btn_save.setToolTip("保存所有修改  (Ctrl+S)")
-        self._btn_flag = QPushButton("⚑ 标记  F5")
-        self._btn_skip = QPushButton("跳过  F6")
+        self._btn_flag = QPushButton("标记")
+        self._btn_flag.setObjectName("secondaryBtn")
+        self._btn_flag.setToolTip("标记当前行  (F5)")
+        self._btn_skip = QPushButton("跳过")
+        self._btn_skip.setObjectName("ghostBtn")
+        self._btn_skip.setToolTip("跳过当前行  (F6)")
         for btn in (self._btn_save, self._btn_flag, self._btn_skip):
-            btn.setMinimumHeight(30)
-            right_v.addWidget(btn)
-
-        status_lbl = QLabel("当前")
-        status_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
-        right_v.addWidget(status_lbl)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
         self._current_scope_lbl = QLabel("全部页面")
         self._current_scope_lbl.setObjectName("muted")
-        self._current_scope_lbl.setWordWrap(True)
-        self._current_scope_lbl.setStyleSheet("font-size:12px; color:#5f6b7a;")
-        right_v.addWidget(self._current_scope_lbl)
 
         self._current_line_lbl = QLabel("当前行 0 / 0")
-        self._current_line_lbl.setStyleSheet("font-size:13px; color:#1f2937;")
-        right_v.addWidget(self._current_line_lbl)
-
-        self._proof_progress_bar = QProgressBar()
-        self._proof_progress_bar.setTextVisible(False)
-        self._proof_progress_bar.setFixedHeight(8)
-        self._proof_progress_bar.setRange(0, 1)
-        self._proof_progress_bar.setValue(0)
-        self._proof_progress_bar.setStyleSheet(
-            "QProgressBar { background:#e5e7eb; border:0; border-radius:4px; }"
-            "QProgressBar::chunk { background:#1a73e8; border-radius:4px; }"
-        )
-        right_v.addWidget(self._proof_progress_bar)
+        self._current_line_lbl.setObjectName("proofStatusStrong")
 
         self._handled_lbl = QLabel("已处理 0 / 0")
         self._handled_lbl.setObjectName("muted")
-        self._handled_lbl.setStyleSheet("font-size:11px; color:#667085;")
-        right_v.addWidget(self._handled_lbl)
 
-        stats_lbl = QLabel("统计")
-        stats_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
-        right_v.addWidget(stats_lbl)
-
+        # Backing widgets kept for tests and internal state reads; they are no
+        # longer part of the visible right sidebar.
+        self._proof_progress_bar = QProgressBar()
+        self._proof_progress_bar.setRange(0, 1)
+        self._proof_progress_bar.setValue(0)
+        self._proof_progress_bar.setVisible(False)
         self._pending_lbl = QLabel("待确认 0")
         self._confirmed_lbl = QLabel("已确认 0")
         self._modified_lbl = QLabel("已修改 0")
         self._flagged_lbl = QLabel("疑点 0")
-        for lbl in (
-            self._pending_lbl,
-            self._confirmed_lbl,
-            self._modified_lbl,
-            self._flagged_lbl,
-        ):
-            lbl.setMinimumHeight(22)
-            lbl.setStyleSheet(
-                "font-size:12px; color:#344054; padding:2px 0;"
-            )
-            right_v.addWidget(lbl)
-
-        debug_lbl = QLabel("调试")
-        debug_lbl.setStyleSheet("font-weight:600; color:#444; font-size:12px;")
-        right_v.addWidget(debug_lbl)
 
         self._btn_debug_formula = QPushButton("公式")
         self._btn_debug_formula.setObjectName("ghostBtn")
@@ -2080,55 +2796,59 @@ class HProofPanel(QWidget):
         self._btn_debug_table.setCheckable(True)
         self._btn_debug_table.setToolTip("只显示被识别为表格或表格路由的行")
         for btn in (self._btn_debug_formula, self._btn_debug_table):
-            btn.setMinimumHeight(28)
-            right_v.addWidget(btn)
+            btn.setFixedHeight(28)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        # 统计徽章（保留：用于全局进度小字提示）
         self._stat_lbl = QLabel("")
         self._stat_lbl.setObjectName("muted")
-        self._stat_lbl.setStyleSheet("font-size:11px; color:#666;")
-        right_v.addWidget(self._stat_lbl)
-
-        right_v.addStretch()
-        splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setSizes([180, 9999, 180])
+        splitter.setSizes([282, 9999])
         root.addWidget(splitter, 1)
 
         # ── 底部状态栏 ─────────────────────────────────────────
         statusbar = QWidget()
-        statusbar.setFixedHeight(28)
-        statusbar.setStyleSheet("background:#f5f7fb; border-top:1px solid #e3e8ef;")
+        statusbar.setObjectName("proofStatusBar")
+        statusbar.setFixedHeight(44)
         sl = QHBoxLayout(statusbar)
-        sl.setContentsMargins(12, 0, 12, 0)
-        sl.setSpacing(16)
+        sl.setContentsMargins(12, 3, 12, 3)
+        sl.setSpacing(10)
+
+        self._progress_ring = _ProofProgressRing()
+        sl.addWidget(self._progress_ring)
+        sl.addWidget(self._current_scope_lbl)
+        sl.addWidget(self._current_line_lbl)
+        sl.addWidget(self._handled_lbl)
+
+        sl.addSpacing(6)
+        sl.addWidget(self._btn_save)
+        sl.addWidget(self._btn_flag)
+        sl.addWidget(self._btn_skip)
+
+        sl.addSpacing(8)
+        sl.addWidget(self._btn_debug_formula)
+        sl.addWidget(self._btn_debug_table)
 
         self._total_lbl = QLabel("总字数 0")
         self._diff_lbl  = QLabel("差异 0 (0%)")
         for lbl in (self._total_lbl, self._diff_lbl):
             lbl.setStyleSheet("font-size:11px; color:#666;")
-            sl.addWidget(lbl)
-
-        for color, label in (
-            ("#2e7d32", "高置信"),
-            ("#e8801f", "可疑"),
-            ("#c62828", "错字 / 高风险"),
-            ("#222222", "已修正"),
-        ):
-            dot = QLabel(
-                f"<span style='color:{color}'>●</span>"
-                f"<span style='color:#666;font-size:11px;'> {label}</span>"
-            )
-            dot.setTextFormat(Qt.TextFormat.RichText)
-            sl.addWidget(dot)
 
         sl.addStretch()
+        sl.addWidget(self._total_lbl)
+        sl.addWidget(self._diff_lbl)
+        sl.addWidget(self._stat_lbl)
         root.addWidget(statusbar)
 
         # ── 信号 ───────────────────────────────────────────────
+        self._btn_nav_toggle.clicked.connect(
+            lambda checked=False: self._set_left_sidebar_collapsed(
+                not self._hproof_sidebar_collapsed
+            )
+        )
+        self._btn_nav_pages.clicked.connect(self._show_directory_sidebar)
+        self._progress_ring.clicked.connect(self._show_progress_popup)
         self._btn_save.clicked.connect(self._save_all)
         self._btn_flag.clicked.connect(self._toggle_flag)
         self._btn_skip.clicked.connect(self._next)
@@ -2141,10 +2861,33 @@ class HProofPanel(QWidget):
             lambda _: self._load_visible_images()
         )
 
+    def _show_directory_sidebar(self) -> None:
+        self._set_left_sidebar_collapsed(False)
+        self._btn_nav_pages.setChecked(True)
+
+    def _set_left_sidebar_collapsed(self, collapsed: bool) -> None:
+        collapsed = bool(collapsed)
+        if collapsed == self._hproof_sidebar_collapsed:
+            return
+        self._hproof_sidebar_collapsed = collapsed
+        self._btn_nav_toggle.setChecked(collapsed)
+        self._btn_nav_pages.setChecked(True)
+        self._hproof_page_pane.setVisible(not collapsed)
+
+        if collapsed:
+            self._hproof_left_pane.setMinimumWidth(56)
+            self._hproof_left_pane.setMaximumWidth(56)
+            self._hproof_splitter.setSizes([56, max(800, self._hproof_splitter.width() - 56)])
+        else:
+            self._hproof_left_pane.setMinimumWidth(250)
+            self._hproof_left_pane.setMaximumWidth(322)
+            self._hproof_splitter.setSizes([282, max(800, self._hproof_splitter.width() - 282)])
+        self._hproof_left_pane.updateGeometry()
+
     # ── 公共 API ───────────────────────────────────────────────
 
     def load_pages(self, pages: List[Page]) -> None:
-        self._pages = pages
+        self._session.set_pages(pages, page_has_lines=self._page_has_lines)
         self._refresh_page_filter()
         self._render_pages(self._filtered_pages())
 
@@ -2153,115 +2896,182 @@ class HProofPanel(QWidget):
         if not self._pairs:
             self.load_pages(pages)
             return
-        self._pages = pages
+        self._session.set_pages(pages, page_has_lines=self._page_has_lines)
         self._refresh_page_filter()
         loaded_keys = {
-            self._line_key(block, line, page, li): index
-            for index, (block, line, page, li) in enumerate(self._items)
+            projection.identity_key: index
+            for index, projection in enumerate(self._session.projections)
         }
-        prev_page_number = self._items[-1][2].page_number if self._items else -1
-        added = False
-        for page in self._filtered_pages():
+        old_current_key = None
+        current_index = self._session.current_projection_index
+        if 0 <= current_index < len(self._session.projections):
+            old_current_key = self._session.projections[current_index].identity_key
+        preserved_dirty_texts = {
+            projection.identity_key: self._pairs[index].dirty_editor_snapshot()
+            for index, projection in enumerate(self._session.projections)
+            if index < len(self._pairs) and self._pairs[index].is_editor_dirty()
+        }
+        filtered_pages = self._filtered_pages()
+        new_entries: list[tuple[ProofLineProjection, int]] = []
+        for page in filtered_pages:
             page_line_num = 1
             for block, line, li in self._iter_page_lines(page):
-                key = self._line_key(block, line, page, li)
-                existing_index = loaded_keys.get(key)
+                projection = self._build_projection(page, block, line, li)
+                new_entries.append((projection, page_line_num))
+                page_line_num += 1
+        new_keys = {projection.identity_key for projection, _page_line_num in new_entries}
+        if set(loaded_keys) - new_keys:
+            self._render_pages(filtered_pages)
+            target_idx = 0
+            for index, projection in enumerate(self._session.projections):
+                if projection.identity_key == old_current_key:
+                    target_idx = index
+            if self._pairs:
+                self._activate(target_idx)
+            for index, projection in enumerate(self._session.projections):
+                if projection.identity_key in preserved_dirty_texts and index < len(self._pairs):
+                    dirty_text, previous_loaded_text = preserved_dirty_texts[projection.identity_key]
+                    self._pairs[index].restore_dirty_editor_text(
+                        dirty_text,
+                        previous_loaded_text=previous_loaded_text,
+                    )
+            self._update_stats()
+            return
+        projections = self._session.projections
+        prev_page_number = projections[-1].page.page_number if projections else -1
+        added = False
+        for projection, page_line_num in new_entries:
+                existing_index = loaded_keys.get(projection.identity_key)
                 if existing_index is not None:
-                    self._items[existing_index] = (block, line, page, li)
-                    self._line_view_models[existing_index] = ProofLineViewModel.from_model(
-                        page=page,
-                        block=block,
-                        line=line,
-                        line_index=li,
-                        display_text=_displayed_text(line, page, block),
-                        source="hproof.merge",
-                    )
+                    unit = self._unit_from_projection(projection, page_line_num)
+                    projections[existing_index] = projection
                     self._pairs[existing_index].rebind(
-                        block, line, page, page_line_num,
-                        self._debug_badge_for(block, line),
+                        projection.block, projection.line, projection.page, page_line_num,
+                        unit.debug_badge,
+                        unit=unit,
                     )
-                    page_line_num += 1
                     continue
-                if page.page_number != prev_page_number:
-                    sep = QLabel(f"── 第 {page.page_number} 页 ──")
+                if projection.page.page_number != prev_page_number:
+                    sep = QLabel(f"── 第 {projection.page.page_number} 页 ──")
                     sep.setObjectName("pageSep")
                     sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     sep.setMinimumHeight(26)
                     self._list_layout.insertWidget(self._list_layout.count() - 1, sep)
-                    prev_page_number = page.page_number
-                self._append_pair(block, line, page, li, page_line_num)
-                loaded_keys[key] = len(self._items) - 1
-                page_line_num += 1
+                    prev_page_number = projection.page.page_number
+                self._append_projection(projection, page_line_num)
+                loaded_keys[projection.identity_key] = len(projections) - 1
                 added = True
         if added:
             self._empty_lbl.setVisible(False)
-            self._update_stats()
             QTimer.singleShot(100, self._load_visible_images)
+        self._update_stats()
 
     def _refresh_page_filter(self) -> None:
-        """Phase 25：仅维护左侧 PageDirectoryList 的页面项；不再有 combo。"""
-        usable_pages = [
-            page for page in self._pages
-            if self._page_has_lines(page)
-        ]
+        """仅维护左侧 PageDirectoryList 的页面项。"""
+        usable_pages = self._session.usable_pages(self._page_has_lines)
         page_numbers = [p.page_number for p in usable_pages]
-        self._filter_updating = True
+        self._session.filter_updating = True
         if hasattr(self, "_page_dir"):
             self._page_dir.set_pages(usable_pages)
-            if self._selected_page_number in page_numbers:
+            if self._session.selected_page_number in page_numbers:
                 self._page_dir.set_current_index(
-                    page_numbers.index(self._selected_page_number)
+                    page_numbers.index(self._session.selected_page_number)
                 )
         # 若选中页消失（被移除），回退到"全部页面"
-        if (
-            self._selected_page_number is not None
-            and self._selected_page_number not in page_numbers
-        ):
-            self._selected_page_number = None
-        self._filter_updating = False
+        self._session.ensure_selected_page_exists(self._page_has_lines)
+        self._session.filter_updating = False
 
     def _filtered_pages(self) -> List[Page]:
-        if self._selected_page_number is None:
-            return self._pages
-        return [p for p in self._pages if p.page_number == self._selected_page_number]
+        return self._session.filtered_pages()
 
     def set_current_page_number(self, page_number: int) -> None:
         """外部联动调用：把过滤器切换到指定页。"""
         page_number = int(page_number)
+        if self._session.selected_page_number == page_number:
+            return
+        if not self._flush_current_editor_before_view_switch():
+            self._sync_page_dir_selection()
+            return
         # 同步左侧目录视觉
         if hasattr(self, "_page_dir"):
             usable_numbers = [
-                p.page_number for p in self._pages
+                p.page_number for p in self._session.pages
                 if self._page_has_lines(p)
             ]
             if page_number in usable_numbers:
                 self._page_dir.set_current_index(usable_numbers.index(page_number))
-        if self._selected_page_number == page_number:
-            return
-        self._selected_page_number = page_number
+        self._session.selected_page_number = page_number
         self._render_pages(self._filtered_pages())
 
     def _on_page_dir_selected(self, dir_idx: int) -> None:
-        """Phase 25：左栏页面目录是页面过滤的唯一入口。点击 → 切换过滤 + 重渲染。"""
-        if self._filter_updating:
+        """左栏页面目录是页面过滤入口。点击 → 切换过滤 + 重渲染。"""
+        if self._session.filter_updating:
             return
-        usable_pages = [
-            page for page in self._pages
-            if self._page_has_lines(page)
-        ]
+        usable_pages = self._session.usable_pages(self._page_has_lines)
         if not (0 <= dir_idx < len(usable_pages)):
             return
         target = usable_pages[dir_idx]
-        if self._selected_page_number == target.page_number:
+        if self._session.selected_page_number == target.page_number:
             return
-        self._selected_page_number = target.page_number
+        if not self._flush_current_editor_before_view_switch():
+            self._sync_page_dir_selection()
+            return
+        self._session.selected_page_number = target.page_number
         self.page_selected.emit(int(target.page_number))
         self._render_pages(self._filtered_pages())
 
+    def _sync_page_dir_selection(self) -> None:
+        if not hasattr(self, "_page_dir"):
+            return
+        usable_numbers = [
+            p.page_number for p in self._session.pages
+            if self._page_has_lines(p)
+        ]
+        selected_page_number = self._session.selected_page_number
+        if selected_page_number is None:
+            self._session.filter_updating = True
+            try:
+                self._page_dir.setCurrentRow(-1)
+                self._page_dir.clearSelection()
+            finally:
+                self._session.filter_updating = False
+            return
+        if selected_page_number not in usable_numbers:
+            return
+        self._session.filter_updating = True
+        try:
+            self._page_dir.set_current_index(
+                usable_numbers.index(selected_page_number)
+            )
+        finally:
+            self._session.filter_updating = False
+
+    def _flush_current_editor_before_view_switch(self) -> bool:
+        """Flush the active row before destroying/rebuilding HProof rows.
+
+        Returning False means the active editor is in an external-conflict state
+        and the caller must keep the current view alive.
+        """
+        current_index = self._session.current_projection_index
+        if not self._pairs or not (0 <= current_index < len(self._pairs)):
+            return True
+        pair = self._pairs[current_index]
+        if pair.has_external_conflict():
+            pair._refresh_status()
+            if hasattr(self, "_stat_lbl"):
+                self._stat_lbl.setText("当前行存在保存冲突，处理后再切换页面")
+            return False
+        self._save_current(silent=True)
+        return True
+
+    def _clear_pending_external_refresh(self) -> None:
+        self._external_refresh_timer.stop()
+        self._session.clear_pending_external()
+
     def _render_pages(self, pages: List[Page]) -> None:
-        self._items.clear()
+        self._clear_pending_external_refresh()
+        self._session.projections.clear()
         self._pairs.clear()
-        self._line_view_models.clear()
 
         # 清空旧 _LinePair。从后往前递删；skip _empty_lbl 和布局末尾的 stretch。
         # 为什么要 skip ：之前代码会 delete _empty_lbl ，导致二次 load 时
@@ -2297,31 +3107,62 @@ class HProofPanel(QWidget):
                         self._list_layout.count() - 1, sep
                     )
                     prev_page_number = page.page_number
-                self._append_pair(block, line, page, li, page_line_num)
+                self._append_projection(
+                    self._build_projection(page, block, line, li),
+                    page_line_num,
+                )
                 page_line_num += 1
 
-        self._current_idx = 0
+        self._session.current_projection_index = 0
         self._update_stats()
         if self._pairs:
             self._activate(0)
             # 懒加载前 30 行图像
             QTimer.singleShot(100, self._load_visible_images)
 
-    def _append_pair(self, block: Block, line: Line, page: Page, li: int, page_line_num: int) -> None:
-        self._items.append((block, line, page, li))
-        self._line_view_models.append(ProofLineViewModel.from_model(
-            page=page,
-            block=block,
-            line=line,
-            line_index=li,
+    def _build_projection(
+        self,
+        page: Page,
+        block: Block,
+        line: Line,
+        li: int,
+    ) -> ProofLineProjection:
+        return build_proof_line_projection(
+            page,
+            block,
+            line,
+            li,
             display_text=_displayed_text(line, page, block),
-            source="hproof",
-        ))
-        pair = _LinePair(
-            len(self._pairs), block, line, page, page_line_num,
-            self._cache,
-            debug_badge=self._debug_badge_for(block, line),
+            editable=li >= 0,
         )
+
+    def _unit_from_projection(
+        self,
+        projection: ProofLineProjection,
+        page_line_num: int,
+    ) -> ProofUnit:
+        debug_badge = self._debug_badge_for(projection.block, projection.line)
+        return ProofUnit(
+            uid=projection.uid,
+            kind=_proof_unit_kind(debug_badge),
+            page=projection.page,
+            block=projection.block,
+            line=projection.line,
+            line_index=projection.line_index,
+            page_line_number=page_line_num,
+            display_text=projection.display_text,
+            debug_badge=debug_badge,
+            atoms=projection.atoms,
+            editable=projection.editable,
+        )
+
+    def _renderer_for(self, unit: ProofUnit) -> _ProofUnitRenderer:
+        return self._renderers.get(unit.kind, self._renderers[ProofUnitKind.TEXT])
+
+    def _append_projection(self, projection: ProofLineProjection, page_line_num: int) -> None:
+        unit = self._unit_from_projection(projection, page_line_num)
+        self._session.projections.append(projection)
+        pair = self._renderer_for(unit).create_pair(len(self._pairs), unit, self._cache)
         pair.clicked.connect(self._on_pair_clicked)
         pair.text_saved.connect(self._on_text_saved)
         pair.confirmed.connect(self._on_confirmed)
@@ -2334,21 +3175,17 @@ class HProofPanel(QWidget):
         self._list_layout.insertWidget(self._list_layout.count() - 1, pair)
 
     def _debug_enabled(self) -> bool:
-        return self._show_formula_debug or self._show_table_debug
+        return self._session.debug_enabled
 
     def _debug_label(self) -> str:
-        labels = []
-        if self._show_formula_debug:
-            labels.append("公式")
-        if self._show_table_debug:
-            labels.append("表格")
-        return " / ".join(labels)
+        return self._session.debug_label
 
     def _scope_label(self) -> str:
-        if self._selected_page_number is None:
+        selected_page_number = self._session.selected_page_number
+        if selected_page_number is None:
             scope = "全部页面"
         else:
-            scope = f"第 {self._selected_page_number} 页"
+            scope = f"第 {selected_page_number} 页"
         if self._debug_enabled():
             return f"{scope} · {self._debug_label()}调试"
         return f"{scope} · 正文"
@@ -2376,8 +3213,8 @@ class HProofPanel(QWidget):
             return
         yield from iter_unique_page_hproof_debug_lines(
             page,
-            formulas=self._show_formula_debug,
-            tables=self._show_table_debug,
+            formulas=self._session.show_formula_debug,
+            tables=self._session.show_table_debug,
         )
 
     def _page_has_lines(self, page: Page) -> bool:
@@ -2392,35 +3229,26 @@ class HProofPanel(QWidget):
         new_formula = bool(self._btn_debug_formula.isChecked())
         new_table = bool(self._btn_debug_table.isChecked())
         if (
-            new_formula == self._show_formula_debug
-            and new_table == self._show_table_debug
+            new_formula == self._session.show_formula_debug
+            and new_table == self._session.show_table_debug
         ):
             return
-        self._save_current(silent=True)
-        self._show_formula_debug = new_formula
-        self._show_table_debug = new_table
+        if not self._flush_current_editor_before_view_switch():
+            for btn, checked in (
+                (self._btn_debug_formula, self._session.show_formula_debug),
+                (self._btn_debug_table, self._session.show_table_debug),
+            ):
+                btn.blockSignals(True)
+                btn.setChecked(checked)
+                btn.blockSignals(False)
+            return
+        self._session.set_debug_flags(formula=new_formula, table=new_table)
         self._refresh_page_filter()
         self._update_mode_banner()
         self._render_pages(self._filtered_pages())
 
-    def _line_key(self, block: Block, line: Line, page: Page, line_idx: int) -> tuple:
-        bbox = line.bbox.normalize()
-        return (
-            page.display_image_path,
-            page.source_path,
-            int(page.source_page_index),
-            int(page.page_number),
-            block.block_type.value,
-            int(block.order),
-            int(line_idx),
-            int(bbox.x),
-            int(bbox.y),
-            int(bbox.w),
-            int(bbox.h),
-        )
-
     def reset(self) -> None:
-        self._selected_page_number = None
+        self._session.reset()
         for btn in (
             getattr(self, "_btn_debug_formula", None),
             getattr(self, "_btn_debug_table", None),
@@ -2430,8 +3258,6 @@ class HProofPanel(QWidget):
             btn.blockSignals(True)
             btn.setChecked(False)
             btn.blockSignals(False)
-        self._show_formula_debug = False
-        self._show_table_debug = False
         self.load_pages([])
         self._stat_lbl.setText("")
         self._total_lbl.setText("总字数 0")
@@ -2440,108 +3266,217 @@ class HProofPanel(QWidget):
     # ── 导航 ───────────────────────────────────────────────────
 
     def _prev(self) -> None:
-        if self._current_idx > 0:
+        if self._session.current_projection_index > 0:
             self._save_current(silent=True)
-            self._activate(self._current_idx - 1)
+            self._activate(self._session.current_projection_index - 1)
 
     def _next(self) -> None:
-        if self._current_idx < len(self._pairs) - 1:
+        if self._session.current_projection_index < len(self._pairs) - 1:
             self._save_current(silent=True)
-            self._activate(self._current_idx + 1)
+            self._activate(self._session.current_projection_index + 1)
 
     def _activate(self, idx: int) -> None:
         idx = max(0, min(idx, len(self._pairs) - 1))
-        if 0 <= self._current_idx < len(self._pairs) and self._current_idx != idx:
-            self._pairs[self._current_idx].set_active(False)
-        self._current_idx = idx
+        current_index = self._session.current_projection_index
+        if 0 <= current_index < len(self._pairs) and current_index != idx:
+            self._pairs[current_index].set_active(False)
+        self._session.current_projection_index = idx
         pair = self._pairs[idx]
         pair.set_active(True)
+        self._update_focus_depths()
         self._update_stats()
         # 滚动到可见
         QTimer.singleShot(30, lambda: self._scroll.ensureWidgetVisible(pair, 0, 40))
 
+    def _update_focus_depths(self) -> None:
+        for i, pair in enumerate(self._pairs):
+            distance = abs(i - self._session.current_projection_index)
+            if distance == 0:
+                depth = "active"
+            elif distance == 1:
+                depth = "near"
+            else:
+                depth = "far"
+            pair.set_focus_depth(depth)
+
     def _on_pair_clicked(self, idx: int) -> None:
-        if idx != self._current_idx:
+        if idx != self._session.current_projection_index:
             self._save_current(silent=True)
             self._activate(idx)
 
     def _on_confirmed(self, idx: int) -> None:
         """Enter 键确认当前行。"""
-        if not self._items:
+        projections = self._session.projections
+        if not projections:
             return
-        block, line, page, li = self._items[idx]
+        if 0 <= idx < len(self._pairs) and not self._pairs[idx].is_editable:
+            return
+        if 0 <= idx < len(self._pairs) and self._pairs[idx].has_external_conflict():
+            self._pairs[idx]._refresh_status()
+            return
+        projection = projections[idx]
+        block, line, page, li = (
+            projection.block,
+            projection.line,
+            projection.page,
+            projection.line_index,
+        )
+        pair = self._pairs[idx] if 0 <= idx < len(self._pairs) else None
+        if pair is None:
+            return
         # 先保存文本
-        self._save_current(silent=True)
-        line.proof_status = ProofStatus.OK
+        save_result = self._save_current(silent=True)
+        if save_result == _HProofSaveResult.CONFLICT:
+            return
+        status_result = ProofEditService.set_line_status(
+            page,
+            block,
+            line,
+            ProofStatus.OK,
+            expected_signature=pair.loaded_line_signature() if pair is not None else "",
+        )
+        if status_result.blocked:
+            if pair is not None:
+                pair.mark_external_conflict()
+            return
+        if not status_result.changed:
+            self._next()
+            return
         self._publish_line_update(
             page=page, block=block, line=line, line_index=li,
             status=ProofStatus.OK.value, source="hproof.confirm",
         )
-        self.proof_saved.emit()
         self._pairs[idx].refresh_text()
         self._update_stats()
+        self._emit_proof_change(status_result.change)
         self._next()
 
     def _on_text_saved(self, idx: int, new_text: str) -> None:
-        """_LinePair 在 set_active(False) 时保存；cell mode 下每次 cell 编辑
-        也走这里（_LinePair._on_cell_text_committed → text_saved）。
+        """_LinePair 在失焦或主动保存时提交文本。
 
-        Phase 22 blocker 2：保存成功后，被改动行的 proof_status 通常会从
-        UNCHECKED 变 MODIFIED。必须立即刷新该 pair 的状态点 ——
-        但**不能**调 pair.refresh_text()（active+cell_mode 下它会作废重建
-        _cell_row → 把焦点拉回第 0 格）。直接调 _refresh_status() 只更新
-        状态标签，不触碰 _cell_row / editor / 焦点。"""
-        if idx >= len(self._items):
+        保存成功后，被改动行的 proof_status 通常会从 UNCHECKED 变 MODIFIED。
+        这里只刷新状态点，避免重建 editor 干扰当前焦点。"""
+        projections = self._session.projections
+        if idx >= len(projections):
             return
-        block, line, page, _ = self._items[idx]
-        if _save_displayed_edit(line, page, block, new_text):
+        projection = projections[idx]
+        block, line, page, li = (
+            projection.block,
+            projection.line,
+            projection.page,
+            projection.line_index,
+        )
+        pair = self._pairs[idx] if 0 <= idx < len(self._pairs) else None
+        if pair is None:
+            return
+        result = ProofEditService.replace_line_text(
+            page,
+            block,
+            line,
+            new_text,
+            expected_signature=pair.loaded_line_signature(),
+        )
+        if result.blocked:
+            pair.mark_external_conflict()
+            return
+        if result.changed:
             self._publish_line_update(
-                page=page, block=block, line=line, line_index=self._items[idx][3],
-                status=line.proof_status.value, source="hproof.text_saved",
+                page=page, block=block, line=line, line_index=li,
+                status=proof_status(line).value, source="hproof.text_saved",
             )
-            self.proof_saved.emit()
             self._update_stats()
-            # Phase 22 blocker 2：即时刷新 active pair 状态点
-            if 0 <= idx < len(self._pairs):
-                self._pairs[idx]._refresh_status()
+            if pair is not None:
+                pair.mark_editor_saved()
+            self._emit_proof_change(result.change)
 
-    def _save_current(self, *, silent: bool = False) -> None:
+    def _save_current(self, *, silent: bool = False) -> _HProofSaveResult:
         """将当前编辑器内容保存到 line 对象。"""
-        if not self._pairs or self._current_idx >= len(self._pairs):
-            return
-        pair = self._pairs[self._current_idx]
-        # Phase 25：editor 始终可见，直接读其当前文本与 line 比较保存
+        current_index = self._session.current_projection_index
+        if not self._pairs or current_index >= len(self._pairs):
+            return _HProofSaveResult.NOOP
+        pair = self._pairs[current_index]
+        if pair.has_external_conflict():
+            pair._refresh_status()
+            return _HProofSaveResult.CONFLICT
+        if not pair.is_editable:
+            return _HProofSaveResult.READ_ONLY
+        # editor 始终可见，直接读其当前文本与 line 比较保存。
         new_text = pair._editor.toPlainText()
-        block, line, page, _ = self._items[self._current_idx]
-        if _save_displayed_edit(line, page, block, new_text):
+        projection = self._session.projections[current_index]
+        block, line, page, li = (
+            projection.block,
+            projection.line,
+            projection.page,
+            projection.line_index,
+        )
+        result = ProofEditService.replace_line_text(
+            page,
+            block,
+            line,
+            new_text,
+            expected_signature=pair.loaded_line_signature(),
+        )
+        if result.blocked:
+            pair.mark_external_conflict()
+            return _HProofSaveResult.CONFLICT
+        if result.changed:
             self._publish_line_update(
-                page=page, block=block, line=line, line_index=self._items[self._current_idx][3],
-                status=line.proof_status.value, source="hproof.save_current",
+                page=page, block=block, line=line, line_index=li,
+                status=proof_status(line).value, source="hproof.save_current",
             )
-            self.proof_saved.emit()
-            pair.refresh_text()
+            pair.refresh_text(force=True)
             self._update_stats()
+            self._emit_proof_change(result.change)
+            return _HProofSaveResult.SAVED
+        return _HProofSaveResult.NOOP
 
     def _save_all(self) -> None:
         self._save_current()
-        self.proof_saved.emit()
+
+    def _emit_proof_change(self, change: ProofChangeSet) -> None:
+        if not change.needs_persist:
+            return
+        self.proof_changed.emit(change)
 
     def _toggle_flag(self) -> None:
-        if not self._items or self._current_idx >= len(self._items):
+        current_index = self._session.current_projection_index
+        projections = self._session.projections
+        if not projections or current_index >= len(projections):
             return
-        block, line, page, li = self._items[self._current_idx]
+        projection = projections[current_index]
+        block, line, page, li = (
+            projection.block,
+            projection.line,
+            projection.page,
+            projection.line_index,
+        )
+        pair = self._pairs[current_index]
+        if li < 0 or not pair.is_editable:
+            return
         new_status = (
             ProofStatus.UNCHECKED
-            if line.proof_status == ProofStatus.AUTO_FLAGGED
+            if proof_status(line) == ProofStatus.AUTO_FLAGGED
             else ProofStatus.AUTO_FLAGGED
         )
-        line.proof_status = new_status
+        result = ProofEditService.set_line_status(
+            page,
+            block,
+            line,
+            new_status,
+            expected_signature=pair.loaded_line_signature(),
+        )
+        if result.blocked:
+            pair.mark_external_conflict()
+            return
+        if not result.changed:
+            return
         self._publish_line_update(
             page=page, block=block, line=line, line_index=li,
             status=new_status.value, source="hproof.flag",
         )
-        self._pairs[self._current_idx].refresh_text()
+        pair.refresh_text()
         self._update_stats()
+        self._emit_proof_change(result.change)
 
     # ── 统计 ───────────────────────────────────────────────────
 
@@ -2569,56 +3504,83 @@ class HProofPanel(QWidget):
         )
         self._bus.publish_line_update(request)
 
-    def _on_external_line_changed(self, event=None, **kwargs) -> None:
+    def _on_external_line_changed(self, request: ProofUpdateRequest) -> None:
         """收到外部（纵校）发来的 line.proof_changed → 找到本 panel 中
         line.id 匹配的行，刷新该行显示并重算统计。
 
         回路保护：origin == id(self) 时直接跳过（自己 publish 的事件）。
         """
-        request = ProofUpdateRequest.from_legacy(event, **kwargs)
+        if not isinstance(request, ProofUpdateRequest):
+            return
         if request.origin == id(self):
             return
         if (request.line_uid or None) is None and request.line_id is None:
             return
-        touched = False
-        for i, (block, line, page, _li) in enumerate(self._items):
-            if proof_request_matches_line(request, line):
-                pair = self._pairs[i]
-                # Phase 25：editor 始终可见 → 直接走 refresh_text 同步显示文本。
-                pair.refresh_text()
-                touched = True
-        if touched:
+        if not any(
+            proof_request_matches_line(request, projection.line)
+            for projection in self._session.projections
+        ):
+            return
+        self._session.add_pending_external(request)
+        self._external_refresh_timer.start()
+
+    def _do_external_refresh(self) -> None:
+        if not self._session.pending_external_requests:
+            return
+        requests = self._session.pop_pending_external()
+        touched_indexes: set[int] = set()
+        for i, projection in enumerate(self._session.projections):
+            if any(proof_request_matches_line(request, projection.line) for request in requests):
+                touched_indexes.add(i)
+        for i in sorted(touched_indexes):
+            if i < len(self._pairs):
+                self._pairs[i].refresh_text()
+        if touched_indexes:
             self._update_stats()
 
     def _update_stats(self) -> None:
-        total_chars = sum(len(ln.display_text) for _, ln, _, _ in self._items)
+        projections = self._session.projections
+        total_chars = sum(len(projection.display_text) for projection in projections)
         diff_count  = sum(
-            1 for _, ln, _, _ in self._items
-            if ln.proof_status in (ProofStatus.MODIFIED, ProofStatus.AUTO_FLAGGED)
+            1 for projection in projections
+            if proof_status(projection.line) in (ProofStatus.MODIFIED, ProofStatus.AUTO_FLAGGED)
         )
-        pct = (diff_count / max(1, len(self._items))) * 100
+        pct = (diff_count / max(1, len(projections))) * 100
         self._total_lbl.setText(f"总字数 {total_chars:,}")
         self._diff_lbl.setText(f"差异 {diff_count} ({pct:.1f}%)")
 
-        total_lines = len(self._items)
-        current = self._current_idx + 1 if self._pairs else 0
+        total_lines = len(projections)
+        current = self._session.current_projection_index + 1 if self._pairs else 0
         confirmed = sum(
-            1 for _, ln, _, _ in self._items
-            if ln.proof_status == ProofStatus.OK
+            1 for projection in projections
+            if proof_status(projection.line) == ProofStatus.OK
         )
         modified = sum(
-            1 for _, ln, _, _ in self._items
-            if ln.proof_status == ProofStatus.MODIFIED
+            1 for projection in projections
+            if proof_status(projection.line) == ProofStatus.MODIFIED
         )
         flagged = sum(
-            1 for _, ln, _, _ in self._items
-            if ln.proof_status == ProofStatus.AUTO_FLAGGED
+            1 for projection in projections
+            if proof_status(projection.line) == ProofStatus.AUTO_FLAGGED
         )
         pending = sum(
-            1 for _, ln, _, _ in self._items
-            if ln.proof_status == ProofStatus.UNCHECKED
+            1 for projection in projections
+            if proof_status(projection.line) == ProofStatus.UNCHECKED
         )
         handled = confirmed + modified
+        self._last_stats = {
+            "scope": self._scope_label(),
+            "current": current,
+            "total_lines": total_lines,
+            "handled": handled,
+            "pending": pending,
+            "confirmed": confirmed,
+            "modified": modified,
+            "flagged": flagged,
+            "total_chars": total_chars,
+            "diff_count": diff_count,
+            "diff_pct": pct,
+        }
 
         if hasattr(self, "_current_scope_lbl"):
             self._current_scope_lbl.setText(self._scope_label())
@@ -2630,14 +3592,57 @@ class HProofPanel(QWidget):
             self._confirmed_lbl.setText(f"已确认 {confirmed}")
             self._modified_lbl.setText(f"已修改 {modified}")
             self._flagged_lbl.setText(f"疑点 {flagged}")
-            self._stat_lbl.setText(f"{self._scope_label()} · {total_lines} 行")
+            if hasattr(self, "_progress_ring"):
+                self._progress_ring.set_counts(handled, total_lines)
+            self._stat_lbl.setText(self._debug_label() if self._debug_enabled() else "")
 
+    def _show_progress_popup(self) -> None:
+        stats = getattr(self, "_last_stats", None) or {}
+        popup = QFrame(self, Qt.WindowType.Popup)
+        popup.setObjectName("proofProgressPopup")
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+
+        title = QLabel(str(stats.get("scope") or "横校进度"))
+        title.setObjectName("sectionTitle")
+        lay.addWidget(title)
+
+        rows = (
+            ("当前行", f"{stats.get('current', 0)} / {stats.get('total_lines', 0)}"),
+            ("已处理", f"{stats.get('handled', 0)} / {stats.get('total_lines', 0)}"),
+            ("待确认", str(stats.get("pending", 0))),
+            ("已确认", str(stats.get("confirmed", 0))),
+            ("已修改", str(stats.get("modified", 0))),
+            ("疑点", str(stats.get("flagged", 0))),
+            ("总字数", f"{int(stats.get('total_chars', 0)):,}"),
+            ("差异", f"{stats.get('diff_count', 0)} ({float(stats.get('diff_pct', 0.0)):.1f}%)"),
+        )
+        for key, value in rows:
+            row = QWidget()
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setSpacing(18)
+            k = QLabel(key)
+            k.setObjectName("muted")
+            v = QLabel(value)
+            v.setObjectName("fieldLabel")
+            row_lay.addWidget(k)
+            row_lay.addStretch(1)
+            row_lay.addWidget(v)
+            lay.addWidget(row)
+
+        popup.adjustSize()
+        anchor = self._progress_ring.mapToGlobal(self._progress_ring.rect().topLeft())
+        hint = popup.sizeHint()
+        popup.move(anchor.x(), max(0, anchor.y() - hint.height() - 8))
+        popup.show()
+        self._progress_popup = popup
 
     def refresh_quality_probe_state(self) -> None:
         """重新渲染所有可见行，使显示空间文本与全局 active store 对齐。
 
-        Phase 11：「评测：开/关」工具栏按钮已迁移到设置→正确率统计 对话框，
-        所以这里只剩刷新 pair 显示一件事。"""
+        这里只刷新 pair 显示，不改变模型事实。"""
         for pair in self._pairs:
             pair.refresh_text()
 

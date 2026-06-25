@@ -1,16 +1,15 @@
 """OCR 引擎设置对话框。"""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractSpinBox, QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox,
     QVBoxLayout, QWidget,
 )
 
 from app.core.api_profiles import (
-    API_MODEL_PROFILES,
     FIXED_LAYOUT_PROFILE,
     KNOWN_API_ENDPOINT_SUFFIXES,
     get_api_model_profile_options,
@@ -18,197 +17,291 @@ from app.core.api_profiles import (
     normalize_api_base_url,
     resolve_api_endpoint_for_role,
 )
-from app.core.llm_rules import get_default_llm_rules_path
 from app.core.app_config import get_config, update_config
 from app.core.paddle_v16_client import (
     PaddleV16LayoutClient,
     build_paddle_v16_optional_payload,
     is_paddle_v16_endpoint,
 )
+from app.utils.icon_manager import get_icon
 
 
 # ------------------------------------------------------------------ stylesheet
 
 _STYLE = """
 QDialog {
-    background: #f5f7fb;
-    color: #222;
+    background: #F5F3EE;
+    color: #2C2C2C;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Source Han Sans CN", sans-serif;
 }
-QLabel { color: #222; font-size: 13px; }
+QLabel { color: #2C2C2C; font-size: 14px; }
 QLabel#heroEyebrow {
-    color: #1a73e8;
-    font-size: 12px;
+    color: #6B6B6B;
+    font-size: 13px;
     font-weight: 600;
     letter-spacing: 0.5px;
 }
 QLabel#heroTitle {
-    color: #17324d;
+    color: #2C2C2C;
     font-size: 20px;
     font-weight: 700;
 }
 QLabel#heroDesc {
-    color: #62748a;
-    font-size: 13px;
+    color: #6B6B6B;
+    font-size: 12px;
     line-height: 1.5;
 }
 QLabel#sectionTitle {
-    color: #17324d;
-    font-size: 14px;
+    color: #2C2C2C;
+    font-size: 13px;
     font-weight: 700;
     padding: 0 0 4px 0;
 }
-QLabel#sectionDesc { color: #7b8794; font-size: 12px; }
-QLabel#fieldLabel { color: #526071; font-size: 13px; font-weight: 500; }
-QLabel#noteLabel { color: #8191a4; font-size: 12px; }
+QLabel#sectionDesc { color: #6B6B6B; font-size: 13px; }
+QLabel#fieldLabel { color: #4E4E4E; font-size: 12px; font-weight: 500; }
+QLabel#noteLabel { color: #8C8A85; font-size: 12px; }
 QLabel#pill {
-    background: #eef5ff;
-    color: #1a73e8;
-    border: 1px solid #d6e6ff;
+    background: #ECE8DF;
+    color: #2C2C2C;
+    border: 1px solid #E7E2D8;
     border-radius: 10px;
     padding: 3px 10px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
 }
 QLabel#statusPill {
-    background: #f5f9ff;
-    color: #1a73e8;
-    border: 1px solid #d9e9ff;
+    background: #E7EDE3;
+    color: #5C6B58;
+    border: 1px solid #D8D2C8;
     border-radius: 9px;
     padding: 3px 8px;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
 }
 QLabel#bannerInfo {
-    background: #f0f6ff;
-    color: #37618f;
-    border: 1px solid #d6e6ff;
+    background: #FFFDF8;
+    color: #5C6B58;
+    border: 1px solid #D8D2C8;
     border-radius: 8px;
     padding: 8px 10px;
 }
 QLabel#summaryTitle {
-    color: #17324d;
-    font-size: 13px;
+    color: #2C2C2C;
+    font-size: 14px;
     font-weight: 600;
 }
 QLabel#summaryValue {
-    color: #17324d;
-    font-size: 15px;
+    color: #2C2C2C;
+    font-size: 16px;
     font-weight: 700;
 }
 QLabel#summaryDesc {
-    color: #8191a4;
-    font-size: 12px;
+    color: #6B6B6B;
+    font-size: 13px;
     line-height: 1.45;
 }
 QLabel#footerNote {
-    color: #8191a4;
-    font-size: 12px;
+    color: #A1A1A1;
+    font-size: 13px;
     padding: 2px 0 0 2px;
 }
 
 QFrame#heroCard {
-    background: qlineargradient(
-        x1:0, y1:0, x2:1, y2:1,
-        stop:0 #ffffff, stop:1 #eef5ff
-    );
-    border: 1px solid #dce8f8;
-    border-radius: 16px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
 }
 QFrame#card {
-    background: #ffffff;
-    border: 1px solid #e3e8ef;
-    border-radius: 14px;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+QFrame#settingsDetailPane {
+    background: #F5F3EE;
+    border: none;
+    border-radius: 0;
+}
+QFrame#settingsShell {
+    background: #F5F3EE;
+    border: none;
+    border-radius: 0;
+}
+QFrame#settingsTopBar {
+    background: #F5F3EE;
+    border-bottom: 1px solid #D9D4CA;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
 }
 QFrame#modeCard {
-    background: #ffffff;
-    border: 1px solid #dbe4ef;
+    background: #FFFDF8;
+    border: 1px solid #E7E2D8;
     border-radius: 12px;
 }
 QFrame#modeCard[selected="true"] {
-    background: #f0f6ff;
-    border: 1px solid #1a73e8;
+    background: #ECE8DF;
+    border: 1px solid #2C2C2C;
 }
-QFrame#sideInfoCard {
-    background: #f8fbff;
-    border: 1px solid #dce8f8;
-    border-radius: 12px;
+QFrame#sideInfoCard, QFrame#settingsNavPane {
+    background: #F7F2EF;
+    border-right: 1px solid #E1DCD3;
+    border-radius: 0;
+}
+QFrame#bottomBar {
+    background: #F5F3EE;
+    border-top: 1px solid #D9D4CA;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+QFrame#segmentControl {
+    background: #F5F3EE;
+    border: 1px solid #E3DED5;
+    border-radius: 8px;
+}
+
+QScrollArea {
+    background: #F5F3EE;
+    border: none;
+}
+QWidget#settingsScrollContent {
+    background: #F5F3EE;
 }
 
 QLineEdit, QComboBox, QSpinBox {
-    background: #ffffff;
-    border: 1px solid #d6dde6;
-    border-radius: 8px;
-    padding: 8px 10px;
-    min-height: 24px;
-    font-size: 13px;
-    color: #222;
-    selection-background-color: #cfe2ff;
+    background: #FFFFFF;
+    border: 1px solid #DFDDD8;
+    border-radius: 4px;
+    padding: 6px 8px;
+    min-height: 22px;
+    font-size: 12px;
+    color: #2C2C2C;
+    selection-background-color: #2C2C2C;
+    selection-color: #FFFFFF;
+}
+QSpinBox {
+    padding-right: 8px;
 }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-    border: 1px solid #1a73e8;
+    border: 1px solid #5C6B58;
 }
 QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
-    background: #f2f5f8;
-    color: #98a4b3;
+    background: #F5F3EE;
+    color: #A1A1A1;
 }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView {
-    background: #ffffff;
-    border: 1px solid #d6dde6;
-    selection-background-color: #e3f0ff;
-    selection-color: #1a73e8;
+    background: #FFFDF8;
+    border: 1px solid #D1CFCA;
+    selection-background-color: #2C2C2C;
+    selection-color: #FFFFFF;
 }
 
 QRadioButton {
     spacing: 6px;
     padding: 0;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 600;
-    color: #17324d;
+    color: #2C2C2C;
 }
 QRadioButton::indicator { width: 16px; height: 16px; }
 
 QPushButton {
-    background: #ffffff;
-    border: 1px solid #d6dde6;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-size: 13px;
-    color: #344054;
+    background: #FFFFFF;
+    border: 1px solid #D1CFCA;
+    border-radius: 6px;
+    padding: 7px 15px;
+    font-size: 12px;
+    color: #2C2C2C;
 }
-QPushButton:hover { border-color: #1a73e8; color: #1a73e8; }
-QPushButton:pressed { background: #f0f6ff; }
-QPushButton:disabled { color: #aaa; border-color: #e0e4eb; }
+QPushButton:hover { border-color: #5C6B58; color: #2C2C2C; background: #ECE8DF; }
+QPushButton:pressed { background: #E7E2D8; }
+QPushButton:disabled { color: #A1A1A1; border-color: #E7E2D8; }
 
 QPushButton#primaryBtn {
-    background: #1a73e8;
+    background: #2C2C2C;
     color: white;
-    border: 1px solid #1a73e8;
+    border: 1px solid #2C2C2C;
     font-weight: 600;
 }
 QPushButton#primaryBtn:hover {
-    background: #1666cf;
-    border-color: #1666cf;
+    background: #1A1A1A;
+    border-color: #1A1A1A;
     color: white;
 }
-QPushButton#primaryBtn:pressed { background: #1357a8; }
+QPushButton#primaryBtn:pressed { background: #000000; }
 
 QPushButton#testBtn {
-    background: #f0f6ff;
-    color: #1a73e8;
-    border: 1px solid #b8d4ff;
+    background: #E7EDE3;
+    color: #2C2C2C;
+    border: 1px solid #C9D4C5;
 }
-QPushButton#testBtn:hover { background: #e0eeff; }
+QPushButton#testBtn:hover { background: #DDE7D8; }
 
 QPushButton#subtleBtn {
-    background: #ffffff;
-    color: #526071;
-    border: 1px solid #dce3eb;
+    background: #FFFDF8;
+    color: #6B6B6B;
+    border: 1px solid #E7E2D8;
 }
 QPushButton#subtleBtn:hover {
-    color: #1a73e8;
-    border-color: #1a73e8;
+    color: #2C2C2C;
+    border-color: #5C6B58;
+}
+QPushButton#navItemBtn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: #6B6B6B;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 9px 12px;
+    text-align: left;
+}
+QPushButton#navItemBtn:hover {
+    background: #ECE8DF;
+    color: #2C2C2C;
+}
+QPushButton#navItemBtn:checked {
+    background: #ECE8DF;
+    color: #2C2C2C;
+    border-right: 3px solid #2C2C2C;
+}
+QPushButton#segmentBtn {
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 5px 12px;
+    min-width: 54px;
+    color: #5F5D58;
+}
+QPushButton#segmentBtn:hover {
+    background: #ECE8DF;
+    color: #2C2C2C;
+}
+QPushButton#segmentBtn:checked {
+    background: #FFFFFF;
+    border: 1px solid #D9D4CA;
+    color: #2C2C2C;
+    font-weight: 600;
+}
+QFrame#spinStepper {
+    background: #F8F6F1;
+    border: 1px solid #DFDDD8;
+    border-radius: 4px;
+}
+QPushButton#spinStepBtn {
+    background: transparent;
+    border: none;
+    border-radius: 3px;
+    color: #5F5D58;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0;
+}
+QPushButton#spinStepBtn:hover {
+    background: #ECE8DF;
+    color: #2C2C2C;
+}
+QPushButton#spinStepBtn:pressed {
+    background: #E1DCD3;
 }
 """
 
@@ -225,8 +318,8 @@ def _section_card(title: str, desc: str = "") -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("card")
     outer = QVBoxLayout(card)
-    outer.setContentsMargins(18, 18, 18, 18)
-    outer.setSpacing(12)
+    outer.setContentsMargins(0, 8, 0, 0)
+    outer.setSpacing(10)
 
     title_lbl = QLabel(title)
     title_lbl.setObjectName("sectionTitle")
@@ -241,10 +334,10 @@ def _section_card(title: str, desc: str = "") -> tuple[QFrame, QVBoxLayout]:
 
 def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
     row = QHBoxLayout()
-    row.setSpacing(10)
+    row.setSpacing(12)
     lbl = QLabel(label_text)
     lbl.setObjectName("fieldLabel")
-    lbl.setFixedWidth(86)
+    lbl.setFixedWidth(112)
     lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     row.addWidget(lbl)
     row.addWidget(widget, 1)
@@ -255,9 +348,42 @@ def _note_row(label: QLabel) -> QHBoxLayout:
     row = QHBoxLayout()
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(0)
-    row.addSpacing(96)
+    row.addSpacing(124)
     row.addWidget(label, 1)
     return row
+
+
+def _spinbox_with_stepper(spinbox: QSpinBox, *, spin_width: int, total_width: int) -> QWidget:
+    spinbox.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+    spinbox.setFixedWidth(spin_width)
+
+    container = QWidget()
+    container.setFixedWidth(total_width)
+    row = QHBoxLayout(container)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(5)
+    row.addWidget(spinbox)
+
+    stepper = QFrame()
+    stepper.setObjectName("spinStepper")
+    stepper.setFixedSize(23, 32)
+    stepper_layout = QVBoxLayout(stepper)
+    stepper_layout.setContentsMargins(1, 1, 1, 1)
+    stepper_layout.setSpacing(0)
+
+    up_btn = QPushButton("▲")
+    down_btn = QPushButton("▼")
+    for btn in (up_btn, down_btn):
+        btn.setObjectName("spinStepBtn")
+        btn.setFixedSize(19, 14)
+        btn.setAutoRepeat(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    up_btn.clicked.connect(spinbox.stepUp)
+    down_btn.clicked.connect(spinbox.stepDown)
+    stepper_layout.addWidget(up_btn)
+    stepper_layout.addWidget(down_btn)
+    row.addWidget(stepper)
+    return container
 
 
 def _pill(text: str, name: str = "pill") -> QLabel:
@@ -306,8 +432,10 @@ class ApiSettingsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("apiSettingsDialog")
         self.setWindowTitle("OCR 引擎设置")
-        self.setMinimumWidth(820)
+        self.setMinimumWidth(760)
+        self.resize(820, 650)
         self.setStyleSheet(_STYLE)
         # 根据屏幕可用区域限制最大高度，确保小屏上也能完整操作
         _avail = QApplication.primaryScreen().availableGeometry()
@@ -318,78 +446,121 @@ class ApiSettingsDialog(QDialog):
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
-        # 外层布局：滚动区 + 固定底部按钮栏
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # 滚动容器
+        shell = QFrame()
+        shell.setObjectName("settingsShell")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        outer.addWidget(shell, 1)
+
+        top_bar = QFrame()
+        top_bar.setObjectName("settingsTopBar")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(22, 13, 18, 13)
+        top_layout.setSpacing(12)
+        top_title = QLabel("设置中心")
+        top_title.setObjectName("heroTitle")
+        top_layout.addWidget(top_title)
+        top_layout.addStretch()
+        shell_layout.addWidget(top_bar)
+
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        body = QHBoxLayout(content)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+        shell_layout.addWidget(content, 1)
+
+        nav = QFrame()
+        nav.setObjectName("settingsNavPane")
+        nav.setFixedWidth(148)
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(10, 14, 10, 14)
+        nav_layout.setSpacing(2)
+
+        nav_title = QLabel("设置")
+        nav_title.setObjectName("sectionTitle")
+        nav_title.setContentsMargins(2, 0, 2, 8)
+        nav_layout.addWidget(nav_title)
+        self._settings_nav_buttons: dict[str, QPushButton] = {}
+        nav_icons = {
+            "engine": "api",
+        }
+        for idx, (key, text, enabled) in enumerate((
+            ("engine", "识别引擎", True),
+        )):
+            btn = QPushButton(text)
+            btn.setObjectName("navItemBtn")
+            btn.setIcon(get_icon(nav_icons[key], color="#6B6B6B"))
+            btn.setIconSize(QSize(17, 17))
+            btn.setCheckable(True)
+            btn.setEnabled(enabled)
+            if idx == 0:
+                btn.setChecked(True)
+            self._settings_nav_buttons[key] = btn
+            nav_layout.addWidget(btn)
+        nav_layout.addStretch()
+        body.addWidget(nav)
+
+        detail = QFrame()
+        detail.setObjectName("settingsDetailPane")
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(0)
+        body.addWidget(detail, 1)
+
+        # 右侧详情滚动容器
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         scroll_content = QWidget()
+        scroll_content.setObjectName("settingsScrollContent")
         root = QVBoxLayout(scroll_content)
-        root.setContentsMargins(20, 20, 20, 12)
-        root.setSpacing(14)
+        root.setContentsMargins(34, 20, 34, 18)
+        root.setSpacing(12)
         scroll.setWidget(scroll_content)
-        outer.addWidget(scroll, 1)
+        detail_layout.addWidget(scroll)
 
-        # 底部固定栏（分隔线 + 按钮）
         bottom_bar = QFrame()
         bottom_bar.setObjectName("bottomBar")
-        bottom_bar.setStyleSheet(
-            "QFrame#bottomBar { background:#f5f7fb;"
-            " border-top: 1px solid #e3e8ef; padding: 0; }"
-        )
-        bottom_bar.setFixedHeight(56)
+        bottom_bar.setFixedHeight(52)
         bottom_bar_layout = QHBoxLayout(bottom_bar)
-        bottom_bar_layout.setContentsMargins(20, 0, 20, 0)
+        bottom_bar_layout.setContentsMargins(18, 0, 18, 0)
         bottom_bar_layout.setSpacing(8)
-        outer.addWidget(bottom_bar)
+        shell_layout.addWidget(bottom_bar)
 
         hero = QFrame()
         hero.setObjectName("heroCard")
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(20, 18, 20, 18)
-        hero_layout.setSpacing(10)
+        hero_layout.setContentsMargins(0, 0, 0, 0)
+        hero_layout.setSpacing(6)
 
-        hero_eyebrow = QLabel("ENGINE SETTINGS")
-        hero_eyebrow.setObjectName("heroEyebrow")
-        hero_layout.addWidget(hero_eyebrow)
-
-        hero_title = QLabel("OCR 引擎设置")
+        hero_title = QLabel("识别引擎")
         hero_title.setObjectName("heroTitle")
         hero_layout.addWidget(hero_title)
 
-        hero_desc = QLabel(
-            "当前主流程固定为 PaddleOCR-VL-1.6/API 版面 + Hanwang micro-recblock 文字识别。"
-            "这里只维护统一的 API 地址与 Token，不再让用户在多套引擎模式之间切换。"
-        )
+        hero_desc = QLabel("PaddleOCR-VL 版面分析 + CharOCR 文字识别。")
         hero_desc.setObjectName("heroDesc")
         hero_desc.setWordWrap(True)
         hero_layout.addWidget(hero_desc)
 
-        hero_pills = QHBoxLayout()
-        hero_pills.setContentsMargins(0, 0, 0, 0)
-        hero_pills.setSpacing(8)
-        hero_pills.addWidget(_pill("VL1.6 版面"))
-        hero_pills.addWidget(_pill("Hanwang 文字块"))
-        hero_pills.addWidget(_pill("Token 本机保存"))
-        hero_pills.addStretch()
-        hero_layout.addLayout(hero_pills)
         root.addWidget(hero)
 
         mode_card, mode_layout = _section_card(
             "当前链路",
-            "固定使用 PaddleOCR-VL-1.6/API 版面块 + Hanwang micro-recblock，不再暴露并列模式选择。",
+            "固定使用 PaddleOCR-VL-1.6/API 版面块 + CharOCR micro-recblock，不再暴露并列模式选择。",
         )
         mode_row = QHBoxLayout()
         mode_row.setSpacing(12)
         self._radio_local = QRadioButton("")
         self._radio_api = QRadioButton("")
-        self._radio_hanwang = QRadioButton("汉王混合")
+        self._radio_hanwang = QRadioButton("CharOCR 混合")
         self._local_mode_card = _ModeCard(
             self._radio_local,
             "",
@@ -404,8 +575,8 @@ class ApiSettingsDialog(QDialog):
         )
         self._hanwang_mode_card = _ModeCard(
             self._radio_hanwang,
-            "VL1.6 + Hanwang",
-            "API 提供 VL1.6 版面块；文字块走 Hanwang micro-recblock，公式/表格/图片保留 VL1.6。",
+            "VL1.6 + CharOCR",
+            "API 提供 VL1.6 版面块；文字块走 CharOCR micro-recblock，公式/表格/图片保留 VL1.6。",
             "需地址/Token",
         )
         mode_row.addWidget(self._hanwang_mode_card, 1)
@@ -414,28 +585,19 @@ class ApiSettingsDialog(QDialog):
         self._mode_card = mode_card
         self._mode_card.hide()
 
-        self._api_card, api_layout = _section_card(
-            "API 连接",
-            "填写不带 /api/v2/ocr/jobs 或 /ocr 的服务根地址。主流程会用它获取 VL1.6 parsing_res_list。",
-        )
-
         self._api_mode_notice = QLabel()
         self._api_mode_notice.setObjectName("bannerInfo")
         self._api_mode_notice.setWordWrap(True)
-        api_layout.addWidget(self._api_mode_notice)
-
-        api_body = QHBoxLayout()
-        api_body.setSpacing(14)
+        self._api_mode_notice.hide()
 
         self._api_form_panel = QWidget()
         api_form = QVBoxLayout(self._api_form_panel)
         api_form.setContentsMargins(0, 0, 0, 0)
-        api_form.setSpacing(10)
+        api_form.setSpacing(9)
 
         self._api_model_combo = QComboBox()
         for key, label in get_api_model_profile_options():
-            spec = API_MODEL_PROFILES[key]
-            self._api_model_combo.addItem(f"{label}  —  {spec['desc']}", key)
+            self._api_model_combo.addItem(label, key)
         self._api_model_combo.setCurrentIndex(-1)
         self._api_model_row = QWidget()
         self._api_model_row.setLayout(_form_row("官方模型", self._api_model_combo))
@@ -450,7 +612,7 @@ class ApiSettingsDialog(QDialog):
         self._url_edit = QLineEdit()
         self._url_edit.setPlaceholderText("https://xxxxx.aistudio-app.com")
         self._url_edit.setClearButtonEnabled(True)
-        api_form.addLayout(_form_row("API 地址", self._url_edit))
+        api_form.addLayout(_form_row("服务地址", self._url_edit))
 
         self._url_note = QLabel()
         self._url_note.setObjectName("noteLabel")
@@ -468,11 +630,27 @@ class ApiSettingsDialog(QDialog):
         self._btn_show_token = QPushButton("显示")
         self._btn_show_token.setObjectName("subtleBtn")
         self._btn_show_token.setCheckable(True)
-        self._btn_show_token.setFixedWidth(64)
+        self._btn_show_token.setFixedWidth(58)
         self._btn_show_token.setToolTip("显示 / 隐藏 Token")
         self._btn_show_token.toggled.connect(self._toggle_token_visibility)
         token_layout.addWidget(self._btn_show_token)
-        api_form.addLayout(_form_row("访问 Token", token_row))
+        api_form.addLayout(_form_row("Token", token_row))
+
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 2, 0, 0)
+        test_row.addSpacing(124)
+        self._btn_test = QPushButton("测试连接")
+        self._btn_test.setObjectName("testBtn")
+        self._btn_test.clicked.connect(self._test_connection)
+        test_row.addWidget(self._btn_test)
+        test_row.addStretch()
+        api_form.addLayout(test_row)
+
+        self._api_card, api_layout = _section_card("连接参数", "")
+        api_layout.addWidget(self._api_form_panel)
+        root.addWidget(self._api_card)
+
+        performance_form = api_form
 
         timeout_row = QWidget()
         timeout_layout = QHBoxLayout(timeout_row)
@@ -481,11 +659,12 @@ class ApiSettingsDialog(QDialog):
         self._timeout_spin = QSpinBox()
         self._timeout_spin.setRange(5, 600)
         self._timeout_spin.setSuffix(" 秒")
-        self._timeout_spin.setFixedWidth(140)
-        timeout_layout.addWidget(self._timeout_spin)
+        timeout_layout.addWidget(
+            _spinbox_with_stepper(self._timeout_spin, spin_width=88, total_width=116)
+        )
         timeout_layout.addStretch()
         self._timeout_row = timeout_row
-        api_form.addLayout(_form_row("请求超时", self._timeout_row))
+        performance_form.addLayout(_form_row("请求超时", self._timeout_row))
 
         concurrency_row = QWidget()
         concurrency_layout = QHBoxLayout(concurrency_row)
@@ -493,12 +672,12 @@ class ApiSettingsDialog(QDialog):
         concurrency_layout.setSpacing(0)
         self._layout_concurrency_spin = QSpinBox()
         self._layout_concurrency_spin.setRange(1, 10)
-        self._layout_concurrency_spin.setSuffix(" 路")
-        self._layout_concurrency_spin.setFixedWidth(140)
-        self._layout_concurrency_spin.setToolTip("多页版面分析时同时提交的 Paddle jobs 数；建议按失败率在 4-10 间调节。")
-        concurrency_layout.addWidget(self._layout_concurrency_spin)
+        self._layout_concurrency_spin.setToolTip("多页版面分析时同时提交的 Paddle jobs 数。")
+        concurrency_layout.addWidget(
+            _spinbox_with_stepper(self._layout_concurrency_spin, spin_width=62, total_width=90)
+        )
         concurrency_layout.addStretch()
-        api_form.addLayout(_form_row("版面请求并发", concurrency_row))
+        performance_form.addLayout(_form_row("版面请求并发", concurrency_row))
 
         ocr_concurrency_row = QWidget()
         ocr_concurrency_layout = QHBoxLayout(ocr_concurrency_row)
@@ -506,146 +685,46 @@ class ApiSettingsDialog(QDialog):
         ocr_concurrency_layout.setSpacing(0)
         self._ocr_page_concurrency_spin = QSpinBox()
         self._ocr_page_concurrency_spin.setRange(1, 20)
-        self._ocr_page_concurrency_spin.setSuffix(" 页")
-        self._ocr_page_concurrency_spin.setFixedWidth(140)
-        self._ocr_page_concurrency_spin.setToolTip("CharOCR/Hanwang 多页文字识别并发数；默认 2，高性能机器可压力测试到 20。")
-        ocr_concurrency_layout.addWidget(self._ocr_page_concurrency_spin)
+        self._ocr_page_concurrency_spin.setToolTip("CharOCR 多页文字识别并发数。")
+        ocr_concurrency_layout.addWidget(
+            _spinbox_with_stepper(self._ocr_page_concurrency_spin, spin_width=62, total_width=90)
+        )
         ocr_concurrency_layout.addStretch()
-        api_form.addLayout(_form_row("CharOCR 页并发", ocr_concurrency_row))
+        performance_form.addLayout(_form_row("CharOCR 页并发", ocr_concurrency_row))
 
         network_row = QWidget()
         network_layout = QHBoxLayout(network_row)
         network_layout.setContentsMargins(0, 0, 0, 0)
         network_layout.setSpacing(0)
-        self._paddle_network_combo = QComboBox()
-        self._paddle_network_combo.addItem("自动（优先系统代理）", "auto")
-        self._paddle_network_combo.addItem("使用系统代理", "env_proxy")
-        self._paddle_network_combo.addItem("直连（禁用代理）", "direct")
-        self._paddle_network_combo.setFixedWidth(180)
-        self._paddle_network_combo.setToolTip("PaddleOCR-VL jobs API 网络路径；自动模式会先试系统代理，连接类失败再直连。")
-        network_layout.addWidget(self._paddle_network_combo)
+        segment = QFrame()
+        segment.setObjectName("segmentControl")
+        segment_layout = QHBoxLayout(segment)
+        segment_layout.setContentsMargins(3, 3, 3, 3)
+        segment_layout.setSpacing(2)
+        self._network_mode_buttons: dict[str, QPushButton] = {}
+        for mode, text in (
+            ("auto", "自动"),
+            ("env_proxy", "系统代理"),
+            ("direct", "直连"),
+        ):
+            btn = QPushButton(text)
+            btn.setObjectName("segmentBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked=False, value=mode: self._set_network_mode(value))
+            self._network_mode_buttons[mode] = btn
+            segment_layout.addWidget(btn)
+        segment.setToolTip("PaddleOCR-VL jobs API 网络路径。")
+        network_layout.addWidget(segment, 0)
         network_layout.addStretch()
         api_form.addLayout(_form_row("Paddle 网络", network_row))
 
-        test_row = QHBoxLayout()
-        test_row.setContentsMargins(0, 4, 0, 0)
-        test_row.addSpacing(96)
-        self._btn_test = QPushButton("测试连接")
-        self._btn_test.setObjectName("testBtn")
-        self._btn_test.clicked.connect(self._test_connection)
-        test_row.addWidget(self._btn_test)
-        test_row.addStretch()
-        api_form.addLayout(test_row)
-
-        api_body.addWidget(self._api_form_panel, 3)
-
-        side_card = QFrame()
-        side_card.setObjectName("sideInfoCard")
-        side_layout = QVBoxLayout(side_card)
-        side_layout.setContentsMargins(16, 16, 16, 16)
-        side_layout.setSpacing(10)
-
-        summary_title = QLabel("当前配置摘要")
-        summary_title.setObjectName("summaryTitle")
-        side_layout.addWidget(summary_title)
-
-        self._summary_mode = QLabel()
-        self._summary_mode.setObjectName("summaryValue")
-        side_layout.addWidget(self._summary_mode)
-
         self._summary_model = QLabel()
-        self._summary_model.setObjectName("summaryTitle")
-        side_layout.addWidget(self._summary_model)
-
         self._summary_desc = QLabel()
-        self._summary_desc.setObjectName("summaryDesc")
-        self._summary_desc.setWordWrap(True)
-        side_layout.addWidget(self._summary_desc)
-
         self._summary_endpoint_kind = QLabel()
-        self._summary_endpoint_kind.setObjectName("statusPill")
-        side_layout.addWidget(self._summary_endpoint_kind)
-
         self._summary_endpoint = QLabel()
-        self._summary_endpoint.setObjectName("summaryDesc")
-        self._summary_endpoint.setWordWrap(True)
-        side_layout.addWidget(self._summary_endpoint)
-
-        hint_title = QLabel("操作提示")
-        hint_title.setObjectName("summaryTitle")
-        side_layout.addWidget(hint_title)
-
-        for text in (
-            "服务根地址会按角色自动补全 /api/v2/ocr/jobs 与 /ocr。",
-            "如果粘贴完整端点，保存时会自动剥离为基础地址。",
-            "Token 只保存在本机配置中，项目文件不写入 Token。",
-            "版面分析会上传整页图片；若网络较慢可适当提高请求超时。",
-        ):
-            hint = QLabel(f"• {text}")
-            hint.setObjectName("summaryDesc")
-            hint.setWordWrap(True)
-            side_layout.addWidget(hint)
-
-        side_layout.addStretch()
-        api_body.addWidget(side_card, 2)
-        api_layout.addLayout(api_body)
-        root.addWidget(self._api_card)
-
-        self._llm_card, llm_layout = _section_card(
-            "候选字 / LLM 设置",
-            "供纵校候选字模块使用；默认只保存配置，不会在 OCR、版面分析或校对时自动调用模型。",
-        )
-        llm_form = QVBoxLayout()
-        llm_form.setContentsMargins(0, 0, 0, 0)
-        llm_form.setSpacing(10)
-
-        self._llm_url_edit = QLineEdit()
-        self._llm_url_edit.setPlaceholderText("https://llm.example.com/v1/chat/completions")
-        self._llm_url_edit.setClearButtonEnabled(True)
-        llm_form.addLayout(_form_row("模型 URL", self._llm_url_edit))
-
-        llm_key_row = QWidget()
-        llm_key_layout = QHBoxLayout(llm_key_row)
-        llm_key_layout.setContentsMargins(0, 0, 0, 0)
-        llm_key_layout.setSpacing(6)
-        self._llm_key_edit = QLineEdit()
-        self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._llm_key_edit.setPlaceholderText("候选字 LLM API Key")
-        llm_key_layout.addWidget(self._llm_key_edit, 1)
-        self._btn_show_llm_key = QPushButton("显示")
-        self._btn_show_llm_key.setObjectName("subtleBtn")
-        self._btn_show_llm_key.setCheckable(True)
-        self._btn_show_llm_key.setFixedWidth(64)
-        self._btn_show_llm_key.toggled.connect(self._toggle_llm_key_visibility)
-        llm_key_layout.addWidget(self._btn_show_llm_key)
-        llm_form.addLayout(_form_row("API Key", llm_key_row))
-
-        self._llm_rules_edit = QLineEdit()
-        self._llm_rules_edit.setPlaceholderText(str(get_default_llm_rules_path()))
-        self._llm_rules_edit.setClearButtonEnabled(True)
-        llm_form.addLayout(_form_row("规则文件", self._llm_rules_edit))
-        rules_note = QLabel("留空时读取 resources/llm_rules/default_rules.txt；可改为自定义系统提示词/规则文件。")
-        rules_note.setObjectName("noteLabel")
-        rules_note.setWordWrap(True)
-        llm_form.addLayout(_note_row(rules_note))
-        self._llm_scope_note = QLabel(
-            "当前 LLM 只定位为候选/预审建议层，人工仍是终审；未配置或关闭不会阻断主流程，"
-            "也不会把“修改后是否合格”的颜色判定交给 LLM。"
-        )
-        self._llm_scope_note.setObjectName("noteLabel")
-        self._llm_scope_note.setWordWrap(True)
-        llm_form.addLayout(_note_row(self._llm_scope_note))
-        llm_layout.addLayout(llm_form)
-        root.addWidget(self._llm_card)
 
         root.addStretch()
-
-        self._footer_note = QLabel(
-            "保存后主流程按 PaddleOCR-VL-1.6/API + Hanwang micro-recblock 链路运行。"
-        )
-        self._footer_note.setObjectName("footerNote")
-        self._footer_note.setWordWrap(True)
-        root.addWidget(self._footer_note)
 
         # 按钮放入底部固定栏（已在上方构建好 bottom_bar_layout）
         bottom_bar_layout.addStretch()
@@ -656,6 +735,18 @@ class ApiSettingsDialog(QDialog):
         self._btn_ok.clicked.connect(self._save_and_accept)
         bottom_bar_layout.addWidget(self._btn_cancel)
         bottom_bar_layout.addWidget(self._btn_ok)
+
+        def _activate_nav(active_key: str, target: QWidget) -> None:
+            for key, btn in self._settings_nav_buttons.items():
+                btn.setChecked(key == active_key)
+            scroll.ensureWidgetVisible(target, 0, 16)
+
+        for key, target in (
+            ("engine", hero),
+        ):
+            self._settings_nav_buttons[key].clicked.connect(
+                lambda _checked=False, k=key, t=target: _activate_nav(k, t)
+            )
 
         self._radio_local.toggled.connect(self._on_mode_changed)
         self._radio_api.toggled.connect(self._on_mode_changed)
@@ -680,13 +771,8 @@ class ApiSettingsDialog(QDialog):
         self._layout_concurrency_spin.setValue(int(cfg.get("layout_concurrency", 2)))
         self._ocr_page_concurrency_spin.setValue(int(cfg.get("ocr_page_concurrency", 2)))
         network_mode = str(cfg.get("paddle_api_network_mode", "auto") or "auto")
-        network_index = self._paddle_network_combo.findData(network_mode)
-        self._paddle_network_combo.setCurrentIndex(network_index if network_index >= 0 else 0)
+        self._set_network_mode(network_mode)
         self._btn_show_token.setChecked(False)
-        self._llm_url_edit.setText(cfg.get("llm_endpoint", ""))
-        self._llm_key_edit.setText(cfg.get("llm_api_key", ""))
-        self._llm_rules_edit.setText(cfg.get("llm_rules_path", ""))
-        self._btn_show_llm_key.setChecked(False)
         self._on_mode_changed()
 
     def _selected_mode(self) -> str:
@@ -735,9 +821,8 @@ class ApiSettingsDialog(QDialog):
             self._summary_endpoint_kind.setText("固定链端点")
             self._summary_endpoint.setText(f"layout: {layout_endpoint}\nocr: {ocr_endpoint}")
 
-        self._summary_mode.setText("当前链路：汉王混合")
         self._api_mode_notice.setText(
-            "当前主流程需要 API 地址与 Token 先取得 VL1.6 版面块；Hanwang 只负责文字块识别。"
+            "需要 API 地址与 Token：PaddleOCR-VL 获取版面，CharOCR 识别文字。"
         )
 
     def _on_mode_changed(self) -> None:
@@ -761,6 +846,21 @@ class ApiSettingsDialog(QDialog):
         self._api_model_combo.blockSignals(False)
         self._refresh_api_preview()
 
+    def _set_network_mode(self, mode: str) -> None:
+        if mode not in self._network_mode_buttons:
+            mode = "auto"
+        for value, button in self._network_mode_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(value == mode)
+            button.blockSignals(False)
+            _refresh_widget_style(button)
+
+    def _selected_network_mode(self) -> str:
+        for mode, button in self._network_mode_buttons.items():
+            if button.isChecked():
+                return mode
+        return "auto"
+
     def _toggle_token_visibility(self, checked: bool) -> None:
         if checked:
             self._token_edit.setEchoMode(QLineEdit.EchoMode.Normal)
@@ -768,14 +868,6 @@ class ApiSettingsDialog(QDialog):
         else:
             self._token_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self._btn_show_token.setText("显示")
-
-    def _toggle_llm_key_visibility(self, checked: bool) -> None:
-        if checked:
-            self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
-            self._btn_show_llm_key.setText("隐藏")
-        else:
-            self._llm_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-            self._btn_show_llm_key.setText("显示")
 
     def _save_and_accept(self) -> None:
         api_url = normalize_api_base_url(self._url_edit.text())
@@ -789,10 +881,7 @@ class ApiSettingsDialog(QDialog):
             api_layout_model_name="",
             layout_concurrency=self._layout_concurrency_spin.value(),
             ocr_page_concurrency=self._ocr_page_concurrency_spin.value(),
-            paddle_api_network_mode=str(self._paddle_network_combo.currentData() or "auto"),
-            llm_endpoint=self._llm_url_edit.text().strip(),
-            llm_api_key=self._llm_key_edit.text().strip(),
-            llm_rules_path=self._llm_rules_edit.text().strip(),
+            paddle_api_network_mode=self._selected_network_mode(),
         )
         self.accept()
 
@@ -833,7 +922,7 @@ class ApiSettingsDialog(QDialog):
                 token=token,
                 request_timeout=timeout,
                 poll_timeout=timeout,
-                network_mode=str(self._paddle_network_combo.currentData() or "auto"),
+                network_mode=self._selected_network_mode(),
             )
             body = client.analyze_image(
                 img,

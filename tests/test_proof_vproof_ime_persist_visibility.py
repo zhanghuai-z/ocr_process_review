@@ -3,7 +3,7 @@
 四项硬验收：
 1. 相同字索引窗口"挤到看不见" → 缩略图 / 列数 / 行数 提到真实可读尺寸。
 2. VProof 输不了中文 → _GalleryListView 接 QInputMethodEvent.commitString。
-3. 改字后切换字符再回来不应回退 → debounce 落到 page.line.text。
+3. 改字后切换字符再回来不应回退 → 目标编辑直接提交到共享模型。
 4. 改字后 char index 没迁移 → _char_svc 在 commit 后重建。
 
 注意：测试 IME 我们直接构造 QInputMethodEvent 投递到 _GalleryListView，
@@ -11,6 +11,8 @@
 义信号"——这是真实 Qt 输入路径。
 """
 from __future__ import annotations
+
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
 
 import os
 import pytest
@@ -153,14 +155,14 @@ def test_overwrite_persists_after_char_switch():
     v._sync_gallery_entry(idx)
 
     assert v._gallery_direct_overwrite("好")
-    # debounce timer 启动 → 直接调用 commit 方法模拟 120ms 后触发
-    v._commit_local_edits_and_refresh()
+    # 目标字编辑已经同步落到模型；刷新钩子只负责重建当前视图。
+    v._refresh_current_selection_context()
 
     # 切到"草"再切回原位置（"也"应该还剩一个）
     assert _select_char(v, "草")
     assert _select_char(v, "也")
     # 当前"也"只剩 1 个 entry（第二处仍是"也"），第一处已经变"好"
-    txt = v._pages[0].blocks[0].lines[0].display_text
+    txt = proof_display_text(v._session.pages[0].blocks[0].lines[0])
     assert txt == "好草也", f"模型未落盘：{txt!r}"
 
 
@@ -179,7 +181,7 @@ def test_char_index_migrates_after_overwrite():
     assert before["草"] == 1
 
     assert v._gallery_direct_overwrite("好")
-    v._commit_local_edits_and_refresh()
+    v._refresh_current_selection_context()
 
     after = {c: len(v._char_svc.query(c)) for c in ["也", "好", "草"]}
     assert after["也"] == 2, f"'也' 数量没下降：{after}"
@@ -196,17 +198,31 @@ def test_blank_via_backspace_also_persists():
     v._sync_gallery_entry(idx)
 
     assert v._gallery_direct_blank()
-    v._commit_local_edits_and_refresh()
+    v._refresh_current_selection_context()
 
-    txt = v._pages[0].blocks[0].lines[0].display_text
+    txt = proof_display_text(v._session.pages[0].blocks[0].lines[0])
     # 首字被替成空白；保留长度
     assert txt.startswith(" ") or txt[0] != "也", f"未清空：{txt!r}"
     # _char_svc 重建后"也"少一个
     assert len(v._char_svc.query("也")) == 1
 
 
-def test_local_commit_timer_wired():
-    """timer 真的存在并连到 _commit_local_edits_and_refresh。"""
+def test_overwrite_emits_scoped_proof_change():
+    """纵校目标编辑必须发出带 line scope 的 ProofChangeSet。"""
     v, _ = _load_vproof("也")
-    assert v._local_commit_timer.isSingleShot()
-    assert v._local_commit_timer.interval() <= 200
+    changes = []
+    v.proof_changed.connect(changes.append)
+    assert _select_char(v, "也")
+    idx = v._gallery_model.index(0, 0)
+    v._gallery_view.setCurrentIndex(idx)
+    v._sync_gallery_entry(idx)
+
+    assert v._gallery_direct_overwrite("好")
+
+    assert len(changes) == 1
+    change = changes[0]
+    assert change.text_changed is True
+    assert change.needs_persist is True
+    assert len(change.line_refs) == 1
+    assert change.line_refs[0].line is v._session.pages[0].blocks[0].lines[0]
+    assert change.line_refs[0].write_chars is True

@@ -134,7 +134,6 @@ class PageStatus(str, Enum):
     LAYOUT_DONE = "layout_done"
     LAYOUT_CONFIRMED = "layout_confirmed"
     OCR_DONE = "ocr_done"
-    PRE_REVIEW_DONE = "pre_review_done"
     PROOFING = "proofing"
     PROOF_DONE = "proof_done"
     ERROR = "error"
@@ -146,14 +145,6 @@ class BlockSource(str, Enum):
     MANUAL_DRAW = "manual_draw"
     AUTO_TIGHTENED = "auto_tightened"
     USER_EDITED = "user_edited"
-
-
-class LlmReviewStatus(str, Enum):
-    """LLM 预审状态枚举。"""
-    DISABLED = "disabled"
-    PENDING = "pending"
-    DONE = "done"
-    FAILED = "failed"
 
 
 class CanvasMode(str, Enum):

@@ -238,6 +238,76 @@
 - `SegImg` 是固定成本但不是主瓶颈；它每页约 6-8s，和总耗时相关性较低。
 - EngCut 有真实价值，不能简单关闭；但它是可优化点，后续应做缓存、减少重复探针，或把 EngCut 纳入常驻 bridge。
 
+### PP-OCRv5 Route Token Alignment Probe
+
+2026-06-17 追加离线实验，使用 `scripts/experiment_ppocr_route_token_alignment.py`：
+
+- 输入：`file/244771纵校/*.layout-api.json`、`/mnt/d/project/ocr_process/null/claude/.cache/*_ppocrv5_return_word_box.json`、现有 `debug/engcut_line_binding_batch_v2`。
+- 方法：复用主程序 `attach_page_ocr_line_routes()`，将 PP-OCRv5 行框重新挂到 VL1.6 父框；再从 Paddle/VL 父框文本抽取英文/数字 token，在同 block 的 PP-OCRv5 route-line 文本流里做 source-order exact/variant 绑定。
+- 范围：20 页有 PP-OCRv5 缓存的真实样本。
+- 结果：`450` 个正文英文/数字 token 中，`436` 个 exact，`1` 个跨行 variant，`13` 个 unresolved；成功率 `97.11%`。
+- 公式剥离证据：20 页中 `10` 条 route line 被拆成 `text/formula/text`，route segment 总数为 `text=666`、`formula=13`。例如 120166 中 `$ Y_{ct} $`、`$ Incentive_{c} \times Post_{t} $`、`$ \delta_c $ / $ \varphi_t $ / $ \varepsilon_{ct} $` 都在 PP-OCRv5 行内被剥离，Hanwang 只会收到左右 text slice。
+- 120186 重点页：`31` 个 token 全部绑定成功，其中 `PE/VC` 有 1 处跨 PP-OCRv5 两行，被识别为 `PE/\nVC`，绑定到两条 route line；`Lerner`、`Guariglia` 都能落到正确 route line。
+- 与旧整行 EngCut 对比：在同时存在旧 `engcut_line_binding_batch_v2` 的 12 页上，旧路径需要 `204` 次整行 EngCut；按 token 所在 route line 调用只需要 `115` 次，调用量下降 `43.63%`。
+
+结论：
+
+- 当前主程序的设计事实成立：PP-OCRv5 提供行级几何，Paddle/VL 提供公式/表格等结构，`attach_page_ocr_line_routes()` 在 Hanwang 前把行内公式剥离出去。
+- 英文/数字优化不应盲扫所有正文行。更合理的工程策略是：先用 Paddle/VL token + PP-OCRv5 route line 做行级定位，再对包含 token 的 route line 调 EngCut。
+- `reference_content` 的英文密集参考文献仍有风险：PP-OCRv5 行文本会出现漏字/粘连，例如 `Urban Crisis` 变成类似 `Uran Cris`，导致 token exact 无法作为唯一依据。该场景应走“参考文献行整行 EngCut”或 source-order fallback，并由 EngCut exact 结果做最终确认。
+
+### Route-Token EngCut Runtime Probe
+
+2026-06-17 继续实测最新方案真实 EngCut 调用效率，使用：
+
+- `scripts/benchmark_route_token_engcut.py`
+- `scripts/experiment_route_token_engcut_binding.py`
+
+口径说明：
+
+- `97.11%` 不是最终 OCR 正文准确率，也不是页面成功率。
+- 在上一节中，`97.11% = 437 / 450`，含义是：Paddle/VL 抽出的正文英文/数字 token，有多少能在 PP-OCRv5 route-line 文本流里定位到对应行。
+- 本节进一步读取真实 EngCut 输出后重新计算：`97.11% = (432 exact + 5 variant) / 450`，含义变成：Paddle token 有多少能在 EngCut 字符流中完成 exact/source-order 绑定。
+- 表格、公式 HTML、独立公式块不进入该统计；统计对象是会影响正文/校对几何的英文与数字 token。
+
+效率实测：
+
+| Mode | Pages | Calls | Workers | Time | Errors | Notes |
+|---|---:|---:|---:|---:|---:|---|
+| latest route-token | 20 | 217 | 4 | 20.66s | 0 | 只跑 token 所在 route line |
+| latest route-token + unresolved block lines | 20 | 217 | 4 | 22.64s | 0 | unresolved 所在行已被其他 token 纳入，调用数未增加 |
+| latest route-token + unresolved block lines | 20 | 217 | 8 | 18.60s | 0 | 并发 8 有收益，但单任务耗时上升 |
+| latest route-token + unresolved block lines | 20 | 217 | 12 | 17.32s | 0 | 继续提升很小，单任务耗时明显上升 |
+| latest route-token + unresolved block lines | 20 | 217 | 16 | 17.15s | 0 | 当前最佳墙钟，但只比 12 workers 快约 0.17s |
+| latest route-token + unresolved block lines | 20 | 217 | 24 | 19.53s | 0 | 开始退化，进程/IO/CPU 竞争吞掉收益 |
+| old full-line EngCut | 22 | 365 | 4 | 33.55s | 0 | 旧整行方案全量旧样本 |
+| old full-line EngCut, same pages | 12 | 204 | 4 | 19.03s | 0 | 与新方案同页集合 |
+| latest route-token, same pages | 12 | 115 | 4 | 13.82s | 0 | 同页集合调用数下降 43.63%，墙钟下降约 27.36% |
+
+实际绑定结果：
+
+- 20 页共 `450` 个 token。
+- `432` 个 EngCut exact。
+- `5` 个 EngCut variant。
+- `13` 个 unresolved。
+- 成功率 `97.11%`。
+
+重要样例：
+
+- `Urban` / `Crisis`：PP-OCRv5 route text 曾 miss，但真实 EngCut 字符流里已经 exact 绑定成功，说明“route-line 进入 EngCut 后继续匹配”这条 fallback 是有效的。
+- 剩余 unresolved 主要集中在 120180 的英文参考文献和少量正文英文。它们不是新方案静默引入的错误，而是新口径把旧统计未纳入失败分母的 token 暴露出来了：旧 30 页聚合里 120180 为 `148/0`，新绑定结果为 `148 exact + 11 unresolved`。
+  - `Macroeconomics` 被 EngCut 切成近似 `Macroecortomics`。
+  - `Unbalanced` 被切成 `Unbalan.ced`。
+  - `Governments` 被切成近似 `Governme,zts`。
+  - `Lerner` 被切成 `Lemer`。
+
+结论：
+
+- 最新方案的效率收益成立：同页集合下 EngCut 调用从 `204` 降到 `115`，真实墙钟从 `19.03s` 降到 `13.82s`。
+- 当前 EngCut workers 工程上限建议为 `12~16`；`24` workers 已退化。若和 Hanwang page workers 同时运行，应优先保守设为 `8~12`，避免 native probe 互相抢资源。
+- 最新方案不是新建 OCR 真值源，仍然是 Paddle token 主导；EngCut 负责字符几何与 token bbox 绑定。
+- 剩余 2.89% 失败不是“静默错误”，应进入 review 或后续轻量 fallback；不能用模糊识别静默改写 Paddle token。
+
 ### Token-Targeted EngCut Probe
 
 2026-06-17 追加实验，目标是验证“Paddle token 定向 fallback + linecut 低置信 span 小 crop EngCut”能否替代当前整行 EngCut。
@@ -280,6 +350,66 @@
 - 唯一 miss 是 `OtherPE/VCFunds` vs `Other/PE/VC/Funds` 的 token 粒度差异，属于 compound variant/review，不是小 crop OCR 失败。
 - 如果盲扫全部低置信 span，需要 `534` 次调用，调用量会超过当前整行 `365` 次；因此必须坚持 Paddle token 定向触发。
 - 按 30 页 workers=4 样本粗估，EngCut 子阶段可节省约 `50s` 量级；折算到完整 Hanwang OCR 墙钟，预期总耗时下降约 `15%-25%`。实际收益取决于页级并发、token 密度和 native I/O 竞争。
+
+### Pure English Line Direct EngCut Probe
+
+脚本：`scripts/experiment_pure_english_linecut_vs_direct_engcut.py`
+
+输出：
+
+- `debug/pure_english_linecut_vs_direct_engcut/pure_english_linecut_vs_direct_engcut_summary.md`
+- `debug/pure_english_linecut_vs_direct_engcut/120180/*_direct_vs_linecut.png`
+
+候选判定：
+
+- CJK 字符数为 `0`。
+- 英文字母数 `>= 10`。
+- `(英文字母 + 数字) / 非空白字符数 >= 0.45`。
+
+120180 结果：
+
+- 自动筛出 `10` 条纯英文 reference 行。
+- 路径 A：PP-OCR route line bbox -> EngCut。
+- 路径 B：PP-OCR route line bbox -> linecut group bbox -> EngCut。
+- linecut 会系统性收紧 route line bbox。例如 `[32] Baumol...` 从 `[378,2377,2142,2437]` 收紧到 `[378,2387,2134,2430]`，上下共少 `17px`，右侧少 `8px`。
+- 10 条中大多数 direct EngCut 与 linecut > EngCut 文本完全一致；第一条 direct 输出 `UrbanCrisis`，linecut 路径输出 `UrbanCrisits`，说明 linecut 收紧后的 crop 可能在行尾引入额外误切。
+- `Macroecortomics`、`Unbalan.ced`、`Incen.tives`、`Governme,zts`、`Larzd`、`Secon.d` 等问题在 direct 和 linecut 两条路径都存在，不能归因于 linecut；这是 EngCut 对该英文参考文献印刷质量/字距的自身误切。
+
+120186 结果：
+
+- 当前规则筛出 `0` 条纯英文行。
+- 120186 的 `PE/VC`、`Gompers/Lerner`、`Guariglia` 等都在中文混排行内；不能整行绕过 linecut。
+
+工程判断：
+
+- 可以新增“纯英文整行”快路径：符合上述规则时，直接使用 PP-OCR route line bbox 调 EngCut，不再先经过 linecut group 裁剪。
+- 混排行仍走 Paddle token 定位 + EngCut token crop；找不到 token 时再进入 linecut 置信度反选 fallback。
+- direct EngCut 的文本不能成为权威 OCR 文本，只作为字符几何框来源；权威文本仍以 Paddle token/Hanwang OCR/人工校对链路为准。
+
+### EngCut Word-Box Fallback Probe
+
+脚本：`scripts/render_engcut_word_fallback_overlay.py`
+
+输出：
+
+- `debug/engcut_word_fallback_120180/engcut_word_fallback_summary.md`
+- `debug/engcut_word_fallback_120180/120180/*_word_fallback.png`
+
+120180 观察：
+
+- EngCut 的 `group_index` 在纯英文 reference 行里基本已经是词级分组。
+- 当单字符框因为斜体/字距产生重叠或小间隙时，可以把同一 group 内的字框合并为词框。
+- 标点处理规则：
+  - 首尾标点拆成独立框，例如 `[32]` -> `[` / `32` / `]`，`Growth:` -> `Growth` / `:`。
+  - 字母之间的内部点号保留在词框内，例如 `Unbalan.ced`、`Incen.tives`，因为这类点号大概率是 EngCut 误切，不应生成假标点框。
+- 第一行 `[32] Baumol...`：合并后得到 `14` 个词框、`7` 个标点框，`Unbalan.ced` 虽然文本错误，但词边界清楚。
+- 第三条 `[33] Han...`：`Incen.tives`、`Governme,zts` 仍有文本误切，但词级边界明显比单字框稳定。
+
+工程判断：
+
+- 对纯英文行，可以采用“EngCut char boxes -> word/punctuation boxes”的几何 fallback。
+- fallback 触发条件可以是：相邻字符框重叠、相邻字符间隙过小、或 token exact 失败但 group 级几何连续。
+- fallback 输出只能影响几何显示/校对选区；不能把 `Unbalan.ced` 这类 EngCut 文本回写为 OCR 真值。
 
 百页粗估：
 
@@ -334,3 +464,210 @@
    - 目前每次 probe 都是子进程 + PNG/TSV/JSON 临时文件。
    - 更彻底的方案是常驻 native bridge/daemon，或更直接的 DLL 调用层。
    - native collage batch 已在真实宽行上复现崩溃，不能作为主加速线；daemon 的目标应是减少进程启动和临时文件往返，而不是复用不稳定的多 recblock batch。
+
+### Hanwang LineCut Daemon/Cache Probe
+
+2026-06-17 追加。
+
+SegImg daemon 复测：
+
+- 输入：120186 真实页面，9 个 PP-OCR/VL route recblocks。
+- spawn-per-call：5 次，中位数 `5.053s`。
+- `linecut_segimg_probe.exe --daemon`：启动到 READY `0.085s`，5 次中位数 `5.075s`。
+- 结论：SegImg 的耗时主要在 `linecut.dll` 内部分割，不在进程启动；SegImg daemon 对当前真实输入没有收益，短期不应作为主线。
+
+已接入 LineCut native cache：
+
+- 代码：
+  - `app/engines/hanwang/native_cache.py`
+  - `app/engines/hanwang/native_bridge.py`
+- 覆盖：
+  - `run_linecut_segimg()`
+  - `run_linecut_recog()`
+- cache key 包含：
+  - 图像内容 hash、shape、dtype。
+  - recblocks。
+  - 识别参数：`mode`、`postprocess`、`split_mode`、`with_charrcg`。
+  - native 指纹：probe exe、`linecut.dll`、`IntegratRcg.dll`。
+- 默认开启；可用 `HANWANG_NATIVE_CACHE=0` 关闭。
+- cache 目录默认 `.cache/hanwang_native`；可用 `HANWANG_NATIVE_CACHE_DIR` 指定。
+
+120186 micro-recblock 两连跑：
+
+| Run | Total | SegImg | Recog | Groups | Recog calls | Latin EngCut calls | Cache files |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `22.346s` | `5.374s` | `10.187s` | 35 | 35 | 33 | 36 |
+| 2 | `8.010s` | `0.092s` | `1.364s` | 35 | 35 | 33 | 36 |
+
+解释：
+
+- LineCut 段从约 `15.561s` 降到约 `1.456s`。
+- 第二跑剩余墙钟主要来自 Latin EngCut，这轮未纳入 LineCut cache。
+- cache 对首次 OCR 没有收益；它主要解决同页重跑、OCR 失败后重试、人工调框后重复验证、开发阶段反复测试。
+
+### EngCut Mainline Integration And Cache
+
+2026-06-17 追加。
+
+代码：
+
+- `app/engines/hanwang/native_bridge.py`
+- `app/engines/hanwang/micro_recblock.py`
+- `app/core/latin_span_recovery.py`
+- `tests/test_hanwang_native_cache.py`
+- `tests/test_core.py`
+
+接入策略：
+
+- EngCut 仍只作为英文/数字字符几何来源，不能作为 OCR 文本真值。
+- 主程序不再因为 block 内存在 Paddle/VL token 就 probe 全部 Hanwang 行。
+- 新调度先从 Paddle/VL `block_text` 提取英文/数字 token，再用 Hanwang 行文本做 source-order 目标行选择。
+- 若 Hanwang 行文本已有英文/数字片段，也会被纳入轻量 fallback；这保留 `Gua吨lia` -> `Guariglia` 这类“中间被误识别成汉字”的修复机会。
+- 找不到 exact 的 token 不静默改写文本，只打 review 或保持 Hanwang 结果。
+- `PE/VC` 这类 token 增加跨行变体：`PE/\nVC`、`PE\nVC`。跨行命中只进入 review，不自动改写。
+
+cache 覆盖：
+
+- `run_linecut_segimg()`
+- `run_linecut_recog()`
+- `run_eng20_recogline()`
+
+cache key：
+
+- 图像内容：shape、dtype、像素 sha256。
+- 识别区域/参数：
+  - SegImg：`recblocks_xyxy`。
+  - Recog：`recblocks_xyxy`、`mode`、`postprocess`、`split_mode`、`with_charrcg`。
+  - EngCut：`recogline_engstr`、`packed`、`tbrl`。
+- native 指纹：
+  - LineCut：probe exe、`linecut.dll`、`IntegratRcg.dll`。
+  - EngCut：`eng20_probe.exe`、`Eng20.dll`、`CutEng.dll`、`EngDigital.dll`、`HWEng20.db`、`ENWList.db`。
+- cache schema：`hanwang-native-probe-cache-v1`。
+
+cache 使用/刷新/重置规则：
+
+- 默认启用；`HANWANG_NATIVE_CACHE=0` 可关闭。
+- 默认目录：`.cache/hanwang_native`；`HANWANG_NATIVE_CACHE_DIR` 可指定目录。
+- 同一 crop、同一 bbox、同一参数、同一 native 文件指纹会直接复用。
+- 版面框、行框、人工画框、公式剥离结果、识别参数、native dll/db/exe 任一变化，都会生成新 key，旧 cache 不会被命中。
+- 项目保存/加载、UI 缩放、校对窗口切换不会刷新 cache。
+- 如怀疑 native 数据库未被 key 覆盖、cache 文件损坏或磁盘占用过大，直接删除 `.cache/hanwang_native` 即可重置。
+- cache 不改变 OCR 真值，只跳过相同 native probe 的重复子进程调用。
+
+120186 主线实测：
+
+| Mode | Total | SegImg | Recog | Groups | Recog calls | EngCut calls | Exact | Review |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| no cache, new target-line EngCut | `19.765s` | `4.855s` | `9.373s` | 35 | 35 | 19 | 28 | 2 |
+| cache run 1 | `20.938s` | `4.849s` | `10.207s` | 35 | 35 | 19 | 28 | 2 |
+| cache run 2 | `4.403s` | `0.156s` | `2.110s` | 35 | 35 | 19 | 28 | 2 |
+
+120169 主线实测：
+
+| Mode | Total | SegImg | Recog | Groups | Recog calls | EngCut calls | Exact | Review |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| no cache, new target-line EngCut | `14.784s` | `4.664s` | `6.871s` | 27 | 27 | 11 | 12 | 0 |
+
+结论：
+
+- 120186 的 EngCut 调用量从此前记录的 `33` 降到 `19`。
+- EngCut cache 接入后，第二次同页重跑能把 120186 从约 `20.9s` 降到 `4.4s`。
+- 当前统计里的 `latin_engcut_probe_calls` 是逻辑调用数，不区分 cache hit；真实 cache 命中通过墙钟和 cache 文件确认。
+
+### Hanwang Page Concurrency Probe
+
+2026-06-17 追加。测试目标是确认“既然单页 Hanwang native 处理速度不可控，是否能通过页级并发让总时间不累加”。
+
+测试口径：
+
+- `HANWANG_NATIVE_CACHE=0`，避免 cache 命中污染首次 OCR 结果。
+- 使用 `scripts/evaluate_hanwang_page_concurrency.py`。
+- 包含 `SegImg`、`Recog`、`CharRcg`、Latin EngCut。
+- 不包含 Paddle 请求、DB 保存、UI 回填。
+- 避开 120180 参考文献页，优先使用正文页。
+
+4 页样本：120186-120189。
+
+| Workers | Total | Throughput | Max page time | Errors |
+|---:|---:|---:|---:|---:|
+| 1 | `76.017s` | `3.16 pages/min` | `21.69s` | 0 |
+| 2 | `41.721s` | `5.75 pages/min` | `22.41s` | 0 |
+| 4 | `30.918s` | `7.76 pages/min` | `30.86s` | 0 |
+| 6 | `31.445s` | `7.63 pages/min` | `31.36s` | 0 |
+| 8 | `31.636s` | `7.59 pages/min` | `31.55s` | 0 |
+
+4 页结论：
+
+- `2 workers` 收益稳定，几乎不拖慢单页。
+- `4 workers` 继续降低总墙钟，但单页耗时已经从约 20s 上升到约 31s。
+- `6/8 workers` 对 4 页没有收益。
+
+8 页样本：120186-120193。
+
+| Workers | Total | Throughput | Max page time | Errors |
+|---:|---:|---:|---:|---:|
+| 4 | `59.441s` | `8.08 pages/min` | `32.17s` | 0 |
+| 6 | `54.415s` | `8.82 pages/min` | `42.08s` | 0 |
+| 8 | `50.097s` | `9.58 pages/min` | `49.95s` | 0 |
+
+8 页结论：
+
+- `8 workers` 吞吐最高，但每页都被明显拖慢；这是 native/CPU/IO 竞争，不是线性加速。
+- `6 workers` 介于保守和激进之间，总时间比 4 workers 少约 `5s`，但最大单页时间增加约 `10s`。
+- 没有出现 native 错误，但样本仍不足以证明长期百页稳定。
+
+工程建议：
+
+- 交互式/开发默认：`2 workers`。
+- 普通批处理默认：`4 workers`。
+- 大批量实验档：`6 workers`。
+- `8 workers` 只适合用户明确选择“吞吐优先”，不建议默认；它牺牲单页延迟换总吞吐。
+- 继续拉到 `10/12+` 前，需要至少 16 页、30 页压力测试，并加入失败页自动重试、进度按 page UID 回填、native 子进程总数上限。
+
+### Hanwang Native Direct TIF Probe
+
+2026-06-17 追加，目标是验证“不经过 Paddle/VL，直接把 TIF 输入 Hanwang 原生链路”的速度和稳定性。
+
+脚本：`scripts/experiment_hanwang_native_direct.py`
+
+样本：120186、120169，`HANWANG_NATIVE_CACHE=0`。
+
+120186：正文页。
+
+| Mode | Total | Layout | OCR | Blocks | Lines | Chars | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| direct full-page linecut | `34.491s` | - | - | - | 70 | 1196 | 整页一个 recblock，触发 AccessViolation 后逐字符 fallback |
+| native docseg -> OCR | `20.790s` | `5.315s` | `15.475s` | 5 | 35 | 1153 | Hanwang 自己分版面后逐块 OCR |
+| PPVL micro-recblock current | `23.883s` | - | - | 9 | 35 | 1155 | 当前 Paddle/VL 辅助主线 |
+
+120169：标题、正文、表格、独立公式、脚注混合页。
+
+| Mode | Total | Layout | OCR | Blocks | Lines | Chars | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| direct full-page linecut | `34.559s` | - | - | - | 90 | 1018 | 多个大 group 触发 AccessViolation 后逐字符 fallback |
+| native docseg -> OCR | `19.179s` | `4.735s` | `14.443s` | 9 | 36 | 935 | 可切出表格区域，但仍是普通文本行语义 |
+| PPVL micro-recblock current | `16.676s` | - | - | 16 | 30 | 1341 | 保留 Paddle/VL 结构语义，表格/公式由 VL payload 承担 |
+
+输出：
+
+- `debug/hanwang_native_direct/120186/hanwang_native_direct.md`
+- `debug/hanwang_native_direct/120186/120186_direct_full_page_overlay.png`
+- `debug/hanwang_native_direct/120186/120186_native_docseg_then_ocr_overlay.png`
+- `debug/hanwang_native_direct/120186/120186_ppvl_micro_recblock_overlay.png`
+- `debug/hanwang_native_direct/120169/hanwang_native_direct.md`
+- `debug/hanwang_native_direct/120169/120169_direct_full_page_overlay.png`
+- `debug/hanwang_native_direct/120169/120169_native_docseg_then_ocr_overlay.png`
+- `debug/hanwang_native_direct/120169/120169_ppvl_micro_recblock_overlay.png`
+
+观察：
+
+- 整页直接塞给 linecut 不稳定。120186/120169 都触发 `System.AccessViolationException`，随后进入逐字符 fallback，且 overlay 容易出现孤立异常框。
+- Hanwang 自己的 `docseg -> OCR` 速度有价值：120186 为 `20.790s`，比当前 PPVL micro-recblock 的 `23.883s` 略快；120169 为 `19.179s`，但慢于当前 PPVL micro-recblock 的 `16.676s`。
+- Hanwang docseg 的正文行框可用，但只提供原生版面/行几何，不提供 Paddle/VL 的公式、表格、图片、标题、脚注等语义。
+- 当前主线 PPVL micro-recblock 的优势是结构语义和可控路由，而不是单页纯文本速度。
+
+工程判断：
+
+- “整页 TIF 直接 linecut”不适合作主线。
+- “Hanwang docseg -> OCR”可以作为后续速度参考或 Paddle 失败时的文字兜底。
+- 对正式工作流，仍应保留 Paddle/VL 版面作为结构真值；可研究是否用 Hanwang docseg 的行/块几何辅助减少 PPVL route 侧的 Recog 调用或校验异常块。

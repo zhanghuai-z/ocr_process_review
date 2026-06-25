@@ -1,7 +1,4 @@
-"""真实 OCR 引擎适配器：包装现有的本地 PaddleOCR 和 API 模式。
-
-确保旧代码路径仍然可用，同时兼容新的 OcrEngine 接口。
-"""
+"""OCR 引擎适配器：包装本地 PaddleOCR、API 模式和 CharOCR/Hanwang 链路。"""
 from __future__ import annotations
 from typing import List
 
@@ -93,12 +90,13 @@ class LocalOcrEngine:
             )
             if bbox.area <= 0:
                 continue
-            lines.append(Line(
+            line = Line(
                 text=text,
                 confidence=float(score),
                 bbox=bbox,
-                proof_status=proof_status_for(score),
-            ))
+            )
+            line.set_proof_status(proof_status_for(score))
+            lines.append(line)
         return lines
 
 
@@ -178,15 +176,16 @@ class ApiOcrEngine:
                 line_confidence=ir_line.confidence,
                 tokens=ir_line.tokens,
             )
-            lines.append(Line(
+            line = Line(
                 text=ir_line.text,
                 confidence=ir_line.confidence,
                 bbox=ir_line.bbox,
                 chars=chars,
                 ocr_text=ir_line.text,
                 review_flags=ir_line.review_flags,
-                proof_status=proof_status_for(ir_line.confidence, ir_line.review_flags),
-            ))
+            )
+            line.set_proof_status(proof_status_for(ir_line.confidence, ir_line.review_flags))
+            lines.append(line)
         return lines
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from app.models import Line, ProofStatus
+from app.models import ProofStatus
 
 AUTO_FLAG_THRESHOLD = 0.80
 
@@ -32,11 +32,3 @@ def proof_status_for(confidence, review_flags: Iterable | None = None) -> ProofS
         if should_auto_flag(confidence, review_flags)
         else ProofStatus.UNCHECKED
     )
-
-
-def apply_auto_flag(line: Line, review_flags: Iterable | None = None) -> None:
-    """Promote only unchecked lines to auto-flagged when shared rules require it."""
-    if line.proof_status != ProofStatus.UNCHECKED:
-        return
-    if should_auto_flag(line.confidence, review_flags):
-        line.proof_status = ProofStatus.AUTO_FLAGGED

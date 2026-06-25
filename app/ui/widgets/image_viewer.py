@@ -78,7 +78,7 @@ class _ResizeHandle(QGraphicsRectItem):
         super().__init__(-_HS, -_HS, _HS * 2, _HS * 2, parent)
         self._pos = pos
         self._bbox_item = parent
-        pen = QPen(QColor("#1a73e8"), 1)
+        pen = QPen(QColor("#2C2C2C"), 1)
         self.setPen(pen)
         self.setBrush(QColor("#ffffff"))
         self.setZValue(20)
@@ -648,19 +648,19 @@ class ImageViewer(QGraphicsView):
 
     def _begin_draw(self, event) -> None:
         self._draw_start = self._map_event_to_scene(event)
-        pen = QPen(QColor("#1a73e8"), 2, Qt.PenStyle.DashLine)
+        pen = QPen(QColor("#2C2C2C"), 2, Qt.PenStyle.DashLine)
         self._draw_item = QGraphicsRectItem(QRectF(self._draw_start, self._draw_start))
         self._draw_item.setPen(pen)
-        self._draw_item.setBrush(QColor(26, 115, 232, 30))
+        self._draw_item.setBrush(QColor(44, 44, 44, 28))
         self._draw_item.setZValue(50)
         self._scene.addItem(self._draw_item)
 
     def _begin_box_selection(self, event) -> None:
         self._selection_start = self._map_event_to_scene(event)
-        pen = QPen(QColor("#0f9d58"), 2, Qt.PenStyle.DashLine)
+        pen = QPen(QColor("#5C6B58"), 2, Qt.PenStyle.DashLine)
         self._selection_item = QGraphicsRectItem(QRectF(self._selection_start, self._selection_start))
         self._selection_item.setPen(pen)
-        self._selection_item.setBrush(QColor(15, 157, 88, 24))
+        self._selection_item.setBrush(QColor(92, 107, 88, 24))
         self._selection_item.setZValue(55)
         self._scene.addItem(self._selection_item)
 

@@ -5,7 +5,9 @@ import base64
 import requests
 
 API_URL = "https://n6z9feddjca4l7b5.aistudio-app.com/ocr"
-TOKEN = "c7bc28d18e194059a9951eae6ef2f534becd8323"
+TOKEN = os.environ.get("PADDLEOCR_API_TOKEN", "")
+if not TOKEN:
+    raise RuntimeError("Set PADDLEOCR_API_TOKEN before running this script")
 
 file_path = "<local file path>"
 input_filename = os.path.splitext(os.path.basename(file_path))[0]

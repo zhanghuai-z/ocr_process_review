@@ -7,7 +7,7 @@
 
 行为契约（保持与 Phase 11+ / Phase 24 一致）：
 - 开 → ``qp.set_active_store(store)``；关 → ``qp.reset_active_store()``
-- 任何路径**不会**把假象字写入 ``line.final_text``，导出文本永远不含假象字
+- 任何路径**不会**把假象字写入 proof text，导出文本永远不含假象字
 
 测试契约：
 - 主窗只暴露状态控件；明细表通过 ``detail_table()`` 访问。
@@ -37,7 +37,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.core import quality_probe as qp
-from app.core.proof_state import TOPIC_PROBE_OBSERVED, QualityStatsState
+from app.core.proof_change import ProofChangeSet
+from app.core.proof_state import ProbeObservation, TOPIC_PROBE_OBSERVED, QualityStatsState
 from app.models import OcrProject
 
 
@@ -75,7 +76,7 @@ class _RatioRing(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         # 底环（灰）
-        pen = QPen(QColor("#e3e8ef"), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
+        pen = QPen(QColor("#E7E2D8"), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap)
         painter.setPen(pen)
         painter.drawArc(rect, 0, 360 * 16)
 
@@ -86,9 +87,9 @@ class _RatioRing(QWidget):
         else:
             r = max(0.0, min(1.0, self._ratio))
             if r >= 0.95:
-                color = QColor("#2e7d32")    # 绿
+                color = QColor("#5C6B58")    # sage
             elif r >= 0.80:
-                color = QColor("#1a73e8")    # 蓝
+                color = QColor("#5C6B58")    # sage
             elif r >= 0.60:
                 color = QColor("#f9a825")    # 黄
             else:
@@ -102,7 +103,7 @@ class _RatioRing(QWidget):
             center_main = self._main_text or "样本观察"
 
         # 中心主数字
-        painter.setPen(QColor("#222"))
+        painter.setPen(QColor("#2C2C2C"))
         f = QFont()
         f.setPointSize(20)
         f.setBold(True)
@@ -112,7 +113,7 @@ class _RatioRing(QWidget):
 
         # 副文本（已修正/总观察）
         if self._sub_text:
-            painter.setPen(QColor("#666"))
+            painter.setPen(QColor("#6B6B6B"))
             f2 = QFont()
             f2.setPointSize(9)
             painter.setFont(f2)
@@ -131,6 +132,7 @@ class QualityStatsDetailDialog(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("qualityStatsDetailDialog")
         self.setWindowTitle("正确率统计 · 假象字明细")
         self.setModal(True)
         self.resize(720, 460)
@@ -142,11 +144,12 @@ class QualityStatsDetailDialog(QDialog):
         root.setSpacing(8)
 
         self._summary = QLabel("尚未启用")
-        self._summary.setStyleSheet("color:#666;")
+        self._summary.setObjectName("muted")
         root.addWidget(self._summary)
 
         # 列：页 / 块 / 行 / 位置 / 真字 / 假字 / 是否修正 / 当前观察
         self._table = QTableWidget(0, 8)
+        self._table.setObjectName("qualityDetailTable")
         self._table.setHorizontalHeaderLabels(
             ["页", "块", "行", "位置", "真字", "假字", "是否修正", "当前观察"]
         )
@@ -202,15 +205,18 @@ class QualityStatsDialog(QDialog):
         self,
         project_provider: Callable[[], Optional[OcrProject]],
         refresh_panels_cb: Callable[[], None],
+        proof_changed_cb: Optional[Callable[[ProofChangeSet], None]] = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
+        self.setObjectName("qualityStatsDialog")
         self.setWindowTitle("抽样字符校对观察")
         self.setModal(True)
         # 紧凑主窗：360 × 320 足够开关 + 圆环 + 详情入口
         self.resize(360, 320)
         self._project_provider = project_provider
         self._refresh_panels_cb = refresh_panels_cb
+        self._proof_changed_cb = proof_changed_cb
         self._detail_dialog: Optional[QualityStatsDetailDialog] = None
         self._quality_state = QualityStatsState(enabled=False)
         self._density_feedback = ""
@@ -242,7 +248,7 @@ class QualityStatsDialog(QDialog):
         self._btn_toggle.clicked.connect(self._on_toggle)
         top.addWidget(self._btn_toggle)
         self._switch_status = QLabel("当前：未启用")
-        self._switch_status.setStyleSheet("color:#666;")
+        self._switch_status.setObjectName("muted")
         top.addWidget(self._switch_status, 1)
         root.addLayout(top)
 
@@ -260,7 +266,7 @@ class QualityStatsDialog(QDialog):
         self._sand_unit_combo.setFixedWidth(100)
         sand_row.addWidget(self._sand_unit_combo)
         self._density_status = QLabel("")
-        self._density_status.setStyleSheet("color:#1a73e8;")
+        self._density_status.setStyleSheet("color:#5C6B58;")
         sand_row.addWidget(self._density_status, 1)
         sand_row.addStretch()
         root.addLayout(sand_row)
@@ -271,7 +277,7 @@ class QualityStatsDialog(QDialog):
 
         self._scope_note = QLabel("")
         self._scope_note.setWordWrap(True)
-        self._scope_note.setStyleSheet("color:#6b7280; font-size:12px;")
+        self._scope_note.setObjectName("muted")
         root.addWidget(self._scope_note)
 
         # 详情入口 + 关闭
@@ -286,7 +292,7 @@ class QualityStatsDialog(QDialog):
         self._btn_refresh = QPushButton("立刻刷新")
         self._btn_refresh.setMinimumHeight(28)
         self._btn_refresh.setToolTip(
-            "以 line.final_text 为锚扫一遍所有 probe，重算更正数并刷新本窗。"
+            "以 proof text 为锚扫一遍所有 probe，重算更正数并刷新本窗。"
         )
         self._btn_refresh.clicked.connect(self._on_manual_refresh)
         bottom.addWidget(self._btn_refresh)
@@ -405,8 +411,10 @@ class QualityStatsDialog(QDialog):
         dlg.raise_()
         dlg.activateWindow()
 
-    def _on_probe_observed(self, _payload=None, **_kwargs) -> None:
+    def _on_probe_observed(self, observation: ProbeObservation) -> None:
         """Round 17：probe.observed 事件回调 — 实时刷新评测窗 + 通知 panel 刷新 gallery。"""
+        if not isinstance(observation, ProbeObservation):
+            return
         try:
             self._refresh_panels()
         except Exception:
@@ -419,15 +427,17 @@ class QualityStatsDialog(QDialog):
     def _on_manual_refresh(self) -> None:
         """Round 18：用户主动点"立刻刷新"——可靠刷新触发点。
 
-        1. 调 ``qp.detect_corrections`` 以 line.final_text 为锚扫一遍所有 pending probe，
+        1. 调 ``qp.detect_corrections`` 以 proof text 为锚扫一遍所有 pending probe，
            漏报的位置在这里补标 corrected 并广播。
         2. 重新拉一遍 panels 与本窗的 view（圆环 / 详情表）。
         """
         try:
             project = self._project_provider()
-            qp.detect_corrections(qp.get_active_store(), project)
+            changed = qp.detect_corrections(qp.get_active_store(), project)
         except Exception:
-            pass
+            changed = 0
+        if changed and self._proof_changed_cb is not None:
+            self._proof_changed_cb(ProofChangeSet(probe_changed=True, index_changed=True))
         try:
             self._refresh_panels()
         except Exception:
@@ -459,7 +469,7 @@ class QualityStatsDialog(QDialog):
             self._btn_toggle.setChecked(False)
             self._btn_toggle.setText("开始统计")
             self._switch_status.setText("当前：未启用")
-            self._switch_status.setStyleSheet("color:#666;")
+            self._switch_status.setStyleSheet("color:#6B6B6B;")
             self._density_status.setText(self._density_feedback or f"当前密度：{self._density_text()}")
             self._scope_note.setText("状态：未启用；修改密度会自动保存。")
             self._ring.set_ratio(None, "")
@@ -476,7 +486,7 @@ class QualityStatsDialog(QDialog):
         self._btn_toggle.setChecked(True)
         self._btn_toggle.setText("停止统计")
         self._switch_status.setText(f"当前：已启用（{n} 个抽样字符）")
-        self._switch_status.setStyleSheet("color:#1a73e8;")
+        self._switch_status.setStyleSheet("color:#5C6B58;")
         self._density_status.setText(self._density_feedback or f"已生效：{density_text}")
         self._scope_note.setText(
             f"候选池 {getattr(store, 'sampled_from_chars', 0)} 字；目标 {store.target_probes} 个；"

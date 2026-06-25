@@ -45,12 +45,12 @@ def test_hproof_text_editor_has_no_frame_border():
     ed = h._pairs[0]._editor
     ss = ed.styleSheet()
     assert "border:none" in ss.replace(" ", "") or "border:none" in ss
-    assert "background:#eaf3ff" in ss.replace(" ", "") or "background:#eaf3ff" in ss
+    assert "background:#F6F2EA" in ss.replace(" ", "") or "background:#F6F2EA" in ss
     h._activate(1)
     inactive_ss = h._pairs[0]._editor.styleSheet()
     assert (
-        "background:transparent" in inactive_ss.replace(" ", "")
-        or "background:transparent" in inactive_ss
+        "background:#FFFFFF" in inactive_ss.replace(" ", "")
+        or "background:#FFFFFF" in inactive_ss
     )
     # cursor width 0 = caret 不显示
     assert ed.cursorWidth() == 0
@@ -60,12 +60,12 @@ def test_hproof_editor_focus_activates_row():
     h = _hproof_with_two_lines()
     # 先把 0 行激活；再让 1 行的 editor 拿到焦点
     h._activate(0)
-    assert h._current_idx == 0
+    assert h._session.current_projection_index == 0
     p1 = h._pairs[1]
     # 模拟 focusIn —— 走 row_focus_requested
     fe = QFocusEvent(QEvent.Type.FocusIn)
     p1._editor.focusInEvent(fe)
-    assert h._current_idx == 1, "editor 取得焦点应自动切换激活行"
+    assert h._session.current_projection_index == 1, "editor 取得焦点应自动切换激活行"
 
 
 def test_hproof_editor_emits_row_focus_on_mouse_press():

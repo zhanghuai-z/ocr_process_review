@@ -1,0 +1,98 @@
+"""Read-only proof facts derived from the current project model.
+
+``Line`` carries a ``ProofLineState`` runtime object. Code outside proof
+editing/storage should read proof text/status through this module so the
+eventual model split has a single adapter point.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.models import Line, ProofLineState, ProofStatus
+
+
+@dataclass(frozen=True)
+class ProofLineFacts:
+    text: str
+    ocr_text: str
+    status: ProofStatus
+    confidence: float
+    review_flags: tuple[str, ...]
+    char_count: int
+
+    @property
+    def status_value(self) -> str:
+        return self.status.value if hasattr(self.status, "value") else str(self.status)
+
+    @property
+    def is_auto_flagged(self) -> bool:
+        return self.status == ProofStatus.AUTO_FLAGGED or bool(self.review_flags)
+
+    @property
+    def is_modified(self) -> bool:
+        return self.status == ProofStatus.MODIFIED
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.status == ProofStatus.OK
+
+
+def proof_line_facts(line: object) -> ProofLineFacts:
+    state = proof_runtime_state(line)
+    text = _display_text_from_state(line, state)
+    return ProofLineFacts(
+        text=text,
+        ocr_text=str(getattr(line, "ocr_text", "") or ""),
+        status=state.proof_status,
+        confidence=float(getattr(line, "confidence", 0.0) or 0.0),
+        review_flags=tuple(getattr(line, "review_flags", ()) or ()),
+        char_count=len(text),
+    )
+
+
+def proof_runtime_state(line: object) -> ProofLineState:
+    state = getattr(line, "proof_state", None)
+    if not isinstance(state, ProofLineState):
+        raise TypeError("proof line facts require Line.proof_state")
+    return state
+
+
+def proof_final_text(line: Line) -> str:
+    return proof_runtime_state(line).final_text
+
+
+def proof_final_text_set(line: Line) -> bool:
+    return bool(proof_runtime_state(line).final_text_set)
+
+
+def proof_display_text(line: Line) -> str:
+    return proof_line_facts(line).text
+
+
+def proof_ocr_text(line: Line) -> str:
+    return proof_line_facts(line).ocr_text
+
+
+def proof_block_text(block) -> str:
+    return "\n".join(proof_display_text(line) for line in block.lines)
+
+
+def proof_status(line: Line) -> ProofStatus:
+    return proof_line_facts(line).status
+
+
+def proof_status_value(line: Line) -> str:
+    return proof_line_facts(line).status_value
+
+
+def proof_search_texts(line: Line) -> list[str]:
+    facts = proof_line_facts(line)
+    values = [facts.text, facts.ocr_text]
+    return [value for value in values if value]
+
+
+def _display_text_from_state(line: object, state: ProofLineState) -> str:
+    base_text = str(getattr(line, "text", "") or "")
+    if state.final_text_set:
+        return state.final_text
+    return state.final_text or base_text

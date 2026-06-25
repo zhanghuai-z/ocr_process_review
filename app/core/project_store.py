@@ -16,12 +16,13 @@ from typing import Any, List, Optional
 
 from app.models import (
     BBox, Block, BlockSource, BlockType, Char, Line,
-    LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
+    OcrProject, Page, PageStatus, ProofLineState, ProofStatus,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
 from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
+from app.core.proof_line_facts import proof_final_text, proof_final_text_set, proof_status
 
 logger = get_logger(__name__)
 
@@ -77,17 +78,11 @@ CREATE TABLE IF NOT EXISTS line (
     uid               TEXT    NOT NULL DEFAULT '',
     block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
     text              TEXT    NOT NULL DEFAULT '',
-    final_text        TEXT    NOT NULL DEFAULT '',
-    final_text_set    INTEGER NOT NULL DEFAULT 0,
     original_text     TEXT    NOT NULL DEFAULT '',
     confidence        REAL    NOT NULL DEFAULT 0.0,
-    proof_status      TEXT    NOT NULL DEFAULT 'unchecked',
     x INTEGER NOT NULL, y INTEGER NOT NULL,
     w INTEGER NOT NULL, h INTEGER NOT NULL,
     ocr_text          TEXT    NOT NULL DEFAULT '',
-    llm_suggestion    TEXT    NOT NULL DEFAULT '',
-    llm_reason        TEXT    NOT NULL DEFAULT '',
-    llm_review_status TEXT    NOT NULL DEFAULT 'disabled',
     review_flags_json TEXT    NOT NULL DEFAULT '[]'
 );
 
@@ -102,6 +97,21 @@ CREATE TABLE IF NOT EXISTS char_ (
     bbox_granularity TEXT NOT NULL DEFAULT '',
     token_text  TEXT    NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS proof_line_state (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id        INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    line_uid          TEXT    NOT NULL,
+    final_text        TEXT    NOT NULL DEFAULT '',
+    final_text_set    INTEGER NOT NULL DEFAULT 0,
+    proof_status      TEXT    NOT NULL DEFAULT 'unchecked',
+    alignment_state   TEXT    NOT NULL DEFAULT 'aligned',
+    updated_at        REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(project_id, line_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proof_line_state_project
+    ON proof_line_state(project_id);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -146,9 +156,6 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE block ADD COLUMN note TEXT NOT NULL DEFAULT '';",
         # line table additions
         "ALTER TABLE line ADD COLUMN ocr_text TEXT NOT NULL DEFAULT '';",
-        "ALTER TABLE line ADD COLUMN llm_suggestion TEXT NOT NULL DEFAULT '';",
-        "ALTER TABLE line ADD COLUMN llm_reason TEXT NOT NULL DEFAULT '';",
-        "ALTER TABLE line ADD COLUMN llm_review_status TEXT NOT NULL DEFAULT 'disabled';",
         "ALTER TABLE line ADD COLUMN review_flags_json TEXT NOT NULL DEFAULT '[]';",
         # new tables
         "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
@@ -165,10 +172,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE char_ ADD COLUMN bbox_granularity TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE char_ ADD COLUMN token_text TEXT NOT NULL DEFAULT '';",
     ],
-    4: [
-        "ALTER TABLE line ADD COLUMN final_text TEXT NOT NULL DEFAULT '';",
-        "UPDATE line SET final_text = text WHERE final_text = '';",
-    ],
+    4: [],
     5: [
         "ALTER TABLE page ADD COLUMN ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]';",
     ],
@@ -191,10 +195,22 @@ MIGRATIONS: dict[int, list[str]] = {
     10: [
         "ALTER TABLE operation_log ADD COLUMN object_uid TEXT NOT NULL DEFAULT '';",
     ],
-    11: [
-        "ALTER TABLE line ADD COLUMN final_text_set INTEGER NOT NULL DEFAULT 0;",
-        "UPDATE line SET final_text_set = 1 WHERE final_text <> '' AND final_text <> text;",
+    11: [],
+    12: [
+        "CREATE TABLE IF NOT EXISTS proof_line_state ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "line_uid TEXT NOT NULL, "
+        "final_text TEXT NOT NULL DEFAULT '', "
+        "final_text_set INTEGER NOT NULL DEFAULT 0, "
+        "proof_status TEXT NOT NULL DEFAULT 'unchecked', "
+        "alignment_state TEXT NOT NULL DEFAULT 'aligned', "
+        "updated_at REAL NOT NULL DEFAULT 0.0, "
+        "UNIQUE(project_id, line_uid));",
+        "CREATE INDEX IF NOT EXISTS idx_proof_line_state_project "
+        "ON proof_line_state(project_id);",
     ],
+    13: [],
 }
 
 
@@ -237,6 +253,17 @@ def _json_to_dict(s: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _proof_alignment_state(line: Line) -> str:
+    if not line.chars:
+        return "line_only"
+    try:
+        from app.core.proof_char_text import chars_display_text
+        from app.core.proof_line_facts import proof_display_text
+        return "aligned" if chars_display_text(line.chars) == proof_display_text(line) else "degraded"
+    except Exception:
+        return "degraded"
+
+
 _ENTITY_UID_TABLES = (
     ("page", "page", "idx_page_uid"),
     ("block", "block", "idx_block_uid"),
@@ -273,6 +300,7 @@ class ProjectStore:
         self._ensure_meta(schema_version=SCHEMA_VERSION if is_new_database else 1)
         self._migrate()
         self._ensure_entity_uids()
+        self._ensure_proof_line_states()
 
     def _ensure_meta(self, *, schema_version: int) -> None:
         """确保 meta 表和版本记录存在。"""
@@ -348,6 +376,22 @@ class ProjectStore:
             self.conn.execute(
                 f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table}(uid)"
             )
+        self.conn.commit()
+
+    def _ensure_proof_line_states(self) -> None:
+        """Ensure every persisted line has one proof truth row."""
+        now = time.time()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO proof_line_state ("
+            "project_id, line_uid, final_text, final_text_set, proof_status, "
+            "alignment_state, updated_at) "
+            "SELECT p.project_id, l.uid, '', 0, 'unchecked', 'aligned', ? "
+            "FROM line l "
+            "JOIN block b ON b.id = l.block_id "
+            "JOIN page p ON p.id = b.page_id "
+            "WHERE l.uid <> ''",
+            (now,),
+        )
         self.conn.commit()
 
     def close(self) -> None:
@@ -602,6 +646,8 @@ class ProjectStore:
                 if old_id not in saved_page_ids:
                     cur.execute("DELETE FROM page WHERE id=?", (old_id,))
 
+            self._sync_project_proof_line_states_no_commit(cur, project)
+
             conn.commit()
             project.db_path = self.db_path
             return project
@@ -754,6 +800,64 @@ class ProjectStore:
         for old_id in old_line_ids - saved_line_ids:
             cur.execute("DELETE FROM line WHERE id=?", (old_id,))
 
+    def _sync_project_proof_line_states_no_commit(
+        self,
+        cur: sqlite3.Cursor,
+        project: OcrProject,
+    ) -> None:
+        """Persist in-memory proof state into the proof truth table."""
+        if project.id is None:
+            return
+        current_line_uids: set[str] = set()
+        for page in project.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    if not str(line.uid or "").strip():
+                        continue
+                    current_line_uids.add(line.uid)
+                    self._upsert_proof_line_state_no_commit(cur, project.id, line)
+        if not current_line_uids:
+            cur.execute("DELETE FROM proof_line_state WHERE project_id=?", (project.id,))
+            return
+        placeholders = ",".join("?" for _ in current_line_uids)
+        cur.execute(
+            "DELETE FROM proof_line_state "
+            f"WHERE project_id=? AND line_uid NOT IN ({placeholders})",
+            (project.id, *sorted(current_line_uids)),
+        )
+
+    def _upsert_proof_line_state_no_commit(
+        self,
+        cur: sqlite3.Cursor,
+        project_id: int,
+        line: Line,
+    ) -> None:
+        if not str(line.uid or "").strip():
+            return
+        line.ensure_text_contract()
+        now = time.time()
+        cur.execute(
+            "INSERT INTO proof_line_state ("
+            "project_id, line_uid, final_text, final_text_set, proof_status, "
+            "alignment_state, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, line_uid) DO UPDATE SET "
+            "final_text=excluded.final_text, "
+            "final_text_set=excluded.final_text_set, "
+            "proof_status=excluded.proof_status, "
+            "alignment_state=excluded.alignment_state, "
+            "updated_at=excluded.updated_at",
+            (
+                project_id,
+                line.uid,
+                proof_final_text(line),
+                int(proof_final_text_set(line)),
+                proof_status(line).value,
+                _proof_alignment_state(line),
+                now,
+            ),
+        )
+
     def _save_line(
         self,
         cur: sqlite3.Cursor,
@@ -775,27 +879,23 @@ class ProjectStore:
         bb = line.bbox
         line.ensure_text_contract()
         values = (
-            block_id, line.text, line.final_text, int(line.final_text_set),
-            line.original_text, line.confidence,
-            line.proof_status.value, bb.x, bb.y, bb.w, bb.h,
-            line.ocr_text, line.llm_suggestion, line.llm_reason,
-            line.llm_review_status.value,
+            block_id, line.text, line.original_text, line.confidence,
+            bb.x, bb.y, bb.w, bb.h,
+            line.ocr_text,
             _review_flags_to_json(line.review_flags),
         )
         if line.id is None:
             cur.execute(
-                "INSERT INTO line (uid, block_id, text, final_text, final_text_set, original_text, confidence, proof_status, "
-                "x, y, w, h, ocr_text, llm_suggestion, llm_reason, llm_review_status, "
-                "review_flags_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO line (uid, block_id, text, original_text, confidence, "
+                "x, y, w, h, ocr_text, review_flags_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (line.uid, *values),
             )
             line.id = cur.lastrowid
         else:
             cur.execute(
-                "UPDATE line SET block_id=?, text=?, final_text=?, final_text_set=?, original_text=?, "
-                "confidence=?, proof_status=?, x=?, y=?, w=?, h=?, ocr_text=?, "
-                "llm_suggestion=?, llm_reason=?, llm_review_status=?, review_flags_json=? "
+                "UPDATE line SET block_id=?, text=?, original_text=?, "
+                "confidence=?, x=?, y=?, w=?, h=?, ocr_text=?, review_flags_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, line.id, line.uid),
             )
@@ -818,7 +918,12 @@ class ProjectStore:
                 table="char_",
                 seen_uids=save_seen_uids["char"],
             )
-            self._save_char(cur, char, line.id, project_id)
+            self._save_char(
+                cur,
+                char,
+                line.id,
+                project_id,
+            )
             if char.id is not None:
                 saved_char_ids.add(char.id)
 
@@ -831,16 +936,21 @@ class ProjectStore:
         char: Char,
         line_id: int,
         project_id: int,
+        *,
+        allow_project_move: bool = True,
     ) -> None:
-        self._prepare_entity_identity(
-            cur,
-            char,
-            kind="char",
-            table="char_",
-            parent_col="line_id",
-            parent_id=line_id,
-            project_id=project_id,
-        )
+        if allow_project_move:
+            self._prepare_entity_identity(
+                cur,
+                char,
+                kind="char",
+                table="char_",
+                parent_col="line_id",
+                parent_id=line_id,
+                project_id=project_id,
+            )
+        else:
+            self._prepare_char_identity_for_line_sync(cur, char, line_id)
         bb = char.bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
         values = (
@@ -871,14 +981,81 @@ class ProjectStore:
             )
             if cur.rowcount != 1:
                 char.id = None
-                self._save_char(cur, char, line_id, project_id)
+                self._save_char(
+                    cur,
+                    char,
+                    line_id,
+                    project_id,
+                    allow_project_move=allow_project_move,
+                )
 
-    # ------------------------------------------------------------------ update single line
+    def _prepare_char_identity_for_line_sync(
+        self,
+        cur: sqlite3.Cursor,
+        char: Char,
+        line_id: int,
+    ) -> None:
+        """Prepare char identity for proof-line updates without cross-line moves.
 
-    def update_line(self, line: Line) -> None:
-        """只更新单行文字（校对时使用）。"""
-        self._update_line_no_commit(line)
-        self.conn.commit()
+        Full project saves support moving a Char between lines. Incremental
+        proof persistence is different: it only syncs one line's current text
+        facts and must not adopt a matching UID row from another line.
+        """
+        raw_uid = str(getattr(char, "uid", "") or "").strip()
+        uid_was_missing = not raw_uid
+        uid = ensure_entity_uid(raw_uid, "char")
+        char.uid = uid
+
+        id_row = None
+        if char.id is not None:
+            id_row = self._row_by_id_and_parent(cur, "char_", char.id, "line_id", line_id)
+        uid_row = self._row_by_uid_and_parent(cur, "char_", uid, "line_id", line_id)
+
+        if id_row is not None and uid_row is not None:
+            char.id = uid_row["id"]
+            char.uid = uid_row["uid"]
+            return
+        if uid_row is not None:
+            char.id = uid_row["id"]
+            char.uid = uid_row["uid"]
+            return
+        if id_row is not None:
+            db_uid = str(id_row["uid"] or "").strip()
+            if uid_was_missing or db_uid == uid or self._uid_exists(cur, "char_", uid):
+                char.id = id_row["id"]
+                char.uid = db_uid or uid
+                return
+            char.id = id_row["id"]
+            char.uid = db_uid or uid
+            return
+
+        char.id = None
+        if self._uid_exists(cur, "char_", uid):
+            char.uid = self._fresh_db_uid(cur, "char_", "char")
+
+    # ------------------------------------------------------------------ update proof lines
+
+    def update_proof_lines(self, line_updates: list[tuple[Line, bool]]) -> None:
+        """Persist proof line updates as one transaction.
+
+        ``line_updates`` is a list of ``(line, write_chars)``.  The proof
+        change, not the individual line, is the transaction boundary.
+        """
+        if not line_updates:
+            return
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            cur = self.conn.cursor()
+            for line, write_chars in line_updates:
+                project_id = self._project_id_for_line(cur, line)
+                self._update_line_no_commit(line)
+                self._upsert_proof_line_state_no_commit(cur, project_id, line)
+                if write_chars:
+                    self._sync_line_chars_no_commit(cur, line, project_id)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _update_line_no_commit(self, line: Line) -> None:
         if line.id is None:
@@ -886,34 +1063,74 @@ class ProjectStore:
         if not str(line.uid or "").strip():
             raise RuntimeError(f"Line update requires stable uid: id={line.id!r}")
         line.uid = ensure_entity_uid(line.uid, "line")
-        bb = line.bbox
         line.ensure_text_contract()
         cur = self.conn.execute(
-            "UPDATE line SET text=?, final_text=?, final_text_set=?, original_text=?, proof_status=?, "
-            "ocr_text=?, llm_suggestion=?, llm_reason=?, llm_review_status=?, "
+            "UPDATE line SET text=?, original_text=?, ocr_text=?, "
             "review_flags_json=? WHERE id=? AND uid=?",
-            (line.text, line.final_text, int(line.final_text_set), line.original_text, line.proof_status.value,
-             line.ocr_text, line.llm_suggestion, line.llm_reason,
-             line.llm_review_status.value,
-             _review_flags_to_json(line.review_flags), line.id, line.uid),
+            (
+                line.text,
+                line.original_text,
+                line.ocr_text,
+                _review_flags_to_json(line.review_flags),
+                line.id,
+                line.uid,
+            ),
         )
         if cur.rowcount != 1:
             raise RuntimeError(
                 f"Line update failed or matched multiple rows: id={line.id!r} uid={line.uid!r}"
             )
 
-    # ------------------------------------------------------------------ batch update lines
+    def _project_id_for_line(self, cur: sqlite3.Cursor, line: Line) -> int:
+        if line.id is None or not str(line.uid or "").strip():
+            raise RuntimeError("Line project lookup requires rowid and stable uid")
+        row = cur.execute(
+            "SELECT p.project_id FROM line l "
+            "JOIN block b ON b.id = l.block_id "
+            "JOIN page p ON p.id = b.page_id "
+            "WHERE l.id=? AND l.uid=?",
+            (line.id, line.uid),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Line project lookup failed: id={line.id!r} uid={line.uid!r}"
+            )
+        return int(row["project_id"])
 
-    def update_lines(self, lines: list[Line]) -> None:
-        """批量更新行（事务）。"""
-        try:
-            self.conn.execute("BEGIN IMMEDIATE")
-            for line in lines:
-                self._update_line_no_commit(line)
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+    def _sync_line_chars_no_commit(
+        self,
+        cur: sqlite3.Cursor,
+        line: Line,
+        project_id: int,
+    ) -> None:
+        if line.id is None:
+            raise RuntimeError("Char sync requires persisted line id")
+        old_char_ids = {
+            r["id"] for r in cur.execute(
+                "SELECT id FROM char_ WHERE line_id=?", (line.id,)
+            ).fetchall()
+        }
+        saved_char_ids: set[int] = set()
+        seen_uids: set[str] = set()
+        for char in line.chars:
+            self._ensure_unique_child_uid(
+                cur,
+                char,
+                kind="char",
+                table="char_",
+                seen_uids=seen_uids,
+            )
+            self._save_char(
+                cur,
+                char,
+                line.id,
+                project_id,
+                allow_project_move=False,
+            )
+            if char.id is not None:
+                saved_char_ids.add(char.id)
+        for old_id in old_char_ids - saved_char_ids:
+            cur.execute("DELETE FROM char_ WHERE id=?", (old_id,))
 
     # ------------------------------------------------------------------ load
 
@@ -959,7 +1176,39 @@ class ProjectStore:
             page.reconcile_ocr_done_from_result()
             project.pages.append(page)
 
+        self._apply_proof_line_states(project)
         return project
+
+    def _apply_proof_line_states(self, project: OcrProject) -> None:
+        """Apply persisted proof truth to runtime line state."""
+        if project.id is None:
+            return
+        rows = self.conn.execute(
+            "SELECT line_uid, final_text, final_text_set, proof_status "
+            "FROM proof_line_state WHERE project_id=?",
+            (project.id,),
+        ).fetchall()
+        states = {str(row["line_uid"] or ""): row for row in rows}
+        if not states:
+            return
+        for page in project.pages:
+            for block in page.blocks:
+                for line in block.lines:
+                    row = states.get(line.uid)
+                    if row is None:
+                        continue
+                    try:
+                        proof_status = ProofStatus(row["proof_status"])
+                    except ValueError:
+                        proof_status = ProofStatus.UNCHECKED
+                    line.apply_proof_state(
+                        ProofLineState(
+                            line_uid=line.uid,
+                            final_text=row["final_text"],
+                            final_text_set=bool(row["final_text_set"]),
+                            proof_status=proof_status,
+                        )
+                    )
 
     def _load_blocks(self, page_id: int) -> List[Block]:
         rows = self.conn.execute(
@@ -996,18 +1245,12 @@ class ProjectStore:
         for r in rows:
             line = Line(
                 text=r["text"],
-                final_text=r["final_text"],
-                final_text_set=bool(r["final_text_set"]) if "final_text_set" in r.keys() else False,
                 original_text=r["original_text"],
                 confidence=r["confidence"],
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
-                proof_status=ProofStatus(r["proof_status"]),
                 id=r["id"],
                 uid=r["uid"],
                 ocr_text=r["ocr_text"] or r["text"],
-                llm_suggestion=r["llm_suggestion"],
-                llm_reason=r["llm_reason"],
-                llm_review_status=LlmReviewStatus(r["llm_review_status"]),
                 review_flags=_json_to_review_flags(r["review_flags_json"]),
             )
             line.chars = self._load_chars(line.id)

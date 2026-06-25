@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 from app.core.block_attributes import is_position_only_block, semantic_block_type
+from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
 
 
@@ -14,18 +15,12 @@ PROOF_LINE_BLOCK_TYPES = {
     BlockType.REFERENCE,
 }
 
-HPROOF_LINE_BLOCK_TYPES = {
-    BlockType.TEXT,
-    BlockType.TITLE,
-    BlockType.REFERENCE,
-}
-
 PROOF_SKIP_LINE_FLAGS = {
     "hanwang_route_table",
 }
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
-    text = line.display_text
+    text = proof_display_text(line)
     bbox = line.bbox.normalize()
     for seen_text, seen_bbox in seen:
         if text == seen_text and bbox.iou(seen_bbox) >= 0.85:
@@ -56,12 +51,17 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
 
 
 def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int]]:
-    """Yield only text-like lines for HProof, excluding captions/equations."""
+    """Yield proof text lines for HProof, excluding position-only blocks.
+
+    HProof and VProof should be two views over the same proofable text facts.
+    HProof keeps one extra UI filter: page numbers/headers and other
+    position-only blocks are not useful in row-by-row proofreading.
+    """
     seen: list[tuple[str, BBox]] = []
     for block in page.blocks:
         if block.block_type == BlockType.EQUATION:
             continue
-        if semantic_block_type(block) not in HPROOF_LINE_BLOCK_TYPES:
+        if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
             continue
         if is_position_only_block(block):
             continue

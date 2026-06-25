@@ -58,5 +58,5 @@ def test_gallery_box_fixed_height_accounts_for_chrome():
     panel = _new_panel()
     panel._resize_gallery_for_entries(1)
     item_h = GALLERY_THUMB + 18
-    assert panel._gallery_box.height() >= item_h + 90
+    assert panel._gallery_box.height() == item_h + 8 + 48
     panel.close()

@@ -326,7 +326,7 @@ def attach_page_ocr_line_routes(
         formula_subblocks = [subblock for subblock in routed_subblocks if _is_route_formula_label(subblock["label"])]
         line_hints_for_formula = [
             PaddleRouteLineHint(
-                text=getattr(line, "display_text", getattr(line, "text", "")),
+                text=line.text,
                 bbox=line.bbox,
             )
             for line in lines

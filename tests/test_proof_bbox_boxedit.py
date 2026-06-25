@@ -1,9 +1,9 @@
-"""proof-bbox-boxedit (round 9): bbox / 槽位心智的编辑器。
+"""proof-bbox-boxedit (round 9): bbox / 单字位编辑。
 
 覆盖：
-- 槽位感知删除：Backspace / Delete / 选区删 = 填 ASCII 空格而非删字符。
-- 单槽位 inline 编辑：靠 gallery 的 _slot_edit_input + Enter 改当前 entry。
-- 单槽位清空按钮：把当前 entry 改成 " " 而非删除。
+- OCR 文本框是只读参考上下文，Backspace / Delete 不改写模型。
+- 单槽位 inline 编辑：gallery 直输 / 右键气泡改当前 entry。
+- 单槽位清空：Backspace/Delete 把当前 entry 改成 " " 而非删除。
 - modifier + 方向键：Ctrl+Alt+→ 步进 current；Shift+Alt+→ 扩展选择；
   Alt+↓ 跨 wrap 行步进。
 - gallery thumb 尺寸被 round 9 抬到 ≥30。
@@ -71,52 +71,51 @@ def test_gallery_thumb_bumped_round9():
     assert v_proof.GALLERY_THUMB >= 30
 
 
-# ───── 槽位感知删除 ──────────────────────────────────────────
+# ───── OCR 文本参考框只读 ───────────────────────────────────
 
 def _press(widget, key, mod=Qt.KeyboardModifier.NoModifier):
     ev = QKeyEvent(QKeyEvent.Type.KeyPress, key, mod, "")
     QApplication.sendEvent(widget, ev)
 
 
-def test_backspace_fills_blank_keeps_length():
+def test_backspace_does_not_edit_reference_text():
     v, _ = _load(TEXT)
     te = v._text_edit
     before = te.toPlainText()
+    assert te.isReadOnly()
     cur = te.textCursor()
     cur.setPosition(1)  # 光标在"甲"之后
     te.setTextCursor(cur)
     _press(te, Qt.Key.Key_Backspace)
     after = te.toPlainText()
-    assert len(after) == len(before), "长度变化 → 槽位被吃掉"
-    assert after[0] == " ", f"首槽未被填空白：{after!r}"
+    assert after == before
 
 
-def test_delete_forward_fills_blank():
+def test_delete_forward_does_not_edit_reference_text():
     v, _ = _load(TEXT)
     te = v._text_edit
     before = te.toPlainText()
+    assert te.isReadOnly()
     cur = te.textCursor()
     cur.setPosition(0)
     te.setTextCursor(cur)
     _press(te, Qt.Key.Key_Delete)
     after = te.toPlainText()
-    assert len(after) == len(before)
-    assert after[0] == " "
+    assert after == before
 
 
-def test_selection_delete_fills_each_slot_with_blank():
+def test_selection_delete_does_not_edit_reference_text():
     v, _ = _load(TEXT)
     te = v._text_edit
     before = te.toPlainText()
+    assert te.isReadOnly()
     cur = te.textCursor()
     cur.setPosition(0)
     cur.setPosition(3, cur.MoveMode.KeepAnchor)
     te.setTextCursor(cur)
     _press(te, Qt.Key.Key_Delete)
     after = te.toPlainText()
-    assert len(after) == len(before)
-    assert after[:3] == "   ", f"选区前 3 位未全部被空白替代：{after!r}"
-    assert after[3:] == before[3:], "未触及范围被误改"
+    assert after == before
 
 
 def _select_char_in_list(v, char):
@@ -136,8 +135,8 @@ def test_inline_slot_apply_replaces_current_entry():
     _select_char_in_list(v, "甲")
     first = v._gallery_model.index(0, 0)
     v._sync_gallery_entry(first)
-    v._slot_edit_input.setText("替")
-    v._apply_slot_edit_input()
+    assert v._current_candidate_entry is not None
+    assert v._gallery_direct_overwrite("替") is True
     txt = v._text_edit.toPlainText()
     assert txt.startswith("替"), f"首槽未被替换：{txt!r}"
     assert len(txt.rstrip("\n")) == len(TEXT)
@@ -148,7 +147,7 @@ def test_inline_slot_blank_button_fills_space():
     _select_char_in_list(v, "甲")
     first = v._gallery_model.index(0, 0)
     v._sync_gallery_entry(first)
-    v._apply_slot_blank_to_current()
+    assert v._gallery_direct_blank() is True
     txt = v._text_edit.toPlainText()
     assert txt[0] == " "
     assert len(txt.rstrip("\n")) == len(TEXT)
@@ -195,6 +194,8 @@ def test_slot_info_label_updates_on_gallery_sync():
     _select_char_in_list(v, "甲")
     first = v._gallery_model.index(0, 0)
     v._sync_gallery_entry(first)
-    txt = v._slot_info_lbl.text()
-    assert "P1" in txt
-    assert "甲" in txt
+    assert not hasattr(v, "_slot_info_lbl")
+    assert v._current_candidate_entry is not None
+    assert v._current_candidate_entry.page_number == 1
+    assert (v._current_candidate_entry.token_text or v._current_candidate_entry.char) == "甲"
+    assert "第 1 页" in v._gallery_hdr.text()

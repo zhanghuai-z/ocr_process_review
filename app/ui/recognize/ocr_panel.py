@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.block_attributes import block_display_label
+from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -45,6 +46,9 @@ class OcrPanel(QWidget):
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
         self._progress.setFixedWidth(200)
+        self._progress.setFixedHeight(16)
+        self._progress.setFormat("%p%")
+        self._progress.setTextVisible(True)
         self._progress.setVisible(False)
         top.addWidget(self._progress)
         layout.addLayout(top)
@@ -97,7 +101,8 @@ class OcrPanel(QWidget):
         self._progress.setVisible(True)
         pct = int((page_idx + 1) / total * 100)
         self._progress.setValue(pct)
-        self._status_lbl.setText(f"识别中… 第 {page_idx+1}/{total} 页")
+        self._progress.setFormat("%p%")
+        self._status_lbl.setText("识别中…")
 
     def on_recognition_complete(self, pages: List[Page]) -> None:
         self._pages = pages
@@ -105,7 +110,7 @@ class OcrPanel(QWidget):
         self._populate_tree(pages)
         flagged = sum(
             1 for p in pages for b in p.blocks
-            for l in b.lines if l.proof_status == ProofStatus.AUTO_FLAGGED
+            for l in b.lines if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
         )
         total_lines = sum(len(b.lines) for p in pages for b in p.blocks)
         self._status_lbl.setText(
@@ -127,20 +132,21 @@ class OcrPanel(QWidget):
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
                 for line in block.lines:
-                    line_text = line.display_text
+                    facts = proof_line_facts(line)
+                    line_text = facts.text
                     preview = line_text[:40] + ("…" if len(line_text) > 40 else "")
                     status_str = {
                         ProofStatus.UNCHECKED: "",
                         ProofStatus.AUTO_FLAGGED: "⚠ 低置信",
                         ProofStatus.MODIFIED: "✎ 已修改",
                         ProofStatus.OK: "✓ 确认",
-                    }.get(line.proof_status, "")
+                    }.get(facts.status, "")
                     line_item = QTreeWidgetItem(
                         block_item,
-                        [preview, f"{line.confidence:.2f}", status_str],
+                        [preview, f"{facts.confidence:.2f}", status_str],
                     )
                     line_item.setData(0, Qt.ItemDataRole.UserRole, line)
-                    if line.proof_status == ProofStatus.AUTO_FLAGGED:
+                    if facts.status == ProofStatus.AUTO_FLAGGED:
                         line_item.setForeground(1, Qt.GlobalColor.red)
             page_item.setExpanded(True)
 

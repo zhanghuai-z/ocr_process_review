@@ -5,6 +5,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from app.core.block_attributes import block_attributes
+from app.core.proof_line_facts import proof_line_facts, proof_status_value
 from app.export.ir import (
     EXPORT_IR_VERSION,
     ExportAsset,
@@ -20,7 +21,13 @@ from app.export.ir import (
 )
 from app.export.rules import ExportRules, load_export_rules, normalize_export_format
 from app.models import BBox, Block, BlockSource, Line, OcrProject, Page
-from app.services.export_service import get_export_text, iter_export_blocks, iter_export_lines, iter_export_pages
+from app.services.export_service import (
+    build_export_summary,
+    get_export_text,
+    iter_export_blocks,
+    iter_export_lines,
+    iter_export_pages,
+)
 
 
 def build_export_ir(
@@ -85,7 +92,7 @@ def build_export_ir(
         project=ExportProjectMeta(
             name=project.name,
             page_count=project.page_count,
-            summary=project.get_export_summary(),
+            summary=build_export_summary(project),
             created_at=project.created_at,
             updated_at=project.updated_at,
         ),
@@ -238,17 +245,18 @@ def _build_element(
 
 
 def _line_payload(line: Line, line_index: int) -> dict[str, Any]:
+    facts = proof_line_facts(line)
     return {
         "line_id": _entity_source_id(line, line_index),
-        "text": get_export_text(line),
-        "ocr_text": line.ocr_text,
+        "text": facts.text,
+        "ocr_text": facts.ocr_text,
         "bbox": _bbox_to_dict(line.bbox),
         "chars": [
             _char_payload(char, f"line-{line_index}-char-{char_index}")
             for char_index, char in enumerate(line.chars)
         ],
-        "confidence": float(line.confidence),
-        "status": line.proof_status.value if hasattr(line.proof_status, "value") else str(line.proof_status),
+        "confidence": facts.confidence,
+        "status": facts.status_value,
     }
 
 
@@ -300,11 +308,12 @@ def _origin(source: BlockSource) -> str:
 def _proof(lines: list[Line]) -> ExportProof:
     if not lines:
         return ExportProof()
-    confidence = sum(line.confidence for line in lines) / len(lines)
+    facts = [proof_line_facts(line) for line in lines]
+    confidence = sum(item.confidence for item in facts) / len(facts)
     flags = sorted({flag for line in lines for flag in line.review_flags})
     corrected = any(bool(line.original_text) and line.original_text != get_export_text(line) for line in lines)
     status_order = ["auto_flagged", "unchecked", "modified", "ok"]
-    statuses = [line.proof_status.value if hasattr(line.proof_status, "value") else str(line.proof_status) for line in lines]
+    statuses = [proof_status_value(line) for line in lines]
     status = min(statuses, key=lambda item: status_order.index(item) if item in status_order else 99)
     return ExportProof(status=status, confidence=confidence, flags=flags, corrected=corrected)
 

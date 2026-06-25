@@ -23,24 +23,12 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "paddle_api_network_mode": "auto",  # "auto" | "env_proxy" | "direct"
     "layout_debug_artifacts": False, # 开发调试时才写 Paddle raw json / overlay 图片
 
-    # LLM 预审
-    "llm_pre_review_enabled": False,
-    "llm_provider": "fake",        # "fake" | "http" | "openai-compatible" | "local"
-    "llm_endpoint": "",
-    "llm_api_key": "",
-    "llm_model": "",
-    "llm_rules_path": "",
-    "llm_timeout": 30,
-    "llm_batch_lines": 30,
-    "llm_send_context": True,
-    "llm_send_page_text_only": True,
-
     # 校对
     "auto_flag_threshold": 0.80,
     "auto_save_interval": 60,      # 秒
 
     # UI 偏好
-    "theme": "dark_teal",
+    "theme": "light",
     "export_default_format": "txt",
 
     # 自动收紧
@@ -112,7 +100,7 @@ def _as_bool(value: Any) -> bool:
 
 
 def get_config() -> dict[str, Any]:
-    """Return the runtime OCR/LLM config snapshot used by engines and UI."""
+    """Return the runtime OCR config snapshot used by engines and UI."""
     from app.core.api_profiles import normalize_api_base_url
 
     cfg = AppConfig.instance()
@@ -139,14 +127,11 @@ def get_config() -> dict[str, Any]:
         "ocr_page_concurrency": ocr_page_concurrency,
         "paddle_api_network_mode": network_mode,
         "layout_debug_artifacts": _as_bool(cfg.get("layout_debug_artifacts", False)),
-        "llm_endpoint": cfg.get("llm_endpoint", ""),
-        "llm_api_key": cfg.get("llm_api_key", ""),
-        "llm_rules_path": cfg.get("llm_rules_path", ""),
     }
 
 
 def update_config(**kwargs: Any) -> None:
-    """Update runtime OCR/LLM settings through AppConfig keys."""
+    """Update runtime OCR settings through AppConfig keys."""
     cfg = AppConfig.instance()
     mapping = {
         "mode": "ocr_mode",
@@ -159,9 +144,6 @@ def update_config(**kwargs: Any) -> None:
         "ocr_page_concurrency": "ocr_page_concurrency",
         "paddle_api_network_mode": "paddle_api_network_mode",
         "layout_debug_artifacts": "layout_debug_artifacts",
-        "llm_endpoint": "llm_endpoint",
-        "llm_api_key": "llm_api_key",
-        "llm_rules_path": "llm_rules_path",
     }
     for k, v in kwargs.items():
         if k in mapping:

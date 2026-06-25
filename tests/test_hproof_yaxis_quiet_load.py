@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -31,7 +33,7 @@ def _make_pair_with_chars(text: str = "abc"):
         for i, c in enumerate(text)
     ]
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, 400, 32),
-                chars=chars, proof_status=ProofStatus.UNCHECKED, ocr_text=text)
+                chars=chars, ocr_text=text)
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 32),
                   lines=[line])
     page = Page(image_path="", width=400, height=32, blocks=[block])
@@ -97,7 +99,6 @@ def test_line_pair_slot_width_keeps_narrow_punctuation_inside_visual_slot():
         confidence=0.9,
         bbox=BBox(0, 0, 40, 24),
         chars=[Char(char="，", confidence=0.9, bbox=punct_bbox)],
-        proof_status=ProofStatus.UNCHECKED,
         ocr_text="，",
     )
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 24), lines=[line])
@@ -137,7 +138,6 @@ def test_line_pair_punctuation_visual_slots_do_not_overlap_neighbors():
             Char(char="，", confidence=0.9, bbox=bboxes[1]),
             Char(char="乙", confidence=0.9, bbox=bboxes[2]),
         ],
-        proof_status=ProofStatus.UNCHECKED,
         ocr_text="甲，乙",
     )
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 24), lines=[line])
@@ -220,7 +220,7 @@ def test_line_pair_degrades_when_chars_misaligned():
     # text='ab' 但 chars 只给一个
     chars = [Char(char="a", confidence=0.9, bbox=BBox(0, 0, 20, 20))]
     line = Line(text="ab", confidence=0.9, bbox=BBox(0, 0, 80, 20),
-                chars=chars, proof_status=ProofStatus.UNCHECKED)
+                chars=chars)
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20),
                   lines=[line])
     page = Page(image_path="", width=80, height=20, blocks=[block])

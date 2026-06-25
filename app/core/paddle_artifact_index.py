@@ -549,7 +549,6 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
         block.lines = [
             Line(
                 text=binding.text,
-                final_text=binding.text,
                 confidence=0.0,
                 bbox=block.bbox,
                 ocr_text=binding.text,

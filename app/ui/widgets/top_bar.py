@@ -1,18 +1,22 @@
 """内容区顶部 TopBar。
 
 布局：
-    项目 / 当前步骤          [版面分析] [横校] [纵校]          运行版面分析  导出
+    项目名                       [版面分析] [横校] [纵校]      文件 导出 更多 / 运行版面分析
 
 公开 API：
 - 信号: ``step_clicked``, ``layout_run_clicked``, ``export_clicked``
-- 方法: ``set_project_name(name)``, ``set_step_name(name)``,
-        ``set_active(step)``, ``set_enabled_up_to(max_step)``,
-        ``set_layout_run_enabled(bool)``, ``set_status(kind, text)``
+- 方法: ``set_project_name(name)``, ``set_active(step)``,
+        ``set_enabled_up_to(max_step)``, ``set_layout_run_enabled(bool)``,
+        ``set_menus(file_menu, more_menu)``
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtWidgets import (
+    QWidget, QHBoxLayout, QLabel, QPushButton, QFrame, QMenu,
+)
+from app.ui.widgets.effects import apply_soft_shadow
+from app.utils.icon_manager import get_icon
 
 from app.controllers.workflow_controller import STEP_HPROOF, STEP_LAYOUT, STEP_OCR, STEP_VPROOF
 
@@ -32,62 +36,42 @@ class TopBar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("headerBar")
-        self.setFixedHeight(56)
+        self.setFixedHeight(58)
 
         self._project_name: str = ""
-        self._step_name: str = ""
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 0, 16, 0)
-        row.setSpacing(12)
+        row.setContentsMargins(18, 0, 18, 0)
+        row.setSpacing(14)
 
-        # ── 面包屑 ─────────────────────────────
+        # ── Project identity ───────────────────────────────────
         left_box = QFrame()
         left_box.setObjectName("topBarLeft")
         left_row = QHBoxLayout(left_box)
         left_row.setContentsMargins(0, 0, 0, 0)
-        left_row.setSpacing(8)
+        left_row.setSpacing(12)
 
-        self._project_lbl = QLabel("（无项目）")
-        self._project_lbl.setObjectName("crumbProject")
-        self._project_lbl.setMinimumWidth(160)
-        self._project_lbl.setMaximumWidth(360)
-        self._project_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        left_row.addWidget(self._project_lbl)
-
-        self._sep2_lbl = QLabel("/")
-        self._sep2_lbl.setObjectName("crumbSep")
-        self._sep2_lbl.setVisible(False)
-        left_row.addWidget(self._sep2_lbl)
-
-        self._step_lbl = QLabel("")
-        self._step_lbl.setObjectName("crumbStep")
-        self._step_lbl.setVisible(False)
-        left_row.addWidget(self._step_lbl)
-
-        # ── 状态徽章 ─────────────────────────────
-        self._status_lbl = QLabel("")
-        self._status_lbl.setObjectName("statusPill")
-        self._status_lbl.setAlignment(Qt.AlignCenter)
-        self._status_lbl.setVisible(False)
-        left_row.addSpacing(4)
-        left_row.addWidget(self._status_lbl)
+        self._title_lbl = QLabel("未命名项目")
+        self._title_lbl.setObjectName("brandTitle")
+        left_row.addWidget(self._title_lbl)
         left_row.addStretch(1)
-        row.addWidget(left_box, 1)
+        row.addWidget(left_box, 2)
 
         # ── 顶部流程入口 ─────────────────────────
         segment = QFrame()
-        segment.setObjectName("workflowSegment")
+        segment.setObjectName("pillSwitch")
+        apply_soft_shadow(segment, blur_radius=18, y_offset=4, alpha=16)
         segment_row = QHBoxLayout(segment)
-        segment_row.setContentsMargins(2, 2, 2, 2)
-        segment_row.setSpacing(2)
+        segment_row.setContentsMargins(4, 4, 4, 4)
+        segment_row.setSpacing(4)
         self._step_buttons: list[QPushButton] = []
         for label, target_step, _active in _WORKFLOW_STEPS:
             btn = QPushButton(label)
             btn.setObjectName("workflowStepBtn")
             btn.setCheckable(True)
-            btn.setFixedWidth(104 if target_step == STEP_LAYOUT else 80)
-            btn.setFixedHeight(28)
+            btn.setFixedWidth(104 if label == "版面分析" else 88)
+            btn.setFixedHeight(32)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _checked=False, s=target_step: self.step_clicked.emit(s))
             self._step_buttons.append(btn)
             segment_row.addWidget(btn)
@@ -98,24 +82,46 @@ class TopBar(QWidget):
         action_box.setObjectName("topBarActions")
         action_row = QHBoxLayout(action_box)
         action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(12)
+        action_row.setSpacing(8)
         action_row.addStretch(1)
 
-        self._btn_run_layout = QPushButton("▶ 运行版面分析")
-        self._btn_run_layout.setObjectName("primaryBtn")
-        self._btn_run_layout.setFixedWidth(138)
-        self._btn_run_layout.setFixedHeight(32)
-        self._btn_run_layout.setEnabled(False)
-        self._btn_run_layout.clicked.connect(self.layout_run_clicked)
-        action_row.addWidget(self._btn_run_layout)
+        self._btn_file_menu = QPushButton("文件")
+        self._btn_file_menu.setIcon(get_icon("folder", color="#6B6B6B"))
+        self._btn_file_menu.setIconSize(QSize(16, 16))
+        self._btn_file_menu.setObjectName("topMenuBtn")
+        self._btn_file_menu.setFixedHeight(30)
+        self._btn_file_menu.setCursor(Qt.CursorShape.PointingHandCursor)
+        action_row.addWidget(self._btn_file_menu)
 
-        self._btn_export = QPushButton("⤓ 导出")
-        self._btn_export.setObjectName("defaultBtn")
-        self._btn_export.setFixedWidth(76)
-        self._btn_export.setFixedHeight(32)
+        self._btn_export = QPushButton("导出")
+        self._btn_export.setIcon(get_icon("export", color="#6B6B6B"))
+        self._btn_export.setIconSize(QSize(16, 16))
+        self._btn_export.setObjectName("topMenuBtn")
+        self._btn_export.setFixedHeight(30)
+        self._btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_export.clicked.connect(self.export_clicked)
         action_row.addWidget(self._btn_export)
-        row.addWidget(action_box, 1)
+
+        self._btn_more_menu = QPushButton("更多")
+        self._btn_more_menu.setIcon(get_icon("menu", color="#6B6B6B"))
+        self._btn_more_menu.setIconSize(QSize(16, 16))
+        self._btn_more_menu.setObjectName("topMenuBtn")
+        self._btn_more_menu.setFixedHeight(30)
+        self._btn_more_menu.setCursor(Qt.CursorShape.PointingHandCursor)
+        action_row.addWidget(self._btn_more_menu)
+
+        self._btn_run_layout = QPushButton("运行版面分析")
+        self._btn_run_layout.setIcon(get_icon("play", color="#FFFFFF", stroke_width=2.0))
+        self._btn_run_layout.setIconSize(QSize(15, 15))
+        self._btn_run_layout.setObjectName("darkBtn")
+        self._btn_run_layout.setFixedHeight(30)
+        self._btn_run_layout.setMinimumWidth(136)
+        self._btn_run_layout.setEnabled(False)
+        self._btn_run_layout.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_run_layout.clicked.connect(self.layout_run_clicked)
+        apply_soft_shadow(self._btn_run_layout, blur_radius=16, y_offset=3, alpha=18)
+        action_row.addWidget(self._btn_run_layout)
+        row.addWidget(action_box, 2) # Action box also stretches, keeping segment centered
 
     # ── public API ──────────────────────────────────────────
 
@@ -125,44 +131,28 @@ class TopBar(QWidget):
     def set_active(self, step: int) -> None:
         for i, (_, _, active_set) in enumerate(_WORKFLOW_STEPS):
             self._step_buttons[i].setChecked(step in active_set)
+        self._btn_run_layout.setVisible(step in (STEP_LAYOUT, STEP_OCR))
 
     def set_enabled_up_to(self, max_step: int) -> None:
         for i, (_, target_step, _) in enumerate(_WORKFLOW_STEPS):
             self._step_buttons[i].setEnabled(target_step <= max_step)
 
+    def set_menus(
+        self,
+        file_menu: QMenu | None,
+        more_menu: QMenu | None,
+    ) -> None:
+        self._btn_file_menu.setMenu(file_menu)
+        self._btn_more_menu.setMenu(more_menu)
+
     def set_project_name(self, name: str) -> None:
-        # 历史调用方传的是 "项目：xxx"，做一下兜底剥离
-        if name.startswith("项目："):
-            name = name[3:]
         self._project_name = (name or "").strip()
         self._refresh_crumb()
-
-    def set_step_name(self, name: str) -> None:
-        self._step_name = (name or "").strip()
-        self._refresh_crumb()
-
-    def set_status(self, kind: str, text: str = "") -> None:
-        """更新状态徽章。kind ∈ {'idle','running','done','warn','hidden'}。"""
-        kind = (kind or "").lower()
-        if kind == "hidden" or not text:
-            self._status_lbl.setVisible(False)
-            return
-        self._status_lbl.setText(text)
-        # 用 dynamic property 让 QSS 命中 ``QLabel#statusPill[kind="done"]``
-        self._status_lbl.setProperty("kind", kind)
-        self._status_lbl.style().unpolish(self._status_lbl)
-        self._status_lbl.style().polish(self._status_lbl)
-        self._status_lbl.setVisible(True)
 
     # ── 内部 ──────────────────────────────────────────────
 
     def _refresh_crumb(self) -> None:
-        has_project = bool(self._project_name)
-        has_step = bool(self._step_name)
-        self._project_lbl.setText(self._project_name if has_project else "（无项目）")
-        self._sep2_lbl.setVisible(has_step)
-        self._step_lbl.setVisible(has_step)
-        self._step_lbl.setText(self._step_name)
+        self._title_lbl.setText(self._project_name or "未命名项目")
 
 
 __all__ = ["TopBar"]

@@ -5,9 +5,9 @@
 - native_bridge.py  对 *_probe.exe 的 subprocess 封装（32 位 native 桥接）
 - translator.py     原始 JSON → app.models 转换
 
-对外暴露的引擎适配器位于：
-- app/engines/hanwang_ocr_engine.py     (OcrEngine 协议)
-- app/engines/hanwang_layout_engine.py  (LayoutEngine 协议)
+对外暴露的主 OCR 适配器位于：
+- app/engines/hanwang/micro_recblock.py (OcrEngine 协议)
+- app/engines/hanwang_layout_engine.py  (LayoutEngine 协议，本地版面探测)
 """
 
 from app.engines.hanwang.paths import (

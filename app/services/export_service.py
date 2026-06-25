@@ -2,7 +2,7 @@
 
 结构化导出初版口径：
 - XML / HTML / Markdown / TXT 都按项目 -> 页 -> 块 -> 行读取；
-- 行文本统一读取人工最终文本 line.final_text；
+- 行文本统一通过 proof_display_text 读取（OCR 文本或人工终稿的统一视图）；
 - 块按 order 优先、坐标兜底排序，尽量贴近原稿阅读顺序；
 - XML / HTML 保留空块结构，TXT / Markdown 默认只输出有文本的块。
 """
@@ -13,7 +13,9 @@ import re
 from typing import Iterable, List
 
 from app.core.block_attributes import block_attributes, semantic_block_type
+from app.core.proof_line_facts import proof_display_text
 from app.models import Block, BlockType, Line, OcrProject, Page
+from app.services.proof_stats_service import ProofStatsService
 
 
 BLOCK_LABELS: dict[BlockType, str] = {
@@ -70,11 +72,10 @@ def get_export_text(line: Line) -> str:
     """获取导出的最终文本。
 
     统一规则：
-    - 永远读取人工最终文本 (line.final_text)
-    - 不读取 llm_suggestion（除非人工已接受）
+    - 永远通过 proof_display_text 读取当前校对文本
     - 不读取 ocr_text（除非人工未修改且没有原始文本）
     """
-    return line.display_text
+    return proof_display_text(line)
 
 
 def get_block_label(block: Block) -> str:
@@ -142,10 +143,26 @@ def iter_export_lines(block: Block) -> Iterable[Line]:
     return block.lines
 
 
+def build_export_summary(project: OcrProject) -> dict:
+    """Return export readiness counters without asking models to interpret proof state."""
+    proof_stats = ProofStatsService().summarize(project)
+    unproofed = proof_stats.total_lines - proof_stats.confirmed_lines - proof_stats.modified_lines
+    return {
+        "total_pages": project.page_count,
+        "total_lines": proof_stats.total_lines,
+        "unproofed_lines": unproofed,
+        "flagged_lines": proof_stats.flagged_lines,
+        "unrecognized_blocks": sum(
+            1 for page in project.pages for block in page.text_ocr_blocks
+            if not block.lines
+        ),
+    }
+
+
 def check_export_readiness(project: OcrProject) -> List[str]:
     """检查导出就绪状态，返回警告列表。"""
     warnings = []
-    summary = project.get_export_summary()
+    summary = build_export_summary(project)
 
     if not project.pages:
         warnings.append("项目中没有页面")

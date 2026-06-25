@@ -26,8 +26,7 @@ def _qapp():
 def test_classify_char_low_conf_red():
     from app.ui.proof import char_verdict as cv
 
-    v = cv.classify_char(confidence=0.30, text_char="字",
-                         ocr_char="字", llm_char=None)
+    v = cv.classify_char(confidence=0.30, text_char="字", ocr_char="字")
     assert v.severity == cv.SEVERITY_ERROR
     assert v.color == cv.COLOR_ERROR
     assert "0.30" in v.evidence
@@ -38,8 +37,7 @@ def test_classify_char_user_modified_does_not_whitewash_color():
     """用户改过字 → user_modified=True，但颜色仍保持原 severity（不洗白）。"""
     from app.ui.proof import char_verdict as cv
 
-    v = cv.classify_char(confidence=0.30, text_char="改",
-                         ocr_char="原", llm_char=None)
+    v = cv.classify_char(confidence=0.30, text_char="改", ocr_char="原")
     assert v.user_modified is True
     # 关键 invariant：改过 ≠ 已通过校对 → 颜色仍是红
     assert v.severity == cv.SEVERITY_ERROR
@@ -49,8 +47,7 @@ def test_classify_char_user_modified_does_not_whitewash_color():
 def test_classify_char_high_conf_green():
     from app.ui.proof import char_verdict as cv
 
-    v = cv.classify_char(confidence=0.96, text_char="字",
-                         ocr_char="字", llm_char=None)
+    v = cv.classify_char(confidence=0.96, text_char="字", ocr_char="字")
     assert v.severity == cv.SEVERITY_LIKELY_OK
     assert v.color == cv.COLOR_LIKELY_OK
 
@@ -59,30 +56,15 @@ def test_classify_char_mid_conf_default_unverified():
     """0.80 ≤ conf < 0.95 在当前 codebase 没有"绝对正确"证据链 → unverified。"""
     from app.ui.proof import char_verdict as cv
 
-    v = cv.classify_char(confidence=0.88, text_char="字",
-                         ocr_char="字", llm_char=None)
+    v = cv.classify_char(confidence=0.88, text_char="字", ocr_char="字")
     assert v.severity == cv.SEVERITY_UNVERIFIED
     assert v.color == cv.COLOR_UNVERIFIED
-
-
-def test_classify_char_llm_disagrees_upgrades():
-    from app.ui.proof import char_verdict as cv
-
-    # 中段 conf + llm 反对 → 升级为 suspect
-    v = cv.classify_char(confidence=0.88, text_char="字",
-                         ocr_char="字", llm_char="子")
-    assert v.severity == cv.SEVERITY_SUSPECT
-    # 低段 conf + llm 反对 → 升级为 error
-    v2 = cv.classify_char(confidence=0.70, text_char="字",
-                          ocr_char="字", llm_char="子")
-    assert v2.severity == cv.SEVERITY_ERROR
 
 
 def test_classify_char_confidence_missing():
     from app.ui.proof import char_verdict as cv
 
-    v = cv.classify_char(confidence=None, text_char="字",
-                         ocr_char="字", llm_char=None)
+    v = cv.classify_char(confidence=None, text_char="字", ocr_char="字")
     assert v.severity == cv.SEVERITY_UNVERIFIED
     assert "缺失" in v.evidence
 
@@ -105,9 +87,9 @@ def test_aligned_ribbon_aligned_set_clears_degraded():
     assert ribbon.is_degraded()
     verdicts = [
         cv.classify_char(confidence=0.96, text_char="A",
-                         ocr_char="A", llm_char=None),
+                         ocr_char="A"),
         cv.classify_char(confidence=0.30, text_char="B",
-                         ocr_char="B", llm_char=None),
+                         ocr_char="B"),
     ]
     ribbon.set_aligned(
         text="AB",
@@ -124,7 +106,7 @@ def test_aligned_ribbon_aligned_set_clears_degraded():
 
 def _make_simple_pair(line_text: str, chars_with_bbox: bool = True):
     """直接构造一个 _LinePair 用于 _refresh_ribbon 单元测试。"""
-    from app.models import Block, BBox, Char, Line, Page, ProofStatus
+    from app.models import Block, BBox, Char, Line, Page
     from app.models.project import BlockType
     from app.core.page_image_cache import PageImageCache
     from app.ui.proof.h_proof import _LinePair
@@ -138,7 +120,6 @@ def _make_simple_pair(line_text: str, chars_with_bbox: bool = True):
         confidence=0.9,
         bbox=BBox(0, 0, 400, 32),
         chars=chars,
-        proof_status=ProofStatus.UNCHECKED,
         ocr_text=line_text,
     )
     block = Block(block_type=BlockType.TEXT,
@@ -178,7 +159,7 @@ def test_line_pair_uses_inline_y_axis_text_metrics():
     block_fmt = pair._editor.document().firstBlock().blockFormat()
     assert block_fmt.lineHeightType() == QTextBlockFormat.LineHeightTypes.FixedHeight.value
     assert block_fmt.lineHeight() == h_proof.TEXT_LINE_HEIGHT_PX
-    assert h_proof.LINE_PAIR_H == 70
+    assert pair.height() == h_proof.LINE_PAIR_H
     assert not hasattr(pair, "_ribbon")
     pair.deleteLater()
 
@@ -187,7 +168,7 @@ def test_chars_aligned_rejects_multi_glyph_token():
     """proof-layout-collections 第 2 任务：char.char 多于 1 个字符
     （word/token 粒度）时，_chars_aligned 必须返回 False，避免
     \u201c\u5750\u6807\u5bf9\u4e86\u4f46\u5185\u5bb9\u504f\u79fb\u201d。"""
-    from app.models import BBox, Char, Line, Page, Block, ProofStatus
+    from app.models import BBox, Char, Line, Page, Block
     from app.models.project import BlockType
     from app.core.page_image_cache import PageImageCache
     from app.ui.proof.h_proof import _LinePair
@@ -196,8 +177,12 @@ def test_chars_aligned_rejects_multi_glyph_token():
         Char(char="he", confidence=0.9, bbox=BBox(0, 0, 20, 20)),
         Char(char="llo", confidence=0.9, bbox=BBox(20, 0, 60, 20)),
     ]
-    line = Line(text="he", confidence=0.9, bbox=BBox(0, 0, 80, 20),
-                chars=chars, proof_status=ProofStatus.UNCHECKED)
+    line = Line(
+        text="he",
+        confidence=0.9,
+        bbox=BBox(0, 0, 80, 20),
+        chars=chars,
+    )
     block = Block(block_type=BlockType.TEXT,
                   bbox=BBox(0, 0, 80, 20), lines=[line])
     page = Page(image_path="", width=80, height=20, blocks=[block])

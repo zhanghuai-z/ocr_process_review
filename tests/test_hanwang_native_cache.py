@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,7 @@ def test_linecut_segimg_cache_reuses_identical_probe_result(tmp_path, monkeypatc
 
     monkeypatch.setattr(native_bridge, "get_hanwang_bin_dir", fake_get_bin_dir)
     monkeypatch.setattr(native_bridge, "_save_temp_image", fake_save_temp_image)
+    monkeypatch.setattr(native_bridge, "_native_path_arg", lambda path: str(path))
     monkeypatch.setattr(native_bridge, "_run_exe", fake_run_exe)
 
     image = np.zeros((10, 12, 3), dtype=np.uint8)
@@ -72,6 +74,7 @@ def test_linecut_recog_cache_key_includes_recognition_params(tmp_path, monkeypat
 
     monkeypatch.setattr(native_bridge, "get_hanwang_bin_dir", fake_get_bin_dir)
     monkeypatch.setattr(native_bridge, "_save_temp_image", fake_save_temp_image)
+    monkeypatch.setattr(native_bridge, "_native_path_arg", lambda path: str(path))
     monkeypatch.setattr(native_bridge, "_run_exe", fake_run_exe)
 
     image = np.zeros((10, 12, 3), dtype=np.uint8)
@@ -82,6 +85,75 @@ def test_linecut_recog_cache_key_includes_recognition_params(tmp_path, monkeypat
     assert calls["run"] == 2
     assert second == first
     assert third["call"] == 2
+
+
+def test_linecut_recog_batch_list_reuses_cache_and_preserves_order(tmp_path, monkeypatch):
+    from app.engines.hanwang import native_bridge
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in (
+        "linecut_recog_batch_probe.exe",
+        "linecut_recogimg_probe.exe",
+        "linecut.dll",
+        "IntegratRcg.dll",
+    ):
+        (bin_dir / name).write_bytes(f"{name}-stub".encode("ascii"))
+    monkeypatch.setenv("HANWANG_NATIVE_CACHE_DIR", str(tmp_path / "cache"))
+    calls = {"run": 0, "save": 0}
+
+    def fake_get_bin_dir():
+        return bin_dir
+
+    def fake_save_temp_image(image_bgr, work_dir):
+        calls["save"] += 1
+        path = work_dir / f"_fake_{calls['save']}.png"
+        path.write_bytes(b"png")
+        return path
+
+    def fake_run_exe(exe, args, *, cwd, timeout):
+        calls["run"] += 1
+        assert Path(exe).name == "linecut_recog_batch_probe.exe"
+        assert args[0] == "--batch-list"
+        tasks_path = Path(args[1])
+        summary_path = Path(args[2])
+        tasks = []
+        for idx, line in enumerate(tasks_path.read_text(encoding="utf-8").splitlines()):
+            image_path, output_path = line.split("\t")
+            Path(output_path).write_text(
+                json.dumps({"lines": [], "run": calls["run"], "task": idx, "image": image_path}),
+                encoding="utf-8",
+            )
+            tasks.append({
+                "index": idx,
+                "image": image_path,
+                "output": output_path,
+                "ok": True,
+                "lines": 0,
+                "chars": 0,
+                "error": "",
+            })
+        summary_path.write_text(
+            json.dumps({"schema": "linecut_recog_batch_probe.v1", "tasks": tasks}),
+            encoding="utf-8",
+        )
+        return native_bridge._ProbeRun(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(native_bridge, "get_hanwang_bin_dir", fake_get_bin_dir)
+    monkeypatch.setattr(native_bridge, "_save_temp_image", fake_save_temp_image)
+    monkeypatch.setattr(native_bridge, "_native_path_arg", lambda path: str(path))
+    monkeypatch.setattr(native_bridge, "_run_exe", fake_run_exe)
+
+    images = [
+        np.zeros((10, 12, 3), dtype=np.uint8),
+        np.ones((8, 9, 3), dtype=np.uint8),
+    ]
+    first = native_bridge.run_linecut_recog_batch_list(images, mode=71, postprocess=1, split_mode=0)
+    second = native_bridge.run_linecut_recog_batch_list(images, mode=71, postprocess=1, split_mode=0)
+
+    assert calls["run"] == 1
+    assert [item["task"] for item in first] == [0, 1]
+    assert second == first
 
 
 def test_eng20_recogline_cache_reuses_identical_probe_result(tmp_path, monkeypatch):
@@ -119,6 +191,7 @@ def test_eng20_recogline_cache_reuses_identical_probe_result(tmp_path, monkeypat
 
     monkeypatch.setattr(native_bridge, "get_hanwang_bin_dir", fake_get_bin_dir)
     monkeypatch.setattr(native_bridge, "_save_temp_image", fake_save_temp_image)
+    monkeypatch.setattr(native_bridge, "_native_path_arg", lambda path: str(path))
     monkeypatch.setattr(native_bridge, "_run_exe", fake_run_exe)
 
     image = np.zeros((10, 12, 3), dtype=np.uint8)
@@ -174,3 +247,55 @@ def test_native_cache_env_dir_overrides_runtime_dir(tmp_path, monkeypatch):
         assert native_cache.cache_dir() == env_dir
     finally:
         native_cache.reset_runtime_cache_dir()
+
+
+def test_native_bridge_timing_log_records_cache_hit_and_miss(tmp_path, monkeypatch):
+    from app.engines.hanwang import native_bridge
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "linecut_recogimg_probe.exe").write_bytes(b"recog-stub")
+    (bin_dir / "linecut.dll").write_bytes(b"linecut-stub")
+    (bin_dir / "IntegratRcg.dll").write_bytes(b"charrcg-stub")
+    log_path = tmp_path / "timing.jsonl"
+    monkeypatch.setenv("HANWANG_NATIVE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("HANWANG_NATIVE_TIMING_LOG", str(log_path))
+    calls = {"run": 0}
+
+    def fake_get_bin_dir():
+        return bin_dir
+
+    def fake_save_temp_image(image_bgr, work_dir):
+        path = work_dir / f"_fake_{calls['run']}.png"
+        path.write_bytes(b"png")
+        return path
+
+    def fake_run_exe(exe, args, *, cwd, timeout):
+        calls["run"] += 1
+        (Path(cwd) / args[1]).write_text(
+            '{"lines":[]}',
+            encoding="utf-8",
+        )
+        return native_bridge._ProbeRun(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(native_bridge, "get_hanwang_bin_dir", fake_get_bin_dir)
+    monkeypatch.setattr(native_bridge, "_save_temp_image", fake_save_temp_image)
+    monkeypatch.setattr(native_bridge, "_native_path_arg", lambda path: str(path))
+    monkeypatch.setattr(native_bridge, "_run_exe", fake_run_exe)
+
+    image = np.zeros((10, 12, 3), dtype=np.uint8)
+    native_bridge.run_linecut_recog(image, mode=71, postprocess=1, split_mode=0)
+    native_bridge.run_linecut_recog(image, mode=71, postprocess=1, split_mode=0)
+
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    assert calls["run"] == 1
+    assert len(records) == 2
+    assert records[0]["probe"] == "linecut_recog"
+    assert records[0]["cache_hit"] is False
+    assert records[0]["ok"] is True
+    assert "subprocess_seconds" in records[0]
+    assert "temp_image_write_seconds" in records[0]
+    assert records[1]["cache_hit"] is True
+    assert records[1]["ok"] is True
+    assert "subprocess_seconds" not in records[1]

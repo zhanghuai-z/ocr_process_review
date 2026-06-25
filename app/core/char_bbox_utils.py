@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from app.models import BBox, Char, Line
+from app.core.proof_line_facts import proof_display_text
 
 
 LINE_DIRECTION_HORIZONTAL = "horizontal"
@@ -477,7 +478,7 @@ def ensure_line_char_bboxes(
     page_image: Optional[np.ndarray] = None,
 ) -> List[Char]:
     """确保 line.chars 至少拥有与文本长度一致的 page-space bbox。"""
-    text = line.display_text
+    text = proof_display_text(line)
     if not text:
         line.chars = []
         return []

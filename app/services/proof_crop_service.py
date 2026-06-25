@@ -11,6 +11,7 @@ from app.core.char_bbox_utils import (
     MISSING_LINE_BBOX_FLAG,
     split_line_bbox_into_char_bboxes,
 )
+from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
@@ -97,11 +98,11 @@ class ProofCropService:
                     not line.chars
                     or (
                         not has_tokenized_chars
-                        and len(line.chars) != len(line.display_text)
+                        and len(line.chars) != len(proof_display_text(line))
                     )
                 )
                 if needs_fallback_chars and INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
-                    text = line.display_text
+                    text = proof_display_text(line)
                     if text and MISSING_LINE_BBOX_FLAG in line.review_flags:
                         stats.fallback_lines += 1
                         stats.unavailable_chars += len(text)

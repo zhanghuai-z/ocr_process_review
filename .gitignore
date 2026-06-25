@@ -23,13 +23,25 @@ Thumbs.db
 
 # Project cache (created at runtime)
 *.ocrproj
+*.ocrproj.qprobe.json
 .cache/
 _view/
 debug/
+logs/
+*.log
 *.layout-api.json
 *.layout-api-raw.png
 *.layout-app-overlay.png
 .state/
+
+# Local review/design artifacts
+question_img/
+stitch_assets/
+review_bundles/
+ui_preview_*.png
+/preview.py
+/validate_qss.py
+/file/*.md
 
 # Local archive/quarantine. Files here are intentionally kept recoverable
 # but are not part of the active project surface.

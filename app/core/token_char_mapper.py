@@ -102,7 +102,6 @@ def build_line_from_ir(
     """Convert one OCR_IR line into the proof-facing Line/Char model."""
     line = Line(
         text=ir_line.text,
-        final_text=ir_line.text,
         confidence=float(ir_line.confidence),
         bbox=ir_line.bbox,
         chars=build_line_chars(
@@ -115,5 +114,5 @@ def build_line_from_ir(
         review_flags=list(ir_line.review_flags),
     )
     if proof_status is not None:
-        line.proof_status = proof_status
+        line.set_proof_status(proof_status)
     return line

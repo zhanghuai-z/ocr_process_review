@@ -3,7 +3,7 @@
 这两个 service 是从 h_proof / v_proof 抽出的共享层。本文件覆盖：
 
 1. probe text service：
-   - 未启用评测时退化（displayed_text == line.text、save_displayed_edit 仅在差异时落盘）
+   - 未启用评测时退化（displayed_text == line.text、save_displayed_edit_result 仅在差异时落盘）
    - 启用评测时显示叠加 fake_char，但 line.text 永不被污染
    - 解析 block/line 索引：成功路径 + line/block 不在 page 中时返回 None
 
@@ -14,6 +14,8 @@
    - verified_char_crop：在 mock cache 上验证 clamp + pad 路径都被走到
 """
 from __future__ import annotations
+
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
 
 from typing import Optional
 
@@ -27,7 +29,7 @@ from app.core.quality_probe import (
     set_active_store, reset_active_store,
 )
 from app.services.proof_probe_text_service import (
-    displayed_text, save_displayed_edit, resolve_block_line_index,
+    displayed_text, save_displayed_edit_result, resolve_block_line_index,
 )
 from app.services.proof_image_service import (
     clamp_bbox_to_image, adaptive_pad_for_bbox,
@@ -115,47 +117,55 @@ def test_displayed_text_with_probe_does_NOT_overlay_line_text():
     assert line.text[7] == "己"
 
 
-def test_save_displayed_edit_no_store_propagates_change():
+def test_save_displayed_edit_result_no_store_propagates_change():
     line = _line("abc")
     block = _block([line])
     page = _page(1, [block])
-    assert save_displayed_edit(line, page, block, "abd") is True
-    assert line.final_text == "abd"
-    assert line.display_text == "abd"
+    change = save_displayed_edit_result(line, page, block, "abd")
+    assert change.text_changed is True
+    assert change.changed is True
+    assert proof_final_text(line) == "abd"
+    assert proof_display_text(line) == "abd"
 
 
-def test_save_displayed_edit_no_store_no_change_returns_false():
+def test_save_displayed_edit_result_no_store_no_change_returns_empty_change():
     line = _line("abc")
     block = _block([line])
     page = _page(1, [block])
-    assert save_displayed_edit(line, page, block, "abc") is False
+    change = save_displayed_edit_result(line, page, block, "abc")
+    assert change.changed is False
     assert line.text == "abc"
 
 
-def test_save_displayed_edit_with_probe_does_not_touch_unrelated_text():
-    """Round 15 后：save_displayed_edit 不再反向剥离 fake_char，
-    只有调用者传进来的文本才会被写入 final_text。"""
+def test_save_displayed_edit_result_with_probe_does_not_touch_unrelated_text():
+    """Stale probe anchor should not rewrite text, but must exit pending state."""
     line = _line("今天我们来学习己经发生过的历史")
     block = _block([line])
     page = _page(1, [block])
     store = ProbeStore()
-    store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"))
+    probe = Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己")
+    store.add(probe)
     set_active_store(store)
     shown = displayed_text(line, page, block)
-    # 用户未改 → 保存不发生任何变化
-    assert save_displayed_edit(line, page, block, shown) is False
+    # 锚点已不再是 true_char：正文不动，但 probe 不能继续 pending。
+    change = save_displayed_edit_result(line, page, block, shown)
+    assert change.probe_changed is True
+    assert change.changed is True
+    assert probe.observation == "corrected"
     assert line.text[7] == "己"
 
 
-def test_save_displayed_edit_block_not_in_page_falls_back_to_direct_write():
-    """resolve 失败时退化为直接写 final_text。"""
+def test_save_displayed_edit_result_block_not_in_page_is_cancelled():
+    """resolve 失败时拒绝写入，避免 stale UI 把文本写进错误 line。"""
     line = _line("abc")
     block = _block([line])
     other_block = _block([_line("xyz")])
     page = _page(1, [block])
     set_active_store(ProbeStore())
-    assert save_displayed_edit(line, page, other_block, "abd") is True
-    assert line.final_text == "abd"
+    change = save_displayed_edit_result(line, page, other_block, "abd")
+    assert change.cancelled is True
+    assert change.blocked is True
+    assert proof_display_text(line) == "abc"
 
 
 # ════════════════════════════════════════════════════════════════
@@ -244,13 +254,13 @@ def test_clamp_line_box_zero_size_returns_none():
 # ════════════════════════════════════════════════════════════════
 
 class _StubCache:
-    """模拟 PageImageCache：只关心 get_image / get_char_crop 的调用契约。"""
+    """模拟 PageImageCache：只关心 get_page_image / get_char_crop 的调用契约。"""
 
     def __init__(self, image_shape: Optional[tuple]):
         self._shape = image_shape
         self.crop_calls: list = []
 
-    def get_image(self, path):
+    def get_page_image(self, path):
         if self._shape is None:
             return None
         import numpy as np
@@ -298,23 +308,13 @@ def test_verified_char_crop_explicit_pad_overrides_adaptive():
 
 
 # ════════════════════════════════════════════════════════════════
-# 集成回归：旧 v_proof / h_proof 的旧本地名仍指向 service 实现
-# 防止后续误改时旧调用点退回到本地实现而绕过 service 层。
+# 集成回归：proof UI 不应重新内联 probe/edit 逻辑。
 # ════════════════════════════════════════════════════════════════
 
-def test_h_proof_local_aliases_point_to_service():
+def test_h_proof_uses_shared_display_and_edit_services():
     from app.ui.proof import h_proof
     from app.services import proof_probe_text_service as svc
+    from app.services.proof_edit_service import ProofEditService
+
     assert h_proof._displayed_text is svc.displayed_text
-    assert h_proof._save_displayed_edit is svc.save_displayed_edit
-    assert h_proof._resolve_block_line_index is svc.resolve_block_line_index
-
-
-def test_v_proof_verified_char_crop_delegates_to_service():
-    """验证 v_proof._verified_char_crop 不再含 inline clamp 实现。"""
-    import inspect
-    from app.ui.proof import v_proof
-    src = inspect.getsource(v_proof._verified_char_crop)
-    assert "_shared_verified_char_crop" in src
-    # inline clamp 不应再出现在 v_proof 里
-    assert "clamped_x = max(0, min(bbox.x" not in src
+    assert h_proof.ProofEditService is ProofEditService

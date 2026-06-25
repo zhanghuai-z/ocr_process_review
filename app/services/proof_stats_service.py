@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from app.core.proof_line_facts import proof_line_facts
 from app.models import OcrProject, ProofStatus
 
 
@@ -26,12 +27,13 @@ class ProofStatsService:
         for page in project.pages:
             for block in page.blocks:
                 for line in block.lines:
+                    facts = proof_line_facts(line)
                     total += 1
-                    if line.proof_status == ProofStatus.OK:
+                    if facts.status == ProofStatus.OK:
                         confirmed += 1
-                    elif line.proof_status == ProofStatus.MODIFIED:
+                    elif facts.status == ProofStatus.MODIFIED:
                         modified += 1
-                    elif line.proof_status == ProofStatus.AUTO_FLAGGED or line.review_flags:
+                    elif facts.is_auto_flagged:
                         flagged += 1
                     else:
                         pending += 1

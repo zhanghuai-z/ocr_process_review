@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
+from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
 
 
@@ -86,7 +87,8 @@ class ProofLineViewModel:
         display_text: Optional[str] = None,
         source: str = "",
     ) -> "ProofLineViewModel":
-        text = display_text if display_text is not None else line.display_text
+        facts = proof_line_facts(line)
+        text = display_text if display_text is not None else facts.text
         return cls(
             selection=ProofSelection.for_line(
                 page=page,
@@ -96,11 +98,11 @@ class ProofLineViewModel:
                 source=source,
             ),
             text=text,
-            ocr_text=line.ocr_text or "",
-            proof_status=line.proof_status.value,
-            confidence=float(line.confidence),
+            ocr_text=facts.ocr_text,
+            proof_status=facts.status_value,
+            confidence=facts.confidence,
             bbox=line.bbox,
-            review_flags=tuple(line.review_flags or ()),
+            review_flags=facts.review_flags,
             char_count=len(text),
         )
 
@@ -117,37 +119,6 @@ class ProofUpdateRequest:
     origin: Optional[int] = None
     selection: Optional[ProofSelection] = None
     source: str = ""
-
-    @classmethod
-    def from_legacy(cls, payload: Optional[Any] = None, **kwargs: Any) -> "ProofUpdateRequest":
-        if isinstance(payload, cls):
-            return payload
-        data: dict[str, Any] = {}
-        if isinstance(payload, dict):
-            data.update(payload)
-        data.update(kwargs)
-        return cls(
-            page_id=data.get("page_id"),
-            line_id=data.get("line_id"),
-            status=str(data.get("status", "")),
-            page_uid=data.get("page_uid"),
-            line_uid=data.get("line_uid"),
-            origin=data.get("origin"),
-            selection=data.get("selection"),
-            source=str(data.get("source", "")),
-        )
-
-    def to_legacy_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "page_id": self.page_id,
-            "line_id": self.line_id,
-            "status": self.status,
-            "origin": self.origin,
-            "source": self.source,
-        }
-        if self.selection is not None:
-            payload["selection"] = self.selection
-        return payload
 
 
 def proof_request_matches_page(request: ProofUpdateRequest, page: Page) -> bool:
@@ -212,35 +183,6 @@ class ProbeObservation:
     true_char: str
     fake_char: str
     observation: str = "corrected"
-
-    @classmethod
-    def from_legacy(cls, payload: Optional[Any] = None, **kwargs: Any) -> "ProbeObservation":
-        if isinstance(payload, cls):
-            return payload
-        data: dict[str, Any] = {}
-        if isinstance(payload, dict):
-            data.update(payload)
-        data.update(kwargs)
-        return cls(
-            page_number=int(data.get("page_number", 0)),
-            block_index=int(data.get("block_index", 0)),
-            line_index=int(data.get("line_index", 0)),
-            char_index=int(data.get("char_index", 0)),
-            true_char=str(data.get("true_char", "")),
-            fake_char=str(data.get("fake_char", "")),
-            observation=str(data.get("observation", "corrected")),
-        )
-
-    def to_legacy_payload(self) -> dict[str, Any]:
-        return {
-            "page_number": self.page_number,
-            "block_index": self.block_index,
-            "line_index": self.line_index,
-            "char_index": self.char_index,
-            "true_char": self.true_char,
-            "fake_char": self.fake_char,
-            "observation": self.observation,
-        }
 
 
 @dataclass(frozen=True)

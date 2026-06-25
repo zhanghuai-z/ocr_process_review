@@ -6,12 +6,13 @@ from typing import List
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QVBoxLayout,
 )
 
 from app.models import OcrProject
 from app.services.export_service import build_export_path
+from app.ui.widgets.effects import apply_soft_shadow
 
 
 @dataclass(frozen=True)
@@ -90,17 +91,37 @@ class ExportDialog(QDialog):
         self._project = project
         self._worker: ExportWorker | None = None
         self._btn_start = None
+        self.setObjectName("exportDialog")
         self.setWindowTitle("导出")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(560)
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("exportDialogCard")
+        apply_soft_shadow(card, blur_radius=20, y_offset=4, alpha=14)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 18, 18, 18)
+        card_layout.setSpacing(14)
+        layout.addWidget(card)
+
+        title = QLabel("导出文档")
+        title.setObjectName("dialogTitle")
+        card_layout.addWidget(title)
+
+        subtitle = QLabel("选择需要生成的文件格式和输出目录。")
+        subtitle.setObjectName("dialogSubtitle")
+        card_layout.addWidget(subtitle)
 
         # 格式选择
         fmt_group = QGroupBox("选择导出格式")
-        fmt_layout = QVBoxLayout(fmt_group)
+        fmt_layout = QGridLayout(fmt_group)
+        fmt_layout.setHorizontalSpacing(18)
+        fmt_layout.setVerticalSpacing(4)
         self._checkboxes: dict[str, QCheckBox] = {}
         formats = [
             ("txt",  "纯文本 (.txt)"),
@@ -113,12 +134,12 @@ class ExportDialog(QDialog):
             ("html", "HTML (.html)"),
             ("docx", "Word 文档 (.docx)"),
         ]
-        for fmt, label in formats:
+        for index, (fmt, label) in enumerate(formats):
             cb = QCheckBox(label)
             cb.setChecked(fmt in ("txt", "json", "md", "xml"))
             self._checkboxes[fmt] = cb
-            fmt_layout.addWidget(cb)
-        layout.addWidget(fmt_group)
+            fmt_layout.addWidget(cb, index // 2, index % 2)
+        card_layout.addWidget(fmt_group)
 
         # 输出目录
         dir_layout = QHBoxLayout()
@@ -127,17 +148,18 @@ class ExportDialog(QDialog):
         self._dir_edit.setPlaceholderText("选择保存目录…")
         dir_layout.addWidget(self._dir_edit)
         btn_browse = QPushButton("浏览…")
+        btn_browse.setObjectName("secondaryBtn")
         btn_browse.clicked.connect(self._browse_dir)
         dir_layout.addWidget(btn_browse)
-        layout.addLayout(dir_layout)
+        card_layout.addLayout(dir_layout)
 
         # 进度
         self._progress_lbl = QLabel("")
-        self._progress_lbl.setStyleSheet("color:#aaa;")
-        layout.addWidget(self._progress_lbl)
+        self._progress_lbl.setObjectName("muted")
+        card_layout.addWidget(self._progress_lbl)
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
-        layout.addWidget(self._progress_bar)
+        card_layout.addWidget(self._progress_bar)
 
         # 按钮
         btns = QDialogButtonBox(
@@ -145,9 +167,14 @@ class ExportDialog(QDialog):
         )
         self._btn_start = btns.button(QDialogButtonBox.StandardButton.Ok)
         self._btn_start.setText("开始导出")
+        self._btn_start.setObjectName("primaryBtn")
+        cancel_btn = btns.button(QDialogButtonBox.StandardButton.Cancel)
+        if cancel_btn is not None:
+            cancel_btn.setText("取消")
+            cancel_btn.setObjectName("secondaryBtn")
         btns.accepted.connect(self._start_export)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        card_layout.addWidget(btns)
 
     def _browse_dir(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")

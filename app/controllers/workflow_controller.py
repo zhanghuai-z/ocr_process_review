@@ -19,8 +19,9 @@ from app.core.block_payload import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
 from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_line_facts import proof_display_text
 from app.core.project_store import ProjectStore
-from app.core.proof_engine import ProofEngine
+from app.core.proof_change import ProofChangeSet
 from app.core.workflow_state import (
     STEP_HPROOF,
     STEP_IMPORT,
@@ -37,10 +38,12 @@ from app.core import quality_probe as qp
 from app.engines.hanwang import native_cache
 from app.engines.real_ocr_adapter import create_engine
 from app.models import (
-    BBox, Block, BlockType, OcrProject, Page, PageStatus, ProofStatus,
+    BBox, Block, BlockType, OcrProject, Page, PageStatus,
 )
 from app.services.ocr_pipeline import OcrPipeline, OcrProgress
+from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService
+from app.services.proof_persistence_service import ProofPersistenceService
 
 logger = get_logger(__name__)
 PARALLEL_PROOF_PAGE_KEY_ATTR = "_parallel_proof_page_key"
@@ -74,7 +77,7 @@ class WorkflowController(QObject):
         super().__init__(parent)
         self._project: Optional[OcrProject] = None
         self._store: Optional[ProjectStore] = None
-        self._proof_engine = ProofEngine()
+        self._proof_auto_flag_service = ProofAutoFlagService()
         self._proof_crop_service = ProofCropService()
         self._max_step: int = STEP_IMPORT
         self._layout_worker = None
@@ -107,10 +110,6 @@ class WorkflowController(QObject):
     @property
     def store(self) -> Optional[ProjectStore]:
         return self._store
-
-    @property
-    def proof_engine(self) -> ProofEngine:
-        return self._proof_engine
 
     @property
     def max_step(self) -> int:
@@ -269,7 +268,7 @@ class WorkflowController(QObject):
                     line.uid,
                     line.id,
                     line_idx,
-                    line.display_text,
+                    proof_display_text(line),
                     self._bbox_signature(line.bbox),
                     tuple(line.review_flags),
                 ))
@@ -452,6 +451,7 @@ class WorkflowController(QObject):
             self._store.open()
             self._project.db_path = db_path
             self._project = self._store.save_project(self._project)
+            self._save_quality_probe_sidecar()
             self._sync_native_cache_dir()
             self.project_changed.emit(self._project)
             self.status_message.emit(f"项目已保存：{db_path}")
@@ -467,18 +467,19 @@ class WorkflowController(QObject):
             return False
         try:
             self._store.save_project(self._project)
-            # 副带保存评测 sidecar（如果当前有 active store）
-            store = qp.get_active_store()
-            if store is not None and self._project.db_path:
-                side = qp.sidecar_path_for_project(self._project.db_path)
-                if side:
-                    qp.save_store_to_path(store, side)
+            self._save_quality_probe_sidecar()
             self.status_message.emit("项目已保存")
             return True
         except Exception as e:
             logger.error("Save failed: %s", e)
             self.worker_error.emit(f"保存失败：{e}")
             return False
+
+    def _save_quality_probe_sidecar(self) -> bool:
+        """Persist active quality-probe sidecar for the current project path."""
+        if not self._project or not self._store:
+            return False
+        return ProofPersistenceService(self._store, self._project).persist_quality_probe_sidecar()
 
     def has_running_workers(self) -> bool:
         """是否存在仍在运行的后台任务。"""
@@ -522,18 +523,12 @@ class WorkflowController(QObject):
         self.status_message.emit("项目已关闭")
         return True
 
-    def auto_save(self) -> None:
-        """校对时自动保存修改的行。"""
+    def auto_save(self, change: ProofChangeSet | None = None) -> None:
+        """Persist proof mutations requested by proof panels."""
         if not self._project or not self._store:
             return
         try:
-            for page in self._project.pages:
-                for block in page.blocks:
-                    for line in block.lines:
-                        if line.id and line.proof_status in (
-                            ProofStatus.MODIFIED, ProofStatus.OK
-                        ):
-                            self._store.update_line(line)
+            ProofPersistenceService(self._store, self._project).persist(change)
         except Exception as e:
             logger.warning("Auto-save failed: %s", e)
 
@@ -759,16 +754,12 @@ class WorkflowController(QObject):
         raw = progress.message or ""
         total = max(0, int(progress.total_pages))
         current = max(0, int(progress.current_page))
-        completed = max(0, int(progress.completed_pages))
         if "失败" in raw:
             if total and current:
                 return f"文字识别失败：第 {current}/{total} 页"
             return "文字识别失败"
         if "警告" in raw or "fallback" in raw.lower():
             return "文字识别完成，部分字框需要检查"
-        if total:
-            done = min(completed, total)
-            return f"文字识别中… 已完成 {done}/{total} 页"
         return "文字识别中…"
 
     # ------------------------------------------------------------------ workflow actions
@@ -891,7 +882,7 @@ class WorkflowController(QObject):
         proof_stats = self._proof_crop_service.normalize_pages(processed_pages)
 
         # 自动标记低置信行
-        flagged = self._proof_engine.auto_flag(processed_pages)
+        flagged = self._proof_auto_flag_service.auto_flag(processed_pages)
 
         self._update_max_step()
         self.ocr_finished.emit(pages)
@@ -954,10 +945,10 @@ class WorkflowController(QObject):
             phase="layout",
             current=current,
             total=total,
-            message=f"{self._layout_status_label()}中… 已完成 {current + 1}/{total} 页",
+            message=f"{self._layout_status_label()}中…",
         ))
         self.layout_progress.emit(current, total)
-        self.status_message.emit(f"{self._layout_status_label()}中… 已完成 {current + 1}/{total} 页")
+        self.status_message.emit(f"{self._layout_status_label()}中…")
 
     def start_ocr(
         self,
@@ -1177,6 +1168,23 @@ class WorkflowController(QObject):
 
         finished.connect(cleanup_finished)
 
+    @staticmethod
+    def _progress_stage_key(message: str) -> str:
+        lowered = (message or "").lower()
+        if "pp-ocrv5" in lowered and "complete" in lowered:
+            return "ppocr_done"
+        if "pp-ocrv5" in lowered or "prepass" in lowered:
+            return "ppocr"
+        if "segimg" in lowered or "分块" in message:
+            return "segimg"
+        if "recog 准备" in lowered:
+            return "recog_prepare"
+        if "hanwang ocr" in lowered:
+            return "hanwang_recog"
+        if "已写回" in message:
+            return "writeback"
+        return lowered[:48]
+
     def _clear_worker_ref(self, attr_name: str, worker) -> None:
         if getattr(self, attr_name, None) is worker:
             setattr(self, attr_name, None)
@@ -1211,15 +1219,30 @@ class OcrPipelineWorker(QThread):
             completed_pages = 0
             progress_lock = Lock()
             last_progress_emit = 0.0
+            last_progress_signature: tuple[int, int, int, int, str] | None = None
 
             def on_progress(progress: OcrProgress):
-                nonlocal completed_pages, last_progress_emit
+                nonlocal completed_pages, last_progress_emit, last_progress_signature
                 with progress_lock:
                     now = time.monotonic()
                     message = progress.message or ""
                     page_advanced = progress.completed_pages > completed_pages
+                    progress_bucket = (
+                        int(progress.current_block / max(1, progress.total_blocks) * 100)
+                        if progress.total_blocks > 0
+                        else int(progress.current_block)
+                    )
+                    signature = (
+                        int(progress.current_page),
+                        int(progress.total_pages),
+                        progress_bucket,
+                        int(progress.total_blocks),
+                        WorkflowController._progress_stage_key(message),
+                    )
+                    stage_changed = signature != last_progress_signature
                     important = (
                         page_advanced
+                        or stage_changed
                         or progress.current_block <= 0
                         or "失败" in message
                         or "警告" in message
@@ -1227,6 +1250,7 @@ class OcrPipelineWorker(QThread):
                     if important or now - last_progress_emit >= OCR_PROGRESS_MIN_EMIT_INTERVAL_SECONDS:
                         self.progress_state.emit(progress)
                         last_progress_emit = now
+                        last_progress_signature = signature
                     while completed_pages < progress.completed_pages:
                         self.progress_update.emit(completed_pages, total)
                         self.page_done.emit(completed_pages, total)

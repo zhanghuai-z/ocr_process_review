@@ -89,23 +89,23 @@ def test_round17_observe_slot_edit_publishes_event():
         key=qp.ProbeKey(1, 0, 0, 1), true_char="己", fake_char="已"))
     qp.set_active_store(store)
 
-    received: list[dict] = []
+    received: list = []
     ProofStateBus.instance().subscribe(
-        qp.TOPIC_PROBE_OBSERVED, lambda **kw: received.append(kw),
+        qp.TOPIC_PROBE_OBSERVED, received.append,
     )
     ok = qp.observe_slot_edit(store, 1, 0, 0, 1)
     assert ok is True
     assert len(received) == 1
-    assert received[0]["true_char"] == "己"
-    assert received[0]["fake_char"] == "已"
+    assert received[0].true_char == "己"
+    assert received[0].fake_char == "已"
     # 重复调用不再二次广播（已 corrected）
     qp.observe_slot_edit(store, 1, 0, 0, 1)
     assert len(received) == 1
 
 
-# ─── 3. corrected probe 立刻从 extras 退出（"进入正确集合"） ────
+# ─── 3. corrected probe 只通过 CharIndex 正常查询体现 ────
 
-def test_round17_corrected_probe_drops_from_gallery_extras():
+def test_round17_corrected_probe_uses_char_index_without_gallery_extras():
     from app.ui.proof.v_proof import VProofPanel
 
     line = Line(text="己已", confidence=0.9, bbox=BBox(0, 0, 40, 20))
@@ -128,11 +128,13 @@ def test_round17_corrected_probe_drops_from_gallery_extras():
     panel = VProofPanel()
     panel.load_pages([page])
 
-    # Round 18：extras 永远为空。corrected 通过 line.text 锚点反映；
+    # Round 18：gallery extras 已删除。corrected 通过 line.text 锚点反映；
     # gallery 集合归位由 CharIndexService.query(line.text[i]) 自然完成。
-    assert panel._extras_for_tokens(["己"]) == []
+    entries = list(panel._char_svc.query("己"))
+    assert [entry.char_idx for entry in entries] == [0]
     probe.observation = "corrected"
-    assert panel._extras_for_tokens(["己"]) == []
+    entries = list(panel._char_svc.query("己"))
+    assert [entry.char_idx for entry in entries] == [0]
     panel.close()
 
 

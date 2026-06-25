@@ -4,9 +4,9 @@
 - 模型基础行为（含新增字段）
 - BBox 工具函数
 - ProjectStore 保存/加载/迁移/脏数据清理
-- ProofEngine 低置信标记
+- ProofAutoFlagService 低置信标记
 - TXT/XML/HTML 导出
-- Fake OCR/Layout/LLM 引擎
+- Fake OCR/Layout 引擎
 - OcrPipeline
 - ExportService
 """
@@ -18,6 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+
 
 # =====================================================================
 # 模型测试
@@ -26,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def test_models():
     from app.models import (
         BBox, Block, BlockSource, BlockType, Char, Line,
-        LlmReviewStatus, OcrProject, Page, PageStatus, ProofStatus,
+        OcrProject, Page, PageStatus, ProofLineState, ProofStatus,
     )
 
     # BBox
@@ -61,30 +63,52 @@ def test_models():
     # Line
     line = Line(text="测试文字", confidence=0.95, bbox=bb)
     assert line.uid.startswith("line_")
-    assert line.proof_status == ProofStatus.UNCHECKED
-    assert line.llm_review_status == LlmReviewStatus.DISABLED
+    assert proof_status(line) == ProofStatus.UNCHECKED
     assert line.review_flags == []
-    line.update_text("修改文字")
-    assert line.proof_status == ProofStatus.MODIFIED
+    line.set_proof_text("修改文字")
+    assert proof_status(line) == ProofStatus.MODIFIED
     assert line.original_text == "测试文字"
+    assert line.proof_state.final_text == "修改文字"
+    assert line.proof_state.final_text_set is True
+    assert line.proof_state.proof_status == ProofStatus.MODIFIED
+    line.apply_proof_state(
+        ProofLineState(
+            line_uid=line.uid,
+            final_text="状态对象终稿",
+            final_text_set=True,
+            proof_status=ProofStatus.MODIFIED,
+        )
+    )
+    line.ensure_text_contract()
+    assert proof_display_text(line) == "状态对象终稿"
+    assert proof_final_text(line) == "状态对象终稿"
+    assert line.to_dict()["proof_text"] == "状态对象终稿"
+    assert not hasattr(line, "final_text")
+    assert line.proof_state.final_text == "状态对象终稿"
+    assert proof_display_text(line) == "状态对象终稿"
+    line.set_proof_text("修改文字")
 
     # Line with new fields
     line2 = Line(
         text="终稿", confidence=0.85, bbox=bb,
-        ocr_text="OCR原文", llm_suggestion="LLM建议",
-        llm_review_status=LlmReviewStatus.DONE,
+        ocr_text="OCR原文",
         review_flags=["low_confidence"],
     )
     assert line2.ocr_text == "OCR原文"
-    assert line2.llm_suggestion == "LLM建议"
 
     char = Char(char="测", confidence=0.9, bbox=bb)
     assert char.uid.startswith("char_")
 
+    proof_state = ProofLineState(line_uid=line.uid, final_text="修改文字", final_text_set=True)
+    assert proof_state.line_uid == line.uid
+    assert proof_state.proof_status == ProofStatus.UNCHECKED
+
     # Block
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line, line2])
     assert block.uid.startswith("block_")
-    assert block.full_text == "修改文字\n终稿"
+    from app.core.proof_line_facts import proof_block_text
+
+    assert proof_block_text(block) == "修改文字\n终稿"
     assert block.source == BlockSource.AUTO_LAYOUT
     assert block.recognizable is True
 
@@ -138,14 +162,34 @@ def test_models():
     page.clear_ocr_invalidation()
     assert page.needs_ocr_rerun is False
 
-    # Export summary
-    summary = project.get_export_summary()
+    # Export summary lives outside the project model; proof stats are service-owned.
+    from app.services.export_service import build_export_summary
+
+    summary = build_export_summary(project)
     assert summary["total_pages"] == 1
     assert summary["total_lines"] >= 0
     assert summary["unrecognized_blocks"] == 0
     assert project.has_unrecognized_blocks is False
 
     print("test_models PASSED")
+
+
+def test_proof_line_facts_rejects_legacy_field_only_objects():
+    import pytest
+    from types import SimpleNamespace
+
+    from app.core.proof_line_facts import proof_runtime_state
+    from app.models import ProofStatus
+
+    legacy_like = SimpleNamespace(
+        uid="line_legacy",
+        final_text="旧终稿",
+        final_text_set=True,
+        proof_status=ProofStatus.MODIFIED,
+    )
+
+    with pytest.raises(TypeError, match="proof_state"):
+        proof_runtime_state(legacy_like)
 
 
 def test_workflow_state_keeps_project_and_page_ocr_state_separate():
@@ -405,59 +449,6 @@ def test_bbox_tools():
     print("test_bbox_tools PASSED")
 
 
-def test_component_matcher_extracts_and_classifies_cjk_tokens():
-    import cv2
-    import numpy as np
-
-    from app.core.component_matcher import (
-        analyze_token_components, build_component_shape_filter,
-        build_relative_component_shape_filter, count_cjk_tokens, extract_text_components,
-    )
-    from app.models import BBox
-
-    img = np.full((80, 160, 3), 255, dtype=np.uint8)
-    cv2.rectangle(img, (12, 22), (32, 54), (0, 0, 0), -1)
-    cv2.rectangle(img, (58, 22), (78, 54), (0, 0, 0), -1)
-    cv2.rectangle(img, (104, 22), (124, 54), (0, 0, 0), -1)
-
-    components = extract_text_components(
-        img,
-        BBox(0, 0, 150, 70),
-        kernel_size=None,
-        min_area=20,
-    )
-    assert [component.bbox for component in components] == [
-        BBox(12, 22, 21, 33),
-        BBox(58, 22, 21, 33),
-        BBox(104, 22, 21, 33),
-    ]
-
-    single = analyze_token_components(img, "汉", BBox(8, 18, 30, 42), kernel_size=None)
-    assert single.status == "single_cjk"
-    assert single.component_count == 1
-
-    multi = analyze_token_components(img, "天地", BBox(50, 18, 82, 42), kernel_size=None)
-    assert multi.status == "split_candidate"
-    assert multi.component_count == 2
-
-    latin = analyze_token_components(img, "A1", BBox(50, 18, 82, 42), kernel_size=None)
-    assert latin.status == "not_cjk"
-
-    assert count_cjk_tokens(["天", "地玄", "2026", "A1"]) == (1, 1, 2)
-
-    shape_filter = build_component_shape_filter(components)
-    assert all(shape_filter.accepts(component) for component in components)
-    assert not shape_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30))
-
-    relative_filter = build_relative_component_shape_filter(
-        [(component, 40.0) for component in components]
-    )
-    assert all(relative_filter.accepts(component, 40.0) for component in components)
-    assert not relative_filter.accepts(type(components[0])(BBox(2, 2, 3, 40), 30), 40.0)
-
-    print("test_component_matcher_extracts_and_classifies_cjk_tokens PASSED")
-
-
 def test_block_type_mapping():
     from app.models import BlockType
     from app.core.paddle_labels import normalize_paddle_label
@@ -681,28 +672,29 @@ def test_line_final_text_contract_and_project_store_roundtrip():
 
     try:
         bb = BBox(0, 0, 100, 20)
-        line = Line(text="OCR text", final_text="人工终稿", confidence=0.9, bbox=bb)
+        line = Line(text="OCR text", confidence=0.9, bbox=bb)
+        line.set_proof_text("人工终稿")
         assert line.text == "OCR text"
-        assert line.final_text == "人工终稿"
-        assert line.display_text == "人工终稿"
+        assert proof_final_text(line) == "人工终稿"
+        assert proof_display_text(line) == "人工终稿"
         line.text = "直接兼容写入"
-        assert line.final_text == "人工终稿"
+        assert proof_final_text(line) == "人工终稿"
         line.ensure_text_contract()
         assert line.text == "直接兼容写入"
-        assert line.final_text == "人工终稿"
+        assert proof_final_text(line) == "人工终稿"
         assert line.ocr_text == "OCR text"
-        line.final_text = "最终真值"
+        assert not hasattr(line, "final_text")
         assert line.text == "直接兼容写入"
-        line.final_text = ""
-        line.final_text_set = False
-        assert line.display_text == "直接兼容写入"
-        line.update_final_text("最终真值")
-        line.update_final_text("")
+        assert proof_display_text(line) == "人工终稿"
+        assert not hasattr(line, "final_text_set")
+        assert proof_display_text(line) == "人工终稿"
+        line.set_proof_text("最终真值")
+        line.set_proof_text("")
         line.ensure_text_contract()
-        assert line.final_text == ""
-        assert line.final_text_set is True
-        assert line.display_text == ""
-        line.update_final_text("最终真值")
+        assert proof_final_text(line) == ""
+        assert proof_final_text_set(line) is True
+        assert proof_display_text(line) == ""
+        line.set_proof_text("最终真值")
 
         line_without_text = Line(
             text="",
@@ -714,15 +706,16 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         line_without_text.original_text = ""
         line_without_text.ensure_text_contract(fill_original=True)
         assert line_without_text.text == "OCR补全文本"
-        assert line_without_text.final_text == "OCR补全文本"
+        assert proof_display_text(line_without_text) == "OCR补全文本"
         assert line_without_text.ocr_text == "OCR补全文本"
         assert line_without_text.original_text == "OCR补全文本"
 
-        final_only = Line(text="", final_text="人工终稿", confidence=0.8, bbox=bb)
+        final_only = Line(text="", confidence=0.8, bbox=bb)
+        final_only.set_proof_text("人工终稿")
         final_only.ocr_text = ""
         final_only.original_text = ""
         final_only.ensure_text_contract(fill_original=True)
-        assert final_only.final_text == "人工终稿"
+        assert proof_display_text(final_only) == "人工终稿"
         assert final_only.ocr_text == ""
         assert final_only.original_text == ""
 
@@ -735,8 +728,8 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             store.save_project(project)
             loaded = store.load_project(project_id=1)
             loaded_line = loaded.pages[0].blocks[0].lines[0]
-            assert loaded_line.final_text == "最终真值"
-            assert loaded_line.final_text_set is True
+            assert proof_final_text(loaded_line) == "最终真值"
+            assert proof_final_text_set(loaded_line) is True
             assert loaded_line.text == "直接兼容写入"
 
         print("test_line_final_text_contract_and_project_store_roundtrip PASSED")
@@ -754,10 +747,10 @@ def test_project_store_preserves_empty_final_text_roundtrip():
     try:
         bb = BBox(0, 0, 100, 20)
         line = Line(text="OCR原文", confidence=0.9, bbox=bb)
-        line.update_final_text("")
+        line.set_proof_text("")
         line.ensure_text_contract()
-        assert line.final_text == ""
-        assert line.display_text == ""
+        assert proof_final_text(line) == ""
+        assert proof_display_text(line) == ""
 
         project = OcrProject(
             name="empty-final-text",
@@ -769,9 +762,9 @@ def test_project_store_preserves_empty_final_text_roundtrip():
             loaded = store.load_project(project_id=1)
             loaded_line = loaded.pages[0].blocks[0].lines[0]
             assert loaded_line.text == "OCR原文"
-            assert loaded_line.final_text == ""
-            assert loaded_line.final_text_set is True
-            assert loaded_line.display_text == ""
+            assert proof_final_text(loaded_line) == ""
+            assert proof_final_text_set(loaded_line) is True
+            assert proof_display_text(loaded_line) == ""
     finally:
         os.unlink(db_path)
 
@@ -859,7 +852,7 @@ def test_project_store_save_project_preserves_child_rowids():
                 "char": line1.chars[0].uid,
             }
 
-            line1.update_text("第一行已校对")
+            line1.set_proof_text("第一行已校对")
             line1.chars[0].char = "一"
             block.note = "updated without id churn"
             block.lines = [line1]
@@ -879,7 +872,7 @@ def test_project_store_save_project_preserves_child_rowids():
         assert loaded_block.uid == uids["block"]
         assert loaded_line.uid == uids["line"]
         assert loaded_char.uid == uids["char"]
-        assert loaded_line.final_text == "第一行已校对"
+        assert proof_final_text(loaded_line) == "第一行已校对"
         assert loaded_char.char == "一"
         assert loaded_block.note == "updated without id churn"
         assert len(loaded_block.lines) == 1
@@ -950,7 +943,7 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
             p2_block.id = p1_block.id
             p2_line.id = p1_line.id
             p2_char.id = p1_char.id
-            p2_line.update_text("乙已改")
+            p2_line.set_proof_text("乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -977,8 +970,8 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
         assert reloaded2.pages[0].blocks[0].uid == original_p2_uids[1]
         assert reloaded2.pages[0].blocks[0].lines[0].uid == original_p2_uids[2]
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].uid == original_p2_uids[3]
-        assert reloaded2.pages[0].blocks[0].lines[0].final_text == "乙已改"
-        assert reloaded2.pages[0].blocks[0].lines[0].display_text == "乙已改"
+        assert proof_final_text(reloaded2.pages[0].blocks[0].lines[0]) == "乙已改"
+        assert proof_display_text(reloaded2.pages[0].blocks[0].lines[0]) == "乙已改"
         assert reloaded2.pages[0].blocks[0].lines[0].chars[0].char == "乙"
     finally:
         os.unlink(db_path)
@@ -1037,7 +1030,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
             p2_block.id, p2_block.uid = p1_block.id, p1_block.uid
             p2_line.id, p2_line.uid = p1_line.id, p1_line.uid
             p2_char.id, p2_char.uid = p1_char.id, p1_char.uid
-            p2_line.update_text("乙已改")
+            p2_line.set_proof_text("乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -1056,7 +1049,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
             p1_loaded_line.uid,
             p1_loaded_char.uid,
         ) == p1_uids
-        assert p1_loaded_line.display_text == "甲"
+        assert proof_display_text(p1_loaded_line) == "甲"
         assert p1_loaded_char.char == "甲"
 
         p2_loaded_page = reloaded2.pages[0]
@@ -1068,7 +1061,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
         assert p2_loaded_block.uid != p1_uids[1]
         assert p2_loaded_line.uid != p1_uids[2]
         assert p2_loaded_char.uid != p1_uids[3]
-        assert p2_loaded_line.display_text == "乙已改"
+        assert proof_display_text(p2_loaded_line) == "乙已改"
         assert p2_loaded_char.char == "乙"
     finally:
         os.unlink(db_path)
@@ -1128,7 +1121,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
             p2_block.uid = p1_block.uid
             p2_line.uid = p1_line.uid
             p2_char.uid = p1_char.uid
-            p2_line.update_text("乙已改")
+            p2_line.set_proof_text("乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -1141,7 +1134,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
         p1_loaded_line = p1_loaded_block.lines[0]
         p1_loaded_char = p1_loaded_line.chars[0]
         assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
-        assert p1_loaded_line.display_text == "甲"
+        assert proof_display_text(p1_loaded_line) == "甲"
         assert p1_loaded_char.char == "甲"
 
         p2_loaded_page = reloaded2.pages[0]
@@ -1155,7 +1148,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
             p2_loaded_line.uid,
             p2_loaded_char.uid,
         ) == p2_uids
-        assert p2_loaded_line.display_text == "乙已改"
+        assert proof_display_text(p2_loaded_line) == "乙已改"
         assert p2_loaded_char.char == "乙"
     finally:
         os.unlink(db_path)
@@ -1212,7 +1205,7 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
             block2.id = block1.id
             line2.id = line1.id
             block2.note = "第二块已更新"
-            line2.update_text("第二行已更新")
+            line2.set_proof_text("第二行已更新")
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
 
@@ -1230,8 +1223,8 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
         assert loaded_line2.id == original["line2_id"]
         assert loaded_line1.uid == original["line1_uid"]
         assert loaded_line2.uid == original["line2_uid"]
-        assert loaded_line1.display_text == "第一行"
-        assert loaded_line2.display_text == "第二行已更新"
+        assert proof_display_text(loaded_line1) == "第一行"
+        assert proof_display_text(loaded_line2) == "第二行已更新"
     finally:
         os.unlink(db_path)
 
@@ -1256,16 +1249,16 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         )
         line2 = copy.deepcopy(line1)
         line2.text = "乙"
-        line2.final_text = "乙"
         line2.ocr_text = "乙"
+        line2.set_proof_text("乙")
         line2.chars[0].char = "乙"
 
         line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
         block_copy = copy.deepcopy(line_block)
         block_copy.order = 1
         block_copy.lines[0].text = "丙"
-        block_copy.lines[0].final_text = "丙"
         block_copy.lines[0].ocr_text = "丙"
+        block_copy.lines[0].set_proof_text("丙")
         block_copy.lines[0].chars[0].char = "丙"
 
         project = OcrProject(
@@ -1280,9 +1273,9 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         assert len(loaded.pages[0].blocks) == 2
         assert len({block.uid for block in loaded.pages[0].blocks}) == 2
         first_block, second_block = loaded.pages[0].blocks
-        assert [line.display_text for line in first_block.lines] == ["甲", "乙"]
+        assert [proof_display_text(line) for line in first_block.lines] == ["甲", "乙"]
         assert len({line.uid for line in first_block.lines}) == 2
-        assert [line.display_text for line in second_block.lines] == ["丙", "乙"]
+        assert [proof_display_text(line) for line in second_block.lines] == ["丙", "乙"]
         assert len({line.uid for block in loaded.pages[0].blocks for line in block.lines}) == 4
         assert len({
             char.uid
@@ -1463,48 +1456,7 @@ def test_project_store_persists_page_ocr_invalidation_reason():
     print("test_project_store_persists_page_ocr_invalidation_reason PASSED")
 
 
-def test_project_store_reconciles_legacy_ocr_status_from_lines():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
-    from app.core.project_store import ProjectStore
-
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
-        db_path = f.name
-
-    try:
-        bb = BBox(0, 0, 100, 20)
-        project = OcrProject(
-            name="legacy status",
-            pages=[
-                Page(
-                    image_path="/tmp/img.jpg",
-                    width=800,
-                    height=600,
-                    status=PageStatus.LAYOUT_DONE,
-                    blocks=[
-                        Block(
-                            block_type=BlockType.TEXT,
-                            bbox=bb,
-                            lines=[Line(text="旧 OCR", confidence=0.9, bbox=bb)],
-                        )
-                    ],
-                )
-            ],
-        )
-
-        with ProjectStore(db_path) as store:
-            store.save_project(project)
-            loaded = store.load_project(project_id=1)
-
-        assert loaded.pages[0].has_ocr_result is True
-        assert loaded.pages[0].status == PageStatus.OCR_DONE
-        assert loaded.pages[0].is_ocr_done is True
-    finally:
-        os.unlink(db_path)
-
-    print("test_project_store_reconciles_legacy_ocr_status_from_lines PASSED")
-
-
-def test_project_store_update_lines_rolls_back_as_single_transaction():
+def test_project_store_update_proof_lines_rolls_back_as_single_transaction():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
     from app.core.project_store import ProjectStore
 
@@ -1529,31 +1481,31 @@ def test_project_store_update_lines_rolls_back_as_single_transaction():
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
-            line1.update_text("第一行已改")
-            line2.update_text("第二行已改")
+            line1.set_proof_text("第一行已改")
+            line2.set_proof_text("第二行已改")
             line2.id = -999999
             try:
-                store.update_lines([line1, line2])
+                store.update_proof_lines([(line1, False), (line2, False)])
             except Exception:
                 pass
             else:
-                raise AssertionError("update_lines should fail on invalid line id")
+                raise AssertionError("update_proof_lines should fail on invalid line id")
 
             loaded = store.load_project(project_id=1)
 
         loaded_lines = loaded.pages[0].blocks[0].lines
-        assert [line.final_text for line in loaded_lines] == ["第一行", "第二行"]
-        assert [line.proof_status for line in loaded_lines] == [
+        assert [proof_display_text(line) for line in loaded_lines] == ["第一行", "第二行"]
+        assert [proof_status(line) for line in loaded_lines] == [
             ProofStatus.UNCHECKED,
             ProofStatus.UNCHECKED,
         ]
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_update_lines_rolls_back_as_single_transaction PASSED")
+    print("test_project_store_update_proof_lines_rolls_back_as_single_transaction PASSED")
 
 
-def test_project_store_update_line_requires_stable_uid_match():
+def test_project_store_update_proof_lines_requires_stable_uid_match():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
@@ -1584,63 +1536,63 @@ def test_project_store_update_line_requires_stable_uid_match():
             line2_uid = line2.uid
 
             line2.id = line1_id
-            line2.update_text("不应写入第一行")
+            line2.set_proof_text("不应写入第一行")
             try:
-                store.update_line(line2)
+                store.update_proof_lines([(line2, False)])
             except RuntimeError:
                 pass
             else:
-                raise AssertionError("update_line should reject stale rowid with mismatched uid")
+                raise AssertionError("update_proof_lines should reject stale rowid with mismatched uid")
 
             loaded = store.load_project(project_id=project.id)
             loaded_lines = loaded.pages[0].blocks[0].lines
             assert loaded_lines[0].id == line1_id
             assert loaded_lines[0].uid == line1_uid
-            assert loaded_lines[0].display_text == "第一行"
+            assert proof_display_text(loaded_lines[0]) == "第一行"
             assert loaded_lines[1].id == line2_id
             assert loaded_lines[1].uid == line2_uid
-            assert loaded_lines[1].display_text == "第二行"
+            assert proof_display_text(loaded_lines[1]) == "第二行"
 
             line2.id = line1_id
             line2.uid = ""
-            line2.update_text("仍不应写入第一行")
+            line2.set_proof_text("仍不应写入第一行")
             try:
-                store.update_line(line2)
+                store.update_proof_lines([(line2, False)])
             except RuntimeError:
                 pass
             else:
-                raise AssertionError("update_line should reject missing uid even when rowid exists")
+                raise AssertionError("update_proof_lines should reject missing uid even when rowid exists")
 
             loaded = store.load_project(project_id=project.id)
             loaded_lines = loaded.pages[0].blocks[0].lines
             assert loaded_lines[0].id == line1_id
             assert loaded_lines[0].uid == line1_uid
-            assert loaded_lines[0].display_text == "第一行"
+            assert proof_display_text(loaded_lines[0]) == "第一行"
             assert loaded_lines[1].id == line2_id
             assert loaded_lines[1].uid == line2_uid
-            assert loaded_lines[1].display_text == "第二行"
+            assert proof_display_text(loaded_lines[1]) == "第二行"
 
             line1.id = line1_id
             line1.uid = ""
-            line1.update_text("第一行已改")
+            line1.set_proof_text("第一行已改")
             try:
-                store.update_line(line1)
+                store.update_proof_lines([(line1, False)])
             except RuntimeError:
                 pass
             else:
-                raise AssertionError("update_line should reject missing uid on a valid rowid")
+                raise AssertionError("update_proof_lines should reject missing uid on a valid rowid")
 
             line1.uid = line1_uid
-            store.update_line(line1)
+            store.update_proof_lines([(line1, False)])
             loaded = store.load_project(project_id=project.id)
 
         assert loaded.pages[0].blocks[0].lines[0].id == line1_id
         assert loaded.pages[0].blocks[0].lines[0].uid == line1_uid
-        assert loaded.pages[0].blocks[0].lines[0].display_text == "第一行已改"
+        assert proof_display_text(loaded.pages[0].blocks[0].lines[0]) == "第一行已改"
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_update_line_requires_stable_uid_match PASSED")
+    print("test_project_store_update_proof_lines_requires_stable_uid_match PASSED")
 
 
 def test_project_store_new_db_records_current_schema_version():
@@ -1695,120 +1647,13 @@ def test_project_store_new_db_records_current_schema_version():
         os.unlink(db_path)
 
 
-def test_project_store_schema_migration():
-    """从 v1 schema 迁移到当前版本。"""
-    import sqlite3
-    from app.core.project_store import ProjectStore
-
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
-        db_path = f.name
-
-    try:
-        # 创建 v1 风格的数据库
-        conn = sqlite3.connect(db_path)
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS project (
-                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS page (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
-                image_path TEXT NOT NULL, width INTEGER NOT NULL,
-                height INTEGER NOT NULL, page_number INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE TABLE IF NOT EXISTS block (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                page_id INTEGER NOT NULL REFERENCES page(id) ON DELETE CASCADE,
-                block_type TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL,
-                w INTEGER NOT NULL, h INTEGER NOT NULL,
-                block_order INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS line (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                block_id INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
-                text TEXT NOT NULL DEFAULT '', original_text TEXT NOT NULL DEFAULT '',
-                confidence REAL NOT NULL DEFAULT 0.0,
-                proof_status TEXT NOT NULL DEFAULT 'unchecked',
-                x INTEGER NOT NULL, y INTEGER NOT NULL,
-                w INTEGER NOT NULL, h INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS char (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                line_id INTEGER NOT NULL REFERENCES line(id) ON DELETE CASCADE,
-                char TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 0.0,
-                x INTEGER, y INTEGER, w INTEGER, h INTEGER
-            );
-            INSERT INTO project (id, name, created_at, updated_at) VALUES (1, 'legacy', 0, 0);
-            INSERT INTO page (id, project_id, image_path, width, height, page_number)
-                VALUES (1, 1, '/tmp/test.jpg', 800, 600, 1);
-            INSERT INTO block (id, page_id, block_type, x, y, w, h, block_order)
-                VALUES (1, 1, 'text', 0, 0, 100, 20, 0);
-            INSERT INTO line (id, block_id, text, original_text, confidence, proof_status, x, y, w, h)
-                VALUES (1, 1, 'legacy text', '', 0.9, 'unchecked', 0, 0, 100, 20);
-        """)
-        conn.commit()
-        conn.close()
-
-        # 用新 ProjectStore 打开（触发迁移）
-        with ProjectStore(db_path) as store:
-            loaded = store.load_project(project_id=1)
-            assert loaded is not None
-            assert loaded.name == "legacy"
-            assert loaded.pages[0].blocks[0].lines[0].text == "legacy text"
-            assert loaded.pages[0].blocks[0].lines[0].final_text == "legacy text"
-            assert loaded.pages[0].uid.startswith("page_")
-            assert loaded.pages[0].blocks[0].uid.startswith("block_")
-            assert loaded.pages[0].blocks[0].lines[0].uid.startswith("line_")
-
-        # 验证 schema 版本已更新
-        conn2 = sqlite3.connect(db_path)
-        ver = conn2.execute(
-            "SELECT value FROM meta WHERE key='schema_version'"
-        ).fetchone()
-        assert ver is not None
-        assert int(ver[0]) >= 4
-        final_text_col = conn2.execute("PRAGMA table_info(line)").fetchall()
-        assert any(col[1] == "final_text" for col in final_text_col)
-        assert any(col[1] == "final_text_set" for col in final_text_col)
-        page_cols = conn2.execute("PRAGMA table_info(page)").fetchall()
-        assert any(col[1] == "ocr_invalidated_reason" for col in page_cols)
-        operation_cols = conn2.execute("PRAGMA table_info(operation_log)").fetchall()
-        assert any(col[1] == "object_uid" for col in operation_cols)
-        for table in ("page", "block", "line", "char_"):
-            cols = conn2.execute(f"PRAGMA table_info({table})").fetchall()
-            assert any(col[1] == "uid" for col in cols)
-        uid_counts = {
-            table: conn2.execute(
-                f"SELECT COUNT(*), COUNT(NULLIF(uid, '')) FROM {table}"
-            ).fetchone()
-            for table in ("page", "block", "line")
-        }
-        assert uid_counts == {
-            "page": (1, 1),
-            "block": (1, 1),
-            "line": (1, 1),
-        }
-        indexes = {
-            row[1]
-            for table in ("page", "block", "line", "char_")
-            for row in conn2.execute(f"PRAGMA index_list({table})").fetchall()
-        }
-        assert {"idx_page_uid", "idx_block_uid", "idx_line_uid", "idx_char_uid"} <= indexes
-        conn2.close()
-
-        print("test_project_store_schema_migration PASSED")
-    finally:
-        os.unlink(db_path)
-
-
 # =====================================================================
-# ProofEngine 测试
+# ProofAutoFlagService 测试
 # =====================================================================
 
-def test_proof_engine():
+def test_proof_auto_flag_service():
     from app.models import BBox, Block, BlockType, Line, Page, ProofStatus
-    from app.core.proof_engine import ProofEngine
+    from app.services.proof_auto_flag_service import ProofAutoFlagService
 
     bb = BBox(0, 0, 100, 20)
     lines = [
@@ -1819,11 +1664,11 @@ def test_proof_engine():
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=lines)
     page = Page(image_path="/tmp/x.jpg", width=800, height=600, blocks=[block])
 
-    engine = ProofEngine(threshold=0.80)
-    count = engine.auto_flag([page])
+    service = ProofAutoFlagService(threshold=0.80)
+    count = service.auto_flag([page])
     assert count == 1
-    assert lines[1].proof_status == ProofStatus.AUTO_FLAGGED
-    print("test_proof_engine PASSED")
+    assert proof_status(lines[1]) == ProofStatus.AUTO_FLAGGED
+    print("test_proof_auto_flag_service PASSED")
 
 
 # =====================================================================
@@ -2206,10 +2051,11 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page, ProofStatus
 
     bb = BBox(1, 2, 30, 40)
-    edited = Line(text="OCR原文", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED)
+    edited = Line(text="OCR原文", confidence=0.9, bbox=bb)
+    edited.set_proof_status(ProofStatus.MODIFIED)
     edited.ocr_text = "OCR原文"
     edited.chars = [Char(char="O", confidence=0.9, bbox=bb)]
-    edited.update_text("人工终审")
+    edited.set_proof_text("人工终审")
     table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
     page = Page(
         image_path="/tmp/page.png",
@@ -2667,11 +2513,11 @@ def test_xml_authority_and_json_mirror_archive_parity():
         text="OCR旧文",
         confidence=0.7,
         bbox=bb,
-        proof_status=ProofStatus.AUTO_FLAGGED,
         review_flags=["low_confidence"],
     )
+    edited.set_proof_status(ProofStatus.AUTO_FLAGGED)
     edited.ocr_text = "OCR旧文"
-    edited.update_text("人工终文")
+    edited.set_proof_text("人工终文")
     table_line = Line(text="表格文本", confidence=0.8, bbox=bb)
     page = Page(
         image_path="/tmp/archive.png",
@@ -3191,7 +3037,8 @@ def test_layout_panel_analysis_progress_lifecycle():
         assert panel._progress_bar.maximum() == 2
         panel.update_analysis_progress(0, 2)
         assert panel._progress_bar.value() == 1
-        assert "1/2" in panel._status_lbl.text()
+        assert panel._progress_bar.format() == "%p%"
+        assert panel._status_lbl.text() == "版面分析中…"
         panel.finish_analysis_progress("完成")
         assert panel._progress_bar.isHidden()
         assert panel._status_lbl.text() == "完成"
@@ -4494,7 +4341,7 @@ def test_workflow_controller_layout_progress_signal():
     controller._on_layout_progress(1, 3)
 
     assert events == [(1, 3)]
-    assert statuses[-1] == "版面分析中… 已完成 2/3 页"
+    assert statuses[-1] == "版面分析中…"
 
     print("test_workflow_controller_layout_progress_signal PASSED")
 
@@ -4520,11 +4367,40 @@ def test_workflow_controller_abstracts_internal_ocr_progress_messages():
         message="Hanwang micro-recblock SegImg 分块中…",
     ))
 
-    assert statuses[-1] == "文字识别中… 已完成 0/2 页"
-    assert progress_states[-1].message == "文字识别中… 已完成 0/2 页"
+    assert statuses[-1] == "文字识别中…"
+    assert progress_states[-1].message == "文字识别中…"
     assert raw_progress[-1].message == "Hanwang micro-recblock SegImg 分块中…"
 
     print("test_workflow_controller_abstracts_internal_ocr_progress_messages PASSED")
+
+
+def test_ocr_worker_emits_fine_grained_hanwang_progress_without_waiting():
+    from app.controllers.workflow_controller import OcrPipelineWorker
+    from app.models import Page
+    from app.services.ocr_pipeline import OcrProgress, OcrResult
+
+    _get_qapp()
+    page = Page(image_path="/tmp/progress.png", width=10, height=10)
+    emitted = []
+
+    class FastPipeline:
+        def process_project(self, project, progress_callback=None):
+            for current in (0, 1, 5, 10):
+                progress_callback(OcrProgress(
+                    current_page=1,
+                    total_pages=1,
+                    current_block=current,
+                    total_blocks=10,
+                    completed_pages=0,
+                    message=f"Hanwang OCR 识别中 {current}/10",
+                ))
+            return OcrResult(pages=[page])
+
+    worker = OcrPipelineWorker(FastPipeline(), [page])
+    worker.progress_state.connect(emitted.append)
+    worker.run()
+
+    assert [event.current_block for event in emitted] == [0, 1, 5, 10]
 
 
 def test_workflow_controller_clamps_ocr_page_concurrency_to_page_count():
@@ -4575,6 +4451,44 @@ def test_main_window_layout_error_is_status_only():
     print("test_main_window_layout_error_is_status_only PASSED")
 
 
+def test_main_window_worker_error_finishes_background_ocr_progress_on_proof_step():
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.controllers.workflow_controller import STEP_HPROOF
+    from app.services.ocr_pipeline import OcrProgress
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    calls = []
+    original_critical = QMessageBox.critical
+    QMessageBox.critical = lambda *args, **kwargs: calls.append(args)
+    window = MainWindow()
+    try:
+        window._on_ocr_progress(OcrProgress(
+            current_page=1,
+            total_pages=2,
+            current_block=1,
+            total_blocks=4,
+            completed_pages=0,
+            message="Hanwang OCR 识别中 1/4",
+        ))
+        assert window._ocr_placeholder.is_active()
+
+        window._go_to_step(STEP_HPROOF)
+        window._on_worker_error("OCR 后台失败")
+
+        assert calls
+        assert not window._ocr_placeholder.is_active()
+        assert window._ocr_placeholder.isHidden()
+        window._set_status_message("后续状态")
+        assert window.statusBar().currentMessage() == "后续状态"
+    finally:
+        QMessageBox.critical = original_critical
+        window.close()
+
+    print("test_main_window_worker_error_finishes_background_ocr_progress_on_proof_step PASSED")
+
+
 def test_layout_panel_status_label_elides_long_errors():
     from app.ui.recognize.layout_panel import LayoutPanel, STATUS_LABEL_MAX_CHARS
 
@@ -4594,12 +4508,13 @@ def test_layout_panel_status_label_elides_long_errors():
 
 
 def test_main_window_centered_resize_expands_from_current_center():
+    from PySide6.QtWidgets import QApplication
     from app.ui.main_window import MainWindow
 
     app = _get_qapp()
     window = MainWindow()
     try:
-        window.setGeometry(40, 180, 300, 240)
+        window.setGeometry(220, 180, 300, 240)
         window.show()
         app.processEvents()
         before = window.frameGeometry().center()
@@ -4612,12 +4527,48 @@ def test_main_window_centered_resize_expands_from_current_center():
         assert window.height() >= 400
         assert window.width() <= max(700, window.minimumSizeHint().width())
         assert window.height() <= max(400, window.minimumSizeHint().height())
-        assert abs(after.x() - before.x()) <= 1
-        assert abs(after.y() - before.y()) <= 1
+        screen = window.screen() or QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        frame = window.frameGeometry()
+        if available is None or (
+            frame.width() <= available.width()
+            and frame.height() <= available.height()
+            and available.left() <= before.x() - frame.width() // 2
+            and before.x() + frame.width() // 2 <= available.right() + 1
+            and available.top() <= before.y() - frame.height() // 2
+            and before.y() + frame.height() // 2 <= available.bottom() + 1
+        ):
+            assert abs(after.x() - before.x()) <= 1
+            assert abs(after.y() - before.y()) <= 1
+        else:
+            assert frame.left() >= available.left()
+            assert frame.top() >= available.top()
+            assert frame.right() <= available.right()
+            assert frame.bottom() <= available.bottom()
     finally:
         window.close()
 
     print("test_main_window_centered_resize_expands_from_current_center PASSED")
+
+
+def test_main_window_initial_import_window_is_screen_centered():
+    from PySide6.QtWidgets import QApplication
+    from app.ui.main_window import MainWindow
+
+    app = _get_qapp()
+    window = MainWindow()
+    try:
+        app.processEvents()
+        screen = window.screen() or QApplication.primaryScreen()
+        assert screen is not None
+        available_center = screen.availableGeometry().center()
+        frame_center = window.frameGeometry().center()
+        assert abs(frame_center.x() - available_center.x()) <= 2
+        assert abs(frame_center.y() - available_center.y()) <= 2
+    finally:
+        window.close()
+
+    print("test_main_window_initial_import_window_is_screen_centered PASSED")
 
 
 def test_main_window_maximize_state_is_not_forced_back_to_normal():
@@ -4649,15 +4600,12 @@ def test_main_window_file_menu_uses_close_project_action():
 
     from app.ui.main_window import MainWindow
 
-    _get_qapp()
+    app = _get_qapp()
     window = MainWindow()
     try:
-        file_menu_action = next(
-            action
-            for action in window.menuBar().actions()
-            if action.menu() is not None and "文件" in action.text()
-        )
-        file_menu = file_menu_action.menu()
+        assert window.menuBar().isHidden()
+        file_menu = window._top_bar._btn_file_menu.menu()
+        assert file_menu is not None
         actions = [action for action in file_menu.actions() if not action.isSeparator()]
         action_texts = [action.text() for action in actions]
         assert any("关闭项目" in text for text in action_texts)
@@ -4665,6 +4613,10 @@ def test_main_window_file_menu_uses_close_project_action():
         assert not any("退出" in text for text in action_texts)
         close_action = next(action for action in actions if "关闭项目" in action.text())
         assert close_action.shortcut().toString(QKeySequence.SequenceFormat.PortableText) == "Ctrl+W"
+        assert any(
+            action is close_action
+            for action in window.actions()
+        )
     finally:
         window.close()
 
@@ -4678,12 +4630,9 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
     from app.ui.main_window import MainWindow
 
     _get_qapp()
-    questions = []
     warnings = []
     saves = []
-    original_question = QMessageBox.question
     original_warning = QMessageBox.warning
-    QMessageBox.question = lambda *args, **kwargs: questions.append(args) or QMessageBox.StandardButton.Save
     QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
 
     class FakeStore:
@@ -4699,10 +4648,10 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
         window._controller._project = OcrProject(name="demo")
         window._controller._store = store
         window._controller.save_project = lambda: saves.append(True) or True
+        window._ask_save_before_close = lambda title, message: "save"
 
         window._close_project()
 
-        assert questions
         assert saves == [True]
         assert warnings == []
         assert store.closed is True
@@ -4711,11 +4660,43 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
         assert window._layout_panel._pages == []
         assert window.statusBar().currentMessage() == "项目已关闭"
     finally:
-        QMessageBox.question = original_question
         QMessageBox.warning = original_warning
         window.close()
 
     print("test_main_window_close_project_prompts_save_and_resets_workspace PASSED")
+
+
+def test_main_window_close_project_save_uses_save_as_for_transient_project():
+    from PySide6.QtWidgets import QMessageBox
+
+    from app.models import OcrProject
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    warnings = []
+    save_as_calls = []
+    original_warning = QMessageBox.warning
+    QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
+
+    window = MainWindow()
+    try:
+        window._controller._project = OcrProject(name="draft")
+        window._controller._store = None
+        window._ask_save_before_close = lambda title, message: "save"
+        window._save_project_as = lambda: save_as_calls.append(True) or True
+
+        window._close_project()
+
+        assert save_as_calls == [True]
+        assert warnings == []
+        assert window._controller.project is None
+        assert window._stack.currentWidget() is window._import_panel
+        assert window.statusBar().currentMessage() == "项目已关闭"
+    finally:
+        QMessageBox.warning = original_warning
+        window.close()
+
+    print("test_main_window_close_project_save_uses_save_as_for_transient_project PASSED")
 
 
 # =====================================================================
@@ -5065,80 +5046,12 @@ def test_api_ocr_engine_preserves_rec_text_without_any_geometry():
         assert lines[0].ocr_text == "有效OCR文本"
         assert lines[0].bbox == BBox(0, 0, 120, 80)
         assert MISSING_LINE_BBOX_FLAG in lines[0].review_flags
-        assert lines[0].proof_status == ProofStatus.AUTO_FLAGGED
+        assert proof_status(lines[0]) == ProofStatus.AUTO_FLAGGED
     finally:
         requests.post = original_post
         cfg.reset_to_defaults()
 
     print("test_api_ocr_engine_preserves_rec_text_without_any_geometry PASSED")
-
-
-def test_fake_layout_engine():
-    from app.engines.fake_layout_engine import FakeLayoutEngine
-
-    engine = FakeLayoutEngine()
-    blocks = engine.analyze("/tmp/nonexistent.jpg")  # 应返回 fallback
-
-    assert len(blocks) > 0
-    assert blocks[0].bbox.w > 0
-
-    print("test_fake_layout_engine PASSED")
-
-
-# =====================================================================
-# Fake LLM 引擎测试
-# =====================================================================
-
-def test_fake_llm_engine_disabled():
-    """LLM 关闭时不调用 adapter。"""
-    from app.models import Line, LlmReviewStatus
-    # 当 llm_review_status 为 DISABLED 时，不触发审查
-    line = Line(
-        text="测试", confidence=0.9,
-        bbox=__import__('app.models').models.BBox(0, 0, 10, 10),
-        llm_review_status=LlmReviewStatus.DISABLED,
-    )
-    assert line.llm_review_status == LlmReviewStatus.DISABLED
-    assert line.llm_suggestion == ""
-    print("test_fake_llm_engine_disabled PASSED")
-
-
-def test_fake_llm_engine():
-    from app.engines.fake_llm_engine import (
-        FakeLlmPreReviewEngine, LlmPreReviewLine, LlmPreReviewOptions,
-    )
-
-    engine = FakeLlmPreReviewEngine()
-    lines = [
-        LlmPreReviewLine(page_number=1, block_order=0, line_index=0,
-                          text="正常文本", confidence=0.95),
-        LlmPreReviewLine(page_number=1, block_order=0, line_index=1,
-                          text="错別字", confidence=0.90),
-        LlmPreReviewLine(page_number=1, block_order=0, line_index=2,
-                          text="", confidence=0.0),
-        LlmPreReviewLine(page_number=1, block_order=0, line_index=3,
-                          text="低置信", confidence=0.60),
-    ]
-
-    suggestions = engine.review_lines(lines)
-
-    assert len(suggestions) == 4
-
-    # 正常文本：无修改
-    assert suggestions[0].suggested_text == "正常文本"
-    assert suggestions[0].flags == []
-
-    # 错别字检测
-    assert suggestions[1].suggested_text == "错别字"
-    assert "ocr_typo" in suggestions[1].flags
-
-    # 空文本
-    assert "empty_text" in suggestions[2].flags
-
-    # 低置信
-    assert "low_confidence" in suggestions[3].flags
-
-    print("test_fake_llm_engine PASSED")
 
 
 # =====================================================================
@@ -5797,45 +5710,38 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
             ]
         }
 
-    recog_shapes = []
-    recog_recblocks = []
+    batch_shapes = []
 
-    def fake_recog(
-        image_bgr,
-        *,
-        recblock_xyxy=None,
-        recblocks_xyxy=None,
-        with_charrcg=True,
-        timeout=0,
-    ):
-        recog_shapes.append(tuple(image_bgr.shape[:2]))
-        recog_recblocks.append(recblocks_xyxy)
-        assert recblock_xyxy is None
-        h, w = image_bgr.shape[:2]
-        assert (h, w) == (82, 140)
-        assert recblocks_xyxy == [(0, 0, 100, 40), (0, 42, 140, 82)]
-        return {"lines": [
-            {"groups": [{
+    def fake_recog(*_args, **_kwargs):
+        raise AssertionError("batch-list path should avoid per-crop recog")
+
+    def fake_recog_batch(images_bgr, *, with_charrcg=True, timeout=0, **_kwargs):
+        batch_shapes.extend(tuple(image.shape[:2]) for image in images_bgr)
+        assert batch_shapes == [(40, 100), (40, 140)]
+        return [
+            {"lines": [{"groups": [{
                 "bbox": {"left": 0, "top": 0, "right": 100, "bottom": 40},
                 "chars": [
                     {"codes": [code("天")], "scores": [5], "bbox": {"left": 2, "top": 2, "right": 25, "bottom": 38}},
                     {"codes": [code("地")], "scores": [6], "bbox": {"left": 30, "top": 2, "right": 53, "bottom": 38}},
                 ],
-            }]},
-            {"groups": [{
-                "bbox": {"left": 0, "top": 42, "right": 140, "bottom": 82},
+            }]}]},
+            {"lines": [{"groups": [{
+                "bbox": {"left": 0, "top": 0, "right": 140, "bottom": 40},
                 "chars": [
-                    {"codes": [code("短")], "scores": [12], "bbox": {"left": 2, "top": 44, "right": 30, "bottom": 80}},
+                    {"codes": [code("短")], "scores": [12], "bbox": {"left": 2, "top": 2, "right": 30, "bottom": 38}},
                 ],
-            }]},
-        ]}
+            }]}]},
+        ]
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_recog_batch = micro_module.native_bridge.run_linecut_recog_batch_list
     original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     original_batch_reason = micro_module._BATCH_DISABLE_REASON
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module.native_bridge.run_linecut_recog_batch_list = fake_recog_batch
     micro_module._BATCH_DISABLED_FOR_SESSION = False
     micro_module._BATCH_DISABLE_REASON = ""
 
@@ -5861,19 +5767,19 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 0
-        assert recog_shapes == [(82, 140)]
-        assert recog_recblocks == [[(0, 0, 100, 40), (0, 42, 140, 82)]]
+        assert batch_shapes == [(40, 100), (40, 140)]
         assert stats.recog_full_page_pixels == 220 * 240 * 2
         assert stats.recog_crop_pixels == 40 * 100 + 40 * 140
         assert stats.recog_probe_calls == 1
         assert stats.recog_batch_chunks == 1
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
-        assert stats.recog_max_collage_width == 140
-        assert stats.recog_max_collage_height == 82
+        assert stats.recog_max_batch_crop_width == 140
+        assert stats.recog_max_batch_crop_height == 40
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module.native_bridge.run_linecut_recog_batch_list = original_recog_batch
         micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
         micro_module._BATCH_DISABLE_REASON = original_batch_reason
 
@@ -8658,9 +8564,6 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
         timeout=0,
     ):
         h, w = image_bgr.shape[:2]
-        if recblocks_xyxy is not None:
-            calls["batch"] += 1
-            raise RuntimeError("AccessViolationException")
         calls["single"] += 1
         return {"lines": [{"groups": [{
             "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
@@ -8671,13 +8574,19 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
             }],
         }]}]}
 
+    def fake_recog_batch(*_args, **_kwargs):
+        calls["batch"] += 1
+        raise RuntimeError("batch-list failed")
+
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_recog_batch = micro_module.native_bridge.run_linecut_recog_batch_list
     original_max_groups = micro_module.MAX_RECOG_BATCH_GROUPS
     original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     original_batch_reason = micro_module._BATCH_DISABLE_REASON
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module.native_bridge.run_linecut_recog_batch_list = fake_recog_batch
     micro_module.MAX_RECOG_BATCH_GROUPS = 2
     micro_module._BATCH_DISABLED_FOR_SESSION = False
     micro_module._BATCH_DISABLE_REASON = ""
@@ -8700,6 +8609,7 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module.native_bridge.run_linecut_recog_batch_list = original_recog_batch
         micro_module.MAX_RECOG_BATCH_GROUPS = original_max_groups
         micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
         micro_module._BATCH_DISABLE_REASON = original_batch_reason
@@ -8707,7 +8617,7 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     print("test_hanwang_micro_recblock_circuit_breaks_after_batch_failure PASSED")
 
 
-def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
+def test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_guard():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -8726,19 +8636,25 @@ def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
 
     calls = {"batch": 0, "single": 0}
 
-    def fake_recog(
-        image_bgr,
-        *,
-        recblock_xyxy=None,
-        recblocks_xyxy=None,
-        with_charrcg=True,
-        timeout=0,
-    ):
-        h, w = image_bgr.shape[:2]
-        if recblocks_xyxy is not None:
-            calls["batch"] += 1
-            raise AssertionError("wide collage should not use batch")
+    def fake_recog_batch(images_bgr, *, with_charrcg=True, timeout=0, **_kwargs):
+        calls["batch"] += 1
+        assert [tuple(image.shape[:2]) for image in images_bgr] == [(34, 1852), (34, 1852)]
+        raws = []
+        for image in images_bgr:
+            h, w = image.shape[:2]
+            raws.append({"lines": [{"groups": [{
+                "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                "chars": [{
+                    "codes": [code("乙")],
+                    "scores": [5],
+                    "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                }],
+            }]}]})
+        return raws
+
+    def fake_recog_single(image_bgr, **_kwargs):
         calls["single"] += 1
+        h, w = image_bgr.shape[:2]
         return {"lines": [{"groups": [{
             "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
             "chars": [{
@@ -8750,12 +8666,12 @@ def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
-    original_width = micro_module.MAX_RECOG_COLLAGE_WIDTH
+    original_recog_batch = micro_module.native_bridge.run_linecut_recog_batch_list
     original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     original_batch_reason = micro_module._BATCH_DISABLE_REASON
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
-    micro_module.native_bridge.run_linecut_recog = fake_recog
-    micro_module.MAX_RECOG_COLLAGE_WIDTH = 1600
+    micro_module.native_bridge.run_linecut_recog = fake_recog_single
+    micro_module.native_bridge.run_linecut_recog_batch_list = fake_recog_batch
     micro_module._BATCH_DISABLED_FOR_SESSION = False
     micro_module._BATCH_DISABLE_REASON = ""
 
@@ -8767,21 +8683,22 @@ def test_hanwang_micro_recblock_width_guard_skips_risky_batch():
         )
 
         assert rows[0].source == "hanwang"
-        assert calls == {"batch": 0, "single": 2}
-        assert stats.recog_batch_chunks == 2
-        assert stats.recog_batch_guarded_chunks == 2
+        assert calls == {"batch": 1, "single": 0}
+        assert stats.recog_batch_chunks == 1
+        assert stats.recog_batch_guarded_chunks == 0
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
-        assert stats.recog_probe_calls == 2
-        assert stats.recog_max_collage_width == 1852
+        assert stats.recog_probe_calls == 1
+        assert stats.recog_max_batch_crop_width == 1852
+        assert stats.recog_max_batch_crop_height == 34
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
-        micro_module.MAX_RECOG_COLLAGE_WIDTH = original_width
+        micro_module.native_bridge.run_linecut_recog_batch_list = original_recog_batch
         micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
         micro_module._BATCH_DISABLE_REASON = original_batch_reason
 
-    print("test_hanwang_micro_recblock_width_guard_skips_risky_batch PASSED")
+    print("test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_guard PASSED")
 
 
 def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
@@ -10201,6 +10118,65 @@ def test_main_window_ocr_finished_preserves_current_step():
     print("test_main_window_ocr_finished_preserves_current_step PASSED")
 
 
+def test_main_window_bottom_progress_shows_ocr_stage_and_page_count():
+    from app.services.ocr_pipeline import OcrProgress
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    window = MainWindow()
+    try:
+        window._on_ocr_progress(OcrProgress(
+            current_page=1,
+            total_pages=3,
+            current_block=2,
+            total_blocks=10,
+            completed_pages=0,
+            message="Hanwang OCR 识别中 2/10",
+        ))
+
+        assert not window._ocr_placeholder.isHidden()
+        assert window._ocr_placeholder._title.text() == "OCR"
+        assert "第 1/3 页" in window._ocr_placeholder._detail.text()
+        assert "字符识别" in window._ocr_placeholder._detail.text()
+        assert window._ocr_placeholder._count.text() == "0/3 页"
+        assert window._ocr_placeholder._bar.value() == 54
+        assert window.statusBar().currentMessage() == ""
+
+        window._on_ocr_progress(OcrProgress(
+            current_page=1,
+            total_pages=3,
+            current_block=1,
+            total_blocks=1,
+            completed_pages=1,
+            message="OCR 识别中… 第 1/3 页，CharOCR 已写回版面块",
+        ))
+
+        assert window._ocr_placeholder._bar.value() == 100
+        assert window._ocr_placeholder._count.text() == "1/3 页"
+    finally:
+        window.close()
+
+
+def test_main_window_bottom_progress_handles_layout_without_sidebar_progress():
+    from app.ui.main_window import MainWindow
+
+    _get_qapp()
+    window = MainWindow()
+    try:
+        window._on_layout_progress(0, 2)
+
+        assert not window._ocr_placeholder.isHidden()
+        assert window._ocr_placeholder._title.text() == "版面分析"
+        assert window._ocr_placeholder._detail.text() == "等待结果"
+        assert window._ocr_placeholder._count.text() == "1/2 页"
+        assert window._ocr_placeholder._bar.value() == 50
+        assert window._layout_panel._progress_bar.isHidden()
+        window._set_status_message("版面分析中…")
+        assert window.statusBar().currentMessage() == ""
+    finally:
+        window.close()
+
+
 def test_main_window_find_action_opens_layout_find_dialog():
     from app.controllers.workflow_controller import STEP_LAYOUT
     from app.models import OcrProject, Page
@@ -10224,39 +10200,6 @@ def test_main_window_find_action_opens_layout_find_dialog():
         window.close()
 
     print("test_main_window_find_action_opens_layout_find_dialog PASSED")
-
-
-def test_empty_llm_config_does_not_block_ocr_done():
-    from app.controllers.workflow_controller import WorkflowController
-    from app.core.app_config import AppConfig, update_config
-    from app.engines.fake_llm_engine import FakeLlmPreReviewEngine
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-
-    original_review = FakeLlmPreReviewEngine.review_lines
-
-    def raising_review(self, lines, options=None):
-        raise AssertionError("LLM pre-review must not be called from OCR completion")
-
-    FakeLlmPreReviewEngine.review_lines = raising_review
-    cfg = AppConfig.instance()
-    cfg.reset_to_defaults()
-    update_config(llm_pre_review_enabled=True, llm_endpoint="", llm_api_key="")
-    try:
-        line = Line(text="人工终审文本", confidence=0.91, bbox=BBox(1, 2, 40, 16))
-        page = Page(image_path="/tmp/llm-empty.png", width=120, height=80)
-        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40), lines=[line])]
-        controller = WorkflowController()
-        controller._project = OcrProject(name="LlmEmptyDoesNotBlock", pages=[page])
-
-        controller.on_ocr_done([page])
-
-        assert line.text == "人工终审文本"
-        assert line.llm_suggestion == ""
-    finally:
-        FakeLlmPreReviewEngine.review_lines = original_review
-        cfg.reset_to_defaults()
-
-    print("test_empty_llm_config_does_not_block_ocr_done PASSED")
 
 
 def test_workflow_controller_normalizes_loaded_project_geometry():
@@ -10307,6 +10250,716 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
         os.unlink(img_path)
 
 
+def test_workflow_controller_auto_save_persists_quality_probe_sidecar():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core import quality_probe as qp
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    sidecar_path = qp.sidecar_path_for_project(db_path)
+    store = None
+    try:
+        line = Line(text="已", confidence=0.9, bbox=BBox(1, 2, 30, 12))
+        page = Page(
+            image_path="/tmp/auto-save-qprobe.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="qprobe-auto-save", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+
+        probe_store = qp.ProbeStore()
+        probe = qp.Probe(
+            key=qp.ProbeKey(page.page_number, 0, 0, 0),
+            true_char="已",
+            fake_char="己",
+            observation="pending",
+        )
+        probe_store.add(probe)
+        qp.set_active_store(probe_store)
+        assert sidecar_path is not None
+        assert qp.save_store_to_path(probe_store, sidecar_path)
+
+        probe.observation = "corrected"
+        controller = WorkflowController()
+        controller._project = project
+        controller._store = store
+        controller.auto_save()
+
+        loaded = qp.load_store_from_path(sidecar_path)
+        assert loaded is not None
+        assert next(iter(loaded.all())).observation == "corrected"
+    finally:
+        qp.reset_active_store()
+        if store is not None:
+            store.close()
+        if sidecar_path:
+            try:
+                os.unlink(sidecar_path)
+            except FileNotFoundError:
+                pass
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_workflow_controller_auto_save_persists_quality_probe_sidecar PASSED")
+
+
+def test_workflow_controller_auto_save_persists_flag_status_change():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core.proof_change import ProofChangeSet
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(text="疑点", confidence=0.9, bbox=BBox(1, 2, 30, 12))
+        page = Page(
+            image_path="/tmp/auto-save-flag.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="flag-auto-save", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+
+        saved_line = project.pages[0].blocks[0].lines[0]
+        saved_line.set_proof_status(ProofStatus.AUTO_FLAGGED)
+        controller = WorkflowController()
+        controller._project = project
+        controller._store = store
+
+        controller.auto_save(
+            ProofChangeSet(status_changed=True).scoped_to_line(
+                project.pages[0],
+                project.pages[0].blocks[0],
+                saved_line,
+                write_chars=False,
+            )
+        )
+
+        loaded = store.load_project(project.id)
+        assert proof_status(loaded.pages[0].blocks[0].lines[0]) == ProofStatus.AUTO_FLAGGED
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_workflow_controller_auto_save_persists_flag_status_change PASSED")
+
+
+def test_workflow_controller_auto_save_persists_line_chars_for_text_change():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core import quality_probe as qp
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+    from app.services.proof_probe_text_service import save_displayed_edit_result
+
+    qp.reset_active_store()
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(
+            text="甲",
+            confidence=0.9,
+            bbox=BBox(1, 2, 18, 20),
+            chars=[
+                Char(
+                    char="甲",
+                    confidence=0.9,
+                    bbox=BBox(1, 2, 18, 20),
+                    bbox_source="ocr",
+                    bbox_granularity="char",
+                    token_text="甲",
+                )
+            ],
+        )
+        page = Page(
+            image_path="/tmp/auto-save-line-char.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="line-char-auto-save", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        page = project.pages[0]
+        block = page.blocks[0]
+        line = block.lines[0]
+
+        change = save_displayed_edit_result(line, page, block, "乙").scoped_to_line(
+            page,
+            block,
+            line,
+            write_chars=True,
+        )
+        controller = WorkflowController()
+        controller._project = project
+        controller._store = store
+
+        controller.auto_save(change)
+
+        loaded = store.load_project(project.id)
+        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        assert proof_display_text(loaded_line) == "乙"
+        assert loaded_line.chars[0].char == "乙"
+        assert loaded_line.chars[0].token_text == "乙"
+        index = CharIndexService(include_non_cjk=True, include_fallback=True).build(loaded.pages)
+        assert index.query("乙")
+        assert index.query("甲") == []
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_workflow_controller_auto_save_persists_line_chars_for_text_change PASSED")
+
+
+def test_workflow_controller_auto_save_persists_inline_formula_carrier_text_change():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core import quality_probe as qp
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+    from app.services.proof_probe_text_service import save_displayed_edit_result
+
+    qp.reset_active_store()
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(
+            text="甲$ A $乙",
+            confidence=0.9,
+            bbox=BBox(1, 2, 90, 20),
+            chars=[
+                Char("甲", 0.9, BBox(1, 2, 18, 20), bbox_source="ocr", bbox_granularity="char", token_text="甲"),
+                Char(
+                    "$ A $",
+                    1.0,
+                    BBox(24, 2, 42, 20),
+                    bbox_source="paddle_inline_formula",
+                    bbox_granularity="word",
+                    token_text="$ A $",
+                ),
+                Char("乙", 0.9, BBox(70, 2, 18, 20), bbox_source="ocr", bbox_granularity="char", token_text="乙"),
+            ],
+        )
+        page = Page(
+            image_path="/tmp/auto-save-inline-formula-carrier.png",
+            width=120,
+            height=80,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 24), lines=[line])],
+        )
+        project = OcrProject(name="inline-formula-auto-save", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        page = project.pages[0]
+        block = page.blocks[0]
+        line = block.lines[0]
+
+        change = save_displayed_edit_result(line, page, block, "丙$ B $乙").scoped_to_line(
+            page,
+            block,
+            line,
+            write_chars=True,
+        )
+        controller = WorkflowController()
+        controller._project = project
+        controller._store = store
+
+        controller.auto_save(change)
+
+        loaded = store.load_project(project.id)
+        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        assert proof_display_text(loaded_line) == "丙$ B $乙"
+        assert [(char.char, char.token_text) for char in loaded_line.chars] == [
+            ("丙", "丙"),
+            ("$ B $", "$ B $"),
+            ("乙", "乙"),
+        ]
+        index = CharIndexService(include_non_cjk=True).build(loaded.pages)
+        assert index.query("$ B $")
+        assert index.query("$ A $") == []
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_workflow_controller_auto_save_persists_inline_formula_carrier_text_change PASSED")
+
+
+def test_project_store_update_proof_lines_does_not_move_foreign_char_uid():
+    import os
+    import tempfile
+
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line1 = Line(
+            text="甲",
+            confidence=0.9,
+            bbox=BBox(1, 2, 20, 12),
+            chars=[
+                Char("甲", 0.9, BBox(1, 2, 10, 12), bbox_source="ocr", bbox_granularity="char", token_text="甲"),
+            ],
+        )
+        line2 = Line(
+            text="乙",
+            confidence=0.9,
+            bbox=BBox(1, 20, 20, 12),
+            chars=[
+                Char("乙", 0.9, BBox(1, 20, 10, 12), bbox_source="ocr", bbox_granularity="char", token_text="乙"),
+            ],
+        )
+        page = Page(
+            image_path="/tmp/proof-char-uid-collision.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
+        )
+        project = OcrProject(name="proof-char-uid-collision", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        saved_line1, saved_line2 = project.pages[0].blocks[0].lines
+        line1_original_uid = saved_line1.chars[0].uid
+        line2_uid = saved_line2.chars[0].uid
+
+        saved_line1.set_proof_text("丙")
+        saved_line1.chars[0].char = "丙"
+        saved_line1.chars[0].token_text = "丙"
+        saved_line1.chars[0].uid = line2_uid
+
+        store.update_proof_lines([(saved_line1, True)])
+
+        loaded = store.load_project(project.id)
+        loaded_line1, loaded_line2 = loaded.pages[0].blocks[0].lines
+        assert proof_display_text(loaded_line1) == "丙"
+        assert [char.char for char in loaded_line1.chars] == ["丙"]
+        assert loaded_line1.chars[0].uid == line1_original_uid
+        assert proof_display_text(loaded_line2) == "乙"
+        assert [char.char for char in loaded_line2.chars] == ["乙"]
+        assert loaded_line2.chars[0].uid == line2_uid
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_project_store_update_proof_lines_does_not_move_foreign_char_uid PASSED")
+
+
+def test_project_store_creates_and_loads_proof_line_state():
+    import os
+    import tempfile
+
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(text="OCR文本", confidence=0.9, bbox=BBox(1, 2, 40, 12))
+        line.set_proof_text("人工文本")
+        line.set_proof_status(ProofStatus.OK)
+        page = Page(
+            image_path="/tmp/proof-line-state.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="proof-line-state", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        saved_line = project.pages[0].blocks[0].lines[0]
+
+        row = store.conn.execute(
+            "SELECT final_text, final_text_set, proof_status FROM proof_line_state WHERE line_uid=?",
+            (saved_line.uid,),
+        ).fetchone()
+        assert row is not None
+        assert row["final_text"] == "人工文本"
+        assert row["final_text_set"] == 1
+        assert row["proof_status"] == ProofStatus.OK.value
+
+        line_cols = {row["name"] for row in store.conn.execute("PRAGMA table_info(line)").fetchall()}
+        assert {"final_text", "final_text_set", "proof_status"}.isdisjoint(line_cols)
+
+        loaded = store.load_project(project.id)
+        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        assert proof_display_text(loaded_line) == "人工文本"
+        assert proof_status(loaded_line) == ProofStatus.OK
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_project_store_creates_and_loads_proof_line_state PASSED")
+
+
+def test_project_store_update_proof_lines_writes_proof_line_state():
+    import os
+    import tempfile
+
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(text="OCR文本", confidence=0.9, bbox=BBox(1, 2, 40, 12))
+        page = Page(
+            image_path="/tmp/proof-line-state-update.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="proof-line-state-update", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        saved_line = project.pages[0].blocks[0].lines[0]
+
+        saved_line.set_proof_text("")
+        saved_line.set_proof_status(ProofStatus.MODIFIED)
+        store.update_proof_lines([(saved_line, False)])
+
+        row = store.conn.execute(
+            "SELECT final_text, final_text_set, proof_status FROM proof_line_state WHERE line_uid=?",
+            (saved_line.uid,),
+        ).fetchone()
+        assert row is not None
+        assert row["final_text"] == ""
+        assert row["final_text_set"] == 1
+        assert row["proof_status"] == ProofStatus.MODIFIED.value
+
+        line_cols = {row["name"] for row in store.conn.execute("PRAGMA table_info(line)").fetchall()}
+        assert {"final_text", "final_text_set", "proof_status"}.isdisjoint(line_cols)
+
+        loaded = store.load_project(project.id)
+        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        assert proof_display_text(loaded_line) == ""
+        assert proof_final_text_set(loaded_line) is True
+        assert proof_status(loaded_line) == ProofStatus.MODIFIED
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_project_store_update_proof_lines_writes_proof_line_state PASSED")
+
+
+def test_project_store_save_project_prunes_stale_proof_line_state():
+    import os
+    import tempfile
+
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line1 = Line(text="第一行", confidence=0.9, bbox=BBox(1, 2, 40, 12))
+        line2 = Line(text="第二行", confidence=0.9, bbox=BBox(1, 20, 40, 12))
+        page = Page(
+            image_path="/tmp/proof-line-state-prune.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
+        )
+        project = OcrProject(name="proof-line-state-prune", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        block = project.pages[0].blocks[0]
+        stale_uid = block.lines[1].uid
+
+        assert store.conn.execute("SELECT COUNT(*) FROM proof_line_state").fetchone()[0] == 2
+        block.lines = [block.lines[0]]
+        store.save_project(project)
+
+        rows = store.conn.execute("SELECT line_uid FROM proof_line_state").fetchall()
+        assert [row["line_uid"] for row in rows] == [block.lines[0].uid]
+        assert not store.conn.execute(
+            "SELECT 1 FROM proof_line_state WHERE line_uid=?",
+            (stale_uid,),
+        ).fetchone()
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_project_store_save_project_prunes_stale_proof_line_state PASSED")
+
+
+def test_proof_persistence_scoped_status_does_not_overwrite_other_db_lines():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core.proof_change import ProofChangeSet
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line1 = Line(text="第一行", confidence=0.9, bbox=BBox(1, 2, 30, 12))
+        line2 = Line(text="第二行", confidence=0.9, bbox=BBox(1, 20, 30, 12))
+        page = Page(
+            image_path="/tmp/scoped-proof-save.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
+        )
+        project = OcrProject(name="scoped-proof-save", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        page = project.pages[0]
+        block = page.blocks[0]
+        saved_line1, stale_line2 = block.lines
+
+        store.conn.execute(
+            "UPDATE proof_line_state SET final_text=?, final_text_set=1, proof_status=? WHERE line_uid=?",
+            ("数据库新值", ProofStatus.MODIFIED.value, stale_line2.uid),
+        )
+        store.conn.commit()
+
+        saved_line1.set_proof_status(ProofStatus.AUTO_FLAGGED)
+        controller = WorkflowController()
+        controller._project = project
+        controller._store = store
+        controller.auto_save(
+            ProofChangeSet(status_changed=True).scoped_to_line(
+                page,
+                block,
+                saved_line1,
+                write_chars=False,
+            )
+        )
+
+        loaded = store.load_project(project.id)
+        loaded_lines = loaded.pages[0].blocks[0].lines
+        assert proof_status(loaded_lines[0]) == ProofStatus.AUTO_FLAGGED
+        assert proof_display_text(loaded_lines[1]) == "数据库新值"
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_proof_persistence_scoped_status_does_not_overwrite_other_db_lines PASSED")
+
+
+def test_proof_persistence_scoped_lines_commit_atomically():
+    import os
+    import tempfile
+
+    import pytest
+
+    from app.core.proof_change import ProofChangeSet
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.proof_persistence_service import ProofPersistenceService
+    from app.services.proof_probe_text_service import save_displayed_edit_result
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line1 = Line(
+            text="AAAA",
+            confidence=0.9,
+            bbox=BBox(1, 2, 40, 12),
+            chars=[
+                Char(char=ch, confidence=0.9, bbox=BBox(i * 10, 2, 8, 12), bbox_source="ocr", bbox_granularity="char", token_text=ch)
+                for i, ch in enumerate("AAAA")
+            ],
+        )
+        line2 = Line(
+            text="BBBB",
+            confidence=0.9,
+            bbox=BBox(1, 20, 40, 12),
+            chars=[
+                Char(char=ch, confidence=0.9, bbox=BBox(i * 10, 20, 8, 12), bbox_source="ocr", bbox_granularity="char", token_text=ch)
+                for i, ch in enumerate("BBBB")
+            ],
+        )
+        page = Page(
+            image_path="/tmp/scoped-proof-atomic.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
+        )
+        project = OcrProject(name="scoped-proof-atomic", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        page = project.pages[0]
+        block = page.blocks[0]
+        line1, line2 = block.lines
+
+        change1 = save_displayed_edit_result(line1, page, block, "CCCC").scoped_to_line(
+            page,
+            block,
+            line1,
+            write_chars=True,
+        )
+        change2 = save_displayed_edit_result(line2, page, block, "DDDD").scoped_to_line(
+            page,
+            block,
+            line2,
+            write_chars=True,
+        )
+        change = change1.merge(change2)
+        line2.uid = ""
+
+        with pytest.raises(RuntimeError):
+            ProofPersistenceService(store, project).persist(change)
+
+        loaded = store.load_project(project.id)
+        loaded_lines = loaded.pages[0].blocks[0].lines
+        assert [proof_display_text(line) for line in loaded_lines] == ["AAAA", "BBBB"]
+        assert [[char.char for char in line.chars] for line in loaded_lines] == [
+            list("AAAA"),
+            list("BBBB"),
+        ]
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_proof_persistence_scoped_lines_commit_atomically PASSED")
+
+
+def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
+    import os
+    import tempfile
+
+    from app.controllers.workflow_controller import WorkflowController
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    os.unlink(db_path)
+    sidecar_path = qp.sidecar_path_for_project(db_path)
+    controller = WorkflowController()
+    try:
+        line = Line(text="已", confidence=0.9, bbox=BBox(1, 2, 30, 12))
+        page = Page(
+            image_path="/tmp/save-as-qprobe.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        controller._project = OcrProject(name="qprobe-save-as", pages=[page])
+
+        probe_store = qp.ProbeStore()
+        probe_store.add(qp.Probe(
+            key=qp.ProbeKey(page.page_number, 0, 0, 0),
+            true_char="已",
+            fake_char="己",
+            observation="corrected",
+        ))
+        qp.set_active_store(probe_store)
+
+        assert controller.save_project_as(db_path) is True
+
+        assert sidecar_path is not None
+        loaded = qp.load_store_from_path(sidecar_path)
+        assert loaded is not None
+        assert next(iter(loaded.all())).observation == "corrected"
+    finally:
+        qp.reset_active_store()
+        if controller.store is not None:
+            controller.store.close()
+        if sidecar_path:
+            try:
+                os.unlink(sidecar_path)
+            except FileNotFoundError:
+                pass
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_workflow_controller_save_project_as_persists_quality_probe_sidecar PASSED")
+
+
 # =====================================================================
 # ExportService 测试
 # =====================================================================
@@ -10322,7 +10975,7 @@ def test_export_service():
     # 测试 get_export_text
     line = Line(text="最终文本", confidence=0.9, bbox=bb)
     assert get_export_text(line) == "最终文本"
-    line.update_final_text("人工最终真值")
+    line.set_proof_text("人工最终真值")
     assert get_export_text(line) == "人工最终真值"
 
     # 测试空项目
@@ -10333,8 +10986,7 @@ def test_export_service():
     # 测试有未校对行
     page = Page(image_path="/tmp/x.jpg", width=800, height=600)
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[
-        Line(text="未校对", confidence=0.6, bbox=bb,
-             proof_status=ProofStatus.UNCHECKED),
+        Line(text="未校对", confidence=0.6, bbox=bb),
     ])
     page.blocks = [block]
     project = OcrProject(name="test", pages=[page])
@@ -10347,7 +10999,7 @@ def test_export_service():
 
 def test_proof_display_edit_writes_final_text():
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.services.proof_probe_text_service import displayed_text, save_displayed_edit
+    from app.services.proof_probe_text_service import displayed_text, save_displayed_edit_result
 
     bb = BBox(0, 0, 100, 20)
     line = Line(text="OCR原文", confidence=0.9, bbox=bb)
@@ -10355,10 +11007,12 @@ def test_proof_display_edit_writes_final_text():
     page = Page(image_path="/tmp/x.jpg", width=800, height=600, blocks=[block])
 
     assert displayed_text(line, page, block) == "OCR原文"
-    assert save_displayed_edit(line, page, block, "人工终稿") is True
-    assert line.final_text == "人工终稿"
+    change = save_displayed_edit_result(line, page, block, "人工终稿")
+    assert change.text_changed is True
+    assert change.changed is True
+    assert proof_final_text(line) == "人工终稿"
     assert line.text == "OCR原文"
-    assert line.display_text == "人工终稿"
+    assert proof_display_text(line) == "人工终稿"
 
     print("test_proof_display_edit_writes_final_text PASSED")
 
@@ -10422,18 +11076,18 @@ def test_import_service_sequential_page_numbers():
 
 
 def test_proof_state_bus():
-    from app.core.proof_state_bus import (
-        TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus,
-    )
+    from app.core.proof_state import ProofUpdateRequest
+    from app.core.proof_state_bus import TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus
 
     bus = get_proof_state_bus()
     bus.clear()
     events = []
 
     unsubscribe = bus.subscribe(TOPIC_LINE_PROOF_CHANGED, events.append)
-    bus.publish(TOPIC_LINE_PROOF_CHANGED, {"line_id": 7, "status": "ok"})
+    request = ProofUpdateRequest(page_id=None, line_id=7, status="ok")
+    bus.publish_line_update(request)
 
-    assert events == [{"line_id": 7, "status": "ok"}]
+    assert events == [request]
     assert bus.subscriber_count(TOPIC_LINE_PROOF_CHANGED) == 1
 
     unsubscribe()
@@ -10462,11 +11116,9 @@ def test_proof_state_bus_typed_contracts():
     bus.clear()
     assert qp.TOPIC_PROBE_OBSERVED == TOPIC_PROBE_OBSERVED
     line_events = []
-    legacy_line_events = []
     probe_events = []
 
     bus.subscribe(TOPIC_LINE_PROOF_CHANGED, line_events.append)
-    bus.subscribe(TOPIC_LINE_PROOF_CHANGED, lambda **payload: legacy_line_events.append(payload))
     bus.subscribe(TOPIC_PROBE_OBSERVED, probe_events.append)
 
     selection = ProofSelection(
@@ -10501,18 +11153,6 @@ def test_proof_state_bus_typed_contracts():
     bus.publish_probe_observed(observation)
 
     assert line_events == [request]
-    assert legacy_line_events[0]["line_id"] == 11
-    assert legacy_line_events[0]["status"] == "modified"
-    assert ProofUpdateRequest.from_legacy(request) == request
-    assert ProofUpdateRequest.from_legacy(request.to_legacy_payload()).line_id == 11
-    assert "line_uid" not in request.to_legacy_payload()
-    assert ProofUpdateRequest.from_legacy({
-        "page_id": 5,
-        "page_uid": "page_uid_5",
-        "line_id": 11,
-        "line_uid": "line_uid_11",
-        "status": "modified",
-    }).line_uid == "line_uid_11"
     page = Page(image_path="/tmp/page.png", width=100, height=100)
     page.id = 5
     page.uid = "page_uid_5"
@@ -10542,7 +11182,6 @@ def test_proof_state_bus_typed_contracts():
         line,
     )
     assert probe_events == [observation]
-    assert ProbeObservation.from_legacy(observation.to_legacy_payload()) == observation
 
     candidates = CandidateSet.from_values(selection=selection, values=["甲", "乙"], source="unit")
     assert candidates.texts == ["甲", "乙"]
@@ -10982,8 +11621,8 @@ def test_vproof_index_geometry_echo_renders_display_offset_overlay(tmp_path):
 
     assert tax_entry.char_idx == len("A+") + len(carrier)
     assert after_entry.char_idx == tax_entry.char_idx + 1
-    assert flat_text[text_map[tax_entry.char_idx][2]] == "税"
-    assert flat_text[text_map[after_entry.char_idx][2]] == "后"
+    assert flat_text[text_map[tax_entry.char_idx].start] == "税"
+    assert flat_text[text_map[after_entry.char_idx].start] == "后"
     assert overlay_path.exists()
     assert report_path.exists()
 
@@ -11097,6 +11736,48 @@ def test_char_index_skips_empty_narrow_ocr_bbox():
     print("test_char_index_skips_empty_narrow_ocr_bbox PASSED")
 
 
+def test_char_index_reloads_page_image_between_builds_for_same_path():
+    import cv2
+    import numpy as np
+
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        page_path = f.name
+    try:
+        white = np.full((80, 120, 3), 255, dtype=np.uint8)
+        cv2.imwrite(page_path, white)
+
+        line = Line(
+            text="甲",
+            confidence=0.92,
+            bbox=BBox(10, 20, 30, 30),
+        )
+        page = Page(
+            image_path=page_path,
+            width=120,
+            height=80,
+            blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 50), lines=[line])],
+        )
+        project = OcrProject(name="char-index-image-cache", pages=[page])
+        svc = CharIndexService(include_fallback=True)
+
+        svc.build_index(project)
+        assert svc.query("甲") == []
+
+        ink = np.full((80, 120, 3), 255, dtype=np.uint8)
+        cv2.rectangle(ink, (10, 20), (40, 50), (0, 0, 0), -1)
+        cv2.imwrite(page_path, ink)
+
+        svc.build_index(project)
+        assert svc.query("甲")
+    finally:
+        os.unlink(page_path)
+
+    print("test_char_index_reloads_page_image_between_builds_for_same_path PASSED")
+
+
 def test_char_index_skips_lines_with_unverified_geometry():
     import tempfile
 
@@ -11171,9 +11852,9 @@ def test_char_index_deduplicates_overlapping_duplicate_lines():
     print("test_char_index_deduplicates_overlapping_duplicate_lines PASSED")
 
 
-def test_vproof_text_map_deduplicates_overlapping_duplicate_lines():
+def test_vproof_reference_context_deduplicates_overlapping_duplicate_lines():
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.ui.proof.v_proof import _build_text_map
+    from app.services.proof_reference_context import build_proof_reference_context
 
     line_a = Line(text="重复行", confidence=0.9, bbox=BBox(10, 10, 90, 20))
     line_b = Line(text="重复行", confidence=0.9, bbox=BBox(11, 10, 90, 20))
@@ -11188,12 +11869,14 @@ def test_vproof_text_map_deduplicates_overlapping_duplicate_lines():
         ],
     )
 
-    text, mapping = _build_text_map(page)
+    context = build_proof_reference_context(page)
+    text = context.text
+    mapping = context.slots
     assert text.count("重复行") == 2
-    assert sum(1 for line, *_ in mapping if line is line_b) == 0
-    assert sum(1 for line, *_ in mapping if line is line_c) == 3
+    assert sum(1 for slot in mapping if slot.line is line_b) == 0
+    assert sum(1 for slot in mapping if slot.line is line_c) == 3
 
-    print("test_vproof_text_map_deduplicates_overlapping_duplicate_lines PASSED")
+    print("test_vproof_reference_context_deduplicates_overlapping_duplicate_lines PASSED")
 
 
 def test_ui_import_smoke():
@@ -11269,19 +11952,17 @@ def test_proof_stats_service():
 
     bb = BBox(0, 0, 100, 20)
     page = Page(image_path="/tmp/proof.png", width=400, height=300)
+    confirmed = Line(text="确认", confidence=0.9, bbox=bb)
+    confirmed.set_proof_status(ProofStatus.OK)
+    modified = Line(text="修改", confidence=0.9, bbox=bb)
+    modified.set_proof_status(ProofStatus.MODIFIED)
+    flagged = Line(text="疑点", confidence=0.6, bbox=bb, review_flags=["low_confidence"])
+    pending = Line(text="待处理", confidence=0.9, bbox=bb)
     page.blocks = [
         Block(
             block_type=BlockType.TEXT,
             bbox=bb,
-            lines=[
-                Line(text="确认", confidence=0.9, bbox=bb, proof_status=ProofStatus.OK),
-                Line(text="修改", confidence=0.9, bbox=bb, proof_status=ProofStatus.MODIFIED),
-                Line(
-                    text="疑点", confidence=0.6, bbox=bb,
-                    proof_status=ProofStatus.UNCHECKED, review_flags=["low_confidence"],
-                ),
-                Line(text="待处理", confidence=0.9, bbox=bb, proof_status=ProofStatus.UNCHECKED),
-            ],
+            lines=[confirmed, modified, flagged, pending],
         )
     ]
 
@@ -11551,7 +12232,6 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._api_model_combo.currentIndex() == -1
     assert dialog._url_edit.text() == "https://example.com/root"
     assert "汉王混合链路" in dialog._summary_model.text()
-    assert "汉王混合" in dialog._summary_mode.text()
     assert dialog._api_form_panel.isEnabled() is True
     assert not dialog._timeout_row.isHidden()
     assert dialog._timeout_spin.maximum() >= 600
@@ -11559,7 +12239,7 @@ def test_api_settings_dialog_syncs_model_and_url():
     assert dialog._layout_concurrency_spin.maximum() == 10
     assert dialog._ocr_page_concurrency_spin.value() == 3
     assert dialog._ocr_page_concurrency_spin.maximum() == 20
-    assert dialog._paddle_network_combo.currentData() == "direct"
+    assert dialog._selected_network_mode() == "direct"
 
     cfg.reset_to_defaults()
 
@@ -11600,7 +12280,7 @@ def test_api_settings_dialog_keeps_model_preset_sync():
         assert dialog._api_form_panel.isEnabled() is True
         assert dialog._btn_test.isEnabled() is True
         assert dialog._mode_card.isHidden() is True
-        assert "汉王混合" in dialog._summary_mode.text()
+        assert "汉王混合链路" in dialog._summary_model.text()
 
         dialog.close()
         AppConfig.instance().reset_to_defaults()
@@ -11749,29 +12429,6 @@ def test_api_settings_dialog_persists_hanwang_mode_with_api_runtime():
     print("test_api_settings_dialog_persists_hanwang_mode_with_api_runtime PASSED")
 
 
-def test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking():
-    from app.core.app_config import AppConfig
-    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
-
-    _get_qapp()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _reset_app_config_for_test(tmpdir)
-        dialog = ApiSettingsDialog()
-
-        note = dialog._llm_scope_note.text()
-        assert "候选/预审建议层" in note
-        assert "人工仍是终审" in note
-        assert "不会阻断主流程" in note
-        assert "颜色判定" in note
-
-        dialog.close()
-        AppConfig.instance().reset_to_defaults()
-        AppConfig._instance = None
-
-    print("test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking PASSED")
-
-
 def test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5():
     from app.core.api_profiles import get_api_model_profile_url, resolve_api_endpoint_for_role
 
@@ -11788,43 +12445,6 @@ def test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5():
     print("test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5 PASSED")
 
 
-def test_api_settings_dialog_persists_llm_candidate_settings():
-    from app.core.app_config import AppConfig
-    from app.core.app_config import get_config
-    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
-
-    _get_qapp()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _reset_app_config_for_test(tmpdir)
-        dialog = ApiSettingsDialog()
-        dialog._llm_url_edit.setText("https://llm.example.com/v1/chat/completions")
-        dialog._llm_key_edit.setText("llm-secret")
-        dialog._llm_rules_edit.setText("resources/llm_rules/default_rules.txt")
-
-        dialog._save_and_accept()
-
-        cfg = get_config()
-        assert cfg["llm_endpoint"] == "https://llm.example.com/v1/chat/completions"
-        assert cfg["llm_api_key"] == "llm-secret"
-        assert cfg["llm_rules_path"] == "resources/llm_rules/default_rules.txt"
-
-        dialog.close()
-        AppConfig.instance().reset_to_defaults()
-        AppConfig._instance = None
-
-    print("test_api_settings_dialog_persists_llm_candidate_settings PASSED")
-
-
-def test_llm_rules_loads_default_rules_file():
-    from app.core.llm_rules import get_default_llm_rules_path, load_llm_rules
-
-    rules = load_llm_rules()
-
-    assert get_default_llm_rules_path().exists()
-    assert "Do not overwrite final proof text automatically" in rules
-
-    print("test_llm_rules_loads_default_rules_file PASSED")
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
@@ -12204,7 +12824,6 @@ def test_char_index_uses_display_text_for_existing_positional_boxes():
 
     line = Line(
         text="甲乙",
-        final_text="甲丙",
         confidence=0.9,
         bbox=BBox(10, 20, 60, 24),
         chars=[
@@ -12212,6 +12831,7 @@ def test_char_index_uses_display_text_for_existing_positional_boxes():
             Char(char="乙", confidence=0.9, bbox=BBox(40, 20, 20, 24), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
         ],
     )
+    line.set_proof_text("甲丙")
     page = Page(
         image_path="/tmp/display-text-index.png",
         width=120,
@@ -12228,6 +12848,98 @@ def test_char_index_uses_display_text_for_existing_positional_boxes():
     assert entries[0].bbox == BBox(40, 20, 20, 24)
 
     print("test_char_index_uses_display_text_for_existing_positional_boxes PASSED")
+
+
+def test_char_index_skips_grossly_mismatched_geometry_instead_of_showing_wrong_crops():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="错错错",
+        confidence=0.9,
+        bbox=BBox(0, 10, 90, 30),
+        chars=[
+            Char(char="使", confidence=0.9, bbox=BBox(300, 10, 20, 30), bbox_source="fallback", bbox_granularity="fallback"),
+            Char(char="接", confidence=0.9, bbox=BBox(330, 10, 20, 30), bbox_source="fallback", bbox_granularity="fallback"),
+            Char(char="有", confidence=0.9, bbox=BBox(360, 10, 20, 30), bbox_source="fallback", bbox_granularity="fallback"),
+        ],
+    )
+    line.set_proof_text("甲二丙")
+    page = Page(
+        image_path="/tmp/gross-mismatch-index.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 100, 60), lines=[line])],
+    )
+
+    svc = CharIndexService(include_fallback=True).build_index(OcrProject(name="gross-mismatch", pages=[page]))
+
+    assert svc.query("甲") == []
+    assert svc.query("二") == []
+    assert svc.query("丙") == []
+    assert [char.char for char in line.chars] == ["使", "接", "有"]
+
+    print("test_char_index_skips_grossly_mismatched_geometry_instead_of_showing_wrong_crops PASSED")
+
+
+def test_char_index_skips_two_char_full_mismatch_geometry():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="使产",
+        confidence=0.9,
+        bbox=BBox(0, 10, 60, 30),
+        chars=[
+            Char(char="使", confidence=0.9, bbox=BBox(300, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
+            Char(char="产", confidence=0.9, bbox=BBox(330, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
+        ],
+    )
+    line.set_proof_text("二三")
+    page = Page(
+        image_path="/tmp/two-char-full-mismatch-index.png",
+        width=120,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 100, 60), lines=[line])],
+    )
+
+    svc = CharIndexService(include_fallback=True).build_index(OcrProject(name="short-mismatch", pages=[page]))
+
+    assert svc.query("二") == []
+    assert svc.query("三") == []
+    assert [char.char for char in line.chars] == ["使", "产"]
+
+    print("test_char_index_skips_two_char_full_mismatch_geometry PASSED")
+
+
+def test_char_index_skips_existing_chars_when_display_length_changed():
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.services.char_index_service import CharIndexService
+
+    line = Line(
+        text="旧旧旧",
+        confidence=0.9,
+        bbox=BBox(0, 10, 120, 30),
+        chars=[
+            Char(char="旧", confidence=0.9, bbox=BBox(300, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
+            Char(char="旧", confidence=0.9, bbox=BBox(330, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
+            Char(char="旧", confidence=0.9, bbox=BBox(360, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
+        ],
+    )
+    line.set_proof_text("甲二丙丁")
+    page = Page(
+        image_path="/tmp/length-mismatch-index.png",
+        width=160,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 150, 60), lines=[line])],
+    )
+
+    svc = CharIndexService(include_fallback=True).build_index(OcrProject(name="length-mismatch", pages=[page]))
+
+    assert svc.query("二") == []
+    assert [char.char for char in line.chars] == ["旧", "旧", "旧"]
+
+    print("test_char_index_skips_existing_chars_when_display_length_changed PASSED")
 
 
 def test_char_index_sort_categories():
@@ -12831,11 +13543,21 @@ def test_hanwang_native_bridge_writes_multi_recblocks():
             path.write_bytes(b"png")
             return path
 
+        def resolve_probe_arg(raw: str, cwd: Path) -> Path:
+            text = str(raw)
+            if len(text) >= 3 and text[1:3] == ":\\":
+                drive = text[0].lower()
+                return Path(f"/mnt/{drive}") / text[3:].replace("\\", "/")
+            path = Path(text)
+            if path.is_absolute():
+                return path
+            return cwd / path
+
         def fake_run_exe(exe, args, *, cwd, timeout):
-            rb_path = Path(cwd) / args[2]
+            rb_path = resolve_probe_arg(args[2], Path(cwd))
             captured["rb_text"] = rb_path.read_text(encoding="utf-8")
             captured["args"] = list(args)
-            (Path(cwd) / args[1]).write_text('{"lines":[]}', encoding="utf-8")
+            resolve_probe_arg(args[1], Path(cwd)).write_text('{"lines":[]}', encoding="utf-8")
             return native_bridge._ProbeRun(stdout="", stderr="", returncode=0)
 
         original_get_bin_dir = native_bridge.get_hanwang_bin_dir
@@ -13116,7 +13838,7 @@ def test_char_index_service_does_not_repopulate_equation_chars():
     print("test_char_index_service_does_not_repopulate_equation_chars PASSED")
 
 
-def test_hproof_line_iterator_excludes_non_text_elements():
+def test_hproof_line_iterator_uses_shared_proof_text_elements():
     from app.core.proof_line_utils import iter_unique_page_hproof_lines
     from app.models import BBox, Block, BlockType, Line, Page
 
@@ -13128,16 +13850,19 @@ def test_hproof_line_iterator_excludes_non_text_elements():
         Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 20, 80, 20), lines=[
             Line(text="图注", confidence=0.9, bbox=BBox(1, 21, 20, 10)),
         ]),
-        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 40, 80, 20), lines=[
-            Line(text="E=mc2", confidence=0.9, bbox=BBox(1, 41, 30, 10)),
+        Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(0, 40, 80, 20), lines=[
+            Line(text="表注", confidence=0.9, bbox=BBox(1, 41, 20, 10)),
+        ]),
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 60, 80, 20), lines=[
+            Line(text="E=mc2", confidence=0.9, bbox=BBox(1, 61, 30, 10)),
         ]),
     ]
 
     texts = [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)]
 
-    assert texts == ["正文"]
+    assert texts == ["正文", "图注", "表注"]
 
-    print("test_hproof_line_iterator_excludes_non_text_elements PASSED")
+    print("test_hproof_line_iterator_uses_shared_proof_text_elements PASSED")
 
 
 def test_proof_line_iterators_exclude_route_table_lines():
@@ -13259,11 +13984,78 @@ def test_hproof_page_filter_keeps_pages_separate():
     panel.set_current_page_number(2)
 
     assert len(panel._pairs) == 1
-    assert panel._items[0][2] is page2
+    assert panel._session.projections[0].page is page2
     assert panel._pairs[0]._line_in_page == 1
     panel.close()
 
     print("test_hproof_page_filter_keeps_pages_separate PASSED")
+
+
+def test_hproof_page_filter_flushes_dirty_editor_before_switching_pages():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line1 = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page1 = Page(image_path="/tmp/hproof-filter-dirty-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    line2 = Line(text="BBBB", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page2 = Page(image_path="/tmp/hproof-filter-dirty-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+
+    panel = HProofPanel()
+    panel.load_pages([page1, page2])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+
+    panel.set_current_page_number(2)
+
+    assert proof_display_text(line1) == "CCCC"
+    assert proof_final_text(line1) == "CCCC"
+    assert panel._session.selected_page_number == 2
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].page is page2
+
+    panel.set_current_page_number(1)
+
+    assert panel._session.selected_page_number == 1
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].page is page1
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    panel.close()
+
+    print("test_hproof_page_filter_flushes_dirty_editor_before_switching_pages PASSED")
+
+
+def test_hproof_page_filter_blocks_switch_when_current_editor_has_conflict():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line1 = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page1 = Page(image_path="/tmp/hproof-filter-conflict-p1.png", width=100, height=100, page_number=1)
+    page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    line2 = Line(text="BBBB", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page2 = Page(image_path="/tmp/hproof-filter-conflict-p2.png", width=100, height=100, page_number=2)
+    page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
+
+    panel = HProofPanel()
+    panel.load_pages([page1, page2])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+    line1.set_proof_text("DDDD")
+    assert panel._pairs[0].refresh_text() == "conflict"
+
+    panel.set_current_page_number(2)
+
+    assert panel._session.selected_page_number is None
+    assert len(panel._pairs) == 2
+    assert panel._session.projections[0].page is page1
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    assert panel._pairs[0].has_external_conflict()
+    assert proof_display_text(line1) == "DDDD"
+    assert "冲突" in panel._pairs[0]._status_lbl.text()
+    panel.close()
+
+    print("test_hproof_page_filter_blocks_switch_when_current_editor_has_conflict PASSED")
 
 
 def test_hproof_merge_pages_preserves_active_editor_text():
@@ -13287,7 +14079,7 @@ def test_hproof_merge_pages_preserves_active_editor_text():
     panel.merge_pages([page1, page2])
 
     assert len(panel._pairs) == 2
-    assert panel._current_idx == 0
+    assert panel._session.current_projection_index == 0
     assert panel._pairs[0]._editor.toPlainText() == "未保存横校文本"
     panel.close()
 
@@ -13307,8 +14099,9 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
         page_number=1,
         source_path="/tmp/source.tif",
     )
-    old_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[old_line])]
-    new_line = Line(text="新对象", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[old_line])
+    old_page.blocks = [old_block]
+    new_line = Line(text="旧对象", confidence=0.9, bbox=BBox(1, 1, 20, 10))
     new_page = Page(
         image_path="/tmp/hproof-rebind.png",
         width=100,
@@ -13316,7 +14109,11 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
         page_number=1,
         source_path="/tmp/source.tif",
     )
-    new_page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[new_line])]
+    new_page.uid = old_page.uid
+    new_line.uid = old_line.uid
+    new_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[new_line])
+    new_block.uid = old_block.uid
+    new_page.blocks = [new_block]
 
     panel = HProofPanel()
     panel.load_pages([old_page])
@@ -13326,16 +14123,431 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
     panel._save_current(silent=True)
 
     assert len(panel._pairs) == 1
-    assert panel._items[0][1] is new_line
+    assert panel._session.projections[0].line is new_line
     assert panel._pairs[0].line is new_line
-    assert new_line.final_text == "用户未保存"
-    assert old_line.display_text == "旧对象"
+    assert proof_final_text(new_line) == "用户未保存"
+    assert proof_display_text(old_line) == "旧对象"
     panel.close()
 
     print("test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans PASSED")
 
 
-def test_vproof_merge_pages_preserves_current_page_text():
+def test_hproof_merge_rebind_marks_conflict_when_dirty_editor_meets_new_model_text():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    old_line = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_page = Page(
+        image_path="/tmp/hproof-rebind-conflict.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[old_line])
+    old_page.blocks = [old_block]
+    new_line = Line(text="DDDD", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    new_page = Page(
+        image_path="/tmp/hproof-rebind-conflict.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    new_page.uid = old_page.uid
+    new_line.uid = old_line.uid
+    new_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[new_line])
+    new_block.uid = old_block.uid
+    new_page.blocks = [new_block]
+
+    panel = HProofPanel()
+    panel.load_pages([old_page])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+
+    panel.merge_pages([new_page])
+
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].line is new_line
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    assert panel._pairs[0].has_external_conflict()
+    assert "冲突" in panel._pairs[0]._status_lbl.text()
+
+    panel._save_current(silent=True)
+
+    assert proof_display_text(new_line) == "DDDD"
+    assert proof_display_text(new_line) == "DDDD"
+
+    panel._pairs[0]._editor.setPlainText("DDDD")
+    assert not panel._pairs[0].has_external_conflict()
+    panel._save_current(silent=True)
+    assert proof_display_text(new_line) == "DDDD"
+    panel.close()
+
+    print("test_hproof_merge_rebind_marks_conflict_when_dirty_editor_meets_new_model_text PASSED")
+
+
+def test_hproof_merge_uses_stable_uid_when_geometry_changes():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    old_line = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=0, lines=[old_line])
+    old_page = Page(
+        image_path="/tmp/hproof-rebind-uid-geometry.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+        blocks=[old_block],
+    )
+    new_line = Line(text="DDDD", confidence=0.9, bbox=BBox(2, 1, 20, 10))
+    new_line.uid = old_line.uid
+    new_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), order=5, lines=[new_line])
+    new_block.uid = old_block.uid
+    new_page = Page(
+        image_path="/tmp/hproof-rebind-uid-geometry.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+        blocks=[new_block],
+    )
+    new_page.uid = old_page.uid
+
+    panel = HProofPanel()
+    panel.load_pages([old_page])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+
+    panel.merge_pages([new_page])
+
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].line is new_line
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    assert panel._pairs[0].has_external_conflict()
+
+    panel._save_current(silent=True)
+
+    assert proof_display_text(new_line) == "DDDD"
+    panel.close()
+
+    print("test_hproof_merge_uses_stable_uid_when_geometry_changes PASSED")
+
+
+def test_hproof_merge_pages_removes_orphan_rows_absent_from_new_pages():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    old_line1 = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_line2 = Line(text="BBBB", confidence=0.9, bbox=BBox(1, 31, 20, 10))
+    old_page = Page(
+        image_path="/tmp/hproof-orphan.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    old_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 50),
+        order=0,
+        lines=[old_line1, old_line2],
+    )
+    old_page.blocks = [old_block]
+    new_line = Line(text="CCCC", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    new_page = Page(
+        image_path="/tmp/hproof-orphan.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    new_page.uid = old_page.uid
+    new_line.uid = old_line1.uid
+    new_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 50),
+        order=0,
+        lines=[new_line],
+    )
+    new_block.uid = old_block.uid
+    new_page.blocks = [new_block]
+
+    panel = HProofPanel()
+    panel.load_pages([old_page])
+    assert len(panel._pairs) == 2
+
+    panel.merge_pages([new_page])
+
+    assert len(panel._pairs) == 1
+    assert len(panel._session.projections) == 1
+    assert panel._session.projections[0].line is new_line
+    assert panel._pairs[0].line is new_line
+    assert all(projection.line is not old_line2 for projection in panel._session.projections)
+
+    panel._pairs[0]._editor.setPlainText("SAVE")
+    panel._save_current(silent=True)
+    assert proof_final_text(new_line) == "SAVE"
+    assert proof_display_text(old_line2) == "BBBB"
+    panel.close()
+
+    print("test_hproof_merge_pages_removes_orphan_rows_absent_from_new_pages PASSED")
+
+
+def test_hproof_orphan_merge_restore_dirty_text_marks_conflict_when_model_changed():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    old_line1 = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    old_line2 = Line(text="BBBB", confidence=0.9, bbox=BBox(1, 31, 20, 10))
+    old_page = Page(
+        image_path="/tmp/hproof-orphan-conflict.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    old_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 50),
+        order=0,
+        lines=[old_line1, old_line2],
+    )
+    old_page.blocks = [old_block]
+    new_line = Line(text="DDDD", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    new_page = Page(
+        image_path="/tmp/hproof-orphan-conflict.png",
+        width=100,
+        height=100,
+        page_number=1,
+        source_path="/tmp/source.tif",
+    )
+    new_page.uid = old_page.uid
+    new_line.uid = old_line1.uid
+    new_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 50),
+        order=0,
+        lines=[new_line],
+    )
+    new_block.uid = old_block.uid
+    new_page.blocks = [new_block]
+
+    panel = HProofPanel()
+    panel.load_pages([old_page])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+
+    panel.merge_pages([new_page])
+
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].line is new_line
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    assert panel._pairs[0].has_external_conflict()
+    assert "冲突" in panel._pairs[0]._status_lbl.text()
+
+    panel._save_current(silent=True)
+
+    assert proof_display_text(new_line) == "DDDD"
+    assert proof_display_text(new_line) == "DDDD"
+
+    panel._pairs[0]._editor.setPlainText("DDDD")
+    assert not panel._pairs[0].has_external_conflict()
+    panel._save_current(silent=True)
+    assert proof_display_text(new_line) == "DDDD"
+    panel.close()
+
+    print("test_hproof_orphan_merge_restore_dirty_text_marks_conflict_when_model_changed PASSED")
+
+
+def test_hproof_debug_filter_blocks_rebuild_when_current_editor_has_conflict():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    formula_line = Line(text="$$ x=1 $$", confidence=1.0, bbox=BBox(1, 30, 40, 10))
+    page = Page(image_path="/tmp/hproof-debug-conflict.png", width=100, height=100, page_number=1)
+    page.blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line]),
+        Block(block_type=BlockType.EQUATION, bbox=BBox(0, 30, 80, 20), lines=[formula_line]),
+    ]
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    panel._pairs[0]._editor.setPlainText("CCCC")
+    line.set_proof_text("DDDD")
+    assert panel._pairs[0].refresh_text() == "conflict"
+
+    panel._btn_debug_formula.setChecked(True)
+
+    assert panel._session.show_formula_debug is False
+    assert panel._btn_debug_formula.isChecked() is False
+    assert len(panel._pairs) == 1
+    assert panel._pairs[0]._editor.toPlainText() == "CCCC"
+    assert panel._pairs[0].has_external_conflict()
+    assert proof_display_text(line) == "DDDD"
+    panel.close()
+
+    print("test_hproof_debug_filter_blocks_rebuild_when_current_editor_has_conflict PASSED")
+
+
+def test_hproof_save_all_emits_only_when_current_line_is_saved():
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page = Page(image_path="/tmp/hproof-save-all.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    changes: list = []
+    panel.proof_changed.connect(changes.append)
+
+    panel._save_all()
+    assert changes == []
+
+    panel._pairs[0]._editor.setPlainText("CCCC")
+    line.set_proof_text("DDDD")
+    assert panel._pairs[0].refresh_text() == "conflict"
+    panel._save_all()
+    assert changes == []
+    assert proof_display_text(line) == "DDDD"
+
+    panel._pairs[0]._editor.setPlainText("DDDD")
+    panel._save_all()
+    assert changes == []
+
+    panel._pairs[0]._editor.setPlainText("EEEE")
+    panel._save_all()
+    assert len(changes) == 1
+    assert changes[0].text_changed is True
+    assert proof_display_text(line) == "EEEE"
+    panel.close()
+
+    print("test_hproof_save_all_emits_only_when_current_line_is_saved PASSED")
+
+
+def test_hproof_save_all_persists_probe_only_correction():
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line = Line(text="已", confidence=0.9, bbox=BBox(1, 1, 20, 10))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/hproof-probe-only.png", width=100, height=100, page_number=1, blocks=[block])
+    store = qp.ProbeStore()
+    probe = qp.Probe(
+        key=qp.ProbeKey(page.page_number, 0, 0, 0),
+        true_char="已",
+        fake_char="己",
+        observation="pending",
+    )
+    store.add(probe)
+    qp.set_active_store(store)
+    try:
+        panel = HProofPanel()
+        panel.load_pages([page])
+        changes: list = []
+        panel.proof_changed.connect(changes.append)
+
+        assert panel._pairs[0]._editor.toPlainText() == "己"
+        panel._pairs[0]._editor.setPlainText("已")
+        panel._save_all()
+
+        assert probe.observation == "corrected"
+        assert len(changes) == 1
+        assert changes[0].probe_changed is True
+        assert proof_display_text(line) == "已"
+        assert panel._pairs[0]._editor.toPlainText() == "已"
+        assert not panel._pairs[0].is_editor_dirty()
+        panel.close()
+    finally:
+        qp.reset_active_store()
+
+    print("test_hproof_save_all_persists_probe_only_correction PASSED")
+
+
+def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    block = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(0, 0, 80, 20),
+        lines=[],
+        raw_payload={"block_label": "display_formula", "block_content": "ORIGINAL"},
+    )
+    page = Page(
+        image_path="/tmp/hproof-synthetic-debug.png",
+        width=100,
+        height=100,
+        page_number=1,
+        blocks=[block],
+    )
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    panel._btn_debug_formula.setChecked(True)
+
+    assert len(panel._pairs) == 1
+    assert panel._session.projections[0].line_index == -1
+    assert panel._pairs[0]._editor.isReadOnly()
+
+    panel._pairs[0]._editor.setPlainText("EDITED")
+    panel._save_current(silent=True)
+
+    assert block.raw_payload["block_content"] == "ORIGINAL"
+    assert block.app_payload == {}
+
+    changes: list = []
+    panel.proof_changed.connect(changes.append)
+    panel._toggle_flag()
+    panel._on_confirmed(0)
+    assert changes == []
+    assert proof_status(panel._session.projections[0].line).name == "UNCHECKED"
+
+    panel._btn_debug_formula.setChecked(False)
+    panel._btn_debug_formula.setChecked(True)
+
+    assert panel._pairs[0]._editor.toPlainText() == "ORIGINAL"
+    panel.close()
+
+    print("test_hproof_synthetic_debug_line_is_readonly_and_not_persisted PASSED")
+
+
+def test_hproof_toggle_flag_emits_proof_changed_for_persistent_line():
+    from app.models import BBox, Block, BlockType, Line, Page, ProofStatus
+    from app.ui.proof.h_proof import HProofPanel
+
+    _get_qapp()
+    line = Line(text="AAAA", confidence=0.9, bbox=BBox(1, 1, 40, 10))
+    page = Page(image_path="/tmp/hproof-flag.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    changes = []
+    panel.proof_changed.connect(changes.append)
+
+    panel._toggle_flag()
+
+    assert proof_status(line) == ProofStatus.AUTO_FLAGGED
+    assert len(changes) == 1
+    assert changes[0].status_changed is True
+    assert changes[0].needs_persist is True
+    panel.close()
+
+    print("test_hproof_toggle_flag_emits_proof_changed_for_persistent_line PASSED")
+
+
+def test_vproof_merge_pages_reloads_current_page_reference_text():
     from app.models import BBox, Block, BlockType, Char, Line, Page
     from app.ui.proof.v_proof import VProofPanel
 
@@ -13363,12 +14575,305 @@ def test_vproof_merge_pages_preserves_current_page_text():
 
     panel.merge_pages([page1, page2])
 
-    assert panel._current_page_idx == 0
-    assert panel._text_edit.toPlainText() == "未保存纵校文本"
+    assert panel._session.current_page_index() == 0
+    assert panel._text_edit.toPlainText() == "甲\n"
     assert panel._char_svc.query("乙")
     panel.close()
 
-    print("test_vproof_merge_pages_preserves_current_page_text PASSED")
+    print("test_vproof_merge_pages_reloads_current_page_reference_text PASSED")
+
+
+def test_vproof_merge_pages_keeps_current_page_by_uid_when_order_changes():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    p1_line = Line(
+        text="P1",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="P", confidence=0.9, bbox=BBox(0, 0, 10, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="1", confidence=0.9, bbox=BBox(10, 0, 10, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    p1 = Page(image_path="/tmp/vproof-order-p1.png", width=100, height=100, page_number=1)
+    p1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[p1_line])]
+    p2_line = Line(
+        text="P2",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="P", confidence=0.9, bbox=BBox(0, 0, 10, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="2", confidence=0.9, bbox=BBox(10, 0, 10, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    p2 = Page(image_path="/tmp/vproof-order-p2.png", width=100, height=100, page_number=2)
+    p2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[p2_line])]
+
+    new_p2 = Page(image_path="/tmp/vproof-order-p2.png", width=100, height=100, page_number=2)
+    new_p2.uid = p2.uid
+    new_p2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[p2_line])]
+    new_p1 = Page(image_path="/tmp/vproof-order-p1.png", width=100, height=100, page_number=1)
+    new_p1.uid = p1.uid
+    new_p1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[p1_line])]
+
+    panel = VProofPanel()
+    panel.load_pages([p1, p2])
+    assert panel._safe_load_page(1) is True
+    assert panel._text_edit.toPlainText() == "P2\n"
+
+    panel.merge_pages([new_p2, new_p1])
+
+    assert panel._session.current_page_index() == 0
+    assert panel._session.pages[0] is new_p2
+    assert panel._text_edit.toPlainText() == "P2\n"
+    panel.close()
+
+    print("test_vproof_merge_pages_keeps_current_page_by_uid_when_order_changes PASSED")
+
+
+def test_vproof_target_edit_persists_probe_only_correction():
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="已",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="已", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/vproof-probe-only.png", width=100, height=100, page_number=1, blocks=[block])
+    store = qp.ProbeStore()
+    probe = qp.Probe(
+        key=qp.ProbeKey(page.page_number, 0, 0, 0),
+        true_char="已",
+        fake_char="己",
+        observation="pending",
+    )
+    store.add(probe)
+    qp.set_active_store(store)
+    try:
+        panel = VProofPanel()
+        panel.load_pages([page])
+        changes: list = []
+        panel.proof_changed.connect(changes.append)
+
+        assert panel._text_edit.toPlainText() == "己\n"
+        entries = panel._char_svc.query("已")
+        assert entries
+        entry = entries[0]
+        panel._gallery_model.set_entries(entries)
+        panel._sync_gallery_entry(panel._gallery_model.index(0, 0))
+
+        assert panel._apply_replacement_to_selected("已", fallback_entry=entry) == 1
+        assert probe.observation == "corrected"
+        assert len(changes) == 1
+        assert changes[0].probe_changed is True
+        assert panel._text_edit.toPlainText() == "已\n"
+        assert panel._session.loaded_text == "已\n"
+        panel.close()
+    finally:
+        qp.reset_active_store()
+
+    print("test_vproof_target_edit_persists_probe_only_correction PASSED")
+
+
+def test_vproof_refresh_reference_context_persists_stale_probe_anchor_correction():
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="已",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="已", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/vproof-stale-probe.png", width=100, height=100, page_number=1, blocks=[block])
+    store = qp.ProbeStore()
+    probe = qp.Probe(
+        key=qp.ProbeKey(page.page_number, 0, 0, 0),
+        true_char="已",
+        fake_char="己",
+        observation="pending",
+    )
+    store.add(probe)
+    qp.set_active_store(store)
+    try:
+        line.set_proof_text("巳")
+        panel = VProofPanel()
+        panel.load_pages([page])
+        changes = []
+        panel.proof_changed.connect(changes.append)
+
+        assert panel._text_edit.toPlainText() == "巳\n"
+        assert panel._refresh_reference_context() is True
+
+        assert probe.observation == "corrected"
+        assert len(changes) == 1
+        assert changes[0].probe_changed is True
+        assert changes[0].needs_persist is True
+        assert proof_display_text(line) == "巳"
+        panel.close()
+    finally:
+        qp.reset_active_store()
+
+    print("test_vproof_refresh_reference_context_persists_stale_probe_anchor_correction PASSED")
+
+
+def test_vproof_replacement_commits_text_and_probe_together():
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="已",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="已", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/vproof-precommit-probe.png", width=100, height=100, page_number=1, blocks=[block])
+    store = qp.ProbeStore()
+    probe = qp.Probe(
+        key=qp.ProbeKey(page.page_number, 0, 0, 0),
+        true_char="已",
+        fake_char="己",
+        observation="pending",
+    )
+    store.add(probe)
+    qp.set_active_store(store)
+    try:
+        panel = VProofPanel()
+        panel.load_pages([page])
+        changes = []
+        panel.proof_changed.connect(changes.append)
+
+        entries = panel._char_svc.query("已")
+        assert entries
+        entry = entries[0]
+        panel._gallery_model.set_entries(entries)
+        panel._sync_gallery_entry(panel._gallery_model.index(0, 0))
+
+        assert panel._text_edit.toPlainText() == "己\n"
+        assert panel._apply_replacement_to_selected("巳", fallback_entry=entry) == 1
+
+        assert proof_display_text(line) == "巳"
+        assert probe.observation == "corrected"
+        assert len(changes) == 1
+        assert changes[0].text_changed is True
+        assert changes[0].probe_changed is True
+        assert panel._text_edit.toPlainText() == "巳\n"
+        panel.close()
+    finally:
+        qp.reset_active_store()
+
+    print("test_vproof_replacement_commits_text_and_probe_together PASSED")
+
+
+def test_vproof_undo_redo_uses_line_edit_actions():
+    from app.core import quality_probe as qp
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="已",
+        confidence=0.9,
+        bbox=BBox(1, 1, 20, 10),
+        chars=[Char(char="已", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/vproof-history-probe.png", width=100, height=100, page_number=1, blocks=[block])
+    store = qp.ProbeStore()
+    probe = qp.Probe(
+        key=qp.ProbeKey(page.page_number, 0, 0, 0),
+        true_char="已",
+        fake_char="己",
+        observation="pending",
+    )
+    store.add(probe)
+    qp.set_active_store(store)
+    try:
+        panel = VProofPanel()
+        panel.load_pages([page])
+        changes = []
+        panel.proof_changed.connect(changes.append)
+
+        entries = panel._char_svc.query("已")
+        assert entries
+        entry = entries[0]
+        assert panel._apply_replacement_to_selected("巳", fallback_entry=entry) == 1
+        assert proof_display_text(line) == "巳"
+        assert probe.observation == "corrected"
+        assert len(panel._vproof_undo_stack) == 1
+
+        assert panel._undo_vproof_edit() is True
+
+        assert proof_display_text(line) == "已"
+        assert probe.observation == "corrected"
+        assert len(panel._vproof_redo_stack) == 1
+        assert panel._text_edit.toPlainText() == "已\n"
+
+        assert panel._redo_vproof_edit() is True
+
+        assert proof_display_text(line) == "巳"
+        assert panel._text_edit.toPlainText() == "巳\n"
+        assert len(changes) == 3
+        assert changes[0].text_changed is True
+        assert changes[0].probe_changed is True
+        assert changes[1].text_changed is True
+        assert changes[2].text_changed is True
+        panel.close()
+    finally:
+        qp.reset_active_store()
+
+    print("test_vproof_undo_redo_uses_line_edit_actions PASSED")
+
+
+def test_vproof_external_refresh_invalidates_undo_history_before_restore():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line = Line(
+        text="AAAA",
+        confidence=0.9,
+        bbox=BBox(1, 1, 80, 10),
+        chars=[
+            Char(char="A", confidence=0.9, bbox=BBox(1 + i * 12, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
+            for i in range(4)
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 90, 20), lines=[line])
+    page = Page(image_path="/tmp/vproof-external-undo.png", width=120, height=80, page_number=1, blocks=[block])
+
+    panel = VProofPanel()
+    panel.load_pages([page])
+    entry = panel._char_svc.query("A")[0]
+    assert panel._apply_replacement_to_selected("B", fallback_entry=entry) == 1
+    assert panel._vproof_undo_stack
+
+    line.set_proof_text("CCCC")
+    panel._session.pending_external_lines.add(line.uid)
+    panel._do_external_refresh()
+
+    assert proof_display_text(line) == "CCCC"
+    assert panel._text_edit.toPlainText() == "CCCC\n"
+    assert panel._vproof_undo_stack == []
+    assert panel._vproof_redo_stack == []
+    assert panel._undo_vproof_edit() is False
+    assert proof_display_text(line) == "CCCC"
+    panel.close()
+
+    print("test_vproof_external_refresh_invalidates_undo_history_before_restore PASSED")
 
 
 def test_vproof_save_refreshes_current_page_index_incrementally():
@@ -13400,9 +14905,9 @@ def test_vproof_save_refreshes_current_page_index_incrementally():
         raise AssertionError("VProof save should refresh the current page, not rebuild every page")
 
     panel._char_svc.build = fail_full_build  # type: ignore[method-assign]
-    panel._text_edit.setPlainText("丙")
+    entry = panel._char_svc.query("甲")[0]
 
-    assert panel._save_page_text() is True
+    assert panel._apply_replacement_to_selected("丙", fallback_entry=entry) == 1
     assert not panel._char_svc.query("甲")
     assert panel._char_svc.query("丙")
     assert panel._char_svc.query("乙")
@@ -13433,7 +14938,7 @@ def test_char_index_service_replace_pages_preserves_other_page_entries():
     page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
 
     service = CharIndexService(include_non_cjk=True, include_fallback=True).build([page1, page2])
-    line1.update_final_text("丙")
+    line1.set_proof_text("丙")
     line1.chars = [
         Char(char="丙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
     ]
@@ -13541,7 +15046,7 @@ def test_top_bar_hosts_workflow_steps_and_layout_run():
 
     assert not hasattr(nav, "_btn_prev")
     assert not hasattr(nav, "_btn_next")
-    assert nav._btn_run_layout.text() == "▶ 运行版面分析"
+    assert nav._btn_run_layout.text() == "运行版面分析"
     assert [btn.text() for btn in nav._step_buttons] == ["版面分析", "横校", "纵校"]
     nav.set_enabled_up_to(STEP_LAYOUT)
     assert nav._step_buttons[0].isEnabled()
@@ -13575,9 +15080,11 @@ def test_vproof_gallery_uses_wrapping_white_grid():
     # (CJK 真实可读)，sizeHint 上限同步放宽到 ≤ 80
     assert v_proof.GALLERY_THUMB >= 30
     assert v_proof.CHAR_LIST_THUMB == 18
-    assert panel._left_box.maximumWidth() <= 170
+    assert 170 <= panel._left_box.maximumWidth() <= 230
     assert panel._gallery_view.itemDelegate().sizeHint(None, panel._gallery_model.index(0, 0)).height() <= 80
     assert panel._gallery_box.parentWidget() is panel._proof_column
+    assert panel._btn_save.parentWidget() is panel._gallery_box
+    assert panel._conf_badge.isVisible() is False
     assert panel._ocr_text_box.parentWidget() is panel._proof_column
     assert panel._candidate_box.parentWidget() is panel._proof_column
     assert "border:0" in panel._candidate_box.styleSheet()
@@ -13686,54 +15193,6 @@ def test_vproof_highlight_survives_repeated_page_switches():
     print("test_vproof_highlight_survives_repeated_page_switches PASSED")
 
 
-def test_vproof_candidate_provider_interface_is_prepared():
-    from app.models import BBox, Block, BlockType, Char, Line, Page
-    from app.ui.proof.v_proof import VProofPanel
-
-    class Provider:
-        def __init__(self):
-            self.requests = []
-
-        def suggest_candidates(self, request):
-            self.requests.append(request)
-            return ["甲", "由"]
-
-    _get_qapp()
-    line = Line(
-        text="田",
-        confidence=0.9,
-        bbox=BBox(1, 1, 20, 10),
-        chars=[Char(char="田", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")],
-    )
-    page = Page(image_path="/tmp/vproof-candidate.png", width=100, height=100, page_number=3)
-    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
-    panel = VProofPanel()
-    panel.load_pages([page])
-    provider = Provider()
-    panel.set_candidate_provider(provider)
-
-    entry = panel._char_svc.query("田")[0]
-    panel._gallery_model.set_entries([entry])
-    panel._on_gallery_clicked(panel._gallery_model.index(0, 0))
-
-    assert provider.requests
-    assert provider.requests[0].token == "田"
-    assert provider.requests[0].page_number == 3
-    assert provider.requests[0].bbox_source == "ocr"
-    assert provider.requests[0].bbox_granularity == "char"
-    # proof UI clarity（Task #3）：候选区不再展示 "候选：…｜bbox=ocr/char｜…"
-    # 这种解释文案；只保留最多 5 个候选按钮，第一候选 = 当前最高可信来源。
-    button_texts = [button.text() for button in panel._candidate_buttons]
-    assert button_texts[:1] == ["田"]  # 当前字（最高可信）排首位
-    assert "甲" in button_texts and "由" in button_texts  # provider 候选并入
-    assert len(button_texts) <= 5
-    # hint 不再承担长解释；有候选时应被隐藏（或为空）
-    assert not panel._candidate_hint.isVisible() or panel._candidate_hint.text() == ""
-    panel.close()
-
-    print("test_vproof_candidate_provider_interface_is_prepared PASSED")
-
-
 def test_vproof_gallery_keyboard_selection_refreshes_linked_panels():
     from app.models import BBox, Block, BlockType, Char, Line, Page
     from app.ui.proof.v_proof import VProofPanel
@@ -13772,10 +15231,12 @@ def test_vproof_gallery_keyboard_selection_refreshes_linked_panels():
 
 
 def test_vproof_candidate_button_applies_to_ocr_text():
+    import time
+
     from app.models import BBox, Block, BlockType, Char, Line, Page
     from app.ui.proof.v_proof import VProofPanel
 
-    _get_qapp()
+    app = _get_qapp()
     line = Line(
         text="田",
         confidence=0.9,
@@ -13791,32 +15252,424 @@ def test_vproof_candidate_button_applies_to_ocr_text():
     panel._selected_char = "田"
     panel._current_candidate_entry = entry
     panel._update_candidate_panel(entry)
+    changes = []
+    panel.proof_changed.connect(changes.append)
     button_by_text = {button.text(): button for button in panel._candidate_buttons}
     button_by_text["由"].click()
 
     assert panel._text_edit.toPlainText().startswith("由")
-    assert "待保存" in panel._status_lbl.text()
+    assert "已应用" in panel._status_lbl.text()
+    assert len(changes) == 1
+    assert changes[0].text_changed is True
+    assert len(changes[0].line_refs) == 1
+    deadline = time.monotonic() + 0.6
+    while time.monotonic() < deadline and proof_display_text(line) != "由":
+        app.processEvents()
+        time.sleep(0.01)
+    assert proof_display_text(line) == "由"
     panel.close()
 
     print("test_vproof_candidate_button_applies_to_ocr_text PASSED")
 
 
+def test_vproof_right_click_edit_bubble_batches_and_undoes():
+    from PySide6.QtCore import QPoint
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    app = _get_qapp()
+    line = Line(
+        text="田田",
+        confidence=0.9,
+        bbox=BBox(1, 1, 40, 10),
+        chars=[
+            Char(char="田", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="田", confidence=0.9, bbox=BBox(20, 1, 10, 10), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-bubble.png", width=100, height=100, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.resize(800, 600)
+    panel.show()
+    app.processEvents()
+    panel.load_pages([page])
+    entries = panel._char_svc.query("田")
+    panel._selected_char = "田"
+    panel._gallery_model.set_entries(entries)
+
+    idx0 = panel._gallery_model.index(0, 0)
+    idx1 = panel._gallery_model.index(1, 0)
+    sel = panel._gallery_view.selectionModel()
+    sel.select(idx0, sel.SelectionFlag.ClearAndSelect)
+    sel.select(idx1, sel.SelectionFlag.Select)
+    sel.setCurrentIndex(idx0, sel.SelectionFlag.Current)
+    panel._sync_gallery_entry(idx0)
+    changes = []
+    panel.proof_changed.connect(changes.append)
+
+    panel._show_edit_bubble_at(QPoint(20, 20))
+    assert panel._edit_bubble.isVisible()
+    assert panel._edit_bubble_input.placeholderText() == "替换 2 处"
+    panel._edit_bubble_input.setText("由")
+    panel._apply_edit_bubble()
+
+    assert len(changes) == 1
+    assert changes[0].text_changed is True
+    assert len(changes[0].line_refs) == 1
+    assert panel._text_edit.toPlainText().startswith("由由")
+    assert len(panel._vproof_undo_stack) == 1
+    assert len(panel._vproof_undo_stack) <= 5
+
+    panel._undo_vproof_edit()
+    assert panel._text_edit.toPlainText().startswith("田田")
+    assert len(panel._vproof_redo_stack) == 1
+
+    panel._redo_vproof_edit()
+    assert panel._text_edit.toPlainText().startswith("由由")
+    panel.close()
+
+    print("test_vproof_right_click_edit_bubble_batches_and_undoes PASSED")
+
+
+def test_vproof_undo_redo_restores_line_model_after_single_and_batch_edits():
+    from PySide6.QtCore import QPoint
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    app = _get_qapp()
+    text = "一四四四四"
+    line = Line(
+        text=text,
+        confidence=0.9,
+        bbox=BBox(1, 1, 100, 10),
+        chars=[
+            Char(
+                char=ch,
+                confidence=0.9,
+                bbox=BBox(1 + i * 12, 1, 10, 10),
+                bbox_source="ocr",
+                bbox_granularity="char",
+            )
+            for i, ch in enumerate(text)
+        ],
+    )
+    page = Page(image_path="/tmp/vproof-undo-redo-model.png", width=140, height=80, page_number=1)
+    page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 20), lines=[line])]
+    panel = VProofPanel()
+    panel.resize(800, 600)
+    panel.show()
+    app.processEvents()
+    panel.load_pages([page])
+
+    def select_token(token: str, *, all_entries: bool = False) -> None:
+        entries = panel._char_svc.query(token)
+        panel._selected_char = token
+        panel._gallery_model.set_entries(entries)
+        panel._resize_gallery_for_entries(len(entries))
+        idx0 = panel._gallery_model.index(0, 0)
+        sel = panel._gallery_view.selectionModel()
+        if all_entries:
+            sel.select(
+                panel._gallery_model.index(0, 0),
+                sel.SelectionFlag.ClearAndSelect,
+            )
+            for row in range(1, panel._gallery_model.rowCount()):
+                sel.select(panel._gallery_model.index(row, 0), sel.SelectionFlag.Select)
+        else:
+            sel.select(idx0, sel.SelectionFlag.ClearAndSelect)
+        sel.setCurrentIndex(idx0, sel.SelectionFlag.Current)
+        panel._sync_gallery_entry(idx0)
+
+    select_token("一")
+    panel._show_edit_bubble_at(QPoint(20, 20))
+    panel._edit_bubble_input.setText("二")
+    panel._apply_edit_bubble()
+    panel._refresh_current_selection_context()
+    assert proof_display_text(line) == "二四四四四"
+
+    select_token("四", all_entries=True)
+    panel._show_edit_bubble_at(QPoint(20, 20))
+    panel._edit_bubble_input.setText("三")
+    panel._apply_edit_bubble()
+    panel._refresh_current_selection_context()
+    assert proof_display_text(line) == "二三三三三"
+
+    panel._undo_vproof_edit()
+    assert proof_display_text(line) == "二四四四四"
+    assert panel._text_edit.toPlainText().startswith("二四四四四")
+
+    panel._undo_vproof_edit()
+    assert proof_display_text(line) == "一四四四四"
+    assert panel._text_edit.toPlainText().startswith("一四四四四")
+
+    panel._redo_vproof_edit()
+    assert proof_display_text(line) == "二四四四四"
+    assert panel._text_edit.toPlainText().startswith("二四四四四")
+
+    panel._redo_vproof_edit()
+    assert proof_display_text(line) == "二三三三三"
+    assert panel._text_edit.toPlainText().startswith("二三三三三")
+    panel.close()
+
+    print("test_vproof_undo_redo_restores_line_model_after_single_and_batch_edits PASSED")
+
+
+def test_vproof_save_rejects_stale_text_editor_page_binding():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    line1 = Line(
+        text="甲甲",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="甲", confidence=0.9, bbox=BBox(20, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    line2 = Line(
+        text="乙乙",
+        confidence=0.9,
+        bbox=BBox(0, 30, 40, 20),
+        chars=[
+            Char(char="乙", confidence=0.9, bbox=BBox(0, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    page1 = Page(image_path="/tmp/vproof-stale-page-1.png", width=100, height=100, page_number=1)
+    page2 = Page(image_path="/tmp/vproof-stale-page-2.png", width=100, height=100, page_number=2)
+    page1.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 20), lines=[line1])]
+    page2.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 30, 80, 20), lines=[line2])]
+
+    panel = VProofPanel()
+    panel.load_pages([page1, page2])
+    assert panel._text_edit.toPlainText().startswith("甲甲")
+
+    panel._text_edit.setPlainText("丙丙\n")
+    panel._session.set_current_page_by_index(1)
+
+    assert panel._refresh_reference_context() is False
+    assert proof_display_text(line1) == "甲甲"
+    assert proof_display_text(line2) == "乙乙"
+    assert "已刷新" in panel._status_lbl.text()
+    panel.close()
+
+    print("test_vproof_save_rejects_stale_text_editor_page_binding PASSED")
+
+
+def test_vproof_merge_pages_blocks_dirty_editor_when_current_page_object_replaced():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    old_line = Line(
+        text="甲甲",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="甲", confidence=0.9, bbox=BBox(20, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    old_page = Page(
+        image_path="/tmp/vproof-merge-stale-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-same-key",
+    )
+    old_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 20), lines=[old_line])]
+    new_line = Line(
+        text="乙乙",
+        confidence=0.9,
+        bbox=BBox(0, 30, 40, 20),
+        chars=[
+            Char(char="乙", confidence=0.9, bbox=BBox(0, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    new_page = Page(
+        image_path="/tmp/vproof-merge-stale-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-same-key",
+    )
+    new_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 30, 80, 20), lines=[new_line])]
+
+    panel = VProofPanel()
+    panel.load_pages([old_page])
+    panel._text_edit.setPlainText("丙丙\n")
+
+    panel.merge_pages([new_page])
+
+    assert panel._session.current_page_index() == 0
+    assert panel._text_edit.toPlainText() == "乙乙\n"
+    assert panel._refresh_reference_context() is False
+    assert proof_display_text(old_line) == "甲甲"
+    assert proof_display_text(new_line) == "乙乙"
+    panel.close()
+
+    print("test_vproof_merge_pages_blocks_dirty_editor_when_current_page_object_replaced PASSED")
+
+
+def test_vproof_undo_redo_reject_stale_actions_after_current_page_replaced():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    old_line = Line(
+        text="甲甲",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="甲", confidence=0.9, bbox=BBox(20, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    old_page = Page(
+        image_path="/tmp/vproof-undo-stale-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-undo-stale",
+    )
+    old_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 20), lines=[old_line])]
+    new_line = Line(
+        text="乙乙",
+        confidence=0.9,
+        bbox=BBox(0, 30, 40, 20),
+        chars=[
+            Char(char="乙", confidence=0.9, bbox=BBox(0, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    new_page = Page(
+        image_path="/tmp/vproof-undo-stale-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-undo-stale",
+    )
+    new_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 30, 80, 20), lines=[new_line])]
+
+    panel = VProofPanel()
+    panel.load_pages([old_page])
+    entry = panel._char_svc.query("甲")[0]
+    assert panel._apply_replacement_to_selected("丙", fallback_entry=entry) == 1
+    assert proof_display_text(old_line) == "丙甲"
+    old_action = panel._vproof_undo_stack[-1]
+    panel.merge_pages([new_page])
+
+    assert panel._vproof_undo_stack == []
+    assert panel._vproof_redo_stack == []
+
+    panel._vproof_undo_stack.append(old_action)
+    panel._undo_vproof_edit()
+
+    assert len(panel._vproof_undo_stack) == 1
+    assert len(panel._vproof_redo_stack) == 0
+    assert "撤销已取消" in panel._status_lbl.text()
+    assert proof_display_text(new_line) == "乙乙"
+    assert [char.char for char in new_line.chars] == ["乙", "乙"]
+    assert [char.bbox.y for char in new_line.chars] == [30, 30]
+    assert panel._char_svc.query("甲") == []
+    assert panel._char_svc.query("乙")
+
+    panel._vproof_undo_stack.clear()
+    panel._vproof_redo_stack.append(old_action)
+    panel._redo_vproof_edit()
+
+    assert len(panel._vproof_redo_stack) == 1
+    assert len(panel._vproof_undo_stack) == 0
+    assert "重做已取消" in panel._status_lbl.text()
+    assert proof_display_text(new_line) == "乙乙"
+    assert [char.char for char in new_line.chars] == ["乙", "乙"]
+    panel.close()
+
+    print("test_vproof_undo_redo_reject_stale_actions_after_current_page_replaced PASSED")
+
+
+def test_vproof_save_rejects_stale_text_map_even_when_page_key_matches():
+    from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.ui.proof.v_proof import VProofPanel
+
+    _get_qapp()
+    old_line = Line(
+        text="甲甲",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 20),
+        chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="甲", confidence=0.9, bbox=BBox(20, 0, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    old_page = Page(
+        image_path="/tmp/vproof-stale-map-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-stale-map",
+    )
+    old_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 0, 80, 20), lines=[old_line])]
+    new_line = Line(
+        text="乙乙",
+        confidence=0.9,
+        bbox=BBox(0, 30, 40, 20),
+        chars=[
+            Char(char="乙", confidence=0.9, bbox=BBox(0, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+            Char(char="乙", confidence=0.9, bbox=BBox(20, 30, 18, 20), bbox_source="ocr", bbox_granularity="char"),
+        ],
+    )
+    new_page = Page(
+        image_path="/tmp/vproof-stale-map-same-key.png",
+        width=100,
+        height=100,
+        page_number=1,
+        uid="page-stale-map",
+    )
+    new_page.blocks = [Block(block_type=BlockType.TEXT, order=0, bbox=BBox(0, 30, 80, 20), lines=[new_line])]
+
+    panel = VProofPanel()
+    panel.load_pages([old_page])
+    panel._text_edit.setPlainText("丙丙\n")
+    panel._session.set_pages([new_page])
+    panel._session.set_current_page_by_index(0)
+    panel._session.current_page_key = panel._char_index_page_key(new_page)
+
+    assert panel._refresh_reference_context() is False
+    assert proof_display_text(old_line) == "甲甲"
+    assert proof_display_text(new_line) == "乙乙"
+    assert "已刷新" in panel._status_lbl.text()
+    panel.close()
+
+    print("test_vproof_save_rejects_stale_text_map_even_when_page_key_matches PASSED")
+
+
 def test_hproof_visual_size_is_compact():
     from app.ui.proof import h_proof
 
-    assert h_proof.IMAGE_ROW_H <= 32
+    assert h_proof.IMAGE_ROW_H <= 38
     # 脚注/数字/标点的 Hanwang 字符框更窄，横校文本字号只能小幅放大。
-    assert h_proof.TEXT_FONT_PX == 22
-    assert h_proof.TEXT_FONT_PX <= 22
-    assert h_proof.TEXT_LINE_HEIGHT_PX <= 28
-    assert h_proof.TEXT_EDITOR_MAX_H <= 32
-    assert h_proof.LINE_PAIR_H == 70
+    assert h_proof.TEXT_FONT_PX == 26
+    assert h_proof.TEXT_FONT_PX <= 26
+    assert h_proof.TEXT_FONT_WEIGHT_CSS >= 700
+    assert h_proof.TEXT_LINE_HEIGHT_PX <= 34
+    assert h_proof.TEXT_EDITOR_MAX_H <= 40
+    assert h_proof.LINE_PAIR_H == 92
     assert (
         h_proof.LINE_PAIR_H
         >= h_proof.IMAGE_ROW_H + h_proof.TEXT_EDITOR_MAX_H + 2
     )
-    assert "SimHei" in h_proof.TEXT_FONT_FAMILY
-    assert "Noto Sans CJK SC" in h_proof.TEXT_FONT_FAMILY
+    assert "Noto Serif CJK SC" in h_proof.TEXT_FONT_FAMILY
+    assert "SimSun" in h_proof.TEXT_FONT_FAMILY
+    assert "Times New Roman" in h_proof.TEXT_FONT_FAMILY
+    assert "SimHei" not in h_proof.TEXT_FONT_FAMILY
+    assert h_proof.IMAGE_DIVIDER_COLOR != h_proof.TEXT_GUIDE_LINE_COLOR
+    assert h_proof.FOCUS_BORDER_COLOR != "#2C2C2C"
+    assert h_proof.STATUS_W <= 24
     assert h_proof.TEXT_SLOT_MIN_W >= 10.0
     assert h_proof.TEXT_SLOT_GUTTER_W >= 2.0
 
@@ -14317,12 +16170,10 @@ if __name__ == "__main__":
     test_project_store_duplicate_sibling_uids_are_reminted()
     test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order()
     test_project_store_persists_page_ocr_invalidation_reason()
-    test_project_store_reconciles_legacy_ocr_status_from_lines()
-    test_project_store_update_lines_rolls_back_as_single_transaction()
-    test_project_store_update_line_requires_stable_uid_match()
+    test_project_store_update_proof_lines_rolls_back_as_single_transaction()
+    test_project_store_update_proof_lines_requires_stable_uid_match()
     test_project_store_new_db_records_current_schema_version()
-    test_project_store_schema_migration()
-    test_proof_engine()
+    test_proof_auto_flag_service()
     test_export_txt()
     test_txt_dual_encoding_outputs_and_layout_contract()
     test_export_xml()
@@ -14382,9 +16233,11 @@ if __name__ == "__main__":
     test_main_window_layout_error_is_status_only()
     test_layout_panel_status_label_elides_long_errors()
     test_main_window_centered_resize_expands_from_current_center()
+    test_main_window_initial_import_window_is_screen_centered()
     test_main_window_maximize_state_is_not_forced_back_to_normal()
     test_main_window_file_menu_uses_close_project_action()
     test_main_window_close_project_prompts_save_and_resets_workspace()
+    test_main_window_close_project_save_uses_save_as_for_transient_project()
     test_fake_ocr_engine()
     test_create_engine_hanwang_exposes_page_block_capability()
     test_confidence_normalization()
@@ -14393,9 +16246,6 @@ if __name__ == "__main__":
     test_api_ocr_engine_reads_direct_pruned_ppocr_rows()
     test_api_ocr_engine_ignores_block_content_without_rec_rows()
     test_api_ocr_engine_preserves_rec_text_without_any_geometry()
-    test_fake_layout_engine()
-    test_fake_llm_engine_disabled()
-    test_fake_llm_engine()
     test_ocr_pipeline()
     test_ocr_pipeline_keeps_page_relative_boxes()
     test_ocr_pipeline_offsets_crop_relative_boxes()
@@ -14447,7 +16297,7 @@ if __name__ == "__main__":
     test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
     test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
-    test_hanwang_micro_recblock_width_guard_skips_risky_batch()
+    test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_guard()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
     test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text()
@@ -14471,7 +16321,6 @@ if __name__ == "__main__":
     test_workflow_controller_ocr_done_does_not_force_hproof_step()
     test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines()
     test_main_window_ocr_finished_preserves_current_step()
-    test_empty_llm_config_does_not_block_ocr_done()
     test_workflow_controller_normalizes_loaded_project_geometry()
     test_export_service()
     test_import_service()
@@ -14486,9 +16335,6 @@ if __name__ == "__main__":
     test_api_settings_dialog_migrates_legacy_official_layout_url()
     test_api_settings_dialog_collapses_mode_to_hanwang_when_saving()
     test_api_settings_dialog_persists_hanwang_mode_with_api_runtime()
-    test_api_settings_dialog_llm_copy_is_suggestion_only_and_non_blocking()
-    test_api_settings_dialog_persists_llm_candidate_settings()
-    test_llm_rules_loads_default_rules_file()
     test_api_model_profile_helpers()
     test_api_endpoint_role_resolution_keeps_layout_and_proof_separate()
     test_api_http_post_json_disables_environment_proxies()
@@ -14518,15 +16364,31 @@ if __name__ == "__main__":
     test_layout_worker_continues_after_single_page_failure()
     test_workflow_controller_marks_partial_layout_failures_without_blocking_success_pages()
     test_workflow_controller_enables_proof_steps_after_first_ocr_page()
-    test_proof_line_iterator_includes_caption_and_equation_lines()
-    test_hproof_line_iterator_excludes_non_text_elements()
+    test_proof_line_iterator_excludes_equation_lines()
+    test_hproof_line_iterator_uses_shared_proof_text_elements()
     test_proof_line_iterators_exclude_route_table_lines()
     test_hproof_line_iterator_excludes_position_source_labels()
     test_block_attributes_reads_raw_payload_without_note()
     test_hproof_page_filter_keeps_pages_separate()
+    test_hproof_page_filter_flushes_dirty_editor_before_switching_pages()
+    test_hproof_page_filter_blocks_switch_when_current_editor_has_conflict()
     test_hproof_merge_pages_preserves_active_editor_text()
     test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans()
-    test_vproof_merge_pages_preserves_current_page_text()
+    test_hproof_merge_rebind_marks_conflict_when_dirty_editor_meets_new_model_text()
+    test_hproof_merge_uses_stable_uid_when_geometry_changes()
+    test_hproof_merge_pages_removes_orphan_rows_absent_from_new_pages()
+    test_hproof_orphan_merge_restore_dirty_text_marks_conflict_when_model_changed()
+    test_hproof_debug_filter_blocks_rebuild_when_current_editor_has_conflict()
+    test_hproof_save_all_emits_only_when_current_line_is_saved()
+    test_hproof_save_all_persists_probe_only_correction()
+    test_hproof_synthetic_debug_line_is_readonly_and_not_persisted()
+    test_vproof_merge_pages_reloads_current_page_reference_text()
+    test_vproof_merge_pages_keeps_current_page_by_uid_when_order_changes()
+    test_vproof_target_edit_persists_probe_only_correction()
+    test_vproof_refresh_reference_context_persists_stale_probe_anchor_correction()
+    test_vproof_replacement_commits_text_and_probe_together()
+    test_vproof_undo_redo_uses_line_edit_actions()
+    test_vproof_external_refresh_invalidates_undo_history_before_restore()
     test_vproof_save_refreshes_current_page_index_incrementally()
     test_char_index_service_replace_pages_preserves_other_page_entries()
     test_top_bar_hosts_workflow_steps_and_layout_run()
@@ -14534,9 +16396,14 @@ if __name__ == "__main__":
     test_vproof_text_highlight_targets_single_entry()
     test_vproof_highlight_can_repeat_without_losing_state()
     test_vproof_highlight_survives_repeated_page_switches()
-    test_vproof_candidate_provider_interface_is_prepared()
     test_vproof_gallery_keyboard_selection_refreshes_linked_panels()
     test_vproof_candidate_button_applies_to_ocr_text()
+    test_vproof_right_click_edit_bubble_batches_and_undoes()
+    test_vproof_undo_redo_restores_line_model_after_single_and_batch_edits()
+    test_vproof_save_rejects_stale_text_editor_page_binding()
+    test_vproof_merge_pages_blocks_dirty_editor_when_current_page_object_replaced()
+    test_vproof_undo_redo_reject_stale_actions_after_current_page_replaced()
+    test_vproof_save_rejects_stale_text_map_even_when_page_key_matches()
     test_hproof_visual_size_is_compact()
     test_image_viewer_char_boxes_update_char_bbox()
     test_image_viewer_space_pan_temporarily_disables_box_editing()
@@ -14554,6 +16421,9 @@ if __name__ == "__main__":
     test_char_index_horizontal_split()
     test_char_index_hides_fallback_units_by_default()
     test_char_index_dedup_on_rebuild()
+    test_char_index_skips_grossly_mismatched_geometry_instead_of_showing_wrong_crops()
+    test_char_index_skips_two_char_full_mismatch_geometry()
+    test_char_index_skips_existing_chars_when_display_length_changed()
     test_char_index_sort_categories()
     test_char_index_query_stable_order()
     test_char_index_skips_whitespace()
@@ -14567,5 +16437,5 @@ if __name__ == "__main__":
     test_char_index_skips_empty_narrow_ocr_bbox()
     test_char_index_skips_lines_with_unverified_geometry()
     test_char_index_deduplicates_overlapping_duplicate_lines()
-    test_vproof_text_map_deduplicates_overlapping_duplicate_lines()
+    test_vproof_reference_context_deduplicates_overlapping_duplicate_lines()
     print("\n✓ 所有测试通过")

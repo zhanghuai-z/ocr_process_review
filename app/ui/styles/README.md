@@ -2,14 +2,13 @@
 
 ## 模块
 
-- `__init__.py` — `LIGHT_TOKENS` / `DARK_TOKENS` 字典 + `_QSS_TEMPLATE` + `apply_theme(app, name)` 入口。
-- 旧文件 `app/ui/style.py` 已停用，新代码请勿再 import。
+- `__init__.py` — `LIGHT_TOKENS` 字典 + `_QSS_TEMPLATE` + `apply_theme(app, name)` 入口。
 
 ## 用法
 
 ```python
 from app.ui.styles import apply_theme
-apply_theme(app, "light")   # 或 "dark"
+apply_theme(app, "light")
 ```
 
 读取/持久化用户偏好：
@@ -19,7 +18,7 @@ from app.core.app_config import AppConfig
 from app.ui.styles import apply_theme
 
 cfg = AppConfig.instance()
-apply_theme(app, cfg.get("theme"))   # 自动 normalize, 兼容旧 "dark_teal"
+apply_theme(app, cfg.get("theme"))   # 自动 normalize；旧 dark/dark_teal 会回落到 light
 ```
 
 ## token 命名约定
@@ -31,8 +30,8 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize, 兼容旧 "dark_teal"
 | 文本 | `text_primary` / `text_secondary` / `text_muted` / `text_disabled` / `text_on_brand` | 三阶 + 禁用 + 反白 |
 | 品牌 | `brand` / `brand_hover` / `brand_pressed` / `brand_disabled` / `brand_border_lt` | 主操作色 + 状态 |
 | 状态 | `accent_green` / `danger` / `danger_bg` / `danger_border` | 运行 / 危险 |
-| 字号 | `font_size_sm` (12) / `font_size` (13) / `font_size_lg` (14) / `font_size_xl` (18) | |
-| 圆角 | `radius_sm` (4) / `radius_md` (6) / `radius_lg` (8) | |
+| 字号 | `font_size_xs` (12) / `font_size_sm` (13) / `font_size` (14) / `font_size_lg` (16) / `font_size_xl` (20) | |
+| 圆角 | `radius_sm` (2) / `radius_md` (4) / `radius_lg` (8) / `radius_xl` (16) | |
 
 ## objectName 约定
 
@@ -73,10 +72,9 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize, 兼容旧 "dark_teal"
 1. 在本 README 表格中先登记名字 + 用途。
 2. 在 `__init__.py` 的 `_QSS_TEMPLATE` 中添加对应规则，**只使用 token 占位符**，不硬编码颜色。
 3. 在 widget 代码 `setObjectName("xxx")`。
-4. 验证两套主题 (`apply_theme(app, "light")` / `"dark"`) 都正常。
+4. 验证浅色主题 (`apply_theme(app, "light")`) 正常。
 
 ## 严禁
 
 - 在 widget 代码 `setStyleSheet("color: #1a73e8")` 硬编码颜色 → 必须走 objectName + 全局 QSS。
-- 新加 token 时只填一种主题 → 两套 token 字典必须键完全一致。
 - 在 `__init__.py` 外硬编码 token 值。

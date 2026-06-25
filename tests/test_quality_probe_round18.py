@@ -2,13 +2,15 @@
 
 1. **OCR 文本窗口也要体现假象**：displayed_text 把 fake_char 注入到显示空间，
    line.text 始终保持 true_char（"以文本为锚点"）。
-2. **更正后回正确集合**：save_displayed_edit 反向写回时，line.text[i] 变了就
+2. **更正后回正确集合**：save_displayed_edit_result 反向写回时，line.text[i] 变了就
    把命中的 probe 标 corrected；CharIndexService 重建后该位置自然出现在新
    true_char 的 gallery。
 3. **统计刷新可靠触发**：QualityStatsDialog 暴露 "立刻刷新" 按钮；点击后调
    detect_corrections + 重绘本窗。
 """
 from __future__ import annotations
+
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
 
 import os
 
@@ -20,7 +22,10 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.core import quality_probe as qp
 from app.models import BBox, Block, BlockType, Char, Line, Page, OcrProject
-from app.services.proof_probe_text_service import displayed_text, save_displayed_edit
+from app.services.proof_probe_text_service import (
+    displayed_text,
+    save_displayed_edit_result,
+)
 from app.services.char_index_service import CharIndexService
 
 
@@ -85,39 +90,57 @@ def test_round18_displayed_text_corrected_probe_does_not_inject():
     assert displayed_text(line, page, block) == "己已"
 
 
-# ─── 2. save_displayed_edit 文本锚点反向 ────────────────────────
+def test_round18_displayed_text_does_not_mask_stale_probe_anchor():
+    page, block, line = _make_pages()
+    _store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
 
-def test_round18_save_displayed_edit_unchanged_keeps_probe_pending():
+    line.set_proof_text("己巳")
+
+    assert displayed_text(line, page, block) == "己巳"
+    result = save_displayed_edit_result(line, page, block, "己巳")
+    assert result.text_changed is False
+    assert result.probe_changed is True
+    assert result.changed is True
+    assert probe.observation == "corrected"
+    assert proof_display_text(line) == "己巳"
+
+
+# ─── 2. save_displayed_edit_result 文本锚点反向 ────────────────
+
+def test_round18_save_displayed_edit_result_unchanged_keeps_probe_pending():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # 用户没动任何字（送回 displayed 原文）
-    changed = save_displayed_edit(line, page, block, displayed_text(line, page, block))
-    assert changed is False
+    change = save_displayed_edit_result(line, page, block, displayed_text(line, page, block))
+    assert change.changed is False
     assert probe.observation == "pending"
     assert line.text == "己已"
 
 
-def test_round18_save_displayed_edit_user_corrects_marks_corrected_and_preserves_line_text():
+def test_round18_save_displayed_edit_result_user_corrects_marks_corrected_and_preserves_line_text():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # displayed = "己己"；用户把第二个改回 "已"（正确答案）
-    save_displayed_edit(line, page, block, "己已")
+    change = save_displayed_edit_result(line, page, block, "己已")
+    assert change.probe_changed is True
     assert probe.observation == "corrected"
     # line.text 维持 true_char
     assert line.text == "己已"
 
 
-def test_round18_save_displayed_edit_user_types_other_char_still_marks_corrected():
+def test_round18_save_displayed_edit_result_user_types_other_char_still_marks_corrected():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # 用户把 displayed[1] 从 "己" 改成 "巳"（不是 true_char 也不是 fake_char）
-    save_displayed_edit(line, page, block, "己巳")
+    change = save_displayed_edit_result(line, page, block, "己巳")
+    assert change.text_changed is True
+    assert change.probe_changed is True
     assert probe.observation == "corrected"
     # final_text 反映用户实际输入
-    assert line.final_text == "己巳"
+    assert proof_final_text(line) == "己巳"
 
 
-def test_round18_save_displayed_edit_length_change_does_not_persist_untouched_fake_char():
+def test_round18_save_displayed_edit_result_length_change_does_not_persist_untouched_fake_char():
     line = Line(text="甲乙丙", confidence=0.9, bbox=BBox(0, 0, 120, 20))
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 20), lines=[line])
     block.order = 0
@@ -125,25 +148,27 @@ def test_round18_save_displayed_edit_length_change_does_not_persist_untouched_fa
     _store, probe = _plant_probe(line, page, block, true_ch="乙", fake_ch="己", char_index=1)
 
     assert displayed_text(line, page, block) == "甲己丙"
-    changed = save_displayed_edit(line, page, block, "甲己丙丁")
+    change = save_displayed_edit_result(line, page, block, "甲己丙丁")
 
-    assert changed is True
-    assert line.final_text == "甲乙丙丁"
-    assert "己" not in line.final_text
+    assert change.text_changed is True
+    assert change.probe_changed is True
+    assert proof_final_text(line) == "甲乙丙丁"
+    assert "己" not in proof_final_text(line)
     assert probe.observation == "corrected"
 
 
-def test_round18_save_displayed_edit_length_change_keeps_user_replacement():
+def test_round18_save_displayed_edit_result_length_change_keeps_user_replacement():
     line = Line(text="甲乙丙", confidence=0.9, bbox=BBox(0, 0, 120, 20))
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 20), lines=[line])
     block.order = 0
     page = Page(page_number=1, blocks=[block], image_path="/tmp/round18-len.png", width=120, height=20)
     _store, probe = _plant_probe(line, page, block, true_ch="乙", fake_ch="己", char_index=1)
 
-    changed = save_displayed_edit(line, page, block, "甲巳丙丁")
+    change = save_displayed_edit_result(line, page, block, "甲巳丙丁")
 
-    assert changed is True
-    assert line.final_text == "甲巳丙丁"
+    assert change.text_changed is True
+    assert change.probe_changed is True
+    assert proof_final_text(line) == "甲巳丙丁"
     assert probe.observation == "corrected"
 
 
@@ -152,7 +177,7 @@ def test_round18_corrected_probe_position_appears_in_true_char_gallery():
     page, block, line = _make_pages()
     _store, _probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # 用户在显示空间纠正
-    save_displayed_edit(line, page, block, "己已")
+    save_displayed_edit_result(line, page, block, "己已")
     # line.text 已是 "己已"——任何后续 CharIndexService.build(pages) 都会按
     # line.text[1]=="已" 把 idx=1 收入"已" gallery 集合，这就是"归位"语义。
     assert line.text == "己已"
@@ -166,7 +191,7 @@ def test_round18_detect_corrections_picks_up_bypass_path_edits():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # 模拟 batch-replace / 其它绕过 bridge 的路径：直接改 line.text
-    line.update_text("己巳")
+    line.set_proof_text("己巳")
     # detect_corrections 应捕获这处 mutate 并把 probe 标 corrected
     n = qp.detect_corrections(store, [page])
     assert n == 1
@@ -185,7 +210,7 @@ def test_round18_detect_corrections_accepts_project_or_pages():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     project = OcrProject(name="round18", pages=[page])
-    line.update_text("己巳")
+    line.set_proof_text("己巳")
     assert qp.detect_corrections(store, project) == 1
 
 
@@ -198,20 +223,25 @@ def test_round18_dialog_has_refresh_button_and_uses_detect_corrections(monkeypat
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     project = OcrProject(name="round18", pages=[page])
+    changes = []
     dlg = QualityStatsDialog(
         project_provider=lambda: project,
         refresh_panels_cb=lambda: None,
+        proof_changed_cb=changes.append,
     )
     # 立刻刷新按钮必须存在且可见
     assert hasattr(dlg, "_btn_refresh")
     assert dlg._btn_refresh.text() == "立刻刷新"
 
     # 模拟绕过 bridge 的真实编辑
-    line.update_text("己巳")
+    line.set_proof_text("己巳")
     # 点刷新前 probe 还是 pending；点之后被 detect_corrections 抓到
     assert probe.observation == "pending"
     dlg._on_manual_refresh()
     assert probe.observation == "corrected", "立刻刷新必须触发 detect_corrections"
+    assert len(changes) == 1
+    assert changes[0].probe_changed is True
+    assert changes[0].needs_persist is True
     dlg.close()
 
 

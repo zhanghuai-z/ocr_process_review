@@ -46,15 +46,16 @@ def _build_pages_with_planted_probe():
     return [page], line, probe
 
 
-def test_blocker1_extras_are_disabled_in_round18():
+def test_blocker1_gallery_has_no_probe_extra_entrypoint_in_round18():
     """Round 18：gallery extras 完全移除——probe 通过 displayed_text 在 OCR
-    文本窗口里体现，gallery 不应再接收任何 probe extra 入口。"""
+    文本窗口里体现，gallery 只读 CharIndexService 查询结果。"""
     from app.ui.proof.v_proof import VProofPanel
 
     pages, _line, _probe = _build_pages_with_planted_probe()
     panel = VProofPanel()
     panel.load_pages(pages)
 
-    extras = panel._extras_for_tokens(["已"])
-    assert extras == [], f"_extras_for_tokens 应永远返回 []，实际 {extras!r}"
+    assert not hasattr(panel, "_extras_for_tokens")
+    entries = list(panel._char_svc.query("已"))
+    assert [entry.char_idx for entry in entries] == [1]
     panel.close()

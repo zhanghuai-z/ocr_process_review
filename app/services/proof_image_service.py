@@ -1,21 +1,14 @@
 """Proof 侧裁图 / bbox / padding 共享 service。
 
-把原本散落在 ``h_proof.py`` / ``v_proof.py`` 里的几段相同/相近的逻辑下沉到
-一个地方：
+HProof / VProof 都通过这里完成 proof 图像裁切前的坐标校验与 padding 计算：
 
-- ``clamp_bbox_to_image(bbox, W, H)`` —— 把 BBox 修正到图像边界内（之前在
-  v_proof._verified_char_crop 里手写一份）。
+- ``clamp_bbox_to_image(bbox, W, H)`` —— 把 BBox 修正到图像边界内。
 - ``adaptive_pad_for_bbox(bbox, max_pad=6, ratio=0.10)`` —— bbox 自适应 padding，
-  避免纵排小字被固定 12px padding 拽进邻字（之前在 v_proof._verified_char_crop
-  里手写一份）。
+  避免纵排小字被固定 12px padding 拽进邻字。
 - ``verified_char_crop(cache, page_path, bbox, size, pad=None)`` —— 调
   ``PageImageCache.get_char_crop`` 前的坐标校验封装。
 - ``clamp_line_box_pixels(bbox, W, H, pad_y=0)`` —— h_proof line crop 的
   边界 clamp，返回 (x1, y1, x2, y2) 像素元组。
-
-这些纯函数没有状态、不依赖 Qt，只依赖 ``BBox`` 和 ``PageImageCache``。
-不改动任何裁图行为：边界 clamp 规则、adaptive padding 公式、字符裁图调用都和
-原 inline 实现逐字节等价。
 """
 from __future__ import annotations
 
@@ -66,7 +59,7 @@ def verified_char_crop(
 
     pad 为 None 时根据 bbox 尺寸自适应（``adaptive_pad_for_bbox``）。
     """
-    img = cache.get_image(page_path)
+    img = cache.get_page_image(page_path)
     if img is None:
         return None
     H, W = img.shape[:2]

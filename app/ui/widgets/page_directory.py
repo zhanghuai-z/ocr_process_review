@@ -1,11 +1,12 @@
 """共享页面目录列表组件。
 
-PageDir 行版式（对齐 Pencil 设计稿 N56wj）：
+PageDir 行版式（对齐 Stitch Minimalist Studio）：
 
     ┌─────────────────────────────────────┐
-    │ │ ┌──┐  第 1 页              [校] │  62h（选中态左侧 3px brand 条）
-    │ │ │📄│  filename.jpg              │
-    │ │ └──┘                            │
+    │        ┌─────────────── 01 ┐        │
+    │        │    thumbnail      │        │
+    │        └───────────────────┘        │
+    │              filename.tif            │
     └─────────────────────────────────────┘
 
 对外接口（保持稳定）：
@@ -21,28 +22,16 @@ from typing import List
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
+    QFrame, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
 )
 
 from app.models import Page
-from app.models.enums import PageStatus
+from app.ui.widgets.effects import apply_soft_shadow
 
-# 缩略图固定 38×46（对齐设计稿）
-_THUMB_W = 38
-_THUMB_H = 46
-_ROW_H   = 62
-
-# PageStatus → (badge_text, badge_kind)  kind 命中 QLabel#pageBadge[kind=...]
-_STATUS_BADGE: dict[str, tuple[str, str]] = {
-    PageStatus.LAYOUT_DONE.value:       ("版", "done"),
-    PageStatus.LAYOUT_CONFIRMED.value:  ("版", "done"),
-    PageStatus.OCR_DONE.value:          ("识", "running"),
-    PageStatus.PRE_REVIEW_DONE.value:   ("预", "running"),
-    PageStatus.PROOFING.value:          ("校", "warn"),
-    PageStatus.PROOF_DONE.value:        ("✓", "done"),
-    PageStatus.ERROR.value:             ("!", "err"),
-}
-
+# 目录是大缩略图卡片，不再做紧凑行。
+_THUMB_W = 150
+_THUMB_H = 198
+_ROW_H = 236
 
 class _PageRow(QWidget):
     """单条页面行：缩略图 + 标题 + 文件名 + 状态徽章。"""
@@ -54,11 +43,17 @@ class _PageRow(QWidget):
         self.setAutoFillBackground(False)
         self.setFixedHeight(_ROW_H)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(10, 6, 10, 6)
-        row.setSpacing(10)
+        row = QVBoxLayout(self)
+        row.setContentsMargins(8, 8, 8, 8)
+        row.setSpacing(8)
 
-        # 缩略图
+        thumb_card = QFrame()
+        thumb_card.setObjectName("pageThumbCard")
+        thumb_card.setFixedSize(_THUMB_W + 8, _THUMB_H + 8)
+        thumb_layout = QVBoxLayout(thumb_card)
+        thumb_layout.setContentsMargins(4, 4, 4, 4)
+        thumb_layout.setSpacing(0)
+
         thumb_lbl = QLabel()
         thumb_lbl.setObjectName("pageThumb")
         thumb_lbl.setFixedSize(_THUMB_W, _THUMB_H)
@@ -67,16 +62,17 @@ class _PageRow(QWidget):
         if thumbnail is not None and not thumbnail.isNull():
             thumb_lbl.setPixmap(thumbnail)
         else:
-            thumb_lbl.setText("📄")
-        row.addWidget(thumb_lbl)
+            thumb_lbl.setText("DOC")
+        thumb_layout.addWidget(thumb_lbl)
+        apply_soft_shadow(thumb_card, blur_radius=16, y_offset=3, alpha=18)
 
-        # 文本
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(2)
-        title = QLabel(f"第 {page.page_number} 页")
-        title.setObjectName("pageRowTitle")
-        text_col.addWidget(title)
+        page_badge = QLabel(f"{page.page_number:02d}", thumb_card)
+        page_badge.setObjectName("pageBadge")
+        page_badge.setAlignment(Qt.AlignCenter)
+        page_badge.setFixedSize(28, 20)
+        page_badge.move(_THUMB_W - 24, 8)
+        page_badge.raise_()
+        row.addWidget(thumb_card, 0, Qt.AlignmentFlag.AlignHCenter)
 
         src = getattr(page, "source_path", None) or getattr(page, "image_path", None) or ""
         fname = Path(src).name if src else ""
@@ -88,22 +84,10 @@ class _PageRow(QWidget):
         # 弹气泡。需要全名时可用状态栏 / 复制路径菜单。
         # 文件名过长省略
         fm = fname_lbl.fontMetrics()
-        elided = fm.elidedText(fname, Qt.ElideMiddle, 130)
+        elided = fm.elidedText(fname, Qt.ElideMiddle, _THUMB_W)
         fname_lbl.setText(elided)
-        text_col.addWidget(fname_lbl)
-        row.addLayout(text_col, 1)
-
-        # 状态徽章
-        status_val = getattr(getattr(page, "status", None), "value", None)
-        badge = _STATUS_BADGE.get(status_val)
-        if badge is not None:
-            text, kind = badge
-            badge_lbl = QLabel(text)
-            badge_lbl.setObjectName("pageBadge")
-            badge_lbl.setProperty("kind", kind)
-            badge_lbl.setAlignment(Qt.AlignCenter)
-            badge_lbl.setFixedSize(22, 18)
-            row.addWidget(badge_lbl)
+        fname_lbl.setAlignment(Qt.AlignCenter)
+        row.addWidget(fname_lbl)
 
 
 class PageDirectoryList(QListWidget):
@@ -114,10 +98,10 @@ class PageDirectoryList(QListWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("pageDirectoryList")
-        self.setMaximumWidth(240)
-        self.setMinimumWidth(180)
-        self.setSpacing(0)
-        self.setUniformItemSizes(True)
+        self.setMaximumWidth(236)
+        self.setMinimumWidth(196)
+        self.setSpacing(10)
+        self.setUniformItemSizes(False)
         self.setVerticalScrollMode(self.ScrollMode.ScrollPerPixel)
         self._suppress_signal = False
         self.currentRowChanged.connect(self._on_row_changed)
@@ -163,11 +147,14 @@ class PageDirectoryList(QListWidget):
             pm = QPixmap(img_path)
         if pm is None or pm.isNull():
             return None
-        return pm.scaled(
+        scaled = pm.scaled(
             _THUMB_W, _THUMB_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
+        x = max(0, (scaled.width() - _THUMB_W) // 2)
+        y = max(0, (scaled.height() - _THUMB_H) // 2)
+        return scaled.copy(x, y, _THUMB_W, _THUMB_H)
 
     def _on_row_changed(self, idx: int) -> None:
         if self._suppress_signal:

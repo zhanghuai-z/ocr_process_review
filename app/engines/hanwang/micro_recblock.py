@@ -68,6 +68,7 @@ from app.core.paddle_labels import (
     is_hanwang_skip_label,
     normalize_paddle_label,
 )
+from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
 from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
@@ -79,11 +80,7 @@ logger = get_logger(__name__)
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
 
-MAX_RECOG_BATCH_GROUPS = 6
-MAX_RECOG_COLLAGE_WIDTH = 1600
-MAX_RECOG_COLLAGE_HEIGHT = 1600
-MAX_RECOG_COLLAGE_PIXELS = 2_000_000
-MAX_RECOG_COLLAGE_ASPECT = 4.5
+MAX_RECOG_BATCH_GROUPS = int(os.environ.get("HANWANG_MICRO_RECBLOCK_BATCH_GROUPS", "64"))
 _BATCH_ENABLED_BY_ENV = (
     os.environ.get("HANWANG_MICRO_RECBLOCK_BATCH", "").strip().lower()
     in {"1", "true", "yes", "on"}
@@ -92,7 +89,7 @@ _BATCH_DISABLED_FOR_SESSION = not _BATCH_ENABLED_BY_ENV
 _BATCH_DISABLE_REASON = (
     ""
     if _BATCH_ENABLED_BY_ENV
-    else "native batch disabled by default; set HANWANG_MICRO_RECBLOCK_BATCH=1 to enable"
+    else "native batch-list disabled by default; set HANWANG_MICRO_RECBLOCK_BATCH=1 to enable"
 )
 
 
@@ -199,22 +196,25 @@ class RunStats:
     recog_batch_failures: int = 0
     recog_batch_disabled: bool = False
     recog_batch_guarded_chunks: int = 0
-    recog_max_collage_width: int = 0
-    recog_max_collage_height: int = 0
-    recog_max_collage_pixels: int = 0
+    recog_max_batch_crop_width: int = 0
+    recog_max_batch_crop_height: int = 0
+    recog_max_batch_crop_pixels: int = 0
     latin_engcut_probe_calls: int = 0
     latin_engcut_probe_failures: int = 0
     latin_engcut_exact_tokens: int = 0
     latin_engcut_word_tokens: int = 0
     latin_engcut_review_tokens: int = 0
     latin_engcut_disabled: bool = False
+    overlap_merge_probe_calls: int = 0
+    overlap_merge_probe_failures: int = 0
+    overlap_merge_clusters: int = 0
+    overlap_merge_replacements: int = 0
 
 
 @dataclass
 class _GroupPlacement:
     area_idx: int
     page_bbox: tuple[int, int, int, int]
-    collage_bbox: tuple[int, int, int, int]
 
 
 @dataclass
@@ -805,6 +805,225 @@ def _offset_line_results(
     return shifted
 
 
+def _bbox_area(box: tuple[int, int, int, int] | None) -> int:
+    if box is None:
+        return 0
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+
+def _axis_overlap_fraction(a1: int, a2: int, b1: int, b2: int) -> float:
+    overlap = max(0, min(a2, b2) - max(a1, b1))
+    smaller = min(max(0, a2 - a1), max(0, b2 - b1))
+    if smaller <= 0:
+        return 0.0
+    return overlap / smaller
+
+
+def _union_bbox(boxes: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    return (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+
+
+def _overlap_merge_pair(left: CharResult, right: CharResult) -> bool:
+    if left.bbox is None or right.bbox is None:
+        return False
+    if max(left.confidence, right.confidence) > OVERLAP_MERGE_LOW_CONFIDENCE:
+        return False
+    left_area = _bbox_area(left.bbox)
+    right_area = _bbox_area(right.bbox)
+    if left_area <= 0 or right_area <= 0:
+        return False
+    ioa = _intersection_area(left.bbox, right.bbox) / max(1, min(left_area, right_area))
+    vertical = _axis_overlap_fraction(left.bbox[1], left.bbox[3], right.bbox[1], right.bbox[3])
+    if ioa < OVERLAP_MERGE_IOA_THRESHOLD or vertical < OVERLAP_MERGE_VERTICAL_THRESHOLD:
+        return False
+    left_cx, _ = _box_center(left.bbox)
+    right_cx, _ = _box_center(right.bbox)
+    max_height = max(left.bbox[3] - left.bbox[1], right.bbox[3] - right.bbox[1])
+    return abs(right_cx - left_cx) <= max(8.0, max_height * 0.85)
+
+
+def _looks_percent_fragment(text: str) -> bool:
+    compact = "".join(ch for ch in text if not ch.isspace())
+    if len(compact) < 2 or len(compact) > 5:
+        return False
+    if "%" in compact or "％" in compact:
+        return False
+    zero_like = set("0Oo°")
+    slash_like = set("/\\")
+    percent_curve_like = set("Pp")
+    has_zero = any(ch in zero_like for ch in compact)
+    has_slash = any(ch in slash_like for ch in compact)
+    has_curve = any(ch in percent_curve_like for ch in compact)
+    if has_zero and (has_slash or has_curve):
+        return True
+    if has_slash and (has_zero or has_curve):
+        return True
+    return False
+
+
+def _overlap_merge_cluster_actionable(chars: list[CharResult]) -> bool:
+    if len(chars) < 2 or len(chars) > OVERLAP_MERGE_MAX_CLUSTER_CHARS:
+        return False
+    boxes = [char.bbox for char in chars if char.bbox is not None]
+    if len(boxes) != len(chars):
+        return False
+    text = "".join(char.text for char in chars)
+    if _looks_percent_fragment(text):
+        return True
+    union = _union_bbox(boxes)
+    height = max(1, union[3] - union[1])
+    width = max(1, union[2] - union[0])
+    low_conf = sum(1 for char in chars if char.confidence <= OVERLAP_MERGE_LOW_CONFIDENCE)
+    return low_conf == len(chars) and width <= height * 1.35
+
+
+def _find_overlap_merge_clusters(line: LineResult) -> list[tuple[int, int]]:
+    clusters: list[tuple[int, int]] = []
+    chars = line.chars
+    idx = 0
+    while idx < len(chars) - 1:
+        if not _overlap_merge_pair(chars[idx], chars[idx + 1]):
+            idx += 1
+            continue
+        start = idx
+        end = idx + 2
+        while (
+            end < len(chars)
+            and end - start < OVERLAP_MERGE_MAX_CLUSTER_CHARS
+            and _overlap_merge_pair(chars[end - 1], chars[end])
+        ):
+            end += 1
+        if _overlap_merge_cluster_actionable(chars[start:end]):
+            clusters.append((start, end))
+        idx = end
+    return clusters
+
+
+def _offset_char_result(char: CharResult, *, dx: int, dy: int, source: str) -> CharResult:
+    bbox = None
+    if char.bbox is not None:
+        x1, y1, x2, y2 = char.bbox
+        bbox = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+    return CharResult(
+        text=char.text,
+        confidence=char.confidence,
+        bbox=bbox,
+        candidates=list(char.candidates),
+        source=source,
+        bbox_granularity=char.bbox_granularity or ("char" if bbox is not None else "fallback"),
+        token_text=char.token_text or char.text,
+    )
+
+
+def _line_chars_text(chars: list[CharResult]) -> str:
+    return "".join(char.text for char in chars)
+
+
+def _replacement_chars_from_recrop(
+    crop_bgr: np.ndarray,
+    cluster_bbox: tuple[int, int, int, int],
+    *,
+    stats: RunStats,
+    timeout: float,
+) -> list[CharResult]:
+    x1, y1, x2, y2 = cluster_bbox
+    retry_crop = crop_bgr[y1:y2, x1:x2].copy()
+    if retry_crop.size == 0:
+        return []
+    try:
+        stats.overlap_merge_probe_calls += 1
+        raw = native_bridge.run_linecut_recog(
+            retry_crop,
+            recblock_xyxy=None,
+            with_charrcg=True,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        stats.overlap_merge_probe_failures += 1
+        logger.debug("Hanwang overlap-merge recrop failed bbox=%s: %s", cluster_bbox, exc)
+        return []
+    local_lines = _line_results_from_recog(
+        raw,
+        fallback_bbox=(0, 0, max(0, x2 - x1), max(0, y2 - y1)),
+        include_chars=True,
+        fallback_empty=False,
+    )
+    replacement: list[CharResult] = []
+    for local_line in local_lines:
+        for char in local_line.chars:
+            if char.text:
+                replacement.append(_offset_char_result(char, dx=x1, dy=y1, source="hanwang:overlap_merge_recrop"))
+    return replacement
+
+
+def _cluster_replacement_accepted(
+    old_chars: list[CharResult],
+    replacement: list[CharResult],
+) -> bool:
+    if not replacement:
+        return False
+    old_text = _line_chars_text(old_chars)
+    new_text = _line_chars_text(replacement)
+    if not new_text or new_text == old_text:
+        return False
+    if new_text in {"%", "％"}:
+        return _looks_percent_fragment(old_text)
+    old_conf = sum(char.confidence for char in old_chars) / max(1, len(old_chars))
+    new_conf = sum(char.confidence for char in replacement) / max(1, len(replacement))
+    return len(replacement) < len(old_chars) and new_conf >= old_conf
+
+
+def _refine_overlap_fragments_with_recrop(
+    crop_bgr: np.ndarray,
+    lines: list[LineResult],
+    stats: RunStats,
+    *,
+    timeout: float,
+) -> None:
+    if crop_bgr.size == 0:
+        return
+    crop_h, crop_w = crop_bgr.shape[:2]
+    for line in lines:
+        if not line.chars:
+            continue
+        clusters = _find_overlap_merge_clusters(line)
+        if not clusters:
+            continue
+        for start, end in reversed(clusters):
+            old_chars = line.chars[start:end]
+            boxes = [char.bbox for char in old_chars if char.bbox is not None]
+            if len(boxes) != len(old_chars):
+                continue
+            union = _union_bbox(boxes)
+            cluster_bbox = _expand_xyxy(
+                union,
+                crop_w,
+                crop_h,
+                pad_x=OVERLAP_MERGE_PAD_X,
+                pad_y=OVERLAP_MERGE_PAD_Y,
+            )
+            stats.overlap_merge_clusters += 1
+            replacement = _replacement_chars_from_recrop(
+                crop_bgr,
+                cluster_bbox,
+                stats=stats,
+                timeout=timeout,
+            )
+            if _cluster_replacement_accepted(old_chars, replacement):
+                line.chars[start:end] = replacement
+                stats.overlap_merge_replacements += 1
+            else:
+                continue
+            line.text = "".join(char.text for char in line.chars).strip()
+            if line.chars:
+                line.confidence = sum(char.confidence for char in line.chars) / len(line.chars)
+
+
 def _line_char_offset_map(line: LineResult) -> list[int] | None:
     char_text = "".join(char.text for char in line.chars)
     if char_text != line.text:
@@ -828,6 +1047,12 @@ RECOG_GROUP_CROP_PAD_Y = 2
 RECOG_GROUP_RETRY_TOP_TRIM = 3
 ENGCUT_LINE_CROP_PAD_X = 2
 ENGCUT_LINE_CROP_PAD_Y = 2
+OVERLAP_MERGE_LOW_CONFIDENCE = 0.35
+OVERLAP_MERGE_IOA_THRESHOLD = 0.45
+OVERLAP_MERGE_VERTICAL_THRESHOLD = 0.55
+OVERLAP_MERGE_MAX_CLUSTER_CHARS = 5
+OVERLAP_MERGE_PAD_X = 3
+OVERLAP_MERGE_PAD_Y = 3
 
 
 @dataclass
@@ -1559,111 +1784,20 @@ def _intersection_area(
     return max(0, right - left) * max(0, bottom - top)
 
 
-def _placement_for_line(
-    line: LineResult,
-    placements: list[_GroupPlacement],
-) -> _GroupPlacement | None:
-    if not placements:
-        return None
-    x1, y1, x2, y2 = line.bbox
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-    for placement in placements:
-        left, top, right, bottom = placement.collage_bbox
-        if left <= cx <= right and top <= cy <= bottom:
-            return placement
-    return max(
-        placements,
-        key=lambda placement: _intersection_area(line.bbox, placement.collage_bbox),
-    )
-
-
-def _build_group_collage(
-    image_bgr: np.ndarray,
-    group_bboxes: list[tuple[int, int, int, int]],
-    area_indices: list[int],
-) -> tuple[np.ndarray, list[_GroupPlacement]]:
-    if not group_bboxes:
-        return image_bgr[:0, :0].copy(), []
-    gap = 2
-    crops: list[np.ndarray] = []
-    max_width = 1
-    total_height = 0
-    for bbox in group_bboxes:
-        left, top, right, bottom = bbox
-        crop = image_bgr[top:bottom, left:right].copy()
-        crops.append(crop)
-        crop_h, crop_w = crop.shape[:2]
-        max_width = max(max_width, crop_w)
-        total_height += crop_h
-    total_height += gap * max(0, len(crops) - 1)
-    if image_bgr.ndim == 2:
-        collage = np.full((total_height, max_width), 255, dtype=image_bgr.dtype)
-    else:
-        collage = np.full((total_height, max_width, image_bgr.shape[2]), 255, dtype=image_bgr.dtype)
-    placements: list[_GroupPlacement] = []
-    y = 0
-    for crop, page_bbox, area_idx in zip(crops, group_bboxes, area_indices):
-        crop_h, crop_w = crop.shape[:2]
-        collage[y:y + crop_h, 0:crop_w] = crop
-        placements.append(
-            _GroupPlacement(
-                area_idx=area_idx,
-                page_bbox=page_bbox,
-                collage_bbox=(0, y, crop_w, y + crop_h),
-            )
-        )
-        y += crop_h + gap
-    return collage, placements
-
-
-def _estimate_collage_shape(
-    group_bboxes: list[tuple[int, int, int, int]],
-    *,
-    gap: int = 2,
-) -> tuple[int, int, int]:
-    if not group_bboxes:
-        return 0, 0, 0
-    width = max(max(0, right - left) for left, _top, right, _bottom in group_bboxes)
-    height = sum(max(0, bottom - top) for _left, top, _right, bottom in group_bboxes)
-    height += gap * max(0, len(group_bboxes) - 1)
-    return width, height, width * height
-
-
 def _chunk_group_bboxes(
     group_bboxes: list[tuple[int, int, int, int]],
     area_indices: list[int],
     *,
     max_groups: int | None = None,
-    max_width: int | None = None,
-    max_height: int | None = None,
-    max_pixels: int | None = None,
-    max_aspect: float | None = None,
 ) -> list[tuple[list[tuple[int, int, int, int]], list[int]]]:
     if max_groups is None:
         max_groups = MAX_RECOG_BATCH_GROUPS
-    if max_width is None:
-        max_width = MAX_RECOG_COLLAGE_WIDTH
-    if max_height is None:
-        max_height = MAX_RECOG_COLLAGE_HEIGHT
-    if max_pixels is None:
-        max_pixels = MAX_RECOG_COLLAGE_PIXELS
-    if max_aspect is None:
-        max_aspect = MAX_RECOG_COLLAGE_ASPECT
     chunks: list[tuple[list[tuple[int, int, int, int]], list[int]]] = []
     current_bboxes: list[tuple[int, int, int, int]] = []
     current_areas: list[int] = []
     for bbox, area_idx in zip(group_bboxes, area_indices):
         candidate_bboxes = [*current_bboxes, bbox]
-        width, height, pixels = _estimate_collage_shape(candidate_bboxes)
-        aspect = (width / height) if height > 0 else 0.0
-        over_limit = (
-            len(candidate_bboxes) > max_groups
-            or width > max_width
-            or height > max_height
-            or pixels > max_pixels
-            or aspect > max_aspect
-        )
+        over_limit = len(candidate_bboxes) > max_groups
         if current_bboxes and over_limit:
             chunks.append((current_bboxes, current_areas))
             current_bboxes = [bbox]
@@ -1718,7 +1852,6 @@ def run_micro_recblock(
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
     text_route_recblocks = [route.bbox for route in text_routes]
-    has_layout_routes = any(_has_route_subblocks(ppvl_blocks[idx], width, height) for idx in text_indices)
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
@@ -1889,6 +2022,7 @@ def run_micro_recblock(
                 crop_h, crop_w = crop.shape[:2]
                 offset_left = left
                 offset_top = top
+                active_crop = crop
                 try:
                     stats.recog_probe_calls += 1
                     raw = native_bridge.run_linecut_recog(
@@ -1940,6 +2074,7 @@ def run_micro_recblock(
                                 retry_bbox=retry_bbox,
                             )
                             offset_left, offset_top = retry_left, retry_top
+                            active_crop = retry_crop
                             crop_h, crop_w = retry_crop.shape[:2]
                     else:
                         logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
@@ -1950,59 +2085,90 @@ def run_micro_recblock(
                     fallback_bbox=(0, 0, crop_w, crop_h),
                     include_chars=include_chars,
                 )
+                if include_chars:
+                    _refine_overlap_fragments_with_recrop(
+                        active_crop,
+                        local_lines,
+                        stats,
+                        timeout=recog_timeout,
+                    )
                 grouped_lines[text_routes[placement.area_idx].key].extend(
                     _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
                 )
 
-        batch_enabled = not _BATCH_DISABLED_FOR_SESSION and not has_layout_routes
-        stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION or has_layout_routes
+        def recognize_batch_list(placements: list[_GroupPlacement]) -> None:
+            crops: list[np.ndarray] = []
+            for placement in placements:
+                left, top, right, bottom = placement.page_bbox
+                crops.append(image_bgr[top:bottom, left:right].copy())
+            stats.recog_probe_calls += 1
+            raws = native_bridge.run_linecut_recog_batch_list(
+                crops,
+                with_charrcg=True,
+                timeout=recog_timeout,
+            )
+            if len(raws) != len(placements):
+                raise RuntimeError(f"batch-list result count mismatch: {len(raws)}/{len(placements)}")
+            for placement, crop, raw in zip(placements, crops, raws):
+                crop_h, crop_w = crop.shape[:2]
+                local_lines = _line_results_from_recog(
+                    raw,
+                    fallback_bbox=(0, 0, crop_w, crop_h),
+                    include_chars=include_chars,
+                )
+                if include_chars:
+                    _refine_overlap_fragments_with_recrop(
+                        crop,
+                        local_lines,
+                        stats,
+                        timeout=recog_timeout,
+                    )
+                grouped_lines[text_routes[placement.area_idx].key].extend(
+                    _offset_line_results(local_lines, dx=placement.page_bbox[0], dy=placement.page_bbox[1])
+                )
+
+        batch_enabled = not _BATCH_DISABLED_FOR_SESSION
+        stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION
         completed_groups = 0
-        chunks = _chunk_group_bboxes(group_bboxes, group_area_indices)
+        chunks = _chunk_group_bboxes(
+            group_bboxes,
+            group_area_indices,
+            max_groups=MAX_RECOG_BATCH_GROUPS,
+        )
         for chunk_index, (chunk_bboxes, chunk_area_indices) in enumerate(chunks):
-            collage, placements = _build_group_collage(image_bgr, chunk_bboxes, chunk_area_indices)
+            placements: list[_GroupPlacement] = []
+            for page_bbox, area_idx in zip(chunk_bboxes, chunk_area_indices):
+                left, top, right, bottom = page_bbox
+                placements.append(
+                    _GroupPlacement(
+                        area_idx=area_idx,
+                        page_bbox=page_bbox,
+                    )
+                )
             if not placements:
                 continue
             stats.recog_batch_chunks += 1
-            collage_h, collage_w = collage.shape[:2]
-            collage_pixels = collage_w * collage_h
-            stats.recog_max_collage_width = max(stats.recog_max_collage_width, collage_w)
-            stats.recog_max_collage_height = max(stats.recog_max_collage_height, collage_h)
-            stats.recog_max_collage_pixels = max(stats.recog_max_collage_pixels, collage_pixels)
+            max_crop_w = max(max(0, right - left) for left, _top, right, _bottom in chunk_bboxes)
+            max_crop_h = max(max(0, bottom - top) for _left, top, _right, bottom in chunk_bboxes)
+            crop_pixels = sum(
+                max(0, right - left) * max(0, bottom - top)
+                for left, top, right, bottom in chunk_bboxes
+            )
+            stats.recog_max_batch_crop_width = max(stats.recog_max_batch_crop_width, max_crop_w)
+            stats.recog_max_batch_crop_height = max(stats.recog_max_batch_crop_height, max_crop_h)
+            stats.recog_max_batch_crop_pixels = max(stats.recog_max_batch_crop_pixels, crop_pixels)
             stats.recog_full_page_pixels += width * height * len(placements)
-            stats.recog_crop_pixels += sum(
-                (placement.page_bbox[2] - placement.page_bbox[0])
-                * (placement.page_bbox[3] - placement.page_bbox[1])
-                for placement in placements
-            )
-            collage_aspect = (collage_w / collage_h) if collage_h > 0 else 0.0
-            shape_guarded = (
-                collage_w > MAX_RECOG_COLLAGE_WIDTH
-                or collage_h > MAX_RECOG_COLLAGE_HEIGHT
-                or collage_pixels > MAX_RECOG_COLLAGE_PIXELS
-                or collage_aspect > MAX_RECOG_COLLAGE_ASPECT
-            )
-            if shape_guarded:
-                stats.recog_batch_guarded_chunks += 1
-            use_batch = batch_enabled and len(placements) > 1 and not shape_guarded
+            stats.recog_crop_pixels += crop_pixels
+            use_batch = batch_enabled and len(placements) > 1
             if progress_callback:
                 progress_callback(
                     completed_groups,
                     total_groups,
-                    (
-                        "Hanwang micro-recblock 分块批量识别中… "
-                        f"chunk {chunk_index + 1}/{len(chunks)}, groups={len(placements)}, "
-                        f"collage={collage_w}x{collage_h}"
-                    ),
+                    f"Hanwang OCR 识别中 {completed_groups}/{total_groups}",
                 )
             if use_batch:
                 try:
-                    stats.recog_probe_calls += 1
-                    raw = native_bridge.run_linecut_recog(
-                        collage,
-                        recblocks_xyxy=[placement.collage_bbox for placement in placements],
-                        with_charrcg=True,
-                        timeout=recog_timeout,
-                    )
+                    recognize_batch_list(placements)
                 except Exception as exc:
                     stats.recog_batch_failures += 1
                     stats.recog_batch_disabled = True
@@ -2010,34 +2176,16 @@ def run_micro_recblock(
                     _BATCH_DISABLED_FOR_SESSION = True
                     _BATCH_DISABLE_REASON = (
                         f"chunk={chunk_index + 1} groups={len(placements)} "
-                        f"collage={collage_w}x{collage_h}: {exc}"
+                        f"batch-list: {exc}"
                     )
                     logger.warning(
-                        "Hanwang micro_recblock batch failed; disabling batch for this process "
-                        "chunk=%d groups=%d collage=%dx%d: %s",
+                        "Hanwang micro_recblock batch-list failed; disabling batch for this process "
+                        "chunk=%d groups=%d: %s",
                         chunk_index + 1,
                         len(placements),
-                        collage_w,
-                        collage_h,
                         exc,
                     )
                     recognize_individually(placements)
-                else:
-                    local_lines = _line_results_from_recog(
-                        raw,
-                        fallback_bbox=(0, 0, collage_w, collage_h),
-                        include_chars=include_chars,
-                        fallback_empty=False,
-                    )
-                    for local_line in local_lines:
-                        placement = _placement_for_line(local_line, placements)
-                        if placement is None:
-                            continue
-                        dx = placement.page_bbox[0] - placement.collage_bbox[0]
-                        dy = placement.page_bbox[1] - placement.collage_bbox[1]
-                        grouped_lines[text_routes[placement.area_idx].key].extend(
-                            _offset_line_results([local_line], dx=dx, dy=dy)
-                        )
             else:
                 recognize_individually(placements)
 
@@ -2046,7 +2194,7 @@ def run_micro_recblock(
                 progress_callback(
                     completed_groups,
                     total_groups,
-                    f"Hanwang micro-recblock 已完成 {completed_groups}/{total_groups} groups",
+                    f"Hanwang OCR 已完成 {completed_groups}/{total_groups}",
                 )
         stats.recog_seconds = time.time() - started
 
@@ -2191,15 +2339,14 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
     merged_review_flags = [*review_flags, *line.review_flags]
     model = Line(
         text=line.text,
-        final_text=line.text,
         confidence=line.confidence,
         bbox=_bbox_from_xyxy_tuple(line.bbox, width, height),
         chars=chars,
         ocr_text=line.text,
         original_text=line.text,
         review_flags=merged_review_flags,
-        proof_status=proof_status_for(line.confidence, merged_review_flags),
     )
+    model.set_proof_status(proof_status_for(line.confidence, merged_review_flags))
     return model
 
 
@@ -2305,7 +2452,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
 
 
 def _layout_block_content(block: Block) -> str:
-    text = block.full_text
+    text = proof_block_text(block)
     if text:
         return text
     note = str(block.note or "")
@@ -2354,7 +2501,7 @@ def _route_subblock_overlaps_bbox(
 def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dict[str, Any]:
     manual_bbox = _manual_bbox_from_binding(block, binding)
     label = str(binding.get("source_label") or block.source_label or block.block_type.value)
-    text = str(binding.get("text") or block.full_text or "")
+    text = str(binding.get("text") or proof_block_text(block) or "")
     return {
         "block_label": label,
         "block_bbox": list(manual_bbox),
@@ -2699,9 +2846,11 @@ class HanwangMicroRecBlockEngine:
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
             "batch_failures=%d batch_disabled=%s "
             "seg=%.2fs recog=%.2fs "
-            "max_collage=%dx%d probe_calls=%d recog_pixels=%d/%d "
+            "max_batch_crop=%dx%d probe_calls=%d recog_pixels=%d/%d "
             "latin_engcut_calls=%d latin_engcut_failures=%d latin_engcut_exact=%d "
-            "latin_engcut_review=%d latin_engcut_disabled=%s",
+            "latin_engcut_review=%d latin_engcut_disabled=%s "
+            "overlap_merge_clusters=%d overlap_merge_calls=%d overlap_merge_failures=%d "
+            "overlap_merge_replacements=%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
@@ -2716,8 +2865,8 @@ class HanwangMicroRecBlockEngine:
             stats.recog_batch_disabled,
             stats.seg_seconds,
             stats.recog_seconds,
-            stats.recog_max_collage_width,
-            stats.recog_max_collage_height,
+            stats.recog_max_batch_crop_width,
+            stats.recog_max_batch_crop_height,
             stats.recog_probe_calls,
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
@@ -2726,6 +2875,10 @@ class HanwangMicroRecBlockEngine:
             stats.latin_engcut_exact_tokens,
             stats.latin_engcut_review_tokens,
             stats.latin_engcut_disabled,
+            stats.overlap_merge_clusters,
+            stats.overlap_merge_probe_calls,
+            stats.overlap_merge_probe_failures,
+            stats.overlap_merge_replacements,
         )
         return stats
 

@@ -72,10 +72,6 @@ class PageImageCache:
             self._cache.popitem(last=False)
         return img
 
-    def get_image(self, path: str) -> Optional[np.ndarray]:
-        """旧接口别名。"""
-        return self.get_page_image(path)
-
     def get_bbox_crop(
         self,
         page_path: str,

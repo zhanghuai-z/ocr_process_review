@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 from app.services.char_index_service import CharIndexService
-from app.ui.proof.v_proof import _build_text_map
+from app.services.proof_reference_context import build_proof_reference_context
 
 
 DEFAULT_OUT_DIR = Path("debug/vproof_index_geometry_echo")
@@ -84,7 +84,9 @@ def render_vproof_index_geometry_echo(out_dir: Path | str = DEFAULT_OUT_DIR) -> 
     )
     project = OcrProject(name="vproof-index-geometry-echo", pages=[page])
     svc = CharIndexService(include_non_cjk=True, include_fallback=True).build_index(project)
-    flat_text, text_map = _build_text_map(page)
+    reference_context = build_proof_reference_context(page)
+    flat_text = reference_context.text
+    text_map = reference_context.slots
 
     carrier_entry = svc.first_entry(carrier)
     tax_entry = svc.first_entry("税")
@@ -108,8 +110,8 @@ def render_vproof_index_geometry_echo(out_dir: Path | str = DEFAULT_OUT_DIR) -> 
     overlay_path = out_dir / "vproof_index_overlay.png"
     cv2.imwrite(str(overlay_path), overlay)
 
-    tax_text_pos = text_map[tax_entry.char_idx][2]
-    after_text_pos = text_map[after_entry.char_idx][2]
+    tax_text_pos = text_map[tax_entry.char_idx].start
+    after_text_pos = text_map[after_entry.char_idx].start
     report_path = out_dir / "vproof_index_geometry_echo.md"
     report_path.write_text(
         "\n".join([

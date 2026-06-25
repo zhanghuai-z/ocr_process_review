@@ -3,7 +3,7 @@
 Verifies that HProof / VProof / char-index / proof-crop flows handle
 Hanwang OCR output correctly, including char_fallback single-char lines.
 
-Hanwang-specific data shapes (from hanwang_ocr_engine / translator):
+Hanwang-specific data shapes (from micro_recblock / translator):
   - Char.bbox_source = "hanwang:CharRcg"
   - Char.bbox_granularity = "char"
   - char_fallback lines: bbox_source = "hanwang:CharRcg:char_fallback", 1 char per line
@@ -11,6 +11,8 @@ Hanwang-specific data shapes (from hanwang_ocr_engine / translator):
   - No "word" granularity; every char is individually boxed
 """
 from __future__ import annotations
+
+from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
 
 from typing import List, Optional
 import numpy as np
@@ -31,7 +33,7 @@ from app.services.char_index_service import CharIndexService
 
 def _hw_char(glyph: str, x: int, y: int, w: int = 30, h: int = 30, *,
              source: str = "hanwang:CharRcg") -> Char:
-    """Build a Char as HanwangOcrEngine/translator produces it."""
+    """Build a Char as micro_recblock/translator produces it."""
     return Char(
         char=glyph,
         confidence=0.92,
@@ -43,7 +45,7 @@ def _hw_char(glyph: str, x: int, y: int, w: int = 30, h: int = 30, *,
 
 
 def _hw_fallback_char(glyph: str, x: int, y: int, w: int = 30, h: int = 30) -> Char:
-    """Build a char as produced by HanwangOcrEngine._char_fallback."""
+    """Build a char as produced by the Hanwang char fallback path."""
     return _hw_char(glyph, x, y, w, h, source="hanwang:CharRcg:char_fallback")
 
 
@@ -54,7 +56,6 @@ def _hw_line(text: str, chars: List[Char], x: int = 0, y: int = 0,
         confidence=0.90,
         bbox=BBox(x, y, line_w, line_h),
         chars=chars,
-        proof_status=ProofStatus.UNCHECKED,
     )
 
 
@@ -142,7 +143,7 @@ def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
     line = build_line_from_ir(ir_line)
 
     assert line.text == "已"
-    assert line.final_text == "已"
+    assert proof_display_text(line) == "已"
     assert line.ocr_text == "已"
     assert line.review_flags == ["hanwang_char_fallback"]
     assert len(line.chars) == 1
@@ -518,7 +519,7 @@ class _StubCache:
         self._img = img
         self.crop_calls: list = []
 
-    def get_image(self, path):
+    def get_page_image(self, path):
         return self._img
 
     def get_char_crop(self, path, bbox, size, *, pad):
@@ -569,7 +570,7 @@ def test_char_index_svc_default_params_hanwang_chars_indexed():
 
 
 def test_char_index_indexes_old_hanwang_chars_with_empty_granularity():
-    """VProof must not be empty for projects saved before granularity was populated."""
+    """Old Hanwang chars are indexed without mutating persisted char metadata."""
     line = Line(
         text="甲A，",
         confidence=0.9,
@@ -590,4 +591,4 @@ def test_char_index_indexes_old_hanwang_chars_with_empty_granularity():
     assert svc.query("甲")
     assert svc.query("A")
     assert svc.query("，")
-    assert {ch.bbox_granularity for ch in line.chars} == {"char"}
+    assert {ch.bbox_granularity for ch in line.chars} == {""}

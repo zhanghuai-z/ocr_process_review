@@ -5,15 +5,16 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QKeySequence, QShortcut, QColor
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSplitter, QTabWidget, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget
 )
 
+from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     MANUAL_MERGE_FROM_KEY,
@@ -37,6 +38,7 @@ from app.core.paddle_artifact_index import (
     apply_paddle_binding_to_block,
 )
 from app.core.paddle_labels import normalize_paddle_label
+from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.paddle_line_routing import (
     ROUTE_SUBBLOCKS_FIELD,
     formula_texts_by_subblock_bbox,
@@ -45,8 +47,8 @@ from app.core.paddle_line_routing import (
 from app.core.ocr_ir import is_formula_marker_token
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.ui.widgets.image_viewer import ImageViewer
-from app.core.proof_state_bus import ProofStateBus
 from app.ui.widgets.confidence_badge import ConfidenceBadge
+from app.ui.widgets.effects import apply_soft_shadow
 
 STATUS_LABEL_MAX_CHARS = 96
 
@@ -151,26 +153,24 @@ def _block_type_button_stylesheet(block_type: BlockType) -> str:
         QPushButton {{
             min-height: 32px;
             padding: 0 8px;
-            border-radius: 6px;
-            border: 1px solid #d9d9d9;
-            background: #ffffff;
-            color: #4b5563;
+            border-radius: 8px;
+            border: none;
+            background: rgba(255, 255, 255, 150);
+            color: #2C2C2C;
             font-size: 13px;
         }}
         QPushButton:hover {{
-            border-color: #4096ff;
-            color: #4096ff;
+            background: #ffffff;
+            color: #2C2C2C;
         }}
         QPushButton:checked {{
-            border: 1px solid #1677ff;
-            background: #e6f7ff;
-            color: #1677ff;
-            font-weight: 600;
+            background: #2C2C2C;
+            color: #ffffff;
+            font-weight: 500;
         }}
         QPushButton:disabled {{
-            border: 1px solid #d9d9d9;
-            background: #f5f6f7;
-            color: #bfbfbf;
+            background: #F2F0EB;
+            color: #CCCCCC;
             font-weight: 400;
         }}
     """
@@ -180,13 +180,13 @@ def _block_type_group_stylesheet() -> str:
     return """
         QFrame#blockTypeGroup {
             border: none;
-            border-radius: 0;
+            border-radius: 8px;
             background: #ffffff;
         }
         QLabel#blockTypeGroupTitle {
-            color: #8c8c8c;
-            font-size: 12px;
-            font-weight: 600;
+            color: #6B6B6B;
+            font-size: 10px;
+            font-weight: 500;
         }
     """
 
@@ -195,12 +195,12 @@ def _type_badge_stylesheet(block_type: BlockType) -> str:
     return """
         QLabel#typeBadge {{
             padding: 2px 10px;
-            border-radius: 12px;
-            border: 1px solid #91caff;
-            background: #e6f7ff;
-            color: #1677ff;
-            font-weight: 600;
-            font-size: 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(44, 44, 44, 25);
+            background: rgba(44, 44, 44, 12);
+            color: #2C2C2C;
+            font-weight: 500;
+            font-size: 10px;
         }}
     """
 
@@ -256,13 +256,15 @@ class LayoutPanel(QWidget):
         self._btn_run.hide()
 
         self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 0)
-        self._progress_bar.setFixedHeight(6)
-        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setFixedHeight(16)
+        self._progress_bar.setTextVisible(True)
         self._progress_bar.hide()
-
         self._status_lbl = QLabel("请先导入文件并运行版面分析")
         self._status_lbl.setObjectName("muted")
+        self._status_lbl.setWordWrap(True)
         self._status_lbl.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Preferred,
@@ -270,6 +272,7 @@ class LayoutPanel(QWidget):
 
         # 主区域（两栏：页面列表 + 图像查看器）
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(8)
         self._splitter = splitter
 
         # 左：页面目录 / 标题目录切换。
@@ -288,39 +291,67 @@ class LayoutPanel(QWidget):
         splitter.addWidget(self._left_tabs)
 
         # 中：图像查看器 + 上方编辑工具条
-        viewer_wrap = QWidget()
-        vw_lay = QVBoxLayout(viewer_wrap)
-        vw_lay.setContentsMargins(0, 0, 0, 0)
-        vw_lay.setSpacing(0)
+        vw_wrap = QWidget()
+        vw_wrap.setObjectName("layoutCanvasPane")
+        vw_lay = QVBoxLayout(vw_wrap)
+        vw_lay.setContentsMargins(0, 28, 0, 0)
+        vw_lay.setSpacing(16)
 
+        tb_wrap = QWidget()
+        tb_lay = QHBoxLayout(tb_wrap)
+        tb_lay.setContentsMargins(0, 0, 0, 0)
+
+        # viewer 工具条 (悬浮胶囊)
         viewer_tb = QFrame()
-        viewer_tb.setObjectName("viewerToolbar")
-        viewer_tb.setFixedHeight(44)
+        viewer_tb.setObjectName("pillToolbar")
+        apply_soft_shadow(viewer_tb, blur_radius=18, y_offset=4, alpha=16)
+
+        viewer_tb.setFixedHeight(40)
         vtl = QHBoxLayout(viewer_tb)
         vtl.setContentsMargins(16, 0, 16, 0)
-        vtl.setSpacing(8)
+        vtl.setSpacing(12)
 
-        self._btn_char_boxes = QPushButton("\u2318 \u5b57\u6846")
-        self._btn_char_boxes.setObjectName("toolToggle")
+        self._btn_char_boxes = QPushButton("字框")
+        self._btn_char_boxes.setIcon(get_icon("layout_box", color="#6B6B6B"))
+        self._btn_char_boxes.setIconSize(QSize(16, 16))
+        self._btn_char_boxes.setObjectName("pillToolBtn")
         self._btn_char_boxes.setCheckable(True)
         self._btn_char_boxes.setChecked(True)
+        self._btn_char_boxes.setFixedHeight(28)
         self._btn_char_boxes.setToolTip("\u663e\u793a/\u9690\u85cf OCR \u5b57\u6846")
         self._btn_char_boxes.clicked.connect(self._refresh_current_page_layers)
         vtl.addWidget(self._btn_char_boxes)
 
-        self._btn_delete = QPushButton("删除框")
-        self._btn_delete.setObjectName("secondaryBtn")
+        self._btn_delete = QPushButton("删除")
+        self._btn_delete.setIcon(get_icon("delete", color="#6B6B6B"))
+        self._btn_delete.setIconSize(QSize(16, 16))
+        self._btn_delete.setObjectName("pillToolBtn")
+        self._btn_delete.setFixedHeight(28)
         self._btn_delete.setToolTip("删除右键框选中的框（Delete）")
         self._btn_delete.clicked.connect(self._delete_selected)
         vtl.addWidget(self._btn_delete)
 
-        # Debug-only fields are intentionally not mounted in the toolbar.  The
-        # human-facing top bar should stay compact; detailed geometry remains in
-        # the inspector/export IR.
-        self._prop_bbox = QLabel("", self)
-        self._prop_bbox.hide()
-        self._prop_conf = ConfidenceBadge(1.0, self)
-        self._prop_conf.hide()
+        # 添加翻页导航到图像区域顶部
+        vtl.addSpacing(16)
+        self._btn_prev = QPushButton("‹")
+        self._btn_prev.setObjectName("pillToolBtn")
+        self._btn_prev.setFixedSize(28, 28)
+        self._btn_prev.setToolTip("上一页")
+        self._btn_prev.clicked.connect(lambda: self._goto_relative(-1))
+        vtl.addWidget(self._btn_prev)
+
+        self._lbl_page_no = QLabel("0 / 0")
+        self._lbl_page_no.setObjectName("pageNavLabel")
+        self._lbl_page_no.setMinimumWidth(48)
+        self._lbl_page_no.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vtl.addWidget(self._lbl_page_no)
+
+        self._btn_next = QPushButton("›")
+        self._btn_next.setObjectName("pillToolBtn")
+        self._btn_next.setFixedSize(28, 28)
+        self._btn_next.setToolTip("下一页")
+        self._btn_next.clicked.connect(lambda: self._goto_relative(+1))
+        vtl.addWidget(self._btn_next)
 
         vtl.addStretch(1)
         self._selection_mode_lbl = QLabel("新建模式:")
@@ -331,7 +362,11 @@ class LayoutPanel(QWidget):
         self._selection_type_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._selection_type_status.setMinimumWidth(64)
         vtl.addWidget(self._selection_type_status)
-        vw_lay.addWidget(viewer_tb)
+
+        tb_lay.addStretch(1)
+        tb_lay.addWidget(viewer_tb)
+        tb_lay.addStretch(1)
+        vw_lay.addWidget(tb_wrap)
 
         self._find_dialog = self._build_find_dialog()
 
@@ -344,10 +379,11 @@ class LayoutPanel(QWidget):
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
         self._viewer.set_bbox_snapper(self._snap_current_draw_bbox)
         vw_lay.addWidget(self._viewer, 1)
-        splitter.addWidget(viewer_wrap)
+        splitter.addWidget(vw_wrap)
 
         # 右：工具栏 + 项目统计
         right_wrap = QWidget()
+        right_wrap.setObjectName("layoutRightContent")
         right_lay = QVBoxLayout(right_wrap)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
@@ -360,13 +396,16 @@ class LayoutPanel(QWidget):
         self._type_context_title = QLabel("新建框类型")
         self._type_context_title.setObjectName("sidebarTitle")
         sidebar_header_lay.addWidget(self._type_context_title)
+        self._prop_conf = ConfidenceBadge()
+        self._prop_conf.hide()
+        sidebar_header_lay.addWidget(self._prop_conf)
         right_lay.addWidget(sidebar_header)
 
         tool_panel = QFrame()
         tool_panel.setObjectName("sidebarBar")
         tool_lay = QVBoxLayout(tool_panel)
-        tool_lay.setContentsMargins(0, 0, 0, 0)
-        tool_lay.setSpacing(0)
+        tool_lay.setContentsMargins(16, 16, 16, 16)
+        tool_lay.setSpacing(18)
 
         self._type_group = QButtonGroup(self)
         self._type_group.setExclusive(True)
@@ -387,21 +426,18 @@ class LayoutPanel(QWidget):
         self._btn_undo.setToolTip("撤销上一步版面编辑（Ctrl+Z）")
         self._btn_undo.clicked.connect(self._undo_last_edit)
 
-        tool_hint = QLabel("Shift+左键拖拽：添加框；覆盖框线时自动合并为大框。\nSpace 长按：只移动画布，不编辑框。")
-        tool_hint.setObjectName("muted")
-        tool_hint.setWordWrap(True)
         action_wrap = QWidget()
         action_lay = QVBoxLayout(action_wrap)
-        action_lay.setContentsMargins(16, 8, 16, 16)
+        action_lay.setContentsMargins(0, 0, 0, 0)
         action_lay.setSpacing(8)
         action_lay.addWidget(self._btn_undo)
-        action_lay.addWidget(tool_hint)
         tool_lay.addWidget(action_wrap)
 
         right_lay.addWidget(tool_panel)
 
         stats_panel = QFrame()
         stats_panel.setObjectName("layoutStatsPanel")
+        apply_soft_shadow(stats_panel, blur_radius=16, y_offset=4, alpha=14)
         stats_lay = QVBoxLayout(stats_panel)
         stats_lay.setContentsMargins(12, 10, 12, 10)
         stats_lay.setSpacing(6)
@@ -423,72 +459,64 @@ class LayoutPanel(QWidget):
         right_scroll.setMinimumWidth(280)
         right_scroll.setMaximumWidth(380)
         right_scroll.setWidget(right_wrap)
-        splitter.addWidget(right_scroll)
+        # Create right pane
+        right_pane = QWidget()
+        right_pane.setObjectName("layoutRightPane")
+        right_pane_lay = QVBoxLayout(right_pane)
+        right_pane_lay.setContentsMargins(0, 0, 0, 0)
+        right_pane_lay.setSpacing(0)
+        right_pane_lay.addWidget(right_scroll, 1)
+
+        # Right Action Area (Replaces Bottom Bar)
+        action_area = QFrame()
+        action_area.setObjectName("actionArea")
+        action_lay = QVBoxLayout(action_area)
+        action_lay.setContentsMargins(16, 16, 16, 16)
+        action_lay.setSpacing(12)
+
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setSpacing(12)
+
+        self._btn_cancel = QPushButton("取消")
+        self._btn_cancel.setObjectName("secondaryBtn")
+        self._btn_cancel.setFixedHeight(36)
+        self._btn_cancel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._btn_cancel.clicked.connect(self._on_cancel_clicked)
+        btn_row.addWidget(self._btn_cancel)
+
+        self._btn_done = QPushButton("完成本页")
+        self._btn_done.setObjectName("secondaryBtn")
+        self._btn_done.setFixedHeight(36)
+        self._btn_done.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._btn_done.clicked.connect(self._on_done_clicked)
+        btn_row.addWidget(self._btn_done)
+        action_lay.addLayout(btn_row)
+
+        self._btn_submit = QPushButton("提交 OCR")
+        self._btn_submit.setObjectName("darkBtn")
+        self._btn_submit.setFixedHeight(40)
+        self._btn_submit.clicked.connect(self._on_submit_clicked)
+        apply_soft_shadow(self._btn_submit, blur_radius=16, y_offset=3, alpha=18)
+        action_lay.addWidget(self._btn_submit)
+
+        status_row = QVBoxLayout()
+        status_row.setContentsMargins(4, 0, 4, 0)
+        status_row.setSpacing(4)
+        status_row.addWidget(self._status_lbl)
+        self._progress_bar.setFixedHeight(16)
+        status_row.addWidget(self._progress_bar)
+        action_lay.addLayout(status_row)
+
+        right_pane_lay.addWidget(action_area, 0)
+
+        splitter.addWidget(right_pane)
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 9)
         splitter.setStretchFactor(2, 2)
-        splitter.setSizes([220, 980, 320])
+        splitter.setSizes([236, 980, 320])
         main_layout.addWidget(splitter, 1)
-
-        # 底栏（设计稿语义：翻页 + 状态 + 完成 / 提交 / 取消）
-        bottom = QFrame()
-        bottom.setObjectName("toolbar")
-        bottom.setFixedHeight(56)
-        bl = QHBoxLayout(bottom)
-        bl.setContentsMargins(24, 0, 24, 0)
-        bl.setSpacing(8)
-
-        # 左：翻页 ‹ n/N ›  ＋  状态
-        self._btn_prev = QPushButton("‹")
-        self._btn_prev.setObjectName("pageNavBtn")
-        self._btn_prev.setFixedSize(32, 32)
-        self._btn_prev.setToolTip("上一页")
-        self._btn_prev.clicked.connect(lambda: self._goto_relative(-1))
-        bl.addWidget(self._btn_prev)
-
-        self._lbl_page_no = QLabel("0 / 0")
-        self._lbl_page_no.setObjectName("pageNavLabel")
-        self._lbl_page_no.setMinimumWidth(48)
-        self._lbl_page_no.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bl.addWidget(self._lbl_page_no)
-
-        self._btn_next = QPushButton("›")
-        self._btn_next.setObjectName("pageNavBtn")
-        self._btn_next.setFixedSize(32, 32)
-        self._btn_next.setToolTip("下一页")
-        self._btn_next.clicked.connect(lambda: self._goto_relative(+1))
-        bl.addWidget(self._btn_next)
-
-        bl.addSpacing(16)
-        bl.addWidget(self._status_lbl)
-        bl.addWidget(self._progress_bar)
-        # progress 默认隐藏，但需要伸展能力
-        self._progress_bar.setFixedHeight(6)
-        self._progress_bar.setFixedWidth(120)
-
-        bl.addStretch(1)
-
-        # 右：取消 / 完成 / 提交
-        self._btn_cancel = QPushButton("取消")
-        self._btn_cancel.setObjectName("secondaryBtn")
-        self._btn_cancel.setFixedHeight(32)
-        self._btn_cancel.clicked.connect(self._on_cancel_clicked)
-        bl.addWidget(self._btn_cancel)
-
-        self._btn_done = QPushButton("完成本页")
-        self._btn_done.setObjectName("secondaryBtn")
-        self._btn_done.setFixedHeight(32)
-        self._btn_done.clicked.connect(self._on_done_clicked)
-        bl.addWidget(self._btn_done)
-
-        self._btn_submit = QPushButton("提交并进入 OCR")
-        self._btn_submit.setObjectName("primaryBtn")
-        self._btn_submit.setFixedHeight(32)
-        self._btn_submit.clicked.connect(self._on_submit_clicked)
-        bl.addWidget(self._btn_submit)
-
-        main_layout.addWidget(bottom)
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._undo_shortcut.activated.connect(self._undo_last_edit)
         self._page_up_shortcut = QShortcut(QKeySequence("PageUp"), self)
@@ -666,7 +694,6 @@ class LayoutPanel(QWidget):
         self._btn_run.setEnabled(False)
         self._btn_undo.setEnabled(False)
         self._set_selected_type_buttons_enabled(False)
-        self._prop_bbox.setText("")
         self._prop_conf.hide()
         self._update_project_stats()
         self._update_page_nav()
@@ -694,15 +721,17 @@ class LayoutPanel(QWidget):
     def start_analysis_progress(self, total_pages: int) -> None:
         self._progress_bar.setRange(0, max(1, total_pages))
         self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("%p%")
         self._progress_bar.show()
-        self._set_status_text(f"正在分析版面… 0/{total_pages}")
+        self._set_status_text("版面分析中…")
 
     def update_analysis_progress(self, current: int, total: int) -> None:
         current_done = max(0, min(current + 1, total))
         self._progress_bar.setRange(0, max(1, total))
         self._progress_bar.setValue(current_done)
+        self._progress_bar.setFormat("%p%")
         self._progress_bar.show()
-        self._set_status_text(f"正在分析版面… {current_done}/{total}")
+        self._set_status_text("版面分析中…")
 
     def finish_analysis_progress(self, message: str = "") -> None:
         self._progress_bar.hide()
@@ -818,7 +847,7 @@ class LayoutPanel(QWidget):
             block.note,
         ]
         for line in block.lines:
-            parts.extend([line.display_text, line.final_text, line.text, line.ocr_text])
+            parts.extend(proof_search_texts(line))
         parts.extend(LayoutPanel._payload_strings(block.raw_payload))
         parts.extend(LayoutPanel._payload_strings(block.app_payload))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
@@ -827,7 +856,7 @@ class LayoutPanel(QWidget):
     def _block_text_search_fields(block: Block) -> list[str]:
         parts: list[str] = []
         for line in block.lines:
-            parts.extend([line.display_text, line.final_text, line.text, line.ocr_text])
+            parts.extend(proof_search_texts(line))
         if block.note:
             parts.append(block.note.split("|", 1)[0])
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
@@ -839,7 +868,7 @@ class LayoutPanel(QWidget):
     @staticmethod
     def _block_preview_text(block: Block) -> str:
         for line in block.lines:
-            text = line.display_text or line.final_text or line.text or line.ocr_text
+            text = proof_display_text(line)
             if text:
                 return _compact_status_text(text)
         if block.note:
@@ -1041,20 +1070,25 @@ class LayoutPanel(QWidget):
         wrap = QWidget()
         column = QVBoxLayout(wrap)
         column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(0)
+        column.setSpacing(18)
         for group_title, subtype_specs in BLOCK_TYPE_BUTTON_GROUPS:
-            group_frame = QFrame()
-            group_frame.setObjectName("blockTypeGroup")
-            group_lay = QVBoxLayout(group_frame)
-            group_lay.setContentsMargins(16, 8, 16, 16)
-            group_lay.setSpacing(8)
+            section_wrap = QWidget()
+            section_lay = QVBoxLayout(section_wrap)
+            section_lay.setContentsMargins(0, 0, 0, 0)
+            section_lay.setSpacing(8)
 
             title = QLabel(group_title)
             title.setObjectName("blockTypeGroupTitle")
-            group_lay.addWidget(title)
+            section_lay.addWidget(title)
 
-            grid_wrap = QWidget()
-            grid = QGridLayout(grid_wrap)
+            # Floating White Card Wrap
+            grid_wrap = QFrame()
+            grid_wrap.setObjectName("whiteCard")
+            apply_soft_shadow(grid_wrap, blur_radius=18, y_offset=4, alpha=14)
+            grid_lay = QVBoxLayout(grid_wrap)
+            grid_lay.setContentsMargins(12, 12, 12, 12)
+
+            grid = QGridLayout()
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setHorizontalSpacing(8)
             grid.setVerticalSpacing(8)
@@ -1082,15 +1116,13 @@ class LayoutPanel(QWidget):
                 grid.addWidget(button, row, col, 1, min(span, columns))
                 col += span
                 if col >= columns:
-                    row += 1
                     col = 0
-            group_lay.addWidget(grid_wrap)
-            column.addWidget(group_frame)
-            if group_title != BLOCK_TYPE_BUTTON_GROUPS[-1][0]:
-                divider = QFrame()
-                divider.setObjectName("blockTypeDivider")
-                divider.setFixedHeight(1)
-                column.addWidget(divider)
+                    row += 1
+            grid_lay.addLayout(grid)
+            section_lay.addWidget(grid_wrap)
+            column.addWidget(section_wrap)
+
+        column.addStretch(1)
         parent_layout.addWidget(wrap)
         return type_buttons, subtype_buttons
 
@@ -1256,7 +1288,6 @@ class LayoutPanel(QWidget):
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error_message}")
         self._selected_block = None
         self._sync_selected_type_buttons(None)
-        self._prop_bbox.setText("")
         self._prop_conf.hide()
         self._update_project_stats()
         gate = self._page_gate_states.get(page.page_number)
@@ -1276,7 +1307,6 @@ class LayoutPanel(QWidget):
     def _clear_selection_ui(self, page: Page) -> None:
         self._selected_block = None
         self._sync_selected_type_buttons(None)
-        self._prop_bbox.setText("")
         self._prop_conf.hide()
         self._update_project_stats()
 
@@ -1284,7 +1314,6 @@ class LayoutPanel(QWidget):
         self._selected_block = block
         bb = block.bbox
         self._sync_selected_type_buttons(block)
-        self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._prop_conf.set_score(block.avg_confidence)
 
     def _on_block_edit_started(self, block: Block) -> None:
@@ -1292,7 +1321,6 @@ class LayoutPanel(QWidget):
 
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
-        self._prop_bbox.setText(f"x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
@@ -1347,8 +1375,7 @@ class LayoutPanel(QWidget):
         page.blocks = [b for b in page.blocks if b is not block]
         if self._selected_block is block:
             self._selected_block = None
-            self._sync_selected_type_buttons(None)
-            self._prop_bbox.setText("")
+            self._selected_char_box_index = -1
             self._prop_conf.hide()
         self._rebuild_heading_outline()
         self._refresh_block_search()
@@ -1389,8 +1416,6 @@ class LayoutPanel(QWidget):
 
     def _on_char_bbox_moved(self, char) -> None:
         bb = char.bbox
-        if bb is not None:
-            self._prop_bbox.setText(f"字框 x={bb.x} y={bb.y} w={bb.w} h={bb.h}")
         self.geometry_changed.emit()
 
     @staticmethod
@@ -1914,10 +1939,11 @@ class LayoutPanel(QWidget):
                 self._btn_submit.setText(action[1])
                 self._btn_submit.setEnabled(action[2])
             else:
-                self._btn_submit.setText("提交并进入 OCR")
+                self._btn_submit.setText("提交 OCR")
+                self._btn_submit.setProperty("class", "darkBtn")
                 self._btn_submit.setEnabled(True)
         else:
-            self._btn_submit.setText("提交并进入 OCR")
+            self._btn_submit.setText("提交 OCR")
             self._btn_submit.setEnabled(False)
 
     def _goto_relative(self, delta: int) -> None:

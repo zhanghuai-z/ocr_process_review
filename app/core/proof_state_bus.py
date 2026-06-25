@@ -1,19 +1,12 @@
 """校对事件总线：轻量发布/订阅，用于跨面板通知状态变更。
 
-用法（新式，推荐）：
+用法：
     from app.core.proof_state_bus import TOPIC_LINE_PROOF_CHANGED, get_proof_state_bus
 
     bus = get_proof_state_bus()
     unsub = bus.subscribe(TOPIC_LINE_PROOF_CHANGED, my_handler)
-    bus.publish(TOPIC_LINE_PROOF_CHANGED, {"page_id": 1, "line_id": 5, "status": "OK"})
+    bus.publish_line_update(ProofUpdateRequest(page_id=1, line_id=5, status="OK"))
     unsub()  # 取消订阅
-
-用法（旧式，仍兼容）：
-    from app.core.proof_state_bus import ProofStateBus
-
-    bus = ProofStateBus.instance()
-    bus.subscribe("line.proof_changed", my_handler)
-    bus.publish("line.proof_changed", page_id=1, line_id=5, status="OK")
 """
 from __future__ import annotations
 
@@ -36,9 +29,8 @@ logger = logging.getLogger(__name__)
 class ProofStateBus:
     """单例事件总线。
 
-    publish 支持两种调用形式：
-      bus.publish(topic, payload_dict)   → handler(payload_dict)
-      bus.publish(topic, **kwargs)       → handler(**kwargs)
+    Proof event payloads are typed objects; handlers should fail visibly during
+    development if they receive the wrong event shape.
     """
 
     _instance: "ProofStateBus | None" = None
@@ -82,31 +74,18 @@ class ProofStateBus:
             except ValueError:
                 pass
 
-    def publish(self, event: str, payload: Optional[Any] = None, **kwargs: Any) -> None:
+    def publish(self, event: str, payload: Optional[Any] = None) -> None:
         """发布事件，同步调用所有订阅者。handler 异常不中止其他 handler。
 
-        支持两种形式：
-          publish(topic, {"key": "value"})  → handler({"key": "value"})
-          publish(topic, key="value")       → handler(key="value")
+        payload 为 typed object；无 payload 时调用无参 handler。
         """
         handlers = list(self._subscribers.get(event, []))
         for handler in handlers:
             try:
                 if payload is not None:
                     handler(payload)
-                elif kwargs:
-                    handler(**kwargs)
                 else:
                     handler()
-            except TypeError as exc:
-                if payload is not None and hasattr(payload, "to_legacy_payload"):
-                    try:
-                        handler(**payload.to_legacy_payload())
-                        continue
-                    except Exception as legacy_exc:  # noqa: BLE001
-                        logger.warning("ProofStateBus legacy handler error [%s]: %s", event, legacy_exc)
-                        continue
-                logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("ProofStateBus handler error [%s]: %s", event, exc)
 

@@ -3,7 +3,7 @@
 覆盖：
 - _canonicalize_text_to_slots：单字符 chars 下的 pad / 不截断 / 多 token 降级
 - _RowEditor 在 misaligned-shorter 场景下也进入 fixed 模式
-- _apply_batch_input：行内输入 + 多选时的批量替换
+- gallery 多选：批量替换走统一 proof edit 路径
 """
 
 from __future__ import annotations

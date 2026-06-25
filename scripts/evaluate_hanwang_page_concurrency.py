@@ -28,10 +28,6 @@ if str(ROOT) not in sys.path:
 from scripts.benchmark_hanwang_micro_recblock import _load_ppvl_blocks
 from app.engines.hanwang.micro_recblock import (
     MAX_RECOG_BATCH_GROUPS,
-    MAX_RECOG_COLLAGE_ASPECT,
-    MAX_RECOG_COLLAGE_HEIGHT,
-    MAX_RECOG_COLLAGE_PIXELS,
-    MAX_RECOG_COLLAGE_WIDTH,
     run_micro_recblock,
 )
 
@@ -116,13 +112,10 @@ def main() -> int:
         "total_elapsed_seconds": total_elapsed,
         "batch_limits": {
             "max_groups": MAX_RECOG_BATCH_GROUPS,
-            "max_collage_width": MAX_RECOG_COLLAGE_WIDTH,
-            "max_collage_height": MAX_RECOG_COLLAGE_HEIGHT,
-            "max_collage_pixels": MAX_RECOG_COLLAGE_PIXELS,
-            "max_collage_aspect": MAX_RECOG_COLLAGE_ASPECT,
         },
         "risk_notes": [
-            "Native linecut_recogimg_probe.exe has shown AccessViolation risk on large/wide batches.",
+            "Native linecut_recogimg_probe.exe has shown AccessViolation risk when multiple recblocks are passed to one Recog call.",
+            "Current batch-list mode keeps one safe recblock per crop and batches only at the wrapper-process level.",
             "Concurrent pages multiply subprocess and temp-file pressure.",
             "Process-wide batch disable state can make per-page timings non-independent.",
             "UI progress/writeback ordering must remain page-keyed before enabling runtime concurrency.",

@@ -4,14 +4,14 @@ from typing import Any, List, Optional
 import time
 
 from .enums import (
-    BlockSource, BlockType, LlmReviewStatus, PageStatus, ProofStatus,
+    BlockSource, BlockType, PageStatus, ProofStatus,
 )
 from .entity_id import ensure_entity_uid
+from .proof_line_state import ProofLineState
 
 
 OCR_AVAILABLE_PAGE_STATUSES = {
     PageStatus.OCR_DONE,
-    PageStatus.PRE_REVIEW_DONE,
     PageStatus.PROOFING,
     PageStatus.PROOF_DONE,
 }
@@ -115,76 +115,71 @@ class Line:
     confidence: float          # 行平均置信度
     bbox: BBox
     chars: List[Char] = field(default_factory=list)
-    proof_status: ProofStatus = ProofStatus.UNCHECKED
     original_text: str = ""    # 修改前的原始文字（保留用于对比）
     id: Optional[int] = None
-
-    # --- Phase 1 新增字段 ---
-    final_text: str = ""                  # 人工最终文本
-    final_text_set: bool = False          # final_text 是否为显式人工终稿，可为空串
     ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
-    llm_suggestion: str = ""              # LLM 预审建议文本
-    llm_reason: str = ""                  # LLM 修改原因
-    llm_review_status: LlmReviewStatus = LlmReviewStatus.DISABLED
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
     uid: str = ""                         # 稳定业务 ID
+    proof_state: ProofLineState | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "line")
-        if not self.final_text and not self.final_text_set:
-            self.final_text = self.text
         if not self.ocr_text:
             self.ocr_text = self.text
         if not self.original_text:
             self.original_text = self.ocr_text or self.text
+        state = self.proof_state or ProofLineState(line_uid=self.uid)
+        self.apply_proof_state(state)
 
-    def update_text(self, new_text: str) -> None:
-        self.update_final_text(new_text)
-
-    def update_final_text(self, new_text: str) -> None:
+    def set_proof_text(
+        self,
+        new_text: str,
+        *,
+        status: ProofStatus = ProofStatus.MODIFIED,
+    ) -> None:
         if self.original_text == "":
-            self.original_text = self.ocr_text or self.text or self.final_text
-        self.final_text = new_text
-        self.final_text_set = True
-        self.proof_status = ProofStatus.MODIFIED
+            self.original_text = self.ocr_text or self.text
+        state = getattr(self, "proof_state", None) or ProofLineState(line_uid=self.uid)
+        state.final_text = new_text
+        state.final_text_set = True
+        state.proof_status = status
+        self.apply_proof_state(state)
+
+    def set_proof_status(self, status: ProofStatus) -> None:
+        state = getattr(self, "proof_state", None) or ProofLineState(line_uid=self.uid)
+        state.proof_status = status
+        self.apply_proof_state(state)
+
+    def apply_proof_state(self, state: ProofLineState) -> None:
+        state.line_uid = self.uid
+        object.__setattr__(self, "proof_state", state)
 
     def ensure_text_contract(self, *, fill_original: bool = False) -> None:
-        """Normalize legacy/current text fields before persistence or OCR handoff."""
+        """Normalize OCR text fields and ensure proof state exists."""
+        state = getattr(self, "proof_state", None)
+        if state is None:
+            self.apply_proof_state(ProofLineState(line_uid=self.uid))
+        else:
+            state.line_uid = self.uid
         ocr_text = self.ocr_text or self.text
         if not self.text:
             self.text = ocr_text
-        if self.final_text_set:
-            final_text = self.final_text
-        elif self.final_text and self.final_text != self.text:
-            self.final_text_set = True
-            final_text = self.final_text
-        else:
-            final_text = self.final_text or self.text or ocr_text
         if fill_original and not self.original_text:
             self.original_text = ocr_text or self.text
-        self.final_text = final_text
         self.ocr_text = ocr_text
 
-    @property
-    def display_text(self) -> str:
-        if self.final_text_set:
-            return self.final_text
-        return self.final_text or self.text or ""
-
     def to_dict(self) -> dict:
+        state = self.proof_state or ProofLineState(line_uid=self.uid)
         return {
             "text": self.text,
             "uid": self.uid,
-            "final_text": self.final_text,
-            "final_text_set": self.final_text_set,
+            "proof_text": state.final_text,
+            "proof_text_set": state.final_text_set,
             "confidence": self.confidence,
             "bbox": self.bbox.to_dict(),
-            "proof_status": self.proof_status.value,
+            "proof_status": state.proof_status.value,
             "original_text": self.original_text,
             "ocr_text": self.ocr_text,
-            "llm_suggestion": self.llm_suggestion,
-            "llm_reason": self.llm_reason,
-            "llm_review_status": self.llm_review_status.value,
         }
 
 
@@ -197,7 +192,6 @@ class Block:
     order: int = 0             # 阅读顺序（从版面分析得到）
     id: Optional[int] = None
 
-    # --- Phase 1 新增字段 ---
     source: BlockSource = BlockSource.AUTO_LAYOUT  # 块来源
     recognizable: bool = True                       # 是否送 OCR
     note: str = ""                                  # 用户备注或系统说明
@@ -208,10 +202,6 @@ class Block:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
-
-    @property
-    def full_text(self) -> str:
-        return "\n".join(line.display_text for line in self.lines)
 
     @property
     def avg_confidence(self) -> float:
@@ -230,7 +220,6 @@ class Page:
     page_number: int = 1
     id: Optional[int] = None
 
-    # --- Phase 1 新增字段 ---
     source_path: str = ""                   # 原始导入文件路径
     source_type: str = "image"              # "image" | "pdf"
     source_page_index: int = 1              # PDF 页码（1-based）
@@ -296,7 +285,7 @@ class Page:
         self.ocr_invalidated_reason = ""
 
     def reconcile_ocr_done_from_result(self) -> None:
-        """Promote legacy/progress-loaded OCR content into explicit page state."""
+        """Promote loaded OCR content into explicit page state."""
         if (
             self.has_ocr_result
             and not self.is_ocr_done
@@ -304,23 +293,6 @@ class Page:
             and not self.error_message
         ):
             self.status = PageStatus.OCR_DONE
-
-    @property
-    def proofed_lines(self) -> int:
-        """已校对行数。"""
-        return sum(
-            1 for b in self.blocks for l in b.lines
-            if l.proof_status in (ProofStatus.OK, ProofStatus.MODIFIED)
-        )
-
-    @property
-    def flagged_lines(self) -> int:
-        """低置信或疑点标记行数。"""
-        return sum(
-            1 for b in self.blocks for l in b.lines
-            if l.proof_status == ProofStatus.AUTO_FLAGGED
-            or (l.review_flags and l.proof_status != ProofStatus.OK)
-        )
 
 
 @dataclass
@@ -340,14 +312,6 @@ class OcrProject:
     @property
     def total_lines(self) -> int:
         return sum(p.total_lines for p in self.pages)
-
-    @property
-    def total_flagged_lines(self) -> int:
-        return sum(p.flagged_lines for p in self.pages)
-
-    @property
-    def total_unproofed_lines(self) -> int:
-        return self.total_lines - sum(p.proofed_lines for p in self.pages)
 
     @property
     def has_any_ocr_result(self) -> bool:
@@ -374,16 +338,3 @@ class OcrProject:
             not b.lines
             for p in self.pages for b in p.text_ocr_blocks
         )
-
-    def get_export_summary(self) -> dict:
-        """导出前状态摘要。"""
-        return {
-            "total_pages": self.page_count,
-            "total_lines": self.total_lines,
-            "unproofed_lines": self.total_unproofed_lines,
-            "flagged_lines": self.total_flagged_lines,
-            "unrecognized_blocks": sum(
-                1 for p in self.pages for b in p.text_ocr_blocks
-                if not b.lines
-            ),
-        }

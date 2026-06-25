@@ -38,7 +38,7 @@ class FakeOcrEngine:
                 else ProofStatus.UNCHECKED
             )
 
-            lines.append(Line(
+            line = Line(
                 text=text,
                 original_text=text,
                 ocr_text=text,
@@ -49,7 +49,8 @@ class FakeOcrEngine:
                     w=min(w - 20, 200),
                     h=20,
                 ),
-                proof_status=proof,
-            ))
+            )
+            line.set_proof_status(proof)
+            lines.append(line)
 
         return lines
