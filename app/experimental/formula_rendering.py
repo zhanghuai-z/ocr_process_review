@@ -22,6 +22,7 @@ import re
 import tempfile
 
 import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPixmap
 
 
@@ -32,6 +33,9 @@ ENV_FLAG = "OCR_EXPERIMENTAL_FORMULA_RENDER"
 class FormulaRenderResult:
     pixmap: QPixmap
     normalized_latex: str
+    logical_width: int
+    logical_height: int
+    device_pixel_ratio: float
 
 
 def formula_rendering_enabled() -> bool:
@@ -51,11 +55,17 @@ def render_formula_pixmap(
     target_height: int,
     color: str = "#2C2C2C",
     dpi: int = 180,
+    oversample: float = 2.0,
 ) -> FormulaRenderResult | None:
     """Render a formula-like text fragment to a transparent pixmap.
 
     Returns ``None`` for disabled experiment, invalid text, unsupported TeX, or
     unavailable Matplotlib.  Callers must treat ``None`` as "use old display".
+
+    The returned pixmap is already scaled to the requested logical height and
+    tagged with the active screen DPR.  Callers should use ``logical_width`` and
+    ``logical_height`` for layout instead of ``pixmap.width()`` when high-DPI
+    screens are involved.
     """
     if not formula_rendering_enabled():
         return None
@@ -64,26 +74,40 @@ def render_formula_pixmap(
     latex = normalize_formula_latex(text)
     if not latex:
         return None
+    height = max(8, int(target_height))
+    dpr = _current_device_pixel_ratio()
+    physical_height = max(8, int(round(height * dpr)))
+    render_dpi = max(72, int(round(float(dpi) * dpr * max(1.0, float(oversample)))))
     try:
-        rgba = _render_mathtext_rgba(latex, color, int(dpi))
+        rgba = _render_mathtext_rgba(latex, color, render_dpi)
     except Exception:
         return None
     if rgba.size == 0:
         return None
-    image = QImage(
-        rgba.data,
-        rgba.shape[1],
-        rgba.shape[0],
-        rgba.strides[0],
-        QImage.Format.Format_RGBA8888,
-    ).copy()
+    image = _rgba_to_qimage(rgba)
+    if image.height() != physical_height:
+        image = image.scaledToHeight(
+            physical_height,
+            Qt.TransformationMode.SmoothTransformation,
+        )
     pixmap = QPixmap.fromImage(image)
     if pixmap.isNull():
         return None
-    height = max(8, int(target_height))
-    if pixmap.height() > height:
-        pixmap = pixmap.scaledToHeight(height)
-    return FormulaRenderResult(pixmap=pixmap, normalized_latex=latex)
+    pixmap.setDevicePixelRatio(dpr)
+    logical_width = max(1, int(round(pixmap.width() / dpr)))
+    logical_height = max(1, int(round(pixmap.height() / dpr)))
+    return FormulaRenderResult(
+        pixmap=pixmap,
+        normalized_latex=latex,
+        logical_width=logical_width,
+        logical_height=logical_height,
+        device_pixel_ratio=dpr,
+    )
+
+
+def clear_formula_render_cache() -> None:
+    """Clear cached mathtext rasters for manual renderer experiments."""
+    _render_mathtext_rgba.cache_clear()
 
 
 def normalize_formula_latex(text: str) -> str:
@@ -122,6 +146,28 @@ def normalize_formula_latex(text: str) -> str:
 
 def _contains_cjk(text: str) -> bool:
     return bool(re.search(r"[\u3400-\u9fff]", text or ""))
+
+
+def _current_device_pixel_ratio() -> float:
+    app = QGuiApplication.instance()
+    screen = app.primaryScreen() if app is not None else None
+    try:
+        value = float(screen.devicePixelRatio()) if screen is not None else 1.0
+    except Exception:
+        value = 1.0
+    if value < 1.0:
+        return 1.0
+    return min(value, 4.0)
+
+
+def _rgba_to_qimage(rgba: np.ndarray) -> QImage:
+    return QImage(
+        rgba.data,
+        rgba.shape[1],
+        rgba.shape[0],
+        rgba.strides[0],
+        QImage.Format.Format_RGBA8888,
+    ).copy()
 
 
 @lru_cache(maxsize=256)
