@@ -1236,6 +1236,66 @@ def test_hproof_proof_unit_carries_word_atom_for_multichar_token():
     h.deleteLater()
 
 
+def test_hproof_inline_formula_atom_visual_overlay_selects_raw_formula():
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from app.core.proof_atom import ProofAtomKind as AtomKind
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
+
+    formula = "$ E=mc^2 $"
+    line = Line(
+        text=f"含{formula}",
+        confidence=0.9,
+        bbox=BBox(0, 0, 120, 24),
+        chars=[
+            Char(
+                char="含",
+                confidence=0.9,
+                bbox=BBox(0, 0, 10, 24),
+                bbox_source="ocr",
+                bbox_granularity="char",
+                token_text="含",
+            ),
+            Char(
+                char=formula,
+                confidence=1.0,
+                bbox=BBox(12, 0, 80, 24),
+                bbox_source="paddle_inline_formula",
+                bbox_granularity="formula",
+                token_text=formula,
+            ),
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 120, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=140, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+
+    pair = h._pairs[0]
+    assert pair._unit.kind == ProofUnitKind.TEXT
+    assert [atom.kind for atom in pair._unit.atoms] == [AtomKind.CHAR, AtomKind.FORMULA]
+    assert not pair._editor.has_visual_text_override()
+    assert pair._editor.has_atom_visual_overlays()
+    overlay = pair._editor.atom_visual_overlays()[0]
+    assert pair._editor.toPlainText() == f"含{formula}"
+
+    x = (overlay.left + overlay.right) / 2.0
+    pair._editor.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(x, 10),
+        QPointF(x, 10),
+        QPointF(x, 10),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+
+    assert pair._editor.textCursor().selectedText() == formula
+    assert pair._editor.toPlainText() == f"含{formula}"
+    h.deleteLater()
+
+
 def test_hproof_right_dock_updates_progress_and_status_counts():
     from app.models import ProofStatus
     from app.ui.proof.h_proof import HProofPanel

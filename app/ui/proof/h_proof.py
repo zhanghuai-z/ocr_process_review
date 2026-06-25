@@ -49,7 +49,8 @@ from app.core.block_attributes import block_attributes, normalize_source_label, 
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
-from app.core.proof_atom import ProofAtom
+from app.core.proof_atom import ProofAtom, ProofAtomKind
+from app.core.proof_char_text import chars_display_spans, chars_display_text
 from app.core.proof_line_facts import proof_block_text, proof_display_text, proof_ocr_text, proof_status
 from app.core.proof_occurrence import line_signature
 from app.core.proof_projection import ProofLineProjection, build_proof_line_projection
@@ -1015,6 +1016,7 @@ class _SlotLineEditor(QWidget):
         self._visual_text_override: Optional[str] = None
         self._visual_pixmap_override: Optional[QPixmap] = None
         self._visual_text_kind: str = ""
+        self._atom_visual_overlays: list[_AtomVisualOverlay] = []
         self._undo_stack: list[tuple[str, int, int]] = []
         self._redo_stack: list[tuple[str, int, int]] = []
         self._max_undo = 100
@@ -1076,6 +1078,16 @@ class _SlotLineEditor(QWidget):
 
     def has_visual_text_override(self) -> bool:
         return bool(self._visual_text_override) or self._visual_pixmap_override is not None
+
+    def set_atom_visual_overlays(self, overlays: list[_AtomVisualOverlay] | None) -> None:
+        self._atom_visual_overlays = list(overlays or [])
+        self.update()
+
+    def has_atom_visual_overlays(self) -> bool:
+        return bool(self._atom_visual_overlays)
+
+    def atom_visual_overlays(self) -> list[_AtomVisualOverlay]:
+        return list(self._atom_visual_overlays)
 
     def visual_text_content_width(self) -> int:
         if self._visual_pixmap_override is not None:
@@ -1161,6 +1173,9 @@ class _SlotLineEditor(QWidget):
     # ── slot 选择 / 文本修改 ───────────────────────────────────
 
     def _slot_index_for_x(self, x: float, *, nearest: bool = False) -> int:
+        overlay = self._atom_overlay_for_x(x)
+        if overlay is not None:
+            return overlay.start
         text = self.toPlainText()
         centers = self._slot_x_centers or self._fallback_slot_centers(text)
         if not centers:
@@ -1198,6 +1213,14 @@ class _SlotLineEditor(QWidget):
             if x < first_left - margin or x > last_right + margin:
                 return -1
         return best_idx
+
+    def _atom_overlay_for_x(self, x: float) -> _AtomVisualOverlay | None:
+        for overlay in self._atom_visual_overlays:
+            left = min(overlay.left, overlay.right)
+            right = max(overlay.left, overlay.right)
+            if left <= x <= right:
+                return overlay
+        return None
 
     def _select_slot_index(self, idx: int) -> None:
         text_len = len(self.toPlainText())
@@ -1342,7 +1365,14 @@ class _SlotLineEditor(QWidget):
             selected_start, selected_end = self._selection_bounds_for_paint() if self._active_visual else (-1, -1)
             y_baseline = (self.height() + fm.ascent() - fm.descent()) // 2
             n = min(len(text), len(centers))
+            hidden_indices = {
+                idx
+                for overlay in self._atom_visual_overlays
+                for idx in range(max(0, overlay.start), min(len(text), overlay.end))
+            }
             for i in range(n):
+                if i in hidden_indices:
+                    continue
                 center = centers[i]
                 if center is None:
                     continue
@@ -1372,6 +1402,13 @@ class _SlotLineEditor(QWidget):
                     char_w = fm.horizontalAdvance(ch)
                     tx = int(round(float(center) - char_w / 2.0))
                     p.drawText(tx, y_baseline, ch)
+            for overlay in self._atom_visual_overlays:
+                self._paint_atom_visual_overlay(
+                    p,
+                    overlay,
+                    selected_start=selected_start,
+                    selected_end=selected_end,
+                )
         finally:
             p.end()
 
@@ -1392,6 +1429,49 @@ class _SlotLineEditor(QWidget):
     def _paint_visual_pixmap_override(self, painter: QPainter, pixmap: QPixmap) -> None:
         y = max(0, (self.height() - pixmap.height()) // 2)
         painter.drawPixmap(6, y, pixmap)
+
+    def _paint_atom_visual_overlay(
+        self,
+        painter: QPainter,
+        overlay: _AtomVisualOverlay,
+        *,
+        selected_start: int,
+        selected_end: int,
+    ) -> None:
+        left = int(round(min(overlay.left, overlay.right)))
+        right = int(round(max(overlay.left, overlay.right)))
+        rect = QRect(left, 2, max(1, right - left), self.height() - 4)
+        hovered = overlay.start <= self._last_hover_idx < overlay.end
+        selected = selected_start < overlay.end and selected_end > overlay.start
+        if hovered:
+            painter.fillRect(rect, QColor("#e8f0fe"))
+        if selected:
+            painter.fillRect(rect, QColor("#cfe2ff"))
+        if hovered or selected:
+            painter.setPen(QPen(QColor("#9cc2ff"), 1))
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        if overlay.pixmap is not None and not overlay.pixmap.isNull():
+            pixmap = overlay.pixmap
+            max_w = max(1, rect.width() - 4)
+            max_h = max(1, rect.height() - 4)
+            if pixmap.width() > max_w or pixmap.height() > max_h:
+                pixmap = pixmap.scaled(
+                    max_w,
+                    max_h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            x = rect.x() + max(0, (rect.width() - pixmap.width()) // 2)
+            y = rect.y() + max(0, (rect.height() - pixmap.height()) // 2)
+            painter.drawPixmap(x, y, pixmap)
+            return
+        font = QFont(self.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        if overlay.kind == "formula":
+            font.setItalic(True)
+        painter.setFont(font)
+        painter.setPen(QPen(self.palette().text().color(), 1))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, overlay.text)
 
     def _fallback_slot_centers(self, text: str) -> list[Optional[float]]:
         if not text:
@@ -1470,6 +1550,21 @@ class _SlotLineEditor(QWidget):
         if self.has_visual_text_override():
             self.set_visual_text_override(None)
         pos = self._event_pos(event)
+        overlay = self._atom_overlay_for_x(float(pos.x()))
+        if overlay is not None:
+            cur = QTextCursor(self._document)
+            cur.setPosition(max(0, min(overlay.start, len(self.toPlainText()))))
+            cur.setPosition(
+                max(0, min(overlay.end, len(self.toPlainText()))),
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.setTextCursor(cur)
+            self.setFocus()
+            try:
+                event.accept()
+            except Exception:
+                pass
+            return
         idx = self._slot_index_for_x(float(pos.x()), nearest=True)
         if idx >= 0:
             self._select_slot_index(idx)
@@ -1615,6 +1710,17 @@ class _HProofSaveResult(Enum):
     NOOP = "noop"
     CONFLICT = "conflict"
     READ_ONLY = "read_only"
+
+
+@dataclass(frozen=True)
+class _AtomVisualOverlay:
+    start: int
+    end: int
+    left: float
+    right: float
+    text: str
+    pixmap: QPixmap | None = None
+    kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -1796,6 +1902,7 @@ class _LinePair(QFrame):
         self._editor.row_focus_requested.connect(self._on_editor_focus_in)
         # 有可靠 char boxes 时锁定编辑器长度，保持图字一一对应。
         self._apply_fixed_length_to_editor()
+        self._sync_editor_slot_geometry()
         content_v.addWidget(self._editor)
 
         root.addWidget(self._content, 1)
@@ -1857,6 +1964,8 @@ class _LinePair(QFrame):
         else:
             self._editor.set_visual_text_override(visual_text, kind=visual_kind)
         if visual_pixmap is not None or visual_text:
+            self._editor.set_atom_visual_overlays(None)
+        if visual_pixmap is not None or visual_text:
             self._editor.set_slot_geometry(None, None)
             content_w = max(self._editor.visual_text_content_width(), int(self._line.bbox.w))
             self._editor.setMinimumWidth(content_w)
@@ -1866,6 +1975,115 @@ class _LinePair(QFrame):
             self._editor.setMinimumWidth(0)
             self._content.setMinimumWidth(0)
             self.setMinimumWidth(0)
+
+    def _formula_atom_visual_data(
+        self,
+        text: str,
+    ) -> tuple[list[_AtomVisualOverlay], list[Optional[float]] | None, list[float] | None]:
+        if self._unit is None or not self._unit.atoms or not self._line.chars:
+            return [], None, None
+        if text != chars_display_text(self._line.chars):
+            return [], None, None
+        spans = chars_display_spans(self._line.chars)
+        span_by_char_index = {
+            char_index: span
+            for span in spans
+            for char_index in span.char_indices
+        }
+        centers: list[Optional[float]] = [None] * len(text)
+        widths: list[float] = [0.0] * len(text)
+        scale = float(self._render_scale or 0.0)
+        ox, _oy = self._line_crop_origin
+        fm = QFontMetrics(self._editor.font())
+        if scale > 0:
+            for atom in self._unit.atoms:
+                if atom.kind not in {ProofAtomKind.CHAR, ProofAtomKind.PUNCT, ProofAtomKind.NUMBER}:
+                    continue
+                if atom.bbox is None or not atom.char_indices:
+                    continue
+                span = span_by_char_index.get(atom.char_indices[0])
+                if span is None or span.end - span.start != 1:
+                    continue
+                idx = span.start
+                if not (0 <= idx < len(text)):
+                    continue
+                centers[idx] = ((atom.bbox.x + atom.bbox.x2) / 2.0 - float(ox)) * scale
+                widths[idx] = _slot_visual_width(text[idx], fm)
+
+        overlays: list[_AtomVisualOverlay] = []
+        for atom in self._unit.atoms:
+            if atom.kind != ProofAtomKind.FORMULA or not atom.char_indices:
+                continue
+            span = span_by_char_index.get(atom.char_indices[0])
+            if span is None:
+                continue
+            start = max(0, min(span.start, len(text)))
+            end = max(start, min(span.end, len(text)))
+            if end <= start:
+                continue
+            raw = text[start:end]
+            left, right = self._formula_atom_rect(atom, text, start, end)
+            rendered_pixmap: QPixmap | None = None
+            try:
+                from app.experimental.formula_rendering import render_formula_pixmap
+                rendered = render_formula_pixmap(
+                    raw,
+                    target_height=max(12, self._editor_h - 6),
+                    color="#2C2C2C",
+                )
+                rendered_pixmap = rendered.pixmap if rendered is not None else None
+            except Exception:
+                rendered_pixmap = None
+            visual_text = _render_formula_display(raw) or raw
+            overlays.append(
+                _AtomVisualOverlay(
+                    start=start,
+                    end=end,
+                    left=left,
+                    right=right,
+                    text=visual_text,
+                    pixmap=rendered_pixmap,
+                    kind="formula",
+                )
+            )
+        slot_centers = centers if any(center is not None for center in centers) else None
+        slot_widths = widths if slot_centers is not None else None
+        return overlays, slot_centers, slot_widths
+
+    def _formula_atom_rect(
+        self,
+        atom: ProofAtom,
+        text: str,
+        start: int,
+        end: int,
+    ) -> tuple[float, float]:
+        scale = float(self._render_scale or 0.0)
+        if atom.bbox is not None and scale > 0:
+            ox, _oy = self._line_crop_origin
+            left = (atom.bbox.x - float(ox)) * scale
+            right = (atom.bbox.x2 - float(ox)) * scale
+            if right > left + 4:
+                return max(0.0, left), max(4.0, right)
+        return self._fallback_text_range_rect(text, start, end)
+
+    def _fallback_text_range_rect(self, text: str, start: int, end: int) -> tuple[float, float]:
+        font = QFont(self._editor.font())
+        font.setWeight(TEXT_FONT_WEIGHT)
+        fm = QFontMetrics(font)
+        x = max(6.0, TEXT_SLOT_MIN_W / 2.0)
+        left = x
+        right = x
+        for idx, ch in enumerate(text):
+            width = _slot_visual_width(ch, fm)
+            if idx == start:
+                left = x
+            x += width
+            if idx + 1 == end:
+                right = x
+                break
+        if right <= left:
+            right = left + TEXT_SLOT_MIN_W
+        return left, right
 
     def _exit_formula_edit_mode(self) -> bool:
         if self._unit is None or self._unit.kind != ProofUnitKind.FORMULA:
@@ -2339,6 +2557,13 @@ class _LinePair(QFrame):
             return
         if hasattr(editor, "has_visual_text_override") and editor.has_visual_text_override():
             editor.set_slot_geometry(None, None)
+            editor.set_atom_visual_overlays(None)
+            return
+        text = editor.toPlainText()
+        atom_overlays, atom_centers, atom_widths = self._formula_atom_visual_data(text)
+        editor.set_atom_visual_overlays(atom_overlays)
+        if atom_centers is not None:
+            editor.set_slot_geometry(atom_centers, _clip_slot_widths_to_centers(atom_centers, atom_widths or []))
             return
         if not self._chars_aligned():
             editor.set_slot_geometry(None, None)
