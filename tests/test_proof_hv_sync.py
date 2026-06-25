@@ -1580,11 +1580,23 @@ def test_hproof_formula_visual_uses_experimental_pixmap(monkeypatch):
 
     pair = h._pairs[0]
     assert pair._unit.kind == ProofUnitKind.FORMULA
-    assert calls == [("$$ E=mc^2 $$", 34)]
+    assert calls == [("$$ E=mc^2 $$", 28)]
     assert pair._editor.has_visual_text_override()
     assert pair._editor._visual_pixmap_override is not None
     assert pair._editor.visual_text_content_width() == 80
     h.deleteLater()
+
+
+def test_hproof_formula_fallback_keeps_cjk_text_upright(monkeypatch):
+    from app.ui.proof.h_proof import _render_formula_visual
+
+    monkeypatch.setenv("OCR_EXPERIMENTAL_FORMULA_RENDER", "0")
+
+    visual = _render_formula_visual("含$ A_t $公式", target_height=28)
+
+    assert visual is not None
+    assert visual.text == "含Aₜ公式"
+    assert visual.kind == ""
 
 
 def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():

@@ -102,6 +102,7 @@ IMAGE_DIVIDER_COLOR = "#D8D2C8"
 TEXT_GUIDE_LINE_COLOR = "#AFC0D8"
 ROW_DIVIDER_COLOR = "#E7E2D8"
 FOCUS_BORDER_COLOR = "#7A7368"
+FORMULA_VISUAL_HEIGHT_RATIO = 0.70
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
 LINE_PAIR_H = 92
 NEAR_LINE_PAIR_H = 34
@@ -330,6 +331,8 @@ def _compact_formula_spacing(text: str) -> str:
     s = re.sub(rf"(?<=[{sub_sup}])\s+(?=[{latin}0-9])", "", s)
     s = re.sub(r"\s*([=+\-×·*/])\s*", r" \1 ", s)
     s = re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"(?<=[\u3400-\u9fff])\s+(?=\S)", "", s)
+    s = re.sub(r"(?<=\S)\s+(?=[\u3400-\u9fff])", "", s)
     return s
 
 
@@ -362,6 +365,14 @@ def _render_formula_display(text: str) -> str:
     return _compact_formula_spacing(s)
 
 
+def _contains_cjk_text(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff]", text or ""))
+
+
+def _formula_visual_target_height(editor_height: int) -> int:
+    return max(10, int(round(max(1, int(editor_height)) * FORMULA_VISUAL_HEIGHT_RATIO)))
+
+
 def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual | None:
     fallback_text = _render_formula_display(text)
     try:
@@ -382,7 +393,8 @@ def _render_formula_visual(text: str, *, target_height: int) -> _FormulaVisual |
             kind="formula",
         )
     if fallback_text:
-        return _FormulaVisual(text=fallback_text, kind="formula")
+        kind = "" if _contains_cjk_text(fallback_text) else "formula"
+        return _FormulaVisual(text=fallback_text, kind=kind)
     return None
 
 
@@ -1991,7 +2003,7 @@ class _LinePair(QFrame):
         visual: _FormulaVisual | None = None
         if self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
             raw_formula = self._editor.toPlainText()
-            visual = _render_formula_visual(raw_formula, target_height=max(12, self._editor_h - 6))
+            visual = _render_formula_visual(raw_formula, target_height=_formula_visual_target_height(self._editor_h))
         self._editor.set_visual_formula_override(visual)
         if visual is not None:
             self._editor.set_atom_visual_overlays(None)
@@ -2053,7 +2065,7 @@ class _LinePair(QFrame):
                 continue
             raw = text[start:end]
             left, right = self._formula_atom_rect(atom, text, start, end)
-            visual = _render_formula_visual(raw, target_height=max(12, self._editor_h - 6))
+            visual = _render_formula_visual(raw, target_height=_formula_visual_target_height(self._editor_h))
             visual_text = visual.text if visual is not None and visual.text else raw
             overlays.append(
                 _AtomVisualOverlay(
