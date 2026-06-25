@@ -1761,6 +1761,23 @@ def test_phase25_horizontal_scroll_as_needed():
     h.deleteLater()
 
 
+def test_hproof_active_row_scroll_keeps_text_left_aligned():
+    """激活横校行时只做纵向可见，水平滚动保持左对齐。"""
+    from app.ui.proof.h_proof import HProofPanel
+
+    proj = _make_project_with_char_crops("abcdef", lines_per_page=3)
+    h = HProofPanel()
+    h.load_pages(proj.pages)
+    hbar = h._scroll.horizontalScrollBar()
+    hbar.setRange(0, 100)
+    hbar.setValue(73)
+
+    h._ensure_pair_visible_left_aligned(h._pairs[1])
+
+    assert hbar.value() == 0
+    h.deleteLater()
+
+
 def test_hproof_slot_editor_hit_testing_uses_painted_slot_geometry():
     """横校文本自绘后，鼠标命中必须按可见槽位算，不能按 Qt 原生文本布局算。"""
     from app.ui.proof.h_proof import _RowEditor

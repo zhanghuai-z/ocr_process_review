@@ -1014,7 +1014,6 @@ class _SlotLineEditor(QWidget):
         self._last_hover_idx = -1
         self._active_visual = False
         self._visual_text_override: Optional[str] = None
-        self._visual_pixmap_override: Optional[QPixmap] = None
         self._visual_text_kind: str = ""
         self._atom_visual_overlays: list[_AtomVisualOverlay] = []
         self._undo_stack: list[tuple[str, int, int]] = []
@@ -1059,25 +1058,15 @@ class _SlotLineEditor(QWidget):
         next_kind = kind if next_text else ""
         if (
             self._visual_text_override == next_text
-            and self._visual_pixmap_override is None
             and self._visual_text_kind == next_kind
         ):
             return
         self._visual_text_override = next_text
-        self._visual_pixmap_override = None
-        self._visual_text_kind = next_kind
-        self.update()
-
-    def set_visual_pixmap_override(self, pixmap: Optional[QPixmap], *, kind: str = "") -> None:
-        next_pixmap = pixmap if pixmap is not None and not pixmap.isNull() else None
-        next_kind = kind if next_pixmap is not None else ""
-        self._visual_text_override = None
-        self._visual_pixmap_override = next_pixmap
         self._visual_text_kind = next_kind
         self.update()
 
     def has_visual_text_override(self) -> bool:
-        return bool(self._visual_text_override) or self._visual_pixmap_override is not None
+        return bool(self._visual_text_override)
 
     def set_atom_visual_overlays(self, overlays: list[_AtomVisualOverlay] | None) -> None:
         self._atom_visual_overlays = list(overlays or [])
@@ -1090,8 +1079,6 @@ class _SlotLineEditor(QWidget):
         return list(self._atom_visual_overlays)
 
     def visual_text_content_width(self) -> int:
-        if self._visual_pixmap_override is not None:
-            return self._visual_pixmap_override.width() + 16
         if not self._visual_text_override:
             return 0
         font = QFont(self.font())
@@ -1344,9 +1331,6 @@ class _SlotLineEditor(QWidget):
         p = QPainter(self)
         try:
             p.fillRect(self.rect(), self.palette().base())
-            if self._visual_pixmap_override is not None:
-                self._paint_visual_pixmap_override(p, self._visual_pixmap_override)
-                return
             if self._visual_text_override:
                 self._paint_visual_text_override(p, self._visual_text_override)
                 return
@@ -1426,10 +1410,6 @@ class _SlotLineEditor(QWidget):
             text,
         )
 
-    def _paint_visual_pixmap_override(self, painter: QPainter, pixmap: QPixmap) -> None:
-        y = max(0, (self.height() - pixmap.height()) // 2)
-        painter.drawPixmap(6, y, pixmap)
-
     def _paint_atom_visual_overlay(
         self,
         painter: QPainter,
@@ -1450,21 +1430,6 @@ class _SlotLineEditor(QWidget):
         if hovered or selected:
             painter.setPen(QPen(QColor("#9cc2ff"), 1))
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
-        if overlay.pixmap is not None and not overlay.pixmap.isNull():
-            pixmap = overlay.pixmap
-            max_w = max(1, rect.width() - 4)
-            max_h = max(1, rect.height() - 4)
-            if pixmap.width() > max_w or pixmap.height() > max_h:
-                pixmap = pixmap.scaled(
-                    max_w,
-                    max_h,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            x = rect.x() + max(0, (rect.width() - pixmap.width()) // 2)
-            y = rect.y() + max(0, (rect.height() - pixmap.height()) // 2)
-            painter.drawPixmap(x, y, pixmap)
-            return
         font = QFont(self.font())
         font.setWeight(TEXT_FONT_WEIGHT)
         if overlay.kind == "formula":
@@ -1719,7 +1684,6 @@ class _AtomVisualOverlay:
     left: float
     right: float
     text: str
-    pixmap: QPixmap | None = None
     kind: str = ""
 
 
@@ -1938,34 +1902,17 @@ class _LinePair(QFrame):
 
     def _apply_editor_visual_override(self) -> None:
         visual_text: str | None = None
-        visual_pixmap: QPixmap | None = None
         visual_kind = ""
         if self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
             raw_formula = self._editor.toPlainText()
-            rendered_formula = None
-            try:
-                from app.experimental.formula_rendering import render_formula_pixmap
-                rendered_formula = render_formula_pixmap(
-                    raw_formula,
-                    target_height=max(12, self._editor_h - 6),
-                    color="#2C2C2C",
-                )
-            except Exception:
-                rendered_formula = None
-            if rendered_formula is not None:
-                visual_pixmap = rendered_formula.pixmap
-                visual_kind = "formula"
             rendered = _render_formula_display(raw_formula)
             if rendered:
                 visual_text = rendered
                 visual_kind = "formula"
-        if visual_pixmap is not None:
-            self._editor.set_visual_pixmap_override(visual_pixmap, kind=visual_kind)
-        else:
-            self._editor.set_visual_text_override(visual_text, kind=visual_kind)
-        if visual_pixmap is not None or visual_text:
+        self._editor.set_visual_text_override(visual_text, kind=visual_kind)
+        if visual_text:
             self._editor.set_atom_visual_overlays(None)
-        if visual_pixmap is not None or visual_text:
+        if visual_text:
             self._editor.set_slot_geometry(None, None)
             content_w = max(self._editor.visual_text_content_width(), int(self._line.bbox.w))
             self._editor.setMinimumWidth(content_w)
@@ -2023,17 +1970,6 @@ class _LinePair(QFrame):
                 continue
             raw = text[start:end]
             left, right = self._formula_atom_rect(atom, text, start, end)
-            rendered_pixmap: QPixmap | None = None
-            try:
-                from app.experimental.formula_rendering import render_formula_pixmap
-                rendered = render_formula_pixmap(
-                    raw,
-                    target_height=max(12, self._editor_h - 6),
-                    color="#2C2C2C",
-                )
-                rendered_pixmap = rendered.pixmap if rendered is not None else None
-            except Exception:
-                rendered_pixmap = None
             visual_text = _render_formula_display(raw) or raw
             overlays.append(
                 _AtomVisualOverlay(
@@ -2042,7 +1978,6 @@ class _LinePair(QFrame):
                     left=left,
                     right=right,
                     text=visual_text,
-                    pixmap=rendered_pixmap,
                     kind="formula",
                 )
             )
@@ -3500,6 +3435,22 @@ class HProofPanel(QWidget):
             self._save_current(silent=True)
             self._activate(self._session.current_projection_index + 1)
 
+    def _ensure_pair_visible_left_aligned(self, pair: _LinePair) -> None:
+        """Keep the active row visible without horizontal auto-centering."""
+        vbar = self._scroll.verticalScrollBar()
+        hbar = self._scroll.horizontalScrollBar()
+        viewport_h = max(1, self._scroll.viewport().height())
+        margin = 40
+        top = pair.y()
+        bottom = top + pair.height()
+        view_top = vbar.value()
+        view_bottom = view_top + viewport_h
+        if top < view_top + margin:
+            vbar.setValue(max(0, top - margin))
+        elif bottom > view_bottom - margin:
+            vbar.setValue(max(0, bottom - viewport_h + margin))
+        hbar.setValue(0)
+
     def _activate(self, idx: int) -> None:
         idx = max(0, min(idx, len(self._pairs) - 1))
         current_index = self._session.current_projection_index
@@ -3511,7 +3462,7 @@ class HProofPanel(QWidget):
         self._update_focus_depths()
         self._update_stats()
         # 滚动到可见
-        QTimer.singleShot(30, lambda: self._scroll.ensureWidgetVisible(pair, 0, 40))
+        QTimer.singleShot(30, lambda pair=pair: self._ensure_pair_visible_left_aligned(pair))
 
     def _update_focus_depths(self) -> None:
         for i, pair in enumerate(self._pairs):
