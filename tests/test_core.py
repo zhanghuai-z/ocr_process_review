@@ -101,7 +101,6 @@ def test_models():
     line.ensure_text_contract()
     assert proof_display_text(line) == "状态对象终稿"
     assert proof_final_text(line) == "状态对象终稿"
-    assert line.to_dict()["proof_text"] == "状态对象终稿"
     assert not hasattr(line, "final_text")
     assert line.proof_state.final_text == "状态对象终稿"
     assert proof_display_text(line) == "状态对象终稿"

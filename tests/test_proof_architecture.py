@@ -225,6 +225,17 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
     assert "def __setattr__" not in source
     assert "original_text" not in source
     assert "fill_original" not in source
+    tree = ast.parse(source, filename="app/models/project.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Line":
+            line_methods = {
+                child.name for child in node.body
+                if isinstance(child, ast.FunctionDef)
+            }
+            assert "to_dict" not in line_methods
+            break
+    else:
+        raise AssertionError("Line class not found")
 
 
 def test_proof_line_facts_does_not_reconstruct_state_from_retired_mirrors():

@@ -161,20 +161,6 @@ class Line:
             self.text = ocr_text
         self.ocr_text = ocr_text
 
-    def to_dict(self) -> dict:
-        state = self.proof_state or ProofLineState(line_uid=self.uid)
-        return {
-            "text": self.text,
-            "uid": self.uid,
-            "proof_text": state.final_text,
-            "proof_text_set": state.final_text_set,
-            "confidence": self.confidence,
-            "bbox": self.bbox.to_dict(),
-            "proof_status": state.proof_status.value,
-            "ocr_text": self.ocr_text,
-        }
-
-
 @dataclass
 class BlockOrigin:
     """版面块来源事实。
