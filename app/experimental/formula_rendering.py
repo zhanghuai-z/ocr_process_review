@@ -33,7 +33,9 @@ ENV_FLAG = "OCR_EXPERIMENTAL_FORMULA_RENDER"
 ENV_ENGINE = "OCR_EXPERIMENTAL_FORMULA_ENGINE"
 ENV_MATHJAX_NODE_MODULES = "OCR_MATHJAX_NODE_MODULES"
 ENV_MATHJAX_NODE_BIN = "OCR_MATHJAX_NODE_BIN"
+ENV_MATHJAX_TIMEOUT = "OCR_MATHJAX_TIMEOUT"
 DEFAULT_ENGINE = "mathjax_svg"
+DEFAULT_MATHJAX_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -299,7 +301,7 @@ def _render_mathjax_svg(latex_body: str, color: str) -> bytes:
         input=payload,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=20,
+        timeout=_mathjax_timeout_seconds(),
         check=True,
         env=env,
     )
@@ -310,6 +312,17 @@ def _render_mathjax_svg(latex_body: str, color: str) -> bytes:
     color_text = str(color or "#2C2C2C")
     svg = svg.replace(b"currentColor", color_text.encode("ascii", errors="ignore") or b"#2C2C2C")
     return svg
+
+
+def _mathjax_timeout_seconds() -> int:
+    raw = os.environ.get(ENV_MATHJAX_TIMEOUT, "").strip()
+    if not raw:
+        return DEFAULT_MATHJAX_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MATHJAX_TIMEOUT_SECONDS
+    return max(5, value)
 
 
 def _mathjax_node_executable() -> str | None:

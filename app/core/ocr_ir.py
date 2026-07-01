@@ -6,11 +6,13 @@ preserve source semantics before converting into project models.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 import unicodedata
 import re
 from typing import Any, Literal, Optional
 
 from app.models import BBox
+from app.models.entity_id import ensure_entity_uid
 
 OCR_IR_SOURCE_REC_TEXT = "overall_ocr_res.rec_texts"
 
@@ -107,3 +109,47 @@ class OcrIrLine:
     source_text: str
     tokens: list[OcrIrToken] = field(default_factory=list)
     review_flags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OcrRun:
+    """A typed OCR observation run.
+
+    ``OcrIrLine``/``OcrIrToken`` remain the line/token payload.  The run adds
+    identity and engine/layout metadata so OCR observations can be carried
+    without pretending that proof-facing ``Line`` is the source object.
+    """
+    engine: str
+    lines: list[OcrIrLine] = field(default_factory=list)
+    page_uid: str = ""
+    block_uid: str = ""
+    engine_version: str = ""
+    input_layout_revision: int = 0
+    created_at: float = field(default_factory=time.time)
+    uid: str = ""
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "ocrrun")
+
+
+OcrToken = OcrIrToken
+OcrLine = OcrIrLine
+
+
+def build_ocr_run(
+    *,
+    engine: str,
+    lines: list[OcrIrLine],
+    page_uid: str = "",
+    block_uid: str = "",
+    engine_version: str = "",
+    input_layout_revision: int = 0,
+) -> OcrRun:
+    return OcrRun(
+        engine=engine,
+        lines=list(lines),
+        page_uid=page_uid,
+        block_uid=block_uid,
+        engine_version=engine_version,
+        input_layout_revision=input_layout_revision,
+    )

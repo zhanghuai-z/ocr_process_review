@@ -22,7 +22,8 @@ from app.core.paddle_line_routing import (
     route_subblocks_for_block,
     vertical_overlap_ratio,
 )
-from app.models import BBox, Block, BlockType, Line
+from app.core.raw_ocr_artifact import raw_layout_records
+from app.models import BBox, Block, BlockType, Line, OcrPolicy
 
 
 XYXY = tuple[int, int, int, int]
@@ -209,10 +210,14 @@ class PaddleManualBinding:
         return self.status not in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}
 
     @property
-    def recognizable(self) -> bool:
+    def ocr_policy(self) -> OcrPolicy:
         if self.block_type in {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE, BlockType.UNKNOWN}:
-            return False
-        return not self.is_bound
+            if self.block_type == BlockType.EQUATION:
+                return OcrPolicy.PRESERVE_AS_FORMULA
+            if self.block_type == BlockType.TABLE:
+                return OcrPolicy.PRESERVE_AS_TABLE
+            return OcrPolicy.SKIP
+        return OcrPolicy.MANUAL_ONLY if self.is_bound else OcrPolicy.TEXT_OCR
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -247,7 +252,7 @@ class PaddleArtifactIndex:
 
     @classmethod
     def from_page(cls, page) -> "PaddleArtifactIndex":
-        return cls(page.width, page.height, list(page.ppvl_parsing_res_list or []))
+        return cls(page.width, page.height, list(raw_layout_records(page)))
 
     def _build(self, records: list[dict[str, Any]]) -> None:
         for index, record in enumerate(records):
@@ -515,7 +520,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
         PADDLE_BLOCK_BBOX_KEY: list(block.bbox.to_xyxy()),
     })
     block.source_label = binding.source_label or block.source_label or block.block_type.value
-    block.recognizable = binding.recognizable
+    block.ocr_policy = binding.ocr_policy
     if binding.text:
         block.lines = [
             Line(

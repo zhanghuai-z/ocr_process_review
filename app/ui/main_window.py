@@ -975,7 +975,7 @@ class MainWindow(QMainWindow):
             self._controller.handle_ocr_entry_requested("main_window", self._controller.current_page_number)
             return
         pages = self._controller.pages
-        if self._controller.get_recognizable_block_count() == 0:
+        if self._controller.get_text_ocr_block_count() == 0:
             return  # 无可识别块，静默跳过
         self._ocr_placeholder.start_ocr(len(pages))
         self._status_bar.clearMessage()

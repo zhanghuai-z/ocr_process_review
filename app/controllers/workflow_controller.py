@@ -133,7 +133,7 @@ class WorkflowController(QObject):
             return STEP_LAYOUT
         return STEP_IMPORT
 
-    def get_recognizable_block_count(self) -> int:
+    def get_text_ocr_block_count(self) -> int:
         if not self._project:
             return 0
         return sum(len(page.text_ocr_blocks) for page in self._project.pages)
@@ -861,7 +861,7 @@ class WorkflowController(QObject):
             self._discard_parallel_proof_result = False
             queued_callback = self._queued_ocr_progress_callback
             self._queued_ocr_progress_callback = None
-            if self.get_recognizable_block_count() == 0:
+            if self.get_text_ocr_block_count() == 0:
                 self.status_message.emit(
                     "版面分析完成，但文字识别未获得可用文本"
                 )
@@ -886,7 +886,7 @@ class WorkflowController(QObject):
             queued_callback = self._queued_ocr_progress_callback
             self._auto_start_ocr_after_layout = False
             self._queued_ocr_progress_callback = None
-            if self.get_recognizable_block_count() == 0:
+            if self.get_text_ocr_block_count() == 0:
                 self.status_message.emit("版面分析未产生可识别文字块，已停止自动 OCR")
                 return
             self.start_ocr(pages, notify_page_callback=queued_callback)

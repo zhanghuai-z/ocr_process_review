@@ -6,7 +6,9 @@ import time
 
 
 _CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-_ALLOWED_KINDS = frozenset({"page", "block", "line", "char"})
+_ALLOWED_KINDS = frozenset({
+    "page", "block", "line", "char", "rawocr", "layoutedit", "ocrrun",
+})
 
 
 def _encode_crockford32(value: int, length: int) -> str:

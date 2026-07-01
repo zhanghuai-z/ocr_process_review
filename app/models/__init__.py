@@ -1,14 +1,18 @@
 from .enums import (
-    BlockSource, BlockType, CanvasMode, PageStatus, ProofStatus,
+    BlockSource, BlockType, CanvasMode, OcrPolicy, PageStatus, ProofStatus,
 )
-from .project import BBox, Block, Char, Line, OcrProject, Page
+from .project import (
+    BBox, Block, BlockOrigin, Char, LayoutEditEvent, Line, OcrProject, Page,
+    RawOcrArtifact,
+)
 from .proof_line_state import ProofLineState
 from .entity_id import ensure_entity_uid, new_entity_uid, new_ulid
 
 __all__ = [
-    "BlockType", "ProofStatus", "PageStatus", "BlockSource",
+    "BlockType", "OcrPolicy", "ProofStatus", "PageStatus", "BlockSource",
     "CanvasMode",
-    "BBox", "Char", "Line", "Block", "Page", "OcrProject",
+    "BBox", "Char", "Line", "Block", "BlockOrigin", "LayoutEditEvent",
+    "Page", "OcrProject", "RawOcrArtifact",
     "ProofLineState",
     "ensure_entity_uid", "new_entity_uid", "new_ulid",
 ]

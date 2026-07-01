@@ -4,8 +4,8 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from app.core.block_payload import PADDLE_BINDING_KEY
-from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label
-from app.models.enums import BlockType
+from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label, normalize_paddle_label
+from app.models.enums import BlockType, OcrPolicy
 
 
 class OcrDispatchBlock(Protocol):
@@ -13,7 +13,7 @@ class OcrDispatchBlock(Protocol):
     source_label: str
     raw_payload: dict[str, Any]
     app_payload: dict[str, Any]
-    recognizable: bool
+    ocr_policy: OcrPolicy
 
 
 TEXT_OCR_BLOCK_TYPES = {
@@ -43,6 +43,10 @@ def _payload_label(payload: dict[str, Any]) -> str:
 
 def authoritative_block_label(block: OcrDispatchBlock) -> str:
     """Return the best available vendor/source label for routing decisions."""
+    origin = getattr(block, "origin", None)
+    origin_label = str(getattr(origin, "source_label", "") or "")
+    if origin_label:
+        return origin_label
     if block.source_label:
         return str(block.source_label)
     if isinstance(getattr(block, "app_payload", None), dict):
@@ -59,8 +63,8 @@ def authoritative_block_label(block: OcrDispatchBlock) -> str:
 def is_text_ocr_candidate(block: OcrDispatchBlock) -> bool:
     """Whether the block's semantic type/source label may enter text OCR.
 
-    This ignores ``block.recognizable`` so UI code can use it when refreshing
-    recognizability after type changes. Runtime dispatch should call
+    This ignores ``block.ocr_policy`` so UI code can use it when deriving the
+    default policy after type changes. Runtime dispatch should call
     ``should_dispatch_to_text_ocr`` instead.
     """
     if block.block_type in PRESERVE_BLOCK_TYPES:
@@ -73,7 +77,18 @@ def is_text_ocr_candidate(block: OcrDispatchBlock) -> bool:
 
 def should_dispatch_to_text_ocr(block: OcrDispatchBlock) -> bool:
     """Whether this block should be sent to a text OCR engine now."""
-    return bool(block.recognizable) and is_text_ocr_candidate(block)
+    return block.ocr_policy == OcrPolicy.TEXT_OCR
+
+
+def default_ocr_policy_for_block(block: OcrDispatchBlock) -> OcrPolicy:
+    label = normalize_paddle_label(authoritative_block_label(block))
+    if block.block_type == BlockType.EQUATION or any(token in label for token in ("equation", "formula", "math")):
+        return OcrPolicy.PRESERVE_AS_FORMULA
+    if block.block_type == BlockType.TABLE or "table" in label:
+        return OcrPolicy.PRESERVE_AS_TABLE
+    if is_text_ocr_candidate(block):
+        return OcrPolicy.TEXT_OCR
+    return OcrPolicy.SKIP
 
 
 def should_block_page_ocr_line(block: OcrDispatchBlock) -> bool:

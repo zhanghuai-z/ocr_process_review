@@ -4,7 +4,7 @@ from typing import Any, List, Optional
 import time
 
 from .enums import (
-    BlockSource, BlockType, PageStatus, ProofStatus,
+    BlockSource, BlockType, OcrPolicy, PageStatus, ProofStatus,
 )
 from .entity_id import ensure_entity_uid
 from .proof_line_state import ProofLineState
@@ -184,6 +184,57 @@ class Line:
 
 
 @dataclass
+class BlockOrigin:
+    """版面块来源事实。
+
+    只记录块最初从哪里来、外部引擎当时给了什么标签和框。
+    当前可编辑 bbox/type 仍在 Block 自身，人工修改不应覆盖 origin。
+    """
+    created_by: str = BlockSource.AUTO_LAYOUT.value
+    source_engine: str = ""
+    source_run_id: str = ""
+    source_label: str = ""
+    source_confidence: Optional[float] = None
+    original_bbox: Optional[BBox] = None
+    original_kind: Optional[BlockType] = None
+    raw_artifact_uid: str = ""
+    raw_json_path: str = ""
+    raw_index: Optional[int] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "created_by": self.created_by,
+            "source_engine": self.source_engine,
+            "source_run_id": self.source_run_id,
+            "source_label": self.source_label,
+            "source_confidence": self.source_confidence,
+            "original_bbox": self.original_bbox.to_dict() if self.original_bbox else None,
+            "original_kind": self.original_kind.value if self.original_kind else "",
+            "raw_artifact_uid": self.raw_artifact_uid,
+            "raw_json_path": self.raw_json_path,
+            "raw_index": self.raw_index,
+        }
+
+
+def _payload_float(value: object) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _payload_int(value: object) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
 class Block:
     """版面分析得到的一个内容块。"""
     block_type: BlockType
@@ -193,21 +244,162 @@ class Block:
     id: Optional[int] = None
 
     source: BlockSource = BlockSource.AUTO_LAYOUT  # 块来源
-    recognizable: bool = True                       # 是否送 OCR
+    ocr_policy: OcrPolicy = OcrPolicy.TEXT_OCR      # OCR 调度策略
     note: str = ""                                  # 用户备注或系统说明
     source_label: str = ""                          # 原始 PP-VL/Paddle label
     raw_payload: dict[str, Any] = field(default_factory=dict)  # 外部引擎原始块属性
     app_payload: dict[str, Any] = field(default_factory=dict)  # 应用派生状态/人工绑定
+    origin: BlockOrigin | None = None               # 块来源事实；新代码优先读这里
     uid: str = ""                                   # 稳定业务 ID
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
+        if self.origin is None:
+            self.origin = self._origin_from_legacy_fields()
+        self._sync_legacy_source_fields_from_origin()
+        if self.ocr_policy == OcrPolicy.TEXT_OCR:
+            self.ocr_policy = self._normalized_default_ocr_policy()
+
+    def _origin_from_legacy_fields(self) -> BlockOrigin:
+        binding = self.app_payload.get("paddle_binding")
+        binding_dict = binding if isinstance(binding, dict) else {}
+        label = (
+            self.source_label
+            or str(binding_dict.get("source_label") or binding_dict.get("block_type") or "")
+            or str(self.raw_payload.get("block_label") or self.raw_payload.get("label") or "")
+        )
+        confidence = _payload_float(
+            self.raw_payload.get("confidence", self.raw_payload.get("score"))
+        )
+        raw_index = _payload_int(
+            binding_dict.get("raw_index", binding_dict.get("index", self.raw_payload.get("index")))
+        )
+        raw_artifact_uid = str(
+            binding_dict.get("raw_artifact_uid")
+            or binding_dict.get("artifact_uid")
+            or self.raw_payload.get("raw_artifact_uid")
+            or ""
+        )
+        return BlockOrigin(
+            created_by=getattr(self.source, "value", str(self.source or BlockSource.AUTO_LAYOUT.value)),
+            source_engine=str(binding_dict.get("source_engine") or self.raw_payload.get("source_engine") or ""),
+            source_run_id=str(binding_dict.get("source_run_id") or self.raw_payload.get("run_id") or ""),
+            source_label=str(label or ""),
+            source_confidence=confidence,
+            original_bbox=self.bbox,
+            original_kind=self.block_type,
+            raw_artifact_uid=raw_artifact_uid,
+            raw_json_path=str(binding_dict.get("raw_json_path") or ""),
+            raw_index=raw_index,
+        )
+
+    def _sync_legacy_source_fields_from_origin(self) -> None:
+        origin = self.origin
+        if origin is None:
+            return
+        if not self.source_label and origin.source_label:
+            self.source_label = origin.source_label
+        if isinstance(self.source, BlockSource):
+            return
+        try:
+            self.source = BlockSource(str(origin.created_by or BlockSource.AUTO_LAYOUT.value))
+        except ValueError:
+            self.source = BlockSource.AUTO_LAYOUT
+
+    def _normalized_default_ocr_policy(self) -> OcrPolicy:
+        label = self._ocr_policy_label()
+        if self.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION, BlockType.TITLE, BlockType.REFERENCE, BlockType.TEXT}:
+            if any(token in label for token in ("equation", "formula", "math")):
+                return OcrPolicy.PRESERVE_AS_FORMULA
+            if self.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
+                return OcrPolicy.TEXT_OCR
+        if self.block_type == BlockType.EQUATION or any(token in label for token in ("equation", "formula", "math")):
+            return OcrPolicy.PRESERVE_AS_FORMULA
+        if self.block_type == BlockType.TABLE or "table" in label:
+            return OcrPolicy.PRESERVE_AS_TABLE
+        if self.block_type in {BlockType.FIGURE, BlockType.UNKNOWN}:
+            return OcrPolicy.SKIP
+        if any(token in label for token in ("figure", "image", "picture", "graphic", "photo", "chart", "seal", "stamp")):
+            return OcrPolicy.SKIP
+        return OcrPolicy.TEXT_OCR
+
+    def _ocr_policy_label(self) -> str:
+        values: list[object] = [self.source_label]
+        binding = self.app_payload.get("paddle_binding")
+        if isinstance(binding, dict):
+            values.extend([binding.get("source_label"), binding.get("block_type")])
+        values.extend([
+            self.app_payload.get("block_label"),
+            self.raw_payload.get("block_label"),
+            self.raw_payload.get("label"),
+            self.block_type.value,
+        ])
+        for value in values:
+            text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+            if text:
+                return text
+        return ""
 
     @property
     def avg_confidence(self) -> float:
         if not self.lines:
             return 0.0
         return sum(l.confidence for l in self.lines) / len(self.lines)
+
+
+@dataclass
+class RawOcrArtifact:
+    """外部 OCR/版面引擎的原始证据引用。"""
+    engine: str
+    engine_version: str
+    run_id: str = ""
+    artifact_path: str = ""
+    artifact_hash: str = ""
+    records: List[dict[str, Any]] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    page_uid: str = ""
+    uid: str = ""
+    id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "rawocr")
+
+    @classmethod
+    def from_paddle_layout_records(
+        cls,
+        records: List[dict[str, Any]],
+        *,
+        page_uid: str = "",
+        run_id: str = "",
+        artifact_path: str = "",
+        artifact_hash: str = "",
+    ) -> "RawOcrArtifact":
+        return cls(
+            engine="paddleocr-vl",
+            engine_version="1.6",
+            run_id=run_id,
+            artifact_path=artifact_path,
+            artifact_hash=artifact_hash,
+            records=list(records),
+            page_uid=page_uid,
+        )
+
+
+@dataclass
+class LayoutEditEvent:
+    """人工/系统版面编辑事件。"""
+    page_uid: str
+    op: str
+    target_uid: str = ""
+    before: dict[str, Any] = field(default_factory=dict)
+    after: dict[str, Any] = field(default_factory=dict)
+    actor: str = "user"
+    created_at: float = field(default_factory=time.time)
+    uid: str = ""
+    id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.uid = ensure_entity_uid(self.uid, "layoutedit")
 
 
 @dataclass
@@ -228,11 +420,16 @@ class Page:
     status: PageStatus = PageStatus.IMPORTED
     error_message: str = ""                 # 当前页失败原因
     ocr_invalidated_reason: str = ""        # 版面变更导致 OCR 结果失效的原因
-    ppvl_parsing_res_list: List[dict[str, Any]] = field(default_factory=list)
+    raw_layout_artifact: RawOcrArtifact | None = None
+    layout_edit_events: List[LayoutEditEvent] = field(default_factory=list)
     uid: str = ""                           # 稳定业务 ID
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "page")
+        if self.raw_layout_artifact is not None:
+            self.raw_layout_artifact.page_uid = self.uid
+        for event in self.layout_edit_events:
+            event.page_uid = self.uid
 
     @property
     def is_analyzed(self) -> bool:

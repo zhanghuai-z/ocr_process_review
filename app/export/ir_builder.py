@@ -5,7 +5,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from app.core.block_attributes import block_attributes
-from app.core.proof_line_facts import proof_line_facts, proof_status_value
+from app.core.proof_line_facts import ProofLineFacts, proof_line_facts, proof_status_value
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
 from app.export.ir import (
     EXPORT_IR_VERSION,
@@ -21,10 +21,9 @@ from app.export.ir import (
     ExportSource,
 )
 from app.export.rules import ExportRules, load_export_rules, normalize_export_format
-from app.models import BBox, Block, BlockSource, Line, OcrProject, Page
+from app.models import BBox, Block, BlockSource, Line, OcrPolicy, OcrProject, Page
 from app.services.export_service import (
     build_export_summary,
-    get_export_text,
     iter_export_blocks,
     iter_export_lines,
     iter_export_pages,
@@ -225,13 +224,13 @@ def _build_element(
             {"block_attributes": attrs.to_export_dict()},
         ))
 
-    if not block.recognizable:
+    if block.ocr_policy != OcrPolicy.TEXT_OCR:
         diagnostics.append(_diagnostic(
             "info",
-            "block_not_recognizable",
-            "该块标记为不可 OCR，导出仅保留现有内容/兜底。",
+            "block_not_text_ocr_policy",
+            "该块 OCR 策略不是 text_ocr，导出仅保留现有内容/兜底。",
             element_id,
-            {"block_attributes": attrs.to_export_dict()},
+            {"block_attributes": attrs.to_export_dict(), "ocr_policy": block.ocr_policy.value},
         ))
 
     return ExportElement(
@@ -351,11 +350,15 @@ def _proof(lines: list[Line]) -> ExportProof:
     facts = [proof_line_facts(line) for line in lines]
     confidence = sum(item.confidence for item in facts) / len(facts)
     flags = sorted({flag for line in lines for flag in line.review_flags})
-    corrected = any(bool(line.original_text) and line.original_text != get_export_text(line) for line in lines)
+    corrected = any(_is_line_corrected(facts_line) for facts_line in facts)
     status_order = ["auto_flagged", "unchecked", "modified", "ok"]
     statuses = [proof_status_value(line) for line in lines]
     status = min(statuses, key=lambda item: status_order.index(item) if item in status_order else 99)
     return ExportProof(status=status, confidence=confidence, flags=flags, corrected=corrected)
+
+
+def _is_line_corrected(facts: ProofLineFacts) -> bool:
+    return bool(facts.ocr_text) and facts.text != facts.ocr_text
 
 
 def _append_region_asset(

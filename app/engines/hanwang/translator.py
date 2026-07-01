@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
-from app.core.ocr_ir import OcrIrLine, OcrIrToken, classify_ir_text
+from app.core.ocr_ir import OcrIrLine, OcrIrToken, OcrRun, build_ocr_run, classify_ir_text
 from app.core.token_char_mapper import build_line_from_ir
 from app.models import BBox, Block, BlockSource, BlockType, Line, ProofStatus
 
@@ -135,6 +135,30 @@ def translate_linecut_ir(
     return out
 
 
+def translate_linecut_run(
+    raw: dict,
+    *,
+    page_uid: str = "",
+    block_uid: str = "",
+    engine_version: str = "native",
+    input_layout_revision: int = 0,
+    bbox_source: str = "hanwang:CharRcg",
+    review_flags: list[str] | None = None,
+) -> OcrRun:
+    return build_ocr_run(
+        engine="hanwang",
+        engine_version=engine_version,
+        page_uid=page_uid,
+        block_uid=block_uid,
+        input_layout_revision=input_layout_revision,
+        lines=translate_linecut_ir(
+            raw,
+            bbox_source=bbox_source,
+            review_flags=review_flags,
+        ),
+    )
+
+
 def translate_linecut(raw: dict) -> List[Line]:
     """Compatibility adapter: linecut_recog raw JSON → List[Line] via OCR_IR."""
     out = []
@@ -181,5 +205,6 @@ __all__ = [
     "decode_gbk_word",
     "translate_docseg",
     "translate_linecut_ir",
+    "translate_linecut_run",
     "translate_linecut",
 ]

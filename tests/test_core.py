@@ -18,7 +18,27 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.models import OcrPolicy
+
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+
+
+def _paddle_layout_artifact(records):
+    from app.models import RawOcrArtifact
+
+    return RawOcrArtifact.from_paddle_layout_records(records)
+
+
+def _attach_raw_layout_records(page, records):
+    from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
+
+    return set_paddle_raw_layout_records(page, records)
+
+
+def _raw_layout_records(page):
+    from app.core.raw_ocr_artifact import raw_layout_records
+
+    return raw_layout_records(page)
 
 
 # =====================================================================
@@ -110,23 +130,23 @@ def test_models():
 
     assert proof_block_text(block) == "修改文字\n终稿"
     assert block.source == BlockSource.AUTO_LAYOUT
-    assert block.recognizable is True
+    assert block.ocr_policy == OcrPolicy.TEXT_OCR
 
     # Block new fields
     block2 = Block(
         block_type=BlockType.TABLE, bbox=bb,
         source=BlockSource.MANUAL_DRAW,
-        recognizable=False, note="测试备注",
+        ocr_policy=OcrPolicy.MANUAL_ONLY, note="测试备注",
     )
     assert block2.source == BlockSource.MANUAL_DRAW
-    assert block2.recognizable is False
+    assert block2.ocr_policy != OcrPolicy.TEXT_OCR
     assert block2.note == "测试备注"
 
     # Page
     page = Page(image_path="/tmp/test.jpg", width=800, height=1200)
     assert page.uid.startswith("page_")
     page.blocks.append(block)
-    formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, recognizable=True)
+    formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     page.blocks.append(formula_block)
     assert page.is_analyzed
     assert page.status == PageStatus.IMPORTED
@@ -450,27 +470,30 @@ def test_bbox_tools():
 
 
 def test_block_type_mapping():
+    from app.adapters.paddle import map_paddle_label_to_block_type
     from app.models import BlockType
     from app.core.paddle_labels import normalize_paddle_label
 
-    assert BlockType.from_paddle("paragraph") == BlockType.TEXT
-    assert BlockType.from_paddle("doc_title") == BlockType.TITLE
-    assert BlockType.from_paddle("section_title") == BlockType.TITLE
-    assert BlockType.from_paddle("heading_1") == BlockType.TITLE
-    assert BlockType.from_paddle("heading_6") == BlockType.TITLE
-    assert BlockType.from_paddle("image_caption") == BlockType.FIGURE_CAPTION
-    assert BlockType.from_paddle("table_caption_text") == BlockType.TABLE_CAPTION
-    assert BlockType.from_paddle("table_body") == BlockType.TABLE
-    assert BlockType.from_paddle("graphic") == BlockType.FIGURE
-    assert BlockType.from_paddle("isolated_formula") == BlockType.EQUATION
-    assert BlockType.from_paddle("bibliography") == BlockType.REFERENCE
-    assert BlockType.from_paddle("vision_footnote") == BlockType.TEXT
+    assert map_paddle_label_to_block_type("paragraph") == BlockType.TEXT
+    assert map_paddle_label_to_block_type("doc_title") == BlockType.TITLE
+    assert map_paddle_label_to_block_type("section_title") == BlockType.TITLE
+    assert map_paddle_label_to_block_type("heading_1") == BlockType.TITLE
+    assert map_paddle_label_to_block_type("heading_6") == BlockType.TITLE
+    assert map_paddle_label_to_block_type("image_caption") == BlockType.FIGURE_CAPTION
+    assert map_paddle_label_to_block_type("table_caption_text") == BlockType.TABLE_CAPTION
+    assert map_paddle_label_to_block_type("table_body") == BlockType.TABLE
+    assert map_paddle_label_to_block_type("graphic") == BlockType.FIGURE
+    assert map_paddle_label_to_block_type("isolated_formula") == BlockType.EQUATION
+    assert map_paddle_label_to_block_type("bibliography") == BlockType.REFERENCE
+    assert map_paddle_label_to_block_type("vision_footnote") == BlockType.TEXT
     assert normalize_paddle_label("vision_footnote") == "footnote"
 
     print("test_block_type_mapping PASSED")
 
 
 def test_block_payload_helpers_preserve_existing_entries():
+    import pytest
+
     from app.core.block_payload import (
         OCR_INVALIDATION_KIND_KEY,
         OCR_TEXT_INVALIDATED_KEY,
@@ -487,10 +510,13 @@ def test_block_payload_helpers_preserve_existing_entries():
         raw_payload={"vendor": {"keep": True}},
     )
 
-    set_payload_entries(block, {"custom": 1})
+    set_payload_entries(block, {OCR_INVALIDATION_KIND_KEY: "manual"})
     assert payload_get(block, "vendor") is None
-    assert payload_get(block, "custom") == 1
-    assert payload_bool(block, "custom") is True
+    assert payload_get(block, OCR_INVALIDATION_KIND_KEY) == "manual"
+    assert payload_bool(block, OCR_INVALIDATION_KIND_KEY) is True
+
+    with pytest.raises(ValueError, match="unregistered app_payload keys"):
+        set_payload_entries(block, {"custom": 1})
 
     mark_ocr_text_invalidated(block, "block_moved")
     assert block.app_payload[OCR_TEXT_INVALIDATED_KEY] is True
@@ -545,6 +571,65 @@ def test_paddle_layout_schema_normalizes_record_fields():
     assert block_text({"markdown": "must not route"}) == ""
 
     print("test_paddle_layout_schema_normalizes_record_fields PASSED")
+
+
+def test_ocr_run_wraps_ir_lines_without_proof_model():
+    from app.core.ocr_ir import OcrIrLine, OcrIrToken, OcrLine, OcrToken, build_ocr_run
+    from app.models import BBox
+
+    token = OcrIrToken(
+        text="甲",
+        bbox=BBox(1, 2, 3, 4),
+        row_index=0,
+        token_index=0,
+        confidence=0.9,
+        kind="text",
+    )
+    line = OcrIrLine(
+        text="甲",
+        confidence=0.9,
+        bbox=BBox(1, 2, 20, 10),
+        source_text="test",
+        tokens=[token],
+    )
+    run = build_ocr_run(
+        engine="hanwang",
+        engine_version="native",
+        page_uid="page_1",
+        block_uid="block_1",
+        lines=[line],
+        input_layout_revision=7,
+    )
+
+    assert run.uid.startswith("ocrrun_")
+    assert run.page_uid == "page_1"
+    assert run.block_uid == "block_1"
+    assert run.input_layout_revision == 7
+    assert run.lines == [line]
+    assert OcrLine is OcrIrLine
+    assert OcrToken is OcrIrToken
+    assert not hasattr(run.lines[0], "proof_state")
+
+    print("test_ocr_run_wraps_ir_lines_without_proof_model PASSED")
+
+
+def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
+    from app.core.block_attributes import block_attributes
+    from app.core.ocr_dispatch_policy import authoritative_block_label
+    from app.models import BBox, Block, BlockOrigin, BlockType
+
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 100, 20),
+        source_label="stale_text",
+        raw_payload={"block_label": "stale_raw"},
+        origin=BlockOrigin(source_label="footnote"),
+    )
+
+    assert authoritative_block_label(block) == "footnote"
+    assert block_attributes(block).source_label == "footnote"
+
+    print("test_block_origin_label_is_authoritative_for_attributes_and_dispatch PASSED")
 
 
 # =====================================================================
@@ -605,7 +690,7 @@ def test_project_store():
         os.unlink(db_path)
 
 
-def test_project_store_persists_ppvl_parsing_res_list():
+def test_project_store_persists_raw_layout_artifact():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
@@ -626,13 +711,13 @@ def test_project_store_persists_ppvl_parsing_res_list():
             },
         ]
         project = OcrProject(
-            name="ppvl-raw",
+            name="paddle-raw-artifact",
             pages=[
                 Page(
                     image_path="/tmp/img.jpg",
                     width=800,
                     height=600,
-                    ppvl_parsing_res_list=parsing_res_list,
+                    raw_layout_artifact=_paddle_layout_artifact(parsing_res_list),
                     blocks=[
                         Block(
                             block_type=BlockType.TEXT,
@@ -653,12 +738,122 @@ def test_project_store_persists_ppvl_parsing_res_list():
             store.save_project(project)
             loaded = store.load_project(project_id=1)
 
-        assert loaded.pages[0].ppvl_parsing_res_list == parsing_res_list
+        artifact = loaded.pages[0].raw_layout_artifact
+        assert artifact is not None
+        assert artifact.engine == "paddleocr-vl"
+        assert artifact.engine_version == "1.6"
+        assert _raw_layout_records(loaded.pages[0]) == parsing_res_list
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.source_label == "paragraph_title"
         assert loaded_block.raw_payload["attributes"]["level"] == 2
 
-        print("test_project_store_persists_ppvl_parsing_res_list PASSED")
+        print("test_project_store_persists_raw_layout_artifact PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+def test_project_store_persists_block_origin_separately_from_current_layout():
+    from app.core.project_store import ProjectStore
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockSource, BlockType, OcrProject, Page,
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        origin_bbox = BBox(10, 20, 100, 40)
+        current_bbox = BBox(15, 25, 120, 44)
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=current_bbox,
+            source=BlockSource.USER_EDITED,
+            source_label="paragraph_title",
+            origin=BlockOrigin(
+                created_by=BlockSource.AUTO_LAYOUT.value,
+                source_engine="paddleocr-vl",
+                source_run_id="run-1",
+                source_label="paragraph_title",
+                source_confidence=0.88,
+                original_bbox=origin_bbox,
+                original_kind=BlockType.TITLE,
+                raw_artifact_uid="rawocr_1",
+                raw_json_path=".cache/paddle_artifacts/page/run-1.json",
+                raw_index=3,
+            ),
+        )
+        project = OcrProject(
+            name="block-origin",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+            loaded_block = loaded.pages[0].blocks[0]
+            assert loaded_block.bbox == current_bbox
+            assert loaded_block.origin is not None
+            assert loaded_block.origin.original_bbox == origin_bbox
+            assert loaded_block.origin.original_kind == BlockType.TITLE
+            assert loaded_block.origin.source_label == "paragraph_title"
+            assert loaded_block.origin.source_confidence == 0.88
+            assert loaded_block.origin.raw_index == 3
+
+            loaded_block.bbox = BBox(30, 40, 130, 50)
+            store.save_project(loaded)
+            reloaded = store.load_project(project_id=1)
+            reloaded_block = reloaded.pages[0].blocks[0]
+            assert reloaded_block.bbox == BBox(30, 40, 130, 50)
+            assert reloaded_block.origin is not None
+            assert reloaded_block.origin.original_bbox == origin_bbox
+
+        print("test_project_store_persists_block_origin_separately_from_current_layout PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+def test_project_store_persists_layout_edit_events():
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, LayoutEditEvent, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 20))
+        page = Page(
+            image_path="/tmp/img.jpg",
+            width=800,
+            height=600,
+            blocks=[block],
+            layout_edit_events=[
+                LayoutEditEvent(
+                    page_uid="",
+                    target_uid=block.uid,
+                    op="resize_block",
+                    before={"bbox": [0, 0, 100, 20]},
+                    after={"bbox": [5, 5, 110, 25]},
+                )
+            ],
+        )
+        project = OcrProject(name="layout-events", pages=[page])
+
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            loaded = store.load_project(project_id=1)
+            events = loaded.pages[0].layout_edit_events
+            assert len(events) == 1
+            assert events[0].page_uid == loaded.pages[0].uid
+            assert events[0].target_uid == block.uid
+            assert events[0].op == "resize_block"
+            assert events[0].before == {"bbox": [0, 0, 100, 20]}
+            assert events[0].after == {"bbox": [5, 5, 110, 25]}
+
+            store.save_project(loaded)
+            reloaded = store.load_project(project_id=1)
+            assert [event.uid for event in reloaded.pages[0].layout_edit_events] == [events[0].uid]
+
+        print("test_project_store_persists_layout_edit_events PASSED")
     finally:
         os.unlink(db_path)
 
@@ -808,11 +1003,13 @@ def test_project_store_clean_on_resave():
         os.unlink(db_path)
 
 
-def test_project_store_strips_runtime_layout_line_routes_on_save_and_load():
-    from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY
-    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
-    from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, ROUTE_SUBBLOCKS_FIELD
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -824,49 +1021,165 @@ def test_project_store_strips_runtime_layout_line_routes_on_save_and_load():
                 "segments": [{"kind": "text", "bbox": [80, 0, 120, 30], "text": ""}],
             }
         ]
+        route_subblocks = [{"block_label": "inline_formula", "block_bbox": [10, 10, 20, 20]}]
         page = Page(
             image_path="/tmp/runtime-route-cache.png",
             width=160,
             height=80,
-            status=PageStatus.OCR_DONE,
-            ppvl_parsing_res_list=[
-                {
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 140, 40],
-                    "block_content": "甲 $ A $ 乙",
-                    LAYOUT_LINE_ROUTES_FIELD: stale_routes,
-                }
-            ],
         )
-        page.blocks.append(
-            Block(
-                block_type=BlockType.TEXT,
-                bbox=BBox.from_xyxy(0, 0, 140, 40),
-                lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
-                raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
-                app_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
-            )
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 140, 40),
+            lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
+            raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes, ROUTE_SUBBLOCKS_FIELD: route_subblocks},
         )
+        page.blocks.append(block)
         project = OcrProject(name="runtime route cache", pages=[page])
 
         with ProjectStore(db_path) as store:
-            saved = store.save_project(project)
-            loaded = store.load_project(saved.id)
+            with pytest.raises(ProjectDataError, match="runtime routing data"):
+                store.save_project(project)
 
-        loaded_page = loaded.pages[0]
-        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_page.ppvl_parsing_res_list[0]
-        loaded_block = loaded_page.blocks[0]
-        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_block.raw_payload
-        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_block.app_payload
-        assert loaded_block.lines == []
-        assert loaded_block.app_payload.get(OCR_TEXT_INVALIDATED_KEY) is True
-        assert loaded_page.ocr_invalidated_reason == "stale_layout_line_routes_stripped"
-        assert loaded_page.status == PageStatus.LAYOUT_DONE
+        assert block.lines[0].text == "旧OCR结果"
+        assert LAYOUT_LINE_ROUTES_FIELD in block.raw_payload
+        assert ROUTE_SUBBLOCKS_FIELD in block.raw_payload
+
+        clean_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 140, 40),
+            lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
+        )
+        clean_project = OcrProject(
+            name="runtime route load",
+            pages=[Page(image_path="/tmp/runtime-route-cache.png", width=160, height=80, blocks=[clean_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(clean_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET raw_payload_json=? WHERE id=?",
+                (json.dumps({ROUTE_SUBBLOCKS_FIELD: route_subblocks}, ensure_ascii=False), clean_block.id),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="runtime routing data"):
+                store.load_project(saved.id)
 
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_strips_runtime_layout_line_routes_on_save_and_load PASSED")
+    print("test_project_store_rejects_runtime_layout_routes_on_save_and_load PASSED")
+
+
+def test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            app_payload={"future_unregistered_key": True},
+        )
+        project = OcrProject(
+            name="unregistered app payload",
+            pages=[Page(image_path="/tmp/unregistered-app-payload.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="unregistered app_payload keys"):
+                store.save_project(project)
+
+        clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        clean_project = OcrProject(
+            name="unregistered app payload load",
+            pages=[Page(image_path="/tmp/unregistered-app-payload.png", width=80, height=40, blocks=[clean_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(clean_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (json.dumps({"future_unregistered_key": True}, ensure_ascii=False), clean_block.id),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="unregistered app_payload keys"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load PASSED")
+
+
+def test_project_store_rejects_invalid_payload_json_on_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        project = OcrProject(
+            name="invalid payload json",
+            pages=[Page(image_path="/tmp/invalid-payload-json.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE block SET raw_payload_json=? WHERE id=?", ("[", block.id))
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="block.raw_payload_json invalid json"):
+                store.load_project(saved.id)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE block SET raw_payload_json=?, app_payload_json=? WHERE id=?", ("{}", "[]", block.id))
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="block.app_payload_json must be dict"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_invalid_payload_json_on_load PASSED")
+
+
+def test_model_validation_rejects_legacy_page_and_runtime_payloads():
+    import pytest
+
+    from app.core.model_validation import ModelValidationError, validate_block_model, validate_page_model
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
+    from app.models import BBox, Block, BlockType, Page
+
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(0, 0, 20, 20),
+        app_payload={"future_unregistered_key": True},
+    )
+    with pytest.raises(ModelValidationError, match="unregistered app_payload keys"):
+        validate_block_model(block)
+
+    block.app_payload = {}
+    block.raw_payload = {LAYOUT_LINE_ROUTES_FIELD: []}
+    with pytest.raises(ModelValidationError, match="runtime routing data"):
+        validate_block_model(block)
+
+    page = Page(image_path="/tmp/model-validation.png", width=20, height=20)
+    page.ppvl_parsing_res_list = []
+    with pytest.raises(ModelValidationError, match="ppvl_parsing_res_list"):
+        validate_page_model(page)
+
+    print("test_model_validation_rejects_legacy_page_and_runtime_payloads PASSED")
 
 
 def test_project_store_save_project_preserves_child_rowids():
@@ -4590,7 +4903,7 @@ def test_layout_panel_subtype_buttons_write_paddle_source_label():
             assert block.block_type == BlockType.EQUATION
             assert block.source_label == "display_formula"
             assert block.source == BlockSource.MANUAL_DRAW
-            assert block.recognizable is False
+            assert block.ocr_policy != OcrPolicy.TEXT_OCR
             assert panel._type_context_title.text() == "选中框类型"
             assert panel._selection_mode_lbl.text() == "选中类型:"
             assert panel._selection_type_status.text() == "公式"
@@ -5103,7 +5416,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             image_path=str(image_path),
             width=220,
             height=80,
-            ppvl_parsing_res_list=[parent_record],
+            raw_layout_artifact=_paddle_layout_artifact([parent_record]),
             blocks=[
                 Block(
                     block_type=BlockType.TEXT,
@@ -5128,7 +5441,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
-            assert page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+            assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
 
             # Real resize drags emit several geometry changes. Once the original
             # Paddle inline formula is marked handled, later drag events must
@@ -5144,7 +5457,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.bbox.to_xyxy() == (50, 0, 80, 30)
             assert inline.source.value == "user_edited"
             assert inline.app_payload[PADDLE_BINDING_KEY]["manual_bbox"] == [50, 0, 80, 30]
-            assert page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+            assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
 
             ocr_blocks = _page_blocks_from_layout(page)
             subblocks = ocr_blocks[0][ROUTE_SUBBLOCKS_FIELD]
@@ -5187,7 +5500,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
             image_path=str(image_path),
             width=240,
             height=80,
-            ppvl_parsing_res_list=[parent_record],
+            raw_layout_artifact=_paddle_layout_artifact([parent_record]),
             blocks=[
                 Block(
                     block_type=BlockType.TEXT,
@@ -6404,13 +6717,13 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     bb = BBox(0, 0, 100, 20)
     footnote = Block(block_type=BlockType.TEXT, bbox=bb, source_label="vision_footnote")
     formula_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="inline_formula")
-    equation = Block(block_type=BlockType.EQUATION, bbox=bb, recognizable=True)
+    equation = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     table_binding = Block(
         block_type=BlockType.TEXT,
         bbox=bb,
         app_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
     )
-    disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, recognizable=False)
+    disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, ocr_policy=OcrPolicy.MANUAL_ONLY)
 
     assert is_text_ocr_candidate(footnote) is True
     assert should_dispatch_to_text_ocr(footnote) is True
@@ -6502,7 +6815,7 @@ def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
         block_type=BlockType.EQUATION,
         bbox=BBox(50, 50, 50, 30),
         order=1,
-        recognizable=True,
+        ocr_policy=OcrPolicy.TEXT_OCR,
     )
     normal_line = Line(text="文", confidence=0.95, bbox=BBox(10, 10, 10, 10))
     formula_line = Line(text="式", confidence=0.95, bbox=BBox(55, 55, 10, 10))
@@ -6547,7 +6860,7 @@ def test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block():
         block_type=BlockType.EQUATION,
         bbox=BBox.from_xyxy(50, 10, 130, 40),
         order=1,
-        recognizable=True,
+        ocr_policy=OcrPolicy.TEXT_OCR,
     )
     page = Page(
         image_path="/tmp/hybrid-prepass-hint.png",
@@ -6573,7 +6886,7 @@ def test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block():
     print("test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block PASSED")
 
 
-def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
+def test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula():
     import tempfile
     import cv2
     import numpy as np
@@ -6594,7 +6907,7 @@ def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
             block_type=BlockType.EQUATION,
             bbox=BBox(0, 0, 120, 40),
             lines=[formula_line],
-            recognizable=True,
+            ocr_policy=OcrPolicy.TEXT_OCR,
         )
         page = Page(image_path=img_path, width=160, height=80, blocks=[equation])
         result = OcrPipeline(engine=RaisingTextEngine()).process_project(
@@ -6605,7 +6918,7 @@ def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
     finally:
         os.unlink(img_path)
 
-    print("test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable PASSED")
+    print("test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula PASSED")
 
 
 def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
@@ -6820,9 +7133,9 @@ def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
         return [row], micro_module.RunStats(n_blocks_total=1, n_blocks_ppvl=1)
 
     page = Page(image_path="/tmp/manual-formula.png", width=120, height=90, page_number=1)
-    page.ppvl_parsing_res_list = [
+    _attach_raw_layout_records(page, [
         {"block_label": "text", "block_bbox": [0, 0, 100, 20], "block_content": "stale paddle text"}
-    ]
+    ])
     page.blocks = [
         Block(
             block_type=BlockType.EQUATION,
@@ -6840,7 +7153,7 @@ def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
     assert "stale paddle text" not in str(captured["blocks"][0])
     assert len(page.blocks) == 1
     assert page.blocks[0].block_type == BlockType.EQUATION
-    assert page.blocks[0].recognizable is False
+    assert page.blocks[0].ocr_policy != OcrPolicy.TEXT_OCR
     assert len(page.blocks[0].lines) == 1
     assert page.blocks[0].lines[0].text == ""
     assert "manual_formula_needs_text" in page.blocks[0].lines[0].review_flags
@@ -6869,7 +7182,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
         image_path="/tmp/manual-binding-route.png",
         width=220,
         height=60,
-        ppvl_parsing_res_list=[dict(parent_record)],
+        raw_layout_artifact=_paddle_layout_artifact([dict(parent_record)]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -6946,13 +7259,13 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
         image_path="/tmp/manual-formula-sibling-route.png",
         width=2200,
         height=900,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [200, 550, 2050, 850],
                 "block_content": parent_text,
             },
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -7052,7 +7365,7 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
         image_path="/tmp/manual-formula-parent-steal.png",
         width=2200,
         height=900,
-        ppvl_parsing_res_list=[parent_record],
+        raw_layout_artifact=_paddle_layout_artifact([parent_record]),
         blocks=[
             Block(
                 block_type=BlockType.EQUATION,
@@ -7132,7 +7445,7 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
         image_path="/tmp/raw-parent-formula-text.png",
         width=260,
         height=80,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [0, 0, 240, 40],
@@ -7142,7 +7455,7 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
                     {"block_label": "inline_formula", "block_bbox": [120, 0, 150, 30]},
                 ],
             },
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -7204,7 +7517,7 @@ def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
         image_path="/tmp/manual-unbound-route.png",
         width=240,
         height=60,
-        ppvl_parsing_res_list=[dict(parent_record)],
+        raw_layout_artifact=_paddle_layout_artifact([dict(parent_record)]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -7319,14 +7632,14 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
         image_path="/tmp/manual-formula-preserve.png",
         width=220,
         height=60,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [0, 0, 200, 40],
                 "block_content": "甲 $ B $ 乙",
                 ROUTE_SUBBLOCKS_FIELD: [],
             }
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -7437,14 +7750,14 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
         image_path="/tmp/manual-formula-crop-ocr.png",
         width=220,
         height=60,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [0, 0, 200, 40],
                 "block_content": "甲 $ B $ 乙",
                 ROUTE_SUBBLOCKS_FIELD: [],
             }
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -7527,7 +7840,7 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
         image_path="/tmp/manual-unbound-preserve.png",
         width=240,
         height=60,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [0, 0, 220, 40],
@@ -7536,7 +7849,7 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
                     {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
                 ],
             }
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -8989,7 +9302,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         image_path="",
         width=150,
         height=60,
-        ppvl_parsing_res_list=[
+        raw_layout_artifact=_paddle_layout_artifact([
             {
                 "block_label": "text",
                 "block_bbox": [0, 0, 130, 40],
@@ -9001,7 +9314,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
                     }
                 ],
             }
-        ],
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -9024,7 +9337,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         page,
     )
 
-    assert LAYOUT_LINE_ROUTES_FIELD not in page.ppvl_parsing_res_list[0]
+    assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
     assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].raw_payload
     assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].app_payload
 
@@ -9575,19 +9888,31 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         cv2.imwrite(img_path, np.ones((80, 200, 3), dtype=np.uint8) * 255)
 
     try:
+        route_subblocks = [
+            {"block_label": "inline_formula", "block_bbox": [60, 0, 90, 40]},
+        ]
         page = Page(
             image_path=img_path,
             width=200,
             height=80,
-            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 190, 50))],
-            ppvl_parsing_res_list=[{
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(0, 0, 190, 50),
+                    source_label="text",
+                    raw_payload={
+                        "block_label": "text",
+                        "block_bbox": [0, 0, 190, 50],
+                        "block_content": "甲 $ A $ 乙",
+                    },
+                )
+            ],
+            raw_layout_artifact=_paddle_layout_artifact([{
                 "block_label": "text",
                 "block_bbox": [0, 0, 190, 50],
                 "block_content": "甲 $ A $ 乙",
-                "_route_subblocks": [
-                    {"block_label": "inline_formula", "block_bbox": [60, 0, 90, 40]},
-                ],
-            }],
+                "_route_subblocks": route_subblocks,
+            }]),
         )
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(),
@@ -9854,7 +10179,7 @@ def test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero():
     )
     LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
 
-    parent = page.ppvl_parsing_res_list[12]
+    parent = _raw_layout_records(page)[12]
     routes = line_routes_for_block(parent, page.width, page.height)
     formula_segments = [
         segment
@@ -10239,7 +10564,7 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
     LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
 
     skip_records = [
-        record for record in page.ppvl_parsing_res_list
+        record for record in _raw_layout_records(page)
         if record.get("block_label") in {"display_formula", "formula_number"}
     ]
     assert skip_records
@@ -10247,7 +10572,7 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
     assert all(LAYOUT_LINE_ROUTES_FIELD not in record for record in skip_records)
 
     text_record = next(
-        record for record in page.ppvl_parsing_res_list
+        record for record in _raw_layout_records(page)
         if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
     )
     assert len(text_record[ROUTE_SUBBLOCKS_FIELD]) == 7
@@ -10321,13 +10646,13 @@ def test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
         )
 
     attach_page_ocr_line_routes(
-        page.ppvl_parsing_res_list,
+        _raw_layout_records(page),
         page_ocr_lines,
         page.width,
         page.height,
     )
     text_record = next(
-        record for record in page.ppvl_parsing_res_list
+        record for record in _raw_layout_records(page)
         if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
     )
     formula_texts = [
@@ -10399,7 +10724,7 @@ def test_paddle_artifact_index_marks_missing_inline_formula_for_crop_ocr():
 
     assert geometry.status == BINDING_GEOMETRY_HIT
     assert geometry.text == ""
-    assert geometry.recognizable is False
+    assert geometry.ocr_policy != OcrPolicy.TEXT_OCR
     assert "manual_formula_needs_text" in geometry.review_flags
     assert missing.status == BINDING_EMPTY_REVIEW
     assert missing.text == ""
@@ -10417,7 +10742,7 @@ def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
     from app.models import BBox, BlockType, Page
 
     page = Page(image_path="/tmp/table-page.png", width=300, height=220)
-    page.ppvl_parsing_res_list = [
+    _attach_raw_layout_records(page, [
         {
             "block_label": "table",
             "block_bbox": [40, 50, 260, 160],
@@ -10428,7 +10753,7 @@ def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
             "block_bbox": [40, 170, 260, 205],
             "block_content": "plain text without formula",
         },
-    ]
+    ])
 
     index = PaddleArtifactIndex.from_page(page)
     table = index.bind_manual_bbox(BBox.from_xyxy(35, 45, 265, 165), BlockType.TABLE)
@@ -10437,7 +10762,7 @@ def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
     assert table.status == BINDING_PARENT_TABLE_HIT
     assert table.text == "<table><tr><td>A</td></tr></table>"
     assert table.source_label == "table"
-    assert table.recognizable is False
+    assert table.ocr_policy != OcrPolicy.TEXT_OCR
     assert empty_formula.status == BINDING_EMPTY_REVIEW
     assert empty_formula.text == ""
     assert "manual_formula_needs_text" in empty_formula.review_flags
@@ -10461,7 +10786,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
         image_path = Path(tmpdir) / "page.png"
         QImage(300, 120, QImage.Format.Format_RGB888).save(str(image_path))
         page = Page(image_path=str(image_path), width=300, height=120)
-        page.ppvl_parsing_res_list = [
+        _attach_raw_layout_records(page, [
             {
                 "block_label": "text",
                 "block_bbox": [10, 10, 260, 70],
@@ -10470,7 +10795,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
                     {"block_label": "inline_formula", "block_bbox": [60, 12, 90, 40]},
                 ],
             }
-        ]
+        ])
         block = Block(
             block_type=BlockType.EQUATION,
             bbox=BBox.from_xyxy(120, 12, 150, 42),
@@ -10485,7 +10810,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
             assert binding["status"] == BINDING_EMPTY_REVIEW
             assert binding["text"] == ""
             assert block.source_label == "inline_formula"
-            assert block.recognizable is False
+            assert block.ocr_policy != OcrPolicy.TEXT_OCR
             assert block.lines == []
         finally:
             panel.close()
@@ -10520,9 +10845,10 @@ def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     }
 
     blocks, overlays = LayoutAnalyzer()._extract_api_blocks(page, data)
-    subblocks = page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD]
+    subblocks = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD]
 
-    assert blocks[0].app_payload[ROUTE_SUBBLOCKS_FIELD] == subblocks
+    assert ROUTE_SUBBLOCKS_FIELD not in blocks[0].raw_payload
+    assert ROUTE_SUBBLOCKS_FIELD not in blocks[0].app_payload
     assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
         ("inline_formula", [50, 10, 80, 32]),
     ]
@@ -11080,16 +11406,36 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
             return [Line(text="预识别", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)]
 
     try:
+        ppvl_records = [
+            {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"},
+            {"block_label": "display_formula", "block_bbox": [20, 80, 180, 120], "block_content": "$$x+y$$"},
+            {"block_label": "reference", "block_bbox": [20, 140, 180, 180], "block_content": "参考文献"},
+        ]
         page = Page(
             image_path=img_path,
             width=240,
             height=220,
-            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 30))],
-            ppvl_parsing_res_list=[
-                {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"},
-                {"block_label": "display_formula", "block_bbox": [20, 80, 180, 120], "block_content": "$$x+y$$"},
-                {"block_label": "reference", "block_bbox": [20, 140, 180, 180], "block_content": "参考文献"},
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(10, 20, 110, 60),
+                    source_label="text",
+                    raw_payload=dict(ppvl_records[0]),
+                ),
+                Block(
+                    block_type=BlockType.EQUATION,
+                    bbox=BBox.from_xyxy(20, 80, 180, 120),
+                    source_label="display_formula",
+                    raw_payload=dict(ppvl_records[1]),
+                ),
+                Block(
+                    block_type=BlockType.REFERENCE,
+                    bbox=BBox.from_xyxy(20, 140, 180, 180),
+                    source_label="reference",
+                    raw_payload=dict(ppvl_records[2]),
+                ),
             ],
+            raw_layout_artifact=_paddle_layout_artifact(ppvl_records),
         )
         progress_events = []
         result = OcrPipeline(
@@ -11101,7 +11447,14 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         )
 
         assert len(calls) == 1
-        assert calls[0][0] == page.ppvl_parsing_res_list
+        assert calls[0][0] is not _raw_layout_records(page)
+        assert [block["block_label"] for block in calls[0][0]] == ["text", "display_formula", "reference"]
+        assert [block["block_bbox"] for block in calls[0][0]] == [
+            [10, 20, 110, 60],
+            [20, 80, 180, 120],
+            [20, 140, 180, 180],
+        ]
+        assert [block["block_content"] for block in calls[0][0]] == ["PPVL文本", "$$x+y$$", "参考文献"]
         assert calls[0][1]["include_chars"] is True
         assert len(calls[0][1]["page_ocr_lines"]) == 1
         assert calls[0][1]["page_ocr_lines"][0].text == "预识别"
@@ -11124,7 +11477,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert out_page.blocks[0].raw_payload["extra"]["role"] == "body"
         assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
         assert out_page.blocks[1].lines[0].text == "$$x+y$$"
-        assert out_page.blocks[1].recognizable is False
+        assert out_page.blocks[1].ocr_policy != OcrPolicy.TEXT_OCR
         assert out_page.blocks[1].raw_payload["formula_format"] == "latex"
         assert "fallback_reason=" not in out_page.blocks[2].note
         assert out_page.blocks[2].lines == []
@@ -11206,7 +11559,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
                     },
                 )
             ],
-            ppvl_parsing_res_list=[
+            raw_layout_artifact=_paddle_layout_artifact([
                 {
                     "block_label": "text",
                     "block_bbox": [10, 20, 110, 60],
@@ -11218,7 +11571,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
                         }
                     ],
                 }
-            ],
+            ]),
         )
         progress_events = []
         result = OcrPipeline(
@@ -11297,9 +11650,9 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
                     lines=[Line(text="旧CharOCR行", bbox=BBox.from_xyxy(12, 24, 90, 58), confidence=0.9)],
                 )
             ],
-            ppvl_parsing_res_list=[
+            raw_layout_artifact=_paddle_layout_artifact([
                 {"block_label": "text", "block_bbox": [10, 20, 110, 60], "block_content": "PPVL文本"}
-            ],
+            ]),
         )
         progress_events = []
         result = OcrPipeline(
@@ -11328,7 +11681,7 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
     from app.engines.hanwang.micro_recblock import (
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
-    from app.models import OcrProject, Page
+    from app.models import BBox, Block, BlockType, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
     barrier = threading.Barrier(2, timeout=5)
@@ -11375,24 +11728,40 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
             cv2.imwrite(path, np.ones((80, 100, 3), dtype=np.uint8) * 255)
             paths.append(path)
 
+        ppvl_records = [
+            {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p1"},
+            {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p2"},
+        ]
         pages = [
             Page(
                 image_path=paths[0],
                 width=100,
                 height=80,
                 page_number=1,
-                ppvl_parsing_res_list=[
-                    {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p1"}
+                blocks=[
+                    Block(
+                        block_type=BlockType.TEXT,
+                        bbox=BBox.from_xyxy(0, 0, 80, 40),
+                        source_label="text",
+                        raw_payload=dict(ppvl_records[0]),
+                    )
                 ],
+                raw_layout_artifact=_paddle_layout_artifact([ppvl_records[0]]),
             ),
             Page(
                 image_path=paths[1],
                 width=100,
                 height=80,
                 page_number=2,
-                ppvl_parsing_res_list=[
-                    {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": "p2"}
+                blocks=[
+                    Block(
+                        block_type=BlockType.TEXT,
+                        bbox=BBox.from_xyxy(0, 0, 80, 40),
+                        source_label="text",
+                        raw_payload=dict(ppvl_records[1]),
+                    )
                 ],
+                raw_layout_artifact=_paddle_layout_artifact([ppvl_records[1]]),
             ),
         ]
         progress_events = []
@@ -11457,6 +11826,45 @@ def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     assert blocks[0]["custom_attr"]["level"] == 2
 
     print("test_hanwang_page_blocks_from_layout_preserves_raw_source_label PASSED")
+
+
+def test_hanwang_current_layout_blocks_for_ocr_uses_current_blocks_not_ppvl_source():
+    from app.engines.hanwang.micro_recblock import _current_layout_blocks_for_ocr
+    from app.models import BBox, Block, BlockType, Page
+
+    page = Page(
+        image_path="/tmp/current-layout-source.png",
+        width=200,
+        height=120,
+        raw_layout_artifact=_paddle_layout_artifact([
+            {
+                "block_label": "text",
+                "block_bbox": [1, 2, 30, 40],
+                "block_content": "stale paddle text",
+            }
+        ]),
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(20, 30, 160, 90),
+                source_label="text",
+                raw_payload={
+                    "block_label": "text",
+                    "block_content": "current layout text",
+                },
+            )
+        ],
+    )
+
+    blocks = _current_layout_blocks_for_ocr(page)
+
+    assert len(blocks) == 1
+    assert blocks[0] is not _raw_layout_records(page)[0]
+    assert blocks[0]["block_label"] == "text"
+    assert blocks[0]["block_bbox"] == [20, 30, 160, 90]
+    assert blocks[0]["block_content"] == "current layout text"
+
+    print("test_hanwang_current_layout_blocks_for_ocr_uses_current_blocks_not_ppvl_source PASSED")
 
 
 def test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text():
@@ -11524,7 +11932,7 @@ def test_hanwang_ppvl_skip_uses_layout_authority_label():
         image_path="/tmp/ppvl-skip-authority.png",
         width=100,
         height=100,
-        ppvl_parsing_res_list=[],
+        raw_layout_artifact=_paddle_layout_artifact([]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -11543,7 +11951,7 @@ def test_hanwang_ppvl_skip_uses_layout_authority_label():
     assert len(calls) == 1
     assert page.blocks[0].block_type == BlockType.FIGURE
     assert page.blocks[0].source_label == "figure"
-    assert page.blocks[0].recognizable is False
+    assert page.blocks[0].ocr_policy != OcrPolicy.TEXT_OCR
 
     print("test_hanwang_ppvl_skip_uses_layout_authority_label PASSED")
 
@@ -14936,7 +15344,7 @@ def test_layout_parsing_semantics_override_layout_det_when_both_exist():
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
 
-    assert page.ppvl_parsing_res_list[0]["block_label"] == "equation"
+    assert _raw_layout_records(page)[0]["block_label"] == "equation"
     assert [block.block_type for block in blocks] == [BlockType.EQUATION]
     assert blocks[0].source_label == "equation"
     assert len(overlays) == 2
@@ -14975,12 +15383,13 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     }
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
-    subblocks = page.ppvl_parsing_res_list[0]["_route_subblocks"]
-    line_routes = line_routes_for_block(page.ppvl_parsing_res_list[0], page.width, page.height)
+    subblocks = _raw_layout_records(page)[0]["_route_subblocks"]
+    line_routes = line_routes_for_block(_raw_layout_records(page)[0], page.width, page.height)
 
     assert blocks[0].block_type == BlockType.TEXT
-    assert blocks[0].app_payload["_route_subblocks"] == subblocks
-    assert LAYOUT_LINE_ROUTES_FIELD not in page.ppvl_parsing_res_list[0]
+    assert "_route_subblocks" not in blocks[0].raw_payload
+    assert "_route_subblocks" not in blocks[0].app_payload
+    assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
     assert LAYOUT_LINE_ROUTES_FIELD not in blocks[0].app_payload
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
@@ -15017,8 +15426,8 @@ def test_layout_analyzer_persists_raw_parsing_res_list():
     blocks, _ = analyzer._extract_api_blocks(page, data)
 
     assert len(blocks) == 1
-    assert page.ppvl_parsing_res_list == parsing_res_list
-    assert page.ppvl_parsing_res_list[0]["custom_raw"]["keep"] is True
+    assert _raw_layout_records(page) == parsing_res_list
+    assert _raw_layout_records(page)[0]["custom_raw"]["keep"] is True
     assert blocks[0].source_label == "text"
     assert blocks[0].raw_payload["custom_raw"]["keep"] is True
 
@@ -15054,7 +15463,7 @@ def test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks():
 
     assert blocks == []
     assert overlays == []
-    assert page.ppvl_parsing_res_list == []
+    assert _raw_layout_records(page) == []
 
     print("test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks PASSED")
 
@@ -15551,6 +15960,7 @@ def test_layout_analyzer_ignores_conflicting_pruned_shape_when_bbox_is_page_spac
 
 
 def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selected():
+    import hashlib
     import json
     import tempfile
 
@@ -15671,6 +16081,20 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         assert len(page.blocks) == 1
         assert page.blocks[0].block_type == BlockType.TEXT
         assert "OCR行" in page.blocks[0].note
+        artifact = page.raw_layout_artifact
+        assert artifact is not None
+        assert artifact.engine == "paddleocr-vl"
+        assert artifact.engine_version == "1.6"
+        assert artifact.run_id == "job-1"
+        artifact_path = Path(artifact.artifact_path)
+        assert artifact_path.name == "job-1.json"
+        assert artifact_path.parent.name == page.uid
+        assert artifact_path.parent.parent.name == "paddle_artifacts"
+        artifact_blob = artifact_path.read_bytes()
+        assert artifact.artifact_hash == hashlib.sha256(artifact_blob).hexdigest()
+        artifact_json = json.loads(artifact_blob.decode("utf-8"))
+        assert artifact_json["page"]["uid"] == page.uid
+        assert artifact_json["response"]["paddle_v16"]["jobId"] == "job-1"
         assert not Path(page_path).with_suffix(".layout-api.json").exists()
         assert not Path(page_path).with_suffix(".layout-api-raw.png").exists()
         assert not Path(page_path).with_suffix(".layout-app-overlay.png").exists()
@@ -15930,9 +16354,9 @@ def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
     def fake_api_analyze(self, page):
         page.width = 300
         page.height = 200
-        page.ppvl_parsing_res_list = [
+        _attach_raw_layout_records(page, [
             {"block_label": "text", "block_bbox": [12, 18, 92, 58], "block_content": "PPVL"}
-        ]
+        ])
         page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(12, 18, 80, 40), order=0)]
         return page
 
@@ -15949,7 +16373,7 @@ def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
         assert result.blocks[0].bbox == BBox(12, 18, 80, 40)
         assert result.width == 300
         assert result.height == 200
-        assert result.ppvl_parsing_res_list[0]["block_content"] == "PPVL"
+        assert _raw_layout_records(result)[0]["block_content"] == "PPVL"
     finally:
         config_module.get_config = original_get_config
         layout_module.LayoutAnalyzer._api_analyze = original_api_analyze
@@ -18644,8 +19068,16 @@ if __name__ == "__main__":
     test_block_type_mapping()
     test_block_payload_helpers_preserve_existing_entries()
     test_paddle_layout_schema_normalizes_record_fields()
+    test_ocr_run_wraps_ir_lines_without_proof_model()
+    test_block_origin_label_is_authoritative_for_attributes_and_dispatch()
     test_project_store()
-    test_project_store_persists_ppvl_parsing_res_list()
+    test_project_store_persists_raw_layout_artifact()
+    test_project_store_persists_block_origin_separately_from_current_layout()
+    test_project_store_persists_layout_edit_events()
+    test_project_store_rejects_runtime_layout_routes_on_save_and_load()
+    test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load()
+    test_project_store_rejects_invalid_payload_json_on_load()
+    test_model_validation_rejects_legacy_page_and_runtime_payloads()
     test_line_final_text_contract_and_project_store_roundtrip()
     test_project_store_preserves_empty_final_text_roundtrip()
     test_project_store_clean_on_resave()
@@ -18764,7 +19196,7 @@ if __name__ == "__main__":
     test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks()
     test_page_ocr_nested_equation_blocks_before_parent_text_assignment()
     test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block()
-    test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable()
+    test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
     test_hanwang_micro_recblock_routes_and_fallbacks()
@@ -18812,6 +19244,7 @@ if __name__ == "__main__":
     test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_guard()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
     test_hanwang_page_blocks_from_layout_preserves_raw_source_label()
+    test_hanwang_current_layout_blocks_for_ocr_uses_current_blocks_not_ppvl_source()
     test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text()
     test_hanwang_ppvl_skip_uses_layout_authority_label()
     test_ocr_pipeline_records_failed_page_when_block_ocr_fails()

@@ -12,13 +12,20 @@ from typing import Any, Callable
 
 import numpy as np
 
+from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     HANWANG_BBOX_AUDIT_KEY,
     OCR_TEXT_INVALIDATED_KEY,
+    OCR_INVALIDATION_KIND_KEY,
     PADDLE_BINDING_KEY,
+    PADDLE_BLOCK_BBOX_KEY,
+    PADDLE_BLOCK_LABEL_KEY,
+    set_payload_entries,
     split_legacy_raw_payload,
+    strip_runtime_layout_payload,
 )
+from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
 from app.core.latin_span_recovery import (
@@ -80,8 +87,9 @@ from app.core.paddle_labels import (
 )
 from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
+from app.core.raw_ocr_artifact import raw_layout_records
 from app.engines import OCR_BBOX_SPACE_PAGE
-from app.models import BBox, Block, BlockSource, BlockType, Char, Line, Page
+from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolicy, Page
 
 from . import native_bridge
 
@@ -281,7 +289,7 @@ def _block_text(block: dict[str, Any]) -> str:
 
 def _effective_label_for_block(block: dict[str, Any]) -> str:
     label = _label_from_block(block)
-    if BlockType.from_paddle(label) == BlockType.EQUATION:
+    if map_paddle_label_to_block_type(label) == BlockType.EQUATION:
         return label
     if is_formula_style_position_block(block):
         return "formula"
@@ -2441,7 +2449,7 @@ def run_micro_recblock(
         layout_bbox = _layout_block_bbox(block, width, height)
         block_bbox_source = _effective_block_bbox_source(block, width, height)
         ppvl_text = _block_text(block)
-        synthesize_chars = BlockType.from_paddle(label) != BlockType.EQUATION
+        synthesize_chars = map_paddle_label_to_block_type(label) != BlockType.EQUATION
         rows[idx] = BlockResult(
             block_idx=idx,
             block_label=label,
@@ -2942,13 +2950,6 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
     return model
 
 
-def _page_layout_has_user_edits(page: Page) -> bool:
-    return any(
-        block.source in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED)
-        for block in page.blocks
-    )
-
-
 _PARENT_BINDING_STATUSES = {
     BINDING_GEOMETRY_HIT,
     BINDING_FORMULA_CROP_OCR,
@@ -2980,18 +2981,19 @@ def _int_value(value: object, default: int = -1) -> int:
 
 
 def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> int:
-    if not raw_payload or not page.ppvl_parsing_res_list:
+    records = raw_layout_records(page)
+    if not raw_payload or not records:
         return -1
     explicit = _int_value(
         raw_payload.get("_layout_paddle_parent_index", raw_payload.get("paddle_parent_index")),
     )
-    if 0 <= explicit < len(page.ppvl_parsing_res_list):
+    if 0 <= explicit < len(records):
         return explicit
 
     label = route_authority_label(raw_payload)
     bbox = _payload_bbox_xyxy(raw_payload, page.width, page.height)
     text = paddle_block_text(raw_payload)
-    for index, record in enumerate(page.ppvl_parsing_res_list):
+    for index, record in enumerate(records):
         if label and label != route_authority_label(record):
             continue
         if bbox is not None and bbox != block_bbox_xyxy(record, page.width, page.height):
@@ -3034,15 +3036,16 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "block_content": _layout_block_content(block, raw_payload),
         "source_label": block.source_label or source_label,
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
-        "_layout_block_recognizable": bool(block.recognizable),
+        "_layout_block_ocr_policy": block.ocr_policy.value,
     }
     if isinstance(binding, dict) and binding:
         row[PADDLE_BINDING_KEY] = dict(binding)
     for key in (ROUTE_SUBBLOCKS_FIELD,):
         if key in app_payload:
             row[key] = app_payload[key]
-    if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(page.ppvl_parsing_res_list):
-        parent_record = page.ppvl_parsing_res_list[parent_index]
+    records = raw_layout_records(page)
+    if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
+        parent_record = records[parent_index]
         if isinstance(parent_record, dict) and ROUTE_SUBBLOCKS_FIELD in parent_record:
             row[ROUTE_SUBBLOCKS_FIELD] = parent_record[ROUTE_SUBBLOCKS_FIELD]
     if parent_index >= 0:
@@ -3051,7 +3054,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
 
 
 def _strip_cached_layout_line_routes_from_page(page: Page) -> None:
-    for record in page.ppvl_parsing_res_list:
+    for record in raw_layout_records(page):
         if isinstance(record, dict):
             record.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     for block in page.blocks:
@@ -3087,9 +3090,10 @@ def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
 
 
 def _row_matches_paddle_parent_record(page: Page, row: dict[str, Any], parent_index: int) -> bool:
-    if not (0 <= parent_index < len(page.ppvl_parsing_res_list)):
+    records = raw_layout_records(page)
+    if not (0 <= parent_index < len(records)):
         return False
-    parent_record = page.ppvl_parsing_res_list[parent_index]
+    parent_record = records[parent_index]
     if not isinstance(parent_record, dict):
         return False
     row_bbox = block_bbox_xyxy(row, page.width, page.height)
@@ -3250,7 +3254,7 @@ def _manual_structure_parent_row(
         if candidate_block is block or candidate_row is row:
             continue
         label = route_authority_label(candidate_row)
-        if BlockType.from_paddle(label) != BlockType.TEXT:
+        if map_paddle_label_to_block_type(label) != BlockType.TEXT:
             continue
         if is_hanwang_skip_label(label) or is_formula_label(label) or is_table_label(label):
             continue
@@ -3279,9 +3283,10 @@ def _apply_manual_parent_binding(
     block: Block,
     binding: dict[str, Any],
 ) -> None:
-    block_type = BlockType.from_paddle(str(binding.get("block_type") or block.block_type.value))
+    block_type = map_paddle_label_to_block_type(str(binding.get("block_type") or block.block_type.value))
     parent_index = _int_value(binding.get("parent_index"))
-    parent_record = page.ppvl_parsing_res_list[parent_index] if 0 <= parent_index < len(page.ppvl_parsing_res_list) else {}
+    records = raw_layout_records(page)
+    parent_record = records[parent_index] if 0 <= parent_index < len(records) else {}
     if block_type == BlockType.EQUATION:
         parent_text = paddle_block_text(parent_record)
         if parent_text:
@@ -3361,6 +3366,16 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
         row = next(entry_row for entry_block, entry_row in entries if entry_block is block)
         blocks.append(row)
     return blocks
+
+
+def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
+    """Build OCR input from the current layout truth only.
+
+    Paddle parsing records remain available as origin/reference data for binding,
+    but OCR dispatch must not switch data sources based on whether a user edited
+    the page.
+    """
+    return _page_blocks_from_layout(page)
 
 
 def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
@@ -3450,12 +3465,14 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
     }
     block.source_label = "inline_formula"
-    block.recognizable = False
-    block.app_payload[PADDLE_BINDING_KEY] = binding
-    block.app_payload["block_label"] = "inline_formula"
-    block.app_payload["block_bbox"] = bbox_xyxy
+    block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
+    set_payload_entries(block, {
+        PADDLE_BINDING_KEY: binding,
+        PADDLE_BLOCK_LABEL_KEY: "inline_formula",
+        PADDLE_BLOCK_BBOX_KEY: bbox_xyxy,
+    })
     block.app_payload.pop(OCR_TEXT_INVALIDATED_KEY, None)
-    block.app_payload.pop("ocr_invalidation_kind", None)
+    block.app_payload.pop(OCR_INVALIDATION_KIND_KEY, None)
     block.lines = [
         Line(
             text=text,
@@ -3475,21 +3492,23 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
     if reason:
         flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
     block.source_label = "inline_formula"
-    block.recognizable = False
-    block.app_payload[PADDLE_BINDING_KEY] = {
-        "status": BINDING_EMPTY_REVIEW,
-        "source": "paddle_formula_crop_ocr_empty",
-        "block_type": BlockType.EQUATION.value,
-        "source_label": "inline_formula",
-        "text": "",
-        "parent_index": parent_index,
-        "candidate_index": -1,
-        "score": 0.0,
-        "manual_bbox": bbox_xyxy,
-        "review_flags": flags,
-    }
-    block.app_payload["block_label"] = "inline_formula"
-    block.app_payload["block_bbox"] = bbox_xyxy
+    block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
+    set_payload_entries(block, {
+        PADDLE_BINDING_KEY: {
+            "status": BINDING_EMPTY_REVIEW,
+            "source": "paddle_formula_crop_ocr_empty",
+            "block_type": BlockType.EQUATION.value,
+            "source_label": "inline_formula",
+            "text": "",
+            "parent_index": parent_index,
+            "candidate_index": -1,
+            "score": 0.0,
+            "manual_bbox": bbox_xyxy,
+            "review_flags": flags,
+        },
+        PADDLE_BLOCK_LABEL_KEY: "inline_formula",
+        PADDLE_BLOCK_BBOX_KEY: bbox_xyxy,
+    })
     block.lines = [
         Line(
             text="",
@@ -3585,11 +3604,7 @@ class HanwangMicroRecBlockEngine:
             progress_callback=progress_callback,
         )
         preserved_manual_blocks = _routed_manual_structure_blocks(page)
-        layout_blocks = (
-            _page_blocks_from_layout(page)
-            if _page_layout_has_user_edits(page)
-            else (page.ppvl_parsing_res_list or _page_blocks_from_layout(page))
-        )
+        layout_blocks = _current_layout_blocks_for_ocr(page)
         ppvl_blocks = deepcopy(layout_blocks)
         if not ppvl_blocks:
             raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
@@ -3608,7 +3623,7 @@ class HanwangMicroRecBlockEngine:
         height, width = image_bgr.shape[:2]
         for order, row in enumerate(rows):
             bbox = _bbox_from_xyxy_tuple(row.block_bbox, width, height)
-            block_type = BlockType.from_paddle(row.block_label)
+            block_type = map_paddle_label_to_block_type(row.block_label)
             flags: list[str] = []
             if (
                 block_type == BlockType.EQUATION
@@ -3642,8 +3657,8 @@ class HanwangMicroRecBlockEngine:
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
             raw_payload, app_payload = split_legacy_raw_payload(row.raw_block)
-            raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-            app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+            raw_payload = strip_runtime_layout_payload(raw_payload)
+            app_payload = strip_runtime_layout_payload(app_payload)
             audit = app_payload.get(HANWANG_BBOX_AUDIT_KEY)
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
@@ -3651,20 +3666,21 @@ class HanwangMicroRecBlockEngine:
                     note_parts.append(f"hanwang_recog_group_failed={failed_groups}")
                 if audit.get("paddle_label_unknown"):
                     note_parts.append(f"unknown_paddle_label={row.block_label}")
-            new_blocks.append(
-                Block(
-                    block_type=block_type,
-                    bbox=bbox,
-                    lines=lines,
-                    order=order,
-                    source=BlockSource.AUTO_LAYOUT,
-                    recognizable=row.source == "hanwang",
-                    note=" | ".join(note_parts),
-                    source_label=row.block_label,
-                    raw_payload=raw_payload,
-                    app_payload=app_payload,
-                )
+            new_block = Block(
+                block_type=block_type,
+                bbox=bbox,
+                lines=lines,
+                order=order,
+                source=BlockSource.AUTO_LAYOUT,
+                note=" | ".join(note_parts),
+                source_label=row.block_label,
+                raw_payload=raw_payload,
+                app_payload=app_payload,
             )
+            new_block.ocr_policy = default_ocr_policy_for_block(new_block)
+            if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:
+                new_block.ocr_policy = OcrPolicy.MANUAL_ONLY
+            new_blocks.append(new_block)
 
         if preserved_manual_blocks:
             new_blocks.extend(preserved_manual_blocks)

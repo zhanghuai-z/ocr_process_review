@@ -19,6 +19,7 @@ PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
 """
 from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -30,11 +31,12 @@ from app.core.api_profiles import (
     FIXED_LAYOUT_PROFILE,
     resolve_api_endpoint_for_role,
 )
+from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
-from app.core.block_payload import split_legacy_raw_payload
+from app.core.block_payload import split_legacy_raw_payload, strip_runtime_layout_payload
 from app.core.logging import get_logger
-from app.core.ocr_dispatch_policy import is_text_ocr_candidate
+from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_layout_schema import (
     normalize_paddle_layout_record,
     paddle_record_label,
@@ -53,6 +55,7 @@ from app.core.paddle_response import (
     result_dict,
     result_items,
 )
+from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.core.paddle_v16_client import (
     PaddleV16LayoutClient,
     PaddleV16RequestCancelled,
@@ -359,8 +362,10 @@ class LayoutAnalyzer:
 
         raw_overlay_items.append((raw_type, bbox))
         raw_payload, app_payload = split_legacy_raw_payload(normalized.raw)
+        raw_payload = strip_runtime_layout_payload(raw_payload)
+        app_payload = strip_runtime_layout_payload(app_payload)
         block = Block(
-            block_type=BlockType.from_paddle(raw_type),
+            block_type=map_paddle_label_to_block_type(raw_type),
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
@@ -368,7 +373,7 @@ class LayoutAnalyzer:
             raw_payload=raw_payload,
             app_payload=app_payload,
         )
-        block.recognizable = is_text_ocr_candidate(block)
+        block.ocr_policy = default_ocr_policy_for_block(block)
         page_blocks.append(block)
         return order + 1
 
@@ -480,9 +485,9 @@ class LayoutAnalyzer:
         data_info = result.get("dataInfo") if isinstance(result, dict) else None
         page_blocks: List[Block] = []
         raw_overlay_items: List[tuple[str, object]] = []
+        artifact_records: list[dict] = []
         seen: set[tuple] = set()
         order = 0
-        page.ppvl_parsing_res_list = []
 
         for item in layout_results:
             parsing_records = parsing_records_from_item(item)
@@ -502,7 +507,7 @@ class LayoutAnalyzer:
                     scale_x=scale_x,
                     scale_y=scale_y,
                 )
-            page.ppvl_parsing_res_list.extend(parsing_records)
+            artifact_records.extend(parsing_records)
 
             for record in parsing_records:
                 order = self._append_api_block(
@@ -524,6 +529,7 @@ class LayoutAnalyzer:
                     raw_overlay_items=raw_overlay_items,
                 )
 
+        set_paddle_raw_layout_records(page, artifact_records)
         return page_blocks, raw_overlay_items
 
     def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:
@@ -657,6 +663,41 @@ class LayoutAnalyzer:
         except OSError as exc:
             logger.warning("Failed to write API layout debug response: %s", exc)
 
+    def _artifact_root_for_page(self, page: Page) -> Path:
+        image_path = Path(page.display_image_path)
+        if image_path.parent.name == "images" and image_path.parent.parent.name == ".cache":
+            return image_path.parent.parent / "paddle_artifacts"
+        return image_path.parent / ".cache" / "paddle_artifacts"
+
+    def _write_paddle_raw_artifact(self, page: Page, data: dict) -> None:
+        artifact = page.raw_layout_artifact
+        if artifact is None:
+            return
+        job = data.get("paddle_v16", {}) if isinstance(data, dict) else {}
+        run_id = str(job.get("jobId") or self._layout_batch_id or f"layout-{int(time.time() * 1000)}")
+        safe_run_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_id)
+        payload = {
+            "page": {
+                "uid": page.uid,
+                "display_image_path": page.display_image_path,
+                "source_path": page.source_path,
+                "width": page.width,
+                "height": page.height,
+                "page_number": page.page_number,
+            },
+            "response": data,
+        }
+        blob = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        artifact_dir = self._artifact_root_for_page(page) / page.uid
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = artifact_dir / f"{safe_run_id}.json"
+        artifact_path.write_bytes(blob)
+
+        artifact.page_uid = page.uid
+        artifact.run_id = run_id
+        artifact.artifact_path = str(artifact_path)
+        artifact.artifact_hash = hashlib.sha256(blob).hexdigest()
+
     def _write_bbox_overlay(
         self,
         page: Page,
@@ -774,7 +815,7 @@ class LayoutAnalyzer:
                 continue
             raw_payload, app_payload = split_legacy_raw_payload(item)
             page.blocks.append(Block(
-                block_type=BlockType.from_paddle(raw_type),
+                block_type=map_paddle_label_to_block_type(raw_type),
                 bbox=bbox,
                 order=i,
                 source_label=raw_type,
@@ -855,6 +896,7 @@ class LayoutAnalyzer:
                 telemetry.get("batch_id") or "",
             )
         page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)
+        self._write_paddle_raw_artifact(page, data)
         # 注意：不再调用 _rescale_blocks_if_suspicious()——
         # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，
         # 再走通用启发式只会引入二次缩放。

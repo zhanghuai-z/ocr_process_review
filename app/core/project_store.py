@@ -15,17 +15,25 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from app.models import (
-    BBox, Block, BlockSource, BlockType, Char, Line,
-    OcrProject, Page, PageStatus, ProofLineState, ProofStatus,
+    BBox, Block, BlockOrigin, BlockSource, BlockType, Char, LayoutEditEvent, Line,
+    OcrPolicy, OcrProject, Page, PageStatus, ProofLineState, ProofStatus, RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
-from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY, split_legacy_raw_payload
+from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
-from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
+from app.core.model_validation import (
+    ModelValidationError,
+    validate_block_model,
+    validate_persistent_block_payloads,
+)
 from app.core.proof_line_facts import proof_final_text, proof_final_text_set, proof_status
 
 logger = get_logger(__name__)
+
+
+class ProjectDataError(RuntimeError):
+    """Current schema project data violates model boundaries."""
 
 # --------------------------------------------------------------------- schema v3
 DDL_V3 = """
@@ -55,8 +63,26 @@ CREATE TABLE IF NOT EXISTS page (
     status          TEXT    NOT NULL DEFAULT 'imported',
     error_message   TEXT    NOT NULL DEFAULT '',
     ocr_invalidated_reason TEXT NOT NULL DEFAULT '',
-    ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]'
+    raw_layout_artifact_uid TEXT NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS raw_ocr_artifact (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid             TEXT    NOT NULL DEFAULT '',
+    project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    page_uid        TEXT    NOT NULL DEFAULT '',
+    engine          TEXT    NOT NULL,
+    engine_version  TEXT    NOT NULL DEFAULT '',
+    run_id          TEXT    NOT NULL DEFAULT '',
+    artifact_path   TEXT    NOT NULL DEFAULT '',
+    artifact_hash   TEXT    NOT NULL DEFAULT '',
+    records_json    TEXT    NOT NULL DEFAULT '[]',
+    created_at      REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(project_id, uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_ocr_artifact_project_page
+    ON raw_ocr_artifact(project_id, page_uid);
 
 CREATE TABLE IF NOT EXISTS block (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,12 +93,52 @@ CREATE TABLE IF NOT EXISTS block (
     w INTEGER NOT NULL, h INTEGER NOT NULL,
     block_order     INTEGER NOT NULL DEFAULT 0,
     source          TEXT    NOT NULL DEFAULT 'auto_layout',
-    recognizable    INTEGER NOT NULL DEFAULT 1,
+    ocr_policy      TEXT    NOT NULL DEFAULT 'text_ocr',
     note            TEXT    NOT NULL DEFAULT '',
     source_label    TEXT    NOT NULL DEFAULT '',
     raw_payload_json TEXT   NOT NULL DEFAULT '{}',
     app_payload_json TEXT   NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS block_origin (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id          INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    block_uid           TEXT    NOT NULL,
+    created_by          TEXT    NOT NULL DEFAULT 'auto_layout',
+    source_engine       TEXT    NOT NULL DEFAULT '',
+    source_run_id       TEXT    NOT NULL DEFAULT '',
+    source_label        TEXT    NOT NULL DEFAULT '',
+    source_confidence   REAL,
+    original_x          INTEGER,
+    original_y          INTEGER,
+    original_w          INTEGER,
+    original_h          INTEGER,
+    original_kind       TEXT    NOT NULL DEFAULT '',
+    raw_artifact_uid    TEXT    NOT NULL DEFAULT '',
+    raw_json_path       TEXT    NOT NULL DEFAULT '',
+    raw_index           INTEGER,
+    UNIQUE(project_id, block_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_block_origin_project
+    ON block_origin(project_id);
+
+CREATE TABLE IF NOT EXISTS layout_edit_event (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid             TEXT    NOT NULL DEFAULT '',
+    project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    page_uid        TEXT    NOT NULL DEFAULT '',
+    target_uid      TEXT    NOT NULL DEFAULT '',
+    op              TEXT    NOT NULL,
+    before_json     TEXT    NOT NULL DEFAULT '{}',
+    after_json      TEXT    NOT NULL DEFAULT '{}',
+    actor           TEXT    NOT NULL DEFAULT 'user',
+    created_at      REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(project_id, uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_layout_edit_event_project_page
+    ON layout_edit_event(project_id, page_uid);
 
 CREATE TABLE IF NOT EXISTS line (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -153,7 +219,6 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE page ADD COLUMN error_message TEXT NOT NULL DEFAULT '';",
         # block table additions
         "ALTER TABLE block ADD COLUMN source TEXT NOT NULL DEFAULT 'auto_layout';",
-        "ALTER TABLE block ADD COLUMN recognizable INTEGER NOT NULL DEFAULT 1;",
         "ALTER TABLE block ADD COLUMN note TEXT NOT NULL DEFAULT '';",
         # line table additions
         "ALTER TABLE line ADD COLUMN ocr_text TEXT NOT NULL DEFAULT '';",
@@ -174,9 +239,7 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE char_ ADD COLUMN token_text TEXT NOT NULL DEFAULT '';",
     ],
     4: [],
-    5: [
-        "ALTER TABLE page ADD COLUMN ppvl_parsing_res_list_json TEXT NOT NULL DEFAULT '[]';",
-    ],
+    5: [],
     6: [
         "ALTER TABLE block ADD COLUMN source_label TEXT NOT NULL DEFAULT '';",
         "ALTER TABLE block ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT '{}';",
@@ -212,6 +275,65 @@ MIGRATIONS: dict[int, list[str]] = {
         "ON proof_line_state(project_id);",
     ],
     13: [],
+    14: [
+        "ALTER TABLE page ADD COLUMN raw_layout_artifact_uid TEXT NOT NULL DEFAULT '';",
+        "CREATE TABLE IF NOT EXISTS raw_ocr_artifact ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "uid TEXT NOT NULL DEFAULT '', "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "page_uid TEXT NOT NULL DEFAULT '', "
+        "engine TEXT NOT NULL, "
+        "engine_version TEXT NOT NULL DEFAULT '', "
+        "run_id TEXT NOT NULL DEFAULT '', "
+        "artifact_path TEXT NOT NULL DEFAULT '', "
+        "artifact_hash TEXT NOT NULL DEFAULT '', "
+        "records_json TEXT NOT NULL DEFAULT '[]', "
+        "created_at REAL NOT NULL DEFAULT 0.0, "
+        "UNIQUE(project_id, uid));",
+        "CREATE INDEX IF NOT EXISTS idx_raw_ocr_artifact_project_page "
+        "ON raw_ocr_artifact(project_id, page_uid);",
+    ],
+    15: [
+        "ALTER TABLE block ADD COLUMN ocr_policy TEXT NOT NULL DEFAULT 'text_ocr';",
+    ],
+    16: [
+        "CREATE TABLE IF NOT EXISTS block_origin ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "block_uid TEXT NOT NULL, "
+        "created_by TEXT NOT NULL DEFAULT 'auto_layout', "
+        "source_engine TEXT NOT NULL DEFAULT '', "
+        "source_run_id TEXT NOT NULL DEFAULT '', "
+        "source_label TEXT NOT NULL DEFAULT '', "
+        "source_confidence REAL, "
+        "original_x INTEGER, "
+        "original_y INTEGER, "
+        "original_w INTEGER, "
+        "original_h INTEGER, "
+        "original_kind TEXT NOT NULL DEFAULT '', "
+        "raw_artifact_uid TEXT NOT NULL DEFAULT '', "
+        "raw_json_path TEXT NOT NULL DEFAULT '', "
+        "raw_index INTEGER, "
+        "UNIQUE(project_id, block_uid));",
+        "CREATE INDEX IF NOT EXISTS idx_block_origin_project "
+        "ON block_origin(project_id);",
+    ],
+    17: [
+        "CREATE TABLE IF NOT EXISTS layout_edit_event ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "uid TEXT NOT NULL DEFAULT '', "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "page_uid TEXT NOT NULL DEFAULT '', "
+        "target_uid TEXT NOT NULL DEFAULT '', "
+        "op TEXT NOT NULL, "
+        "before_json TEXT NOT NULL DEFAULT '{}', "
+        "after_json TEXT NOT NULL DEFAULT '{}', "
+        "actor TEXT NOT NULL DEFAULT 'user', "
+        "created_at REAL NOT NULL DEFAULT 0.0, "
+        "UNIQUE(project_id, uid));",
+        "CREATE INDEX IF NOT EXISTS idx_layout_edit_event_project_page "
+        "ON layout_edit_event(project_id, page_uid);",
+    ],
 }
 
 
@@ -234,24 +356,28 @@ def _json_to_review_flags(s: str) -> list[str]:
         return []
 
 
-def _json_to_list(s: str) -> list:
+def _json_to_list(s: str, *, field: str) -> list:
     if not s:
-        return []
+        raise ProjectDataError(f"{field} is empty")
     try:
         value = json.loads(s)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    return value if isinstance(value, list) else []
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ProjectDataError(f"{field} invalid json") from exc
+    if not isinstance(value, list):
+        raise ProjectDataError(f"{field} must be list")
+    return value
 
 
-def _json_to_dict(s: str) -> dict:
+def _json_to_dict(s: str, *, field: str) -> dict:
     if not s:
-        return {}
+        raise ProjectDataError(f"{field} is empty")
     try:
         value = json.loads(s)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ProjectDataError(f"{field} invalid json") from exc
+    if not isinstance(value, dict):
+        raise ProjectDataError(f"{field} must be dict")
+    return value
 
 
 def _proof_alignment_state(line: Line) -> str:
@@ -265,24 +391,8 @@ def _proof_alignment_state(line: Line) -> str:
         return "degraded"
 
 
-def _strip_runtime_layout_routes_from_dict(payload: dict[str, Any]) -> bool:
-    had_routes = LAYOUT_LINE_ROUTES_FIELD in payload
-    payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-    return had_routes
-
-
-def _strip_runtime_layout_routes_from_list(values: list[Any]) -> list[Any]:
-    for item in values:
-        if isinstance(item, dict):
-            _strip_runtime_layout_routes_from_dict(item)
-    return values
-
-
-def _has_runtime_layout_routes_in_list(values: list[Any]) -> bool:
-    return any(
-        isinstance(item, dict) and LAYOUT_LINE_ROUTES_FIELD in item
-        for item in values
-    )
+def _raise_project_data_error(exc: ModelValidationError) -> None:
+    raise ProjectDataError(str(exc)) from exc
 
 
 _ENTITY_UID_TABLES = (
@@ -706,20 +816,20 @@ class ProjectStore:
             parent_id=project_id,
             project_id=project_id,
         )
-        _strip_runtime_layout_routes_from_list(page.ppvl_parsing_res_list)
+        raw_layout_artifact_uid = self._save_raw_layout_artifact(cur, page, project_id)
         if page.id is None:
             cur.execute(
                 "INSERT INTO page (uid, project_id, image_path, width, height, "
                 "page_number, source_path, source_type, source_page_index, "
                 "cache_image_path, thumbnail_path, status, error_message, "
-                "ocr_invalidated_reason, ppvl_parsing_res_list_json) "
+                "ocr_invalidated_reason, raw_layout_artifact_uid) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (page.uid, project_id, page.image_path, page.width, page.height,
                  page.page_number, page.source_path, page.source_type,
                  page.source_page_index, page.cache_image_path,
                  page.thumbnail_path, page.status.value, page.error_message,
                  page.ocr_invalidated_reason,
-                 json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False)),
+                 raw_layout_artifact_uid),
             )
             page.id = cur.lastrowid
         else:
@@ -728,14 +838,14 @@ class ProjectStore:
                 "source_path=?, source_type=?, source_page_index=?, "
                 "cache_image_path=?, thumbnail_path=?, status=?, error_message=?, "
                 "ocr_invalidated_reason=?, "
-                "ppvl_parsing_res_list_json=?, project_id=? "
+                "raw_layout_artifact_uid=?, project_id=? "
                 "WHERE id=? AND uid=?",
                 (page.image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
                  page.cache_image_path, page.thumbnail_path, page.status.value,
                  page.error_message,
                  page.ocr_invalidated_reason,
-                 json.dumps(page.ppvl_parsing_res_list, ensure_ascii=False),
+                 raw_layout_artifact_uid,
                  project_id, page.id, page.uid),
             )
             if cur.rowcount != 1:
@@ -743,9 +853,17 @@ class ProjectStore:
                 self._save_page(cur, page, project_id, save_seen_uids=save_seen_uids)
                 return
 
+        self._save_layout_edit_events(cur, page, project_id)
+
         old_block_ids = {
             r["id"] for r in cur.execute(
                 "SELECT id FROM block WHERE page_id=?", (page.id,)
+            ).fetchall()
+        }
+        old_block_uid_by_id = {
+            r["id"]: str(r["uid"] or "")
+            for r in cur.execute(
+                "SELECT id, uid FROM block WHERE page_id=?", (page.id,)
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
@@ -762,7 +880,113 @@ class ProjectStore:
                 saved_block_ids.add(block.id)
 
         for old_id in old_block_ids - saved_block_ids:
+            old_uid = old_block_uid_by_id.get(old_id, "")
+            if old_uid:
+                cur.execute(
+                    "DELETE FROM block_origin WHERE project_id=? AND block_uid=?",
+                    (project_id, old_uid),
+                )
             cur.execute("DELETE FROM block WHERE id=?", (old_id,))
+
+    def _save_layout_edit_events(
+        self,
+        cur: sqlite3.Cursor,
+        page: Page,
+        project_id: int,
+    ) -> None:
+        cur.execute(
+            "DELETE FROM layout_edit_event WHERE project_id=? AND page_uid=?",
+            (project_id, page.uid),
+        )
+        seen_uids: set[str] = set()
+        for event in page.layout_edit_events:
+            event.page_uid = page.uid
+            event.uid = ensure_entity_uid(event.uid, "layoutedit")
+            if event.uid in seen_uids:
+                event.uid = self._fresh_db_uid(cur, "layout_edit_event", "layoutedit", seen_uids)
+            seen_uids.add(event.uid)
+            cur.execute(
+                "INSERT INTO layout_edit_event ("
+                "uid, project_id, page_uid, target_uid, op, before_json, "
+                "after_json, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.uid,
+                    project_id,
+                    event.page_uid,
+                    event.target_uid,
+                    event.op,
+                    json.dumps(event.before, ensure_ascii=False),
+                    json.dumps(event.after, ensure_ascii=False),
+                    event.actor,
+                    event.created_at,
+                ),
+            )
+            event.id = cur.lastrowid
+
+    def _save_raw_layout_artifact(
+        self,
+        cur: sqlite3.Cursor,
+        page: Page,
+        project_id: int,
+    ) -> str:
+        artifact = page.raw_layout_artifact
+        if artifact is None:
+            return ""
+        artifact.page_uid = page.uid
+        if not artifact.uid:
+            artifact.uid = new_entity_uid("rawocr")
+        payload = (
+            artifact.uid,
+            project_id,
+            artifact.page_uid,
+            artifact.engine,
+            artifact.engine_version,
+            artifact.run_id,
+            artifact.artifact_path,
+            artifact.artifact_hash,
+            json.dumps(artifact.records, ensure_ascii=False),
+            artifact.created_at,
+        )
+        if artifact.id is None:
+            row = cur.execute(
+                "SELECT id FROM raw_ocr_artifact WHERE project_id=? AND uid=?",
+                (project_id, artifact.uid),
+            ).fetchone()
+            if row is not None:
+                artifact.id = row["id"]
+        if artifact.id is None:
+            cur.execute(
+                "INSERT INTO raw_ocr_artifact ("
+                "uid, project_id, page_uid, engine, engine_version, run_id, "
+                "artifact_path, artifact_hash, records_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                payload,
+            )
+            artifact.id = cur.lastrowid
+        else:
+            cur.execute(
+                "UPDATE raw_ocr_artifact SET page_uid=?, engine=?, engine_version=?, "
+                "run_id=?, artifact_path=?, artifact_hash=?, records_json=?, created_at=? "
+                "WHERE id=? AND project_id=? AND uid=?",
+                (
+                    artifact.page_uid,
+                    artifact.engine,
+                    artifact.engine_version,
+                    artifact.run_id,
+                    artifact.artifact_path,
+                    artifact.artifact_hash,
+                    json.dumps(artifact.records, ensure_ascii=False),
+                    artifact.created_at,
+                    artifact.id,
+                    project_id,
+                    artifact.uid,
+                ),
+            )
+            if cur.rowcount != 1:
+                artifact.id = None
+                return self._save_raw_layout_artifact(cur, page, project_id)
+        return artifact.uid
 
     def _save_block(
         self,
@@ -783,16 +1007,13 @@ class ProjectStore:
             project_id=project_id,
         )
         bb = block.bbox
-        had_runtime_routes = (
-            _strip_runtime_layout_routes_from_dict(block.raw_payload)
-            or _strip_runtime_layout_routes_from_dict(block.app_payload)
-        )
-        if had_runtime_routes and block.lines:
-            block.lines = []
-            block.app_payload[OCR_TEXT_INVALIDATED_KEY] = True
+        try:
+            validate_block_model(block)
+        except ModelValidationError as exc:
+            _raise_project_data_error(exc)
         values = (
             page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
-            block.source.value, int(block.recognizable),
+            block.source.value, block.ocr_policy.value,
             block.note, block.source_label,
             json.dumps(block.raw_payload, ensure_ascii=False),
             json.dumps(block.app_payload, ensure_ascii=False),
@@ -800,7 +1021,7 @@ class ProjectStore:
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
-                "source, recognizable, note, source_label, raw_payload_json, "
+                "source, ocr_policy, note, source_label, raw_payload_json, "
                 "app_payload_json) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
@@ -809,7 +1030,7 @@ class ProjectStore:
         else:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
-                "block_order=?, source=?, recognizable=?, note=?, "
+                "block_order=?, source=?, ocr_policy=?, note=?, "
                 "source_label=?, raw_payload_json=?, app_payload_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
@@ -818,6 +1039,8 @@ class ProjectStore:
                 block.id = None
                 self._save_block(cur, block, page_id, project_id, save_seen_uids=save_seen_uids)
                 return
+
+        self._save_block_origin(cur, block, project_id)
 
         old_line_ids = {
             r["id"] for r in cur.execute(
@@ -839,6 +1062,57 @@ class ProjectStore:
 
         for old_id in old_line_ids - saved_line_ids:
             cur.execute("DELETE FROM line WHERE id=?", (old_id,))
+
+    def _save_block_origin(
+        self,
+        cur: sqlite3.Cursor,
+        block: Block,
+        project_id: int,
+    ) -> None:
+        origin = block.origin
+        if origin is None:
+            origin = block._origin_from_legacy_fields()
+            block.origin = origin
+        bb = origin.original_bbox
+        x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
+        cur.execute(
+            "INSERT INTO block_origin ("
+            "project_id, block_uid, created_by, source_engine, source_run_id, "
+            "source_label, source_confidence, original_x, original_y, original_w, "
+            "original_h, original_kind, raw_artifact_uid, raw_json_path, raw_index) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, block_uid) DO UPDATE SET "
+            "created_by=excluded.created_by, "
+            "source_engine=excluded.source_engine, "
+            "source_run_id=excluded.source_run_id, "
+            "source_label=excluded.source_label, "
+            "source_confidence=excluded.source_confidence, "
+            "original_x=excluded.original_x, "
+            "original_y=excluded.original_y, "
+            "original_w=excluded.original_w, "
+            "original_h=excluded.original_h, "
+            "original_kind=excluded.original_kind, "
+            "raw_artifact_uid=excluded.raw_artifact_uid, "
+            "raw_json_path=excluded.raw_json_path, "
+            "raw_index=excluded.raw_index",
+            (
+                project_id,
+                block.uid,
+                origin.created_by,
+                origin.source_engine,
+                origin.source_run_id,
+                origin.source_label,
+                origin.source_confidence,
+                x,
+                y,
+                w,
+                h,
+                origin.original_kind.value if origin.original_kind else "",
+                origin.raw_artifact_uid,
+                origin.raw_json_path,
+                origin.raw_index,
+            ),
+        )
 
     def _sync_project_proof_line_states_no_commit(
         self,
@@ -1195,10 +1469,9 @@ class ProjectStore:
             (project.id,),
         ).fetchall()
         for pr in pages:
-            raw_ppvl_parsing_res_list = _json_to_list(pr["ppvl_parsing_res_list_json"])
-            page_had_runtime_routes = _has_runtime_layout_routes_in_list(raw_ppvl_parsing_res_list)
-            ppvl_parsing_res_list = _strip_runtime_layout_routes_from_list(
-                raw_ppvl_parsing_res_list
+            raw_layout_artifact = self._load_raw_layout_artifact(
+                project.id,
+                str(pr["raw_layout_artifact_uid"] or ""),
             )
             page = Page(
                 image_path=pr["image_path"],
@@ -1215,24 +1488,70 @@ class ProjectStore:
                 status=PageStatus(pr["status"]),
                 error_message=pr["error_message"],
                 ocr_invalidated_reason=pr["ocr_invalidated_reason"],
-                ppvl_parsing_res_list=ppvl_parsing_res_list,
+                raw_layout_artifact=raw_layout_artifact,
+                layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
-            page.blocks = self._load_blocks(page.id)
-            if page_had_runtime_routes or any(
-                bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY))
-                for block in page.blocks
-            ):
-                page.ocr_invalidated_reason = (
-                    page.ocr_invalidated_reason
-                    or "stale_layout_line_routes_stripped"
-                )
-                if page.status == PageStatus.OCR_DONE:
-                    page.status = PageStatus.LAYOUT_DONE
+            page.blocks = self._load_blocks(page.id, project.id)
             page.reconcile_ocr_done_from_result()
             project.pages.append(page)
 
         self._apply_proof_line_states(project)
         return project
+
+    def _load_raw_layout_artifact(
+        self,
+        project_id: int,
+        artifact_uid: str,
+    ) -> RawOcrArtifact | None:
+        if not artifact_uid:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM raw_ocr_artifact WHERE project_id=? AND uid=?",
+            (project_id, artifact_uid),
+        ).fetchone()
+        if row is None:
+            return None
+        return RawOcrArtifact(
+            id=row["id"],
+            uid=row["uid"],
+            page_uid=row["page_uid"],
+            engine=row["engine"],
+            engine_version=row["engine_version"],
+            run_id=row["run_id"],
+            artifact_path=row["artifact_path"],
+            artifact_hash=row["artifact_hash"],
+            records=_json_to_list(row["records_json"], field="raw_ocr_artifact.records_json"),
+            created_at=row["created_at"],
+        )
+
+    def _load_layout_edit_events(
+        self,
+        project_id: int,
+        page_uid: str,
+    ) -> list[LayoutEditEvent]:
+        if not page_uid:
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM layout_edit_event WHERE project_id=? AND page_uid=? "
+            "ORDER BY created_at, id",
+            (project_id, page_uid),
+        ).fetchall()
+        events: list[LayoutEditEvent] = []
+        for row in rows:
+            events.append(
+                LayoutEditEvent(
+                    id=row["id"],
+                    uid=row["uid"],
+                    page_uid=row["page_uid"],
+                    target_uid=row["target_uid"],
+                    op=row["op"],
+                    before=_json_to_dict(row["before_json"], field="layout_edit_event.before_json"),
+                    after=_json_to_dict(row["after_json"], field="layout_edit_event.after_json"),
+                    actor=row["actor"],
+                    created_at=row["created_at"],
+                )
+            )
+        return events
 
     def _apply_proof_line_states(self, project: OcrProject) -> None:
         """Apply persisted proof truth to runtime line state."""
@@ -1265,20 +1584,25 @@ class ProjectStore:
                         )
                     )
 
-    def _load_blocks(self, page_id: int) -> List[Block]:
+    def _load_blocks(self, page_id: int, project_id: int) -> List[Block]:
         rows = self.conn.execute(
             "SELECT * FROM block WHERE page_id=? ORDER BY block_order", (page_id,)
         ).fetchall()
         blocks = []
         for r in rows:
             raw_payload, app_payload = split_legacy_raw_payload(
-                _json_to_dict(r["raw_payload_json"]),
-                _json_to_dict(r["app_payload_json"]) if "app_payload_json" in r.keys() else {},
+                _json_to_dict(r["raw_payload_json"], field="block.raw_payload_json"),
+                _json_to_dict(r["app_payload_json"], field="block.app_payload_json") if "app_payload_json" in r.keys() else {},
             )
-            had_runtime_routes = (
-                _strip_runtime_layout_routes_from_dict(raw_payload)
-                or _strip_runtime_layout_routes_from_dict(app_payload)
-            )
+            try:
+                validate_persistent_block_payloads(
+                    raw_payload,
+                    app_payload,
+                    raw_field="block.raw_payload_json",
+                    app_field="block.app_payload_json",
+                )
+            except ModelValidationError as exc:
+                _raise_project_data_error(exc)
             block = Block(
                 block_type=BlockType(r["block_type"]),
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
@@ -1286,18 +1610,48 @@ class ProjectStore:
                 id=r["id"],
                 uid=r["uid"],
                 source=BlockSource(r["source"]),
-                recognizable=bool(r["recognizable"]),
+                ocr_policy=OcrPolicy(str(r["ocr_policy"] or OcrPolicy.TEXT_OCR.value)),
                 note=r["note"],
                 source_label=r["source_label"],
                 raw_payload=raw_payload,
                 app_payload=app_payload,
+                origin=self._load_block_origin(project_id, str(r["uid"] or "")),
             )
             block.lines = self._load_lines(block.id)
-            if had_runtime_routes and block.lines:
-                block.lines = []
-                block.app_payload[OCR_TEXT_INVALIDATED_KEY] = True
             blocks.append(block)
         return blocks
+
+    def _load_block_origin(self, project_id: int, block_uid: str) -> BlockOrigin | None:
+        if not block_uid:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM block_origin WHERE project_id=? AND block_uid=?",
+            (project_id, block_uid),
+        ).fetchone()
+        if row is None:
+            return None
+        bbox = None
+        if row["original_x"] is not None:
+            bbox = BBox(row["original_x"], row["original_y"], row["original_w"], row["original_h"])
+        kind = None
+        raw_kind = str(row["original_kind"] or "")
+        if raw_kind:
+            try:
+                kind = BlockType(raw_kind)
+            except ValueError:
+                kind = None
+        return BlockOrigin(
+            created_by=row["created_by"],
+            source_engine=row["source_engine"],
+            source_run_id=row["source_run_id"],
+            source_label=row["source_label"],
+            source_confidence=row["source_confidence"],
+            original_bbox=bbox,
+            original_kind=kind,
+            raw_artifact_uid=row["raw_artifact_uid"],
+            raw_json_path=row["raw_json_path"],
+            raw_index=row["raw_index"],
+        )
 
     def _load_lines(self, block_id: int) -> List[Line]:
         rows = self.conn.execute(

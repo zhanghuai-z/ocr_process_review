@@ -31,7 +31,7 @@ from app.core.block_payload import (
     payload_get,
     set_payload_entries,
 )
-from app.core.ocr_dispatch_policy import is_text_ocr_candidate
+from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -40,6 +40,7 @@ from app.core.paddle_artifact_index import (
 )
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
+from app.core.raw_ocr_artifact import raw_layout_records
 from app.core.paddle_line_routing import (
     ROUTE_SUBBLOCKS_FIELD,
     block_text,
@@ -47,7 +48,7 @@ from app.core.paddle_line_routing import (
     line_routes_for_block,
 )
 from app.core.ocr_ir import is_formula_marker_token
-from app.models import BBox, Block, BlockSource, BlockType, Page
+from app.models import BBox, Block, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -237,6 +238,7 @@ class LayoutPanel(QWidget):
         self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._undo_stack: list[list[tuple[int, list[Block]]]] = []
+        self._layout_edit_start_state: dict[str, dict] = {}
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
         self._analysis_running = False
@@ -1335,13 +1337,53 @@ class LayoutPanel(QWidget):
         self._sync_selected_type_buttons(block)
         self._prop_conf.set_score(block.avg_confidence)
 
+    @staticmethod
+    def _layout_block_state(block: Block) -> dict:
+        return {
+            "uid": block.uid,
+            "block_type": getattr(block.block_type, "value", str(block.block_type)),
+            "bbox": list(block.bbox.to_xyxy()),
+            "order": block.order,
+            "source_label": block.source_label,
+            "ocr_policy": getattr(block.ocr_policy, "value", str(block.ocr_policy)),
+        }
+
+    def _record_layout_edit(
+        self,
+        page: Page,
+        op: str,
+        block: Block | None,
+        *,
+        before: dict,
+        after: dict,
+    ) -> None:
+        page.layout_edit_events.append(
+            LayoutEditEvent(
+                page_uid=page.uid,
+                target_uid=block.uid if block is not None else "",
+                op=op,
+                before=before,
+                after=after,
+                actor="user",
+            )
+        )
+
     def _on_block_edit_started(self, block: Block) -> None:
         self._push_undo_snapshot()
+        self._layout_edit_start_state[block.uid] = self._layout_block_state(block)
 
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
         page = self._pages[self._current_page_idx]
+        before = self._layout_edit_start_state.pop(block.uid, self._layout_block_state(block))
         self._persist_user_block_geometry(page, block)
+        self._record_layout_edit(
+            page,
+            "resize_block",
+            block,
+            before=before,
+            after=self._layout_block_state(block),
+        )
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
@@ -1382,7 +1424,7 @@ class LayoutPanel(QWidget):
             next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         block.source_label = source_label
-        block.recognizable = False
+        block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
         for line in block.lines:
             line.bbox = block.bbox
         set_payload_entries(block, {
@@ -1408,7 +1450,15 @@ class LayoutPanel(QWidget):
             bt,
         )
         if intersecting:
+            before = {"blocks": [self._layout_block_state(block) for block in intersecting]}
             merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, source_label)
+            self._record_layout_edit(
+                page,
+                "merge_blocks",
+                merged,
+                before=before,
+                after={"block": self._layout_block_state(merged)},
+            )
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
             self._set_status_text("已合并框，需重新识别")
@@ -1424,9 +1474,16 @@ class LayoutPanel(QWidget):
             source=BlockSource.MANUAL_DRAW,
             source_label=source_label,
         )
-        new_block.recognizable = is_text_ocr_candidate(new_block)
+        new_block.ocr_policy = default_ocr_policy_for_block(new_block)
         self._bind_manual_block_to_paddle(page, new_block)
         page.blocks.append(new_block)
+        self._record_layout_edit(
+            page,
+            "create_block",
+            new_block,
+            before={},
+            after={"block": self._layout_block_state(new_block)},
+        )
         self._show_page_layers(page)
         self._select_block_for_edit(new_block)
         self._rebuild_heading_outline()
@@ -1441,8 +1498,16 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
+        before = self._layout_block_state(block)
         self._mark_generated_inline_formula_handled(page, block)
         page.blocks = [b for b in page.blocks if b is not block]
+        self._record_layout_edit(
+            page,
+            "delete_block",
+            block,
+            before={"block": before},
+            after={},
+        )
         if self._selected_block is block:
             self._selected_block = None
             self._selected_char_box_index = -1
@@ -1470,12 +1535,21 @@ class LayoutPanel(QWidget):
             self._sync_selected_type_buttons(self._selected_block)
             return
         self._push_undo_snapshot()
+        page = self._pages[self._current_page_idx]
+        before = self._layout_block_state(self._selected_block)
         self._apply_subtype_to_block(
-            self._pages[self._current_page_idx],
+            page,
             self._selected_block,
             new_subtype,
         )
-        self._show_page_layers(self._pages[self._current_page_idx])
+        self._record_layout_edit(
+            page,
+            "change_kind",
+            self._selected_block,
+            before={"block": before},
+            after={"block": self._layout_block_state(self._selected_block)},
+        )
+        self._show_page_layers(page)
         self._viewer.select_block(self._selected_block)
         self._sync_selected_type_buttons(self._selected_block)
         self._rebuild_heading_outline()
@@ -1787,7 +1861,7 @@ class LayoutPanel(QWidget):
             ))
 
     def _iter_inline_formula_subblocks(self, page: Page):
-        for parent in page.ppvl_parsing_res_list:
+        for parent in raw_layout_records(page):
             subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
             if not isinstance(subblocks, list):
                 continue
@@ -1925,7 +1999,7 @@ class LayoutPanel(QWidget):
         block.block_type = subtype.block_type
         block.source_label = source_label
         block.source = BlockSource.USER_EDITED
-        block.recognizable = is_text_ocr_candidate(block)
+        block.ocr_policy = default_ocr_policy_for_block(block)
         self._bind_manual_block_to_paddle(page, block)
         return changed
 
@@ -2009,7 +2083,7 @@ class LayoutPanel(QWidget):
         primary.source_label = source_label
         primary.lines = []
         primary.source = BlockSource.USER_EDITED
-        primary.recognizable = is_text_ocr_candidate(primary)
+        primary.ocr_policy = default_ocr_policy_for_block(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
         set_payload_entries(primary, {
             MANUAL_MERGE_FROM_KEY: [
@@ -2036,7 +2110,7 @@ class LayoutPanel(QWidget):
     def _collect_readonly_layout_overlays(self, page: Page) -> List[tuple[str, BBox]]:
         overlays: List[tuple[str, BBox]] = []
         seen: set[tuple[str, tuple[int, int, int, int]]] = set()
-        for parent in page.ppvl_parsing_res_list:
+        for parent in raw_layout_records(page):
             subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
             if not isinstance(subblocks, list):
                 continue

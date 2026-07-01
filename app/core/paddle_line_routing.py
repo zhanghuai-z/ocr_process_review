@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
 from app.core.ocr_ir import is_formula_marker_token, is_formula_token
@@ -100,7 +101,7 @@ def is_formula_style_position_block(block: dict[str, Any]) -> bool:
 
 
 def is_formula_label(label: str) -> bool:
-    return BlockType.from_paddle(label) == BlockType.EQUATION
+    return map_paddle_label_to_block_type(label) == BlockType.EQUATION
 
 
 def _is_route_formula_label(label: str) -> bool:
@@ -108,7 +109,7 @@ def _is_route_formula_label(label: str) -> bool:
 
 
 def is_table_label(label: str) -> bool:
-    return BlockType.from_paddle(label) == BlockType.TABLE
+    return map_paddle_label_to_block_type(label) == BlockType.TABLE
 
 
 def clamp_xyxy(

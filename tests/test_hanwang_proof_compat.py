@@ -131,6 +131,25 @@ def test_hanwang_translate_linecut_ir_preserves_char_semantics():
     assert ir_line.tokens[0].kind == "text"
 
 
+def test_hanwang_translate_linecut_run_wraps_ir_observation():
+    from app.engines.hanwang.translator import translate_linecut_run
+
+    run = translate_linecut_run(
+        _raw_hanwang_line("国家"),
+        page_uid="page_1",
+        block_uid="block_1",
+        input_layout_revision=3,
+    )
+
+    assert run.uid.startswith("ocrrun_")
+    assert run.engine == "hanwang"
+    assert run.page_uid == "page_1"
+    assert run.block_uid == "block_1"
+    assert run.input_layout_revision == 3
+    assert [line.text for line in run.lines] == ["国家"]
+    assert not hasattr(run.lines[0], "proof_state")
+
+
 def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
     from app.core.token_char_mapper import build_line_from_ir
     from app.engines.hanwang.translator import translate_linecut_ir

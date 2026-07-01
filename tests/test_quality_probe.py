@@ -95,9 +95,12 @@ def test_block_eligibility_excludes_specific_types():
 
 
 def test_block_eligibility_uses_dispatch_policy_for_source_labels():
+    from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
+
     line = _line("这是一段足够长的正文用来测试可投放性")
     formula_like = _block(BlockType.TEXT, [line])
     formula_like.source_label = "inline_formula"
+    formula_like.ocr_policy = default_ocr_policy_for_block(formula_like)
 
     table_like = _block(BlockType.TEXT, [line])
     table_like.app_payload = {
@@ -106,6 +109,7 @@ def test_block_eligibility_uses_dispatch_policy_for_source_labels():
             "block_type": "table",
         }
     }
+    table_like.ocr_policy = default_ocr_policy_for_block(table_like)
 
     assert not is_block_eligible(formula_like)
     assert not is_block_eligible(table_like)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
 from app.models import Block, BlockSource, BlockType
 
@@ -71,12 +72,14 @@ def block_attributes(block: Block) -> BlockAttributes:
     binding_label = ""
     if isinstance(binding, dict):
         binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
-    source_label = normalize_source_label(block.source_label or binding_label or raw_label)
+    origin = getattr(block, "origin", None)
+    origin_label = str(getattr(origin, "source_label", "") or "")
+    source_label = normalize_source_label(origin_label or block.source_label or binding_label or raw_label)
     user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
     semantic_label = normalize_source_label(
         (source_label if user_authored_label else raw_label) or source_label or block.block_type.value
     )
-    semantic_block_type = BlockType.from_paddle(semantic_label)
+    semantic_block_type = map_paddle_label_to_block_type(semantic_label)
     if semantic_block_type == BlockType.UNKNOWN:
         semantic_block_type = block.block_type
     return BlockAttributes(

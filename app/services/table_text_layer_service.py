@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.block_payload import set_payload_entries
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY, build_table_text_layer_cells
 from app.models import Block, BlockType, Page
 
@@ -27,7 +28,7 @@ class TableTextLayerService:
                 page_height=page.height,
             )
             if cells:
-                block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY] = cells
+                set_payload_entries(block, {TABLE_TEXT_LAYER_CELLS_KEY: cells})
                 updated += 1
             else:
                 block.app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY, None)
