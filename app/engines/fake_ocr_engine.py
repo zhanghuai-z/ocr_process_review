@@ -40,7 +40,6 @@ class FakeOcrEngine:
 
             line = Line(
                 text=text,
-                original_text=text,
                 ocr_text=text,
                 confidence=confidence,
                 bbox=BBox(

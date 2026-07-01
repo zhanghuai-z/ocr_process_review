@@ -2943,7 +2943,6 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
         bbox=_bbox_from_xyxy_tuple(line.bbox, width, height),
         chars=chars,
         ocr_text=line.text,
-        original_text=line.text,
         review_flags=merged_review_flags,
     )
     model.set_proof_status(proof_status_for(line.confidence, merged_review_flags))
@@ -3479,7 +3478,6 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
             confidence=1.0,
             bbox=block.bbox,
             ocr_text=text,
-            original_text=text,
             review_flags=[FORMULA_CROP_OCR_REVIEW_FLAG],
         )
     ]
@@ -3515,7 +3513,6 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             confidence=0.0,
             bbox=block.bbox,
             ocr_text="",
-            original_text="",
             review_flags=flags,
         )
     ]

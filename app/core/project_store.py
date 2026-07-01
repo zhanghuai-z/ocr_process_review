@@ -145,7 +145,6 @@ CREATE TABLE IF NOT EXISTS line (
     uid               TEXT    NOT NULL DEFAULT '',
     block_id          INTEGER NOT NULL REFERENCES block(id) ON DELETE CASCADE,
     text              TEXT    NOT NULL DEFAULT '',
-    original_text     TEXT    NOT NULL DEFAULT '',
     confidence        REAL    NOT NULL DEFAULT 0.0,
     x INTEGER NOT NULL, y INTEGER NOT NULL,
     w INTEGER NOT NULL, h INTEGER NOT NULL,
@@ -1193,22 +1192,22 @@ class ProjectStore:
         bb = line.bbox
         line.ensure_text_contract()
         values = (
-            block_id, line.text, line.original_text, line.confidence,
+            block_id, line.text, line.confidence,
             bb.x, bb.y, bb.w, bb.h,
             line.ocr_text,
             _review_flags_to_json(line.review_flags),
         )
         if line.id is None:
             cur.execute(
-                "INSERT INTO line (uid, block_id, text, original_text, confidence, "
+                "INSERT INTO line (uid, block_id, text, confidence, "
                 "x, y, w, h, ocr_text, review_flags_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (line.uid, *values),
             )
             line.id = cur.lastrowid
         else:
             cur.execute(
-                "UPDATE line SET block_id=?, text=?, original_text=?, "
+                "UPDATE line SET block_id=?, text=?, "
                 "confidence=?, x=?, y=?, w=?, h=?, ocr_text=?, review_flags_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, line.id, line.uid),
@@ -1379,11 +1378,10 @@ class ProjectStore:
         line.uid = ensure_entity_uid(line.uid, "line")
         line.ensure_text_contract()
         cur = self.conn.execute(
-            "UPDATE line SET text=?, original_text=?, ocr_text=?, "
+            "UPDATE line SET text=?, ocr_text=?, "
             "review_flags_json=? WHERE id=? AND uid=?",
             (
                 line.text,
-                line.original_text,
                 line.ocr_text,
                 _review_flags_to_json(line.review_flags),
                 line.id,
@@ -1661,7 +1659,6 @@ class ProjectStore:
         for r in rows:
             line = Line(
                 text=r["text"],
-                original_text=r["original_text"],
                 confidence=r["confidence"],
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
                 id=r["id"],

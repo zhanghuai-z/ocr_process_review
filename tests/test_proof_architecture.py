@@ -122,6 +122,10 @@ def test_retired_core_proof_engine_is_not_restored():
     assert not Path("app/core/proof_engine.py").exists()
 
 
+def test_retired_ocr_token_char_mapper_is_not_restored():
+    assert not Path("app/core/token_char_mapper.py").exists()
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (
@@ -154,6 +158,7 @@ def test_project_store_line_table_does_not_restore_retired_proof_columns():
     assert line_table is not None
     assert "_le" "gacy_line_table_proof_values" not in source
     assert "_migrate_legacy_line_proof_columns" not in source
+    assert "original_text" not in line_table.group(1)
     assert "final_text" not in line_table.group(1)
     assert "final_text_set" not in line_table.group(1)
     assert "proof_status" not in line_table.group(1)
@@ -200,6 +205,8 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     assert "def update_final_text" not in source
     assert "def __setattr__" not in source
+    assert "original_text" not in source
+    assert "fill_original" not in source
 
 
 def test_proof_line_facts_does_not_reconstruct_state_from_retired_mirrors():
@@ -213,7 +220,7 @@ def test_proof_field_writes_stay_inside_approved_boundaries():
     allowed_files = {
         Path("app/models/project.py"),
         Path("app/core/project_store.py"),
-        Path("app/core/token_char_mapper.py"),
+        Path("app/core/ocr_proof_projection.py"),
         Path("app/services/proof_edit_service.py"),
         Path("app/services/proof_probe_text_service.py"),
     }

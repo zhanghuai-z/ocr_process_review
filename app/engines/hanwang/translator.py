@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Iterable, List
 
 from app.core.ocr_ir import OcrIrLine, OcrIrToken, OcrRun, build_ocr_run, classify_ir_text
-from app.core.token_char_mapper import build_line_from_ir
+from app.core.ocr_proof_projection import project_ocr_line_to_proof_line
 from app.models import BBox, Block, BlockSource, BlockType, Line, ProofStatus
 
 
@@ -164,7 +164,7 @@ def translate_linecut(raw: dict) -> List[Line]:
     out = []
     for ir_line in translate_linecut_ir(raw):
         out.append(
-            build_line_from_ir(
+            project_ocr_line_to_proof_line(
                 ir_line,
                 proof_status=(
                     ProofStatus.AUTO_FLAGGED

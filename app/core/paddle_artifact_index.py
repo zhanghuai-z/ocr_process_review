@@ -528,7 +528,6 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
                 confidence=0.0,
                 bbox=block.bbox,
                 ocr_text=binding.text,
-                original_text=binding.text,
                 review_flags=list(binding.review_flags),
             )
         ]

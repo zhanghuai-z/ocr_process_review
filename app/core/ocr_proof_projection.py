@@ -1,5 +1,13 @@
-"""Map OCR IR tokens onto proof-facing Char objects."""
+"""Project OCR observations into proof-facing compatibility models.
+
+OCR engines should produce ``OcrIrLine``/``OcrIrToken`` observations first.
+This module is the single adapter that turns those observations into the
+current proof-facing ``Line``/``Char`` objects while the storage model is being
+migrated away from embedding OCR and proof facts in one object tree.
+"""
 from __future__ import annotations
+
+from collections.abc import Callable
 
 import numpy as np
 
@@ -12,12 +20,16 @@ from app.core.ocr_ir_builder import (
 from app.models import Char, Line
 
 
-def find_token_span(
+ProofStatusFactory = Callable[[OcrIrLine], object | None]
+
+
+def find_unoccupied_token_span(
     line_text: str,
     token_text: str,
     cursor: int,
     occupied: list[bool],
 ) -> tuple[int, int] | None:
+    """Find the next unoccupied literal token span in OCR line text."""
     token_len = len(token_text)
     if token_len <= 0 or token_len > len(line_text):
         return None
@@ -39,13 +51,14 @@ def find_token_span(
     return None
 
 
-def build_line_chars(
+def project_ocr_tokens_to_proof_chars(
     *,
     page_image: np.ndarray | None,
     line_text: str,
     line_confidence: float,
     tokens: list[OcrIrToken],
 ) -> list[Char]:
+    """Project OCR token geometry onto proof ``Char`` compatibility objects."""
     chars = [
         Char(
             char=glyph,
@@ -70,7 +83,7 @@ def build_line_chars(
             continue
         if page_image is not None and not is_meaningful_text_bbox(page_image, bbox, token_text):
             continue
-        span = find_token_span(line_text, token_text, cursor, occupied)
+        span = find_unoccupied_token_span(line_text, token_text, cursor, occupied)
         if span is None:
             continue
         start, end = span
@@ -93,18 +106,18 @@ def build_line_chars(
     return chars
 
 
-def build_line_from_ir(
+def project_ocr_line_to_proof_line(
     ir_line: OcrIrLine,
     *,
     page_image: np.ndarray | None = None,
-    proof_status=None,
+    proof_status: object | None = None,
 ) -> Line:
-    """Convert one OCR_IR line into the proof-facing Line/Char model."""
+    """Project one OCR observation line into the current proof line model."""
     line = Line(
         text=ir_line.text,
         confidence=float(ir_line.confidence),
         bbox=ir_line.bbox,
-        chars=build_line_chars(
+        chars=project_ocr_tokens_to_proof_chars(
             page_image=page_image,
             line_text=ir_line.text,
             line_confidence=float(ir_line.confidence),
@@ -116,3 +129,23 @@ def build_line_from_ir(
     if proof_status is not None:
         line.set_proof_status(proof_status)
     return line
+
+
+def project_ocr_lines_to_proof_lines(
+    ir_lines: list[OcrIrLine],
+    *,
+    page_image: np.ndarray | None = None,
+    proof_status_for: ProofStatusFactory | None = None,
+) -> list[Line]:
+    """Project a batch of OCR observation lines into proof lines."""
+    lines: list[Line] = []
+    for ir_line in ir_lines:
+        status = proof_status_for(ir_line) if proof_status_for is not None else None
+        lines.append(
+            project_ocr_line_to_proof_line(
+                ir_line,
+                page_image=page_image,
+                proof_status=status,
+            )
+        )
+    return lines

@@ -151,7 +151,7 @@ def test_hanwang_translate_linecut_run_wraps_ir_observation():
 
 
 def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
-    from app.core.token_char_mapper import build_line_from_ir
+    from app.core.ocr_proof_projection import project_ocr_line_to_proof_line
     from app.engines.hanwang.translator import translate_linecut_ir
 
     ir_line = translate_linecut_ir(
@@ -159,7 +159,7 @@ def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
         bbox_source="hanwang:CharRcg:char_fallback",
         review_flags=["hanwang_char_fallback"],
     )[0]
-    line = build_line_from_ir(ir_line)
+    line = project_ocr_line_to_proof_line(ir_line)
 
     assert line.text == "已"
     assert proof_display_text(line) == "已"

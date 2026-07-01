@@ -14,9 +14,9 @@ from app.core.ocr_ir import (
 from app.core.ocr_ir_builder import (
     build_ir_lines_from_item,
 )
+from app.core.ocr_proof_projection import project_ocr_lines_to_proof_lines
 from app.core.paddle_response import iter_ocr_preferred_items
 from app.core.proof_status import normalize_confidence, proof_status_for
-from app.core.token_char_mapper import build_line_chars
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Line
@@ -168,25 +168,14 @@ class ApiOcrEngine:
                 fallback_bbox=self._unverified_full_crop_bbox(image_bgr),
             ))
 
-        lines: List[Line] = []
-        for ir_line in ir_lines:
-            chars = build_line_chars(
-                page_image=image_bgr,
-                line_text=ir_line.text,
-                line_confidence=ir_line.confidence,
-                tokens=ir_line.tokens,
-            )
-            line = Line(
-                text=ir_line.text,
-                confidence=ir_line.confidence,
-                bbox=ir_line.bbox,
-                chars=chars,
-                ocr_text=ir_line.text,
-                review_flags=ir_line.review_flags,
-            )
-            line.set_proof_status(proof_status_for(ir_line.confidence, ir_line.review_flags))
-            lines.append(line)
-        return lines
+        return project_ocr_lines_to_proof_lines(
+            ir_lines,
+            page_image=image_bgr,
+            proof_status_for=lambda ir_line: proof_status_for(
+                ir_line.confidence,
+                ir_line.review_flags,
+            ),
+        )
 
 
 def create_engine(mode: str = ""):

@@ -520,7 +520,6 @@ def _synthetic_block_debug_line(block: Block) -> Line | None:
         text=text,
         confidence=1.0,
         bbox=block.bbox,
-        original_text=text,
         ocr_text=text,
     )
 
@@ -2772,7 +2771,7 @@ class _LinePair(QFrame):
         if i >= len(text):
             return None
         conf = char_confidence(self._line, i)
-        ocr = proof_ocr_text(self._line) or self._line.original_text or ""
+        ocr = proof_ocr_text(self._line) or ""
         # 只在等长时取同下标字符；长度不一致时退回 None，避免错位比对
         ocr_ch = ocr[i] if len(ocr) == len(text) and i < len(ocr) else None
         return _cv.classify_char(
@@ -3146,7 +3145,7 @@ class _LinePair(QFrame):
 
     def _revert(self) -> None:
         # 还原到 OCR 原始文本。
-        original_true = self._line.original_text or proof_ocr_text(self._line) or self._line.text or ""
+        original_true = proof_ocr_text(self._line) or proof_display_text(self._line) or ""
         self._editor.blockSignals(True)
         # 还原后也按槽位规则补空。
         _rev_canon, _ = _canonicalize_text_to_slots(

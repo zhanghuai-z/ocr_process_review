@@ -656,7 +656,7 @@ class OcrPipeline:
                     char.bbox,
                     source_space=bbox_space,
                 )
-            line.ensure_text_contract(fill_original=True)
+            line.ensure_text_contract()
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:

@@ -54,9 +54,10 @@ def build_ir_lines_from_item(
             text=line_text,
             confidence=score,
             bbox=bbox,
-            source_text=OCR_IR_SOURCE_REC_TEXT,
+            source_text=line_text,
             tokens=[],
             review_flags=review_flags,
+            source_field=OCR_IR_SOURCE_REC_TEXT,
         ))
 
     return ir_lines

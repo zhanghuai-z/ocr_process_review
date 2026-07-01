@@ -87,7 +87,6 @@ def test_models():
     assert line.review_flags == []
     line.set_proof_text("修改文字")
     assert proof_status(line) == ProofStatus.MODIFIED
-    assert line.original_text == "测试文字"
     assert line.proof_state.final_text == "修改文字"
     assert line.proof_state.final_text_set is True
     assert line.proof_state.proof_status == ProofStatus.MODIFIED
@@ -896,23 +895,18 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             ocr_text="OCR补全文本",
             confidence=0.8,
             bbox=bb,
-            original_text="",
         )
-        line_without_text.original_text = ""
-        line_without_text.ensure_text_contract(fill_original=True)
+        line_without_text.ensure_text_contract()
         assert line_without_text.text == "OCR补全文本"
         assert proof_display_text(line_without_text) == "OCR补全文本"
         assert line_without_text.ocr_text == "OCR补全文本"
-        assert line_without_text.original_text == "OCR补全文本"
 
         final_only = Line(text="", confidence=0.8, bbox=bb)
         final_only.set_proof_text("人工终稿")
         final_only.ocr_text = ""
-        final_only.original_text = ""
-        final_only.ensure_text_contract(fill_original=True)
+        final_only.ensure_text_contract()
         assert proof_display_text(final_only) == "人工终稿"
         assert final_only.ocr_text == ""
-        assert final_only.original_text == ""
 
         project = OcrProject(
             name="final_text",
@@ -6098,6 +6092,9 @@ def test_ocr_ir_builder_ignores_legacy_word_box_payload():
     lines = build_ir_lines_from_item(item, fallback_bbox=BBox(0, 0, 100, 40))
 
     assert len(lines) == 1
+    assert lines[0].text == "甲乙"
+    assert lines[0].source_text == "甲乙"
+    assert lines[0].source_field == "overall_ocr_res.rec_texts"
     assert lines[0].bbox == BBox(0, 0, 100, 40)
     assert lines[0].tokens == []
     assert MISSING_LINE_BBOX_FLAG in lines[0].review_flags

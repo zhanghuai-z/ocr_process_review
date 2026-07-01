@@ -115,9 +115,8 @@ class Line:
     confidence: float          # 行平均置信度
     bbox: BBox
     chars: List[Char] = field(default_factory=list)
-    original_text: str = ""    # 修改前的原始文字（保留用于对比）
     id: Optional[int] = None
-    ocr_text: str = ""                    # OCR 原始文本（与 original_text 互补）
+    ocr_text: str = ""                    # OCR 原始文本
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
     uid: str = ""                         # 稳定业务 ID
     proof_state: ProofLineState | None = field(default=None, repr=False, compare=False)
@@ -126,8 +125,6 @@ class Line:
         self.uid = ensure_entity_uid(self.uid, "line")
         if not self.ocr_text:
             self.ocr_text = self.text
-        if not self.original_text:
-            self.original_text = self.ocr_text or self.text
         state = self.proof_state or ProofLineState(line_uid=self.uid)
         self.apply_proof_state(state)
 
@@ -137,8 +134,6 @@ class Line:
         *,
         status: ProofStatus = ProofStatus.MODIFIED,
     ) -> None:
-        if self.original_text == "":
-            self.original_text = self.ocr_text or self.text
         state = getattr(self, "proof_state", None) or ProofLineState(line_uid=self.uid)
         state.final_text = new_text
         state.final_text_set = True
@@ -154,7 +149,7 @@ class Line:
         state.line_uid = self.uid
         object.__setattr__(self, "proof_state", state)
 
-    def ensure_text_contract(self, *, fill_original: bool = False) -> None:
+    def ensure_text_contract(self) -> None:
         """Normalize OCR text fields and ensure proof state exists."""
         state = getattr(self, "proof_state", None)
         if state is None:
@@ -164,8 +159,6 @@ class Line:
         ocr_text = self.ocr_text or self.text
         if not self.text:
             self.text = ocr_text
-        if fill_original and not self.original_text:
-            self.original_text = ocr_text or self.text
         self.ocr_text = ocr_text
 
     def to_dict(self) -> dict:
@@ -178,7 +171,6 @@ class Line:
             "confidence": self.confidence,
             "bbox": self.bbox.to_dict(),
             "proof_status": state.proof_status.value,
-            "original_text": self.original_text,
             "ocr_text": self.ocr_text,
         }
 
