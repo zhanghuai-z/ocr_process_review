@@ -19,6 +19,8 @@ class BlockAttributes:
 
     block_type: BlockType
     source_label: str = ""
+    current_label: str = ""
+    origin_label: str = ""
     raw_label: str = ""
     semantic_label: str = ""
     semantic_block_type: BlockType = BlockType.UNKNOWN
@@ -55,6 +57,8 @@ class BlockAttributes:
         payload = {
             "block_type": self.block_type.value,
             "source_label": self.source_label,
+            "current_label": self.current_label,
+            "origin_label": self.origin_label,
             "raw_label": self.raw_label,
             "semantic_label": self.semantic_label,
             "semantic_block_type": self.semantic_block_type.value,
@@ -73,18 +77,29 @@ def block_attributes(block: Block) -> BlockAttributes:
     if isinstance(binding, dict):
         binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
     origin = getattr(block, "origin", None)
-    origin_label = str(getattr(origin, "source_label", "") or "")
-    source_label = normalize_source_label(origin_label or block.source_label or binding_label or raw_label)
+    origin_label = normalize_source_label(str(getattr(origin, "source_label", "") or ""))
+    current_label = normalize_source_label(block.source_label or binding_label or raw_label or block.block_type.value)
+    source_label = origin_label or current_label
     user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
-    semantic_label = normalize_source_label(
-        (source_label if user_authored_label else raw_label) or source_label or block.block_type.value
+    semantic_source = (
+        current_label
+        if user_authored_label
+        else _best_auto_semantic_label(
+            block.block_type,
+            origin_label=origin_label,
+            raw_label=raw_label,
+            current_label=current_label,
+        )
     )
+    semantic_label = normalize_source_label(semantic_source or block.block_type.value)
     semantic_block_type = map_paddle_label_to_block_type(semantic_label)
     if semantic_block_type == BlockType.UNKNOWN:
         semantic_block_type = block.block_type
     return BlockAttributes(
         block_type=block.block_type,
         source_label=source_label,
+        current_label=current_label,
+        origin_label=origin_label,
         raw_label=raw_label,
         semantic_label=semantic_label,
         semantic_block_type=semantic_block_type,
@@ -95,6 +110,19 @@ def block_attributes(block: Block) -> BlockAttributes:
 
 def semantic_block_type(block: Block) -> BlockType:
     return block_attributes(block).semantic_block_type
+
+
+def _best_auto_semantic_label(
+    block_type: BlockType,
+    *,
+    origin_label: str,
+    raw_label: str,
+    current_label: str,
+) -> str:
+    raw_kind = map_paddle_label_to_block_type(raw_label)
+    if raw_label and raw_kind not in {BlockType.UNKNOWN, block_type}:
+        return raw_label
+    return origin_label or raw_label or current_label
 
 
 def semantic_label(block: Block) -> str:

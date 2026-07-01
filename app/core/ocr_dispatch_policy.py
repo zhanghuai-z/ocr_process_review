@@ -1,18 +1,15 @@
 """Shared policy for dispatching layout blocks to text OCR."""
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Protocol
 
-from app.core.block_payload import PADDLE_BINDING_KEY
-from app.core.paddle_labels import authoritative_paddle_label, is_hanwang_skip_label, normalize_paddle_label
+from app.core.block_attributes import block_attributes
+from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.models.enums import BlockType, OcrPolicy
 
 
 class OcrDispatchBlock(Protocol):
     block_type: BlockType
-    source_label: str
-    raw_payload: dict[str, Any]
-    app_payload: dict[str, Any]
     ocr_policy: OcrPolicy
 
 
@@ -32,32 +29,10 @@ PRESERVE_BLOCK_TYPES = {
 }
 
 
-def _payload_label(payload: dict[str, Any]) -> str:
-    binding = payload.get(PADDLE_BINDING_KEY)
-    if isinstance(binding, dict):
-        label = binding.get("source_label") or binding.get("block_type")
-        if label:
-            return str(label)
-    return authoritative_paddle_label(payload, default="")
-
-
 def authoritative_block_label(block: OcrDispatchBlock) -> str:
-    """Return the best available vendor/source label for routing decisions."""
-    origin = getattr(block, "origin", None)
-    origin_label = str(getattr(origin, "source_label", "") or "")
-    if origin_label:
-        return origin_label
-    if block.source_label:
-        return str(block.source_label)
-    if isinstance(getattr(block, "app_payload", None), dict):
-        label = _payload_label(block.app_payload)
-        if label:
-            return label
-    if isinstance(block.raw_payload, dict):
-        label = authoritative_paddle_label(block.raw_payload, default="")
-        if label:
-            return label
-    return block.block_type.value
+    """Return the normalized source label used by routing decisions."""
+    attrs = block_attributes(block)  # type: ignore[arg-type]
+    return attrs.normalized_semantic_label or attrs.source_label or block.block_type.value
 
 
 def is_text_ocr_candidate(block: OcrDispatchBlock) -> bool:

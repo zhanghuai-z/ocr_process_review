@@ -615,7 +615,7 @@ def test_ocr_run_wraps_ir_lines_without_proof_model():
 def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
     from app.core.block_attributes import block_attributes
     from app.core.ocr_dispatch_policy import authoritative_block_label
-    from app.models import BBox, Block, BlockOrigin, BlockType
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType
 
     block = Block(
         block_type=BlockType.TEXT,
@@ -627,6 +627,15 @@ def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
 
     assert authoritative_block_label(block) == "footnote"
     assert block_attributes(block).source_label == "footnote"
+
+    block.source = BlockSource.USER_EDITED
+    block.source_label = "inline_formula"
+    attrs = block_attributes(block)
+    assert attrs.source_label == "footnote"
+    assert attrs.origin_label == "footnote"
+    assert attrs.current_label == "inline_formula"
+    assert attrs.semantic_label == "inline_formula"
+    assert authoritative_block_label(block) == "inline_formula"
 
     print("test_block_origin_label_is_authoritative_for_attributes_and_dispatch PASSED")
 

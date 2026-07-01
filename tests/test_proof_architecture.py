@@ -126,6 +126,15 @@ def test_retired_ocr_token_char_mapper_is_not_restored():
     assert not Path("app/core/token_char_mapper.py").exists()
 
 
+def test_ocr_dispatch_policy_uses_block_attributes_not_payload_guessing():
+    source = Path("app/core/ocr_dispatch_policy.py").read_text(encoding="utf-8")
+    assert "block_attributes(" in source
+    assert "app_payload" not in source
+    assert "raw_payload" not in source
+    assert "block.source_label" not in source
+    assert "PADDLE_BINDING_KEY" not in source
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (
