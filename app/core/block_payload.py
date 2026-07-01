@@ -47,7 +47,7 @@ APP_PAYLOAD_KEYS = frozenset({
     TABLE_TEXT_LAYER_CELLS_KEY,
 })
 
-LEGACY_RAW_APP_PAYLOAD_KEYS = APP_PAYLOAD_KEYS - {
+RAW_PAYLOAD_FORBIDDEN_APP_KEYS = APP_PAYLOAD_KEYS - {
     PADDLE_BLOCK_LABEL_KEY,
     PADDLE_BLOCK_BBOX_KEY,
 }
@@ -100,21 +100,3 @@ def mark_ocr_text_invalidated(block: object, kind: str | None = None) -> dict[st
     if kind is not None:
         entries[OCR_INVALIDATION_KIND_KEY] = kind
     return set_payload_entries(block, entries)
-
-
-def split_legacy_raw_payload(
-    raw_payload: Mapping[str, Any] | None,
-    app_payload: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Move app-owned keys out of legacy raw payloads.
-
-    Existing project files stored routing/UI state in ``block.raw_payload``.
-    New code keeps vendor facts in ``raw_payload`` and app state in
-    ``app_payload``. Explicit ``app_payload`` values win over legacy values.
-    """
-    raw = dict(raw_payload or {})
-    app = dict(app_payload or {})
-    for key in list(raw):
-        if key in LEGACY_RAW_APP_PAYLOAD_KEYS:
-            app.setdefault(key, raw.pop(key))
-    return raw, app

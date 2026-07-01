@@ -20,7 +20,6 @@ from app.models import (
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
-from app.core.block_payload import split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 from app.core.model_validation import (
     ModelValidationError,
@@ -1588,9 +1587,11 @@ class ProjectStore:
         ).fetchall()
         blocks = []
         for r in rows:
-            raw_payload, app_payload = split_legacy_raw_payload(
-                _json_to_dict(r["raw_payload_json"], field="block.raw_payload_json"),
-                _json_to_dict(r["app_payload_json"], field="block.app_payload_json") if "app_payload_json" in r.keys() else {},
+            raw_payload = _json_to_dict(r["raw_payload_json"], field="block.raw_payload_json")
+            app_payload = (
+                _json_to_dict(r["app_payload_json"], field="block.app_payload_json")
+                if "app_payload_json" in r.keys()
+                else {}
             )
             try:
                 validate_persistent_block_payloads(

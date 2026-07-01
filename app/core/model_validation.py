@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from app.core.block_payload import RUNTIME_LAYOUT_PAYLOAD_KEYS, validate_app_payload_keys
+from app.core.block_payload import (
+    RAW_PAYLOAD_FORBIDDEN_APP_KEYS,
+    RUNTIME_LAYOUT_PAYLOAD_KEYS,
+    validate_app_payload_keys,
+)
 from app.models import Block, BlockOrigin, OcrPolicy, Page
 
 
@@ -33,6 +37,11 @@ def validate_persistent_block_payloads(
         validate_app_payload_keys(app, field=app_field)
     except ValueError as exc:
         raise ModelValidationError(str(exc)) from exc
+    forbidden_app_keys = sorted(set(raw) & RAW_PAYLOAD_FORBIDDEN_APP_KEYS)
+    if forbidden_app_keys:
+        raise ModelValidationError(
+            f"{raw_field} contains app-owned payload keys: {forbidden_app_keys}"
+        )
 
 
 def validate_block_model(block: Block) -> None:

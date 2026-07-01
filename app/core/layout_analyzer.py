@@ -34,7 +34,7 @@ from app.core.api_profiles import (
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
-from app.core.block_payload import split_legacy_raw_payload, strip_runtime_layout_payload
+from app.core.block_payload import strip_runtime_layout_payload
 from app.core.logging import get_logger
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_layout_schema import (
@@ -361,9 +361,8 @@ class LayoutAnalyzer:
             note_parts.append(f"source_label={normalized_type}")
 
         raw_overlay_items.append((raw_type, bbox))
-        raw_payload, app_payload = split_legacy_raw_payload(normalized.raw)
-        raw_payload = strip_runtime_layout_payload(raw_payload)
-        app_payload = strip_runtime_layout_payload(app_payload)
+        raw_payload = strip_runtime_layout_payload(normalized.raw)
+        app_payload = {}
         block = Block(
             block_type=map_paddle_label_to_block_type(raw_type),
             bbox=bbox,
@@ -813,14 +812,13 @@ class LayoutAnalyzer:
                 continue
             if bbox.area <= 0:
                 continue
-            raw_payload, app_payload = split_legacy_raw_payload(item)
+            raw_payload = strip_runtime_layout_payload(item)
             page.blocks.append(Block(
                 block_type=map_paddle_label_to_block_type(raw_type),
                 bbox=bbox,
                 order=i,
                 source_label=raw_type,
                 raw_payload=raw_payload,
-                app_payload=app_payload,
             ))
         self._rescale_blocks_if_suspicious(page)
         return page

@@ -126,6 +126,15 @@ def test_retired_ocr_token_char_mapper_is_not_restored():
     assert not Path("app/core/token_char_mapper.py").exists()
 
 
+def test_retired_legacy_raw_payload_splitter_is_not_restored():
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "split_legacy_raw_payload" in source or "LEGACY_RAW_APP_PAYLOAD_KEYS" in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_ocr_dispatch_policy_uses_block_attributes_not_payload_guessing():
     source = Path("app/core/ocr_dispatch_policy.py").read_text(encoding="utf-8")
     assert "block_attributes(" in source

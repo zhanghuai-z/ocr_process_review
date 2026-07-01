@@ -1120,6 +1120,53 @@ def test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load():
     print("test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load PASSED")
 
 
+def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.block_payload import PADDLE_BINDING_KEY
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            raw_payload={PADDLE_BINDING_KEY: {"source_label": "text"}},
+        )
+        project = OcrProject(
+            name="app-owned raw payload",
+            pages=[Page(image_path="/tmp/app-owned-raw-payload.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="app-owned payload keys"):
+                store.save_project(project)
+
+        clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        clean_project = OcrProject(
+            name="app-owned raw payload load",
+            pages=[Page(image_path="/tmp/app-owned-raw-payload.png", width=80, height=40, blocks=[clean_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(clean_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET raw_payload_json=? WHERE id=?",
+                (json.dumps({PADDLE_BINDING_KEY: {"source_label": "text"}}, ensure_ascii=False), clean_block.id),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="app-owned payload keys"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load PASSED")
+
+
 def test_project_store_rejects_invalid_payload_json_on_load():
     import pytest
     import sqlite3
@@ -1160,6 +1207,7 @@ def test_project_store_rejects_invalid_payload_json_on_load():
 def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     import pytest
 
+    from app.core.block_payload import PADDLE_BINDING_KEY, PADDLE_BLOCK_LABEL_KEY
     from app.core.model_validation import ModelValidationError, validate_block_model, validate_page_model
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockType, Page
@@ -1176,6 +1224,13 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     block.raw_payload = {LAYOUT_LINE_ROUTES_FIELD: []}
     with pytest.raises(ModelValidationError, match="runtime routing data"):
         validate_block_model(block)
+
+    block.raw_payload = {PADDLE_BINDING_KEY: {"source_label": "text"}}
+    with pytest.raises(ModelValidationError, match="app-owned payload keys"):
+        validate_block_model(block)
+
+    block.raw_payload = {PADDLE_BLOCK_LABEL_KEY: "text"}
+    validate_block_model(block)
 
     page = Page(image_path="/tmp/model-validation.png", width=20, height=20)
     page.ppvl_parsing_res_list = []
