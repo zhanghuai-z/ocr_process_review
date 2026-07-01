@@ -59,9 +59,11 @@ class WorkflowController(QObject):
     step_requested = Signal(int)           # 请求跳转步骤
     layout_finished = Signal(object)       # List[Page]
     layout_progress = Signal(int, int)     # completed_index, total
+    layout_stage = Signal(int, int, str)   # page_index, total, stage message
     ocr_finished = Signal(object)          # List[Page]
     ocr_progress = Signal(object)          # OcrProgress
     worker_error = Signal(str)             # 错误消息
+    layout_cancelled = Signal()            # 版面分析被用户取消
     status_message = Signal(str)           # 状态栏消息
     # ── view-state ownership signals (本轮新增) ──
     current_step_changed = Signal(int)     # 当前激活的 step
@@ -491,6 +493,44 @@ class WorkflowController(QObject):
                 self._proof_ocr_worker,
             )
         )
+
+    def cancel_layout_analysis(self, *, wait_ms: int = 200, force: bool = False) -> bool:
+        """Request cancellation for the active layout worker."""
+        worker = self._layout_worker
+        if not self._worker_is_running(worker):
+            return False
+        self._discard_parallel_proof_result = True
+        self._pending_layout_pages = None
+        self._pending_proof_pages = None
+        stopped = self._request_worker_stop(worker, wait_ms=wait_ms, force=force)
+        if stopped:
+            self._clear_worker_ref("_layout_worker", worker)
+            self._on_layout_cancelled()
+        else:
+            self.status_message.emit("正在停止版面分析…")
+        return True
+
+    def cancel_running_workers(self, *, wait_ms: int = 1200, force: bool = False) -> bool:
+        """Stop all background workers. Used by close/force-close paths."""
+        requested = False
+        all_stopped = True
+        for attr_name in ("_layout_worker", "_ocr_worker", "_proof_ocr_worker"):
+            worker = getattr(self, attr_name, None)
+            if not self._worker_is_running(worker):
+                continue
+            requested = True
+            stopped = self._request_worker_stop(worker, wait_ms=wait_ms, force=force)
+            all_stopped = all_stopped and stopped
+            if stopped:
+                self._clear_worker_ref(attr_name, worker)
+        if requested:
+            self._discard_parallel_proof_result = True
+            self._pending_layout_pages = None
+            self._pending_proof_pages = None
+            self._ocr_target_page_numbers = None
+            self.set_layout_run_enabled(True)
+            self.status_message.emit("后台任务已停止" if all_stopped else "后台任务正在停止…")
+        return all_stopped
 
     def close_project(self) -> bool:
         """关闭当前项目，但不退出应用。"""
@@ -928,8 +968,14 @@ class WorkflowController(QObject):
         self._layout_worker = LayoutWorker(pages)
         self._connect_worker_cleanup("_layout_worker", self._layout_worker)
         self._layout_worker.page_done.connect(self._on_layout_progress)
+        stage_signal = getattr(self._layout_worker, "stage_update", None)
+        if stage_signal is not None and hasattr(stage_signal, "connect"):
+            stage_signal.connect(self._on_layout_stage)
         self._layout_worker.all_done.connect(self.on_layout_done)
         self._layout_worker.error.connect(self._on_worker_error)
+        cancelled_signal = getattr(self._layout_worker, "cancelled", None)
+        if cancelled_signal is not None and hasattr(cancelled_signal, "connect"):
+            cancelled_signal.connect(self._on_layout_cancelled)
         self._layout_worker.start()
         if parallel_started:
             self.status_message.emit(
@@ -949,6 +995,15 @@ class WorkflowController(QObject):
         ))
         self.layout_progress.emit(current, total)
         self.status_message.emit(f"{self._layout_status_label()}中…")
+
+    def _on_layout_stage(self, current: int, total: int, message: str) -> None:
+        self.progress_state_changed.emit(WorkflowProgressState(
+            phase="layout",
+            current=current,
+            total=total,
+            message=message,
+        ))
+        self.layout_stage.emit(current, total, message)
 
     def start_ocr(
         self,
@@ -1158,6 +1213,14 @@ class WorkflowController(QObject):
         self.worker_error.emit(msg)
         self.status_message.emit("处理失败")
 
+    def _on_layout_cancelled(self) -> None:
+        self._discard_parallel_proof_result = True
+        self._pending_layout_pages = None
+        self._pending_proof_pages = None
+        self.set_layout_run_enabled(True)
+        self.layout_cancelled.emit()
+        self.status_message.emit("版面分析已取消")
+
     def _connect_worker_cleanup(self, attr_name: str, worker) -> None:
         finished = getattr(worker, "finished", None)
         if finished is None or not hasattr(finished, "connect"):
@@ -1167,6 +1230,32 @@ class WorkflowController(QObject):
             self._clear_worker_ref(_attr, _worker)
 
         finished.connect(cleanup_finished)
+
+    def _request_worker_stop(self, worker, *, wait_ms: int, force: bool) -> bool:
+        if worker is None:
+            return True
+        try:
+            cancel = getattr(worker, "cancel", None)
+            if callable(cancel):
+                cancel()
+            elif hasattr(worker, "requestInterruption"):
+                worker.requestInterruption()
+        except RuntimeError:
+            return True
+        if wait_ms > 0:
+            try:
+                if worker.wait(wait_ms):
+                    return True
+            except RuntimeError:
+                return True
+        if force:
+            try:
+                if worker.isRunning():
+                    worker.terminate()
+                    worker.wait(1000)
+            except RuntimeError:
+                return True
+        return not self._worker_is_running(worker)
 
     @staticmethod
     def _progress_stage_key(message: str) -> str:

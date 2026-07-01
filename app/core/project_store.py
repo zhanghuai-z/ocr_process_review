@@ -20,8 +20,9 @@ from app.models import (
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
-from app.core.block_payload import split_legacy_raw_payload
+from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY, split_legacy_raw_payload
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
+from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
 from app.core.proof_line_facts import proof_final_text, proof_final_text_set, proof_status
 
 logger = get_logger(__name__)
@@ -264,6 +265,26 @@ def _proof_alignment_state(line: Line) -> str:
         return "degraded"
 
 
+def _strip_runtime_layout_routes_from_dict(payload: dict[str, Any]) -> bool:
+    had_routes = LAYOUT_LINE_ROUTES_FIELD in payload
+    payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+    return had_routes
+
+
+def _strip_runtime_layout_routes_from_list(values: list[Any]) -> list[Any]:
+    for item in values:
+        if isinstance(item, dict):
+            _strip_runtime_layout_routes_from_dict(item)
+    return values
+
+
+def _has_runtime_layout_routes_in_list(values: list[Any]) -> bool:
+    return any(
+        isinstance(item, dict) and LAYOUT_LINE_ROUTES_FIELD in item
+        for item in values
+    )
+
+
 _ENTITY_UID_TABLES = (
     ("page", "page", "idx_page_uid"),
     ("block", "block", "idx_block_uid"),
@@ -396,8 +417,18 @@ class ProjectStore:
 
     def close(self) -> None:
         if self._conn:
+            self.flush_to_main_file()
             self._conn.close()
             self._conn = None
+
+    def flush_to_main_file(self) -> None:
+        """Checkpoint WAL pages so the .ocrproj file is externally readable."""
+        if not self._conn:
+            return
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            logger.warning("Project WAL checkpoint failed: %s", exc)
 
     def __enter__(self) -> "ProjectStore":
         self.open()
@@ -649,6 +680,7 @@ class ProjectStore:
             self._sync_project_proof_line_states_no_commit(cur, project)
 
             conn.commit()
+            self.flush_to_main_file()
             project.db_path = self.db_path
             return project
 
@@ -674,6 +706,7 @@ class ProjectStore:
             parent_id=project_id,
             project_id=project_id,
         )
+        _strip_runtime_layout_routes_from_list(page.ppvl_parsing_res_list)
         if page.id is None:
             cur.execute(
                 "INSERT INTO page (uid, project_id, image_path, width, height, "
@@ -750,6 +783,13 @@ class ProjectStore:
             project_id=project_id,
         )
         bb = block.bbox
+        had_runtime_routes = (
+            _strip_runtime_layout_routes_from_dict(block.raw_payload)
+            or _strip_runtime_layout_routes_from_dict(block.app_payload)
+        )
+        if had_runtime_routes and block.lines:
+            block.lines = []
+            block.app_payload[OCR_TEXT_INVALIDATED_KEY] = True
         values = (
             page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
             block.source.value, int(block.recognizable),
@@ -1155,6 +1195,11 @@ class ProjectStore:
             (project.id,),
         ).fetchall()
         for pr in pages:
+            raw_ppvl_parsing_res_list = _json_to_list(pr["ppvl_parsing_res_list_json"])
+            page_had_runtime_routes = _has_runtime_layout_routes_in_list(raw_ppvl_parsing_res_list)
+            ppvl_parsing_res_list = _strip_runtime_layout_routes_from_list(
+                raw_ppvl_parsing_res_list
+            )
             page = Page(
                 image_path=pr["image_path"],
                 width=pr["width"],
@@ -1170,9 +1215,19 @@ class ProjectStore:
                 status=PageStatus(pr["status"]),
                 error_message=pr["error_message"],
                 ocr_invalidated_reason=pr["ocr_invalidated_reason"],
-                ppvl_parsing_res_list=_json_to_list(pr["ppvl_parsing_res_list_json"]),
+                ppvl_parsing_res_list=ppvl_parsing_res_list,
             )
             page.blocks = self._load_blocks(page.id)
+            if page_had_runtime_routes or any(
+                bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY))
+                for block in page.blocks
+            ):
+                page.ocr_invalidated_reason = (
+                    page.ocr_invalidated_reason
+                    or "stale_layout_line_routes_stripped"
+                )
+                if page.status == PageStatus.OCR_DONE:
+                    page.status = PageStatus.LAYOUT_DONE
             page.reconcile_ocr_done_from_result()
             project.pages.append(page)
 
@@ -1220,6 +1275,10 @@ class ProjectStore:
                 _json_to_dict(r["raw_payload_json"]),
                 _json_to_dict(r["app_payload_json"]) if "app_payload_json" in r.keys() else {},
             )
+            had_runtime_routes = (
+                _strip_runtime_layout_routes_from_dict(raw_payload)
+                or _strip_runtime_layout_routes_from_dict(app_payload)
+            )
             block = Block(
                 block_type=BlockType(r["block_type"]),
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
@@ -1234,6 +1293,9 @@ class ProjectStore:
                 app_payload=app_payload,
             )
             block.lines = self._load_lines(block.id)
+            if had_runtime_routes and block.lines:
+                block.lines = []
+                block.app_payload[OCR_TEXT_INVALIDATED_KEY] = True
             blocks.append(block)
         return blocks
 

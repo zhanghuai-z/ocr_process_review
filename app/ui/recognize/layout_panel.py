@@ -20,6 +20,7 @@ from app.core.block_payload import (
     MANUAL_MERGE_FROM_KEY,
     MANUAL_DRAW_BBOX_KEY,
     OCR_TEXT_INVALIDATED_KEY,
+    PADDLE_BINDING_KEY,
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
     UI_DELETED_INLINE_FORMULA_KEY,
@@ -41,6 +42,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.paddle_line_routing import (
     ROUTE_SUBBLOCKS_FIELD,
+    block_text,
     formula_texts_by_subblock_bbox,
     line_routes_for_block,
 )
@@ -51,6 +53,11 @@ from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
 
 STATUS_LABEL_MAX_CHARS = 96
+STRUCTURAL_DRAW_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
+INLINE_FORMULA_SPAN_RE = re.compile(
+    r"(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$(?!\$).*?(?<!\\)\$(?!\$)",
+    re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -218,6 +225,7 @@ class LayoutPanel(QWidget):
     ocr_entry_requested = Signal(str, int)  # source, page_number
     page_completed = Signal(int)  # 用户点「完成」时（payload: page idx）
     edits_cancelled = Signal(int) # 用户点「取消」时（payload: page idx）
+    analysis_cancel_requested = Signal()
     DRAW_SNAP_TOLERANCE = 8
     DRAW_INK_SNAP_TOLERANCE = 16
 
@@ -231,6 +239,7 @@ class LayoutPanel(QWidget):
         self._undo_stack: list[list[tuple[int, list[Block]]]] = []
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
+        self._analysis_running = False
         self._new_block_type: BlockType = self._new_subtype.block_type
         self._new_type_buttons: dict[BlockType, QPushButton] = {}
         self._new_subtype_buttons: dict[str, QPushButton] = {}
@@ -719,10 +728,13 @@ class LayoutPanel(QWidget):
             self._set_status_text(f"共 {len(pages)} 页，{total_blocks} 个版面块")
 
     def start_analysis_progress(self, total_pages: int) -> None:
+        self._analysis_running = True
         self._progress_bar.setRange(0, max(1, total_pages))
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("%p%")
         self._progress_bar.show()
+        self._btn_cancel.setText("停止分析")
+        self._btn_cancel.setEnabled(True)
         self._set_status_text("版面分析中…")
 
     def update_analysis_progress(self, current: int, total: int) -> None:
@@ -733,8 +745,15 @@ class LayoutPanel(QWidget):
         self._progress_bar.show()
         self._set_status_text("版面分析中…")
 
+    def update_analysis_stage(self, message: str) -> None:
+        if self._analysis_running:
+            self._set_status_text(f"版面分析：{message}")
+
     def finish_analysis_progress(self, message: str = "") -> None:
+        self._analysis_running = False
         self._progress_bar.hide()
+        self._btn_cancel.setText("取消")
+        self._update_page_nav()
         if message:
             self._set_status_text(message)
 
@@ -1321,9 +1340,57 @@ class LayoutPanel(QWidget):
 
     def _on_block_moved(self, block: Block) -> None:
         bb = block.bbox
+        page = self._pages[self._current_page_idx]
+        self._persist_user_block_geometry(page, block)
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
+
+    def _persist_user_block_geometry(self, page: Page, block: Block) -> None:
+        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
+            return
+        block.source = BlockSource.USER_EDITED
+        set_payload_entries(block, {
+            PADDLE_BLOCK_BBOX_KEY: list(block.bbox.to_xyxy()),
+            OCR_TEXT_INVALIDATED_KEY: True,
+        })
+        if not self._update_existing_manual_binding_bbox(block):
+            block.lines = []
+            self._bind_manual_block_to_paddle(page, block)
+        if payload_bool(block, UI_GENERATED_INLINE_FORMULA_BLOCK_KEY):
+            self._mark_generated_inline_formula_handled(page, block)
+
+    @staticmethod
+    def _update_existing_manual_binding_bbox(block: Block) -> bool:
+        binding = payload_get(block, PADDLE_BINDING_KEY)
+        if not isinstance(binding, dict) or not binding:
+            return False
+        status = str(binding.get("status") or "")
+        if status in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}:
+            return False
+        try:
+            if int(binding.get("parent_index", -1)) < 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        manual_bbox = list(block.bbox.to_xyxy())
+        next_binding = dict(binding)
+        next_binding["manual_bbox"] = manual_bbox
+        origin_bbox = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
+        if not next_binding.get("candidate_bbox") and isinstance(origin_bbox, (list, tuple)) and len(origin_bbox) == 4:
+            next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
+        source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
+        block.source_label = source_label
+        block.recognizable = False
+        for line in block.lines:
+            line.bbox = block.bbox
+        set_payload_entries(block, {
+            PADDLE_BINDING_KEY: next_binding,
+            PADDLE_BLOCK_LABEL_KEY: source_label,
+            PADDLE_BLOCK_BBOX_KEY: manual_bbox,
+        })
+        return True
 
     def _on_block_created(self, bbox: BBox) -> None:
         if not self._pages:
@@ -1336,7 +1403,10 @@ class LayoutPanel(QWidget):
         subtype = self._new_subtype
         bt = self._coerce_block_type(subtype.block_type, BlockType.TEXT)
         source_label = self._source_label_for_bbox_subtype(page, bbox, subtype)
-        intersecting = self._blocks_intersecting_bbox(page, bbox)
+        intersecting = self._draw_merge_candidates(
+            self._blocks_intersecting_bbox(page, bbox),
+            bt,
+        )
         if intersecting:
             merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, source_label)
             self._show_page_layers(page)
@@ -1432,8 +1502,8 @@ class LayoutPanel(QWidget):
                     for char in line.chars
                     if (
                         char.bbox is not None
-                        and (char.char or char.token_text)
                         and char.bbox_source != "paddle_inline_formula"
+                        and (char.char or char.token_text)
                     )
                 ])
         return chars
@@ -1455,6 +1525,7 @@ class LayoutPanel(QWidget):
         explicit_source_label = block.source_label
         binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
         apply_paddle_binding_to_block(block, binding)
+        self._preserve_inline_formula_origin_binding(block)
         if normalize_paddle_label(explicit_source_label) in DEFAULT_SUBTYPE_BY_SOURCE_LABEL or normalize_paddle_label(explicit_source_label) in {
             "display_formula",
             "inline_formula",
@@ -1468,6 +1539,20 @@ class LayoutPanel(QWidget):
             self._set_status_text("已创建校验框，需确认")
         elif binding.text:
             self._set_status_text("已绑定识别结果")
+
+    @staticmethod
+    def _preserve_inline_formula_origin_binding(block: Block) -> None:
+        if normalize_paddle_label(block.source_label) != "inline_formula":
+            return
+        origin_bbox = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
+        if not isinstance(origin_bbox, (list, tuple)) or len(origin_bbox) != 4:
+            return
+        binding = payload_get(block, PADDLE_BINDING_KEY)
+        if not isinstance(binding, dict) or not binding or binding.get("candidate_bbox"):
+            return
+        next_binding = dict(binding)
+        next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
+        set_payload_entries(block, {PADDLE_BINDING_KEY: next_binding})
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
@@ -1662,6 +1747,19 @@ class LayoutPanel(QWidget):
             if self._bbox_hits_frame(bbox, block.bbox)
         ]
 
+    @staticmethod
+    def _draw_merge_candidates(blocks: list[Block], block_type: BlockType) -> list[Block]:
+        target_structural = block_type in STRUCTURAL_DRAW_BLOCK_TYPES
+        candidates: list[Block] = []
+        for block in blocks:
+            existing_structural = block.block_type in STRUCTURAL_DRAW_BLOCK_TYPES
+            if target_structural != existing_structural:
+                continue
+            if target_structural and block.block_type != block_type:
+                continue
+            candidates.append(block)
+        return candidates
+
     def _ensure_inline_formula_blocks(self, page: Page) -> None:
         """Promote Paddle inline_formula subblocks to editable equation blocks."""
         for parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
@@ -1719,6 +1817,9 @@ class LayoutPanel(QWidget):
     @staticmethod
     def _inline_formula_subblock_text(page: Page, parent: dict, bbox: BBox) -> str:
         target = bbox.clamp(page.width, page.height).to_xyxy()
+        marker_text = LayoutPanel._inline_formula_marker_text_from_parent_order(page, parent, target)
+        if marker_text:
+            return marker_text
         for route in line_routes_for_block(parent, page.width, page.height):
             for segment in route.get("segments", []):
                 if segment.get("kind") != "formula":
@@ -1735,6 +1836,50 @@ class LayoutPanel(QWidget):
         for formula_bbox, text in formula_texts_by_subblock_bbox(parent, page.width, page.height).items():
             if LayoutPanel._same_inline_formula_route_span(formula_bbox, target):
                 return text
+        return ""
+
+    @staticmethod
+    def _inline_formula_marker_text_from_parent_order(
+        page: Page,
+        parent: dict,
+        target: tuple[int, int, int, int],
+    ) -> str:
+        spans = [match.group(0) for match in INLINE_FORMULA_SPAN_RE.finditer(block_text(parent))]
+        if not spans:
+            return ""
+        subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
+        if not isinstance(subblocks, list):
+            return ""
+        formula_bboxes: list[tuple[int, int, int, int]] = []
+        for subblock in subblocks:
+            if not isinstance(subblock, dict):
+                continue
+            label = str(
+                subblock.get("block_label")
+                or subblock.get("label")
+                or subblock.get("type")
+                or ""
+            )
+            if normalize_paddle_label(label) != "inline_formula":
+                continue
+            bbox = bbox_from_variant(
+                subblock.get("block_bbox") or subblock.get("bbox") or subblock.get("coordinate"),
+                max_w=page.width,
+                max_h=page.height,
+            )
+            if bbox is None or bbox.area <= 0:
+                continue
+            formula_bboxes.append(bbox.clamp(page.width, page.height).to_xyxy())
+        formula_bboxes.sort(key=lambda item: (item[1], item[0]))
+        for index, formula_bbox in enumerate(formula_bboxes):
+            if index >= len(spans):
+                break
+            if not LayoutPanel._same_inline_formula_route_span(formula_bbox, target):
+                continue
+            span = spans[index]
+            if is_formula_marker_token(span):
+                return span
+            return ""
         return ""
 
     @staticmethod
@@ -1967,6 +2112,10 @@ class LayoutPanel(QWidget):
 
     def _on_cancel_clicked(self) -> None:
         """取消本页未提交的编辑（占位：发出信号供控制器处理）。"""
+        if self._analysis_running:
+            self._set_status_text("正在停止版面分析…")
+            self.analysis_cancel_requested.emit()
+            return
         if not self._pages:
             return
         self._set_status_text(f"已取消第 {self._pages[self._current_page_idx].page_number} 页编辑")

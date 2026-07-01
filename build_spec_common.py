@@ -22,6 +22,15 @@ def collect_shared_build_inputs(*, include_tools: bool = False):
                 rel_parent = f.parent.relative_to(PROJECT_ROOT).as_posix()
                 datas.append((str(f), rel_parent))
 
+    # 公式渲染资产：MathJax 以 node_modules 形式随包分发，运行时由
+    # app.experimental.formula_rendering 通过 NODE_PATH 定位。
+    formula_dir = PROJECT_ROOT / "resources" / "formula"
+    if formula_dir.exists():
+        for f in formula_dir.rglob("*"):
+            if f.is_file():
+                rel_parent = f.parent.relative_to(PROJECT_ROOT).as_posix()
+                datas.append((str(f), rel_parent))
+
     datas += collect_data_files("jinja2")
     datas += collect_data_files("fpdf")
 

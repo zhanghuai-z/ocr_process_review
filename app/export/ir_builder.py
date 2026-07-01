@@ -6,6 +6,7 @@ from typing import Any
 
 from app.core.block_attributes import block_attributes
 from app.core.proof_line_facts import proof_line_facts, proof_status_value
+from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
 from app.export.ir import (
     EXPORT_IR_VERSION,
     ExportAsset,
@@ -165,6 +166,9 @@ def _build_element(
             "text": text,
             "lines": line_payloads,
         }
+        table_cells = _table_text_layer_cells(block)
+        if table_cells:
+            payload[TABLE_TEXT_LAYER_CELLS_KEY] = table_cells
         fallback = _fallback_from_rule(fallback_rule, asset_ref=asset_ref)
         diagnostics.append(_diagnostic(
             "warning",
@@ -270,6 +274,42 @@ def _char_payload(char, fallback: int | str) -> dict[str, Any]:
         "bbox_granularity": char.bbox_granularity,
         "token_text": char.token_text,
     }
+
+
+def _table_text_layer_cells(block: Block) -> list[dict[str, Any]]:
+    raw = block.app_payload.get(TABLE_TEXT_LAYER_CELLS_KEY)
+    if not isinstance(raw, list):
+        return []
+    cells: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "")
+        bbox = item.get("bbox")
+        if not text or not isinstance(bbox, dict):
+            continue
+        try:
+            clean_bbox = {
+                "x": int(round(float(bbox.get("x") or 0))),
+                "y": int(round(float(bbox.get("y") or 0))),
+                "w": int(round(float(bbox.get("w") or 0))),
+                "h": int(round(float(bbox.get("h") or 0))),
+            }
+        except (TypeError, ValueError):
+            continue
+        if clean_bbox["w"] <= 0 or clean_bbox["h"] <= 0:
+            continue
+        cells.append({
+            "text": text,
+            "bbox": clean_bbox,
+            "row": int(item.get("row") or 0),
+            "col": int(item.get("col") or 0),
+            "row_span": max(1, int(item.get("row_span") or 1)),
+            "col_span": max(1, int(item.get("col_span") or 1)),
+            "bbox_source": str(item.get("bbox_source") or ""),
+            "bbox_granularity": str(item.get("bbox_granularity") or "table_cell"),
+        })
+    return cells
 
 
 def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:

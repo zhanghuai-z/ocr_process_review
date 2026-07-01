@@ -202,11 +202,17 @@ class ImportService:
 
     @staticmethod
     def _source_digest(src: Path) -> str:
+        digest = hashlib.sha1()
         try:
-            source_key = str(src.resolve())
+            resolved = src.resolve()
         except OSError:
-            source_key = str(src.absolute())
-        return hashlib.sha1(source_key.encode("utf-8")).hexdigest()[:10]
+            resolved = src.absolute()
+        digest.update(str(resolved).encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+        with src.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()[:10]
 
     def _generate_thumbnail(self, src_path: str, src: Path) -> Optional[str]:
         """生成缩略图。"""

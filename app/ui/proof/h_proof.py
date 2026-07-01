@@ -33,7 +33,7 @@ from typing import List, Optional
 import unicodedata
 
 import cv2
-from PySide6.QtCore import QEvent, Qt, QRect, QTimer, Signal, QSize
+from PySide6.QtCore import QEvent, Qt, QRect, QTimer, Signal, QSize, QPoint
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut,
     QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
@@ -103,6 +103,8 @@ TEXT_GUIDE_LINE_COLOR = "#AFC0D8"
 ROW_DIVIDER_COLOR = "#E7E2D8"
 FOCUS_BORDER_COLOR = "#7A7368"
 FORMULA_VISUAL_HEIGHT_RATIO = 0.70
+FORMULA_SOURCE_PANEL_H = 88
+FORMULA_SOURCE_POPUP_OFFSET = QPoint(10, 18)
 # 保持“图 + 文本”两层的既有总高度，减少布局连锁变化。
 LINE_PAIR_H = 92
 NEAR_LINE_PAIR_H = 34
@@ -175,6 +177,10 @@ _DEBUG_TABLE_LINE_FLAGS = {"hanwang_route_table"}
 _DEBUG_FORMULA_EXCLUDED_LABELS = {"formula_number"}
 _DEBUG_FORMULA_LABEL_TOKENS = ("formula", "equation", "math")
 _DEBUG_TABLE_LABEL_TOKENS = ("table",)
+_INLINE_FORMULA_RE = re.compile(
+    r"(\$\$.*?\$\$|\$[^$\n]+?\$|\\\(.*?\\\)|\\\[.*?\\\])",
+    re.S,
+)
 
 
 def _slot_visual_width(
@@ -196,6 +202,19 @@ def _is_punctuation_slot_text(text: str) -> bool:
     if not text:
         return False
     return all(unicodedata.category(ch).startswith("P") for ch in text)
+
+
+def _formula_overlay_slot_width(
+    text_char: str,
+    atom: ProofAtom,
+    font_metrics: QFontMetrics,
+    scale: float,
+) -> float:
+    width = _slot_visual_width(text_char, font_metrics)
+    if not _is_punctuation_slot_text(text_char) or atom.bbox is None or scale <= 0:
+        return width
+    bbox_width = max(TEXT_SLOT_CLIPPED_MIN_W, float(atom.bbox.w) * scale)
+    return min(width, bbox_width)
 
 
 _LATEX_SYMBOLS = {
@@ -521,6 +540,23 @@ def _is_debug_formula_block(block: Block) -> bool:
         for label in labels
         for token in _DEBUG_FORMULA_LABEL_TOKENS
     )
+
+
+def _is_inline_formula_block(block: Block) -> bool:
+    return any("inline_formula" in label for label in _debug_block_labels(block))
+
+
+def _is_display_formula_unit(block: Block, line: Line) -> bool:
+    if _line_is_formula_marker_only(line):
+        return False
+    if _is_inline_formula_block(block):
+        return False
+    if not _is_debug_formula_block(block):
+        return False
+    if semantic_block_type(block) == BlockType.EQUATION:
+        return True
+    labels = _debug_block_labels(block)
+    return any(label in {"display_formula", "display_equation", "equation"} for label in labels)
 
 
 def _is_debug_table_block(block: Block) -> bool:
@@ -1028,6 +1064,7 @@ class _SlotLineEditor(QWidget):
     hover_char_changed = Signal(int)
     row_focus_requested = Signal()
     visual_edit_exit_requested = Signal()
+    formula_source_requested = Signal(int, int, QPoint)
     textChanged = Signal()
     selectionChanged = Signal()
     cursorPositionChanged = Signal()
@@ -1308,6 +1345,35 @@ class _SlotLineEditor(QWidget):
             self._cursor.setPosition(next_pos + 1, QTextCursor.MoveMode.KeepAnchor)
         else:
             self._cursor.setPosition(len(new_text))
+        self.textChanged.emit()
+        self.selectionChanged.emit()
+        self.cursorPositionChanged.emit()
+        self.update()
+
+    def replace_text_range(self, start: int, end: int, replacement: str) -> None:
+        """Replace a raw text range without fixed-slot truncation.
+
+        This path is reserved for formula source editing, where the source
+        length is allowed to change and the rendered atom is recomputed from the
+        new source text.
+        """
+        current = self.toPlainText()
+        start = max(0, min(int(start), len(current)))
+        end = max(start, min(int(end), len(current)))
+        replacement = replacement or ""
+        if current[start:end] == replacement:
+            return
+        before = self._snapshot()
+        self._push_undo_snapshot(before)
+        new_text = current[:start] + replacement + current[end:]
+        self._document.setPlainText(new_text)
+        self._apply_document_line_height()
+        self._cursor = QTextCursor(self._document)
+        next_start = start
+        next_end = start + len(replacement)
+        self._cursor.setPosition(next_start)
+        if next_end != next_start:
+            self._cursor.setPosition(next_end, QTextCursor.MoveMode.KeepAnchor)
         self.textChanged.emit()
         self.selectionChanged.emit()
         self.cursorPositionChanged.emit()
@@ -1594,15 +1660,25 @@ class _SlotLineEditor(QWidget):
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.RightButton:
-            self.visual_edit_exit_requested.emit()
+            pos = self._event_pos(event)
+            text_len = len(self.toPlainText())
+            overlay = self._atom_overlay_for_x(float(pos.x()))
+            if overlay is not None and overlay.kind == "formula":
+                self.formula_source_requested.emit(
+                    max(0, min(overlay.start, text_len)),
+                    max(0, min(overlay.end, text_len)),
+                    self.mapToGlobal(pos),
+                )
+            elif self.has_visual_text_override():
+                self.formula_source_requested.emit(0, text_len, self.mapToGlobal(pos))
+            else:
+                self.visual_edit_exit_requested.emit()
             try:
                 event.accept()
             except Exception:
                 pass
             return
         self.row_focus_requested.emit()
-        if self.has_visual_text_override():
-            self.set_visual_text_override(None)
         pos = self._event_pos(event)
         overlay = self._atom_overlay_for_x(float(pos.x()))
         if overlay is not None:
@@ -1786,6 +1862,154 @@ class _AtomVisualOverlay:
     kind: str = ""
 
 
+class _FormulaSourcePopup(QFrame):
+    """Small formula source editor opened from a rendered formula atom."""
+
+    source_changed = Signal(str)
+    closed = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setObjectName("formulaSourcePopup")
+        self.setStyleSheet(
+            "QFrame#formulaSourcePopup { background:#FFFDF8; border:1px solid #CFC7BA; "
+            "border-radius:8px; }"
+            "QLabel { color:#5F574D; font-size:11px; font-weight:600; }"
+            "QPlainTextEdit { background:#FFFFFF; border:1px solid #DED6CA; "
+            "border-radius:6px; padding:6px; font-family:'JetBrains Mono','Consolas',monospace; "
+            "font-size:13px; color:#27231E; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 10)
+        layout.setSpacing(6)
+        label = QLabel("公式源码")
+        layout.addWidget(label)
+        self._source_edit = QPlainTextEdit()
+        self._source_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._source_edit.setFixedSize(420, 76)
+        self._source_edit.installEventFilter(self)
+        layout.addWidget(self._source_edit)
+        self._emit_timer = QTimer(self)
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.setInterval(160)
+        self._emit_timer.timeout.connect(self._emit_source_changed)
+        self._source_edit.textChanged.connect(self._schedule_source_changed)
+
+    def open_for(self, source: str, global_pos: QPoint, *, editable: bool = True) -> None:
+        self._source_edit.blockSignals(True)
+        self._source_edit.setPlainText(source or "")
+        self._source_edit.blockSignals(False)
+        self._source_edit.setReadOnly(not editable)
+        self.adjustSize()
+        self.move(global_pos + FORMULA_SOURCE_POPUP_OFFSET)
+        self.show()
+        self.raise_()
+        self._source_edit.setFocus()
+        cursor = self._source_edit.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        self._source_edit.setTextCursor(cursor)
+
+    def source_text(self) -> str:
+        return self._source_edit.toPlainText().replace("\r", "").replace("\n", " ").strip()
+
+    def _schedule_source_changed(self) -> None:
+        self._emit_timer.start()
+
+    def _emit_source_changed(self) -> None:
+        self.source_changed.emit(self.source_text())
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._source_edit and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            if key == Qt.Key.Key_Escape or (ctrl and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}):
+                self.hide()
+                return True
+        return super().eventFilter(watched, event)
+
+    def hideEvent(self, event) -> None:  # type: ignore[override]
+        if self._emit_timer.isActive():
+            self._emit_timer.stop()
+            self._emit_source_changed()
+        super().hideEvent(event)
+        self.closed.emit()
+
+
+class _FormulaSourceInlinePanel(QFrame):
+    """Embedded source editor for display formula rows.
+
+    Display formulas are usually wider than a line, so they need a full-width
+    third pane instead of the small inline popup used by inline formulas.
+    """
+
+    source_changed = Signal(str)
+    close_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("formulaSourceInlinePanel")
+        self.setFixedHeight(FORMULA_SOURCE_PANEL_H)
+        self.setStyleSheet(
+            "QFrame#formulaSourceInlinePanel { background:#FBF8F1; "
+            "border-top:1px solid #DED6CA; }"
+            "QLabel { color:#5F574D; font-size:11px; font-weight:600; }"
+            "QPlainTextEdit { background:#FFFFFF; border:1px solid #DED6CA; "
+            "border-radius:5px; padding:5px 6px; font-family:'JetBrains Mono','Consolas',monospace; "
+            "font-size:13px; color:#27231E; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 7)
+        layout.setSpacing(5)
+        label = QLabel("公式源码")
+        layout.addWidget(label)
+        self._source_edit = QPlainTextEdit()
+        self._source_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._source_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._source_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._source_edit.setFixedHeight(48)
+        self._source_edit.installEventFilter(self)
+        layout.addWidget(self._source_edit)
+        self._emit_timer = QTimer(self)
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.setInterval(160)
+        self._emit_timer.timeout.connect(self.flush_source_changed)
+        self._source_edit.textChanged.connect(self._schedule_source_changed)
+        self.hide()
+
+    def open_for(self, source: str, *, editable: bool = True) -> None:
+        self._source_edit.blockSignals(True)
+        self._source_edit.setPlainText(source or "")
+        self._source_edit.blockSignals(False)
+        self._source_edit.setReadOnly(not editable)
+        self.show()
+        self._source_edit.setFocus()
+        cursor = self._source_edit.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        self._source_edit.setTextCursor(cursor)
+
+    def source_text(self) -> str:
+        return self._source_edit.toPlainText().replace("\r", "").replace("\n", " ").strip()
+
+    def flush_source_changed(self) -> None:
+        if self._emit_timer.isActive():
+            self._emit_timer.stop()
+        self.source_changed.emit(self.source_text())
+
+    def _schedule_source_changed(self) -> None:
+        self._emit_timer.start()
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._source_edit and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            if key == Qt.Key.Key_Escape or (ctrl and key in {Qt.Key.Key_Return, Qt.Key.Key_Enter}):
+                self.flush_source_changed()
+                self.close_requested.emit()
+                return True
+        return super().eventFilter(watched, event)
+
+
 @dataclass(frozen=True)
 class ProofUnit:
     """横校内部的稳定渲染输入。
@@ -1806,8 +2030,8 @@ class ProofUnit:
     atoms: tuple[ProofAtom, ...] = ()
     editable: bool = True
 
-def _proof_unit_kind(debug_badge: str) -> ProofUnitKind:
-    if debug_badge == "公式":
+def _proof_unit_kind(projection: ProofLineProjection, debug_badge: str) -> ProofUnitKind:
+    if debug_badge == "公式" and _is_display_formula_unit(projection.block, projection.line):
         return ProofUnitKind.FORMULA
     if debug_badge == "表格":
         return ProofUnitKind.TABLE
@@ -1867,6 +2091,11 @@ class _LinePair(QFrame):
         # hproof-visual-marking：editor 鼠标悬停的字符索引（-1 = 未悬停）。
         # _render_line_image 会按 active 选区/光标 + 这个 hover idx 联合画框。
         self._hover_char_idx: int = -1
+        self._formula_source_popup: _FormulaSourcePopup | None = None
+        self._formula_source_panel: _FormulaSourceInlinePanel | None = None
+        self._formula_source_range: tuple[int, int] | None = None
+        self._formula_source_anchor_span: tuple[int, int] | None = None
+        self._formula_source_anchor_rect: tuple[float, float] | None = None
 
         self.setObjectName("linePair")
         self.setStyleSheet(
@@ -1948,6 +2177,7 @@ class _LinePair(QFrame):
         self._editor.skip_requested.connect(self.skip_req)
         self._editor.revert_requested.connect(self._revert)
         self._editor.visual_edit_exit_requested.connect(self._exit_formula_edit_mode)
+        self._editor.formula_source_requested.connect(self._open_formula_source_editor)
         # hproof-visual-marking：鼠标悬停 editor → 在行图上高亮对应字
         self._editor.hover_char_changed.connect(self._on_editor_hover_char)
         self._editor.selectionChanged.connect(self._refresh_extra_selections)
@@ -1999,6 +2229,17 @@ class _LinePair(QFrame):
             f"font-weight:{TEXT_FONT_WEIGHT_CSS}; padding:0 2px; background:{bg}; border:none;"
         )
 
+    def _formula_source_panel_open(self) -> bool:
+        return bool(
+            self._formula_source_panel is not None
+            and not self._formula_source_panel.isHidden()
+            and self._focus_depth == "active"
+        )
+
+    def _apply_pair_height(self) -> None:
+        extra = FORMULA_SOURCE_PANEL_H if self._formula_source_panel_open() else 0
+        self.setFixedHeight(self._pair_h + extra)
+
     def _apply_editor_visual_override(self) -> None:
         visual: _FormulaVisual | None = None
         if self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
@@ -2023,15 +2264,10 @@ class _LinePair(QFrame):
         text: str,
     ) -> tuple[list[_AtomVisualOverlay], list[Optional[float]] | None, list[float] | None]:
         if self._unit is None or not self._unit.atoms or not self._line.chars:
-            return [], None, None
-        if text != chars_display_text(self._line.chars):
-            return [], None, None
-        spans = chars_display_spans(self._line.chars)
-        span_by_char_index = {
-            char_index: span
-            for span in spans
-            for char_index in span.char_indices
-        }
+            return self._fallback_formula_visual_data(text), None, None
+        span_by_char_index = self._span_by_char_index_for_formula_text(text)
+        if span_by_char_index is None:
+            return self._fallback_formula_visual_data(text), None, None
         centers: list[Optional[float]] = [None] * len(text)
         widths: list[float] = [0.0] * len(text)
         scale = float(self._render_scale or 0.0)
@@ -2039,18 +2275,21 @@ class _LinePair(QFrame):
         fm = QFontMetrics(self._editor.font())
         if scale > 0:
             for atom in self._unit.atoms:
-                if atom.kind not in {ProofAtomKind.CHAR, ProofAtomKind.PUNCT, ProofAtomKind.NUMBER}:
+                if atom.kind == ProofAtomKind.FORMULA:
                     continue
                 if atom.bbox is None or not atom.char_indices:
                     continue
                 span = span_by_char_index.get(atom.char_indices[0])
-                if span is None or span.end - span.start != 1:
+                if span is None:
                     continue
-                idx = span.start
+                span_start, span_end = span
+                if span_end - span_start != 1:
+                    continue
+                idx = span_start
                 if not (0 <= idx < len(text)):
                     continue
                 centers[idx] = ((atom.bbox.x + atom.bbox.x2) / 2.0 - float(ox)) * scale
-                widths[idx] = _slot_visual_width(text[idx], fm)
+                widths[idx] = _formula_overlay_slot_width(text[idx], atom, fm, scale)
 
         overlays: list[_AtomVisualOverlay] = []
         for atom in self._unit.atoms:
@@ -2059,8 +2298,8 @@ class _LinePair(QFrame):
             span = span_by_char_index.get(atom.char_indices[0])
             if span is None:
                 continue
-            start = max(0, min(span.start, len(text)))
-            end = max(start, min(span.end, len(text)))
+            start = max(0, min(span[0], len(text)))
+            end = max(start, min(span[1], len(text)))
             if end <= start:
                 continue
             raw = text[start:end]
@@ -2082,6 +2321,87 @@ class _LinePair(QFrame):
         slot_centers = centers if any(center is not None for center in centers) else None
         slot_widths = widths if slot_centers is not None else None
         return overlays, slot_centers, slot_widths
+
+    def _span_by_char_index_for_formula_text(
+        self,
+        text: str,
+    ) -> dict[int, tuple[int, int]] | None:
+        old_text = chars_display_text(self._line.chars or [])
+        spans = chars_display_spans(self._line.chars or [])
+        if text == old_text:
+            return {
+                char_index: (span.start, span.end)
+                for span in spans
+                for char_index in span.char_indices
+            }
+        anchor = self._formula_source_anchor_span
+        current = self._formula_source_range
+        if anchor is None or current is None:
+            return None
+        old_start, old_end = anchor
+        new_start, new_end = current
+        old_start = max(0, min(old_start, len(old_text)))
+        old_end = max(old_start, min(old_end, len(old_text)))
+        new_start = max(0, min(new_start, len(text)))
+        new_end = max(new_start, min(new_end, len(text)))
+        if text[:new_start] != old_text[:old_start]:
+            return None
+        if text[new_end:] != old_text[old_end:]:
+            return None
+        delta = (new_end - new_start) - (old_end - old_start)
+        mapped: dict[int, tuple[int, int]] = {}
+        for span in spans:
+            if span.end <= old_start:
+                next_span = (span.start, span.end)
+            elif span.start >= old_end:
+                next_span = (span.start + delta, span.end + delta)
+            elif span.start == old_start and span.end == old_end:
+                next_span = (new_start, new_end)
+            else:
+                return None
+            for char_index in span.char_indices:
+                mapped[char_index] = next_span
+        return mapped
+
+    def _fallback_formula_visual_data(self, text: str) -> list[_AtomVisualOverlay]:
+        ranges: list[tuple[int, int]] = []
+        if self._formula_source_range is not None:
+            start, end = self._formula_source_range
+            start = max(0, min(start, len(text)))
+            end = max(start, min(end, len(text)))
+            if end > start:
+                ranges.append((start, end))
+        for match in _INLINE_FORMULA_RE.finditer(text or ""):
+            span = (match.start(), match.end())
+            if span not in ranges:
+                ranges.append(span)
+        overlays: list[_AtomVisualOverlay] = []
+        for start, end in ranges:
+            raw = text[start:end]
+            if not raw.strip():
+                continue
+            if (
+                self._formula_source_range is not None
+                and (start, end) == self._formula_source_range
+                and self._formula_source_anchor_rect is not None
+            ):
+                left, right = self._formula_source_anchor_rect
+            else:
+                left, right = self._fallback_text_range_rect(text, start, end)
+            visual = _render_formula_visual(raw, target_height=_formula_visual_target_height(self._editor_h))
+            overlays.append(
+                _AtomVisualOverlay(
+                    start=start,
+                    end=end,
+                    left=left,
+                    right=right,
+                    text=visual.text if visual is not None and visual.text else raw,
+                    pixmap=visual.pixmap if visual is not None else None,
+                    logical_size=visual.logical_size if visual is not None else None,
+                    kind="formula",
+                )
+            )
+        return overlays
 
     def _formula_atom_rect(
         self,
@@ -2129,6 +2449,95 @@ class _LinePair(QFrame):
         self._render_line_image()
         return True
 
+    def _open_formula_source_editor(self, start: int, end: int, global_pos: QPoint) -> None:
+        if not self._edit_session.editable:
+            return
+        text = self._editor.toPlainText()
+        start = max(0, min(int(start), len(text)))
+        end = max(start, min(int(end), len(text)))
+        if end <= start and self._unit is not None and self._unit.kind == ProofUnitKind.FORMULA:
+            start, end = 0, len(text)
+        if end <= start:
+            return
+        self._formula_source_range = (start, end)
+        self._formula_source_anchor_span = (start, end)
+        self._formula_source_anchor_rect = self._formula_source_rect_for_range(text, start, end)
+        if self._should_use_formula_source_panel(start, end, text):
+            self._open_formula_source_panel(text[start:end])
+            return
+        self._close_formula_source_panel()
+        if self._formula_source_popup is None:
+            self._formula_source_popup = _FormulaSourcePopup(self)
+            self._formula_source_popup.source_changed.connect(self._apply_formula_source_text)
+            self._formula_source_popup.closed.connect(self._on_formula_source_popup_closed)
+        self._formula_source_popup.open_for(text[start:end], global_pos, editable=self._edit_session.editable)
+
+    def _formula_source_rect_for_range(self, text: str, start: int, end: int) -> tuple[float, float]:
+        for overlay in self._editor.atom_visual_overlays():
+            if overlay.kind == "formula" and overlay.start == start and overlay.end == end:
+                return overlay.left, overlay.right
+        if self._unit is not None and self._unit.atoms:
+            span_by_char_index = self._span_by_char_index_for_formula_text(text)
+            if span_by_char_index is not None:
+                for atom in self._unit.atoms:
+                    if atom.kind != ProofAtomKind.FORMULA or not atom.char_indices:
+                        continue
+                    span = span_by_char_index.get(atom.char_indices[0])
+                    if span == (start, end):
+                        return self._formula_atom_rect(atom, text, start, end)
+        return self._fallback_text_range_rect(text, start, end)
+
+    def _should_use_formula_source_panel(self, start: int, end: int, text: str) -> bool:
+        if self._unit is None or self._unit.kind != ProofUnitKind.FORMULA:
+            return False
+        return start <= 0 and end >= len(text)
+
+    def _open_formula_source_panel(self, source: str) -> None:
+        if self._formula_source_popup is not None:
+            self._formula_source_popup.hide()
+        panel = self._ensure_formula_source_panel()
+        panel.open_for(source, editable=self._edit_session.editable)
+        self._apply_pair_height()
+
+    def _ensure_formula_source_panel(self) -> _FormulaSourceInlinePanel:
+        if self._formula_source_panel is None:
+            self._formula_source_panel = _FormulaSourceInlinePanel()
+            self._formula_source_panel.source_changed.connect(self._apply_formula_source_text)
+            self._formula_source_panel.close_requested.connect(self._close_formula_source_panel)
+            layout = self._content.layout()
+            if isinstance(layout, QVBoxLayout):
+                layout.addWidget(self._formula_source_panel)
+        return self._formula_source_panel
+
+    def _close_formula_source_panel(self) -> None:
+        panel = self._formula_source_panel
+        if panel is None or panel.isHidden():
+            return
+        panel.flush_source_changed()
+        panel.hide()
+        self._apply_pair_height()
+
+    def _apply_formula_source_text(self, source: str) -> None:
+        if self._formula_source_range is None:
+            return
+        start, end = self._formula_source_range
+        current = self._editor.toPlainText()
+        start = max(0, min(start, len(current)))
+        end = max(start, min(end, len(current)))
+        if current[start:end] == source:
+            return
+        self._editor.replace_text_range(start, end, source)
+        self._formula_source_range = (start, start + len(source))
+        self._apply_editor_visual_override()
+        self._sync_editor_slot_geometry()
+        self._refresh_status()
+        self._apply_pair_height()
+
+    def _on_formula_source_popup_closed(self) -> None:
+        self._apply_editor_visual_override()
+        self._sync_editor_slot_geometry()
+        self._refresh_extra_selections()
+
     @staticmethod
     def _focus_metrics(depth: str) -> tuple[int, int, int, float]:
         if depth == "active":
@@ -2158,10 +2567,15 @@ class _LinePair(QFrame):
         self._pair_h = pair_h
         self._image_row_h = image_h
         self._editor_h = editor_h
-        self.setFixedHeight(pair_h)
+        self._apply_pair_height()
         self._img_lbl.setFixedHeight(image_h)
         self._editor.setFixedHeight(editor_h)
         self._editor.setVisible(depth == "active")
+        if self._formula_source_panel is not None:
+            self._formula_source_panel.setVisible(
+                (not self._formula_source_panel.isHidden()) and depth == "active"
+            )
+            self._apply_pair_height()
         if depth == "active" and self._active:
             self._editor.setFocus()
         self._opacity_effect.setOpacity(opacity)
@@ -2179,6 +2593,9 @@ class _LinePair(QFrame):
     def _set_editor_text(self, text: str) -> None:
         if self._editor.toPlainText() == text:
             return
+        self._formula_source_range = None
+        self._formula_source_anchor_span = None
+        self._formula_source_anchor_rect = None
         self._editor.blockSignals(True)
         self._editor.setPlainText(text)
         self._editor.apply_inline_y_axis_metrics()
@@ -2254,7 +2671,8 @@ class _LinePair(QFrame):
             image_style = f"background:#FFFFFF; border-bottom:1px solid {IMAGE_DIVIDER_COLOR};"
             self._editor.setFocus()
         else:
-            # 切走前先把 in-flight 文本保存（编辑器始终可见）
+            # 切走前先把公式源码栏刷回 editor，再保存 in-flight 文本。
+            self._close_formula_source_panel()
             self._flush_editor_if_dirty()
             # 切行时清掉本行 editor 的选中状态和高亮，避免非焦点行仍有选中感。
             cur = self._editor.textCursor()
@@ -2280,6 +2698,7 @@ class _LinePair(QFrame):
             self._editor.set_active_visual(active)
         self.setProperty("active", active)
         self.setStyleSheet(frame_style)
+        self._apply_pair_height()
         self._refresh_status()
         self._refresh_extra_selections()
         self._render_line_image()
@@ -3402,7 +3821,7 @@ class HProofPanel(QWidget):
         debug_badge = self._debug_badge_for(projection.block, projection.line)
         return ProofUnit(
             uid=projection.uid,
-            kind=_proof_unit_kind(debug_badge),
+            kind=_proof_unit_kind(projection, debug_badge),
             page=projection.page,
             block=projection.block,
             line=projection.line,

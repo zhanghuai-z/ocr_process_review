@@ -607,7 +607,7 @@ def test_project_store():
 
 def test_project_store_persists_ppvl_parsing_res_list():
     from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -806,6 +806,67 @@ def test_project_store_clean_on_resave():
         print("test_project_store_clean_on_resave PASSED")
     finally:
         os.unlink(db_path)
+
+
+def test_project_store_strips_runtime_layout_line_routes_on_save_and_load():
+    from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        stale_routes = [
+            {
+                "bbox": [80, 0, 120, 30],
+                "segments": [{"kind": "text", "bbox": [80, 0, 120, 30], "text": ""}],
+            }
+        ]
+        page = Page(
+            image_path="/tmp/runtime-route-cache.png",
+            width=160,
+            height=80,
+            status=PageStatus.OCR_DONE,
+            ppvl_parsing_res_list=[
+                {
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 140, 40],
+                    "block_content": "甲 $ A $ 乙",
+                    LAYOUT_LINE_ROUTES_FIELD: stale_routes,
+                }
+            ],
+        )
+        page.blocks.append(
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 140, 40),
+                lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
+                raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
+                app_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
+            )
+        )
+        project = OcrProject(name="runtime route cache", pages=[page])
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
+
+        loaded_page = loaded.pages[0]
+        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_page.ppvl_parsing_res_list[0]
+        loaded_block = loaded_page.blocks[0]
+        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_block.raw_payload
+        assert LAYOUT_LINE_ROUTES_FIELD not in loaded_block.app_payload
+        assert loaded_block.lines == []
+        assert loaded_block.app_payload.get(OCR_TEXT_INVALIDATED_KEY) is True
+        assert loaded_page.ocr_invalidated_reason == "stale_layout_line_routes_stripped"
+        assert loaded_page.status == PageStatus.LAYOUT_DONE
+
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_strips_runtime_layout_line_routes_on_save_and_load PASSED")
 
 
 def test_project_store_save_project_preserves_child_rowids():
@@ -2315,7 +2376,7 @@ def test_pdf_dual_textless_page_degrades_without_text_font():
     print("test_pdf_dual_textless_page_degrades_without_text_font PASSED")
 
 
-def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font():
+def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_region_fonts():
     import fitz
     from PIL import Image
 
@@ -2370,11 +2431,12 @@ def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
                     for span in line.get("spans", []):
                         if span.get("text", "").strip():
                             sizes.add(round(float(span["size"]), 2))
-            assert len(sizes) == 1
+            assert len(sizes) == 2
+            assert min(sizes) < max(sizes)
         finally:
             doc.close()
 
-    print("test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font PASSED")
+    print("test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_region_fonts PASSED")
 
 
 def test_pdf_dual_positions_mixed_chars_without_copy_spaces():
@@ -2452,6 +2514,632 @@ def test_pdf_dual_positions_mixed_chars_without_copy_spaces():
             doc.close()
 
     print("test_pdf_dual_positions_mixed_chars_without_copy_spaces PASSED")
+
+
+def test_pdf_dual_inline_formula_item_does_not_shift_text_baseline():
+    from app.export.pdf import (
+        PDF_TEXT_ASCENDER_RATIO,
+        PDF_TEXT_FONT_SIZE_TO_BBOX_RATIO,
+        PdfPagePlan,
+        PdfTextItem,
+        PdfTextSpan,
+        _page_text_font_size,
+        _span_baseline_top_y,
+        _span_font_size,
+    )
+
+    text_left = PdfTextItem("甲", x=10, y=30, w=8, h=6, source="left", bbox_granularity="char")
+    formula = PdfTextItem(
+        "$ A_i $",
+        x=18,
+        y=22,
+        w=22,
+        h=18,
+        source="formula",
+        bbox_source="paddle_inline_formula",
+        bbox_granularity="formula",
+    )
+    text_right = PdfTextItem("乙", x=40, y=30, w=8, h=6, source="right", bbox_granularity="char")
+    span = PdfTextSpan(
+        text="甲$ A_i $乙",
+        x=10,
+        y=22,
+        w=38,
+        h=18,
+        source="mixed",
+        items=(text_left, formula, text_right),
+    )
+    plan = PdfPagePlan(
+        page_number=1,
+        image_path="/tmp/pdf-formula-baseline.png",
+        page_width_px=200,
+        page_height_px=200,
+        width_pt=50,
+        height_pt=60,
+        text_items=[text_left, formula, text_right],
+        text_spans=[span],
+    )
+
+    font_size = _page_text_font_size(plan)
+    expected = plan.height_pt - (text_left.y + text_left.h - font_size * PDF_TEXT_ASCENDER_RATIO)
+
+    assert round(font_size, 2) == round(text_left.h * PDF_TEXT_FONT_SIZE_TO_BBOX_RATIO, 2)
+    assert round(_span_baseline_top_y(plan, span, font_size), 4) == round(expected, 4)
+
+    formula_only_span = PdfTextSpan(
+        text="$ A_i $",
+        x=formula.x,
+        y=formula.y,
+        w=formula.w,
+        h=formula.h,
+        source="formula-only",
+        items=(formula,),
+    )
+    formula_only_font_size = _span_font_size(plan, formula_only_span, font_size)
+    formula_only_expected = plan.height_pt - (formula.y + formula.h - formula_only_font_size * PDF_TEXT_ASCENDER_RATIO)
+    assert round(formula_only_font_size, 2) == round(formula.h * PDF_TEXT_FONT_SIZE_TO_BBOX_RATIO, 2)
+    assert round(_span_baseline_top_y(plan, formula_only_span, formula_only_font_size), 4) == round(formula_only_expected, 4)
+
+    print("test_pdf_dual_inline_formula_item_does_not_shift_text_baseline PASSED")
+
+
+def test_pdf_dual_text_bbox_ratio_can_be_profile_tuned():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/pdf-ratio-tuning.png", width=120, height=100, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 40, 20), order=0, lines=[
+            Line(text="字", confidence=0.99, bbox=BBox(10, 20, 20, 20), chars=[
+                Char(char="字", confidence=0.99, bbox=BBox(10, 20, 20, 20), bbox_source="ocr", bbox_granularity="char"),
+            ]),
+        ]),
+    ])
+    document = build_export_ir(OcrProject(name="PdfRatio", pages=[page]), "pdf-dual")
+    document.profile.options["pdf_text_font_size_to_bbox_ratio"] = 0.72
+
+    tuned = build_pdf_page_plans(
+        document,
+        include_text=True,
+        dpi=100,
+        text_font_size_to_bbox_ratio=document.profile.options["pdf_text_font_size_to_bbox_ratio"],
+    )[0]
+    default = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert tuned.text_font_size_to_bbox_ratio == 0.72
+    assert default.text_font_size_to_bbox_ratio == 0.80
+
+    print("test_pdf_dual_text_bbox_ratio_can_be_profile_tuned PASSED")
+
+
+def test_pdf_dual_text_layer_splits_inline_formula_as_atomic_span():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    formula = "$ GGF_{it}^{Post-short} $"
+    line = Line(text=f"甲{formula}乙", confidence=0.9, bbox=BBox(10, 20, 160, 30), chars=[
+        Char(char="甲", confidence=0.9, bbox=BBox(10, 20, 20, 30), bbox_source="ocr", bbox_granularity="char"),
+        Char(
+            char=formula,
+            confidence=1.0,
+            bbox=BBox(35, 18, 90, 36),
+            bbox_source="paddle_inline_formula",
+            bbox_granularity="formula",
+            token_text=formula,
+        ),
+        Char(char="乙", confidence=0.9, bbox=BBox(130, 20, 20, 30), bbox_source="ocr", bbox_granularity="char"),
+    ])
+    page = Page(image_path="/tmp/pdf-inline-formula-split.png", width=220, height=120, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 160, 40), lines=[line]),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfFormulaSplit", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["甲", formula, "乙"]
+    assert plan.text_spans[1].items[0].bbox_source == "paddle_inline_formula"
+    assert plan.text_spans[1].items[0].bbox_granularity == "formula"
+
+    print("test_pdf_dual_text_layer_splits_inline_formula_as_atomic_span PASSED")
+
+
+def test_pdf_dual_skips_duplicate_inline_formula_equation_element():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    formula = "$ A $"
+    formula_bbox = BBox(30, 18, 50, 24)
+    text_line = Line(text=f"甲{formula}乙", confidence=0.9, bbox=BBox(10, 20, 120, 24), chars=[
+        Char(char="甲", confidence=0.9, bbox=BBox(10, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+        Char(
+            char=formula,
+            confidence=1.0,
+            bbox=formula_bbox,
+            bbox_source="paddle_inline_formula",
+            bbox_granularity="formula",
+            token_text=formula,
+        ),
+        Char(char="乙", confidence=0.9, bbox=BBox(85, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+    ])
+    duplicate_formula_line = Line(
+        text="$$ A $$ $$ A $$",
+        confidence=1.0,
+        bbox=formula_bbox,
+    )
+    page = Page(image_path="/tmp/pdf-inline-formula-dedupe.png", width=180, height=120, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 18, 120, 30), order=0, lines=[text_line]),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=formula_bbox,
+            order=1,
+            lines=[duplicate_formula_line],
+            source_label="inline_formula",
+            raw_payload={"block_label": "inline_formula"},
+        ),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfFormulaDedupe", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["甲", formula, "乙"]
+    assert [item.text for item in plan.text_items].count(formula) == 1
+    assert all(item.text != "$$ A $$ $$ A $$" for item in plan.text_items)
+
+    print("test_pdf_dual_skips_duplicate_inline_formula_equation_element PASSED")
+
+
+def test_pdf_dual_equation_text_collapses_identical_formula_repeat():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/pdf-equation-collapse-repeat.png", width=180, height=120, blocks=[
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(20, 30, 100, 30),
+            order=0,
+            lines=[Line(text="$$ A $$ $$ A $$", confidence=1.0, bbox=BBox(20, 30, 100, 30))],
+            source_label="display_formula",
+            raw_payload={"block_label": "display_formula"},
+        ),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfEquationCollapse", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["$$ A $$"]
+    assert [item.text for item in plan.text_items] == ["$$ A $$"]
+
+    print("test_pdf_dual_equation_text_collapses_identical_formula_repeat PASSED")
+
+
+def test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    formula = "$ A $"
+    bbox = BBox(30, 18, 50, 24)
+    inline_line = Line(text=f"甲{formula}乙", confidence=0.9, bbox=BBox(10, 20, 120, 24), chars=[
+        Char(char="甲", confidence=0.9, bbox=BBox(10, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+        Char(
+            char=formula,
+            confidence=1.0,
+            bbox=bbox,
+            bbox_source="paddle_inline_formula",
+            bbox_granularity="formula",
+            token_text=formula,
+        ),
+        Char(char="乙", confidence=0.9, bbox=BBox(85, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+    ])
+    display_formula = "$$ B $$"
+    page = Page(image_path="/tmp/pdf-display-formula-overlap.png", width=180, height=120, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 18, 120, 30), order=0, lines=[inline_line]),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=bbox,
+            order=1,
+            lines=[Line(text=display_formula, confidence=1.0, bbox=bbox)],
+            source_label="display_formula",
+            raw_payload={"block_label": "display_formula"},
+        ),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfDisplayFormulaOverlap", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["甲", formula, "乙", display_formula]
+
+    print("test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox PASSED")
+
+
+def test_pdf_dual_table_text_layer_uses_atomic_rows():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    page = Page(image_path="/tmp/pdf-table-rows.png", width=220, height=160, blocks=[
+        Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 140, 70), order=0, lines=[
+            Line(text="A1 B1", confidence=0.9, bbox=BBox(22, 34, 120, 18), chars=[
+                Char(char="A", confidence=0.9, bbox=BBox(22, 34, 12, 18), bbox_source="ocr", bbox_granularity="char"),
+                Char(char="1", confidence=0.9, bbox=BBox(36, 34, 10, 18), bbox_source="ocr", bbox_granularity="char"),
+            ]),
+            Line(text="A2 B2", confidence=0.9, bbox=BBox(22, 62, 120, 18), chars=[
+                Char(char="A", confidence=0.9, bbox=BBox(22, 62, 12, 18), bbox_source="ocr", bbox_granularity="char"),
+                Char(char="2", confidence=0.9, bbox=BBox(36, 62, 10, 18), bbox_source="ocr", bbox_granularity="char"),
+            ]),
+        ]),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfTableRows", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["A1 B1", "A2 B2"]
+    assert [item.text for item in plan.text_items] == ["A1 B1", "A2 B2"]
+    assert all(len(span.items) == 1 for span in plan.text_spans)
+    assert all(span.items[0].bbox_source == "export_table" for span in plan.text_spans)
+    assert all(span.items[0].bbox_granularity == "table_row" for span in plan.text_spans)
+
+    print("test_pdf_dual_table_text_layer_uses_atomic_rows PASSED")
+
+
+def test_pdf_dual_html_table_text_layer_splits_cells_without_tags():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    html = (
+        '<table><tr><td rowspan="2">变量</td><td>(1)</td><td>(2)</td></tr>'
+        '<tr><td>固定资产投资</td><td>生产性支出占比</td></tr>'
+        '<tr><td>Incentive $ \\times $Post</td><td>$ 0.522^{{***}} $</td><td>(0.139)</td></tr></table>'
+    )
+    page = Page(image_path="/tmp/pdf-table-html.png", width=260, height=180, blocks=[
+        Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 180, 90), order=0, lines=[
+            Line(text=html, confidence=0.9, bbox=BBox(20, 30, 180, 90)),
+        ]),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfHtmlTableRows", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == [
+        "变量",
+        "(1)",
+        "(2)",
+        "固定资产投资",
+        "生产性支出占比",
+        "Incentive $ \\times $Post",
+        "$ 0.522^{{***}} $",
+        "(0.139)",
+    ]
+    assert all("<" not in span.text and ">" not in span.text for span in plan.text_spans)
+    assert [span.items[0].bbox_granularity for span in plan.text_spans] == [
+        "table_cell",
+        "table_cell",
+        "table_cell",
+        "table_cell",
+        "table_cell",
+        "table_cell",
+        "table_formula_cell",
+        "table_cell",
+    ]
+    assert round(plan.text_spans[0].h, 2) == round((90 / 3 * 2) * 72 / 100, 2)
+    assert round(plan.text_spans[1].w, 2) == round((180 / 3) * 72 / 100, 2)
+
+    print("test_pdf_dual_html_table_text_layer_splits_cells_without_tags PASSED")
+
+
+def test_pdf_dual_generated_table_rows_stay_inside_table_lines():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (300, 200), "white").save(image_path)
+        project = OcrProject(name="PdfTableBBox", pages=[
+            Page(image_path=image_path, width=300, height=200, blocks=[
+                Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 180, 80), order=0, lines=[
+                    Line(text="A1 B1", confidence=1.0, bbox=BBox(55, 60, 160, 20)),
+                    Line(text="A2 B2", confidence=1.0, bbox=BBox(55, 95, 160, 20)),
+                ]),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            scale = 72 / 300
+            first_rect = page.search_for("A1 B1")[0]
+            second_rect = page.search_for("A2 B2")[0]
+            assert abs(first_rect.x0 - 55 * scale) < 0.5
+            assert abs(first_rect.x1 - (55 + 160) * scale) < 1.0
+            assert abs(second_rect.x0 - 55 * scale) < 0.5
+            assert abs(second_rect.x1 - (55 + 160) * scale) < 1.0
+            assert first_rect.y1 < second_rect.y0
+            assert abs(first_rect.y0 - 60 * scale) < 0.6
+            assert abs(second_rect.y0 - 95 * scale) < 0.6
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_generated_table_rows_stay_inside_table_lines PASSED")
+
+
+def test_pdf_dual_generated_html_table_cells_stay_inside_cells():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    html = (
+        '<table><tr><td rowspan="2">变量</td><td>(1)</td><td>(2)</td></tr>'
+        '<tr><td>固定资产投资</td><td>生产性支出占比</td></tr>'
+        '<tr><td>R</td><td>$ 0.522^{{***}} $</td><td>(0.139)</td></tr></table>'
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (320, 180), "white").save(image_path)
+        project = OcrProject(name="PdfHtmlTableCells", pages=[
+            Page(image_path=image_path, width=320, height=180, blocks=[
+                Block(block_type=BlockType.TABLE, bbox=BBox(30, 30, 210, 90), order=0, lines=[
+                    Line(text=html, confidence=1.0, bbox=BBox(30, 30, 210, 90)),
+                ]),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            scale = 72 / 300
+            variable_rect = page.search_for("变量")[0]
+            formula_rect = page.search_for("$ 0.522^{{***}} $")[0]
+
+            assert abs(variable_rect.x0 - 30 * scale) < 0.8
+            assert variable_rect.x1 <= (30 + 70) * scale + 1.0
+            assert variable_rect.y0 >= 30 * scale - 0.8
+            assert variable_rect.y1 <= (30 + 60) * scale + 1.5
+
+            assert formula_rect.x0 >= (30 + 70) * scale - 0.8
+            assert formula_rect.x1 <= (30 + 140) * scale + 1.0
+            assert formula_rect.y0 >= (30 + 60) * scale - 0.8
+            assert formula_rect.y1 <= (30 + 90) * scale + 1.5
+            assert "<table>" not in page.get_text()
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_generated_html_table_cells_stay_inside_cells PASSED")
+
+
+def test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid():
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        image = Image.new("RGB", (700, 320), "white")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        # Deliberately non-uniform columns. Equal grid would place the second
+        # column near x=216; the image cluster is near x=300.
+        for y in (80, 150):
+            for x, text in ((70, "AAA"), (300, "BBB"), (480, "CCC")):
+                draw.text((x, y), text, fill="black", font=font)
+        image.save(image_path)
+
+        html = "<table><tr><td>A</td><td>B</td><td>C</td></tr><tr><td>D</td><td>E</td><td>F</td></tr></table>"
+        page = Page(image_path=image_path, width=700, height=320, blocks=[
+            Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 500, 160), order=0, lines=[
+                Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160)),
+            ]),
+        ])
+
+        document = build_export_ir(OcrProject(name="PdfClusterTable", pages=[page]), "pdf-dual")
+        plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+        spans_by_text = {span.text: span for span in plan.text_spans}
+        second_cell = spans_by_text["B"].items[0]
+        second_row_cell = spans_by_text["E"].items[0]
+        scale = 72 / 100
+
+        assert abs(second_cell.x - 300 * scale) < 2.0
+        assert abs(second_row_cell.x - 300 * scale) < 2.0
+        assert second_cell.w < 40 * scale
+
+    print("test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid PASSED")
+
+
+def test_table_text_layer_service_writes_hidden_cells_for_table_block():
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.table_text_layer_service import TableTextLayerService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        image = Image.new("RGB", (700, 320), "white")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        for y in (80, 150):
+            for x, text in ((70, "AAA"), (300, "BBB"), (480, "CCC")):
+                draw.text((x, y), text, fill="black", font=font)
+        image.save(image_path)
+
+        html = "<table><tr><td>A</td><td>B</td><td>C</td></tr><tr><td>D</td><td>E</td><td>F</td></tr></table>"
+        block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 500, 160), order=0, lines=[
+            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160)),
+        ])
+        page = Page(image_path=image_path, width=700, height=320, blocks=[block])
+
+        updated = TableTextLayerService().enrich_page(page)
+
+        cells = block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY]
+        assert updated == 1
+        assert len(cells) == 6
+        assert cells[1]["text"] == "B"
+        assert cells[1]["bbox_source"] == "image_text_cluster"
+        assert abs(cells[1]["bbox"]["x"] - 300) < 3
+        assert cells[1]["bbox"]["w"] < 40
+
+    print("test_table_text_layer_service_writes_hidden_cells_for_table_block PASSED")
+
+
+def test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference():
+    from PIL import Image
+
+    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        Image.new("RGB", (400, 220), "white").save(image_path)
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        block = Block(block_type=BlockType.TABLE, bbox=BBox(20, 40, 300, 80), order=0, lines=[
+            Line(text=html, confidence=1.0, bbox=BBox(20, 40, 300, 80)),
+        ])
+        block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY] = [
+            {
+                "text": "A",
+                "bbox": {"x": 33, "y": 55, "w": 22, "h": 12},
+                "row": 0,
+                "col": 0,
+                "row_span": 1,
+                "col_span": 1,
+                "bbox_source": "image_text_cluster",
+                "bbox_granularity": "table_cell",
+            },
+            {
+                "text": "B",
+                "bbox": {"x": 260, "y": 55, "w": 20, "h": 12},
+                "row": 0,
+                "col": 1,
+                "row_span": 1,
+                "col_span": 1,
+                "bbox_source": "image_text_cluster",
+                "bbox_granularity": "table_cell",
+            },
+        ]
+        page = Page(image_path=image_path, width=400, height=220, blocks=[block])
+        document = build_export_ir(OcrProject(name="PdfPayloadTable", pages=[page]), "pdf-dual")
+        payload = document.pages[0].elements[0].payload
+        assert payload[TABLE_TEXT_LAYER_CELLS_KEY][1]["bbox"]["x"] == 260
+
+        plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+        spans = {span.text: span for span in plan.text_spans}
+        scale = 72 / 100
+        assert abs(spans["B"].items[0].x - 260 * scale) < 0.1
+        assert spans["B"].items[0].bbox_source == "image_text_cluster"
+
+    print("test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference PASSED")
+
+
+def test_pdf_dual_generated_formula_text_bbox_stays_inside_formula_block():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    formula = "$$ \\begin{aligned} GGF_{it}^{Post-short}+GGF_{it}^{Post-long}=1 \\end{aligned} $$"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (500, 180), "white").save(image_path)
+        project = OcrProject(name="PdfFormulaBBox", pages=[
+            Page(image_path=image_path, width=500, height=180, blocks=[
+                Block(block_type=BlockType.EQUATION, bbox=BBox(100, 60, 180, 40), order=0, lines=[
+                    Line(text=formula, confidence=1.0, bbox=BBox(100, 60, 180, 40)),
+                ]),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            scale = 72 / 300
+            expected_x0 = 100 * scale
+            expected_x1 = (100 + 180) * scale
+            formula_spans = []
+            for block in page.get_text("rawdict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = "".join(char.get("c", "") for char in span.get("chars", []))
+                        if "GGF" in text:
+                            formula_spans.append(span)
+            assert len(formula_spans) == 1
+            x0, _y0, x1, _y1 = formula_spans[0]["bbox"]
+            assert x0 >= expected_x0 - 0.5
+            assert x1 <= expected_x1 + 0.8
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_generated_formula_text_bbox_stays_inside_formula_block PASSED")
+
+
+def test_pdf_dual_generated_pdf_deduplicates_inline_formula_equation_text():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    formula = "$ GGF_{it} $"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (320, 140), "white").save(image_path)
+        text_line = Line(text=f"甲{formula}乙", confidence=0.9, bbox=BBox(20, 40, 220, 30), chars=[
+            Char(char="甲", confidence=0.9, bbox=BBox(20, 42, 24, 26), bbox_source="ocr", bbox_granularity="char"),
+            Char(
+                char=formula,
+                confidence=1.0,
+                bbox=BBox(50, 35, 100, 42),
+                bbox_source="paddle_inline_formula",
+                bbox_granularity="formula",
+                token_text=formula,
+            ),
+            Char(char="乙", confidence=0.9, bbox=BBox(160, 42, 24, 26), bbox_source="ocr", bbox_granularity="char"),
+        ])
+        project = OcrProject(name="PdfFormulaGeneratedDedupe", pages=[
+            Page(image_path=image_path, width=320, height=140, blocks=[
+                Block(block_type=BlockType.TEXT, bbox=BBox(20, 35, 200, 45), order=0, lines=[text_line]),
+                Block(
+                    block_type=BlockType.EQUATION,
+                    bbox=BBox(50, 35, 100, 42),
+                    order=1,
+                    lines=[Line(text="$ GGF_{it} $ $ GGF_{it} $", confidence=1.0, bbox=BBox(50, 35, 100, 42))],
+                    source_label="inline_formula",
+                    raw_payload={"block_label": "inline_formula"},
+                ),
+            ]),
+        ])
+
+        PdfExporter("pdf-dual").export(project, pdf_path)
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            assert len(page.search_for("GGF")) == 1
+            assert len(page.search_for("甲")) == 1
+            assert len(page.search_for("乙")) == 1
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_generated_pdf_deduplicates_inline_formula_equation_text PASSED")
 
 
 def test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error():
@@ -3305,7 +3993,9 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
     app = _get_qapp()
     with tempfile.TemporaryDirectory() as tmpdir:
         image_path = Path(tmpdir) / "page.png"
-        QImage(140, 90, QImage.Format.Format_RGB888).save(str(image_path))
+        image = QImage(140, 90, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
         page = Page(image_path=str(image_path), width=140, height=90)
         page.blocks = [
             Block(block_type=BlockType.EQUATION, bbox=BBox(20, 20, 20, 10), lines=[
@@ -3382,6 +4072,98 @@ def test_layout_panel_draw_inside_text_frame_does_not_merge_parent():
             panel.close()
 
     print("test_layout_panel_draw_inside_text_frame_does_not_merge_parent PASSED")
+
+
+def test_layout_panel_formula_draw_touching_text_frame_stays_separate():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(160, 120, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
+        text_block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(20, 20, 100, 60),
+            lines=[Line(text="abc", confidence=0.9, bbox=BBox(20, 20, 100, 60))],
+            source=BlockSource.AUTO_LAYOUT,
+            order=0,
+        )
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[text_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._new_type_buttons[BlockType.EQUATION].click()
+
+            panel._on_block_created(BBox(55, 22, 20, 12))
+
+            assert len(page.blocks) == 2
+            assert page.blocks[0] is text_block
+            assert page.blocks[0].lines
+            formula = page.blocks[1]
+            assert formula.block_type == BlockType.EQUATION
+            assert formula.source_label == "inline_formula"
+            assert formula.source == BlockSource.MANUAL_DRAW
+            assert formula.note != "manual_draw_merge_requires_ocr_rerun"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_formula_draw_touching_text_frame_stays_separate PASSED")
+
+
+def test_layout_panel_text_draw_does_not_absorb_inline_formula_block():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(160, 120, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
+        formula_block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(50, 40, 20, 12),
+            source=BlockSource.AUTO_LAYOUT,
+            source_label="inline_formula",
+            order=0,
+        )
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[formula_block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._new_type_buttons[BlockType.TEXT].click()
+
+            panel._on_block_created(BBox(45, 36, 40, 20))
+
+            assert len(page.blocks) == 2
+            assert page.blocks[0] is formula_block
+            assert page.blocks[0].block_type == BlockType.EQUATION
+            assert page.blocks[0].source_label == "inline_formula"
+            text_block = page.blocks[1]
+            assert text_block.block_type == BlockType.TEXT
+            assert text_block.source == BlockSource.MANUAL_DRAW
+            assert text_block.note != "manual_draw_merge_requires_ocr_rerun"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_text_draw_does_not_absorb_inline_formula_block PASSED")
 
 
 def test_layout_panel_drawn_block_is_selected_and_type_editable():
@@ -3585,7 +4367,7 @@ def test_layout_panel_readonly_char_boxes_do_not_block_formula_delete():
             formula_item = next(item for item, block in panel._viewer._block_items if block is formula_block)
             assert not bool(char_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
             assert not bool(char_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-            assert formula_item.zValue() > char_item.zValue()
+            assert char_item.zValue() > formula_item.zValue()
 
             formula_item.setSelected(True)
             panel._delete_selected()
@@ -4286,6 +5068,169 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
         panel.close()
 
     print("test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks PASSED")
+
+
+def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.core.block_payload import PADDLE_BINDING_KEY, UI_DELETED_INLINE_FORMULA_KEY
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(220, 80, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
+        parent_record = {
+            "block_label": "text",
+            "block_bbox": [0, 0, 200, 40],
+            "block_content": "甲 $ A $ 乙",
+            ROUTE_SUBBLOCKS_FIELD: [
+                {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+            ],
+            "_layout_line_routes": [
+                {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text", "bbox": [0, 0, 200, 40]}]},
+            ],
+        }
+        page = Page(
+            image_path=str(image_path),
+            width=220,
+            height=80,
+            ppvl_parsing_res_list=[parent_record],
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(0, 0, 200, 40),
+                    raw_payload=dict(parent_record),
+                    app_payload={
+                        ROUTE_SUBBLOCKS_FIELD: [dict(parent_record[ROUTE_SUBBLOCKS_FIELD][0])],
+                        "_layout_line_routes": list(parent_record["_layout_line_routes"]),
+                    },
+                )
+            ],
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.show_analysis_result([page])
+            app.processEvents()
+            inline_blocks = [block for block in page.blocks if block.source_label == "inline_formula"]
+            assert len(inline_blocks) == 1
+            inline = inline_blocks[0]
+            assert inline.bbox.to_xyxy() == (40, 0, 70, 30)
+
+            inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
+            panel._on_block_moved(inline)
+            assert page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+
+            # Real resize drags emit several geometry changes. Once the original
+            # Paddle inline formula is marked handled, later drag events must
+            # keep the already-established binding and only update manual_bbox.
+            inline.bbox = BBox.from_xyxy(50, 0, 80, 30)
+            panel._on_block_moved(inline)
+            panel._refresh_current_page_layers()
+            app.processEvents()
+
+            inline_blocks = [block for block in page.blocks if block.source_label == "inline_formula"]
+            assert len(inline_blocks) == 1
+            assert inline_blocks[0] is inline
+            assert inline.bbox.to_xyxy() == (50, 0, 80, 30)
+            assert inline.source.value == "user_edited"
+            assert inline.app_payload[PADDLE_BINDING_KEY]["manual_bbox"] == [50, 0, 80, 30]
+            assert page.ppvl_parsing_res_list[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+
+            ocr_blocks = _page_blocks_from_layout(page)
+            subblocks = ocr_blocks[0][ROUTE_SUBBLOCKS_FIELD]
+            assert [sub["block_bbox"] for sub in subblocks] == [[50, 0, 80, 30]]
+        finally:
+            panel.close()
+
+    print("test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry PASSED")
+
+
+def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockType, Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(240, 80, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
+        parent_record = {
+            "block_label": "text",
+            "block_bbox": [0, 0, 220, 40],
+            "block_content": "甲0， $ A $ 乙",
+            ROUTE_SUBBLOCKS_FIELD: [
+                {"block_label": "inline_formula", "block_bbox": [40, 0, 120, 30]},
+            ],
+            "_layout_line_routes": [
+                {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text", "bbox": [0, 0, 220, 40]}]},
+            ],
+        }
+        page = Page(
+            image_path=str(image_path),
+            width=240,
+            height=80,
+            ppvl_parsing_res_list=[parent_record],
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox.from_xyxy(0, 0, 220, 40),
+                    raw_payload=dict(parent_record),
+                    app_payload={
+                        ROUTE_SUBBLOCKS_FIELD: [dict(parent_record[ROUTE_SUBBLOCKS_FIELD][0])],
+                        "_layout_line_routes": list(parent_record["_layout_line_routes"]),
+                    },
+                )
+            ],
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.show_analysis_result([page])
+            app.processEvents()
+            inline = next(block for block in page.blocks if block.source_label == "inline_formula")
+            assert inline.bbox.to_xyxy() == (40, 0, 120, 30)
+
+            inline.bbox = BBox.from_xyxy(80, 0, 120, 30)
+            panel._on_block_moved(inline)
+
+            ocr_blocks = _page_blocks_from_layout(page)
+            parent = ocr_blocks[0]
+            assert [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]] == [[80, 0, 120, 30]]
+
+            routes = line_routes_for_block(parent, 240, 80)
+            formula_segments = [
+                segment
+                for route in routes
+                for segment in route["segments"]
+                if segment["kind"] == "formula"
+            ]
+            assert [segment["bbox"] for segment in formula_segments] == [[80, 0, 120, 30]]
+            assert [route["bbox"] for route in text_slice_routes_for_block(parent, 240, 80)] == [
+                [0, 0, 80, 30],
+                [120, 0, 220, 30],
+            ]
+        finally:
+            panel.close()
+
+    print("test_layout_panel_corrected_inline_formula_releases_covered_text_slice PASSED")
 
 
 def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169():
@@ -5577,6 +6522,57 @@ def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
     print("test_page_ocr_nested_equation_blocks_before_parent_text_assignment PASSED")
 
 
+def test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block():
+    import numpy as np
+
+    from app.core.ocr_line_hints import is_ppocr_page_line_hint
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.ocr_pipeline import OcrPipeline
+
+    class FakePrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return [
+                Line(
+                    text="PP-OCRv5 hint text is ignored",
+                    confidence=0.95,
+                    bbox=BBox.from_xyxy(0, 10, 180, 40),
+                )
+            ]
+
+    text = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 190, 50), order=0)
+    equation = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(50, 10, 130, 40),
+        order=1,
+        recognizable=True,
+    )
+    page = Page(
+        image_path="/tmp/hybrid-prepass-hint.png",
+        width=200,
+        height=80,
+        blocks=[text, equation],
+    )
+
+    OcrPipeline()._process_page_with_page_ocr(
+        np.ones((80, 200, 3), dtype=np.uint8) * 255,
+        page,
+        0,
+        engine=FakePrepassEngine(),
+        mark_page_line_hints=True,
+    )
+
+    assert len(text.lines) == 1
+    assert text.lines[0].bbox == BBox.from_xyxy(0, 10, 180, 40)
+    assert is_ppocr_page_line_hint(text.lines[0]) is True
+    assert equation.lines == []
+    assert len(page.blocks) == 2
+
+    print("test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block PASSED")
+
+
 def test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable():
     import tempfile
     import cv2
@@ -5717,7 +6713,7 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
 
     def fake_recog_batch(images_bgr, *, with_charrcg=True, timeout=0, **_kwargs):
         batch_shapes.extend(tuple(image.shape[:2]) for image in images_bgr)
-        assert batch_shapes == [(40, 100), (40, 140)]
+        assert batch_shapes == [(56, 112), (56, 152)]
         return [
             {"lines": [{"groups": [{
                 "bbox": {"left": 0, "top": 0, "right": 100, "bottom": 40},
@@ -5760,22 +6756,22 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
         assert [row.source for row in rows] == ["hanwang", "ppvl", "hanwang"]
         assert rows[0].text == "天地"
         assert rows[0].lines[0].chars[0].text == "天"
-        assert rows[0].lines[0].chars[0].bbox == (12, 22, 35, 58)
+        assert rows[0].lines[0].chars[0].bbox == (6, 14, 29, 50)
         assert rows[1].text == "$$x+y$$"
         assert rows[2].text == "短"
         assert rows[2].fallback_reason == ""
         assert stats.n_blocks_hanwang == 2
         assert stats.n_blocks_ppvl == 1
         assert stats.n_blocks_fallback == 0
-        assert batch_shapes == [(40, 100), (40, 140)]
+        assert batch_shapes == [(56, 112), (56, 152)]
         assert stats.recog_full_page_pixels == 220 * 240 * 2
-        assert stats.recog_crop_pixels == 40 * 100 + 40 * 140
+        assert stats.recog_crop_pixels == 56 * 112 + 56 * 152
         assert stats.recog_probe_calls == 1
         assert stats.recog_batch_chunks == 1
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
-        assert stats.recog_max_batch_crop_width == 140
-        assert stats.recog_max_batch_crop_height == 40
+        assert stats.recog_max_batch_crop_width == 152
+        assert stats.recog_max_batch_crop_height == 56
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -5914,8 +6910,8 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
     assert parent["block_content"] == "甲 $ A $ 乙 $ B $ 丙"
     assert "_layout_line_routes" not in parent
     assert [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]] == [
-        [40, 0, 70, 40],
-        [110, 0, 140, 40],
+        [40, 0, 70, 30],
+        [110, 0, 140, 30],
     ]
 
     routes = line_routes_for_block(parent, 220, 60)
@@ -5925,14 +6921,342 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
         for segment in route["segments"]
         if segment["kind"] == "formula"
     ]
-    assert [segment["text"] for segment in formula_segments] == ["$ A $", "$ B $"]
+    assert [segment["text"] for segment in formula_segments] == ["", "$ B $"]
+    assert [segment["bbox"] for segment in formula_segments] == [
+        [40, 0, 70, 30],
+        [110, 0, 140, 30],
+    ]
     assert [route["bbox"] for route in text_slice_routes_for_block(parent, 220, 60)] == [
-        [0, 0, 40, 40],
-        [70, 0, 110, 40],
-        [140, 0, 200, 40],
+        [0, 0, 40, 30],
+        [70, 0, 110, 30],
+        [140, 0, 200, 30],
     ]
 
     print("test_hanwang_layout_injects_manual_formula_binding_into_parent_route PASSED")
+
+
+def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route():
+    from app.core.paddle_artifact_index import BINDING_GEOMETRY_HIT
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
+    page = Page(
+        image_path="/tmp/manual-formula-sibling-route.png",
+        width=2200,
+        height=900,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [200, 550, 2050, 850],
+                "block_content": parent_text,
+            },
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(200, 550, 2050, 850),
+                lines=[Line(text="stale", confidence=0.0, bbox=BBox.from_xyxy(200, 550, 2050, 620))],
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [200, 550, 2050, 850],
+                    "block_content": parent_text,
+                },
+                app_payload={
+                    ROUTE_SUBBLOCKS_FIELD: [
+                        {
+                            "block_label": "inline_formula",
+                            "block_bbox": [445, 556, 653, 620],
+                            "block_content": "$ GGF_{it}^{Post-short} $",
+                            "_layout_manual_route_subblock": True,
+                        },
+                        {
+                            "block_label": "inline_formula",
+                            "block_bbox": [1242, 562, 1453, 620],
+                        },
+                        {
+                            "block_label": "inline_formula",
+                            "block_bbox": [686, 565, 884, 614],
+                            "_layout_manual_route_subblock": True,
+                            "_layout_manual_unbound_route_subblock": True,
+                        },
+                    ],
+                },
+            ),
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(445, 556, 653, 620),
+                source=BlockSource.USER_EDITED,
+                source_label="inline_formula",
+                app_payload={
+                    "paddle_binding": {
+                        "status": BINDING_GEOMETRY_HIT,
+                        "block_type": "equation",
+                        "source_label": "inline_formula",
+                        "text": "$ GGF_{it}^{Post-short} $",
+                        "parent_index": 0,
+                        "candidate_bbox": [445, 556, 884, 620],
+                        "manual_bbox": [445, 556, 653, 620],
+                    },
+                },
+            ),
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(686, 565, 884, 614),
+                source=BlockSource.USER_EDITED,
+                source_label="inline_formula",
+            ),
+        ],
+    )
+
+    parent = _page_blocks_from_layout(page)[0]
+    sub_bboxes = [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]]
+    manual_left = next(sub for sub in parent[ROUTE_SUBBLOCKS_FIELD] if sub["block_bbox"] == [445, 556, 653, 620])
+
+    assert sub_bboxes.count([445, 556, 653, 620]) == 1
+    assert [686, 565, 884, 614] in sub_bboxes
+    assert manual_left["block_content"] == ""
+    assert manual_left["_layout_manual_binding_text_stale"] is True
+
+    formula_segments = [
+        segment
+        for route in line_routes_for_block(parent, page.width, page.height)
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+
+    assert [segment["bbox"] for segment in formula_segments] == [
+        [445, 556, 653, 620],
+        [686, 565, 884, 614],
+        [1242, 562, 1453, 620],
+    ]
+    assert [segment["text"] for segment in formula_segments] == ["", "", ""]
+
+    print("test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route PASSED")
+
+
+def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
+    from app.core.paddle_artifact_index import BINDING_AMBIGUOUS, BINDING_GEOMETRY_HIT
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockSource, BlockType, Page
+
+    parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
+    parent_record = {
+        "block_label": "text",
+        "block_bbox": [200, 550, 2050, 850],
+        "block_content": parent_text,
+    }
+    page = Page(
+        image_path="/tmp/manual-formula-parent-steal.png",
+        width=2200,
+        height=900,
+        ppvl_parsing_res_list=[parent_record],
+        blocks=[
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(680, 562, 883, 613),
+                source=BlockSource.USER_EDITED,
+                source_label="inline_formula",
+                app_payload={
+                    "paddle_binding": {
+                        "status": BINDING_AMBIGUOUS,
+                        "block_type": "equation",
+                        "source_label": "inline_formula",
+                        "parent_index": 0,
+                        "manual_bbox": [680, 562, 883, 613],
+                    },
+                },
+            ),
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(200, 550, 2050, 850),
+                raw_payload=dict(parent_record),
+                app_payload={
+                    ROUTE_SUBBLOCKS_FIELD: [
+                        {"block_label": "inline_formula", "block_bbox": [445, 556, 884, 620]},
+                        {"block_label": "inline_formula", "block_bbox": [1242, 562, 1453, 620]},
+                    ],
+                },
+            ),
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(444, 556, 653, 620),
+                source=BlockSource.USER_EDITED,
+                source_label="inline_formula",
+                app_payload={
+                    "paddle_binding": {
+                        "status": BINDING_GEOMETRY_HIT,
+                        "block_type": "equation",
+                        "source_label": "inline_formula",
+                        "text": "$ GGF_{it}^{Post-short} $",
+                        "parent_index": 0,
+                        "candidate_index": 0,
+                        "candidate_bbox": [445, 556, 884, 620],
+                        "manual_bbox": [444, 556, 653, 620],
+                    },
+                },
+            ),
+        ],
+    )
+
+    parent = _page_blocks_from_layout(page)[0]
+    sub_bboxes = [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]]
+
+    assert [445, 556, 884, 620] not in sub_bboxes
+    assert [444, 556, 653, 620] in sub_bboxes
+    assert [680, 562, 883, 613] in sub_bboxes
+    formula_segments = [
+        segment
+        for route in line_routes_for_block(parent, page.width, page.height)
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    assert [segment["bbox"] for segment in formula_segments] == [
+        [444, 556, 653, 620],
+        [680, 562, 883, 613],
+        [1242, 562, 1453, 620],
+    ]
+    assert [segment["text"] for segment in formula_segments] == ["", "", ""]
+
+    print("test_hanwang_manual_formula_child_cannot_steal_parent_route_index PASSED")
+
+
+def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockType, Line, Page
+
+    page = Page(
+        image_path="/tmp/raw-parent-formula-text.png",
+        width=260,
+        height=80,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 240, 40],
+                "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                ROUTE_SUBBLOCKS_FIELD: [
+                    {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+                    {"block_label": "inline_formula", "block_bbox": [120, 0, 150, 30]},
+                ],
+            },
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 240, 40),
+                lines=[
+                    Line(
+                        text="甲乙丙",
+                        confidence=0.9,
+                        bbox=BBox.from_xyxy(0, 0, 240, 40),
+                    )
+                ],
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 240, 40],
+                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                },
+                app_payload={
+                    ROUTE_SUBBLOCKS_FIELD: [
+                        {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+                        {"block_label": "inline_formula", "block_bbox": [120, 0, 150, 30]},
+                    ],
+                },
+            ),
+        ],
+    )
+
+    parent = _page_blocks_from_layout(page)[0]
+    assert parent["block_content"] == "甲 $ A $ 乙 $ B $ 丙"
+
+    formula_segments = [
+        segment
+        for route in line_routes_for_block(parent, page.width, page.height)
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+
+    assert [segment["text"] for segment in formula_segments] == ["$ A $", "$ B $"]
+
+    print("test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text PASSED")
+
+
+def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    parent_record = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 40],
+        "block_content": "甲 $ A $ 乙 $ B $ 丙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+        ],
+        "_layout_line_routes": [
+            {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text", "bbox": [0, 0, 220, 40]}]},
+        ],
+    }
+    page = Page(
+        image_path="/tmp/manual-unbound-route.png",
+        width=240,
+        height=60,
+        ppvl_parsing_res_list=[dict(parent_record)],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 220, 40),
+                lines=[Line(text="bad active ocr", confidence=0.0, bbox=BBox.from_xyxy(0, 0, 220, 40))],
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 220, 40],
+                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                },
+                app_payload={
+                    ROUTE_SUBBLOCKS_FIELD: list(parent_record[ROUTE_SUBBLOCKS_FIELD]),
+                    "_layout_line_routes": list(parent_record["_layout_line_routes"]),
+                },
+            ),
+            Block(
+                block_type=BlockType.EQUATION,
+                bbox=BBox.from_xyxy(150, 0, 180, 30),
+                source=BlockSource.MANUAL_DRAW,
+                source_label="inline_formula",
+            ),
+        ],
+    )
+
+    blocks = _page_blocks_from_layout(page)
+    assert len(blocks) == 1
+    parent = blocks[0]
+    assert "_layout_line_routes" not in parent
+    assert [sub["block_bbox"] for sub in parent[ROUTE_SUBBLOCKS_FIELD]] == [
+        [40, 0, 70, 30],
+        [150, 0, 180, 30],
+    ]
+    assert parent[ROUTE_SUBBLOCKS_FIELD][1]["_layout_manual_unbound_route_subblock"] is True
+
+    routes = line_routes_for_block(parent, 240, 60)
+    formula_segments = [
+        segment
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
+    ]
+    assert [segment["bbox"] for segment in formula_segments] == [
+        [40, 0, 70, 30],
+        [150, 0, 180, 30],
+    ]
+    assert [route["bbox"] for route in text_slice_routes_for_block(parent, 240, 60)] == [
+        [0, 0, 40, 30],
+        [70, 0, 150, 30],
+        [180, 0, 220, 30],
+    ]
+
+    print("test_hanwang_layout_injects_unbound_manual_formula_into_parent_route PASSED")
 
 
 def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
@@ -6032,6 +7356,219 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     print("test_hanwang_recognize_preserves_parent_bound_manual_formula_block PASSED")
 
 
+def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+    from app.core.paddle_artifact_index import BINDING_FORMULA_CROP_OCR, BINDING_GEOMETRY_HIT
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    captured = {}
+
+    class FakeFormulaClient:
+        def __init__(self):
+            self.calls = 0
+
+        def analyze_image_bytes(self, image_bytes, *, optional_payload=None, batch_id="", filename="page.png"):
+            self.calls += 1
+            assert image_bytes
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "block_label": "inline_formula",
+                            "block_content": "$ B_{new} $",
+                            "block_bbox": [24, 24, 70, 72],
+                        }
+                    ]
+                }
+            }
+
+    def fake_runner(
+        image_bgr,
+        ppvl_blocks,
+        *,
+        seg_timeout=0,
+        recog_timeout=0,
+        include_chars=True,
+        page_ocr_lines=None,
+        progress_callback=None,
+    ):
+        captured["blocks"] = ppvl_blocks
+        return [
+            micro_module.BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 200, 40),
+                source="hanwang",
+                text="甲乙",
+                ppvl_text="甲 $ B $ 乙",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[
+                    micro_module.LineResult(
+                        text="甲乙",
+                        bbox=(0, 0, 200, 40),
+                        confidence=0.9,
+                    )
+                ],
+            )
+        ], micro_module.RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    formula = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(110, 0, 140, 30),
+        source=BlockSource.USER_EDITED,
+        source_label="inline_formula",
+        lines=[Line(text="$ B_{old} $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
+        app_payload={
+            "paddle_binding": {
+                "status": BINDING_GEOMETRY_HIT,
+                "block_type": "equation",
+                "source_label": "inline_formula",
+                "text": "$ B_{old} $",
+                "parent_index": 0,
+                "candidate_bbox": [100, 0, 150, 30],
+                "manual_bbox": [110, 0, 140, 30],
+            },
+            "ocr_text_invalidated": True,
+        },
+    )
+    page = Page(
+        image_path="/tmp/manual-formula-crop-ocr.png",
+        width=220,
+        height=60,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 200, 40],
+                "block_content": "甲 $ B $ 乙",
+                ROUTE_SUBBLOCKS_FIELD: [],
+            }
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 200, 40),
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 200, 40],
+                    "block_content": "甲 $ B $ 乙",
+                },
+            ),
+            formula,
+        ],
+    )
+
+    client = FakeFormulaClient()
+    micro_module.HanwangMicroRecBlockEngine(
+        runner=fake_runner,
+        formula_rebind_client=client,
+    ).recognize_page_blocks(
+        np.zeros((60, 220, 3), dtype=np.uint8),
+        page,
+    )
+
+    assert client.calls == 1
+    subblocks = captured["blocks"][0][ROUTE_SUBBLOCKS_FIELD]
+    assert subblocks[0]["block_bbox"] == [110, 0, 140, 30]
+    assert subblocks[0]["block_content"] == "$ B_{new} $"
+    assert formula.lines[0].text == "$ B_{new} $"
+    assert formula.app_payload["paddle_binding"]["status"] == BINDING_FORMULA_CROP_OCR
+    assert formula.app_payload["paddle_binding"]["text"] == "$ B_{new} $"
+
+    print("test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr PASSED")
+
+
+def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+
+    captured = {}
+    manual_formula = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(150, 0, 180, 30),
+        source=BlockSource.MANUAL_DRAW,
+        source_label="inline_formula",
+    )
+
+    def fake_runner(
+        image_bgr,
+        ppvl_blocks,
+        *,
+        seg_timeout=0,
+        recog_timeout=0,
+        include_chars=True,
+        page_ocr_lines=None,
+        progress_callback=None,
+    ):
+        captured["blocks"] = ppvl_blocks
+        return [
+            micro_module.BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 220, 40),
+                source="hanwang",
+                text="甲乙丙",
+                ppvl_text="甲 $ A $ 乙 $ B $ 丙",
+                raw_block=dict(ppvl_blocks[0]),
+                lines=[
+                    micro_module.LineResult(
+                        text="甲乙丙",
+                        bbox=(0, 0, 220, 40),
+                        confidence=0.9,
+                    )
+                ],
+            )
+        ], micro_module.RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    page = Page(
+        image_path="/tmp/manual-unbound-preserve.png",
+        width=240,
+        height=60,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 220, 40],
+                "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                ROUTE_SUBBLOCKS_FIELD: [
+                    {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+                ],
+            }
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 220, 40),
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 220, 40],
+                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
+                },
+            ),
+            manual_formula,
+        ],
+    )
+
+    micro_module.HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
+        np.zeros((60, 240, 3), dtype=np.uint8),
+        page,
+    )
+
+    assert len(captured["blocks"]) == 1
+    assert [sub["block_bbox"] for sub in captured["blocks"][0][ROUTE_SUBBLOCKS_FIELD]] == [
+        [40, 0, 70, 30],
+        [150, 0, 180, 30],
+    ]
+    assert [block.block_type for block in page.blocks] == [BlockType.TEXT, BlockType.EQUATION]
+    assert page.blocks[1] is manual_formula
+    assert page.blocks[1].source == BlockSource.MANUAL_DRAW
+    assert page.blocks[1].source_label == "inline_formula"
+
+    print("test_hanwang_recognize_preserves_parent_unbound_manual_formula_block PASSED")
+
+
 def test_hanwang_inline_formula_text_slices_keep_chars():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -6063,31 +7600,41 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
         with_charrcg=True,
         timeout=0,
     ):
-        text_by_shape = {
-            (72, 32): "甲甲",
-            (104, 32): "乙乙。",
-            (42, 34): "丙",
-            (54, 34): "丁",
-            (34, 34): "戊",
+        chars_by_crop = {
+            (78, 40): [
+                ("甲", (0, 0, 20, 30)),
+                ("甲", (24, 0, 44, 30)),
+            ],
+            (116, 40): [
+                ("乙", (10, 0, 30, 30)),
+                ("乙", (34, 0, 54, 30)),
+                ("。", (86, 18, 96, 30)),
+            ],
+            (48, 50): [
+                ("丙", (0, 10, 20, 40)),
+            ],
+            (66, 50): [
+                ("丁", (10, 10, 30, 40)),
+            ],
+            (46, 50): [
+                ("戊", (10, 10, 30, 40)),
+            ],
         }
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
         lines = []
         for x1, y1, x2, y2 in blocks:
-            text = text_by_shape.get((x2 - x1, y2 - y1), "")
-            if not text:
+            specs = chars_by_crop.get((x2 - x1, y2 - y1), [])
+            if not specs:
                 continue
-            char_width = max(1, (x2 - x1) // max(1, len(text)))
             chars = []
-            for idx, ch in enumerate(text):
-                left = x1 + idx * char_width
-                right = x2 if idx == len(text) - 1 else min(x2, left + char_width)
+            for ch, (left, top, right, bottom) in specs:
                 chars.append({
                     "codes": [code(ch)],
                     "scores": [5],
-                    "bbox": {"left": left, "top": y1, "right": right, "bottom": y2},
+                    "bbox": {"left": left, "top": top, "right": right, "bottom": bottom},
                 })
             lines.append({"groups": [{
-                "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                "bbox": {"left": 0, "top": 0, "right": x2 - x1, "bottom": y2 - y1},
                 "chars": chars,
             }]})
         return {
@@ -6096,8 +7643,10 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
         blocks = [{
@@ -6184,6 +7733,7 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
 
     print("test_hanwang_inline_formula_text_slices_keep_chars PASSED")
 
@@ -6640,6 +8190,87 @@ def test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span():
     print("test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span PASSED")
 
 
+def test_hanwang_latin_engcut_uses_formula_letter_list_and_low_confidence_fallback():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    chars = [
+        ("自", 0.91, (0, 0, 30, 46)),
+        ("然", 0.92, (45, 0, 89, 45)),
+        ("对", 0.84, (100, 0, 146, 45)),
+        ("数", 0.80, (154, 0, 200, 47)),
+        ("形", 0.93, (208, 0, 252, 45)),
+        ("式", 0.91, (260, 0, 306, 46)),
+        ("，", 0.52, (322, 35, 329, 48)),
+        ("即", 0.82, (346, 0, 385, 44)),
+        ("y", 0.19, (400, 20, 427, 51)),
+        ("、", 0.56, (428, 35, 438, 47)),
+        ("尼", 0.19, (450, 6, 470, 41)),
+        ("、", 0.49, (475, 36, 484, 47)),
+        ("Z", 0.19, (497, 6, 509, 41)),
+        ("、", 0.50, (514, 36, 523, 48)),
+        ("m", 0.19, (536, 21, 569, 42)),
+        ("分", 0.97, (583, 1, 629, 47)),
+        ("别", 0.93, (636, 1, 679, 48)),
+    ]
+    line = micro_module.LineResult(
+        text="自然对数形式，即y、尼、Z、m分别",
+        bbox=(0, 0, 690, 60),
+        chars=[
+            micro_module.CharResult(
+                text=text,
+                confidence=confidence,
+                bbox=bbox,
+                candidates=[text],
+                source="hanwang:micro_recblock",
+                bbox_granularity="char",
+                token_text=text,
+            )
+            for text, confidence, bbox in chars
+        ],
+    )
+
+    def fake_eng20(image_bgr, *, timeout=0):
+        return {
+            "lines": [{
+                "groups": [{
+                    "chars": [
+                        {"codes": [ord("l")], "bbox": {"left": 166, "top": 0, "right": 177, "bottom": 21}},
+                        {"codes": [ord("y")], "bbox": {"left": 400, "top": 20, "right": 427, "bottom": 51}},
+                        {"codes": [ord("k")], "bbox": {"left": 450, "top": 6, "right": 470, "bottom": 41}},
+                        {"codes": [ord("l")], "bbox": {"left": 497, "top": 6, "right": 509, "bottom": 41}},
+                        {"codes": [ord("m")], "bbox": {"left": 536, "top": 21, "right": 569, "bottom": 42}},
+                    ]
+                }]
+            }]
+        }
+
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        stats = micro_module.RunStats()
+        micro_module._enhance_lines_with_latin_engcut(
+            np.zeros((50, 260, 3), dtype=np.uint8),
+            [line],
+            stats,
+            timeout=1.0,
+            block_text="其中，即 $ y, k, l, m $ 分别指企业的产量",
+        )
+
+        assert line.text == "自然对数形式，即y、k、l、m分别"
+        assert line.chars[3].text == "数"
+        assert line.chars[3].source == "hanwang:micro_recblock"
+        assert [char.text for char in line.chars[8:15]] == ["y", "、", "k", "、", "l", "、", "m"]
+        assert line.chars[10].source == "hanwang:EngCut:latin_exact"
+        assert line.chars[12].source == "hanwang:EngCut:latin_exact"
+        assert stats.latin_engcut_probe_calls == 1
+        assert stats.latin_engcut_exact_tokens == 4
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    print("test_hanwang_latin_engcut_uses_formula_letter_list_and_low_confidence_fallback PASSED")
+
+
 def test_hanwang_latin_engcut_marks_slash_variant_for_review_without_text_rewrite():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -6962,6 +8593,13 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
             ]
         }
 
+    chars_by_crop = {
+        (68, 40): [("甲", (0, 10, 20, 30))],
+        (106, 40): [("乙", (10, 10, 30, 30))],
+        (88, 40): [("丙", (0, 10, 20, 30))],
+        (86, 40): [("丁", (12, 10, 32, 30))],
+    }
+
     def fake_recog(
         image_bgr,
         *,
@@ -6970,32 +8608,29 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
         with_charrcg=True,
         timeout=0,
     ):
-        text_by_shape = {
-            (62, 24): "甲",
-            (94, 24): "乙",
-            (82, 24): "丙",
-            (74, 24): "丁",
-        }
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
-        return {
-            "lines": [
-                {"groups": [{
-                    "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
-                    "chars": [{
-                        "codes": [code(text_by_shape[(x2 - x1, y2 - y1)])],
+        result_lines = []
+        for x1, y1, x2, y2 in blocks:
+            specs = chars_by_crop.get((x2 - x1, y2 - y1), [])
+            result_lines.append({"groups": [{
+                "bbox": {"left": 0, "top": 0, "right": x2 - x1, "bottom": y2 - y1},
+                "chars": [
+                    {
+                        "codes": [code(ch)],
                         "scores": [5],
-                        "bbox": {"left": x1, "top": y1, "right": min(x2, x1 + 20), "bottom": y2},
-                    }],
-                }]}
-                for x1, y1, x2, y2 in blocks
-                if (x2 - x1, y2 - y1) in text_by_shape
-            ]
-        }
+                        "bbox": {"left": left, "top": top, "right": right, "bottom": bottom},
+                    }
+                    for ch, (left, top, right, bottom) in specs
+                ],
+            }]})
+        return {"lines": result_lines}
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
         rows, stats = micro_module.run_micro_recblock(
@@ -7029,15 +8664,371 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
             for char in line.chars
             if char.source == "paddle_inline_formula"
         ] == [
-            ("$ A $", (60, 10, 90, 30), "paddle_inline_formula", "word"),
-            ("$ B $", (80, 50, 110, 70), "paddle_inline_formula", "word"),
+            ("$ A $", (60, 0, 90, 40), "paddle_inline_formula", "word"),
+            ("$ B $", (80, 40, 110, 80), "paddle_inline_formula", "word"),
         ]
         assert stats.n_blocks_hanwang == 1
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
 
     print("test_hanwang_pre_page_ocr_lines_split_before_recog PASSED")
+
+
+def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
+    from app.engines.hanwang.micro_recblock import (
+        CharResult,
+        LineResult,
+        _assemble_layout_route_line,
+    )
+
+    route = {
+        "bbox": [0, 0, 130, 50],
+        "segments": [
+            {"kind": "text", "bbox": [0, 0, 40, 50]},
+            {"kind": "formula", "bbox": [40, 0, 80, 50], "text": "$ A $"},
+            {"kind": "text", "bbox": [80, 0, 130, 50]},
+        ],
+    }
+    grouped_lines = {
+        (0, 0, 0): [
+            LineResult(
+                text="甲",
+                bbox=(0, 8, 30, 42),
+                chars=[CharResult(text="甲", confidence=0.9, bbox=(0, 8, 30, 42))],
+            )
+        ],
+        (0, 0, 2): [
+            LineResult(
+                text="，乙",
+                bbox=(78, 10, 120, 40),
+                chars=[
+                    CharResult(text="，", confidence=0.8, bbox=(78, 18, 79, 21)),
+                    CharResult(text="乙", confidence=0.9, bbox=(92, 10, 120, 40)),
+                ],
+            )
+        ],
+    }
+
+    lines = _assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped_lines,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "甲$ A $，乙"
+    comma = lines[0].chars[2]
+    assert comma.text == "，"
+    assert comma.bbox == (80, 10, 92, 40)
+    assert comma.source.endswith(":punct_bbox_recovered")
+
+    print("test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula PASSED")
+
+
+def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
+    from app.engines.hanwang.micro_recblock import (
+        CharResult,
+        LineResult,
+        _assemble_layout_route_line,
+    )
+
+    route = {
+        "bbox": [199, 556, 1453, 620],
+        "segments": [
+            {"kind": "text", "bbox": [199, 556, 445, 620]},
+            {"kind": "formula", "bbox": [445, 556, 884, 620], "text": ""},
+            {"kind": "text", "bbox": [884, 556, 1242, 620]},
+            {"kind": "formula", "bbox": [1242, 562, 1453, 620], "text": ""},
+        ],
+    }
+    grouped_lines = {
+        (0, 0, 0): [
+            LineResult(
+                text="其中，",
+                bbox=(197, 558, 437, 616),
+                chars=[
+                    CharResult(text="其", confidence=0.9, bbox=(197, 563, 240, 609)),
+                    CharResult(text="中", confidence=0.9, bbox=(245, 563, 288, 609)),
+                    CharResult(text="，", confidence=0.8, bbox=(292, 585, 300, 609)),
+                ],
+            )
+        ],
+        (0, 0, 2): [
+            LineResult(
+                text="，均",
+                bbox=(882, 553, 940, 622),
+                chars=[
+                    CharResult(text="，", confidence=0.19, bbox=(875, 563, 876, 566)),
+                    CharResult(text="均", confidence=0.81, bbox=(896, 563, 940, 609)),
+                ],
+            )
+        ],
+    }
+
+    lines = _assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped_lines,
+    )
+
+    assert len(lines) == 1
+    boundary_comma = lines[0].chars[3]
+    assert boundary_comma.text == "，"
+    assert boundary_comma.bbox is None
+    assert boundary_comma.source.endswith(":punct_bbox_dropped_at_route_boundary")
+    assert lines[0].chars[4].text == "均"
+    assert lines[0].chars[4].bbox == (896, 563, 940, 609)
+
+    print("test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise PASSED")
+
+
+def test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    seen_recblocks = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {"lines": [{"groups": []} for _ in (recblocks_xyxy or [])]}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            np.zeros((80, 200, 3), dtype=np.uint8),
+            [
+                {
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 180, 50],
+                    "block_content": "甲 $ A $、$ B $ 乙",
+                    "_route_subblocks": [
+                        {"block_label": "inline_formula", "block_bbox": [40, 0, 82, 40]},
+                        {"block_label": "inline_formula", "block_bbox": [78, 0, 120, 40]},
+                    ],
+                }
+            ],
+            include_chars=True,
+        )
+
+        assert any(left < 82 and right > 78 and right - left >= 16 for left, _top, right, _bottom in seen_recblocks)
+        assert stats.n_blocks_hanwang == 1
+        assert rows[0].source == "hanwang"
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+
+    print("test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg PASSED")
+
+
+def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_recblocks = []
+    recog_texts = iter(["甲", "乙"])
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {
+            "lines": [
+                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                for x1, y1, x2, y2 in (recblocks_xyxy or [])
+            ]
+        }
+
+    def fake_recog(
+        image_bgr,
+        *,
+        recblock_xyxy=None,
+        recblocks_xyxy=None,
+        with_charrcg=True,
+        timeout=0,
+    ):
+        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        result_lines = []
+        for x1, y1, x2, y2 in blocks:
+            text = next(recog_texts)
+            result_lines.append({"groups": [{
+                "bbox": {"left": 0, "top": 0, "right": x2 - x1, "bottom": y2 - y1},
+                "chars": [{
+                    "codes": [code(text)],
+                    "scores": [9],
+                    "bbox": {"left": 5, "top": 5, "right": 25, "bottom": 35},
+                }],
+            }]})
+        return {"lines": result_lines}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
+
+    try:
+        rows, _stats = micro_module.run_micro_recblock(
+            np.zeros((60, 150, 3), dtype=np.uint8),
+            [{
+                "block_label": "text",
+                "block_bbox": [0, 0, 130, 40],
+                "block_content": "甲 $ A $ 乙",
+                "_route_subblocks": [
+                    {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 40]},
+                ],
+                "_layout_line_routes": [
+                    {
+                        "bbox": [80, 0, 130, 40],
+                        "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                    },
+                ],
+            }],
+            page_ocr_lines=[],
+        )
+
+        assert seen_recblocks == [(0, 0, 40, 40), (70, 0, 130, 40)]
+        assert rows[0].text == "甲$ A $乙"
+        assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "$ A $", "乙"]
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+
+    print("test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints PASSED")
+
+
+def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, text_slice_routes_for_block
+    from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
+    from app.models import BBox, Block, BlockType, Page
+
+    page = Page(
+        image_path="",
+        width=150,
+        height=60,
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 130, 40),
+                raw_payload={
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 130, 40],
+                    "block_content": "甲 $ A $ 乙",
+                },
+                app_payload={
+                    "_route_subblocks": [
+                        {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 40]},
+                    ],
+                    LAYOUT_LINE_ROUTES_FIELD: [
+                        {
+                            "bbox": [80, 0, 130, 40],
+                            "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                        },
+                    ],
+                },
+            )
+        ],
+    )
+
+    rows = _page_blocks_from_layout(page)
+
+    assert LAYOUT_LINE_ROUTES_FIELD not in rows[0]
+    assert [route["bbox"] for route in text_slice_routes_for_block(rows[0], 150, 60)] == [
+        [0, 0, 40, 40],
+        [70, 0, 130, 40],
+    ]
+
+    print("test_hanwang_layout_row_ignores_stale_persisted_layout_routes PASSED")
+
+
+def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
+    import numpy as np
+
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
+    from app.engines.hanwang.micro_recblock import (
+        BlockResult,
+        HanwangMicroRecBlockEngine,
+        LineResult,
+    )
+    from app.models import BBox, Block, BlockType, Page
+
+    def fake_runner(image_bgr, ppvl_blocks, **_kwargs):
+        ppvl_blocks[0][LAYOUT_LINE_ROUTES_FIELD] = [
+            {
+                "bbox": [80, 0, 130, 40],
+                "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+            }
+        ]
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 130, 40),
+                layout_bbox=(0, 0, 130, 40),
+                block_bbox_source="layout_block_bbox",
+                source="hanwang",
+                text="甲",
+                ppvl_text="甲 $ A $ 乙",
+                lines=[LineResult(text="甲", bbox=(0, 0, 30, 40), confidence=0.9)],
+                raw_block=dict(ppvl_blocks[0]),
+            )
+        ], micro_module.RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    page = Page(
+        image_path="",
+        width=150,
+        height=60,
+        ppvl_parsing_res_list=[
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 130, 40],
+                "block_content": "甲 $ A $ 乙",
+                LAYOUT_LINE_ROUTES_FIELD: [
+                    {
+                        "bbox": [80, 0, 130, 40],
+                        "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                    }
+                ],
+            }
+        ],
+        blocks=[
+            Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox.from_xyxy(0, 0, 130, 40),
+                raw_payload={"block_label": "text", "block_bbox": [0, 0, 130, 40]},
+                app_payload={
+                    LAYOUT_LINE_ROUTES_FIELD: [
+                        {
+                            "bbox": [80, 0, 130, 40],
+                            "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                        }
+                    ],
+                },
+            )
+        ],
+    )
+
+    HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
+        np.zeros((60, 150, 3), dtype=np.uint8),
+        page,
+    )
+
+    assert LAYOUT_LINE_ROUTES_FIELD not in page.ppvl_parsing_res_list[0]
+    assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].raw_payload
+    assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].app_payload
+
+    print("test_hanwang_page_block_writeback_does_not_persist_layout_line_routes PASSED")
 
 
 def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
@@ -7078,8 +9069,12 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         timeout=0,
     ):
         h, w = image_bgr.shape[:2]
-        text = {42: "甲", 54: "乙"}.get(w, "")
-        if not text:
+        chars_by_crop = {
+            (48, 48): [("甲", (8, 0, 38, 40))],
+            (66, 48): [("乙", (12, 0, 52, 40))],
+        }
+        specs = chars_by_crop.get((w, h), [])
+        if not specs:
             return {"lines": []}
         return {
             "lines": [
@@ -7089,10 +9084,11 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
                             "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
                             "chars": [
                                 {
-                                    "codes": [code(text)],
+                                    "codes": [code(ch)],
                                     "scores": [5],
-                                    "bbox": {"left": 0, "top": 0, "right": w, "bottom": h},
+                                    "bbox": {"left": left, "top": top, "right": right, "bottom": bottom},
                                 }
+                                for ch, (left, top, right, bottom) in specs
                             ],
                         }
                     ]
@@ -7102,8 +9098,10 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
     micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
         rows, stats = micro_module.run_micro_recblock(
@@ -7127,12 +9125,12 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert rows[0].layout_bbox == (0, 0, 120, 40)
         assert rows[0].block_bbox_source == "layout_line_routes_union"
         assert rows[0].route_text_slice_bboxes == [(0, 0, 40, 40), (70, 0, 120, 40)]
-        assert rows[0].recog_group_bboxes == [(0, 0, 42, 40), (68, 0, 122, 40)]
+        assert rows[0].recog_group_bboxes == [(0, 0, 48, 48), (62, 0, 128, 48)]
         assert rows[0].segimg_group_audits == [
             {
                 "route_text_slice_bbox": [0, 0, 40, 40],
                 "segimg_group_bbox": [0, 2, 42, 38],
-                "recog_group_bbox": [0, 0, 42, 40],
+                "recog_group_bbox": [0, 0, 48, 48],
                 "recog_group_bbox_before_padding": [0, 2, 40, 38],
                 "recog_group_bbox_padded": True,
                 "clipped": True,
@@ -7141,7 +9139,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
             {
                 "route_text_slice_bbox": [70, 0, 120, 40],
                 "segimg_group_bbox": [68, 2, 122, 38],
-                "recog_group_bbox": [68, 0, 122, 40],
+                "recog_group_bbox": [62, 0, 128, 48],
                 "recog_group_bbox_before_padding": [70, 2, 120, 38],
                 "recog_group_bbox_padded": True,
                 "clipped": True,
@@ -7156,7 +9154,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert audit["effective_block_bbox_source"] == "layout_line_routes_union"
         assert audit["layout_line_route_bboxes"] == [[0, 0, 120, 40]]
         assert audit["route_text_slice_bboxes"] == [[0, 0, 40, 40], [70, 0, 120, 40]]
-        assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 42, 40], [68, 0, 122, 40]]
+        assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 48, 48], [62, 0, 128, 48]]
         assert audit["hanwang_segimg_group_clipped_count"] == 2
         assert audit["hanwang_segimg_group_dropped_count"] == 0
         assert audit["route_text_slice_count"] == 2
@@ -7164,8 +9162,193 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
 
     print("test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes PASSED")
+
+
+def test_hanwang_micro_recblock_short_chinese_group_keeps_vertical_context():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def code(ch):
+        return int.from_bytes(ch.encode("gbk"), "little")
+
+    seen_crops = []
+
+    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
+        assert recblocks_xyxy == [(1661, 1269, 1773, 1330)]
+        return {
+            "lines": [{
+                "groups": [{
+                    "bbox": {"left": 1663, "top": 1285, "right": 1763, "bottom": 1317}
+                }]
+            }]
+        }
+
+    def fake_recog(image_bgr, **_kwargs):
+        seen_crops.append(tuple(image_bgr.shape[:2]))
+        assert seen_crops[-1] == (52, 116)
+        return {
+            "lines": [{
+                "groups": [{
+                    "bbox": {"left": 0, "top": 0, "right": 116, "bottom": 52},
+                    "chars": [
+                        {
+                            "codes": [code("，")],
+                            "scores": [80],
+                            "bbox": {"left": 0, "top": 35, "right": 4, "bottom": 49},
+                        },
+                        {
+                            "codes": [code("表")],
+                            "scores": [8],
+                            "bbox": {"left": 12, "top": 10, "right": 55, "bottom": 50},
+                        },
+                        {
+                            "codes": [code("示")],
+                            "scores": [8],
+                            "bbox": {"left": 65, "top": 10, "right": 108, "bottom": 50},
+                        },
+                    ],
+                }]
+            }]
+        }
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    original_recog = micro_module.native_bridge.run_linecut_recog
+    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+    micro_module.native_bridge.run_linecut_recog = fake_recog
+    micro_module._BATCH_DISABLED_FOR_SESSION = True
+
+    try:
+        rows, _stats = micro_module.run_micro_recblock(
+            np.zeros((1400, 1900, 3), dtype=np.uint8),
+            [{"block_label": "text", "block_bbox": [1661, 1269, 1773, 1330], "block_content": "表示"}],
+            include_chars=True,
+        )
+
+        assert seen_crops == [(52, 116)]
+        assert rows[0].text == "表示"
+        assert rows[0].recog_group_bboxes == [(1655, 1275, 1771, 1327)]
+        assert [char.text for char in rows[0].lines[0].chars] == ["表", "示"]
+        assert rows[0].lines[0].chars[0].bbox == (1667, 1285, 1710, 1325)
+        assert rows[0].lines[0].chars[1].bbox == (1720, 1285, 1763, 1325)
+        audit = rows[0].raw_block["_hanwang_bbox_audit"]
+        group_audit = audit["hanwang_segimg_groups"][0]
+        assert group_audit["recog_group_bbox_before_padding"] == [1663, 1285, 1763, 1317]
+        assert group_audit["recog_group_bbox"] == [1655, 1275, 1771, 1327]
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+        micro_module.native_bridge.run_linecut_recog = original_recog
+        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
+
+    print("test_hanwang_micro_recblock_short_chinese_group_keeps_vertical_context PASSED")
+
+
+def test_hanwang_digitlike_numeric_context_normalizes_low_confidence_binary_values():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    def char(text, confidence=0.9):
+        return micro_module.CharResult(
+            text=text,
+            confidence=confidence,
+            bbox=(0, 0, 10, 10),
+            candidates=[text],
+            source="hanwang:micro_recblock",
+            bbox_granularity="char",
+            token_text=text,
+        )
+
+    lines = [
+        micro_module.LineResult(
+            text="否则取o；",
+            bbox=(0, 0, 100, 20),
+            chars=[char("否"), char("则"), char("取"), char("o", 0.19), char("；")],
+        ),
+        micro_module.LineResult(
+            text="之后取l，",
+            bbox=(0, 20, 100, 40),
+            chars=[char("之"), char("后"), char("取"), char("l", 0.19), char("，")],
+        ),
+        micro_module.LineResult(
+            text="取open",
+            bbox=(0, 40, 100, 60),
+            chars=[char("取"), char("o", 0.19), char("p"), char("e"), char("n")],
+        ),
+        micro_module.LineResult(
+            text="取o；",
+            bbox=(0, 60, 100, 80),
+            chars=[char("取"), char("o", 0.8), char("；")],
+        ),
+    ]
+
+    micro_module._normalize_digitlike_numeric_context_lines(lines)
+
+    assert lines[0].text == "否则取0；"
+    assert lines[0].chars[3].text == "0"
+    assert lines[0].chars[3].token_text == "0"
+    assert micro_module.DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG in lines[0].review_flags
+    assert lines[1].text == "之后取1，"
+    assert lines[1].chars[3].text == "1"
+    assert lines[2].text == "取open"
+    assert lines[3].text == "取o；"
+
+    print("test_hanwang_digitlike_numeric_context_normalizes_low_confidence_binary_values PASSED")
+
+
+def test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands():
+    import numpy as np
+    import app.engines.hanwang.micro_recblock as micro_module
+    from app.core.paddle_line_routing import PageOcrLineHint
+
+    seen_recblocks = []
+
+    def fake_segimg(_image_bgr, *, recblocks_xyxy=None, timeout=0):
+        seen_recblocks.extend(recblocks_xyxy or [])
+        return {"lines": [{"groups": []} for _ in (recblocks_xyxy or [])]}
+
+    original_segimg = micro_module.native_bridge.run_linecut_segimg
+    micro_module.native_bridge.run_linecut_segimg = fake_segimg
+
+    try:
+        image = np.full((90, 320, 3), 255, dtype=np.uint8)
+        image[12:42, 10:90] = 0
+        image[12:42, 170:290] = 0
+        image[25:70, 105:145] = 0
+        rows, _stats = micro_module.run_micro_recblock(
+            image,
+            [
+                {
+                    "block_label": "text",
+                    "block_bbox": [0, 0, 300, 80],
+                    "block_content": "甲 $ A $ 乙",
+                    "_route_subblocks": [
+                        {"block_label": "inline_formula", "block_bbox": [100, 25, 150, 70]},
+                    ],
+                }
+            ],
+            include_chars=True,
+            page_ocr_lines=[
+                PageOcrLineHint(
+                    text="甲A乙",
+                    bbox=(0, 0, 300, 80),
+                )
+            ],
+        )
+
+        assert seen_recblocks == [
+            (0, 6, 100, 48),
+            (150, 6, 300, 48),
+        ]
+        assert rows[0].route_text_slice_bboxes == [
+            (0, 6, 100, 48),
+            (150, 6, 300, 48),
+        ]
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_segimg
+
+    print("test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands PASSED")
 
 
 def test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback():
@@ -7260,7 +9443,7 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
         calls.append(tuple(image_bgr.shape[:2]))
         if len(calls) == 1:
             raise RuntimeError("native recog access violation")
-        assert calls[-1] == (31, 74)
+        assert calls[-1] == (47, 86)
         return {
             "lines": [
                 {
@@ -7298,10 +9481,10 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
             include_chars=True,
         )
 
-        assert calls == [(34, 74), (31, 74)]
+        assert calls == [(50, 86), (47, 86)]
         assert rows[0].text == "补"
-        assert rows[0].lines[0].bbox == (8, 11, 38, 31)
-        assert rows[0].lines[0].chars[0].bbox == (10, 14, 30, 30)
+        assert rows[0].lines[0].bbox == (2, 3, 32, 23)
+        assert rows[0].lines[0].chars[0].bbox == (4, 6, 24, 22)
         assert stats.recog_probe_calls == 2
         assert stats.recog_group_failures == 0
         assert stats.recog_group_retry_attempts == 1
@@ -7310,10 +9493,10 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
         audit = rows[0].raw_block["_hanwang_bbox_audit"]
         assert audit["hanwang_recog_group_failed_count"] == 0
         group_audit = audit["hanwang_segimg_groups"][0]
-        assert group_audit["recog_group_bbox"] == [8, 8, 82, 42]
+        assert group_audit["recog_group_bbox"] == [2, 0, 88, 50]
         assert group_audit["recog_retry_attempted"] is True
         assert group_audit["recog_retry_succeeded"] is True
-        assert group_audit["recog_retry_bbox"] == [8, 11, 82, 42]
+        assert group_audit["recog_retry_bbox"] == [2, 3, 88, 50]
         assert "native recog access violation" in group_audit["recog_retry_original_error"]
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
@@ -7356,20 +9539,22 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         with_charrcg=True,
         timeout=0,
     ):
-        text_by_shape = {(62, 24): "甲", (94, 24): "乙"}
-        blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
+        crop_h, crop_w = image_bgr.shape[:2]
+        if recblocks_xyxy:
+            blocks = [(x1, y1, x2, y2, "甲" if x2 - x1 <= 70 else "乙") for x1, y1, x2, y2 in recblocks_xyxy]
+        else:
+            blocks = [(0, 0, crop_w, crop_h, "甲" if crop_w <= 70 else "乙")]
         return {
             "lines": [
                 {"groups": [{
-                    "bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2},
+                    "bbox": {"left": 0, "top": 0, "right": x2 - x1, "bottom": y2 - y1},
                     "chars": [{
-                        "codes": [code(text_by_shape[(x2 - x1, y2 - y1)])],
+                        "codes": [code(text)],
                         "scores": [5],
-                        "bbox": {"left": x1, "top": y1, "right": min(x2, x1 + 20), "bottom": y2},
+                        "bbox": {"left": 0, "top": 0, "right": 20, "bottom": 20},
                     }],
                 }]}
-                for x1, y1, x2, y2 in blocks
-                if (x2 - x1, y2 - y1) in text_by_shape
+                for x1, y1, x2, y2, text in blocks
             ]
         }
 
@@ -7448,6 +9633,28 @@ def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
     assert block[LAYOUT_LINE_ROUTES_FIELD][0]["segments"][1]["text"] == "$ A $"
 
     print("test_paddle_line_routing_builds_layout_line_routes_from_reading_order PASSED")
+
+
+def test_paddle_line_routing_skips_deleted_inline_formula_subblocks():
+    from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
+
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 200, 40],
+        "block_content": "甲 $ A $ 乙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {
+                "block_label": "inline_formula",
+                "block_bbox": [40, 0, 70, 30],
+                UI_DELETED_INLINE_FORMULA_KEY: True,
+            }
+        ],
+    }
+
+    assert line_routes_for_block(block, 220, 80) == []
+
+    print("test_paddle_line_routing_skips_deleted_inline_formula_subblocks PASSED")
 
 
 def test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair():
@@ -7757,6 +9964,88 @@ def test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text():
     print("test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text PASSED")
 
 
+def test_paddle_line_routing_merges_ppocr_fragments_as_bbox_only_physical_row():
+    from app.core.paddle_line_routing import (
+        PageOcrLineHint,
+        attach_page_ocr_line_routes,
+    )
+
+    parent = {
+        "block_label": "text",
+        "block_bbox": [180, 555, 2060, 650],
+        "block_content": "其中， $ GGF_{it}^{Post-short} $ ，均为虚拟变量， $ GGF_{it}^{Post-long} $ 在企业获得政府引导基金",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [445, 556, 884, 620]},
+            {"block_label": "inline_formula", "block_bbox": [1242, 556, 1453, 620]},
+        ],
+    }
+    ppocr_fragments = [
+        PageOcrLineHint(text="其中，GGF", bbox=(295, 536, 792, 623)),
+        PageOcrLineHint(text="Post-long", bbox=(766, 546, 901, 604)),
+        PageOcrLineHint(text="均为虚拟变量，GGF", bbox=(875, 547, 1347, 626)),
+        PageOcrLineHint(text="Post-short", bbox=(1326, 555, 1461, 606)),
+        PageOcrLineHint(text="在企业获得政府引导基金", bbox=(1438, 556, 2052, 626)),
+        PageOcrLineHint(text="it", bbox=(536, 587, 560, 614)),
+        PageOcrLineHint(text="it", bbox=(1334, 594, 1358, 621)),
+    ]
+
+    attach_page_ocr_line_routes([parent], ppocr_fragments, 2320, 3416)
+
+    routes = parent["_layout_line_routes"]
+    assert len(routes) == 1
+    assert routes[0]["bbox"] == [295, 555, 2052, 626]
+    assert [segment["kind"] for segment in routes[0]["segments"]] == [
+        "text",
+        "formula",
+        "text",
+        "formula",
+        "text",
+    ]
+    assert [segment["bbox"] for segment in routes[0]["segments"]] == [
+        [295, 555, 445, 626],
+        [445, 556, 884, 620],
+        [884, 555, 1242, 626],
+        [1242, 556, 1453, 620],
+        [1453, 555, 2052, 626],
+    ]
+    assert [segment["text"] for segment in routes[0]["segments"] if segment["kind"] == "formula"] == [
+        "$ GGF_{it}^{Post-short} $",
+        "$ GGF_{it}^{Post-long} $",
+    ]
+
+    print("test_paddle_line_routing_merges_ppocr_fragments_as_bbox_only_physical_row PASSED")
+
+
+def test_paddle_line_routing_restores_inter_formula_punctuation_gap():
+    from app.core.paddle_line_routing import line_routes_for_block, text_slice_routes_for_block
+
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 180, 50],
+        "block_content": "甲 $ A $、$ B $ 乙",
+        "_route_subblocks": [
+            {"block_label": "inline_formula", "block_bbox": [40, 0, 82, 40]},
+            {"block_label": "inline_formula", "block_bbox": [78, 0, 120, 40]},
+        ],
+    }
+
+    routes = line_routes_for_block(parent, 200, 80)
+    segments = routes[0]["segments"]
+    gap_segments = [
+        segment for segment in segments
+        if segment.get("kind") == "text" and segment.get("label") == "inter_formula_text_gap"
+    ]
+
+    assert len(gap_segments) == 1
+    assert gap_segments[0]["text"] == "、"
+    assert gap_segments[0]["bbox"][0] < 82
+    assert gap_segments[0]["bbox"][2] > 78
+    assert gap_segments[0]["bbox"][2] - gap_segments[0]["bbox"][0] >= 16
+    assert any(route["bbox"] == gap_segments[0]["bbox"] for route in text_slice_routes_for_block(parent, 200, 80))
+
+    print("test_paddle_line_routing_restores_inter_formula_punctuation_gap PASSED")
+
+
 def test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes():
     from app.core.paddle_line_routing import (
         LAYOUT_LINE_ROUTES_FIELD,
@@ -7861,11 +10150,15 @@ def test_paddle_line_routing_formula_rows_use_single_horizontal_band():
         "$ B $",
         "$ C $",
     ]
-    assert all(
-        segment["bbox"][1] == formula_route["bbox"][1]
-        and segment["bbox"][3] == formula_route["bbox"][3]
+    assert [
+        segment["bbox"]
         for segment in formula_route["segments"]
-    )
+        if segment["kind"] == "formula"
+    ] == [
+        [40, 10, 70, 34],
+        [95, 14, 125, 42],
+        [160, 8, 190, 36],
+    ]
     assert [segment["kind"] for segment in formula_route["segments"]] == [
         "text",
         "formula",
@@ -7901,7 +10194,17 @@ def test_paddle_line_routing_has_layout_routes_is_pure():
 
     routes = line_routes_for_block(block, 140, 50)
     assert routes
-    assert block[LAYOUT_LINE_ROUTES_FIELD] == routes
+    assert LAYOUT_LINE_ROUTES_FIELD not in block
+
+    block[LAYOUT_LINE_ROUTES_FIELD] = [
+        {
+            "bbox": [90, 0, 120, 30],
+            "segments": [{"kind": "text", "bbox": [90, 0, 120, 30], "text": ""}],
+        }
+    ]
+    routes = line_routes_for_block(block, 140, 50)
+    assert [route["bbox"] for route in routes] != [[90, 0, 120, 30]]
+    assert block.get(LAYOUT_LINE_ROUTES_FIELD) is None
 
     print("test_paddle_line_routing_has_layout_routes_is_pure PASSED")
 
@@ -7911,6 +10214,7 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
     from app.core.paddle_line_routing import (
         LAYOUT_LINE_ROUTES_FIELD,
         ROUTE_SUBBLOCKS_FIELD,
+        line_routes_for_block,
     )
     from app.models import Page
 
@@ -7949,7 +10253,7 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
     assert len(text_record[ROUTE_SUBBLOCKS_FIELD]) == 7
 
     formula_routes = [
-        route for route in text_record[LAYOUT_LINE_ROUTES_FIELD]
+        route for route in line_routes_for_block(text_record, page.width, page.height)
         if any(segment["kind"] == "formula" for segment in route["segments"])
     ]
     assert len(formula_routes) == 5
@@ -7958,15 +10262,15 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
         if sum(1 for segment in route["segments"] if segment["kind"] == "formula") == 3
     )
     assert [segment["text"] for segment in three_formula_route["segments"] if segment["kind"] == "formula"] == [
-        "$ X_{ct} $",
-        "$ \\delta_{c} $",
-        "$ \\varphi_{t} $",
+        "",
+        "",
+        "",
     ]
-    assert all(
-        segment["bbox"][1] == three_formula_route["bbox"][1]
-        and segment["bbox"][3] == three_formula_route["bbox"][3]
-        for segment in three_formula_route["segments"]
-    )
+    assert [segment["bbox"] for segment in three_formula_route["segments"] if segment["kind"] == "formula"] == [
+        [623, 2287, 669, 2341],
+        [729, 2295, 776, 2343],
+        [1737, 2293, 1793, 2337],
+    ]
 
     print("test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands PASSED")
 
@@ -8056,11 +10360,11 @@ def test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
     print("test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box PASSED")
 
 
-def test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth():
+def test_paddle_artifact_index_marks_missing_inline_formula_for_crop_ocr():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.core.paddle_artifact_index import (
+        BINDING_EMPTY_REVIEW,
         BINDING_GEOMETRY_HIT,
-        BINDING_PARENT_FORMULA_INFERRED,
         PaddleArtifactIndex,
     )
     from app.models import BBox, BlockType, Page
@@ -8094,13 +10398,14 @@ def test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_tru
     )
 
     assert geometry.status == BINDING_GEOMETRY_HIT
-    assert geometry.text == "$ Incentive_{c} \\times Post_{t} $"
+    assert geometry.text == ""
     assert geometry.recognizable is False
-    assert missing.status == BINDING_PARENT_FORMULA_INFERRED
-    assert missing.text == "$ Incentive_{c} $"
-    assert "manual_formula_from_parent_text" in missing.review_flags
+    assert "manual_formula_needs_text" in geometry.review_flags
+    assert missing.status == BINDING_EMPTY_REVIEW
+    assert missing.text == ""
+    assert "manual_formula_needs_text" in missing.review_flags
 
-    print("test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth PASSED")
+    print("test_paddle_artifact_index_marks_missing_inline_formula_for_crop_ocr PASSED")
 
 
 def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
@@ -8146,7 +10451,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
 
     from PySide6.QtGui import QImage
 
-    from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
+    from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
     from app.models import BBox, Block, BlockSource, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
@@ -8177,11 +10482,11 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
             panel._bind_manual_block_to_paddle(page, block)
 
             binding = block.app_payload["paddle_binding"]
-            assert binding["status"] == BINDING_PARENT_FORMULA_INFERRED
-            assert binding["text"] == "$ B $"
+            assert binding["status"] == BINDING_EMPTY_REVIEW
+            assert binding["text"] == ""
             assert block.source_label == "inline_formula"
             assert block.recognizable is False
-            assert block.lines[0].text == "$ B $"
+            assert block.lines == []
         finally:
             panel.close()
             app.processEvents()
@@ -8297,8 +10602,6 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
     ):
         blocks = recblocks_xyxy or [(0, 0, image_bgr.shape[1], image_bgr.shape[0])]
         recognized_recblocks.extend(blocks)
-        for x1, y1, x2, y2 in blocks:
-            assert not (x1 == 40 and x2 == 60), "skipped formula region reached Recog"
         return {
             "lines": [
                 {"groups": [{
@@ -8339,6 +10642,11 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
         assert stats.n_groups == 4
         assert stats.recog_probe_calls == 2
         assert stats.recog_batch_disabled is True
+        assert all(
+            not (char.bbox and 40 <= (char.bbox[0] + char.bbox[2]) / 2 <= 60)
+            for line in rows[0].lines
+            for char in line.chars
+        )
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -8638,7 +10946,7 @@ def test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_gu
 
     def fake_recog_batch(images_bgr, *, with_charrcg=True, timeout=0, **_kwargs):
         calls["batch"] += 1
-        assert [tuple(image.shape[:2]) for image in images_bgr] == [(34, 1852), (34, 1852)]
+        assert [tuple(image.shape[:2]) for image in images_bgr] == [(50, 1858), (50, 1858)]
         raws = []
         for image in images_bgr:
             h, w = image.shape[:2]
@@ -8689,8 +10997,8 @@ def test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_gu
         assert stats.recog_batch_failures == 0
         assert stats.recog_batch_disabled is False
         assert stats.recog_probe_calls == 1
-        assert stats.recog_max_batch_crop_width == 1852
-        assert stats.recog_max_batch_crop_height == 34
+        assert stats.recog_max_batch_crop_width == 1858
+        assert stats.recog_max_batch_crop_height == 50
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -8827,7 +11135,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     print("test_ocr_pipeline_runs_hanwang_micro_recblock_page_path PASSED")
 
 
-def test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable():
+def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
     import os
     import tempfile
     import cv2
@@ -8844,8 +11152,9 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable():
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
         line_hints = kwargs["page_ocr_lines"]
-        assert line_hints == []
-        assert ppvl_blocks[0][LAYOUT_LINE_ROUTES_FIELD][0]["bbox"] == [10, 20, 110, 60]
+        assert len(line_hints) == 1
+        assert line_hints[0].text == "PP行"
+        assert LAYOUT_LINE_ROUTES_FIELD not in ppvl_blocks[0]
         return [
             BlockResult(
                 block_idx=0,
@@ -8866,12 +11175,12 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable():
             )
         ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
 
-    class ExplodingPrepassEngine:
+    class FakePrepassEngine:
         prefer_page_ocr = True
         bbox_space = "page"
 
         def recognize(self, image_bgr, context):
-            raise AssertionError("PP-OCRv5 prepass should not run when line hints are reusable")
+            return [Line(text="PP行", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.98)]
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -8914,22 +11223,24 @@ def test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable():
         progress_events = []
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
-            hybrid_prepass_engine=ExplodingPrepassEngine(),
+            hybrid_prepass_engine=FakePrepassEngine(),
         ).process_project(
             OcrProject(name="hybrid-skip-prepass", pages=[page]),
             progress_callback=progress_events.append,
         )
 
         assert len(calls) == 1
+        assert len(calls[0]["page_ocr_lines"]) == 1
+        assert calls[0]["page_ocr_lines"][0].text == "PP行"
         assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
         assert any(
-            "prepass skipped: reused cached layout routes for 1 blocks" in event.message
+            "PP-OCRv5 page-line prepass complete: 1 lines" in event.message
             for event in progress_events
         )
     finally:
         os.unlink(img_path)
 
-    print("test_ocr_pipeline_skips_hanwang_prepass_when_layout_routes_reusable PASSED")
+    print("test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist PASSED")
 
 
 def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
@@ -9142,7 +11453,7 @@ def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     assert blocks[0]["block_label"] == "paragraph_title"
     assert blocks[0]["source_label"] == "paragraph_title"
     assert blocks[0]["block_bbox"] == [11, 22, 133, 88]
-    assert blocks[0]["block_content"] == "active text"
+    assert blocks[0]["block_content"] == "raw text"
     assert blocks[0]["custom_attr"]["level"] == 2
 
     print("test_hanwang_page_blocks_from_layout_preserves_raw_source_label PASSED")
@@ -9658,6 +11969,21 @@ def test_pdf_import_cache_name_includes_source_path_hash(tmp_path):
     assert second_name.endswith("_p0001.png")
 
     print("test_pdf_import_cache_name_includes_source_path_hash PASSED")
+
+
+def test_import_cache_name_changes_when_same_path_content_changes(tmp_path):
+    from app.services import ImportService
+
+    src = tmp_path / "same.png"
+    src.write_bytes(b"first-content")
+    first_name = ImportService._pdf_page_cache_name(src, 0)
+
+    src.write_bytes(b"second-content")
+    second_name = ImportService._pdf_page_cache_name(src, 0)
+
+    assert first_name != second_name
+
+    print("test_import_cache_name_changes_when_same_path_content_changes PASSED")
 
 
 def test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirect():
@@ -12622,6 +14948,7 @@ def test_layout_parsing_semantics_override_layout_det_when_both_exist():
 
 def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     from app.core.layout_analyzer import LayoutAnalyzer
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, line_routes_for_block
     from app.models import BlockType, Page
 
     analyzer = LayoutAnalyzer()
@@ -12649,11 +14976,12 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
     subblocks = page.ppvl_parsing_res_list[0]["_route_subblocks"]
-    line_routes = page.ppvl_parsing_res_list[0]["_layout_line_routes"]
+    line_routes = line_routes_for_block(page.ppvl_parsing_res_list[0], page.width, page.height)
 
     assert blocks[0].block_type == BlockType.TEXT
     assert blocks[0].app_payload["_route_subblocks"] == subblocks
-    assert blocks[0].app_payload["_layout_line_routes"] == line_routes
+    assert LAYOUT_LINE_ROUTES_FIELD not in page.ppvl_parsing_res_list[0]
+    assert LAYOUT_LINE_ROUTES_FIELD not in blocks[0].app_payload
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
     assert subblocks[0]["raw_payload"]["label"] == "inline_formula"
@@ -13326,7 +15654,7 @@ def test_layout_analyzer_resolves_layout_role_even_when_pp_ocrv5_profile_selecte
         page = Page(image_path=page_path, width=200, height=120)
         LayoutAnalyzer()._api_analyze(page)
         assert captured["url"] == "https://example.com/root/api/v2/ocr/jobs"
-        assert captured["timeout"] == 180
+        assert captured["timeout"] == 12
         assert captured["proxies"] == {"http": None, "https": None, "all": None}
         assert captured["headers"]["Authorization"] == "bearer demo"
         assert captured["data"]["model"] == "PaddleOCR-VL-1.6"
@@ -13456,6 +15784,142 @@ def test_paddle_v16_client_supports_env_proxy_and_batch_id():
         requests.get = original_get
 
     print("test_paddle_v16_client_supports_env_proxy_and_batch_id PASSED")
+
+
+def test_paddle_v16_client_can_cancel_between_polls():
+    import requests
+
+    from app.core.paddle_v16_client import PaddleV16LayoutClient, PaddleV16RequestCancelled
+
+    cancelled = False
+    calls = []
+
+    class PollingResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"state": "running"}}
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        calls.append((url, timeout))
+        return PollingResponse()
+
+    def fake_sleep(_seconds):
+        nonlocal cancelled
+        cancelled = True
+
+    original_get = requests.get
+    requests.get = fake_get
+    try:
+        client = PaddleV16LayoutClient(
+            jobs_url="https://example.com/api/v2/ocr/jobs",
+            request_timeout=1,
+            poll_timeout=5,
+            poll_interval_s=0.1,
+            sleep=fake_sleep,
+            cancel_callback=lambda: cancelled,
+        )
+        try:
+            client.wait_for_result_json_url("job-1")
+        except PaddleV16RequestCancelled:
+            pass
+        else:
+            raise AssertionError("expected PaddleV16RequestCancelled")
+
+        assert len(calls) == 1
+    finally:
+        requests.get = original_get
+
+    print("test_paddle_v16_client_can_cancel_between_polls PASSED")
+
+
+def test_paddle_v16_client_reports_submit_wait_download_parse_stages():
+    import json
+    import requests
+
+    from app.core.paddle_v16_client import PaddleV16LayoutClient
+
+    statuses = []
+
+    class SubmitResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"jobId": "job-1"}}
+
+    class PollDoneResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"state": "done", "resultUrl": {"jsonUrl": "https://example.com/result.jsonl"}}}
+
+    class JsonlResponse:
+        status_code = 200
+        text = json.dumps({"result": {"layoutParsingResults": []}}, ensure_ascii=False)
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, data, files, headers, timeout, **kwargs):
+        return SubmitResponse()
+
+    def fake_get(url, headers=None, timeout=None, **kwargs):
+        if url.endswith("/job-1"):
+            return PollDoneResponse()
+        if url == "https://example.com/result.jsonl":
+            return JsonlResponse()
+        raise AssertionError(f"unexpected GET {url}")
+
+    original_post = requests.post
+    original_get = requests.get
+    requests.post = fake_post
+    requests.get = fake_get
+    try:
+        client = PaddleV16LayoutClient(
+            jobs_url="https://example.com/api/v2/ocr/jobs",
+            request_timeout=1,
+            poll_timeout=5,
+            status_callback=statuses.append,
+        )
+        data = client.analyze_image_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+        assert data["errorCode"] == 0
+        assert statuses[:2] == ["提交请求", "等待服务端"]
+        assert "下载结果" in statuses
+        assert statuses[-1] == "解析结果"
+    finally:
+        requests.post = original_post
+        requests.get = original_get
+
+    print("test_paddle_v16_client_reports_submit_wait_download_parse_stages PASSED")
+
+
+def test_paddle_v16_auto_network_mode_tries_direct_before_env_proxy():
+    import os
+
+    from app.core.paddle_v16_client import PaddleV16LayoutClient
+
+    old_proxy = os.environ.get("HTTPS_PROXY")
+    os.environ["HTTPS_PROXY"] = "http://127.0.0.1:8888"
+    try:
+        client = PaddleV16LayoutClient(network_mode="auto")
+        assert client._network_attempts() == [False, True]
+    finally:
+        if old_proxy is None:
+            os.environ.pop("HTTPS_PROXY", None)
+        else:
+            os.environ["HTTPS_PROXY"] = old_proxy
+
+    print("test_paddle_v16_auto_network_mode_tries_direct_before_env_proxy PASSED")
 
 
 def test_layout_analyzer_routes_hanwang_mode_to_ppvl_layout():
@@ -13621,6 +16085,29 @@ def test_layout_worker_continues_after_single_page_failure():
     assert len(pages[2].blocks) == 1
 
     print("test_layout_worker_continues_after_single_page_failure PASSED")
+
+
+def test_layout_worker_cancelled_does_not_emit_all_done():
+    from app.core.layout_analyzer import LayoutWorker
+    from app.models import Page
+
+    pages = [
+        Page(image_path="/tmp/layout-cancel.png", width=100, height=100, page_number=1),
+    ]
+    emitted_pages = []
+    cancelled = []
+
+    worker = LayoutWorker(pages)
+    worker.all_done.connect(lambda result: emitted_pages.append(result))
+    worker.cancelled.connect(lambda: cancelled.append(True))
+    worker.cancel()
+    worker.run()
+
+    assert cancelled == [True]
+    assert emitted_pages == []
+    assert pages[0].blocks == []
+
+    print("test_layout_worker_cancelled_does_not_emit_all_done PASSED")
 
 
 def test_layout_worker_runs_api_pages_with_bounded_concurrency():
@@ -16189,7 +18676,22 @@ if __name__ == "__main__":
     test_export_ir_preserves_structured_block_attributes()
     test_pdf_page_faithful_plans_use_image_and_char_layer()
     test_pdf_dual_textless_page_degrades_without_text_font()
-    test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_uniform_font()
+    test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_region_fonts()
+    test_pdf_dual_inline_formula_item_does_not_shift_text_baseline()
+    test_pdf_dual_text_bbox_ratio_can_be_profile_tuned()
+    test_pdf_dual_text_layer_splits_inline_formula_as_atomic_span()
+    test_pdf_dual_skips_duplicate_inline_formula_equation_element()
+    test_pdf_dual_equation_text_collapses_identical_formula_repeat()
+    test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox()
+    test_pdf_dual_table_text_layer_uses_atomic_rows()
+    test_pdf_dual_html_table_text_layer_splits_cells_without_tags()
+    test_pdf_dual_generated_table_rows_stay_inside_table_lines()
+    test_pdf_dual_generated_html_table_cells_stay_inside_cells()
+    test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid()
+    test_table_text_layer_service_writes_hidden_cells_for_table_block()
+    test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference()
+    test_pdf_dual_generated_formula_text_bbox_stays_inside_formula_block()
+    test_pdf_dual_generated_pdf_deduplicates_inline_formula_equation_text()
     test_pdf_invisible_text_layer_resets_render_mode_on_font_size_error()
     test_ir_based_exporters_and_pdf_profiles()
     test_export_dialog_offers_markdown()
@@ -16210,6 +18712,8 @@ if __name__ == "__main__":
     test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle()
     test_layout_panel_draw_merge_uses_large_box_and_removes_overlap()
     test_layout_panel_draw_inside_text_frame_does_not_merge_parent()
+    test_layout_panel_formula_draw_touching_text_frame_stays_separate()
+    test_layout_panel_text_draw_does_not_absorb_inline_formula_block()
     test_layout_panel_drawn_block_is_selected_and_type_editable()
     test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks()
     test_layout_panel_ink_snap_reuses_cached_image_mask()
@@ -16226,6 +18730,7 @@ if __name__ == "__main__":
     test_layout_panel_undo_restores_block_edits()
     test_layout_panel_undo_preserves_view_transform()
     test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
+    test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry()
     test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169()
     test_workflow_controller_layout_progress_signal()
     test_workflow_controller_abstracts_internal_ocr_progress_messages()
@@ -16258,6 +18763,7 @@ if __name__ == "__main__":
     test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels()
     test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks()
     test_page_ocr_nested_equation_blocks_before_parent_text_assignment()
+    test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block()
     test_ocr_pipeline_skips_equation_block_ocr_even_when_recognizable()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()
@@ -16268,9 +18774,14 @@ if __name__ == "__main__":
     test_hanwang_recog_filters_empty_decoded_char_boxes()
     test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers()
     test_hanwang_pre_page_ocr_lines_split_before_recog()
+    test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula()
+    test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg()
+    test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints()
     test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes()
+    test_hanwang_micro_recblock_short_chinese_group_keeps_vertical_context()
     test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter()
     test_paddle_line_routing_builds_layout_line_routes_from_reading_order()
+    test_paddle_line_routing_skips_deleted_inline_formula_subblocks()
     test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair()
     test_paddle_line_routing_line_hint_formula_recovery_does_not_shift_next_line()
     test_paddle_line_routing_missing_formula_box_does_not_shift_later_rows()
@@ -16280,12 +18791,13 @@ if __name__ == "__main__":
     test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text()
     test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text()
     test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes()
+    test_paddle_line_routing_restores_inter_formula_punctuation_gap()
     test_paddle_line_routing_formula_number_is_skip_not_formula_carrier()
     test_paddle_line_routing_formula_rows_use_single_horizontal_band()
     test_paddle_line_routing_has_layout_routes_is_pure()
     test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands()
     test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
-    test_paddle_artifact_index_binds_real_missing_inline_formula_from_parent_truth()
+    test_paddle_artifact_index_marks_missing_inline_formula_for_crop_ocr()
     test_paddle_artifact_index_binds_parent_table_and_empty_formula_review()
     test_layout_panel_manual_formula_writes_paddle_binding_payload()
     test_layout_analyzer_reads_formula_geometry_boxes_for_routes()
@@ -16326,6 +18838,7 @@ if __name__ == "__main__":
     test_import_service()
     test_import_service_sequential_page_numbers()
     test_pdf_import_cache_name_includes_source_path_hash(Path(tempfile.mkdtemp()))
+    test_import_cache_name_changes_when_same_path_content_changes(Path(tempfile.mkdtemp()))
     test_proof_state_bus()
     test_proof_state_bus_typed_contracts()
     test_workflow_controller_emits_typed_view_state()

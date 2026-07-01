@@ -148,6 +148,23 @@ def build_line_proof_atoms(block: Block | None, line: Line) -> list[ProofAtom]:
             )
             continue
 
+        if _is_low_confidence_number_or_punct_slot(char, text):
+            flush_pending()
+            atoms.append(
+                ProofAtom(
+                    kind=_kind_for_single_char(text),
+                    text=text,
+                    edit_text=text,
+                    bbox=char.bbox,
+                    char_indices=(idx,),
+                    source=source or char.bbox_source,
+                    confidence=float(char.confidence or 0.0),
+                    reliable=False,
+                    reason="low_confidence_single_char",
+                )
+            )
+            continue
+
         pending.append((idx, char, text, source or char.bbox_source))
 
     flush_pending()
@@ -202,6 +219,16 @@ def _is_stable_single_char(chars: list[Char], idx: int) -> bool:
     if _breaks_x_order(chars, idx):
         return False
     return True
+
+
+def _is_low_confidence_number_or_punct_slot(char: Char, text: str) -> bool:
+    if len(text) != 1:
+        return False
+    if char.bbox is None:
+        return False
+    if normalize_source_label(char.bbox_granularity) != "char":
+        return False
+    return _kind_for_single_char(text) in {ProofAtomKind.NUMBER, ProofAtomKind.PUNCT}
 
 
 def _overlaps_neighbor_too_much(chars: list[Char], idx: int) -> bool:

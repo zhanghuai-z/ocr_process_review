@@ -106,6 +106,14 @@ class _WorkflowProgressWidget(QWidget):
         detail = "解析结果" if done >= total else "等待结果"
         self._activate("版面分析", detail, f"{done}/{total} 页", pct)
 
+    def update_layout_stage(self, current: int, total: int, message: str) -> None:
+        total = max(1, int(total))
+        current_page = max(1, min(int(current) + 1, total))
+        completed = max(0, min(int(current), total - 1))
+        base = int(round(completed / total * 100))
+        value = max(4, min(96, base + 6))
+        self._activate("版面分析", message or "处理中", f"{current_page}/{total} 页", value)
+
     def start_ocr(self, total_pages: int = 0) -> None:
         total = max(1, int(total_pages or 1))
         self._activate("OCR", "准备中", f"0/{total} 页", 0)
@@ -505,12 +513,15 @@ class MainWindow(QMainWindow):
         self._controller.ocr_finished.connect(self._on_ocr_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
         self._controller.layout_progress.connect(self._on_layout_progress)
+        self._controller.layout_stage.connect(self._on_layout_stage)
+        self._controller.layout_cancelled.connect(self._on_layout_cancelled)
         self._controller.ocr_progress.connect(self._on_ocr_progress)
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._set_status_message)
         self._layout_panel.geometry_changed.connect(self._controller.save_project)
         self._layout_panel.block_contract_changed.connect(self._controller.handle_block_contract_changed)
         self._layout_panel.ocr_entry_requested.connect(self._controller.handle_ocr_entry_requested)
+        self._layout_panel.analysis_cancel_requested.connect(self._cancel_layout_analysis)
         self._layout_panel.page_selected.connect(self._on_layout_page_selected)
         self._controller.focus_page.connect(self._layout_panel.set_current_page_number)
         self._controller.page_gate_state.connect(self._layout_panel.set_page_gate_state)
@@ -654,6 +665,13 @@ class MainWindow(QMainWindow):
         self._ocr_placeholder.update_layout(current, total)
         self._status_bar.clearMessage()
 
+    def _on_layout_stage(self, current: int, total: int, message: str) -> None:
+        if not self._ocr_placeholder.is_active():
+            self._ocr_placeholder.start_layout(total)
+        self._ocr_placeholder.update_layout_stage(current, total, message)
+        self._layout_panel.update_analysis_stage(message)
+        self._status_bar.clearMessage()
+
     def _on_layout_finished(self, pages: List[Page]) -> None:
         """版面分析完成，更新 UI；后续 OCR 由 WorkflowController 调度。"""
         self._layout_panel.show_analysis_result(pages)
@@ -668,6 +686,21 @@ class MainWindow(QMainWindow):
         else:
             self._ocr_placeholder.finish()
             self._set_status_message(f"版面分析完成：{len(pages)} 页")
+
+    def _cancel_layout_analysis(self) -> None:
+        if self._controller.cancel_layout_analysis():
+            self._set_status_message("正在停止版面分析…")
+        else:
+            self._layout_panel.finish_analysis_progress()
+            self._ocr_placeholder.finish()
+            self._set_status_message("当前没有正在运行的版面分析")
+
+    def _on_layout_cancelled(self) -> None:
+        self._ocr_placeholder.finish()
+        self._layout_panel.finish_analysis_progress("版面分析已取消")
+        self._layout_panel.run_button.setEnabled(True)
+        self._controller.set_layout_run_enabled(True)
+        self._set_status_message("版面分析已取消")
 
     def _on_ocr_finished(self, pages: List[Page]) -> None:
         """OCR 完成（由 controller 发出，业务事件）。
@@ -797,7 +830,13 @@ class MainWindow(QMainWindow):
             self._set_status_message("当前没有打开的项目")
             return
         if self._controller.has_running_workers() or self._import_worker_is_running():
-            QMessageBox.warning(self, "关闭项目", "后台任务仍在运行，请等待完成后再关闭项目。")
+            if not self._confirm_stop_running_tasks("关闭项目"):
+                return
+            if not self._stop_running_tasks_for_close():
+                QMessageBox.warning(self, "关闭项目", "后台任务仍未停止，已取消关闭项目。")
+                return
+            if self._controller.close_project():
+                self._reset_workspace_after_project_closed()
             return
         if not self._confirm_close_project_save():
             return
@@ -855,6 +894,29 @@ class MainWindow(QMainWindow):
             return bool(worker.isRunning())
         except RuntimeError:
             return False
+
+    def _cancel_import_worker(self, *, wait_ms: int = 1000, force: bool = False) -> bool:
+        worker = self._import_worker
+        if not self._import_worker_is_running():
+            return True
+        try:
+            worker.requestInterruption()
+            if wait_ms > 0 and worker.wait(wait_ms):
+                self._import_worker = None
+                self._import_panel.setEnabled(True)
+                return True
+            if force and worker.isRunning():
+                worker.terminate()
+                worker.wait(1000)
+        except RuntimeError:
+            self._import_worker = None
+            self._import_panel.setEnabled(True)
+            return True
+        stopped = not self._import_worker_is_running()
+        if stopped:
+            self._import_worker = None
+            self._import_panel.setEnabled(True)
+        return stopped
 
     def _on_import_done(self, result) -> None:
         if not result.pages:
@@ -954,8 +1016,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._controller.has_running_workers() or self._import_worker_is_running():
-            QMessageBox.warning(self, "关闭程序", "后台任务仍在运行，请等待完成后再关闭。")
-            event.ignore()
+            if not self._confirm_stop_running_tasks("关闭程序"):
+                event.ignore()
+                return
+            if not self._stop_running_tasks_for_close():
+                QMessageBox.warning(self, "关闭程序", "后台任务仍未停止，已取消关闭。")
+                event.ignore()
+                return
+            self._controller.close()
+            super().closeEvent(event)
             return
         if self._controller.project:
             if self._controller.store:
@@ -973,6 +1042,26 @@ class MainWindow(QMainWindow):
                     return
         self._controller.close()
         super().closeEvent(event)
+
+    def _confirm_stop_running_tasks(self, title: str) -> bool:
+        reply = QMessageBox.question(
+            self,
+            title,
+            "后台任务仍在运行。\n\n是否停止任务并继续关闭？\n未完成的自动处理结果不会保存。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _stop_running_tasks_for_close(self) -> bool:
+        controller_stopped = self._controller.cancel_running_workers(wait_ms=1000, force=True)
+        import_stopped = self._cancel_import_worker(wait_ms=1000, force=True)
+        self._ocr_placeholder.finish()
+        self._layout_panel.finish_analysis_progress("后台任务已停止")
+        self._layout_panel.run_button.setEnabled(True)
+        self._controller.set_layout_run_enabled(True)
+        QApplication.processEvents()
+        return controller_stopped and import_stopped
 
     def _clear_charocr_cache(self) -> None:
         path = self._controller.active_charocr_cache_dir

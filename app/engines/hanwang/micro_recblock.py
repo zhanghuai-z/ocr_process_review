@@ -2,14 +2,23 @@
 from __future__ import annotations
 
 import os
+import json
+import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY, PADDLE_BINDING_KEY, split_legacy_raw_payload
+from app.core.block_payload import (
+    HANWANG_BBOX_AUDIT_KEY,
+    OCR_TEXT_INVALIDATED_KEY,
+    PADDLE_BINDING_KEY,
+    split_legacy_raw_payload,
+)
 from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
 from app.core.latin_span_recovery import (
@@ -56,6 +65,7 @@ from app.core.paddle_line_routing import (
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
+    BINDING_FORMULA_CROP_OCR,
     BINDING_GEOMETRY_HIT,
     BINDING_PARENT_FIGURE_HIT,
     BINDING_PARENT_FORMULA_INFERRED,
@@ -79,6 +89,22 @@ logger = get_logger(__name__)
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
+TEXT_ROUTE_INK_THRESHOLD = 220
+TEXT_ROUTE_INK_MIN_ROW_PIXELS = 2
+TEXT_ROUTE_INK_MIN_ROW_RATIO = 0.015
+TEXT_ROUTE_INK_PAD_Y = 6
+DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
+LATIN_ENGCUT_TEXT_REWRITE_MAX_CONFIDENCE = 0.25
+FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
+FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
+_DIGITLIKE_ZERO_CHARS = {"o", "O"}
+_DIGITLIKE_ONE_CHARS = {"l", "I"}
+_DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
+_INLINE_FORMULA_SPAN_RE = re.compile(
+    r"(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$(?!\$).*?(?<!\\)\$(?!\$)",
+    re.DOTALL,
+)
+_SIMPLE_FORMULA_LETTER_LIST_RE = re.compile(r"[A-Za-z\s,，、;；]+")
 
 MAX_RECOG_BATCH_GROUPS = int(os.environ.get("HANWANG_MICRO_RECBLOCK_BATCH_GROUPS", "64"))
 _BATCH_ENABLED_BY_ENV = (
@@ -298,6 +324,105 @@ def _text_route_bboxes_for_block(
     ]
 
 
+def _refined_text_segment_bbox_from_ink(
+    image_bgr: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    left, top, right, bottom = bbox
+    if right <= left or bottom <= top:
+        return None
+    page_h, page_w = image_bgr.shape[:2]
+    left, top, right, bottom = _clamp_xyxy((left, top, right, bottom), page_w, page_h)
+    if right <= left or bottom <= top:
+        return None
+    crop = image_bgr[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+    if crop.ndim == 3 and crop.shape[2] >= 3:
+        gray = (
+            crop[:, :, 0].astype(np.float32) * 0.114
+            + crop[:, :, 1].astype(np.float32) * 0.587
+            + crop[:, :, 2].astype(np.float32) * 0.299
+        )
+    else:
+        gray = crop.astype(np.float32)
+    dark = gray < TEXT_ROUTE_INK_THRESHOLD
+    row_counts = dark.sum(axis=1)
+    min_pixels = max(TEXT_ROUTE_INK_MIN_ROW_PIXELS, int(round((right - left) * TEXT_ROUTE_INK_MIN_ROW_RATIO)))
+    rows = np.flatnonzero(row_counts >= min_pixels)
+    if rows.size == 0:
+        return None
+    refined_top = max(top, top + int(rows[0]) - TEXT_ROUTE_INK_PAD_Y)
+    refined_bottom = min(bottom, top + int(rows[-1]) + 1 + TEXT_ROUTE_INK_PAD_Y)
+    if refined_bottom <= refined_top:
+        return None
+    return left, refined_top, right, refined_bottom
+
+
+def _refine_layout_text_route_bands_from_image(
+    image_bgr: np.ndarray,
+    ppvl_blocks: list[dict],
+    width: int,
+    height: int,
+) -> None:
+    """Tighten text route vertical bands using page pixels, not formula-heavy PP-OCR rows."""
+    if image_bgr.size == 0:
+        return
+    for block in ppvl_blocks:
+        routes = line_routes_for_block(block, width, height)
+        if not routes:
+            continue
+        changed = False
+        refined_routes: list[dict[str, Any]] = []
+        for route in routes:
+            segments = route.get("segments")
+            if not isinstance(segments, list):
+                refined_routes.append(route)
+                continue
+            has_formula = any(
+                isinstance(segment, dict) and segment.get("kind") == "formula"
+                for segment in segments
+            )
+            if not has_formula:
+                refined_routes.append(route)
+                continue
+            refined_segments: list[dict[str, Any]] = []
+            route_changed = False
+            for segment in segments:
+                if not isinstance(segment, dict):
+                    continue
+                next_segment = dict(segment)
+                if segment.get("kind") == "text":
+                    raw_bbox = segment.get("bbox")
+                    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+                        refined_segments.append(next_segment)
+                        continue
+                    try:
+                        bbox = _clamp_xyxy(
+                            (int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3])),
+                            width,
+                            height,
+                        )
+                    except (TypeError, ValueError):
+                        refined_segments.append(next_segment)
+                        continue
+                    refined_bbox = _refined_text_segment_bbox_from_ink(image_bgr, bbox)
+                    if refined_bbox is not None and refined_bbox != bbox:
+                        next_segment["bbox"] = list(refined_bbox)
+                        route_changed = True
+                refined_segments.append(next_segment)
+            if route_changed and refined_segments:
+                next_route = dict(route)
+                next_route["segments"] = refined_segments
+                next_route["bbox"] = list(union_xyxy([tuple(segment["bbox"]) for segment in refined_segments]))
+                refined_routes.append(next_route)
+                changed = True
+            else:
+                refined_routes.append(route)
+        if changed:
+            block[LAYOUT_LINE_ROUTES_FIELD] = refined_routes
+
+
 def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:
     return has_layout_line_routes(block, width, height)
 
@@ -368,6 +493,142 @@ def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
     return buckets
 
 
+def _box_width(box: tuple[int, int, int, int]) -> int:
+    return max(0, box[2] - box[0])
+
+
+def _box_height(box: tuple[int, int, int, int]) -> int:
+    return max(0, box[3] - box[1])
+
+
+def _is_usable_text_char_box(char: CharResult) -> bool:
+    if char.bbox is None or char.source == "paddle_inline_formula":
+        return False
+    if char.text in CHINESE_PUNCT:
+        return False
+    return _box_width(char.bbox) >= 8 and _box_height(char.bbox) >= 12
+
+
+def _nearest_char_box(
+    chars: list[CharResult],
+    index: int,
+    *,
+    step: int,
+    text_only: bool = False,
+) -> tuple[int, int, int, int] | None:
+    pos = index + step
+    while 0 <= pos < len(chars):
+        char = chars[pos]
+        if char.bbox is not None and (not text_only or _is_usable_text_char_box(char)):
+            return char.bbox
+        pos += step
+    return None
+
+
+def _recover_degenerate_punctuation_bboxes(
+    line: LineResult,
+    char_bounds: list[tuple[int, int, int, int] | None] | None = None,
+) -> LineResult:
+    if not line.chars:
+        return line
+    recovered: list[CharResult] = []
+    changed = False
+    for index, char in enumerate(line.chars):
+        if char.bbox is None or char.text not in CHINESE_PUNCT:
+            recovered.append(char)
+            continue
+        width = _box_width(char.bbox)
+        height = _box_height(char.bbox)
+        if width >= 4 and height >= 8:
+            recovered.append(char)
+            continue
+
+        prev_box = _nearest_char_box(line.chars, index, step=-1)
+        next_box = _nearest_char_box(line.chars, index, step=1)
+        ref_box = (
+            _nearest_char_box(line.chars, index, step=1, text_only=True)
+            or _nearest_char_box(line.chars, index, step=-1, text_only=True)
+        )
+        if ref_box is None:
+            recovered.append(char)
+            continue
+
+        target_width = max(8, min(18, round(_box_width(ref_box) * 0.35)))
+        left: int
+        right: int
+        if prev_box is not None and next_box is not None and prev_box[2] <= next_box[0]:
+            gap_width = next_box[0] - prev_box[2]
+            if 4 <= gap_width <= target_width * 2:
+                left, right = prev_box[2], next_box[0]
+            else:
+                center = (char.bbox[0] + char.bbox[2]) // 2
+                left = center - target_width // 2
+                right = left + target_width
+        elif next_box is not None:
+            right = next_box[0]
+            left = right - target_width
+        elif prev_box is not None:
+            left = prev_box[2]
+            right = left + target_width
+        else:
+            recovered.append(char)
+            continue
+
+        bound = (
+            char_bounds[index]
+            if char_bounds is not None and index < len(char_bounds) and char_bounds[index] is not None
+            else line.bbox
+        )
+        line_x1, line_y1, line_x2, line_y2 = bound
+        left = max(line_x1, left)
+        right = min(line_x2, right)
+        if right - left < 8:
+            recovered.append(
+                CharResult(
+                    text=char.text,
+                    confidence=char.confidence,
+                    bbox=None,
+                    candidates=list(char.candidates),
+                    source=f"{char.source}:punct_bbox_dropped_at_route_boundary",
+                    bbox_granularity=char.bbox_granularity or "char",
+                    token_text=char.token_text,
+                )
+            )
+            changed = True
+            continue
+        if right - left < 4:
+            recovered.append(char)
+            continue
+        top = max(line_y1, ref_box[1])
+        bottom = min(line_y2, ref_box[3])
+        if bottom - top < 8:
+            top, bottom = line_y1, line_y2
+        recovered.append(
+            CharResult(
+                text=char.text,
+                confidence=char.confidence,
+                bbox=(left, top, right, bottom),
+                candidates=list(char.candidates),
+                source=f"{char.source}:punct_bbox_recovered",
+                bbox_granularity=char.bbox_granularity or "char",
+                token_text=char.token_text,
+            )
+        )
+        changed = True
+
+    if not changed:
+        return line
+    return LineResult(
+        text=line.text,
+        bbox=line.bbox,
+        confidence=line.confidence,
+        chars=recovered,
+        source=line.source,
+        bbox_source=line.bbox_source,
+        review_flags=list(line.review_flags),
+    )
+
+
 def _assemble_layout_route_line(
     *,
     block_idx: int,
@@ -428,6 +689,7 @@ def _assemble_layout_route_line(
         cluster_bbox = union_xyxy([line.bbox for line in cluster])
         text_parts: list[str] = []
         chars: list[CharResult] = []
+        char_bounds: list[tuple[int, int, int, int] | None] = []
         component_boxes: list[tuple[int, int, int, int]] = []
         confidence_values: list[float] = []
         flags: set[str] = set()
@@ -447,6 +709,7 @@ def _assemble_layout_route_line(
                 text_parts.append("".join(line.text for line in segment_lines if line.text))
                 for line in segment_lines:
                     chars.extend(line.chars)
+                    char_bounds.extend([segment_bbox] * len(line.chars))
                     component_boxes.append(line.bbox)
                     flags.update(line.review_flags)
                     if line.confidence > 0:
@@ -470,23 +733,27 @@ def _assemble_layout_route_line(
                         token_text=formula_text,
                     )
                 )
+                char_bounds.append(segment_bbox)
                 flags.add(ROUTE_INLINE_FORMULA_FLAG)
         merged_text = "".join(text_parts)
         if not merged_text:
             continue
         assembled.append(
-            LineResult(
-                text=merged_text,
-                bbox=union_xyxy(component_boxes) if component_boxes else tuple(route["bbox"]),
-                confidence=(
-                    sum(confidence_values) / len(confidence_values)
-                    if confidence_values
-                    else 0.0
+            _recover_degenerate_punctuation_bboxes(
+                LineResult(
+                    text=merged_text,
+                    bbox=union_xyxy(component_boxes) if component_boxes else tuple(route["bbox"]),
+                    confidence=(
+                        sum(confidence_values) / len(confidence_values)
+                        if confidence_values
+                        else 0.0
+                    ),
+                    chars=chars,
+                    source="layout_route+hanwang",
+                    bbox_source="layout_route_assembled",
+                    review_flags=sorted(flags),
                 ),
-                chars=chars,
-                source="layout_route+hanwang",
-                bbox_source="layout_route_assembled",
-                review_flags=sorted(flags),
+                char_bounds=char_bounds,
             )
         )
     return assembled
@@ -805,6 +1072,65 @@ def _offset_line_results(
     return shifted
 
 
+def _char_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
+    return (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+
+
+def _point_in_xyxy(point: tuple[float, float], box: tuple[int, int, int, int]) -> bool:
+    x, y = point
+    return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+def _filter_line_results_to_route_bbox(
+    lines: list[LineResult],
+    route_bbox: tuple[int, int, int, int],
+) -> list[LineResult]:
+    """Drop OCR context characters that fall outside the current text route.
+
+    Recognition crops may intentionally include a few pixels of neighbouring
+    formula/line context so native OCR sees complete glyphs.  The text fact
+    still belongs to the route slice, so characters centered outside that slice
+    must not enter the assembled line.
+    """
+    filtered: list[LineResult] = []
+    for line in lines:
+        if not line.chars:
+            if _intersection_area(line.bbox, route_bbox) > 0:
+                filtered.append(line)
+            continue
+        kept_chars: list[CharResult] = []
+        dropped = False
+        for char in line.chars:
+            if char.bbox is None or _point_in_xyxy(_char_center(char.bbox), route_bbox):
+                kept_chars.append(char)
+            else:
+                dropped = True
+        if not kept_chars:
+            continue
+        if not dropped:
+            filtered.append(line)
+            continue
+        boxes = [char.bbox for char in kept_chars if char.bbox is not None]
+        text = "".join(char.text for char in kept_chars)
+        confidence = (
+            sum(char.confidence for char in kept_chars) / len(kept_chars)
+            if kept_chars
+            else line.confidence
+        )
+        filtered.append(
+            LineResult(
+                text=text,
+                bbox=union_xyxy(boxes) if boxes else line.bbox,
+                confidence=confidence,
+                chars=kept_chars,
+                source=f"{line.source}:route_context_filtered",
+                bbox_source=line.bbox_source,
+                review_flags=list(line.review_flags),
+            )
+        )
+    return filtered
+
+
 def _bbox_area(box: tuple[int, int, int, int] | None) -> int:
     if box is None:
         return 0
@@ -922,6 +1248,56 @@ def _offset_char_result(char: CharResult, *, dx: int, dy: int, source: str) -> C
 
 def _line_chars_text(chars: list[CharResult]) -> str:
     return "".join(char.text for char in chars)
+
+
+def _normalize_digitlike_numeric_context_lines(lines: list[LineResult]) -> None:
+    for line in lines:
+        if not line.chars:
+            continue
+        changed = False
+        for index, char in enumerate(line.chars):
+            replacement = _digitlike_numeric_context_replacement(line.chars, index)
+            if replacement is None:
+                continue
+            original = char.text
+            char.text = replacement
+            char.token_text = replacement
+            char.candidates = [replacement, *[candidate for candidate in char.candidates if candidate != replacement]]
+            if f"digitlike:{original}" not in char.source:
+                char.source = f"{char.source}:digitlike:{original}"
+            changed = True
+        if changed:
+            line.text = _line_chars_text(line.chars).strip()
+            if DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG not in line.review_flags:
+                line.review_flags.append(DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG)
+
+
+def _digitlike_numeric_context_replacement(chars: list[CharResult], index: int) -> str | None:
+    char = chars[index]
+    text = str(char.text or "")
+    if text in _DIGITLIKE_ZERO_CHARS:
+        replacement = "0"
+    elif text in _DIGITLIKE_ONE_CHARS:
+        replacement = "1"
+    else:
+        return None
+    if float(char.confidence or 0.0) > 0.35:
+        return None
+    if _adjacent_visible_text(chars, index, step=-1) != "取":
+        return None
+    if _adjacent_visible_text(chars, index, step=1) not in _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS:
+        return None
+    return replacement
+
+
+def _adjacent_visible_text(chars: list[CharResult], index: int, *, step: int) -> str:
+    pos = index + step
+    while 0 <= pos < len(chars):
+        text = str(chars[pos].text or "")
+        if text.strip():
+            return text
+        pos += step
+    return ""
 
 
 def _replacement_chars_from_recrop(
@@ -1042,8 +1418,8 @@ def _mark_latin_engcut_review(line: LineResult) -> None:
 CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
 LATIN_REVERSE_OCCUPY_CONFIDENCE = 0.50
 LATIN_CANDIDATE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./&+-")
-RECOG_GROUP_CROP_PAD_X = 2
-RECOG_GROUP_CROP_PAD_Y = 2
+RECOG_GROUP_CROP_PAD_X = 8
+RECOG_GROUP_CROP_PAD_Y = 10
 RECOG_GROUP_RETRY_TOP_TRIM = 3
 ENGCUT_LINE_CROP_PAD_X = 2
 ENGCUT_LINE_CROP_PAD_Y = 2
@@ -1193,39 +1569,47 @@ def _bind_token_in_stream(
     entries: list[_EngcutEntry | None],
     cursor: int,
 ) -> tuple[_TokenBinding | None, int]:
-    best: tuple[int, str] | None = None
-    for variant in token_variants(token.text):
-        pos = stream_text.find(variant, cursor)
-        if pos >= 0 and (best is None or pos < best[0]):
-            best = (pos, variant)
-    if best is None:
-        return _bind_token_from_word_fallback_group(token, future_tokens, stream_text, entries, cursor)
-    found, variant = best
-    if _future_token_before(stream_text, cursor, found, future_tokens):
-        return None, cursor
-    end = found + len(variant)
-    entry_slice = entries[found:end]
-    if len(entry_slice) != len(variant) or any(item is None or item.char.bbox is None for item in entry_slice):
-        return None, cursor
-    records: list[_EngcutLine] = []
-    chars: list[EngcutChar] = []
-    for item in entry_slice:
-        assert item is not None
-        chars.append(item.char)
-        if item.line_record not in records:
-            records.append(item.line_record)
-    status = LATIN_ENGCUT_EXACT_STATUS if variant == token.text else LATIN_ENGCUT_VARIANT_STATUS
-    if len(records) > 1:
-        status = LATIN_ENGCUT_MULTILINE_STATUS
-    line_span = _line_span_from_stream_entries(entries, found, end, records[0]) if len(records) == 1 else None
-    return _TokenBinding(
-        token=token,
-        status=status,
-        matched_text=variant,
-        chars=chars,
-        line_records=records,
-        line_span=line_span,
-    ), end
+    search_cursor = cursor
+    while search_cursor < len(stream_text):
+        best: tuple[int, str] | None = None
+        for variant in token_variants(token.text):
+            pos = stream_text.find(variant, search_cursor)
+            if pos >= 0 and (best is None or pos < best[0]):
+                best = (pos, variant)
+        if best is None:
+            return _bind_token_from_word_fallback_group(token, future_tokens, stream_text, entries, cursor)
+        found, variant = best
+        if token.kind != "formula_letter" and _future_token_before(stream_text, cursor, found, future_tokens):
+            return None, cursor
+        end = found + len(variant)
+        entry_slice = entries[found:end]
+        if len(entry_slice) != len(variant) or any(item is None or item.char.bbox is None for item in entry_slice):
+            search_cursor = found + 1
+            continue
+        records: list[_EngcutLine] = []
+        chars: list[EngcutChar] = []
+        for item in entry_slice:
+            assert item is not None
+            chars.append(item.char)
+            if item.line_record not in records:
+                records.append(item.line_record)
+        status = LATIN_ENGCUT_EXACT_STATUS if variant == token.text else LATIN_ENGCUT_VARIANT_STATUS
+        if len(records) > 1:
+            status = LATIN_ENGCUT_MULTILINE_STATUS
+        line_span = _line_span_from_stream_entries(entries, found, end, records[0]) if len(records) == 1 else None
+        binding = _TokenBinding(
+            token=token,
+            status=status,
+            matched_text=variant,
+            chars=chars,
+            line_records=records,
+            line_span=line_span,
+        )
+        if _formula_letter_binding_hits_protected_span(binding):
+            search_cursor = found + 1
+            continue
+        return binding, end
+    return _bind_token_from_word_fallback_group(token, future_tokens, stream_text, entries, cursor)
 
 
 def _bind_token_from_word_fallback_group(
@@ -1349,6 +1733,22 @@ def _bind_token_from_reverse_groups(
     return None, cursor
 
 
+def _formula_letter_binding_hits_protected_span(binding: _TokenBinding) -> bool:
+    if binding.token.kind != "formula_letter":
+        return False
+    if len(binding.line_records) != 1 or not binding.chars:
+        return False
+    binding_bbox = binding.bbox
+    if binding_bbox is None:
+        return False
+    line = binding.line_records[0].line
+    span = _span_for_binding(line, binding_bbox, binding.token.text, binding.matched_text, binding.line_span)
+    if span is None:
+        return False
+    start, end = span
+    return any(_is_occupied_cjk_or_punct(char) for char in line.chars[start:end])
+
+
 def _char_center_inside_binding(
     char: CharResult,
     binding_bbox: tuple[int, int, int, int],
@@ -1375,6 +1775,47 @@ def _span_matches_binding_text(span_text: str, token: str, matched_text: str) ->
         if span_text in token_variants(candidate) or candidate in token_variants(span_text):
             return True
     return False
+
+
+def _low_confidence_latin_rewrite_candidate(char: CharResult) -> bool:
+    if float(char.confidence or 0.0) > LATIN_ENGCUT_TEXT_REWRITE_MAX_CONFIDENCE:
+        return False
+    text = str(char.text or "")
+    if len(text) != 1:
+        return False
+    return text in LATIN_CANDIDATE_CHARS or _looks_cjk_text(text)
+
+
+def _span_allows_engcut_text_rewrite(chars: list[CharResult], token_text: str) -> bool:
+    current = [str(char.text or "") for char in chars]
+    if len(chars) == len(token_text):
+        changed = False
+        for char, expected in zip(chars, token_text):
+            if str(char.text or "") == expected:
+                continue
+            changed = True
+            if not _low_confidence_latin_rewrite_candidate(char):
+                return False
+        return changed
+
+    prefix = 0
+    while prefix < len(current) and prefix < len(token_text) and current[prefix] == token_text[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < len(current) - prefix
+        and suffix < len(token_text) - prefix
+        and current[len(current) - 1 - suffix] == token_text[len(token_text) - 1 - suffix]
+    ):
+        suffix += 1
+
+    changed_chars = chars[prefix:len(chars) - suffix if suffix else len(chars)]
+    replacement_text = token_text[prefix:len(token_text) - suffix if suffix else len(token_text)]
+    if not changed_chars or not replacement_text:
+        return False
+    if not all(ch in LATIN_CANDIDATE_CHARS for ch in replacement_text):
+        return False
+    return all(_low_confidence_latin_rewrite_candidate(char) for char in changed_chars)
 
 
 def _binding_span_score(
@@ -1478,6 +1919,10 @@ def _replace_line_span_with_binding(line: LineResult, binding: _TokenBinding) ->
     token_text = binding.token.text
     if len(binding.chars) != len(token_text):
         return False
+    current_chars = line.chars[start:end]
+    if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
+        if not _span_allows_engcut_text_rewrite(current_chars, token_text):
+            return False
     replacement = [
         CharResult(
             text=token_text[idx],
@@ -1516,6 +1961,10 @@ def _replace_line_span_with_word_binding(line: LineResult, binding: _TokenBindin
         return False
     start, end = span
     token_text = binding.token.text
+    current_chars = line.chars[start:end]
+    if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
+        if not all(_low_confidence_latin_rewrite_candidate(char) for char in current_chars):
+            return False
     line.chars[start:end] = [
         CharResult(
             text=token_text,
@@ -1580,6 +2029,67 @@ def _line_may_contain_block_token(line_text: str, token_text: str) -> bool:
     return common >= 3 and common / max(1, len(token_key)) >= 0.55
 
 
+def _block_text_engcut_tokens(block_text: str) -> list[LatinToken]:
+    tokens = list(text_token_spans(block_text)) if block_text else []
+    tokens.extend(_simple_formula_letter_tokens(block_text))
+    tokens.sort(key=lambda token: (token.start, token.end, token.text))
+    deduped: list[LatinToken] = []
+    seen: set[tuple[int, int, str]] = set()
+    for token in tokens:
+        key = (token.start, token.end, token.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(token)
+    return deduped
+
+
+def _simple_formula_letter_tokens(block_text: str) -> list[LatinToken]:
+    tokens: list[LatinToken] = []
+    for match in _INLINE_FORMULA_SPAN_RE.finditer(block_text or ""):
+        raw = match.group(0)
+        if raw.startswith("$$") and raw.endswith("$$"):
+            inner = raw[2:-2]
+            offset = 2
+        elif raw.startswith("$") and raw.endswith("$"):
+            inner = raw[1:-1]
+            offset = 1
+        else:
+            continue
+        if not _SIMPLE_FORMULA_LETTER_LIST_RE.fullmatch(inner.strip()):
+            continue
+        letters = list(re.finditer(r"[A-Za-z]", inner))
+        if len(letters) < 2:
+            continue
+        for letter in letters:
+            start = match.start() + offset + letter.start()
+            tokens.append(LatinToken(text=letter.group(0), start=start, end=start + 1, kind="formula_letter"))
+    return tokens
+
+
+def _has_formula_letter_tokens(tokens: list[LatinToken]) -> bool:
+    return any(token.kind == "formula_letter" for token in tokens)
+
+
+def _line_has_low_confidence_formula_letter_candidate(line: LineResult) -> bool:
+    if not line.chars:
+        return False
+    has_latin_hint = any(
+        len(char.text or "") == 1 and (char.text in LATIN_CANDIDATE_CHARS)
+        for char in line.chars
+    )
+    has_low_confidence_candidate = any(
+        float(char.confidence or 0.0) <= 0.25
+        and len(char.text or "") == 1
+        and (
+            char.text in LATIN_CANDIDATE_CHARS
+            or _looks_cjk_text(char.text)
+        )
+        for char in line.chars
+    )
+    return has_latin_hint and has_low_confidence_candidate
+
+
 def _engcut_target_line_orders(
     lines: list[LineResult],
     block_tokens: list[LatinToken],
@@ -1617,8 +2127,12 @@ def _engcut_target_line_orders(
     # Lightweight fallback: if Hanwang has already exposed Latin/digit fragments
     # on a line, probe that line. This preserves cases such as "Gua吨lia" where
     # Paddle has "Guariglia" but Hanwang damaged the middle span before EngCut.
+    has_formula_letter_tokens = _has_formula_letter_tokens(block_tokens)
     for order, line in enumerate(lines):
         if _line_has_text_token(line):
+            target_orders.add(order)
+            continue
+        if has_formula_letter_tokens and _line_has_low_confidence_formula_letter_candidate(line):
             target_orders.add(order)
             continue
         if any(_line_may_contain_block_token(line.text, token.text) for token in unresolved_tokens):
@@ -1635,7 +2149,7 @@ def _enhance_lines_with_latin_engcut(
     block_text: str = "",
 ) -> None:
     height, width = image_bgr.shape[:2]
-    block_tokens = text_token_spans(block_text) if block_text else []
+    block_tokens = _block_text_engcut_tokens(block_text)
     target_orders = _engcut_target_line_orders(lines, block_tokens)
     records: list[_EngcutLine] = []
     for order, line in enumerate(lines):
@@ -1810,6 +2324,70 @@ def _chunk_group_bboxes(
     return chunks
 
 
+def _write_micro_recblock_hook(
+    image_bgr: np.ndarray,
+    ppvl_blocks: list[dict],
+    rows: list[BlockResult],
+    stats: RunStats,
+) -> None:
+    hook_dir = os.environ.get("HANWANG_MICRO_RECBLOCK_HOOK_DIR", "").strip()
+    if not hook_dir:
+        return
+    try:
+        out_dir = Path(hook_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = int(time.time() * 1000)
+        payload = {
+            "schema": "hanwang_micro_recblock_hook.v1",
+            "timestamp_ms": stamp,
+            "image_shape": list(image_bgr.shape),
+            "crop_padding": {
+                "pad_x": RECOG_GROUP_CROP_PAD_X,
+                "pad_y": RECOG_GROUP_CROP_PAD_Y,
+                "retry_top_trim": RECOG_GROUP_RETRY_TOP_TRIM,
+            },
+            "stats": dict(stats.__dict__),
+            "input_blocks": ppvl_blocks,
+            "rows": [row.to_dict() for row in rows],
+        }
+        (out_dir / f"micro_recblock_{stamp}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+        try:
+            import cv2
+
+            canvas = image_bgr.copy()
+            for row in rows:
+                x1, y1, x2, y2 = row.block_bbox
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), (0, 180, 0), 2)
+                for route in row.route_text_slice_bboxes:
+                    rx1, ry1, rx2, ry2 = route
+                    cv2.rectangle(canvas, (rx1, ry1), (rx2, ry2), (255, 0, 0), 2)
+                for group in row.recog_group_bboxes:
+                    gx1, gy1, gx2, gy2 = group
+                    cv2.rectangle(canvas, (gx1, gy1), (gx2, gy2), (0, 255, 0), 1)
+                for line in row.lines:
+                    lx1, ly1, lx2, ly2 = line.bbox
+                    cv2.rectangle(canvas, (lx1, ly1), (lx2, ly2), (0, 165, 255), 2)
+                    for char in line.chars:
+                        if char.bbox is None:
+                            continue
+                        cx1, cy1, cx2, cy2 = char.bbox
+                        cv2.rectangle(canvas, (cx1, cy1), (cx2, cy2), (0, 0, 255), 1)
+            cv2.imwrite(str(out_dir / f"micro_recblock_{stamp}_overlay.png"), canvas)
+        except Exception as exc:
+            logger.warning("Failed to write Hanwang micro_recblock hook overlay: %s", exc)
+    except Exception as exc:
+        logger.warning("Failed to write Hanwang micro_recblock hook: %s", exc)
+
+
+def _drop_cached_layout_line_routes(ppvl_blocks: list[dict]) -> None:
+    for block in ppvl_blocks:
+        if isinstance(block, dict):
+            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+
+
 def run_micro_recblock(
     image_bgr: np.ndarray,
     ppvl_blocks: list[dict],
@@ -1825,6 +2403,9 @@ def run_micro_recblock(
     height, width = image_bgr.shape[:2]
     if page_ocr_lines:
         attach_page_ocr_line_routes(ppvl_blocks, page_ocr_lines, width, height)
+        _refine_layout_text_route_bands_from_image(image_bgr, ppvl_blocks, width, height)
+    else:
+        _drop_cached_layout_line_routes(ppvl_blocks)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
     skip_indices: list[int] = []
@@ -2092,8 +2673,10 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                grouped_lines[text_routes[placement.area_idx].key].extend(
-                    _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
+                route = text_routes[placement.area_idx]
+                offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
+                grouped_lines[route.key].extend(
+                    _filter_line_results_to_route_bbox(offset_lines, route.bbox)
                 )
 
         def recognize_batch_list(placements: list[_GroupPlacement]) -> None:
@@ -2123,8 +2706,14 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                grouped_lines[text_routes[placement.area_idx].key].extend(
-                    _offset_line_results(local_lines, dx=placement.page_bbox[0], dy=placement.page_bbox[1])
+                route = text_routes[placement.area_idx]
+                offset_lines = _offset_line_results(
+                    local_lines,
+                    dx=placement.page_bbox[0],
+                    dy=placement.page_bbox[1],
+                )
+                grouped_lines[route.key].extend(
+                    _filter_line_results_to_route_bbox(offset_lines, route.bbox)
                 )
 
         batch_enabled = not _BATCH_DISABLED_FOR_SESSION
@@ -2239,6 +2828,7 @@ def run_micro_recblock(
                 timeout=min(30.0, max(1.0, float(recog_timeout))),
                 block_text=ppvl_text,
             )
+            _normalize_digitlike_numeric_context_lines(lines)
             hw_text = "".join(line.text for line in lines).strip()
             source = "hanwang"
             text = hw_text
@@ -2314,7 +2904,9 @@ def run_micro_recblock(
             ),
         )
 
-    return [row for row in rows if row is not None], stats
+    final_rows = [row for row in rows if row is not None]
+    _write_micro_recblock_hook(image_bgr, ppvl_blocks, final_rows, stats)
+    return final_rows, stats
 
 
 def _bbox_from_xyxy_tuple(raw: tuple[int, int, int, int], width: int, height: int) -> BBox:
@@ -2359,6 +2951,7 @@ def _page_layout_has_user_edits(page: Page) -> bool:
 
 _PARENT_BINDING_STATUSES = {
     BINDING_GEOMETRY_HIT,
+    BINDING_FORMULA_CROP_OCR,
     BINDING_PARENT_FORMULA_INFERRED,
     BINDING_PARENT_TABLE_HIT,
     BINDING_PARENT_FIGURE_HIT,
@@ -2413,6 +3006,8 @@ def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> in
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     raw_payload = dict(block.raw_payload)
     app_payload = dict(block.app_payload)
+    raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+    app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     parent_index = _parent_index_for_raw_payload(page, raw_payload)
     if parent_index < 0:
         parent_index = _int_value(
@@ -2436,22 +3031,38 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         **raw_payload,
         "block_label": source_label,
         "block_bbox": list(block.bbox.to_xyxy()),
-        "block_content": _layout_block_content(block),
+        "block_content": _layout_block_content(block, raw_payload),
         "source_label": block.source_label or source_label,
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_block_recognizable": bool(block.recognizable),
     }
     if isinstance(binding, dict) and binding:
         row[PADDLE_BINDING_KEY] = dict(binding)
-    for key in (ROUTE_SUBBLOCKS_FIELD, LAYOUT_LINE_ROUTES_FIELD):
+    for key in (ROUTE_SUBBLOCKS_FIELD,):
         if key in app_payload:
             row[key] = app_payload[key]
+    if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(page.ppvl_parsing_res_list):
+        parent_record = page.ppvl_parsing_res_list[parent_index]
+        if isinstance(parent_record, dict) and ROUTE_SUBBLOCKS_FIELD in parent_record:
+            row[ROUTE_SUBBLOCKS_FIELD] = parent_record[ROUTE_SUBBLOCKS_FIELD]
     if parent_index >= 0:
         row["_layout_paddle_parent_index"] = parent_index
     return row
 
 
-def _layout_block_content(block: Block) -> str:
+def _strip_cached_layout_line_routes_from_page(page: Page) -> None:
+    for record in page.ppvl_parsing_res_list:
+        if isinstance(record, dict):
+            record.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+    for block in page.blocks:
+        block.raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+        block.app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+
+
+def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = None) -> str:
+    raw_text = paddle_block_text(raw_payload or {})
+    if raw_text:
+        return raw_text
     text = proof_block_text(block)
     if text:
         return text
@@ -2473,6 +3084,21 @@ def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
     if _int_value(binding.get("parent_index")) < 0:
         return None
     return binding
+
+
+def _row_matches_paddle_parent_record(page: Page, row: dict[str, Any], parent_index: int) -> bool:
+    if not (0 <= parent_index < len(page.ppvl_parsing_res_list)):
+        return False
+    parent_record = page.ppvl_parsing_res_list[parent_index]
+    if not isinstance(parent_record, dict):
+        return False
+    row_bbox = block_bbox_xyxy(row, page.width, page.height)
+    parent_bbox = block_bbox_xyxy(parent_record, page.width, page.height)
+    if row_bbox != parent_bbox:
+        return False
+    row_label = route_authority_label(row)
+    parent_label = route_authority_label(parent_record)
+    return not row_label or not parent_label or row_label == parent_label
 
 
 def _manual_bbox_from_binding(block: Block, binding: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -2501,8 +3127,9 @@ def _route_subblock_overlaps_bbox(
 def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dict[str, Any]:
     manual_bbox = _manual_bbox_from_binding(block, binding)
     label = str(binding.get("source_label") or block.source_label or block.block_type.value)
-    text = str(binding.get("text") or proof_block_text(block) or "")
-    return {
+    text_is_stale = _manual_binding_text_is_stale(manual_bbox, binding)
+    text = "" if text_is_stale else str(binding.get("text") or proof_block_text(block) or "")
+    payload = {
         "block_label": label,
         "block_bbox": list(manual_bbox),
         "block_content": text,
@@ -2510,81 +3137,35 @@ def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dic
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_manual_route_subblock": True,
     }
+    if text_is_stale:
+        payload["_layout_manual_binding_text_stale"] = True
+    return payload
 
 
-def _cached_route_bands(
-    row: dict[str, Any],
-    width: int,
-    height: int,
-) -> list[tuple[int, int, int, int]]:
-    routes = row.get(LAYOUT_LINE_ROUTES_FIELD)
-    if not isinstance(routes, list):
-        return []
-    bands: list[tuple[int, int, int, int]] = []
-    for route in routes:
-        if not isinstance(route, dict):
-            continue
-        bbox = bbox_from_variant(route.get("bbox"), max_w=width, max_h=height)
-        if bbox is None or bbox.area <= 0:
-            continue
-        bands.append(_clamp_xyxy(bbox.to_xyxy(), width, height))
-    return bands
+def _manual_binding_text_is_stale(
+    manual_bbox: tuple[int, int, int, int],
+    binding: dict[str, Any],
+) -> bool:
+    candidate = bbox_from_variant(binding.get("candidate_bbox"))
+    if candidate is None:
+        return False
+    candidate_bbox = tuple(int(value) for value in candidate.to_xyxy())
+    return candidate_bbox != manual_bbox
 
 
-def _best_cached_band_for_bbox(
-    bbox: tuple[int, int, int, int],
-    bands: list[tuple[int, int, int, int]],
-) -> tuple[int, int, int, int] | None:
-    if not bands:
-        return None
-    _x1, y1, _x2, y2 = bbox
-    cy = (y1 + y2) / 2
-    best_band: tuple[int, int, int, int] | None = None
-    best_score = 0.0
-    for band in bands:
-        overlap = vertical_overlap_ratio(bbox, band)
-        center_inside = 1.0 if band[1] <= cy <= band[3] else 0.0
-        score = overlap + center_inside * 0.25
-        if score > best_score:
-            best_score = score
-            best_band = band
-    return best_band if best_score >= 0.1 else None
-
-
-def _expand_formula_subblock_to_cached_band(
-    value: dict[str, Any],
-    bands: list[tuple[int, int, int, int]],
-    width: int,
-    height: int,
-) -> dict[str, Any]:
-    if not is_formula_label(route_authority_label(value)):
-        return value
-    bbox = block_bbox_xyxy(value, width, height)
-    band = _best_cached_band_for_bbox(bbox, bands)
-    if band is None:
-        return value
-    expanded = dict(value)
-    expanded["block_bbox"] = [bbox[0], band[1], bbox[2], band[3]]
-    return expanded
-
-
-def _expand_formula_subblocks_to_cached_bands(
-    row: dict[str, Any],
-    width: int,
-    height: int,
-) -> None:
-    bands = _cached_route_bands(row, width, height)
-    if not bands:
-        return
-    values = row.get(ROUTE_SUBBLOCKS_FIELD)
-    if not isinstance(values, list):
-        return
-    row[ROUTE_SUBBLOCKS_FIELD] = [
-        _expand_formula_subblock_to_cached_band(dict(value), bands, width, height)
-        if isinstance(value, dict)
-        else value
-        for value in values
-    ]
+def _manual_unbound_route_subblock(block: Block) -> dict[str, Any]:
+    manual_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
+    label = block.source_label or block.block_type.value
+    if block.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
+        label = "inline_formula"
+    return {
+        "block_label": label,
+        "block_bbox": list(manual_bbox),
+        "block_content": proof_block_text(block),
+        "_layout_block_source": getattr(block.source, "value", str(block.source)),
+        "_layout_manual_route_subblock": True,
+        "_layout_manual_unbound_route_subblock": True,
+    }
 
 
 def _replace_or_append_route_subblock(
@@ -2603,19 +3184,92 @@ def _replace_or_append_route_subblock(
     replaced = False
     next_values: list[dict[str, Any]] = []
     for value in values:
-        if target_bbox is not None and _route_subblock_overlaps_bbox(value, target_bbox, width, height):
-            next_values.append(route_subblock)
-            replaced = True
+        current_bbox = block_bbox_xyxy(value, width, height)
+        value_is_manual = bool(value.get("_layout_manual_route_subblock"))
+        if current_bbox == manual_bbox:
+            if not replaced:
+                next_values.append(route_subblock)
+                replaced = True
             continue
-        if _route_subblock_overlaps_bbox(value, manual_bbox, width, height):
-            next_values.append(route_subblock)
-            replaced = True
+        if value_is_manual:
+            next_values.append(value)
+            continue
+        should_replace = (
+            target_bbox is not None
+            and _route_subblock_overlaps_bbox(value, target_bbox, width, height)
+        ) or _route_subblock_overlaps_bbox(value, manual_bbox, width, height)
+        if should_replace:
+            if not replaced:
+                next_values.append(route_subblock)
+                replaced = True
             continue
         next_values.append(value)
     if not replaced:
         next_values.append(route_subblock)
     row[ROUTE_SUBBLOCKS_FIELD] = next_values
     row.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+
+
+def _append_manual_route_subblock(
+    row: dict[str, Any],
+    route_subblock: dict[str, Any],
+    width: int,
+    height: int,
+) -> None:
+    current_values = row.get(ROUTE_SUBBLOCKS_FIELD)
+    values = [dict(value) for value in current_values if isinstance(value, dict)] if isinstance(current_values, list) else []
+    manual_bbox = tuple(route_subblock["block_bbox"])
+    next_values: list[dict[str, Any]] = []
+    replaced = False
+    for value in values:
+        current_bbox = block_bbox_xyxy(value, width, height)
+        if current_bbox == manual_bbox:
+            next_values.append(route_subblock)
+            replaced = True
+        else:
+            next_values.append(value)
+    if not replaced:
+        next_values.append(route_subblock)
+    row[ROUTE_SUBBLOCKS_FIELD] = next_values
+    row.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+
+
+def _manual_structure_parent_row(
+    entries: list[tuple[Block, dict[str, Any]]],
+    block: Block,
+    row: dict[str, Any],
+    page: Page,
+) -> dict[str, Any] | None:
+    if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
+        return None
+    if block.source not in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
+        return None
+    block_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
+    best: tuple[float, dict[str, Any]] | None = None
+    for candidate_block, candidate_row in entries:
+        if candidate_block is block or candidate_row is row:
+            continue
+        label = route_authority_label(candidate_row)
+        if BlockType.from_paddle(label) != BlockType.TEXT:
+            continue
+        if is_hanwang_skip_label(label) or is_formula_label(label) or is_table_label(label):
+            continue
+        candidate_bbox = block_bbox_xyxy(candidate_row, page.width, page.height)
+        overlap_area = _intersection_area(block_bbox, candidate_bbox)
+        if overlap_area <= 0:
+            continue
+        block_area = max(1, (block_bbox[2] - block_bbox[0]) * (block_bbox[3] - block_bbox[1]))
+        score = overlap_area / block_area
+        center_inside = (
+            candidate_bbox[0] <= (block_bbox[0] + block_bbox[2]) / 2 <= candidate_bbox[2]
+            and candidate_bbox[1] <= (block_bbox[1] + block_bbox[3]) / 2 <= candidate_bbox[3]
+        )
+        score += 0.25 if center_inside else 0.0
+        if best is None or score > best[0]:
+            best = (score, candidate_row)
+    if best is None or best[0] < 0.25:
+        return None
+    return best[1]
 
 
 def _apply_manual_parent_binding(
@@ -2633,13 +3287,7 @@ def _apply_manual_parent_binding(
         if parent_text:
             parent_row["block_content"] = parent_text
             parent_row["_layout_block_content_authority"] = "paddle_parent_binding"
-        _expand_formula_subblocks_to_cached_bands(parent_row, page.width, page.height)
-        route_subblock = _expand_formula_subblock_to_cached_band(
-            _manual_binding_route_subblock(block, binding),
-            _cached_route_bands(parent_row, page.width, page.height),
-            page.width,
-            page.height,
-        )
+        route_subblock = _manual_binding_route_subblock(block, binding)
         _replace_or_append_route_subblock(
             parent_row,
             route_subblock,
@@ -2656,6 +3304,16 @@ def _apply_manual_parent_binding(
     parent_row["_layout_parent_replaced_by_manual_binding"] = True
 
 
+def _apply_manual_unbound_parent_route(
+    *,
+    page: Page,
+    parent_row: dict[str, Any],
+    block: Block,
+) -> None:
+    route_subblock = _manual_unbound_route_subblock(block)
+    _append_manual_route_subblock(parent_row, route_subblock, page.width, page.height)
+
+
 def _page_blocks_from_layout(page: Page) -> list[dict]:
     entries: list[tuple[Block, dict[str, Any]]] = [
         (block, _layout_row_from_block(page, block))
@@ -2664,7 +3322,11 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
     parent_rows: dict[int, dict[str, Any]] = {}
     for _block, row in entries:
         parent_index = _int_value(row.get("_layout_paddle_parent_index"))
-        if parent_index >= 0 and parent_index not in parent_rows:
+        if (
+            parent_index >= 0
+            and parent_index not in parent_rows
+            and _row_matches_paddle_parent_record(page, row, parent_index)
+        ):
             parent_rows[parent_index] = row
 
     skip_block_ids: set[int] = set()
@@ -2672,17 +3334,24 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             continue
         binding = _binding_payload_from_block(block)
-        if binding is None:
-            continue
-        parent_row = parent_rows.get(_int_value(binding.get("parent_index")))
+        parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
+        if parent_row is None:
+            parent_row = _manual_structure_parent_row(entries, block, row, page)
         if parent_row is None or parent_row is row:
             continue
-        _apply_manual_parent_binding(
-            page=page,
-            parent_row=parent_row,
-            block=block,
-            binding=binding,
-        )
+        if binding is not None:
+            _apply_manual_parent_binding(
+                page=page,
+                parent_row=parent_row,
+                block=block,
+                binding=binding,
+            )
+        else:
+            _apply_manual_unbound_parent_route(
+                page=page,
+                parent_row=parent_row,
+                block=block,
+            )
         skip_block_ids.add(id(block))
 
     blocks: list[dict] = []
@@ -2714,7 +3383,11 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
     parent_rows: dict[int, dict[str, Any]] = {}
     for _block, row in entries:
         parent_index = _int_value(row.get("_layout_paddle_parent_index"))
-        if parent_index >= 0 and parent_index not in parent_rows:
+        if (
+            parent_index >= 0
+            and parent_index not in parent_rows
+            and _row_matches_paddle_parent_record(page, row, parent_index)
+        ):
             parent_rows[parent_index] = row
 
     preserved: list[Block] = []
@@ -2724,13 +3397,159 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
         if block.source not in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
             continue
         binding = _binding_payload_from_block(block)
-        if binding is None:
-            continue
-        parent_row = parent_rows.get(_int_value(binding.get("parent_index")))
+        parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
+        if parent_row is None:
+            parent_row = _manual_structure_parent_row(entries, block, row, page)
         if parent_row is None or parent_row is row:
             continue
         preserved.append(block)
     return preserved
+
+
+def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
+    targets: list[Block] = []
+    for block in page.blocks:
+        if block.block_type != BlockType.EQUATION:
+            continue
+        label = normalize_paddle_label(
+            block.source_label
+            or str(block.app_payload.get("block_label") or "")
+            or str(block.raw_payload.get("block_label") or "")
+        )
+        if label not in {"inline_formula", "formula"}:
+            continue
+        if block.bbox is None or block.bbox.area <= 0:
+            continue
+        targets.append(block)
+    targets.sort(key=lambda item: (item.bbox.y, item.bbox.x, item.order))
+    return targets
+
+
+def _existing_parent_index(block: Block) -> int:
+    binding = block.app_payload.get(PADDLE_BINDING_KEY)
+    if isinstance(binding, dict):
+        parent_index = _int_value(binding.get("parent_index"))
+        if parent_index >= 0:
+            return parent_index
+    return _int_value(block.app_payload.get("_layout_paddle_parent_index", block.raw_payload.get("_layout_paddle_parent_index")))
+
+
+def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
+    bbox_xyxy = [int(value) for value in block.bbox.to_xyxy()]
+    parent_index = _existing_parent_index(block)
+    binding: dict[str, Any] = {
+        "status": BINDING_FORMULA_CROP_OCR,
+        "source": "paddle_formula_crop_ocr",
+        "block_type": BlockType.EQUATION.value,
+        "source_label": "inline_formula",
+        "text": text,
+        "parent_index": parent_index,
+        "candidate_index": -1,
+        "score": 1.0,
+        "manual_bbox": bbox_xyxy,
+        "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
+    }
+    block.source_label = "inline_formula"
+    block.recognizable = False
+    block.app_payload[PADDLE_BINDING_KEY] = binding
+    block.app_payload["block_label"] = "inline_formula"
+    block.app_payload["block_bbox"] = bbox_xyxy
+    block.app_payload.pop(OCR_TEXT_INVALIDATED_KEY, None)
+    block.app_payload.pop("ocr_invalidation_kind", None)
+    block.lines = [
+        Line(
+            text=text,
+            confidence=1.0,
+            bbox=block.bbox,
+            ocr_text=text,
+            original_text=text,
+            review_flags=[FORMULA_CROP_OCR_REVIEW_FLAG],
+        )
+    ]
+
+
+def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
+    bbox_xyxy = [int(value) for value in block.bbox.to_xyxy()]
+    parent_index = _existing_parent_index(block)
+    flags = ["manual_formula_needs_text"]
+    if reason:
+        flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
+    block.source_label = "inline_formula"
+    block.recognizable = False
+    block.app_payload[PADDLE_BINDING_KEY] = {
+        "status": BINDING_EMPTY_REVIEW,
+        "source": "paddle_formula_crop_ocr_empty",
+        "block_type": BlockType.EQUATION.value,
+        "source_label": "inline_formula",
+        "text": "",
+        "parent_index": parent_index,
+        "candidate_index": -1,
+        "score": 0.0,
+        "manual_bbox": bbox_xyxy,
+        "review_flags": flags,
+    }
+    block.app_payload["block_label"] = "inline_formula"
+    block.app_payload["block_bbox"] = bbox_xyxy
+    block.lines = [
+        Line(
+            text="",
+            confidence=0.0,
+            bbox=block.bbox,
+            ocr_text="",
+            original_text="",
+            review_flags=flags,
+        )
+    ]
+
+
+def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:
+    for block in blocks:
+        binding = block.app_payload.get(PADDLE_BINDING_KEY)
+        binding_source = str(binding.get("source") or "") if isinstance(binding, dict) else ""
+        invalidated = bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY))
+        stale_parent_binding = "parent_text" in binding_source or binding_source == "paddle_geometry"
+        if invalidated or stale_parent_binding or not proof_block_text(block):
+            _mark_inline_formula_needs_text(block)
+
+
+def _mark_formula_crop_ocr_failed(blocks: list[Block], reason: str) -> None:
+    for block in blocks:
+        _mark_inline_formula_needs_text(block, reason)
+
+
+def _build_formula_rebind_client(progress_callback: Callable[[int, int, str], None] | None) -> Any | None:
+    try:
+        from app.core.app_config import get_config
+        from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
+        from app.core.paddle_v16_client import (
+            PaddleV16LayoutClient,
+            is_paddle_v16_endpoint,
+        )
+
+        cfg = get_config()
+        url = resolve_api_endpoint_for_role(
+            cfg.get("api_url", ""),
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
+        )
+        if not url or not is_paddle_v16_endpoint(url):
+            return None
+        configured_timeout = max(1, int(cfg.get("api_timeout", 180)))
+        return PaddleV16LayoutClient(
+            jobs_url=url,
+            token=str(cfg.get("api_token", "") or ""),
+            request_timeout=min(max(10, configured_timeout), 30),
+            poll_timeout=max(configured_timeout, 180),
+            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
+            status_callback=(
+                (lambda message: progress_callback(0, 1, f"Paddle 公式重识别：{message}"))
+                if progress_callback
+                else None
+            ),
+        )
+    except Exception as exc:
+        logger.warning("Cannot create Paddle formula crop OCR client: %s", exc)
+        return None
 
 
 class HanwangMicroRecBlockEngine:
@@ -2745,10 +3564,12 @@ class HanwangMicroRecBlockEngine:
         *,
         seg_timeout: float = 120.0,
         recog_timeout: float = 60.0,
+        formula_rebind_client: Any | None = None,
         runner=run_micro_recblock,
     ) -> None:
         self._seg_timeout = seg_timeout
         self._recog_timeout = recog_timeout
+        self._formula_rebind_client = formula_rebind_client
         self._runner = runner
 
     def recognize_page_blocks(
@@ -2757,12 +3578,19 @@ class HanwangMicroRecBlockEngine:
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> RunStats:
+        _strip_cached_layout_line_routes_from_page(page)
+        self._refresh_inline_formula_texts_from_current_crops(
+            image_bgr,
+            page,
+            progress_callback=progress_callback,
+        )
         preserved_manual_blocks = _routed_manual_structure_blocks(page)
-        ppvl_blocks = (
+        layout_blocks = (
             _page_blocks_from_layout(page)
             if _page_layout_has_user_edits(page)
             else (page.ppvl_parsing_res_list or _page_blocks_from_layout(page))
         )
+        ppvl_blocks = deepcopy(layout_blocks)
         if not ppvl_blocks:
             raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
 
@@ -2814,6 +3642,8 @@ class HanwangMicroRecBlockEngine:
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
             raw_payload, app_payload = split_legacy_raw_payload(row.raw_block)
+            raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+            app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
             audit = app_payload.get(HANWANG_BBOX_AUDIT_KEY)
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
@@ -2881,6 +3711,60 @@ class HanwangMicroRecBlockEngine:
             stats.overlap_merge_replacements,
         )
         return stats
+
+    def _refresh_inline_formula_texts_from_current_crops(
+        self,
+        image_bgr: np.ndarray,
+        page: Page,
+        *,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> None:
+        targets = _inline_formula_crop_ocr_targets(page)
+        if not targets:
+            return
+        client = self._formula_rebind_client or _build_formula_rebind_client(progress_callback)
+        if client is None:
+            _mark_formula_crop_ocr_unavailable(targets)
+            if progress_callback:
+                progress_callback(0, max(1, len(targets)), "Paddle 公式重识别未配置，公式框保留待确认")
+            return
+
+        if progress_callback:
+            progress_callback(0, max(1, len(targets)), f"Paddle 公式重识别中… {len(targets)} 个框")
+        try:
+            from app.experimental.inline_formula_rebind import (
+                build_formula_pseudo_page,
+                recognize_formula_pseudo_page,
+            )
+
+            bboxes = [tuple(int(value) for value in block.bbox.to_xyxy()) for block in targets]
+            pseudo_page = build_formula_pseudo_page(image_bgr, bboxes)
+            recognitions, _response = recognize_formula_pseudo_page(
+                pseudo_page,
+                client=client,
+                batch_id=f"ocr-process-formula-{page.page_number}-{int(time.time() * 1000)}",
+                filename=f"page-{page.page_number}-inline-formula-pseudo.png",
+            )
+        except Exception as exc:
+            logger.warning("Paddle formula crop OCR failed for page=%s: %s", page.page_number, exc)
+            _mark_formula_crop_ocr_failed(targets, str(exc))
+            if progress_callback:
+                progress_callback(0, max(1, len(targets)), f"Paddle 公式重识别失败：{exc}")
+            return
+
+        text_by_index = {item.crop_index: item.text for item in recognitions if str(item.text or "").strip()}
+        for index, block in enumerate(targets):
+            text = str(text_by_index.get(index) or "").strip()
+            if text:
+                _set_inline_formula_crop_ocr_text(block, text)
+            else:
+                _mark_inline_formula_needs_text(block)
+        if progress_callback:
+            progress_callback(
+                len(text_by_index),
+                max(1, len(targets)),
+                f"Paddle 公式重识别完成：{len(text_by_index)}/{len(targets)}",
+            )
 
 
 __all__ = [

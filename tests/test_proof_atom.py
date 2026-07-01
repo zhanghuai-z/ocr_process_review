@@ -33,6 +33,34 @@ def test_build_line_proof_atoms_keeps_stable_single_char_atoms():
     assert not has_non_char_atoms(atoms)
 
 
+def test_build_line_proof_atoms_keeps_low_confidence_number_punctuation_slots():
+    line = _line(
+        "1．生产率",
+        [
+            Char("1", 0.19, BBox(0, 0, 10, 20), bbox_source="ocr", bbox_granularity="char", token_text="1"),
+            Char("．", 0.19, BBox(12, 15, 5, 5), bbox_source="ocr", bbox_granularity="char", token_text="．"),
+            Char("生", 0.9, BBox(22, 0, 10, 20), bbox_source="ocr", bbox_granularity="char", token_text="生"),
+            Char("产", 0.9, BBox(34, 0, 10, 20), bbox_source="ocr", bbox_granularity="char", token_text="产"),
+            Char("率", 0.9, BBox(46, 0, 10, 20), bbox_source="ocr", bbox_granularity="char", token_text="率"),
+        ],
+    )
+
+    atoms = build_line_proof_atoms(None, line)
+
+    assert [atom.kind for atom in atoms] == [
+        ProofAtomKind.NUMBER,
+        ProofAtomKind.PUNCT,
+        ProofAtomKind.CHAR,
+        ProofAtomKind.CHAR,
+        ProofAtomKind.CHAR,
+    ]
+    assert [atom.text for atom in atoms] == ["1", "．", "生", "产", "率"]
+    assert atoms[0].reliable is False
+    assert atoms[0].reason == "low_confidence_single_char"
+    assert atoms[1].reliable is False
+    assert atoms[1].reason == "low_confidence_single_char"
+
+
 def test_proof_line_projection_is_the_single_line_view_contract():
     line = _line(
         "甲",

@@ -20,6 +20,10 @@ PADDLE_V16_NETWORK_MODES = {"direct", "env_proxy", "auto"}
 _DIRECT_PROXY_OVERRIDES = {"http": None, "https": None, "all": None}
 
 
+class PaddleV16RequestCancelled(RuntimeError):
+    """Raised when the caller cancels an in-flight Paddle layout request."""
+
+
 def is_paddle_v16_endpoint(endpoint_url: str | None) -> bool:
     return (endpoint_url or "").strip().rstrip("/").endswith(PADDLE_V16_JOBS_PATH)
 
@@ -96,7 +100,26 @@ class PaddleV16LayoutClient:
     poll_interval_s: float = 5.0
     sleep: Callable[[float], None] = field(default=time.sleep)
     network_mode: str = "direct"
+    cancel_callback: Callable[[], bool] | None = None
+    status_callback: Callable[[str], None] | None = None
     telemetry: dict[str, Any] = field(default_factory=dict, init=False)
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_callback is not None and self.cancel_callback():
+            raise PaddleV16RequestCancelled("PaddleOCR-VL-1.6 request cancelled")
+
+    def _emit_status(self, message: str) -> None:
+        if self.status_callback is not None:
+            self.status_callback(message)
+
+    def _sleep_poll_interval(self) -> None:
+        remaining = max(0.0, float(self.poll_interval_s))
+        while remaining > 0:
+            self._raise_if_cancelled()
+            step = min(0.25, remaining)
+            self.sleep(step)
+            remaining -= step
+        self._raise_if_cancelled()
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -109,7 +132,7 @@ class PaddleV16LayoutClient:
         if mode == "env_proxy":
             return [True]
         if mode == "auto" and _has_env_proxy():
-            return [True, False]
+            return [False, True]
         return [False]
 
     def _request_proxy_kwargs(self, use_env_proxy: bool) -> dict[str, Any]:
@@ -142,6 +165,7 @@ class PaddleV16LayoutClient:
         last_exc: BaseException | None = None
         for index, use_env_proxy in enumerate(attempts):
             try:
+                self._raise_if_cancelled()
                 request_kwargs = {**kwargs, **self._request_proxy_kwargs(use_env_proxy)}
                 if method.upper() == "POST":
                     response = requests.post(url, **request_kwargs)
@@ -149,6 +173,7 @@ class PaddleV16LayoutClient:
                     response = requests.get(url, **request_kwargs)
                 else:
                     response = requests.request(method, url, **request_kwargs)
+                self._raise_if_cancelled()
                 self.telemetry[f"{label}_network_mode"] = "env_proxy" if use_env_proxy else "direct"
                 return response
             except retryable_errors as exc:
@@ -156,7 +181,9 @@ class PaddleV16LayoutClient:
                 if index >= len(attempts) - 1:
                     raise
                 self._rewind_request_files(kwargs.get("files"))
-                self.telemetry[f"{label}_fallback"] = "env_proxy_to_direct"
+                src = "env_proxy" if use_env_proxy else "direct"
+                dst = "env_proxy" if attempts[index + 1] else "direct"
+                self.telemetry[f"{label}_fallback"] = f"{src}_to_{dst}"
         if last_exc is not None:
             raise last_exc
         raise RuntimeError(f"PaddleOCR-VL-1.6 request failed before sending: {method} {url}")
@@ -196,6 +223,8 @@ class PaddleV16LayoutClient:
         batch_id: str = "",
         filename: str = "page.png",
     ) -> str:
+        self._raise_if_cancelled()
+        self._emit_status("提交请求")
         started = time.perf_counter()
         payload = optional_payload or build_paddle_v16_optional_payload()
         data = {
@@ -227,6 +256,7 @@ class PaddleV16LayoutClient:
             raise RuntimeError(f"PaddleOCR-VL-1.6 submit response missing jobId: {body!r}") from exc
         if not isinstance(job_id, str) or not job_id:
             raise RuntimeError(f"PaddleOCR-VL-1.6 submit response has invalid jobId: {body!r}")
+        self._emit_status("等待服务端")
         return job_id
 
     def wait_for_result_json_url(self, job_id: str) -> tuple[str, dict[str, Any]]:
@@ -236,6 +266,8 @@ class PaddleV16LayoutClient:
         started = time.perf_counter()
         poll_count = 0
         while time.monotonic() <= deadline:
+            self._raise_if_cancelled()
+            self._emit_status("等待服务端")
             resp = self._request_with_network_fallback(
                 "GET",
                 poll_url,
@@ -256,6 +288,7 @@ class PaddleV16LayoutClient:
                 if isinstance(json_url, str) and json_url:
                     self.telemetry["wait_seconds"] = time.perf_counter() - started
                     self.telemetry["poll_count"] = poll_count
+                    self._emit_status("下载结果")
                     return json_url, data
                 raise RuntimeError(f"PaddleOCR-VL-1.6 job done without jsonUrl: {body!r}")
             if state in {"failed", "canceled", "cancelled"}:
@@ -263,12 +296,14 @@ class PaddleV16LayoutClient:
                 self.telemetry["wait_seconds"] = time.perf_counter() - started
                 self.telemetry["poll_count"] = poll_count
                 raise RuntimeError(f"PaddleOCR-VL-1.6 job {state}: {error_msg}")
-            self.sleep(self.poll_interval_s)
+            self._sleep_poll_interval()
         self.telemetry["wait_seconds"] = time.perf_counter() - started
         self.telemetry["poll_count"] = poll_count
         raise TimeoutError(f"PaddleOCR-VL-1.6 job polling timed out: {job_id}, last={last_body!r}")
 
     def download_jsonl(self, json_url: str) -> str:
+        self._raise_if_cancelled()
+        self._emit_status("下载结果")
         started = time.perf_counter()
         resp = self._request_with_network_fallback(
             "GET",
@@ -281,9 +316,11 @@ class PaddleV16LayoutClient:
         text = resp.text
         self.telemetry["download_seconds"] = time.perf_counter() - started
         self.telemetry["jsonl_bytes"] = len(text.encode("utf-8"))
+        self._emit_status("解析结果")
         return text
 
     def get_batch_status(self, batch_id: str) -> dict[str, Any]:
+        self._raise_if_cancelled()
         url = f"{self.jobs_url.rstrip('/')}/batch/{batch_id}"
         resp = self._request_with_network_fallback(
             "GET",

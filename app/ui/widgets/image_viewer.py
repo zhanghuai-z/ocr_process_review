@@ -48,6 +48,9 @@ BLOCK_COLORS: dict[BlockType, QColor] = {
 
 _LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)
 _LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)
+_CHAR_BOX_COLOR = QColor("#ff8c00")
+_FORMULA_CHAR_BOX_COLOR = QColor("#2563eb")
+_CHAR_BOX_Z = 16
 
 # ── 缩放手柄 ──────────────────────────────────────────────────
 
@@ -421,22 +424,24 @@ class ImageViewer(QGraphicsView):
             if item.scene() is self._scene:
                 self._scene.removeItem(item)
         self._char_items.clear()
-        color = QColor("#ff8c00")
         for char in chars:
             if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
                 continue
             bb = char.bbox
+            is_formula_carrier = char.bbox_source == "paddle_inline_formula"
+            color = _FORMULA_CHAR_BOX_COLOR if is_formula_carrier else _CHAR_BOX_COLOR
+            label = "[formula-token]" if is_formula_carrier else "[char]"
             item = BBoxItem(
                 QRectF(0, 0, bb.w, bb.h),
                 color,
-                f"[char] {char.char or char.token_text}",
+                f"{label} {char.char or char.token_text}",
                 pen_width=1.0,
             )
             item.setPos(bb.x, bb.y)
             item.set_block(char)
             item.set_selectable(editable)
             item.set_editable(editable and self._edit_mode and not self._space_pan_active)
-            item.setZValue(8 if editable else 1)
+            item.setZValue(_CHAR_BOX_Z)
             item.signals.moved.connect(self.char_bbox_moved.emit)
             self._scene.addItem(item)
             self._char_items.append((item, char))

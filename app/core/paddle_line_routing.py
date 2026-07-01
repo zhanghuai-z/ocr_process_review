@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
+from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
 from app.core.ocr_ir import is_formula_marker_token, is_formula_token
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_layout_schema import paddle_record_label, paddle_record_text
@@ -13,6 +14,8 @@ from app.models import BlockType
 
 ROUTE_SUBBLOCKS_FIELD = "_route_subblocks"
 LAYOUT_LINE_ROUTES_FIELD = "_layout_line_routes"
+LAYOUT_ROUTE_SOURCE_FIELD = "_layout_route_source"
+LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS = "ppocr_page_line_hints"
 ROUTE_INLINE_FORMULA_FLAG = "hanwang_route_inline_formula"
 ROUTE_TABLE_FLAG = "hanwang_route_table"
 _FORMULA_STYLE_POSITION_LABELS = {"footer"}
@@ -40,6 +43,10 @@ _FORMULA_COMMAND_ALIASES = {
     "phi": ("phi", "φ"),
     "varphi": ("varphi", "phi", "φ"),
 }
+_PHYSICAL_LINE_MIN_VERTICAL_OVERLAP = 0.25
+_PHYSICAL_LINE_MAX_CENTER_GAP_RATIO = 0.65
+_PHYSICAL_LINE_MAX_CENTER_GAP_PX = 18
+_INTER_FORMULA_TEXT_GAP_MIN_WIDTH = 16
 
 
 @dataclass(frozen=True)
@@ -187,6 +194,7 @@ def _horizontal_gap_segments(
     line_bbox: tuple[int, int, int, int],
     subblocks: list[dict[str, Any]],
     formula_texts_by_bbox: dict[tuple[int, int, int, int], str],
+    parent_text: str = "",
 ) -> list[dict[str, Any]]:
     lx1, ly1, lx2, ly2 = line_bbox
     cuts: list[dict[str, Any]] = []
@@ -204,11 +212,12 @@ def _horizontal_gap_segments(
         text = formula_texts_by_bbox.get(sub_bbox, subblock.get("text", ""))
         if kind == "formula" and is_formula_marker_token(text):
             continue
+        bbox = sub_bbox if kind == "formula" else (ox1, ly1, ox2, ly2)
         cuts.append(
             {
                 "kind": kind,
                 "label": subblock["label"],
-                "bbox": (ox1, ly1, ox2, ly2),
+                "bbox": bbox,
                 "text": text,
             }
         )
@@ -226,10 +235,130 @@ def _horizontal_gap_segments(
         cursor = max(cursor, cx2)
     if cursor < lx2:
         segments.append({"kind": "text", "bbox": (cursor, ly1, lx2, ly2)})
+    segments = _restore_expected_inter_formula_text_gaps(
+        line_bbox,
+        segments,
+        cuts,
+        parent_text,
+    )
     return [
         segment for segment in segments
         if segment["bbox"][2] - segment["bbox"][0] >= 4 and segment["bbox"][3] - segment["bbox"][1] >= 4
     ]
+
+
+def _restore_expected_inter_formula_text_gaps(
+    line_bbox: tuple[int, int, int, int],
+    segments: list[dict[str, Any]],
+    cuts: list[dict[str, Any]],
+    parent_text: str,
+) -> list[dict[str, Any]]:
+    formula_cuts = [
+        cut for cut in cuts
+        if cut.get("kind") == "formula" and str(cut.get("text") or "").strip()
+    ]
+    if len(formula_cuts) < 2 or not parent_text:
+        return segments
+
+    span_matches = [
+        match for match in _FORMULA_PATTERN.finditer(parent_text or "")
+        if not is_formula_marker_token(match.group(0))
+    ]
+    if len(span_matches) < 2:
+        return segments
+
+    matched_indices = _match_formula_cuts_to_parent_spans(formula_cuts, span_matches)
+    if len(matched_indices) != len(formula_cuts):
+        return segments
+
+    restored = list(segments)
+    for left_idx, right_idx in zip(range(len(formula_cuts) - 1), range(1, len(formula_cuts))):
+        left_span_index = matched_indices[left_idx]
+        right_span_index = matched_indices[right_idx]
+        if right_span_index != left_span_index + 1:
+            continue
+        between_text = parent_text[span_matches[left_span_index].end():span_matches[right_span_index].start()]
+        if not _has_visible_inter_formula_text(between_text):
+            continue
+        left_bbox = tuple(formula_cuts[left_idx]["bbox"])
+        right_bbox = tuple(formula_cuts[right_idx]["bbox"])
+        gap_bbox = _inter_formula_text_gap_bbox(line_bbox, left_bbox, right_bbox)
+        if gap_bbox is None:
+            continue
+        if _text_segment_covers_gap(restored, gap_bbox):
+            continue
+        restored.append(
+            {
+                "kind": "text",
+                "label": "inter_formula_text_gap",
+                "bbox": gap_bbox,
+                "text": between_text.strip(),
+            }
+        )
+    restored.sort(key=lambda item: (item["bbox"][0], item["bbox"][1], 0 if item.get("kind") == "formula" else 1))
+    return restored
+
+
+def _match_formula_cuts_to_parent_spans(
+    formula_cuts: list[dict[str, Any]],
+    span_matches: list[Any],
+) -> list[int]:
+    matched: list[int] = []
+    cursor = 0
+    for cut in formula_cuts:
+        text = str(cut.get("text") or "").strip()
+        if not text:
+            return []
+        found = -1
+        for index in range(cursor, len(span_matches)):
+            if span_matches[index].group(0) == text:
+                found = index
+                break
+        if found < 0:
+            return []
+        matched.append(found)
+        cursor = found + 1
+    return matched
+
+
+def _has_visible_inter_formula_text(text: str) -> bool:
+    return any(not ch.isspace() for ch in str(text or ""))
+
+
+def _inter_formula_text_gap_bbox(
+    line_bbox: tuple[int, int, int, int],
+    left_bbox: tuple[int, int, int, int],
+    right_bbox: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    lx1, ly1, lx2, ly2 = line_bbox
+    natural_left = max(lx1, min(left_bbox[2], right_bbox[0]))
+    natural_right = min(lx2, max(left_bbox[2], right_bbox[0]))
+    if natural_right - natural_left >= 4:
+        center = (natural_left + natural_right) // 2
+    else:
+        center = (left_bbox[2] + right_bbox[0]) // 2
+    half = max(_INTER_FORMULA_TEXT_GAP_MIN_WIDTH // 2, (natural_right - natural_left) // 2)
+    x1 = max(lx1, center - half)
+    x2 = min(lx2, center + half)
+    if x2 - x1 < 4:
+        return None
+    return (x1, ly1, x2, ly2)
+
+
+def _text_segment_covers_gap(
+    segments: list[dict[str, Any]],
+    gap_bbox: tuple[int, int, int, int],
+) -> bool:
+    gap_center = (gap_bbox[0] + gap_bbox[2]) / 2.0
+    for segment in segments:
+        if segment.get("kind") != "text":
+            continue
+        bbox = tuple(segment["bbox"])
+        if vertical_overlap_ratio(bbox, gap_bbox) < 0.25:
+            continue
+        if bbox[0] <= gap_center <= bbox[2] and bbox[2] - bbox[0] >= 4:
+            return True
+    return False
 
 
 def _line_hint_from_value(value: Any, width: int, height: int) -> PageOcrLineHint | None:
@@ -273,6 +402,59 @@ def _line_assignment_score(
     return area / line_area
 
 
+def _line_height(bbox: tuple[int, int, int, int]) -> int:
+    return max(1, int(bbox[3]) - int(bbox[1]))
+
+
+def _line_center_y(bbox: tuple[int, int, int, int]) -> float:
+    return (int(bbox[1]) + int(bbox[3])) / 2.0
+
+
+def _same_physical_line(
+    a: tuple[int, int, int, int],
+    b: tuple[int, int, int, int],
+) -> bool:
+    if vertical_overlap_ratio(a, b) >= _PHYSICAL_LINE_MIN_VERTICAL_OVERLAP:
+        return True
+    max_center_gap = max(
+        _PHYSICAL_LINE_MAX_CENTER_GAP_PX,
+        int(round(max(_line_height(a), _line_height(b)) * _PHYSICAL_LINE_MAX_CENTER_GAP_RATIO)),
+    )
+    return abs(_line_center_y(a) - _line_center_y(b)) <= max_center_gap
+
+
+def _bbox_only_physical_line_hints(
+    line_hints: list[PageOcrLineHint],
+) -> list[PageOcrLineHint]:
+    """Collapse PP-OCRv5 fragments into physical row hints.
+
+    PP-OCRv5 may return superscripts, subscripts, inline formulas, and ordinary
+    text chunks as separate OCR lines.  Routing only trusts the merged
+    page-space row geometry.  The concatenated text is retained only as weak
+    context for mapping Paddle parent formula spans back to row geometry; it is
+    never emitted as Hanwang OCR text.
+    """
+    buckets: list[list[PageOcrLineHint]] = []
+    for hint in sorted(line_hints, key=lambda item: (_line_center_y(item.bbox), item.bbox[0])):
+        for bucket in buckets:
+            if any(_same_physical_line(item.bbox, hint.bbox) for item in bucket):
+                bucket.append(hint)
+                break
+        else:
+            buckets.append([hint])
+
+    merged: list[PageOcrLineHint] = []
+    for bucket in buckets:
+        bbox = union_xyxy([item.bbox for item in bucket])
+        text = "".join(
+            str(item.text or "")
+            for item in sorted(bucket, key=lambda value: (value.bbox[0], value.bbox[1]))
+        )
+        merged.append(PageOcrLineHint(text=text, bbox=bbox))
+    merged.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
+    return merged
+
+
 def attach_page_ocr_line_routes(
     ppvl_blocks: list[dict[str, Any]],
     page_ocr_lines: list[Any],
@@ -285,6 +467,7 @@ def attach_page_ocr_line_routes(
     ]
     if not line_hints:
         return
+    line_hints = _bbox_only_physical_line_hints(line_hints)
 
     parent_entries: list[tuple[int, dict[str, Any], tuple[int, int, int, int]]] = []
     for block_idx, block in enumerate(ppvl_blocks):
@@ -305,8 +488,14 @@ def attach_page_ocr_line_routes(
         if best_idx is not None and best_score >= 0.1:
             assigned[best_idx].append(line)
 
-    for block_idx, block, _block_bbox in parent_entries:
-        lines = sorted(assigned.get(block_idx, []), key=lambda item: (item.bbox[1], item.bbox[0]))
+    for block_idx, block, block_bbox in parent_entries:
+        lines = []
+        for line in assigned.get(block_idx, []):
+            clipped_bbox = intersect_xyxy(line.bbox, block_bbox)
+            if clipped_bbox is None:
+                continue
+            lines.append(PageOcrLineHint(text=line.text, bbox=clipped_bbox))
+        lines.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
         if not lines:
             block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
             continue
@@ -341,7 +530,15 @@ def attach_page_ocr_line_routes(
         )
         formula_texts_by_bbox = {segment.bbox: segment.text for segment in recovered}
         routes = [
-            _build_route_line(_horizontal_gap_segments(line.bbox, routed_subblocks, formula_texts_by_bbox))
+            _build_route_line(
+                _horizontal_gap_segments(
+                    line.bbox,
+                    routed_subblocks,
+                    formula_texts_by_bbox,
+                    block_text(block),
+                ),
+                source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+            )
             for line in lines
         ]
         if routes:
@@ -377,6 +574,8 @@ def route_subblocks_for_block(
     subblocks: list[dict[str, Any]] = []
     for value in values:
         if not isinstance(value, dict):
+            continue
+        if bool(value.get(UI_DELETED_INLINE_FORMULA_KEY)):
             continue
         label = route_authority_label(value)
         bbox = intersect_xyxy(parent_bbox, block_bbox_xyxy(value, width, height))
@@ -543,11 +742,38 @@ def _formula_texts_by_bbox(
 ) -> dict[tuple[int, int, int, int], str]:
     formula_spans = _formula_spans(parent_text)
     texts_by_bbox: dict[tuple[int, int, int, int], str] = {}
-    for index, item in enumerate(_reading_order_by_row(formula_subblocks)):
-        if index >= len(formula_spans):
-            break
-        texts_by_bbox[tuple(item["bbox"])] = formula_spans[index]
+    ordered = _reading_order_by_row(formula_subblocks)
+    guessable: list[dict[str, Any]] = []
+    for item in ordered:
+        bbox = tuple(item["bbox"])
+        explicit_text = str(item.get("text") or "").strip()
+        if explicit_text:
+            texts_by_bbox[bbox] = explicit_text
+            continue
+        if _formula_subblock_allows_parent_text_guess(item):
+            guessable.append(item)
+    if len(guessable) == len(formula_spans):
+        for index, item in enumerate(guessable):
+            texts_by_bbox.setdefault(tuple(item["bbox"]), formula_spans[index])
     return texts_by_bbox
+
+
+def _formula_subblock_allows_parent_text_guess(item: dict[str, Any]) -> bool:
+    raw = item.get("raw")
+    if not isinstance(raw, dict):
+        return True
+    if raw.get("_layout_manual_route_subblock"):
+        return False
+    if raw.get("_layout_manual_binding_text_stale"):
+        return False
+    if raw.get("_layout_manual_unbound_route_subblock"):
+        return False
+    binding = raw.get("paddle_binding")
+    if isinstance(binding, dict):
+        source = str(binding.get("source") or "")
+        if "parent_text" in source or source == "paddle_geometry":
+            return False
+    return True
 
 
 def formula_texts_by_subblock_bbox(
@@ -689,8 +915,10 @@ def recover_inline_formula_segments(
 
 def _build_route_line(
     segments: list[dict[str, Any]],
+    *,
+    source: str = "",
 ) -> dict[str, Any]:
-    return {
+    route = {
         "bbox": list(union_xyxy([tuple(segment["bbox"]) for segment in segments])),
         "segments": [
             {
@@ -702,6 +930,9 @@ def _build_route_line(
             for segment in segments
         ],
     }
+    if source:
+        route[LAYOUT_ROUTE_SOURCE_FIELD] = source
+    return route
 
 
 def _route_has_formula(route: dict[str, Any]) -> bool:
@@ -820,7 +1051,16 @@ def build_layout_line_routes(
                 for subblock in formula_subblocks
                 if vertical_overlap_ratio(row_bbox, subblock["bbox"]) >= 0.25
             ]
-            routes.append(_build_route_line(_horizontal_gap_segments(row_bbox, row_subblocks, formula_texts_by_bbox)))
+            routes.append(
+                _build_route_line(
+                    _horizontal_gap_segments(
+                        row_bbox,
+                        row_subblocks,
+                        formula_texts_by_bbox,
+                        block_text(block),
+                    )
+                )
+            )
         else:
             text_segments = [segment for segment in bucket if segment["kind"] == "text"]
             if text_segments:
@@ -878,7 +1118,12 @@ def _normalize_cached_line_routes(
                 }
             )
         if normalized_segments:
-            normalized.append(_build_route_line(normalized_segments))
+            normalized.append(
+                _build_route_line(
+                    normalized_segments,
+                    source=str(route.get(LAYOUT_ROUTE_SOURCE_FIELD) or ""),
+                )
+            )
     return normalized
 
 
@@ -892,6 +1137,13 @@ def _routes_have_marker_formula(routes: list[dict[str, Any]]) -> bool:
     )
 
 
+def _routes_are_runtime_ppocr_line_routes(routes: list[dict[str, Any]]) -> bool:
+    return bool(routes) and all(
+        route.get(LAYOUT_ROUTE_SOURCE_FIELD) == LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS
+        for route in routes
+    )
+
+
 def line_routes_for_block(
     block: dict[str, Any],
     width: int,
@@ -899,14 +1151,14 @@ def line_routes_for_block(
 ) -> list[dict[str, Any]]:
     cached = _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height)
     if cached:
-        if _routes_have_marker_formula(cached) and route_subblocks_for_block(block, width, height):
+        if not _routes_are_runtime_ppocr_line_routes(cached):
+            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+        elif _routes_have_marker_formula(cached) and route_subblocks_for_block(block, width, height):
             block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
         else:
             block[LAYOUT_LINE_ROUTES_FIELD] = cached
             return cached
     routes = build_layout_line_routes(block, width, height)
-    if routes:
-        block[LAYOUT_LINE_ROUTES_FIELD] = routes
     return routes
 
 
@@ -948,13 +1200,16 @@ def has_layout_line_routes(
     height: int,
 ) -> bool:
     """Return whether layout routes exist or can be derived without mutating block."""
-    if _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height):
+    cached = _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height)
+    if _routes_are_runtime_ppocr_line_routes(cached):
         return True
     return bool(route_subblocks_for_block(block, width, height))
 
 
 __all__ = [
     "LAYOUT_LINE_ROUTES_FIELD",
+    "LAYOUT_ROUTE_SOURCE_FIELD",
+    "LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS",
     "PaddleRouteLineHint",
     "PageOcrLineHint",
     "ROUTE_INLINE_FORMULA_FLAG",

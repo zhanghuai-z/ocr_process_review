@@ -1411,7 +1411,11 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
                 confidence=1.0,
                 bbox=BBox(12, 16, 30, 12),
                 bbox_source="paddle_inline_formula",
+                bbox_granularity="formula",
+                token_text="$ A $",
             ),
+            Char(char="公", confidence=0.9, bbox=BBox(46, 16, 10, 12)),
+            Char(char="式", confidence=0.9, bbox=BBox(58, 16, 10, 12)),
         ],
     )
     formula_number_line = Line(text="(1)", confidence=1.0, bbox=BBox(86, 32, 14, 12))
@@ -1483,11 +1487,13 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
         line_less_formula,
     ]
     assert [pair._unit.kind for pair in h._pairs] == [
-        ProofUnitKind.FORMULA,
+        ProofUnitKind.TEXT,
         ProofUnitKind.FORMULA,
         ProofUnitKind.FORMULA,
     ]
     assert [pair._debug_badge for pair in h._pairs] == ["公式", "公式", "公式"]
+    assert not h._pairs[0]._editor.has_visual_text_override()
+    assert h._pairs[0]._editor.has_atom_visual_overlays()
     assert h._pairs[1]._editor.has_visual_text_override()
     assert h._pairs[1]._editor.toPlainText() == "$$ E=mc^2 $$"
     assert h._pairs[2]._editor.has_visual_text_override()
@@ -1503,11 +1509,11 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
         Qt.KeyboardModifier.NoModifier,
     )
     formula_pair._editor.mousePressEvent(left_click)
-    assert not formula_pair._editor.has_visual_text_override()
+    assert formula_pair._editor.has_visual_text_override()
     formula_pair._img_clicked_lookup(left_click)
     assert formula_pair._editor.has_visual_text_override()
     formula_pair._editor.mousePressEvent(left_click)
-    assert not formula_pair._editor.has_visual_text_override()
+    assert formula_pair._editor.has_visual_text_override()
     formula_pair._editor.mousePressEvent(QMouseEvent(
         QEvent.Type.MouseButtonPress,
         QPointF(12, 10),
@@ -1518,6 +1524,9 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
         Qt.KeyboardModifier.NoModifier,
     ))
     assert formula_pair._editor.has_visual_text_override()
+    assert formula_pair._formula_source_panel is not None
+    assert not formula_pair._formula_source_panel.isHidden()
+    assert formula_pair._formula_source_popup is None
 
     h._btn_debug_formula.setChecked(False)
     h._btn_debug_table.setChecked(True)
@@ -1587,6 +1596,126 @@ def test_hproof_formula_visual_uses_experimental_pixmap(monkeypatch):
     h.deleteLater()
 
 
+def test_hproof_display_formula_source_editor_updates_rendered_source(monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QPixmap
+    from app.experimental import formula_rendering
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
+
+    rendered: list[str] = []
+
+    def fake_render_formula_pixmap(text: str, *, target_height: int, **_kwargs):
+        rendered.append(text)
+        pixmap = QPixmap(80, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.setDevicePixelRatio(1.0)
+        return SimpleNamespace(
+            pixmap=pixmap,
+            logical_width=80,
+            logical_height=18,
+            device_pixel_ratio=1.0,
+        )
+
+    monkeypatch.setattr(formula_rendering, "render_formula_pixmap", fake_render_formula_pixmap)
+    line = Line(text="$$ E=mc^2 $$", confidence=0.9, bbox=BBox(0, 0, 90, 20))
+    block = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(0, 0, 90, 20),
+        lines=[line],
+        source_label="display_formula",
+        raw_payload={"block_label": "display_formula"},
+    )
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+    h._btn_debug_formula.setChecked(True)
+
+    pair = h._pairs[0]
+    assert pair._unit.kind == ProofUnitKind.FORMULA
+    base_height = pair.height()
+    pair._open_formula_source_editor(0, len(pair._editor.toPlainText()), QPoint(0, 0))
+    assert pair._formula_source_panel is not None
+    assert not pair._formula_source_panel.isHidden()
+    assert pair._formula_source_popup is None
+    assert pair.height() > base_height
+    pair._apply_formula_source_text("$$ F=ma $$")
+
+    assert pair._editor.toPlainText() == "$$ F=ma $$"
+    assert pair._editor.has_visual_text_override()
+    assert rendered[-1] == "$$ F=ma $$"
+    h.deleteLater()
+
+
+def test_hproof_inline_formula_source_editor_replaces_formula_span(monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QPixmap
+    from app.experimental import formula_rendering
+    from app.ui.proof.h_proof import HProofPanel
+
+    def fake_render_formula_pixmap(text: str, *, target_height: int, **_kwargs):
+        pixmap = QPixmap(64, 18)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.setDevicePixelRatio(1.0)
+        return SimpleNamespace(
+            pixmap=pixmap,
+            logical_width=64,
+            logical_height=18,
+            device_pixel_ratio=1.0,
+        )
+
+    monkeypatch.setattr(formula_rendering, "render_formula_pixmap", fake_render_formula_pixmap)
+    formula = "$ E=mc^2 $"
+    line = Line(
+        text=f"含{formula}公式",
+        confidence=0.9,
+        bbox=BBox(0, 0, 140, 24),
+        chars=[
+            Char(char="含", confidence=0.9, bbox=BBox(0, 0, 10, 24), bbox_granularity="char"),
+            Char(
+                char=formula,
+                confidence=1.0,
+                bbox=BBox(12, 0, 80, 24),
+                bbox_source="paddle_inline_formula",
+                bbox_granularity="formula",
+                token_text=formula,
+            ),
+            Char(char="公", confidence=0.9, bbox=BBox(94, 0, 10, 24), bbox_granularity="char"),
+            Char(char="式", confidence=0.9, bbox=BBox(106, 0, 10, 24), bbox_granularity="char"),
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 140, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=160, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+
+    pair = h._pairs[0]
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    pair._sync_editor_slot_geometry()
+    before_overlay = pair._editor.atom_visual_overlays()[0]
+    start = 1
+    end = start + len(formula)
+    pair._open_formula_source_editor(start, end, QPoint(0, 0))
+    assert pair._formula_source_popup is not None
+    assert pair._formula_source_panel is None
+    pair._apply_formula_source_text(r"$ \\frac{a+b}{c+d}=F_{it} $")
+
+    assert pair._editor.toPlainText() == r"含$ \\frac{a+b}{c+d}=F_{it} $公式"
+    overlays = pair._editor.atom_visual_overlays()
+    assert len(overlays) == 1
+    assert overlays[0].kind == "formula"
+    assert overlays[0].start == 1
+    assert overlays[0].end == len(pair._editor.toPlainText()) - 2
+    assert overlays[0].left == before_overlay.left
+    assert overlays[0].right == before_overlay.right
+    assert pair._editor.has_slot_geometry()
+    h.deleteLater()
+
+
 def test_hproof_formula_fallback_keeps_cjk_text_upright(monkeypatch):
     from app.ui.proof.h_proof import _render_formula_visual
 
@@ -1597,6 +1726,49 @@ def test_hproof_formula_fallback_keeps_cjk_text_upright(monkeypatch):
     assert visual is not None
     assert visual.text == "含Aₜ公式"
     assert visual.kind == ""
+
+
+def test_hproof_display_formula_cjk_fallback_can_open_source_panel(monkeypatch):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from app.ui.proof.h_proof import HProofPanel, ProofUnitKind
+
+    monkeypatch.setenv("OCR_EXPERIMENTAL_FORMULA_RENDER", "0")
+    line = Line(text="$$ 中文公式 A_t $$", confidence=0.9, bbox=BBox(0, 0, 120, 24))
+    block = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(0, 0, 120, 30),
+        lines=[line],
+        source_label="display_formula",
+        raw_payload={"block_label": "display_formula"},
+    )
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=160, height=40)
+
+    h = HProofPanel()
+    h.load_pages([page])
+    h._btn_debug_formula.setChecked(True)
+
+    pair = h._pairs[0]
+    assert pair._unit.kind == ProofUnitKind.FORMULA
+    assert pair._editor.has_visual_text_override()
+    assert pair._editor._visual_text_kind == ""
+
+    pair._editor.mousePressEvent(QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(12, 10),
+        QPointF(12, 10),
+        QPointF(12, 10),
+        Qt.MouseButton.RightButton,
+        Qt.MouseButton.RightButton,
+        Qt.KeyboardModifier.NoModifier,
+    ))
+
+    assert pair._formula_source_panel is not None
+    assert not pair._formula_source_panel.isHidden()
+    pair._apply_formula_source_text("$$ 中文公式 B_t $$")
+    assert pair._editor.toPlainText() == "$$ 中文公式 B_t $$"
+    assert pair._editor.has_visual_text_override()
+    h.deleteLater()
 
 
 def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
@@ -1890,7 +2062,7 @@ def test_hproof_slot_editor_formula_visual_keeps_raw_text():
         Qt.KeyboardModifier.NoModifier,
     ))
 
-    assert not editor.has_visual_text_override()
+    assert editor.has_visual_text_override()
     assert editor.textCursor().selectedText()
     editor.deleteLater()
 
@@ -1925,6 +2097,36 @@ def test_hproof_slot_geometry_clears_when_edit_breaks_alignment():
 
     pair._editor.setPlainText("abcd")
     assert not pair._editor.has_slot_geometry()
+    panel.deleteLater()
+
+
+def test_hproof_formula_slot_geometry_keeps_single_char_word_atom_visible():
+    from app.ui.proof.h_proof import HProofPanel
+
+    formula = "$ F $"
+    text = f"取o；{formula}在"
+    line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, 120, 24))
+    line.chars = [
+        Char(char="取", confidence=0.9, bbox=BBox(0, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="取"),
+        Char(char="o", confidence=0.19, bbox=BBox(22, 0, 10, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="o"),
+        Char(char="；", confidence=0.4, bbox=BBox(36, 0, 8, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="；"),
+        Char(char=formula, confidence=0.0, bbox=BBox(48, 0, 40, 22), bbox_source="paddle_inline_formula", bbox_granularity="word", token_text=formula),
+        Char(char="在", confidence=0.9, bbox=BBox(92, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="在"),
+    ]
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 140, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=160, height=40)
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    pair = panel._pairs[0]
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    _overlays, centers, widths = pair._formula_atom_visual_data(text)
+
+    assert centers is not None
+    assert centers[text.index("o")] is not None
+    assert widths is not None
+    assert widths[text.index("；")] <= 8.0
     panel.deleteLater()
 
 

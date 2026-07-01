@@ -212,18 +212,18 @@ class Block:
 
 @dataclass
 class Page:
-    """一页（对应一张图片）。"""
-    image_path: str            # 原始图片绝对路径
+    """一页（对应一张导入后生成的页面工作图）。"""
+    image_path: str            # 页面工作图路径；导入时写入标准化图片或 PDF 渲染页图
     width: int
     height: int
     blocks: List[Block] = field(default_factory=list)
     page_number: int = 1
     id: Optional[int] = None
 
-    source_path: str = ""                   # 原始导入文件路径
+    source_path: str = ""                   # 原始导入文件路径（图片或 PDF）
     source_type: str = "image"              # "image" | "pdf"
     source_page_index: int = 1              # PDF 页码（1-based）
-    cache_image_path: str = ""              # 处理后的实际工作图片路径
+    cache_image_path: str = ""              # 当前优先工作图路径；display_image_path 会优先使用它
     thumbnail_path: str = ""                # 缩略图路径
     status: PageStatus = PageStatus.IMPORTED
     error_message: str = ""                 # 当前页失败原因
@@ -240,9 +240,10 @@ class Page:
 
     @property
     def display_image_path(self) -> str:
-        """当前用于渲染和裁剪的工作图路径。
+        """当前全流程使用的页面图路径。
 
-        OCR、版面分析和画布渲染都必须基于同一张图，否则坐标会漂移。
+        版面分析、OCR、校对裁图、画布渲染和导出图片层都以这个
+        property 为准，确保 bbox 坐标始终落在同一张工作图上。
         """
         return self.cache_image_path or self.image_path
 

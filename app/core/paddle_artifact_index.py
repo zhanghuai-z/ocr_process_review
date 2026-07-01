@@ -31,6 +31,7 @@ BINDING_GEOMETRY_HIT = "paddle_geometry_hit"
 BINDING_PARENT_FORMULA_INFERRED = "paddle_parent_formula_inferred"
 BINDING_PARENT_TABLE_HIT = "paddle_parent_table_hit"
 BINDING_PARENT_FIGURE_HIT = "paddle_parent_figure_hit"
+BINDING_FORMULA_CROP_OCR = "paddle_formula_crop_ocr"
 BINDING_AMBIGUOUS = "paddle_binding_ambiguous"
 BINDING_EMPTY_REVIEW = "paddle_empty_review"
 
@@ -315,13 +316,11 @@ class PaddleArtifactIndex:
             text = candidate.text
             flags: tuple[str, ...] = ("manual_paddle_binding",)
             if not text:
-                text = self._span_for_geometry_candidate(candidate) or ""
-            if not text:
-                flags = (*flags, "paddle_formula_text_ambiguous")
+                flags = (*flags, "manual_formula_needs_text")
             return PaddleManualBinding(
                 status=BINDING_GEOMETRY_HIT,
                 block_type=BlockType.EQUATION,
-                source="paddle_geometry+parent_text",
+                source="paddle_geometry",
                 source_label=candidate.label or "inline_formula",
                 text=text,
                 parent_index=candidate.parent_index,
@@ -337,35 +336,7 @@ class PaddleArtifactIndex:
         parent = self._best_parent_for_manual_formula(manual)
         if parent is None:
             return self._empty_formula(manual)
-        spans = parent.formula_spans
-        if not spans:
-            return self._empty_formula(manual, parent_index=parent.index)
-
-        parent_geometries = [
-            candidate for candidate in self.formula_geometry
-            if candidate.parent_index == parent.index
-        ]
-        missing_count = len(spans) - len(parent_geometries)
-        if len(spans) == 1:
-            span_text = spans[0]
-        elif missing_count == 1:
-            span_text = self._span_for_manual_insert(parent, parent_geometries, manual)
-            if not span_text:
-                return self._ambiguous_parent_formula(manual, parent)
-        else:
-            return self._ambiguous_parent_formula(manual, parent)
-
-        return PaddleManualBinding(
-            status=BINDING_PARENT_FORMULA_INFERRED,
-            block_type=BlockType.EQUATION,
-            source="manual_geometry+paddle_parent_text",
-            source_label="inline_formula",
-            text=span_text,
-            parent_index=parent.index,
-            score=_parent_overlap_score(manual, parent.bbox),
-            manual_bbox=manual,
-            review_flags=("manual_formula_from_parent_text",),
-        )
+        return self._empty_formula(manual, parent_index=parent.index)
 
     def _geometry_hits(
         self,
@@ -529,7 +500,7 @@ class PaddleArtifactIndex:
             status=BINDING_EMPTY_REVIEW,
             block_type=BlockType.EQUATION,
             source="manual_geometry_empty_formula_review",
-            source_label="equation",
+            source_label="inline_formula",
             parent_index=parent_index,
             manual_bbox=manual,
             review_flags=("manual_formula_needs_text",),
@@ -567,6 +538,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
 __all__ = [
     "BINDING_AMBIGUOUS",
     "BINDING_EMPTY_REVIEW",
+    "BINDING_FORMULA_CROP_OCR",
     "BINDING_GEOMETRY_HIT",
     "BINDING_PARENT_FIGURE_HIT",
     "BINDING_PARENT_FORMULA_INFERRED",

@@ -36,6 +36,7 @@ from app.models import (
 )
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
+from app.services.table_text_layer_service import TableTextLayerService
 
 logger = get_logger(__name__)
 OCR_PAGE_CONCURRENCY_CAP = 20
@@ -85,6 +86,7 @@ class OcrPipeline:
         self._engine = engine or FakeOcrEngine()
         self._hybrid_prepass_engine = hybrid_prepass_engine
         self._proof_crop_service = ProofCropService()
+        self._table_text_layer_service = TableTextLayerService()
         try:
             configured_concurrency = int(page_concurrency)
         except (TypeError, ValueError):
@@ -182,6 +184,7 @@ class OcrPipeline:
                         total_pages=total_pages,
                         progress_callback=progress_callback,
                     )
+                    self._enrich_table_text_layer(page)
                     result.pages.append(page)
                     continue
 
@@ -210,6 +213,7 @@ class OcrPipeline:
                         total_pages=total_pages,
                         progress_callback=progress_callback,
                     )
+                    self._enrich_table_text_layer(page)
                     result.pages.append(page)
                     continue
 
@@ -266,6 +270,7 @@ class OcrPipeline:
                     total_pages=total_pages,
                     progress_callback=progress_callback,
                 )
+                self._enrich_table_text_layer(page)
                 result.pages.append(page)
         finally:
             self.close()
@@ -409,6 +414,7 @@ class OcrPipeline:
             failed.append((page_idx, -1, str(exc)))
 
         stats = self._proof_crop_service.normalize_pages([page])
+        self._enrich_table_text_layer(page)
         fallback_total = stats.fallback_chars + stats.unavailable_chars
         if fallback_total > 0:
             message = (
@@ -436,6 +442,15 @@ class OcrPipeline:
             failed_blocks=failed,
             completion_message=completion,
         )
+
+    def _enrich_table_text_layer(self, page: Page) -> None:
+        try:
+            updated = self._table_text_layer_service.enrich_page(page)
+        except Exception as exc:
+            logger.warning("Table text-layer enrichment failed: page=%s: %s", page.page_number, exc)
+            return
+        if updated:
+            logger.info("Table text-layer enrichment complete: page=%s tables=%d", page.page_number, updated)
 
     @staticmethod
     def _clear_ocr_error(page: Page) -> None:
@@ -523,7 +538,9 @@ class OcrPipeline:
         if mark_page_line_hints:
             for line in lines:
                 mark_ppocr_page_line_hint(line)
-        self._assign_page_ocr_lines_to_blocks(page, lines)
+            self._assign_page_ocr_line_hints_to_blocks(page, lines)
+        else:
+            self._assign_page_ocr_lines_to_blocks(page, lines)
 
     def _hybrid_page_ocr_prepass_engine(self) -> object:
         if self._hybrid_prepass_engine is not None:
@@ -584,8 +601,6 @@ class OcrPipeline:
         for block in text_blocks:
             if bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY)):
                 return False
-            if self._has_cached_layout_line_routes(block):
-                continue
             if self._has_marked_page_line_hints(block):
                 continue
             return False
@@ -610,7 +625,6 @@ class OcrPipeline:
 
     def _reusable_page_line_hint_summary(self, page: Page) -> str:
         text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
-        route_blocks = sum(1 for block in text_blocks if self._has_cached_layout_line_routes(block))
         marked_lines = sum(
             1
             for block in text_blocks
@@ -620,8 +634,6 @@ class OcrPipeline:
             and is_ppocr_page_line_hint(line)
         )
         parts: list[str] = []
-        if route_blocks:
-            parts.append(f"reused cached layout routes for {route_blocks} blocks")
         if marked_lines:
             parts.append(f"reused {marked_lines} PP-OCRv5 line hints")
         return "; ".join(parts) if parts else "reused trusted line geometry"
@@ -683,6 +695,26 @@ class OcrPipeline:
             note="PP-OCRv5 unmatched proof lines",
         )
         page.blocks.append(synthetic)
+
+    def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
+        """Assign PP-OCRv5 geometry hints to text containers for Hanwang routing.
+
+        These lines are not proof text.  They are only physical row geometry used
+        to split text slices before Hanwang OCR, so inline formulas/tables must
+        not drop the whole row here.  Structural regions are carved out later by
+        the route builder.
+        """
+        containers = [
+            block for block in page.blocks
+            if should_dispatch_to_text_ocr(block)
+        ]
+        for block in containers:
+            block.lines = []
+
+        for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
+            block = select_container_block_for_line(line, containers)
+            if block is not None:
+                block.lines.append(line)
 
     def assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Public wrapper used when PP-OCRv5 proof lines finish before layout."""

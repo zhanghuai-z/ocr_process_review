@@ -18,11 +18,11 @@ VL1.6 响应在这里采用固定抽取路径：
 PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
 """
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 from pathlib import Path
 import time
-from typing import Iterable, List
+from typing import Callable, Iterable, List
 
 from PySide6.QtCore import QThread, Signal
 
@@ -41,11 +41,7 @@ from app.core.paddle_layout_schema import (
     raw_bbox_max_from_record,
     route_subblock_payload,
 )
-from app.core.paddle_line_routing import (
-    LAYOUT_LINE_ROUTES_FIELD,
-    ROUTE_SUBBLOCKS_FIELD,
-    build_layout_line_routes,
-)
+from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
 from app.core.paddle_labels import (
     is_hanwang_skip_label,
     normalize_paddle_label,
@@ -59,6 +55,7 @@ from app.core.paddle_response import (
 )
 from app.core.paddle_v16_client import (
     PaddleV16LayoutClient,
+    PaddleV16RequestCancelled,
     build_paddle_v16_optional_payload,
     is_paddle_v16_endpoint,
 )
@@ -68,6 +65,7 @@ logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
 LOCAL_LAYOUT_CANVAS_H = 608
 LAYOUT_API_TIMEOUT_FLOOR = 180
+LAYOUT_API_REQUEST_TIMEOUT_CAP = 30
 LAYOUT_API_CONCURRENCY_CAP = 10
 
 
@@ -109,19 +107,45 @@ class LayoutWorker(QThread):
     page_done = Signal(int, int)   # (completed_index, total)
     all_done  = Signal(list)       # List[Page]
     error     = Signal(str)
+    cancelled = Signal()
+    stage_update = Signal(int, int, str)  # page_index, total, message
 
     def __init__(self, pages: List[Page], parent=None):
         super().__init__(parent)
         self._pages = pages
         self._batch_id = f"ocr-process-layout-{int(time.time() * 1000)}"
+        self._cancel_requested = False
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        self.requestInterruption()
+
+    def _is_cancelled(self) -> bool:
+        return self._cancel_requested or self.isInterruptionRequested()
+
+    def _emit_stage(self, index: int, message: str) -> None:
+        if not self._is_cancelled():
+            self.stage_update.emit(index, len(self._pages), message)
 
     def _analyze_page(self, index: int, page: Page) -> tuple[int, str | None]:
-        analyzer = LayoutAnalyzer(layout_batch_id=self._batch_id)
+        if self._is_cancelled():
+            return index, None
+        analyzer = LayoutAnalyzer(
+            layout_batch_id=self._batch_id,
+            cancel_callback=self._is_cancelled,
+            status_callback=lambda message, page_index=index: self._emit_stage(page_index, message),
+        )
         try:
             analyzer.analyze(page)
+            if self._is_cancelled():
+                return index, None
             page.error_message = ""
             return index, None
+        except PaddleV16RequestCancelled:
+            return index, None
         except Exception as e:
+            if self._is_cancelled():
+                return index, None
             logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
             page.blocks = []
             page.error_message = f"版面分析失败：{e}"
@@ -135,31 +159,67 @@ class LayoutWorker(QThread):
 
         if max_workers <= 1:
             for i, page in enumerate(self._pages):
+                if self._is_cancelled():
+                    self.cancelled.emit()
+                    return
                 page_idx, error_message = self._analyze_page(i, page)
+                if self._is_cancelled():
+                    self.cancelled.emit()
+                    return
                 if error_message:
                     fatal_errors.append((page_idx, error_message))
                 completed += 1
                 self.page_done.emit(completed - 1, total)
         else:
-            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="layout-api") as executor:
-                futures = {
-                    executor.submit(self._analyze_page, i, page): i
-                    for i, page in enumerate(self._pages)
-                }
-                for future in as_completed(futures):
-                    page_idx = futures[future]
-                    try:
-                        page_idx, error_message = future.result()
-                    except Exception as exc:
-                        page = self._pages[page_idx]
-                        logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
-                        page.blocks = []
-                        page.error_message = f"版面分析失败：{exc}"
-                        error_message = f"第 {page.page_number} 页：{exc}"
-                    if error_message:
-                        fatal_errors.append((page_idx, error_message))
-                    completed += 1
-                    self.page_done.emit(completed - 1, total)
+            executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="layout-api")
+            executor_shutdown = False
+            futures = {
+                executor.submit(self._analyze_page, i, page): i
+                for i, page in enumerate(self._pages)
+            }
+            pending = set(futures)
+            try:
+                while pending:
+                    if self._is_cancelled():
+                        for future in pending:
+                            future.cancel()
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        executor_shutdown = True
+                        self.cancelled.emit()
+                        return
+                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        page_idx = futures[future]
+                        try:
+                            page_idx, error_message = future.result()
+                        except PaddleV16RequestCancelled:
+                            error_message = None
+                        except Exception as exc:
+                            if self._is_cancelled():
+                                error_message = None
+                            else:
+                                page = self._pages[page_idx]
+                                logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
+                                page.blocks = []
+                                page.error_message = f"版面分析失败：{exc}"
+                                error_message = f"第 {page.page_number} 页：{exc}"
+                        if self._is_cancelled():
+                            for pending_future in pending:
+                                pending_future.cancel()
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            executor_shutdown = True
+                            self.cancelled.emit()
+                            return
+                        if error_message:
+                            fatal_errors.append((page_idx, error_message))
+                        completed += 1
+                        self.page_done.emit(completed - 1, total)
+            finally:
+                if not executor_shutdown:
+                    if self._is_cancelled():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    else:
+                        executor.shutdown(wait=True, cancel_futures=True)
 
         if len(fatal_errors) == total and total > 0:
             messages = [message for _idx, message in sorted(fatal_errors, key=lambda item: item[0])]
@@ -170,10 +230,26 @@ class LayoutWorker(QThread):
 
 class LayoutAnalyzer:
 
-    def __init__(self, *, layout_batch_id: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        layout_batch_id: str = "",
+        cancel_callback: Callable[[], bool] | None = None,
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
         self._engine = None
         self._hanwang_layout_engine = None
         self._layout_batch_id = layout_batch_id
+        self._cancel_callback = cancel_callback
+        self._status_callback = status_callback
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_callback is not None and self._cancel_callback():
+            raise PaddleV16RequestCancelled("Paddle layout analysis cancelled")
+
+    def _emit_status(self, message: str) -> None:
+        if self._status_callback is not None:
+            self._status_callback(message)
 
     # ── local mode ─────────────────────────────────────────────
 
@@ -393,20 +469,10 @@ class LayoutAnalyzer:
             if best_parent is not None:
                 subblocks_by_parent[id(best_parent)].append(route_subblock_payload(child))
 
-        for parent, parent_bbox in parent_entries:
+        for parent, _parent_bbox in parent_entries:
             subblocks = subblocks_by_parent.get(id(parent), [])
             if subblocks:
                 parent[ROUTE_SUBBLOCKS_FIELD] = subblocks
-                line_routes = build_layout_line_routes(
-                    {
-                        **parent,
-                        "block_bbox": list(parent_bbox.to_xyxy()),
-                    },
-                    page.width,
-                    page.height,
-                )
-                if line_routes:
-                    parent[LAYOUT_LINE_ROUTES_FIELD] = line_routes
 
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = result_dict(data)
@@ -724,13 +790,19 @@ class LayoutAnalyzer:
         """Call the configured AiStudio model endpoint; raises on network/auth errors."""
         from app.core.app_config import get_config
 
+        self._raise_if_cancelled()
         cfg = get_config()
         url = resolve_api_endpoint_for_role(
             cfg["api_url"],
             profile=FIXED_LAYOUT_PROFILE,
             role="layout",
         )
-        timeout = max(int(cfg["api_timeout"]), LAYOUT_API_TIMEOUT_FLOOR)
+        configured_timeout = max(1, int(cfg["api_timeout"]))
+        request_timeout = min(
+            max(10, configured_timeout),
+            LAYOUT_API_REQUEST_TIMEOUT_CAP,
+        )
+        poll_timeout = max(configured_timeout, LAYOUT_API_TIMEOUT_FLOOR)
         token = cfg.get("api_token", "")
 
         image_path = _display_image_path(page)
@@ -754,9 +826,11 @@ class LayoutAnalyzer:
         client = PaddleV16LayoutClient(
             jobs_url=url,
             token=token,
-            request_timeout=timeout,
-            poll_timeout=timeout,
+            request_timeout=request_timeout,
+            poll_timeout=poll_timeout,
             network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
+            cancel_callback=self._cancel_callback,
+            status_callback=self._emit_status,
         )
         data = client.analyze_image_bytes(
             image_bytes,
