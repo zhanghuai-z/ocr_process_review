@@ -490,23 +490,18 @@ def test_block_type_mapping():
     print("test_block_type_mapping PASSED")
 
 
-def test_block_payload_helpers_preserve_existing_entries():
+def test_block_payload_helpers_use_typed_state_only():
     import pytest
 
     from app.core.block_payload import (
-        OCR_INVALIDATION_KIND_KEY,
-        OCR_TEXT_INVALIDATED_KEY,
-        PADDLE_BINDING_KEY,
-        clear_payload_entries,
         clear_ocr_text_invalidation,
         is_ocr_text_invalidated,
         mark_ocr_text_invalidated,
         ocr_invalidation_reason,
-        payload_bool,
-        payload_get,
-        set_payload_entries,
+        set_paddle_binding,
+        validate_app_payload_keys,
     )
-    from app.models import BBox, Block, BlockType
+    from app.models import BBox, Block, BlockType, PaddleBinding
 
     block = Block(
         block_type=BlockType.TEXT,
@@ -515,27 +510,24 @@ def test_block_payload_helpers_preserve_existing_entries():
     )
 
     with pytest.raises(ValueError, match="unregistered app_payload keys"):
-        set_payload_entries(block, {OCR_INVALIDATION_KIND_KEY: "manual"})
-    assert payload_get(block, "vendor") is None
+        validate_app_payload_keys({"custom": 1})
 
-    with pytest.raises(ValueError, match="unregistered app_payload keys"):
-        set_payload_entries(block, {"custom": 1})
-    with pytest.raises(ValueError, match="unregistered app_payload keys"):
-        set_payload_entries(block, {PADDLE_BINDING_KEY: {"status": "legacy"}})
+    set_paddle_binding(block, {"status": "paddle_geometry_hit", "text": "$ A $"})
+    assert isinstance(block.paddle_binding, PaddleBinding)
+    assert block.paddle_binding.text == "$ A $"
+    assert block.app_payload == {}
 
     mark_ocr_text_invalidated(block, "block_moved")
     assert is_ocr_text_invalidated(block) is True
     assert ocr_invalidation_reason(block) == "block_moved"
     assert block.ocr_invalidated_reason == "block_moved"
-    assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
-    assert OCR_INVALIDATION_KIND_KEY not in block.app_payload
+    assert block.app_payload == {}
     assert block.raw_payload["vendor"] == {"keep": True}
     clear_ocr_text_invalidation(block)
     assert is_ocr_text_invalidated(block) is False
-    assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
-    assert OCR_INVALIDATION_KIND_KEY not in block.app_payload
+    assert block.app_payload == {}
 
-    print("test_block_payload_helpers_preserve_existing_entries PASSED")
+    print("test_block_payload_helpers_use_typed_state_only PASSED")
 
 
 def test_paddle_layout_schema_normalizes_record_fields():
@@ -775,10 +767,8 @@ def test_project_store_persists_raw_layout_artifact():
         os.unlink(db_path)
 
 
-def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload():
-    import sqlite3
-
-    from app.core.block_payload import PADDLE_BINDING_KEY, PADDLE_BLOCK_BBOX_KEY, PADDLE_BLOCK_LABEL_KEY
+def test_project_store_persists_typed_paddle_binding():
+    from app.core.block_payload import PADDLE_BINDING_KEY
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
 
@@ -819,53 +809,12 @@ def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload
         assert loaded_block.paddle_binding.parent_index == 3
         assert PADDLE_BINDING_KEY not in loaded_block.app_payload
 
-        legacy_block = Block(block_type=BlockType.EQUATION, bbox=BBox.from_xyxy(20, 20, 50, 50))
-        legacy_project = OcrProject(
-            name="legacy-paddle-binding",
-            pages=[Page(image_path="/tmp/legacy-binding.png", width=100, height=100, blocks=[legacy_block])],
-        )
-        with ProjectStore(db_path) as store:
-            saved = store.save_project(legacy_project)
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (
-                    json.dumps(
-                        {
-                            PADDLE_BINDING_KEY: binding_payload,
-                            PADDLE_BLOCK_LABEL_KEY: "inline_formula",
-                            PADDLE_BLOCK_BBOX_KEY: [20, 20, 50, 50],
-                        },
-                        ensure_ascii=False,
-                    ),
-                    legacy_block.id,
-                ),
-            )
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            loaded = store.load_project(saved.id)
-            store.save_project(loaded)
-            reloaded = store.load_project(saved.id)
-
-        migrated_block = reloaded.pages[0].blocks[0]
-        assert migrated_block.paddle_binding is not None
-        assert migrated_block.paddle_binding.to_dict()["text"] == "$ A $"
-        assert PADDLE_BINDING_KEY not in migrated_block.app_payload
-        assert PADDLE_BLOCK_LABEL_KEY not in migrated_block.app_payload
-        assert PADDLE_BLOCK_BBOX_KEY not in migrated_block.app_payload
-
-        print("test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload PASSED")
+        print("test_project_store_persists_typed_paddle_binding PASSED")
     finally:
         os.unlink(db_path)
 
 
-def test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload():
-    import sqlite3
-
-    from app.core.block_payload import (
-        OCR_INVALIDATION_KIND_KEY,
-        OCR_TEXT_INVALIDATED_KEY,
-    )
+def test_project_store_persists_block_ocr_invalidation():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, Page
 
@@ -889,102 +838,16 @@ def test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_paylo
 
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.ocr_invalidated_reason == "block_moved"
-        assert OCR_TEXT_INVALIDATED_KEY not in loaded_block.app_payload
-        assert OCR_INVALIDATION_KIND_KEY not in loaded_block.app_payload
+        assert loaded_block.app_payload == {}
 
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET ocr_invalidated_reason='', app_payload_json=? WHERE id=?",
-                (
-                    json.dumps(
-                        {
-                            OCR_TEXT_INVALIDATED_KEY: True,
-                            OCR_INVALIDATION_KIND_KEY: "legacy_kind",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    block.id,
-                ),
-            )
-            conn.commit()
-
-        with ProjectStore(db_path) as store:
-            migrated = store.load_project(saved.id)
-            migrated_block = migrated.pages[0].blocks[0]
-            assert migrated_block.ocr_invalidated_reason == "legacy_kind"
-            assert OCR_TEXT_INVALIDATED_KEY not in migrated_block.app_payload
-            assert OCR_INVALIDATION_KIND_KEY not in migrated_block.app_payload
-            store.save_project(migrated)
-            reloaded = store.load_project(saved.id)
-
-        reloaded_block = reloaded.pages[0].blocks[0]
-        assert reloaded_block.ocr_invalidated_reason == "legacy_kind"
-        assert OCR_TEXT_INVALIDATED_KEY not in reloaded_block.app_payload
-        assert OCR_INVALIDATION_KIND_KEY not in reloaded_block.app_payload
-
-        print("test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload PASSED")
+        print("test_project_store_persists_block_ocr_invalidation PASSED")
     finally:
         os.unlink(db_path)
 
 
-def test_project_store_drops_legacy_manual_layout_payload_details():
-    import sqlite3
-
-    from app.core.block_payload import MANUAL_DRAW_BBOX_KEY, MANUAL_MERGE_FROM_KEY
+def test_project_store_persists_inline_formula_origin():
     from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
-
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
-        db_path = f.name
-
-    try:
-        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
-        project = OcrProject(
-            name="legacy-manual-layout-payload",
-            pages=[Page(image_path="/tmp/manual-layout.png", width=100, height=100, blocks=[block])],
-        )
-
-        with ProjectStore(db_path) as store:
-            saved = store.save_project(project)
-
-        legacy_payload = {
-            MANUAL_MERGE_FROM_KEY: [{"block_type": "text", "bbox": [0, 0, 20, 10]}],
-            MANUAL_DRAW_BBOX_KEY: [0, 0, 40, 20],
-        }
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (json.dumps(legacy_payload, ensure_ascii=False), block.id),
-            )
-            conn.commit()
-
-        with ProjectStore(db_path) as store:
-            migrated = store.load_project(saved.id)
-            migrated_block = migrated.pages[0].blocks[0]
-            assert MANUAL_MERGE_FROM_KEY not in migrated_block.app_payload
-            assert MANUAL_DRAW_BBOX_KEY not in migrated_block.app_payload
-            store.save_project(migrated)
-            reloaded = store.load_project(saved.id)
-
-        reloaded_block = reloaded.pages[0].blocks[0]
-        assert MANUAL_MERGE_FROM_KEY not in reloaded_block.app_payload
-        assert MANUAL_DRAW_BBOX_KEY not in reloaded_block.app_payload
-
-        print("test_project_store_drops_legacy_manual_layout_payload_details PASSED")
-    finally:
-        os.unlink(db_path)
-
-
-def test_project_store_migrates_legacy_inline_formula_payload_to_block_origin():
-    import sqlite3
-
-    from app.core.block_payload import (
-        UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
-        UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
-        UI_INLINE_FORMULA_PARENT_LABEL_KEY,
-    )
-    from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -994,58 +857,36 @@ def test_project_store_migrates_legacy_inline_formula_payload_to_block_origin():
             block_type=BlockType.EQUATION,
             bbox=BBox.from_xyxy(12, 4, 44, 24),
             source_label="inline_formula",
+            origin=BlockOrigin(
+                created_by=BlockSource.AUTO_LAYOUT.value,
+                source_engine="paddleocr-vl",
+                source_label="inline_formula",
+                original_bbox=BBox.from_xyxy(10, 3, 40, 23),
+                original_kind=BlockType.EQUATION,
+            ),
         )
         project = OcrProject(
-            name="legacy-inline-formula-payload",
+            name="inline-formula-origin",
             pages=[Page(image_path="/tmp/inline-formula.png", width=100, height=80, blocks=[block])],
         )
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
 
-        legacy_payload = {
-            UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
-            UI_INLINE_FORMULA_ORIGIN_BBOX_KEY: [10, 3, 40, 23],
-            UI_INLINE_FORMULA_PARENT_LABEL_KEY: "text",
-        }
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "DELETE FROM block_origin WHERE block_uid=?",
-                (block.uid,),
-            )
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (json.dumps(legacy_payload, ensure_ascii=False), block.id),
-            )
-            conn.commit()
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.origin is not None
+        assert loaded_block.origin.source_label == "inline_formula"
+        assert loaded_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
+        assert loaded_block.origin.original_kind == BlockType.EQUATION
+        assert loaded_block.app_payload == {}
 
-        with ProjectStore(db_path) as store:
-            migrated = store.load_project(saved.id)
-            migrated_block = migrated.pages[0].blocks[0]
-            assert migrated_block.origin is not None
-            assert migrated_block.origin.source_label == "inline_formula"
-            assert migrated_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
-            assert migrated_block.origin.original_kind == BlockType.EQUATION
-            assert UI_GENERATED_INLINE_FORMULA_BLOCK_KEY not in migrated_block.app_payload
-            assert UI_INLINE_FORMULA_ORIGIN_BBOX_KEY not in migrated_block.app_payload
-            assert UI_INLINE_FORMULA_PARENT_LABEL_KEY not in migrated_block.app_payload
-            store.save_project(migrated)
-            reloaded = store.load_project(saved.id)
-
-        reloaded_block = reloaded.pages[0].blocks[0]
-        assert reloaded_block.origin is not None
-        assert reloaded_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
-        assert reloaded_block.app_payload == {}
-
-        print("test_project_store_migrates_legacy_inline_formula_payload_to_block_origin PASSED")
+        print("test_project_store_persists_inline_formula_origin PASSED")
     finally:
         os.unlink(db_path)
 
 
-def test_project_store_persists_ocr_audit_and_migrates_legacy_payload():
-    import sqlite3
-
-    from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY
+def test_project_store_persists_ocr_audit():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, Page
 
@@ -1074,41 +915,15 @@ def test_project_store_persists_ocr_audit_and_migrates_legacy_payload():
 
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.ocr_audit["schema"] == "hanwang_bbox_audit.v1"
-        assert HANWANG_BBOX_AUDIT_KEY not in loaded_block.app_payload
+        assert loaded_block.ocr_audit["layout_block_bbox"] == [0, 0, 40, 20]
+        assert loaded_block.app_payload == {}
 
-        legacy_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(10, 10, 50, 30))
-        legacy_project = OcrProject(
-            name="legacy-ocr-audit",
-            pages=[Page(image_path="/tmp/legacy-ocr-audit.png", width=100, height=80, blocks=[legacy_block])],
-        )
-        with ProjectStore(db_path) as store:
-            saved = store.save_project(legacy_project)
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (json.dumps({HANWANG_BBOX_AUDIT_KEY: audit}, ensure_ascii=False), legacy_block.id),
-            )
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            migrated = store.load_project(saved.id)
-            migrated_block = migrated.pages[0].blocks[0]
-            assert migrated_block.ocr_audit["hanwang_recog_group_failed_count"] == 1
-            assert HANWANG_BBOX_AUDIT_KEY not in migrated_block.app_payload
-            store.save_project(migrated)
-            reloaded = store.load_project(saved.id)
-
-        reloaded_block = reloaded.pages[0].blocks[0]
-        assert reloaded_block.ocr_audit["layout_block_bbox"] == [0, 0, 40, 20]
-        assert reloaded_block.app_payload == {}
-
-        print("test_project_store_persists_ocr_audit_and_migrates_legacy_payload PASSED")
+        print("test_project_store_persists_ocr_audit PASSED")
     finally:
         os.unlink(db_path)
 
 
-def test_project_store_persists_table_text_layer_cells_and_migrates_legacy_payload():
-    import sqlite3
-
+def test_project_store_persists_table_text_layer_cells():
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, Page
@@ -1143,32 +958,7 @@ def test_project_store_persists_table_text_layer_cells_and_migrates_legacy_paylo
         assert loaded_block.table_text_layer_cells == cells
         assert TABLE_TEXT_LAYER_CELLS_KEY not in loaded_block.app_payload
 
-        legacy_block = Block(block_type=BlockType.TABLE, bbox=BBox.from_xyxy(5, 5, 75, 35))
-        legacy_project = OcrProject(
-            name="legacy-table-text-layer-cells",
-            pages=[Page(image_path="/tmp/legacy-table-cells.png", width=100, height=80, blocks=[legacy_block])],
-        )
-        with ProjectStore(db_path) as store:
-            saved = store.save_project(legacy_project)
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (json.dumps({TABLE_TEXT_LAYER_CELLS_KEY: cells}, ensure_ascii=False), legacy_block.id),
-            )
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            migrated = store.load_project(saved.id)
-            migrated_block = migrated.pages[0].blocks[0]
-            assert migrated_block.table_text_layer_cells == cells
-            assert TABLE_TEXT_LAYER_CELLS_KEY not in migrated_block.app_payload
-            store.save_project(migrated)
-            reloaded = store.load_project(saved.id)
-
-        reloaded_block = reloaded.pages[0].blocks[0]
-        assert reloaded_block.table_text_layer_cells == cells
-        assert reloaded_block.app_payload == {}
-
-        print("test_project_store_persists_table_text_layer_cells_and_migrates_legacy_payload PASSED")
+        print("test_project_store_persists_table_text_layer_cells PASSED")
     finally:
         os.unlink(db_path)
 
@@ -1655,7 +1445,7 @@ def test_project_store_rejects_invalid_payload_json_on_load():
 def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     import pytest
 
-    from app.core.block_payload import PADDLE_BINDING_KEY, PADDLE_BLOCK_LABEL_KEY
+    from app.core.block_payload import PADDLE_BINDING_KEY
     from app.core.model_validation import ModelValidationError, validate_block_model, validate_page_model
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockType, Page
@@ -1677,7 +1467,7 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     with pytest.raises(ModelValidationError, match="app-owned payload keys"):
         validate_block_model(block)
 
-    block.raw_payload = {PADDLE_BLOCK_LABEL_KEY: "text"}
+    block.raw_payload = {"block_label": "text"}
     validate_block_model(block)
 
     page = Page(image_path="/tmp/model-validation.png", width=20, height=20)
@@ -10648,28 +10438,6 @@ def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
     assert block[LAYOUT_LINE_ROUTES_FIELD][0]["segments"][1]["text"] == "$ A $"
 
     print("test_paddle_line_routing_builds_layout_line_routes_from_reading_order PASSED")
-
-
-def test_paddle_line_routing_skips_deleted_inline_formula_subblocks():
-    from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
-    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
-
-    block = {
-        "block_label": "text",
-        "block_bbox": [0, 0, 200, 40],
-        "block_content": "甲 $ A $ 乙",
-        ROUTE_SUBBLOCKS_FIELD: [
-            {
-                "block_label": "inline_formula",
-                "block_bbox": [40, 0, 70, 30],
-                UI_DELETED_INLINE_FORMULA_KEY: True,
-            }
-        ],
-    }
-
-    assert line_routes_for_block(block, 220, 80) == []
-
-    print("test_paddle_line_routing_skips_deleted_inline_formula_subblocks PASSED")
 
 
 def test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair():
@@ -19805,14 +19573,17 @@ if __name__ == "__main__":
     test_workflow_state_keeps_project_and_page_ocr_state_separate()
     test_bbox_tools()
     test_block_type_mapping()
-    test_block_payload_helpers_preserve_existing_entries()
+    test_block_payload_helpers_use_typed_state_only()
     test_paddle_layout_schema_normalizes_record_fields()
     test_ocr_run_wraps_ir_lines_without_proof_model()
     test_block_origin_label_is_authoritative_for_attributes_and_dispatch()
     test_project_store()
     test_project_store_persists_raw_layout_artifact()
-    test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload()
-    test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload()
+    test_project_store_persists_typed_paddle_binding()
+    test_project_store_persists_block_ocr_invalidation()
+    test_project_store_persists_inline_formula_origin()
+    test_project_store_persists_ocr_audit()
+    test_project_store_persists_table_text_layer_cells()
     test_project_store_persists_block_origin_separately_from_current_layout()
     test_project_store_persists_layout_edit_events()
     test_project_store_rejects_runtime_layout_routes_on_save_and_load()
@@ -19956,7 +19727,6 @@ if __name__ == "__main__":
     test_hanwang_micro_recblock_short_chinese_group_keeps_vertical_context()
     test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter()
     test_paddle_line_routing_builds_layout_line_routes_from_reading_order()
-    test_paddle_line_routing_skips_deleted_inline_formula_subblocks()
     test_paddle_line_routing_display_formula_span_is_not_split_to_empty_pair()
     test_paddle_line_routing_line_hint_formula_recovery_does_not_shift_next_line()
     test_paddle_line_routing_missing_formula_box_does_not_shift_later_rows()

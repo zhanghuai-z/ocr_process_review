@@ -7,7 +7,6 @@ from typing import Any
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
 from app.core.ocr_ir import is_formula_marker_token, is_formula_token
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_layout_schema import paddle_record_label, paddle_record_text
@@ -575,8 +574,6 @@ def route_subblocks_for_block(
     subblocks: list[dict[str, Any]] = []
     for value in values:
         if not isinstance(value, dict):
-            continue
-        if bool(value.get(UI_DELETED_INLINE_FORMULA_KEY)):
             continue
         label = route_authority_label(value)
         bbox = intersect_xyxy(parent_bbox, block_bbox_xyxy(value, width, height))

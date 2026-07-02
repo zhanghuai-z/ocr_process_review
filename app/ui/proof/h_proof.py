@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
-from app.core.block_payload import app_payload_dict
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
@@ -494,11 +493,6 @@ def _block_debug_content(block: Block) -> str:
     keys = ("block_content", "content", "text", "latex", "formula", "formula_latex")
     for value in raw_block_text_values(block, keys):
         return value
-    payload = app_payload_dict(block)
-    for key in keys:
-        value = payload.get(key)
-        if value:
-            return str(value)
     return proof_block_text(block)
 
 

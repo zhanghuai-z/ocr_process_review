@@ -11,7 +11,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
-from app.core.block_payload import TABLE_TEXT_LAYER_CELLS_KEY
+TABLE_TEXT_LAYER_CELLS_KEY = "table_text_layer_cells"
 
 
 @dataclass(frozen=True)

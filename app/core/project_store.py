@@ -28,20 +28,6 @@ from app.core.model_validation import (
     validate_persistent_block_payloads,
 )
 from app.core.line_text_contract import line_text_contract
-from app.core.block_payload import (
-    HANWANG_BBOX_AUDIT_KEY,
-    MANUAL_DRAW_BBOX_KEY,
-    MANUAL_MERGE_FROM_KEY,
-    OCR_INVALIDATION_KIND_KEY,
-    OCR_TEXT_INVALIDATED_KEY,
-    PADDLE_BLOCK_BBOX_KEY,
-    PADDLE_BLOCK_LABEL_KEY,
-    PADDLE_BINDING_KEY,
-    TABLE_TEXT_LAYER_CELLS_KEY,
-    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
-    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
-    UI_INLINE_FORMULA_PARENT_LABEL_KEY,
-)
 
 logger = get_logger(__name__)
 
@@ -49,14 +35,6 @@ logger = get_logger(__name__)
 class ProjectDataError(RuntimeError):
     """Current schema project data violates model boundaries."""
 
-
-def _bbox_from_xyxy_payload(value: object) -> BBox | None:
-    if not isinstance(value, (list, tuple)) or len(value) != 4:
-        return None
-    try:
-        return BBox.from_xyxy(*(int(item) for item in value))
-    except (TypeError, ValueError):
-        return None
 
 # --------------------------------------------------------------------- schema v3
 DDL_V3 = """
@@ -1672,34 +1650,11 @@ class ProjectStore:
                 if "table_text_layer_cells_json" in r.keys()
                 else []
             )
-            if not paddle_binding_payload:
-                legacy_binding = app_payload.pop(PADDLE_BINDING_KEY, None)
-                if isinstance(legacy_binding, dict):
-                    paddle_binding_payload = dict(legacy_binding)
-            legacy_ocr_audit = app_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
-            if not ocr_audit_payload and isinstance(legacy_ocr_audit, dict):
-                ocr_audit_payload = dict(legacy_ocr_audit)
-            legacy_table_cells = app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY, None)
-            if not table_text_layer_cells and isinstance(legacy_table_cells, list):
-                table_text_layer_cells = [dict(item) for item in legacy_table_cells if isinstance(item, dict)]
-            app_payload.pop(PADDLE_BLOCK_LABEL_KEY, None)
-            app_payload.pop(PADDLE_BLOCK_BBOX_KEY, None)
             ocr_invalidated_reason = (
                 str(r["ocr_invalidated_reason"] or "")
                 if "ocr_invalidated_reason" in r.keys()
                 else ""
             )
-            legacy_ocr_invalidated = bool(app_payload.pop(OCR_TEXT_INVALIDATED_KEY, False))
-            legacy_ocr_kind = app_payload.pop(OCR_INVALIDATION_KIND_KEY, "")
-            if not ocr_invalidated_reason and legacy_ocr_invalidated:
-                ocr_invalidated_reason = str(legacy_ocr_kind or "layout_changed")
-            app_payload.pop(MANUAL_MERGE_FROM_KEY, None)
-            app_payload.pop(MANUAL_DRAW_BBOX_KEY, None)
-            legacy_inline_generated = bool(app_payload.pop(UI_GENERATED_INLINE_FORMULA_BLOCK_KEY, False))
-            legacy_inline_bbox = _bbox_from_xyxy_payload(
-                app_payload.pop(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY, None)
-            )
-            app_payload.pop(UI_INLINE_FORMULA_PARENT_LABEL_KEY, None)
             try:
                 validate_persistent_block_payloads(
                     raw_payload,
@@ -1710,14 +1665,6 @@ class ProjectStore:
             except ModelValidationError as exc:
                 _raise_project_data_error(exc)
             origin = self._load_block_origin(project_id, str(r["uid"] or ""))
-            if origin is None and (legacy_inline_generated or legacy_inline_bbox is not None):
-                origin = BlockOrigin(
-                    created_by=str(r["source"] or BlockSource.AUTO_LAYOUT.value),
-                    source_engine="paddleocr-vl",
-                    source_label="inline_formula",
-                    original_bbox=legacy_inline_bbox,
-                    original_kind=BlockType.EQUATION,
-                )
             block = Block(
                 block_type=BlockType(r["block_type"]),
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),

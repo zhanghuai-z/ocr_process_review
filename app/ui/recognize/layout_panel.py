@@ -19,7 +19,6 @@ from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     is_ocr_text_invalidated,
     mark_ocr_text_invalidated,
-    app_payload_dict,
     paddle_binding_dict,
     set_paddle_binding,
 )
@@ -867,7 +866,6 @@ class LayoutPanel(QWidget):
         for line in block.lines:
             parts.extend(proof_search_texts(line))
         parts.extend(LayoutPanel._payload_strings(raw_block_payload(block)))
-        parts.extend(LayoutPanel._payload_strings(app_payload_dict(block)))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod
