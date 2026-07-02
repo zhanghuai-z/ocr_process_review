@@ -414,6 +414,7 @@ def test_auto_flag_uses_service_not_retired_line_mutation_helper():
 def test_line_model_has_no_retired_final_text_mutation_wrapper():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     assert "def update_final_text" not in source
+    assert "def ensure_text_contract" not in source
     assert "def __setattr__" not in source
     assert "original_text" not in source
     assert "fill_original" not in source

@@ -149,18 +149,6 @@ class Line:
         state.line_uid = self.uid
         object.__setattr__(self, "proof_state", state)
 
-    def ensure_text_contract(self) -> None:
-        """Normalize OCR text fields and ensure proof state exists."""
-        state = getattr(self, "proof_state", None)
-        if state is None:
-            self.apply_proof_state(ProofLineState(line_uid=self.uid))
-        else:
-            state.line_uid = self.uid
-        ocr_text = self.ocr_text or self.text
-        if not self.text:
-            self.text = ocr_text
-        self.ocr_text = ocr_text
-
 @dataclass
 class BlockOrigin:
     """版面块来源事实。

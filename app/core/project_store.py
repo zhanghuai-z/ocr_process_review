@@ -26,6 +26,7 @@ from app.core.model_validation import (
     validate_block_model,
     validate_persistent_block_payloads,
 )
+from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import proof_final_text, proof_final_text_set, proof_status
 
 logger = get_logger(__name__)
@@ -1158,7 +1159,7 @@ class ProjectStore:
     ) -> None:
         if not str(line.uid or "").strip():
             return
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         now = time.time()
         cur.execute(
             "INSERT INTO proof_line_state ("
@@ -1201,7 +1202,7 @@ class ProjectStore:
             project_id=project_id,
         )
         bb = line.bbox
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         values = (
             block_id, line.text, line.confidence,
             bb.x, bb.y, bb.w, bb.h,
@@ -1387,7 +1388,7 @@ class ProjectStore:
         if not str(line.uid or "").strip():
             raise RuntimeError(f"Line update requires stable uid: id={line.id!r}")
         line.uid = ensure_entity_uid(line.uid, "line")
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         cur = self.conn.execute(
             "UPDATE line SET text=?, ocr_text=?, "
             "review_flags_json=? WHERE id=? AND uid=?",

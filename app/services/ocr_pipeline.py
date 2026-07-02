@@ -21,6 +21,7 @@ import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY, payload_bool
+from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,
     should_dispatch_to_text_ocr,
@@ -647,7 +648,7 @@ class OcrPipeline:
                     char.bbox,
                     source_space=bbox_space,
                 )
-            line.ensure_text_contract()
+            ensure_line_text_contract(line)
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:

@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import OcrPolicy
 
+from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
 
 
@@ -98,7 +99,7 @@ def test_models():
             proof_status=ProofStatus.MODIFIED,
         )
     )
-    line.ensure_text_contract()
+    ensure_line_text_contract(line)
     assert proof_display_text(line) == "状态对象终稿"
     assert proof_final_text(line) == "状态对象终稿"
     assert not hasattr(line, "final_text")
@@ -887,7 +888,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert proof_display_text(line) == "人工终稿"
         line.text = "直接兼容写入"
         assert proof_final_text(line) == "人工终稿"
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         assert line.text == "直接兼容写入"
         assert proof_final_text(line) == "人工终稿"
         assert line.ocr_text == "OCR text"
@@ -898,7 +899,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert proof_display_text(line) == "人工终稿"
         line.set_proof_text("最终真值")
         line.set_proof_text("")
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         assert proof_final_text(line) == ""
         assert proof_final_text_set(line) is True
         assert proof_display_text(line) == ""
@@ -910,7 +911,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             confidence=0.8,
             bbox=bb,
         )
-        line_without_text.ensure_text_contract()
+        ensure_line_text_contract(line_without_text)
         assert line_without_text.text == "OCR补全文本"
         assert proof_display_text(line_without_text) == "OCR补全文本"
         assert line_without_text.ocr_text == "OCR补全文本"
@@ -918,7 +919,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         final_only = Line(text="", confidence=0.8, bbox=bb)
         final_only.set_proof_text("人工终稿")
         final_only.ocr_text = ""
-        final_only.ensure_text_contract()
+        ensure_line_text_contract(final_only)
         assert proof_display_text(final_only) == "人工终稿"
         assert final_only.ocr_text == ""
 
@@ -951,7 +952,7 @@ def test_project_store_preserves_empty_final_text_roundtrip():
         bb = BBox(0, 0, 100, 20)
         line = Line(text="OCR原文", confidence=0.9, bbox=bb)
         line.set_proof_text("")
-        line.ensure_text_contract()
+        ensure_line_text_contract(line)
         assert proof_final_text(line) == ""
         assert proof_display_text(line) == ""
 
