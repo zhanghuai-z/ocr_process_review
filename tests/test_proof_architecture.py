@@ -358,6 +358,12 @@ def test_project_store_exposes_only_scoped_proof_line_write_port():
     assert not hasattr(ProjectStore, "update_lines")
 
 
+def test_project_store_does_not_mutate_line_text_contract_on_save():
+    source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    assert "ensure_line_text_contract" not in source
+    assert "line_text_contract(" in source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

@@ -26,8 +26,7 @@ from app.core.model_validation import (
     validate_block_model,
     validate_persistent_block_payloads,
 )
-from app.core.line_text_contract import ensure_line_text_contract
-from app.core.proof_line_facts import proof_final_text, proof_final_text_set, proof_status
+from app.core.line_text_contract import line_text_contract
 
 logger = get_logger(__name__)
 
@@ -393,13 +392,13 @@ def _origin_from_current_block(block: Block) -> BlockOrigin:
     )
 
 
-def _proof_alignment_state(line: Line) -> str:
+def _proof_alignment_state(line: Line, display_text: str | None = None) -> str:
     if not line.chars:
         return "line_only"
     try:
         from app.core.proof_char_text import chars_display_text
-        from app.core.proof_line_facts import proof_display_text
-        return "aligned" if chars_display_text(line.chars) == proof_display_text(line) else "degraded"
+        text = display_text if display_text is not None else line_text_contract(line).text
+        return "aligned" if chars_display_text(line.chars) == text else "degraded"
     except Exception:
         return "degraded"
 
@@ -1159,7 +1158,9 @@ class ProjectStore:
     ) -> None:
         if not str(line.uid or "").strip():
             return
-        ensure_line_text_contract(line)
+        contract = line_text_contract(line)
+        state = contract.proof_state
+        display_text = state.final_text if state.final_text_set else (state.final_text or contract.text)
         now = time.time()
         cur.execute(
             "INSERT INTO proof_line_state ("
@@ -1175,10 +1176,10 @@ class ProjectStore:
             (
                 project_id,
                 line.uid,
-                proof_final_text(line),
-                int(proof_final_text_set(line)),
-                proof_status(line).value,
-                _proof_alignment_state(line),
+                state.final_text,
+                int(state.final_text_set),
+                state.proof_status.value,
+                _proof_alignment_state(line, display_text),
                 now,
             ),
         )
@@ -1202,11 +1203,11 @@ class ProjectStore:
             project_id=project_id,
         )
         bb = line.bbox
-        ensure_line_text_contract(line)
+        contract = line_text_contract(line)
         values = (
-            block_id, line.text, line.confidence,
+            block_id, contract.text, line.confidence,
             bb.x, bb.y, bb.w, bb.h,
-            line.ocr_text,
+            contract.ocr_text,
             _review_flags_to_json(line.review_flags),
         )
         if line.id is None:
@@ -1388,13 +1389,13 @@ class ProjectStore:
         if not str(line.uid or "").strip():
             raise RuntimeError(f"Line update requires stable uid: id={line.id!r}")
         line.uid = ensure_entity_uid(line.uid, "line")
-        ensure_line_text_contract(line)
+        contract = line_text_contract(line)
         cur = self.conn.execute(
             "UPDATE line SET text=?, ocr_text=?, "
             "review_flags_json=? WHERE id=? AND uid=?",
             (
-                line.text,
-                line.ocr_text,
+                contract.text,
+                contract.ocr_text,
                 _review_flags_to_json(line.review_flags),
                 line.id,
                 line.uid,

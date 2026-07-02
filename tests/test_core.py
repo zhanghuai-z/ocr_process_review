@@ -973,6 +973,37 @@ def test_project_store_preserves_empty_final_text_roundtrip():
         os.unlink(db_path)
 
 
+def test_project_store_serializes_line_contract_without_mutating_line():
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bb = BBox(0, 0, 100, 20)
+        line = Line(text="", ocr_text="OCR补全文本", confidence=0.9, bbox=bb)
+        line.proof_state = None
+        project = OcrProject(
+            name="line-contract-no-mutate",
+            pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
+                        blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
+        )
+        with ProjectStore(db_path) as store:
+            store.save_project(project)
+            assert line.text == ""
+            assert line.ocr_text == "OCR补全文本"
+            assert line.proof_state is None
+
+            loaded = store.load_project(project_id=1)
+            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            assert loaded_line.text == "OCR补全文本"
+            assert loaded_line.ocr_text == "OCR补全文本"
+            assert proof_display_text(loaded_line) == "OCR补全文本"
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_clean_on_resave():
     """重新保存时旧 block 不残留。"""
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
