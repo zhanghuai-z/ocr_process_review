@@ -17,8 +17,6 @@ from PySide6.QtWidgets import (
 from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
-    MANUAL_MERGE_FROM_KEY,
-    MANUAL_DRAW_BBOX_KEY,
     UI_DELETED_INLINE_FORMULA_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
@@ -30,7 +28,6 @@ from app.core.block_payload import (
     app_payload_dict,
     paddle_binding_dict,
     set_paddle_binding,
-    set_payload_entries,
 )
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_artifact_index import (
@@ -2076,17 +2073,6 @@ class LayoutPanel(QWidget):
         primary.source = BlockSource.USER_EDITED
         primary.ocr_policy = default_ocr_policy_for_block(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
-        set_payload_entries(primary, {
-            MANUAL_MERGE_FROM_KEY: [
-                {
-                    "block_type": getattr(block.block_type, "value", str(block.block_type)),
-                    "bbox": list(block.bbox.to_xyxy()),
-                    "source_label": block.source_label,
-                }
-                for block in blocks
-            ],
-            MANUAL_DRAW_BBOX_KEY: list(bbox.to_xyxy()),
-        })
         mark_ocr_text_invalidated(primary, "manual_draw_merge")
         self._bind_manual_block_to_paddle(page, primary)
         for block in blocks[1:]:

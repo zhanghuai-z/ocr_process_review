@@ -434,6 +434,23 @@ def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
     assert "set_payload_entries(block, {\n            OCR_TEXT_INVALIDATED_KEY" not in layout_source
 
 
+def test_manual_layout_merge_details_are_events_not_app_payload_state():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    assert "MANUAL_MERGE_FROM_KEY" not in app_keys_segment
+    assert "MANUAL_DRAW_BBOX_KEY" not in app_keys_segment
+    assert "MANUAL_MERGE_FROM_KEY" in legacy_segment
+    assert "MANUAL_DRAW_BBOX_KEY" in legacy_segment
+    assert "MANUAL_MERGE_FROM_KEY" not in layout_source
+    assert "MANUAL_DRAW_BBOX_KEY" not in layout_source
+    assert "app_payload.pop(MANUAL_MERGE_FROM_KEY" in store_source
+    assert "app_payload.pop(MANUAL_DRAW_BBOX_KEY" in store_source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

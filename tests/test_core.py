@@ -907,6 +907,54 @@ def test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_paylo
         os.unlink(db_path)
 
 
+def test_project_store_drops_legacy_manual_layout_payload_details():
+    import sqlite3
+
+    from app.core.block_payload import MANUAL_DRAW_BBOX_KEY, MANUAL_MERGE_FROM_KEY
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        project = OcrProject(
+            name="legacy-manual-layout-payload",
+            pages=[Page(image_path="/tmp/manual-layout.png", width=100, height=100, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+
+        legacy_payload = {
+            MANUAL_MERGE_FROM_KEY: [{"block_type": "text", "bbox": [0, 0, 20, 10]}],
+            MANUAL_DRAW_BBOX_KEY: [0, 0, 40, 20],
+        }
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (json.dumps(legacy_payload, ensure_ascii=False), block.id),
+            )
+            conn.commit()
+
+        with ProjectStore(db_path) as store:
+            migrated = store.load_project(saved.id)
+            migrated_block = migrated.pages[0].blocks[0]
+            assert MANUAL_MERGE_FROM_KEY not in migrated_block.app_payload
+            assert MANUAL_DRAW_BBOX_KEY not in migrated_block.app_payload
+            store.save_project(migrated)
+            reloaded = store.load_project(saved.id)
+
+        reloaded_block = reloaded.pages[0].blocks[0]
+        assert MANUAL_MERGE_FROM_KEY not in reloaded_block.app_payload
+        assert MANUAL_DRAW_BBOX_KEY not in reloaded_block.app_payload
+
+        print("test_project_store_drops_legacy_manual_layout_payload_details PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.core.project_store import ProjectStore
     from app.models import (

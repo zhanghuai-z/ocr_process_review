@@ -29,6 +29,8 @@ from app.core.model_validation import (
 )
 from app.core.line_text_contract import line_text_contract
 from app.core.block_payload import (
+    MANUAL_DRAW_BBOX_KEY,
+    MANUAL_MERGE_FROM_KEY,
     OCR_INVALIDATION_KIND_KEY,
     OCR_TEXT_INVALIDATED_KEY,
     PADDLE_BINDING_KEY,
@@ -1642,6 +1644,8 @@ class ProjectStore:
             legacy_ocr_kind = app_payload.pop(OCR_INVALIDATION_KIND_KEY, "")
             if not ocr_invalidated_reason and legacy_ocr_invalidated:
                 ocr_invalidated_reason = str(legacy_ocr_kind or "layout_changed")
+            app_payload.pop(MANUAL_MERGE_FROM_KEY, None)
+            app_payload.pop(MANUAL_DRAW_BBOX_KEY, None)
             try:
                 validate_persistent_block_payloads(
                     raw_payload,
