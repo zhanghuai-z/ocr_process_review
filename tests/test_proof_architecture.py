@@ -144,6 +144,15 @@ def test_ocr_dispatch_policy_uses_block_attributes_not_payload_guessing():
     assert "PADDLE_BINDING_KEY" not in source
 
 
+def test_block_attributes_do_not_derive_semantics_from_payloads():
+    source = Path("app/core/block_attributes.py").read_text(encoding="utf-8")
+    assert "authoritative_paddle_label" not in source
+    assert "paddle_binding" not in source
+    assert "app_payload.get" not in source
+    assert "raw_payload.get" not in source
+    assert "raw_label and" not in source
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (

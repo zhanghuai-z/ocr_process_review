@@ -625,7 +625,9 @@ def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
     )
 
     assert authoritative_block_label(block) == "footnote"
-    assert block_attributes(block).source_label == "footnote"
+    attrs = block_attributes(block)
+    assert attrs.source_label == "footnote"
+    assert attrs.raw_label == ""
 
     block.source = BlockSource.USER_EDITED
     block.source_label = "inline_formula"
@@ -2644,7 +2646,7 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
 
 def test_export_ir_preserves_structured_block_attributes():
     from app.export.ir_builder import build_export_ir
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
 
     block = Block(
         block_type=BlockType.TEXT,
@@ -2653,6 +2655,7 @@ def test_export_ir_preserves_structured_block_attributes():
         lines=[Line(text="标题文本", confidence=0.95, bbox=BBox(1, 2, 30, 10))],
         source_label="text",
         raw_payload={"block_label": "paragraph_title", "block_bbox": [1, 2, 31, 42]},
+        origin=BlockOrigin(source_label="paragraph_title"),
     )
     page = Page(image_path="/tmp/attrs-page.png", width=100, height=100, blocks=[block])
     document = build_export_ir(OcrProject(name="AttrIR", pages=[page]), "json")
@@ -2660,7 +2663,7 @@ def test_export_ir_preserves_structured_block_attributes():
 
     assert element["kind"] == "title"
     assert element["source"]["block_type"] == "text"
-    assert element["source"]["source_label"] == "text"
+    assert element["source"]["source_label"] == "paragraph_title"
     assert element["source"]["semantic_label"] == "paragraph_title"
     assert element["source"]["semantic_block_type"] == "title"
     assert element["source"]["raw_payload"]["block_label"] == "paragraph_title"
@@ -16899,19 +16902,21 @@ def test_hproof_line_iterator_excludes_position_source_labels():
     print("test_hproof_line_iterator_excludes_position_source_labels PASSED")
 
 
-def test_block_attributes_reads_raw_payload_without_note():
+def test_block_attributes_use_origin_or_current_label_not_raw_payload():
     from app.core.block_attributes import block_attributes, block_display_label, is_position_only_block
-    from app.models import BBox, Block, BlockType
+    from app.models import BBox, Block, BlockOrigin, BlockType
 
     title_like = Block(
         block_type=BlockType.TEXT,
         bbox=BBox(1, 1, 20, 10),
         note="source_label=text",
         raw_payload={"block_label": "paragraph_title", "score": 0.99},
+        origin=BlockOrigin(source_label="paragraph_title"),
     )
     attrs = block_attributes(title_like)
 
     assert attrs.source_label == "paragraph_title"
+    assert attrs.raw_label == ""
     assert attrs.semantic_label == "paragraph_title"
     assert attrs.semantic_block_type == BlockType.TITLE
     assert block_display_label(title_like) == "text · paragraph_title"
@@ -16921,6 +16926,7 @@ def test_block_attributes_reads_raw_payload_without_note():
         bbox=BBox(1, 1, 20, 10),
         note="source_label=text",
         raw_payload={"block_label": "page_number"},
+        source_label="page_number",
     )
     assert is_position_only_block(position)
 
@@ -16928,11 +16934,21 @@ def test_block_attributes_reads_raw_payload_without_note():
         block_type=BlockType.TEXT,
         bbox=BBox(1, 20, 80, 10),
         raw_payload={"block_label": "footnote"},
+        source_label="footnote",
     )
     assert not is_position_only_block(footnote)
     assert block_display_label(footnote) == "text · footnote"
 
-    print("test_block_attributes_reads_raw_payload_without_note PASSED")
+    raw_only = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(1, 40, 80, 10),
+        raw_payload={"block_label": "paragraph_title"},
+    )
+    raw_attrs = block_attributes(raw_only)
+    assert raw_attrs.semantic_label == "text"
+    assert raw_attrs.semantic_block_type == BlockType.TEXT
+
+    print("test_block_attributes_use_origin_or_current_label_not_raw_payload PASSED")
 
 
 def test_hproof_page_filter_keeps_pages_separate():
@@ -18991,7 +19007,7 @@ def test_image_viewer_frame_selection_ignores_box_interior():
 def test_ui_block_labels_use_structured_semantic_label():
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, Page
     from app.ui.recognize.ocr_panel import OcrPanel
     from app.ui.widgets.image_viewer import ImageViewer
 
@@ -19000,7 +19016,8 @@ def test_ui_block_labels_use_structured_semantic_label():
         block_type=BlockType.TEXT,
         bbox=BBox(5, 6, 30, 20),
         lines=[Line(text="标题", confidence=0.9, bbox=BBox(5, 6, 30, 10))],
-        raw_payload={"block_label": "paragraph_title"},
+        raw_payload={"block_label": "legacy_ignored"},
+        origin=BlockOrigin(source_label="paragraph_title"),
     )
 
     viewer = ImageViewer()
@@ -19376,7 +19393,7 @@ if __name__ == "__main__":
     test_hproof_line_iterator_uses_shared_proof_text_elements()
     test_proof_line_iterators_exclude_route_table_lines()
     test_hproof_line_iterator_excludes_position_source_labels()
-    test_block_attributes_reads_raw_payload_without_note()
+    test_block_attributes_use_origin_or_current_label_not_raw_payload()
     test_hproof_page_filter_keeps_pages_separate()
     test_hproof_page_filter_flushes_dirty_editor_before_switching_pages()
     test_hproof_page_filter_blocks_switch_when_current_editor_has_conflict()

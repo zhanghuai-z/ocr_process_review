@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.adapters.paddle import map_paddle_label_to_block_type
-from app.core.paddle_labels import authoritative_paddle_label, normalize_paddle_label
+from app.core.paddle_labels import normalize_paddle_label
 from app.models import Block, BlockSource, BlockType
 
 
@@ -71,14 +71,10 @@ class BlockAttributes:
 def block_attributes(block: Block) -> BlockAttributes:
     raw_payload = dict(block.raw_payload)
     app_payload = dict(block.app_payload)
-    raw_label = authoritative_paddle_label(raw_payload)
-    binding = app_payload.get("paddle_binding")
-    binding_label = ""
-    if isinstance(binding, dict):
-        binding_label = str(binding.get("source_label") or binding.get("block_type") or "")
     origin = getattr(block, "origin", None)
     origin_label = normalize_source_label(str(getattr(origin, "source_label", "") or ""))
-    current_label = normalize_source_label(block.source_label or binding_label or raw_label or block.block_type.value)
+    raw_label = ""
+    current_label = normalize_source_label(block.source_label or block.block_type.value)
     source_label = origin_label or current_label
     user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
     semantic_source = (
@@ -87,7 +83,6 @@ def block_attributes(block: Block) -> BlockAttributes:
         else _best_auto_semantic_label(
             block.block_type,
             origin_label=origin_label,
-            raw_label=raw_label,
             current_label=current_label,
         )
     )
@@ -116,13 +111,12 @@ def _best_auto_semantic_label(
     block_type: BlockType,
     *,
     origin_label: str,
-    raw_label: str,
     current_label: str,
 ) -> str:
-    raw_kind = map_paddle_label_to_block_type(raw_label)
-    if raw_label and raw_kind not in {BlockType.UNKNOWN, block_type}:
-        return raw_label
-    return origin_label or raw_label or current_label
+    origin_kind = map_paddle_label_to_block_type(origin_label)
+    if origin_label and origin_kind not in {BlockType.UNKNOWN, block_type}:
+        return origin_label
+    return origin_label or current_label
 
 
 def semantic_label(block: Block) -> str:

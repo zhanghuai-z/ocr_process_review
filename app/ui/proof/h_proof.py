@@ -457,16 +457,8 @@ def _debug_block_labels(block: Block) -> set[str]:
     attrs = block_attributes(block)
     labels = {
         attrs.normalized_source_label,
-        normalize_source_label(attrs.raw_label),
         attrs.normalized_semantic_label,
     }
-    for key in ("block_label", "label", "type", "category"):
-        value = attrs.raw_payload.get(key)
-        if value:
-            labels.add(normalize_source_label(value))
-        value = attrs.app_payload.get(key)
-        if value:
-            labels.add(normalize_source_label(value))
     return {label for label in labels if label}
 
 

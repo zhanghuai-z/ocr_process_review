@@ -103,16 +103,21 @@ def test_block_eligibility_uses_dispatch_policy_for_source_labels():
     formula_like.ocr_policy = default_ocr_policy_for_block(formula_like)
 
     table_like = _block(BlockType.TEXT, [line])
-    table_like.app_payload = {
+    table_like.source_label = "table"
+    table_like.ocr_policy = default_ocr_policy_for_block(table_like)
+
+    legacy_table_binding = _block(BlockType.TEXT, [line])
+    legacy_table_binding.app_payload = {
         "paddle_binding": {
             "source_label": "table",
             "block_type": "table",
         }
     }
-    table_like.ocr_policy = default_ocr_policy_for_block(table_like)
+    legacy_table_binding.ocr_policy = default_ocr_policy_for_block(legacy_table_binding)
 
     assert not is_block_eligible(formula_like)
     assert not is_block_eligible(table_like)
+    assert is_block_eligible(legacy_table_binding)
     assert is_block_eligible(_block(BlockType.TEXT, [line]))
 
 
