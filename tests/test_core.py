@@ -1106,6 +1106,73 @@ def test_project_store_persists_ocr_audit_and_migrates_legacy_payload():
         os.unlink(db_path)
 
 
+def test_project_store_persists_table_text_layer_cells_and_migrates_legacy_payload():
+    import sqlite3
+
+    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        cells = [
+            {
+                "text": "A",
+                "bbox": {"x": 10, "y": 20, "w": 30, "h": 12},
+                "row": 0,
+                "col": 0,
+            }
+        ]
+        block = Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox.from_xyxy(0, 0, 80, 40),
+            table_text_layer_cells=list(cells),
+        )
+        project = OcrProject(
+            name="table-text-layer-cells",
+            pages=[Page(image_path="/tmp/table-cells.png", width=100, height=80, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
+
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.table_text_layer_cells == cells
+        assert TABLE_TEXT_LAYER_CELLS_KEY not in loaded_block.app_payload
+
+        legacy_block = Block(block_type=BlockType.TABLE, bbox=BBox.from_xyxy(5, 5, 75, 35))
+        legacy_project = OcrProject(
+            name="legacy-table-text-layer-cells",
+            pages=[Page(image_path="/tmp/legacy-table-cells.png", width=100, height=80, blocks=[legacy_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(legacy_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (json.dumps({TABLE_TEXT_LAYER_CELLS_KEY: cells}, ensure_ascii=False), legacy_block.id),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            migrated = store.load_project(saved.id)
+            migrated_block = migrated.pages[0].blocks[0]
+            assert migrated_block.table_text_layer_cells == cells
+            assert TABLE_TEXT_LAYER_CELLS_KEY not in migrated_block.app_payload
+            store.save_project(migrated)
+            reloaded = store.load_project(saved.id)
+
+        reloaded_block = reloaded.pages[0].blocks[0]
+        assert reloaded_block.table_text_layer_cells == cells
+        assert reloaded_block.app_payload == {}
+
+        print("test_project_store_persists_table_text_layer_cells_and_migrates_legacy_payload PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.core.project_store import ProjectStore
     from app.models import (
@@ -3824,7 +3891,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 
         updated = TableTextLayerService().enrich_page(page)
 
-        cells = block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY]
+        cells = block.table_text_layer_cells
         assert updated == 1
         assert len(cells) == 6
         assert cells[1]["text"] == "B"
@@ -3835,40 +3902,36 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
     print("test_table_text_layer_service_writes_hidden_cells_for_table_block PASSED")
 
 
-def test_table_text_layer_service_ignores_app_payload_html_source():
+def test_table_text_layer_service_clears_stale_cells_without_table_html_source():
     from PIL import Image
 
-    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.models import BBox, Block, BlockType, Page
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
         image_path = os.path.join(tmpdir, "page.png")
         Image.new("RGB", (240, 160), "white").save(image_path)
-        html = "<table><tr><td>A</td><td>B</td></tr></table>"
         block = Block(
             block_type=BlockType.TABLE,
             bbox=BBox(20, 30, 160, 70),
             order=0,
-            app_payload={
-                TABLE_TEXT_LAYER_CELLS_KEY: [
-                    {
-                        "text": html,
-                        "bbox": {"x": 20, "y": 30, "w": 160, "h": 70},
-                        "row": 0,
-                        "col": 0,
-                    }
-                ]
-            },
+            table_text_layer_cells=[
+                {
+                    "text": "<table><tr><td>A</td><td>B</td></tr></table>",
+                    "bbox": {"x": 20, "y": 30, "w": 160, "h": 70},
+                    "row": 0,
+                    "col": 0,
+                }
+            ],
         )
         page = Page(image_path=image_path, width=240, height=160, blocks=[block])
 
         updated = TableTextLayerService().enrich_page(page)
 
         assert updated == 0
-        assert TABLE_TEXT_LAYER_CELLS_KEY not in block.app_payload
+        assert block.table_text_layer_cells == []
 
-    print("test_table_text_layer_service_ignores_app_payload_html_source PASSED")
+    print("test_table_text_layer_service_clears_stale_cells_without_table_html_source PASSED")
 
 
 def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
@@ -3893,7 +3956,7 @@ def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
         updated = TableTextLayerService().enrich_page(page)
 
         assert updated == 1
-        assert block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY][0]["text"] == "A"
+        assert block.table_text_layer_cells[0]["text"] == "A"
 
     print("test_table_text_layer_service_accepts_raw_vendor_table_html_source PASSED")
 
@@ -3913,7 +3976,7 @@ def test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference():
         block = Block(block_type=BlockType.TABLE, bbox=BBox(20, 40, 300, 80), order=0, lines=[
             Line(text=html, confidence=1.0, bbox=BBox(20, 40, 300, 80)),
         ])
-        block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY] = [
+        block.table_text_layer_cells = [
             {
                 "text": "A",
                 "bbox": {"x": 33, "y": 55, "w": 22, "h": 12},

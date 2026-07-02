@@ -37,6 +37,7 @@ from app.core.block_payload import (
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
     PADDLE_BINDING_KEY,
+    TABLE_TEXT_LAYER_CELLS_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,
@@ -122,7 +123,8 @@ CREATE TABLE IF NOT EXISTS block (
     app_payload_json TEXT   NOT NULL DEFAULT '{}',
     paddle_binding_json TEXT NOT NULL DEFAULT '{}',
     ocr_invalidated_reason TEXT NOT NULL DEFAULT '',
-    ocr_audit_json TEXT NOT NULL DEFAULT '{}'
+    ocr_audit_json TEXT NOT NULL DEFAULT '{}',
+    table_text_layer_cells_json TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS block_origin (
@@ -366,6 +368,9 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     20: [
         "ALTER TABLE block ADD COLUMN ocr_audit_json TEXT NOT NULL DEFAULT '{}';",
+    ],
+    21: [
+        "ALTER TABLE block ADD COLUMN table_text_layer_cells_json TEXT NOT NULL DEFAULT '[]';",
     ],
 }
 
@@ -1067,13 +1072,15 @@ class ProjectStore:
             json.dumps(block.paddle_binding.to_dict() if block.paddle_binding else {}, ensure_ascii=False),
             block.ocr_invalidated_reason,
             json.dumps(block.ocr_audit, ensure_ascii=False),
+            json.dumps(block.table_text_layer_cells, ensure_ascii=False),
         )
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
                 "source, ocr_policy, note, source_label, raw_payload_json, "
-                "app_payload_json, paddle_binding_json, ocr_invalidated_reason, ocr_audit_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "app_payload_json, paddle_binding_json, ocr_invalidated_reason, "
+                "ocr_audit_json, table_text_layer_cells_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
             )
             block.id = cur.lastrowid
@@ -1082,7 +1089,8 @@ class ProjectStore:
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, ocr_policy=?, note=?, "
                 "source_label=?, raw_payload_json=?, app_payload_json=?, "
-                "paddle_binding_json=?, ocr_invalidated_reason=?, ocr_audit_json=? "
+                "paddle_binding_json=?, ocr_invalidated_reason=?, ocr_audit_json=?, "
+                "table_text_layer_cells_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
             )
@@ -1656,6 +1664,14 @@ class ProjectStore:
                 if "ocr_audit_json" in r.keys()
                 else {}
             )
+            table_text_layer_cells = (
+                _json_to_list(
+                    r["table_text_layer_cells_json"],
+                    field="block.table_text_layer_cells_json",
+                )
+                if "table_text_layer_cells_json" in r.keys()
+                else []
+            )
             if not paddle_binding_payload:
                 legacy_binding = app_payload.pop(PADDLE_BINDING_KEY, None)
                 if isinstance(legacy_binding, dict):
@@ -1663,6 +1679,9 @@ class ProjectStore:
             legacy_ocr_audit = app_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
             if not ocr_audit_payload and isinstance(legacy_ocr_audit, dict):
                 ocr_audit_payload = dict(legacy_ocr_audit)
+            legacy_table_cells = app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY, None)
+            if not table_text_layer_cells and isinstance(legacy_table_cells, list):
+                table_text_layer_cells = [dict(item) for item in legacy_table_cells if isinstance(item, dict)]
             app_payload.pop(PADDLE_BLOCK_LABEL_KEY, None)
             app_payload.pop(PADDLE_BLOCK_BBOX_KEY, None)
             ocr_invalidated_reason = (
@@ -1715,6 +1734,7 @@ class ProjectStore:
                 paddle_binding=PaddleBinding.from_dict(paddle_binding_payload),
                 ocr_invalidated_reason=ocr_invalidated_reason,
                 ocr_audit=ocr_audit_payload,
+                table_text_layer_cells=table_text_layer_cells,
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)

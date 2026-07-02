@@ -289,6 +289,7 @@ class Block:
     paddle_binding: PaddleBinding | None = None     # 人工框与 Paddle 原始事实的结构化绑定
     ocr_invalidated_reason: str = ""                # 块级 OCR 结果失效原因
     ocr_audit: dict[str, Any] = field(default_factory=dict)  # OCR 调试/审计事实
+    table_text_layer_cells: list[dict[str, Any]] = field(default_factory=list)  # 表格双层 PDF 文本层
     uid: str = ""                                   # 稳定业务 ID
 
     def __post_init__(self) -> None:

@@ -44,6 +44,22 @@ def _proof_ui_sources() -> list[Path]:
     return sorted(PROOF_UI_DIR.glob("*.py"))
 
 
+def _payload_key_segments(source: str) -> tuple[str, str]:
+    app_match = re.search(
+        r"APP_PAYLOAD_KEYS\s*=\s*frozenset\((.*?)\)\s*\n\s*LEGACY_APP_PAYLOAD_KEYS",
+        source,
+        flags=re.DOTALL,
+    )
+    legacy_match = re.search(
+        r"LEGACY_APP_PAYLOAD_KEYS\s*=\s*frozenset\(\{(.*?)\}\)",
+        source,
+        flags=re.DOTALL,
+    )
+    assert app_match is not None
+    assert legacy_match is not None
+    return app_match.group(1), legacy_match.group(1)
+
+
 def _assigned_attr_targets(tree: ast.AST) -> list[ast.Attribute]:
     targets: list[ast.Attribute] = []
     for node in ast.walk(tree):
@@ -404,8 +420,7 @@ def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     assert "PADDLE_BINDING_KEY" not in app_keys_segment
     assert "PADDLE_BINDING_KEY" in legacy_segment
     assert "PADDLE_BINDING_KEY" not in artifact_source
@@ -423,8 +438,7 @@ def test_paddle_raw_label_fields_are_not_app_payload_state():
     block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     for key in ("PADDLE_BLOCK_LABEL_KEY", "PADDLE_BLOCK_BBOX_KEY"):
         assert key not in app_keys_segment
         assert key in legacy_segment
@@ -440,7 +454,7 @@ def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, _ = _payload_key_segments(block_payload_source)
     assert "OCR_TEXT_INVALIDATED_KEY" not in app_keys_segment
     assert "OCR_INVALIDATION_KIND_KEY" not in app_keys_segment
     assert "setattr(block, \"ocr_invalidated_reason\"" in block_payload_source
@@ -458,8 +472,7 @@ def test_manual_layout_merge_details_are_events_not_app_payload_state():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     assert "MANUAL_MERGE_FROM_KEY" not in app_keys_segment
     assert "MANUAL_DRAW_BBOX_KEY" not in app_keys_segment
     assert "MANUAL_MERGE_FROM_KEY" in legacy_segment
@@ -475,8 +488,7 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     for key in (
         "UI_GENERATED_INLINE_FORMULA_BLOCK_KEY",
         "UI_INLINE_FORMULA_ORIGIN_BBOX_KEY",
@@ -496,8 +508,7 @@ def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in app_keys_segment
     assert "UI_DELETED_INLINE_FORMULA_KEY" in legacy_segment
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in layout_source
@@ -511,8 +522,7 @@ def test_hanwang_bbox_audit_is_typed_ocr_audit_not_app_payload_state():
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
-    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
     assert "HANWANG_BBOX_AUDIT_KEY" not in app_keys_segment
     assert "HANWANG_BBOX_AUDIT_KEY" in legacy_segment
     assert "ocr_audit:" in model_source
@@ -520,6 +530,23 @@ def test_hanwang_bbox_audit_is_typed_ocr_audit_not_app_payload_state():
     assert "app_payload[HANWANG_BBOX_AUDIT_KEY]" not in hanwang_source
     assert "app_payload.get(HANWANG_BBOX_AUDIT_KEY)" not in hanwang_source
     assert "ocr_audit=ocr_audit" in hanwang_source
+
+
+def test_table_text_layer_cells_are_typed_state_not_app_payload_state():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    model_source = Path("app/models/project.py").read_text(encoding="utf-8")
+    service_source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
+    ir_source = Path("app/export/ir_builder.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    app_keys_segment, legacy_segment = _payload_key_segments(block_payload_source)
+    assert "TABLE_TEXT_LAYER_CELLS_KEY" not in app_keys_segment
+    assert "TABLE_TEXT_LAYER_CELLS_KEY" in legacy_segment
+    assert "table_text_layer_cells:" in model_source
+    assert "table_text_layer_cells_json" in store_source
+    assert "block.table_text_layer_cells = cells" in service_source
+    assert "block.table_text_layer_cells" in ir_source
+    assert "payload_get(block, TABLE_TEXT_LAYER_CELLS_KEY)" not in ir_source
 
 
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
