@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.core.block_payload import clear_payload_entries, set_payload_entries
+from app.core.raw_ocr_artifact import raw_block_text_values
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY, build_table_text_layer_cells
 from app.models import Block, BlockType, Page
 
@@ -37,12 +38,7 @@ class TableTextLayerService:
         candidates: list[str] = []
         candidates.extend(line.text for line in block.lines if line.text)
         candidates.extend(line.ocr_text for line in block.lines if line.ocr_text)
-        if isinstance(block.raw_payload, dict):
-            candidates.extend(
-                str(value)
-                for key in ("html", "table_html", "block_content")
-                if (value := block.raw_payload.get(key))
-            )
+        candidates.extend(raw_block_text_values(block, ("html", "table_html", "block_content")))
         for candidate in candidates:
             text = candidate.strip()
             if "<table" in text.lower() or "<tr" in text.lower():

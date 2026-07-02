@@ -9550,7 +9550,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         page,
     )
 
-    assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
+    assert LAYOUT_LINE_ROUTES_FIELD in _raw_layout_records(page)[0]
     assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].raw_payload
     assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].app_payload
 

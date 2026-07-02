@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
+from app.core.block_payload import app_payload_dict
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
@@ -54,6 +55,7 @@ from app.core.proof_char_text import chars_display_spans, chars_display_text
 from app.core.proof_line_facts import proof_block_text, proof_display_text, proof_ocr_text, proof_status
 from app.core.proof_occurrence import line_signature
 from app.core.proof_projection import ProofLineProjection, build_proof_line_projection
+from app.core.raw_ocr_artifact import raw_block_text_values
 from app.ui.widgets.page_directory import PageDirectoryList
 from app.utils.icon_manager import get_icon
 from app.core.proof_line_utils import iter_unique_page_hproof_lines
@@ -489,18 +491,14 @@ def _line_is_formula_marker_only(line: Line) -> bool:
 
 
 def _block_debug_content(block: Block) -> str:
-    for payload in (block.raw_payload or {}, block.app_payload or {}):
-        for key in (
-            "block_content",
-            "content",
-            "text",
-            "latex",
-            "formula",
-            "formula_latex",
-        ):
-            value = payload.get(key)
-            if value:
-                return str(value)
+    keys = ("block_content", "content", "text", "latex", "formula", "formula_latex")
+    for value in raw_block_text_values(block, keys):
+        return value
+    payload = app_payload_dict(block)
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return str(value)
     return proof_block_text(block)
 
 

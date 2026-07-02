@@ -89,7 +89,7 @@ from app.core.paddle_labels import (
 )
 from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
-from app.core.raw_ocr_artifact import raw_layout_records
+from app.core.raw_ocr_artifact import raw_block_payload, raw_layout_records
 from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolicy, Page
 
@@ -3012,7 +3012,7 @@ def _origin_source_label(block: Block) -> str:
 
 
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
-    raw_payload = dict(block.raw_payload)
+    raw_payload = raw_block_payload(block)
     app_payload = dict(block.app_payload)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
@@ -3071,15 +3071,6 @@ def _persistent_payloads_from_route_row(raw_block: dict[str, Any]) -> tuple[dict
     if isinstance(audit, dict) and audit:
         app_payload[HANWANG_BBOX_AUDIT_KEY] = dict(audit)
     return strip_runtime_layout_payload(raw_payload), strip_runtime_layout_payload(app_payload)
-
-
-def _strip_cached_layout_line_routes_from_page(page: Page) -> None:
-    for record in raw_layout_records(page):
-        if isinstance(record, dict):
-            record.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-    for block in page.blocks:
-        block.raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-        clear_payload_entries(block, LAYOUT_LINE_ROUTES_FIELD)
 
 
 def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = None) -> str:
@@ -3613,7 +3604,6 @@ class HanwangMicroRecBlockEngine:
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> RunStats:
-        _strip_cached_layout_line_routes_from_page(page)
         self._refresh_inline_formula_texts_from_current_crops(
             image_bgr,
             page,

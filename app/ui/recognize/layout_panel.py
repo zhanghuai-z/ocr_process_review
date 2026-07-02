@@ -29,6 +29,7 @@ from app.core.block_payload import (
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,
     payload_bool,
     payload_get,
+    app_payload_dict,
     set_payload_entries,
 )
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
@@ -40,7 +41,7 @@ from app.core.paddle_artifact_index import (
 )
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
-from app.core.raw_ocr_artifact import raw_layout_records
+from app.core.raw_ocr_artifact import raw_block_payload, raw_layout_records
 from app.core.paddle_line_routing import (
     ROUTE_SUBBLOCKS_FIELD,
     block_text,
@@ -869,8 +870,8 @@ class LayoutPanel(QWidget):
         ]
         for line in block.lines:
             parts.extend(proof_search_texts(line))
-        parts.extend(LayoutPanel._payload_strings(block.raw_payload))
-        parts.extend(LayoutPanel._payload_strings(block.app_payload))
+        parts.extend(LayoutPanel._payload_strings(raw_block_payload(block)))
+        parts.extend(LayoutPanel._payload_strings(app_payload_dict(block)))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod

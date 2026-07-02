@@ -208,6 +208,40 @@ def test_app_payload_reads_go_through_block_payload_helpers():
     assert offenders == []
 
 
+def test_raw_payload_is_not_mutated_directly_by_app_code():
+    offenders: list[str] = []
+    direct_mutation_patterns = (
+        ".raw_payload.pop(",
+        ".raw_payload.setdefault(",
+        ".raw_payload.update(",
+    )
+    assignment_pattern = re.compile(r"\.raw_payload\[[^\]]+\]\s*=")
+    for path in sorted(APP_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for pattern in direct_mutation_patterns:
+            if pattern in source:
+                offenders.append(f"{path}: {pattern}")
+        for match in assignment_pattern.finditer(source):
+            offenders.append(f"{path}: {match.group(0)}")
+    assert offenders == []
+
+
+def test_raw_payload_reads_stay_at_storage_validation_or_raw_artifact_boundary():
+    allowed = {
+        Path("app/core/model_validation.py"),
+        Path("app/core/project_store.py"),
+        Path("app/core/raw_ocr_artifact.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "block.raw_payload" in source or '.raw_payload.get(' in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_export_semantic_filters_do_not_read_raw_payload_labels():
     markdown_source = Path("app/export/markdown.py").read_text(encoding="utf-8")
     markdown_tree = ast.parse(markdown_source, filename="app/export/markdown.py")
@@ -240,7 +274,7 @@ def test_table_text_layer_html_source_does_not_scan_app_payload():
             fn_source = ast.get_source_segment(source, node) or ""
             assert "app_payload" not in fn_source
             assert 'get("text")' not in fn_source
-            assert "block.raw_payload" in fn_source
+            assert "raw_block_text_values(" in fn_source
             break
     else:
         raise AssertionError("_table_html function not found")
