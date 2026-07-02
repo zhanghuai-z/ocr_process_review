@@ -17,12 +17,16 @@ from PySide6.QtWidgets import (
 from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
-    UI_DELETED_INLINE_FORMULA_KEY,
     is_ocr_text_invalidated,
     mark_ocr_text_invalidated,
     app_payload_dict,
     paddle_binding_dict,
     set_paddle_binding,
+)
+from app.core.inline_formula_edit_state import (
+    handled_inline_formula_origin_bboxes,
+    inline_formula_origin_bbox,
+    mark_inline_formula_origin_handled,
 )
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_artifact_index import (
@@ -1394,12 +1398,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _inline_formula_origin_bbox(block: Block) -> tuple[int, int, int, int] | None:
-        origin = block.origin
-        if origin is None or origin.original_bbox is None:
-            return None
-        if normalize_paddle_label(origin.source_label) != "inline_formula":
-            return None
-        return origin.original_bbox.to_xyxy()
+        return inline_formula_origin_bbox(block)
 
     @staticmethod
     def _is_generated_inline_formula_block(block: Block) -> bool:
@@ -1501,7 +1500,7 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
         before = self._layout_block_state(block)
-        self._mark_generated_inline_formula_handled(page, block)
+        self._mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
         page.blocks = [b for b in page.blocks if b is not block]
         self._record_layout_edit(
             page,
@@ -1837,10 +1836,12 @@ class LayoutPanel(QWidget):
 
     def _ensure_inline_formula_blocks(self, page: Page) -> None:
         """Promote Paddle inline_formula subblocks to editable equation blocks."""
+        handled_origins = handled_inline_formula_origin_bboxes(page)
         for parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
-            if subblock.get(UI_DELETED_INLINE_FORMULA_KEY):
+            origin_tuple = bbox.to_xyxy()
+            if origin_tuple in handled_origins:
                 continue
-            origin = list(bbox.to_xyxy())
+            origin = list(origin_tuple)
             if self._has_inline_formula_origin_block(page, origin):
                 continue
             page.blocks.append(Block(
@@ -1983,14 +1984,14 @@ class LayoutPanel(QWidget):
                 return True
         return False
 
-    def _mark_generated_inline_formula_handled(self, page: Page, block: Block) -> None:
-        origin = self._inline_formula_origin_bbox(block)
-        if origin is None:
-            return
-        origin_tuple = tuple(origin)
-        for _parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
-            if bbox.to_xyxy() == origin_tuple:
-                subblock[UI_DELETED_INLINE_FORMULA_KEY] = True
+    def _mark_generated_inline_formula_handled(
+        self,
+        page: Page,
+        block: Block,
+        *,
+        op: str = "claim_inline_formula",
+    ) -> None:
+        mark_inline_formula_origin_handled(page, block, op=op)
 
     def _apply_subtype_to_block(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> bool:
         source_label = self._source_label_for_subtype(page, block, subtype)
@@ -2090,7 +2091,7 @@ class LayoutPanel(QWidget):
         mark_ocr_text_invalidated(primary, "manual_draw_merge")
         self._bind_manual_block_to_paddle(page, primary)
         for block in blocks[1:]:
-            self._mark_generated_inline_formula_handled(page, block)
+            self._mark_generated_inline_formula_handled(page, block, op="merge_inline_formula")
         remove_ids = {id(block) for block in blocks[1:]}
         page.blocks = [block for block in page.blocks if id(block) not in remove_ids]
         for order, block in enumerate(page.blocks):

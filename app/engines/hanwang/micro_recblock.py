@@ -24,6 +24,7 @@ from app.core.block_payload import (
     strip_runtime_layout_payload,
 )
 from app.core.block_attributes import route_source_label
+from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
@@ -3028,6 +3029,9 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         parent_record = records[parent_index]
         if isinstance(parent_record, dict) and ROUTE_SUBBLOCKS_FIELD in parent_record:
             row[ROUTE_SUBBLOCKS_FIELD] = parent_record[ROUTE_SUBBLOCKS_FIELD]
+    current_subblocks = row.get(ROUTE_SUBBLOCKS_FIELD)
+    if isinstance(current_subblocks, list):
+        row[ROUTE_SUBBLOCKS_FIELD] = filter_handled_inline_formula_subblocks(page, current_subblocks)
     if parent_index >= 0:
         row["_layout_paddle_parent_index"] = parent_index
     return row

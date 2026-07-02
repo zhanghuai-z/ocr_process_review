@@ -491,6 +491,20 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
     assert "_inline_formula_origin_bbox(block)" in layout_source
 
 
+def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    assert "UI_DELETED_INLINE_FORMULA_KEY" not in app_keys_segment
+    assert "UI_DELETED_INLINE_FORMULA_KEY" in legacy_segment
+    assert "UI_DELETED_INLINE_FORMULA_KEY" not in layout_source
+    assert "mark_inline_formula_origin_handled" in layout_source
+    assert "filter_handled_inline_formula_subblocks" in hanwang_source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

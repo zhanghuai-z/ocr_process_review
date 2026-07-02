@@ -5845,6 +5845,7 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
 
     from PySide6.QtWidgets import QGraphicsItem
 
+    from app.core.inline_formula_edit_state import HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
@@ -5902,6 +5903,12 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
         assert first_inline not in page.blocks
         panel._show_page_layers(page)
         assert len([block for block in page.blocks if block.source_label == "inline_formula"]) == 6
+        delete_events = [
+            event for event in page.layout_edit_events
+            if event.op == "delete_inline_formula"
+            and event.after.get(HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY)
+        ]
+        assert len(delete_events) == 1
     finally:
         panel.close()
 
@@ -5914,7 +5921,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
 
     from PySide6.QtGui import QImage
 
-    from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
+    from app.core.inline_formula_edit_state import HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockType, Page
@@ -5970,7 +5977,14 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
-            assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+            raw_subblock = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0]
+            assert "_ui_deleted" not in raw_subblock
+            claim_events = [
+                event for event in page.layout_edit_events
+                if event.op == "claim_inline_formula"
+                and event.after.get(HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY) == [40, 0, 70, 30]
+            ]
+            assert len(claim_events) == 1
 
             # Real resize drags emit several geometry changes. Once the original
             # Paddle inline formula is marked handled, later drag events must
@@ -5990,7 +6004,13 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.origin is not None
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
             assert inline.app_payload == {}
-            assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
+            assert "_ui_deleted" not in _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0]
+            claim_events = [
+                event for event in page.layout_edit_events
+                if event.op == "claim_inline_formula"
+                and event.after.get(HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY) == [40, 0, 70, 30]
+            ]
+            assert len(claim_events) == 1
 
             ocr_blocks = _page_blocks_from_layout(page)
             subblocks = ocr_blocks[0][ROUTE_SUBBLOCKS_FIELD]
