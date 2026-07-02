@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
-from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY, payload_bool
+from app.core.block_payload import is_ocr_text_invalidated
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,
@@ -599,7 +599,7 @@ class OcrPipeline:
         if not text_blocks:
             return True
         for block in text_blocks:
-            if payload_bool(block, OCR_TEXT_INVALIDATED_KEY):
+            if is_ocr_text_invalidated(block):
                 return False
             if self._has_marked_page_line_hints(block):
                 continue

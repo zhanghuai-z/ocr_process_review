@@ -16,11 +16,9 @@ from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     HANWANG_BBOX_AUDIT_KEY,
-    OCR_TEXT_INVALIDATED_KEY,
-    OCR_INVALIDATION_KIND_KEY,
     PADDLE_BINDING_KEY,
-    clear_payload_entries,
-    payload_bool,
+    clear_ocr_text_invalidation,
+    is_ocr_text_invalidated,
     paddle_binding_dict,
     set_paddle_binding,
     strip_runtime_layout_payload,
@@ -3462,7 +3460,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
     block.source_label = "inline_formula"
     block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
     set_paddle_binding(block, binding)
-    clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
+    clear_ocr_text_invalidation(block)
     block.lines = [
         Line(
             text=text,
@@ -3509,7 +3507,7 @@ def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:
     for block in blocks:
         binding = paddle_binding_dict(block)
         binding_source = str(binding.get("source") or "") if isinstance(binding, dict) else ""
-        invalidated = payload_bool(block, OCR_TEXT_INVALIDATED_KEY)
+        invalidated = is_ocr_text_invalidated(block)
         stale_parent_binding = "parent_text" in binding_source or binding_source == "paddle_geometry"
         if invalidated or stale_parent_binding or not proof_block_text(block):
             _mark_inline_formula_needs_text(block)

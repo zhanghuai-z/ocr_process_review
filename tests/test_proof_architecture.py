@@ -414,6 +414,26 @@ def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     assert "set_payload_entries(block, {\n        PADDLE_BINDING_KEY" not in hanwang_source
 
 
+def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    ocr_source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
+    hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    assert "OCR_TEXT_INVALIDATED_KEY" not in app_keys_segment
+    assert "OCR_INVALIDATION_KIND_KEY" not in app_keys_segment
+    assert "setattr(block, \"ocr_invalidated_reason\"" in block_payload_source
+    assert "mark_ocr_text_invalidated(block" in layout_source
+    assert "is_ocr_text_invalidated(block)" in layout_source
+    assert "is_ocr_text_invalidated(block)" in ocr_source
+    assert "is_ocr_text_invalidated(block)" in hanwang_source
+    assert "ocr_invalidated_reason" in store_source
+    assert "app_payload[OCR_TEXT_INVALIDATED_KEY]" not in layout_source
+    assert "set_payload_entries(block, {\n            OCR_TEXT_INVALIDATED_KEY" not in layout_source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

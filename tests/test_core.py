@@ -497,7 +497,10 @@ def test_block_payload_helpers_preserve_existing_entries():
         OCR_INVALIDATION_KIND_KEY,
         OCR_TEXT_INVALIDATED_KEY,
         clear_payload_entries,
+        clear_ocr_text_invalidation,
+        is_ocr_text_invalidated,
         mark_ocr_text_invalidated,
+        ocr_invalidation_reason,
         payload_bool,
         payload_get,
         set_payload_entries,
@@ -510,19 +513,22 @@ def test_block_payload_helpers_preserve_existing_entries():
         raw_payload={"vendor": {"keep": True}},
     )
 
-    set_payload_entries(block, {OCR_INVALIDATION_KIND_KEY: "manual"})
+    with pytest.raises(ValueError, match="unregistered app_payload keys"):
+        set_payload_entries(block, {OCR_INVALIDATION_KIND_KEY: "manual"})
     assert payload_get(block, "vendor") is None
-    assert payload_get(block, OCR_INVALIDATION_KIND_KEY) == "manual"
-    assert payload_bool(block, OCR_INVALIDATION_KIND_KEY) is True
 
     with pytest.raises(ValueError, match="unregistered app_payload keys"):
         set_payload_entries(block, {"custom": 1})
 
     mark_ocr_text_invalidated(block, "block_moved")
-    assert block.app_payload[OCR_TEXT_INVALIDATED_KEY] is True
-    assert block.app_payload[OCR_INVALIDATION_KIND_KEY] == "block_moved"
+    assert is_ocr_text_invalidated(block) is True
+    assert ocr_invalidation_reason(block) == "block_moved"
+    assert block.ocr_invalidated_reason == "block_moved"
+    assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
+    assert OCR_INVALIDATION_KIND_KEY not in block.app_payload
     assert block.raw_payload["vendor"] == {"keep": True}
-    clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
+    clear_ocr_text_invalidation(block)
+    assert is_ocr_text_invalidated(block) is False
     assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
     assert OCR_INVALIDATION_KIND_KEY not in block.app_payload
 
@@ -829,6 +835,74 @@ def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload
         assert PADDLE_BINDING_KEY not in migrated_block.app_payload
 
         print("test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload PASSED")
+    finally:
+        os.unlink(db_path)
+
+
+def test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload():
+    import sqlite3
+
+    from app.core.block_payload import (
+        OCR_INVALIDATION_KIND_KEY,
+        OCR_TEXT_INVALIDATED_KEY,
+    )
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            ocr_invalidated_reason="block_moved",
+        )
+        project = OcrProject(
+            name="typed-ocr-invalidation",
+            pages=[Page(image_path="/tmp/ocr-invalidated.png", width=100, height=100, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
+
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.ocr_invalidated_reason == "block_moved"
+        assert OCR_TEXT_INVALIDATED_KEY not in loaded_block.app_payload
+        assert OCR_INVALIDATION_KIND_KEY not in loaded_block.app_payload
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET ocr_invalidated_reason='', app_payload_json=? WHERE id=?",
+                (
+                    json.dumps(
+                        {
+                            OCR_TEXT_INVALIDATED_KEY: True,
+                            OCR_INVALIDATION_KIND_KEY: "legacy_kind",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    block.id,
+                ),
+            )
+            conn.commit()
+
+        with ProjectStore(db_path) as store:
+            migrated = store.load_project(saved.id)
+            migrated_block = migrated.pages[0].blocks[0]
+            assert migrated_block.ocr_invalidated_reason == "legacy_kind"
+            assert OCR_TEXT_INVALIDATED_KEY not in migrated_block.app_payload
+            assert OCR_INVALIDATION_KIND_KEY not in migrated_block.app_payload
+            store.save_project(migrated)
+            reloaded = store.load_project(saved.id)
+
+        reloaded_block = reloaded.pages[0].blocks[0]
+        assert reloaded_block.ocr_invalidated_reason == "legacy_kind"
+        assert OCR_TEXT_INVALIDATED_KEY not in reloaded_block.app_payload
+        assert OCR_INVALIDATION_KIND_KEY not in reloaded_block.app_payload
+
+        print("test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload PASSED")
     finally:
         os.unlink(db_path)
 
@@ -4588,7 +4662,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
 
             assert not hasattr(panel, "_inspector")
 
-            text_block.app_payload["ocr_text_invalidated"] = True
+            text_block.ocr_invalidated_reason = "block_moved"
             page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
@@ -4636,7 +4710,7 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
             assert page.blocks[0].block_type == BlockType.EQUATION
             assert page.blocks[0].lines == []
             assert page.blocks[0].source == BlockSource.USER_EDITED
-            assert page.blocks[0].app_payload["ocr_text_invalidated"] is True
+            assert page.blocks[0].ocr_invalidated_reason == "manual_draw_merge"
         finally:
             panel.close()
 
@@ -5030,11 +5104,11 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
             panel.set_pages([page])
             assert len(panel._viewer._char_items) == 1
 
-            block.app_payload["ocr_text_invalidated"] = True
+            block.ocr_invalidated_reason = "block_moved"
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
 
-            block.app_payload.clear()
+            block.ocr_invalidated_reason = ""
             page.invalidate_ocr("block_moved")
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
@@ -8040,7 +8114,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
         source=BlockSource.USER_EDITED,
         source_label="inline_formula",
         lines=[Line(text="$ B_{old} $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
-        app_payload={"ocr_text_invalidated": True},
+        ocr_invalidated_reason="layout_changed",
         paddle_binding=PaddleBinding.from_dict(
             {
                 "status": BINDING_GEOMETRY_HIT,
@@ -19437,6 +19511,7 @@ if __name__ == "__main__":
     test_project_store()
     test_project_store_persists_raw_layout_artifact()
     test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload()
+    test_project_store_persists_block_ocr_invalidation_and_migrates_legacy_payload()
     test_project_store_persists_block_origin_separately_from_current_layout()
     test_project_store_persists_layout_edit_events()
     test_project_store_rejects_runtime_layout_routes_on_save_and_load()

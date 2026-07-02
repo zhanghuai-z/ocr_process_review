@@ -37,8 +37,6 @@ APP_PAYLOAD_KEYS = frozenset({
     PADDLE_BINDING_KEY,
     PADDLE_BLOCK_LABEL_KEY,
     PADDLE_BLOCK_BBOX_KEY,
-    OCR_TEXT_INVALIDATED_KEY,
-    OCR_INVALIDATION_KIND_KEY,
     MANUAL_MERGE_FROM_KEY,
     MANUAL_DRAW_BBOX_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
@@ -49,7 +47,12 @@ APP_PAYLOAD_KEYS = frozenset({
     TABLE_TEXT_LAYER_CELLS_KEY,
 })
 
-RAW_PAYLOAD_FORBIDDEN_APP_KEYS = APP_PAYLOAD_KEYS - {
+LEGACY_APP_PAYLOAD_KEYS = frozenset({
+    OCR_TEXT_INVALIDATED_KEY,
+    OCR_INVALIDATION_KIND_KEY,
+})
+
+RAW_PAYLOAD_FORBIDDEN_APP_KEYS = (APP_PAYLOAD_KEYS | LEGACY_APP_PAYLOAD_KEYS) - {
     PADDLE_BLOCK_LABEL_KEY,
     PADDLE_BLOCK_BBOX_KEY,
 }
@@ -85,6 +88,23 @@ def set_paddle_binding(block: object, binding: Mapping[str, Any] | PaddleBinding
 
 def clear_paddle_binding(block: object) -> None:
     setattr(block, "paddle_binding", None)
+
+
+def is_ocr_text_invalidated(block: object) -> bool:
+    reason = str(getattr(block, "ocr_invalidated_reason", "") or "")
+    if reason:
+        return True
+    return payload_bool(block, OCR_TEXT_INVALIDATED_KEY)
+
+
+def ocr_invalidation_reason(block: object) -> str:
+    reason = str(getattr(block, "ocr_invalidated_reason", "") or "")
+    if reason:
+        return reason
+    legacy_kind = payload_get(block, OCR_INVALIDATION_KIND_KEY)
+    if legacy_kind:
+        return str(legacy_kind)
+    return "layout_changed" if payload_bool(block, OCR_TEXT_INVALIDATED_KEY) else ""
 
 
 def set_payload_entries(block: object, entries: Mapping[str, Any]) -> dict[str, Any]:
@@ -130,7 +150,12 @@ def strip_runtime_layout_payload(payload: Mapping[str, Any] | None) -> dict[str,
 
 
 def mark_ocr_text_invalidated(block: object, kind: str | None = None) -> dict[str, Any]:
-    entries: dict[str, Any] = {OCR_TEXT_INVALIDATED_KEY: True}
-    if kind is not None:
-        entries[OCR_INVALIDATION_KIND_KEY] = kind
-    return set_payload_entries(block, entries)
+    reason = str(kind or "layout_changed")
+    setattr(block, "ocr_invalidated_reason", reason)
+    clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
+    return app_payload_dict(block)
+
+
+def clear_ocr_text_invalidation(block: object) -> dict[str, Any]:
+    setattr(block, "ocr_invalidated_reason", "")
+    return clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))

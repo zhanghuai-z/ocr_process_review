@@ -287,6 +287,7 @@ class Block:
     app_payload: dict[str, Any] = field(default_factory=dict)  # 应用派生状态/人工绑定
     origin: BlockOrigin | None = None               # 块来源事实；新代码优先读这里
     paddle_binding: PaddleBinding | None = None     # 人工框与 Paddle 原始事实的结构化绑定
+    ocr_invalidated_reason: str = ""                # 块级 OCR 结果失效原因
     uid: str = ""                                   # 稳定业务 ID
 
     def __post_init__(self) -> None:

@@ -19,11 +19,12 @@ from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     MANUAL_MERGE_FROM_KEY,
     MANUAL_DRAW_BBOX_KEY,
-    OCR_TEXT_INVALIDATED_KEY,
     UI_DELETED_INLINE_FORMULA_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
     UI_INLINE_FORMULA_PARENT_LABEL_KEY,
+    is_ocr_text_invalidated,
+    mark_ocr_text_invalidated,
     payload_bool,
     payload_get,
     app_payload_dict,
@@ -1392,9 +1393,7 @@ class LayoutPanel(QWidget):
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             return
         block.source = BlockSource.USER_EDITED
-        set_payload_entries(block, {
-            OCR_TEXT_INVALIDATED_KEY: True,
-        })
+        mark_ocr_text_invalidated(block, "block_geometry_changed")
         if not self._update_existing_manual_binding_bbox(block):
             block.lines = []
             self._bind_manual_block_to_paddle(page, block)
@@ -1563,7 +1562,7 @@ class LayoutPanel(QWidget):
             return []
         chars = []
         for block in page.blocks:
-            if payload_bool(block, OCR_TEXT_INVALIDATED_KEY):
+            if is_ocr_text_invalidated(block):
                 continue
             for line in block.lines:
                 chars.extend([
@@ -2087,8 +2086,8 @@ class LayoutPanel(QWidget):
                 for block in blocks
             ],
             MANUAL_DRAW_BBOX_KEY: list(bbox.to_xyxy()),
-            OCR_TEXT_INVALIDATED_KEY: True,
         })
+        mark_ocr_text_invalidated(primary, "manual_draw_merge")
         self._bind_manual_block_to_paddle(page, primary)
         for block in blocks[1:]:
             self._mark_generated_inline_formula_handled(page, block)
