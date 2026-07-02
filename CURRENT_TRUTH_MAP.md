@@ -1,6 +1,6 @@
 # OCR Process 当前真值地图
 
-生成时间：2026-06-23
+生成时间：2026-07-02
 
 本文用于回答三个问题：
 
@@ -19,15 +19,16 @@
      - source_path/source_page_index 记录原始来源
 
 版面分析 Paddle VL1.6
-  -> page.ppvl_parsing_res_list
+  -> Page.raw_layout_artifact
      - Paddle 原始版面事实列表
      - 主要含 block_label、block_bbox、block_content 等
+     - 通过 raw_ocr_artifact.raw_layout_records(page) 读取
   -> page.blocks
      - 程序理解后的 Block
      - block_type 是程序大类
      - source_label 是 Paddle 细标签
      - raw_payload 保存外部 vendor fact
-     - app_payload 保存程序派生状态
+     - app_payload 已退役为空；程序派生状态必须使用 typed 字段或事件
 
 路由构建
   -> _route_subblocks / _layout_line_routes
@@ -41,8 +42,9 @@ OCR Hanwang/CharOCR
      - Line.chars 是字符/词/公式 carrier 的几何与文本观察
 
 校对 HProof/VProof
-  -> Line.final_text / final_text_set
+  -> Line.proof_state / ProofLineState
      - 人工校对后的文本事实
+     - proof_display_text(line) 是统一显示文本入口
   -> Line.chars
      - 等长或可对齐编辑时同步字符事实
      - 不能同步时，下游 ProofAtom/CharIndex 必须降级或跳过
@@ -57,7 +59,7 @@ OCR Hanwang/CharOCR
 
 导出
   -> Export IR / Markdown / PDF
-     - 应读取最终文本 Line.display_text
+     - 应读取最终文本 proof_display_text(line)
      - 几何来自 Block/Line/Char bbox
      - 不应泄露本机绝对路径
 ```
@@ -71,13 +73,13 @@ OCR Hanwang/CharOCR
 | 块身份 | `Block.uid` | `Block.id`、order、bbox | order/bbox 可随编辑变化，不是身份。 |
 | 行身份 | `Line.uid` | `Line.id`、line index、bbox | HProof/VProof merge 必须 uid 优先，几何只能 fallback。 |
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
-| Paddle 原始事实 | `page.ppvl_parsing_res_list`、`block.raw_payload` | `block.note` | raw_payload 应只放外部返回事实。 |
-| 程序派生状态 | `block.app_payload` | `block.raw_payload` | `_route_subblocks`、`_layout_line_routes` 等现在仍是过渡状态。 |
+| Paddle 原始事实 | `Page.raw_layout_artifact`、`block.raw_payload` | `block.note`、`block.app_payload` | raw_payload 应只放外部返回事实；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
+| 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | `block.raw_payload`、`block.app_payload` | `app_payload` 已退役为空，非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
-| 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` | `block.recognizable` 单独判断 | recognizability 只是条件之一，公式/表格/图片必须阻断。 |
+| 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测 | 公式、表格、图片通过明确 policy 阻断。 |
 | OCR 原文 | `Line.ocr_text` | `Line.text` 单独判断 | `text` 仍有兼容属性；新逻辑应优先明确 ocr_text。 |
-| 校对终稿 | `Line.display_text` | `final_text` 是否为空 | `final_text_set=True` 时空串也是有效终稿。 |
+| 校对终稿 | `proof_display_text(line)` / `Line.proof_state` | `final_text` 是否为空、`Line.text` 单独判断 | `final_text_set=True` 时空串也是有效终稿。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
 | 字符索引 | `CharIndexService` 查询结果 | CharIndex 当作数据源 | 它是派生索引；错配行会被跳过，不能修复坏数据。 |
@@ -120,7 +122,7 @@ OCR Hanwang/CharOCR
 
 当前边界：
 
-- `block.recognizable` 仍保留，但不能单独作为是否 OCR 的判断。
+- `recognizable` 已退役，OCR 入口不得恢复裸 bool 判断。
 
 ### 3. Paddle 路由：父文本块 + 子结构块
 
@@ -137,7 +139,7 @@ OCR Hanwang/CharOCR
 
 当前边界：
 
-- `_route_subblocks`、`_layout_line_routes` 仍然放在 dict payload 里，不是独立 DTO。
+- `_route_subblocks`、`_layout_line_routes` 仍是运行时 dict 计划，但不再写入 `Block.raw_payload/app_payload` 持久化模型。
 - 这是当前最需要抽象成 `RoutingPlan/DispatchPlan` 的地方。
 
 ### 4. Line 文本：空终稿与 fake probe
@@ -175,7 +177,7 @@ OCR Hanwang/CharOCR
 
 当前边界：
 
-- `Line.chars` 不能完整表达 `Line.display_text` 时，不允许 UI 假装字符事实可靠。
+- `Line.chars` 不能完整表达 `proof_display_text(line)` 时，不允许 UI 假装字符事实可靠。
 
 ### 6. VProof/HProof 保存：位置映射 -> 编辑会话/冲突判断
 
@@ -249,12 +251,12 @@ OCR Hanwang/CharOCR
 ### 真值层
 
 - `Page.display_image_path`：几何坐标对应的工作图。
-- `page.ppvl_parsing_res_list`：Paddle VL1.6 原始版面事实。
+- `Page.raw_layout_artifact`：Paddle VL1.6 原始版面事实。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
 - `Line.ocr_text`：OCR 原始文本。
-- `Line.display_text`：当前校对文本事实。
+- `proof_display_text(line)`：当前校对文本事实。
 - `Line.chars`：字符/词/公式 carrier 几何事实，前提是与 display_text 可对齐。
 - `quality_probe` sidecar：质量探针事实。
 
@@ -262,15 +264,14 @@ OCR Hanwang/CharOCR
 
 - `ProofAtom`：proof UI 渲染单元。
 - `CharIndexService`：相同字/字符 gallery 索引。
-- `_route_subblocks` / `_layout_line_routes`：当前路线计划的 dict 形式。
+- `_route_subblocks` / `_layout_line_routes`：当前路线计划的运行时 dict 形式。
 - `ProofLineViewModel` / UI 状态标签：展示投影。
 - `block.note`：提示/调试说明，不应参与关键判断。
 
 ### 兼容/过渡层
 
-- `Line.text`：仍兼容旧 OCR 文本字段；新逻辑不应把它当唯一真值。
-- `Block.recognizable`：保留但必须和 dispatch policy 一起使用。
-- `raw_payload` 中历史 app key：加载时通过 `split_legacy_raw_payload()` 迁到 `app_payload`。
+- `Line.text`：仍作为 OCR 行文本字段；新逻辑不应把它当唯一 proof 真值。
+- `Block.app_payload`：退役空字段，仅保留 schema 边界；非空会被拒绝，不再迁移旧项目。
 - `proof_saved` 信号名：名称像“已保存”，实际仍是“proof changed，需要持久化”的遗留信号。
 
 ## 五、当前仍不健康的职责边界
@@ -279,8 +280,8 @@ OCR Hanwang/CharOCR
    - 同时承担 OCR 观察、人工终稿、UI 展示、存储 rowid、导出来源。
    - 后续应拆成 Observation / EditState / ViewModel / Persistence DTO。
 
-2. `raw_payload/app_payload` 仍是过渡容器。
-   - 已经把 vendor fact 和 app state 分开，但 route plan 仍是 dict。
+2. `raw_payload` 仍是外部证据容器，`app_payload` 已退役。
+   - vendor fact 和 app state 已分开，但 route plan 仍是运行时 dict。
    - 后续应抽 `PaddleArtifact`、`LayoutSnapshot`、`RoutingPlan`、`DispatchPlan`、`OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
@@ -294,7 +295,7 @@ OCR Hanwang/CharOCR
 
 5. 已坏项目数据不会自动修复。
    - CharIndex 只会过滤错配，不会改项目文件。
-   - 需要独立诊断工具扫描 `Line.display_text`、`chars_display_text`、bbox、uid 重复、probe sidecar。
+   - 需要独立诊断工具扫描 `proof_display_text(line)`、`chars_display_text`、bbox、uid 重复、probe sidecar。
 
 ## 六、后续重构优先级
 
@@ -309,7 +310,7 @@ OCR Hanwang/CharOCR
 
 - 要判断“这个框是谁说的”：先看 Paddle raw，再看人工 binding，再看 route 派生。
 - 要判断“这行该不该 OCR”：只看 `should_dispatch_to_text_ocr()`。
-- 要判断“这行最终文本是什么”：只看 `Line.display_text`。
+- 要判断“这行最终文本是什么”：只看 `proof_display_text(line)`。
 - 要判断“这个字符框能不能信”：先比较 `chars_display_text(line.chars)` 与 `line.display_text`。
 - 要判断“这个对象是谁”：uid 优先，rowid 只辅助存储。
 - 要判断“是否需要保存”：看 `ProofChangeSet.needs_persist` 和 scoped `line_refs`。
