@@ -27,7 +27,6 @@ from app.core.ocr_dispatch_policy import (
 )
 from app.core.ocr_line_hints import is_ppocr_page_line_hint, mark_ppocr_page_line_hint
 from app.core.page_errors import is_ocr_error_message
-from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
 from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
 from app.engines.fake_ocr_engine import FakeOcrEngine
@@ -605,14 +604,6 @@ class OcrPipeline:
                 continue
             return False
         return True
-
-    @staticmethod
-    def _has_cached_layout_line_routes(block: Block) -> bool:
-        for payload in (block.app_payload, block.raw_payload):
-            routes = payload.get(LAYOUT_LINE_ROUTES_FIELD) if isinstance(payload, dict) else None
-            if isinstance(routes, list) and routes:
-                return True
-        return False
 
     @staticmethod
     def _has_marked_page_line_hints(block: Block) -> bool:

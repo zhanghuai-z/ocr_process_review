@@ -3454,6 +3454,56 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
     print("test_table_text_layer_service_writes_hidden_cells_for_table_block PASSED")
 
 
+def test_table_text_layer_service_ignores_app_payload_html_source():
+    from PIL import Image
+
+    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
+    from app.models import BBox, Block, BlockType, Page
+    from app.services.table_text_layer_service import TableTextLayerService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        Image.new("RGB", (240, 160), "white").save(image_path)
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        block = Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 160, 70), order=0)
+        block.app_payload["html"] = html
+        page = Page(image_path=image_path, width=240, height=160, blocks=[block])
+
+        updated = TableTextLayerService().enrich_page(page)
+
+        assert updated == 0
+        assert TABLE_TEXT_LAYER_CELLS_KEY not in block.app_payload
+
+    print("test_table_text_layer_service_ignores_app_payload_html_source PASSED")
+
+
+def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
+    from PIL import Image
+
+    from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
+    from app.models import BBox, Block, BlockType, Page
+    from app.services.table_text_layer_service import TableTextLayerService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        Image.new("RGB", (240, 160), "white").save(image_path)
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        block = Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox(20, 30, 160, 70),
+            order=0,
+            raw_payload={"block_content": html},
+        )
+        page = Page(image_path=image_path, width=240, height=160, blocks=[block])
+
+        updated = TableTextLayerService().enrich_page(page)
+
+        assert updated == 1
+        assert block.app_payload[TABLE_TEXT_LAYER_CELLS_KEY][0]["text"] == "A"
+
+    print("test_table_text_layer_service_accepts_raw_vendor_table_html_source PASSED")
+
+
 def test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference():
     from PIL import Image
 

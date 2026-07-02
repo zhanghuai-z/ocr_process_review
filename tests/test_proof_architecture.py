@@ -177,6 +177,20 @@ def test_export_semantic_filters_do_not_read_raw_payload_labels():
         raise AssertionError("_is_inline_formula_element function not found")
 
 
+def test_table_text_layer_html_source_does_not_scan_app_payload():
+    source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/services/table_text_layer_service.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_table_html":
+            fn_source = ast.get_source_segment(source, node) or ""
+            assert "app_payload" not in fn_source
+            assert 'get("text")' not in fn_source
+            assert "block.raw_payload" in fn_source
+            break
+    else:
+        raise AssertionError("_table_html function not found")
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (
