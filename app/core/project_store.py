@@ -33,6 +33,8 @@ from app.core.block_payload import (
     MANUAL_MERGE_FROM_KEY,
     OCR_INVALIDATION_KIND_KEY,
     OCR_TEXT_INVALIDATED_KEY,
+    PADDLE_BLOCK_BBOX_KEY,
+    PADDLE_BLOCK_LABEL_KEY,
     PADDLE_BINDING_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
@@ -1647,6 +1649,8 @@ class ProjectStore:
                 legacy_binding = app_payload.pop(PADDLE_BINDING_KEY, None)
                 if isinstance(legacy_binding, dict):
                     paddle_binding_payload = dict(legacy_binding)
+            app_payload.pop(PADDLE_BLOCK_LABEL_KEY, None)
+            app_payload.pop(PADDLE_BLOCK_BBOX_KEY, None)
             ocr_invalidated_reason = (
                 str(r["ocr_invalidated_reason"] or "")
                 if "ocr_invalidated_reason" in r.keys()

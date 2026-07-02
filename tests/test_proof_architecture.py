@@ -398,11 +398,16 @@ def test_project_store_does_not_mutate_line_text_contract_on_save():
 
 
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    assert "PADDLE_BINDING_KEY" not in app_keys_segment
+    assert "PADDLE_BINDING_KEY" in legacy_segment
     assert "PADDLE_BINDING_KEY" not in artifact_source
     assert "PADDLE_BINDING_KEY" not in layout_source
     assert "set_paddle_binding(block" in artifact_source
@@ -412,6 +417,20 @@ def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     assert "PaddleBinding.from_dict" in store_source
     assert "app_payload[PADDLE_BINDING_KEY]" not in hanwang_source
     assert "set_payload_entries(block, {\n        PADDLE_BINDING_KEY" not in hanwang_source
+
+
+def test_paddle_raw_label_fields_are_not_app_payload_state():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    for key in ("PADDLE_BLOCK_LABEL_KEY", "PADDLE_BLOCK_BBOX_KEY"):
+        assert key not in app_keys_segment
+        assert key in legacy_segment
+        assert f"app_payload.pop({key}" in store_source
+    assert "PADDLE_BLOCK_LABEL_KEY," in block_payload_source
+    assert "PADDLE_BLOCK_BBOX_KEY," in block_payload_source
 
 
 def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():

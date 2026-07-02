@@ -496,6 +496,7 @@ def test_block_payload_helpers_preserve_existing_entries():
     from app.core.block_payload import (
         OCR_INVALIDATION_KIND_KEY,
         OCR_TEXT_INVALIDATED_KEY,
+        PADDLE_BINDING_KEY,
         clear_payload_entries,
         clear_ocr_text_invalidation,
         is_ocr_text_invalidated,
@@ -519,6 +520,8 @@ def test_block_payload_helpers_preserve_existing_entries():
 
     with pytest.raises(ValueError, match="unregistered app_payload keys"):
         set_payload_entries(block, {"custom": 1})
+    with pytest.raises(ValueError, match="unregistered app_payload keys"):
+        set_payload_entries(block, {PADDLE_BINDING_KEY: {"status": "legacy"}})
 
     mark_ocr_text_invalidated(block, "block_moved")
     assert is_ocr_text_invalidated(block) is True
@@ -773,7 +776,9 @@ def test_project_store_persists_raw_layout_artifact():
 
 
 def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload():
-    from app.core.block_payload import PADDLE_BINDING_KEY
+    import sqlite3
+
+    from app.core.block_payload import PADDLE_BINDING_KEY, PADDLE_BLOCK_BBOX_KEY, PADDLE_BLOCK_LABEL_KEY
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
 
@@ -814,17 +819,30 @@ def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload
         assert loaded_block.paddle_binding.parent_index == 3
         assert PADDLE_BINDING_KEY not in loaded_block.app_payload
 
-        legacy_block = Block(
-            block_type=BlockType.EQUATION,
-            bbox=BBox.from_xyxy(20, 20, 50, 50),
-            app_payload={PADDLE_BINDING_KEY: binding_payload},
-        )
+        legacy_block = Block(block_type=BlockType.EQUATION, bbox=BBox.from_xyxy(20, 20, 50, 50))
         legacy_project = OcrProject(
             name="legacy-paddle-binding",
             pages=[Page(image_path="/tmp/legacy-binding.png", width=100, height=100, blocks=[legacy_block])],
         )
         with ProjectStore(db_path) as store:
             saved = store.save_project(legacy_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (
+                    json.dumps(
+                        {
+                            PADDLE_BINDING_KEY: binding_payload,
+                            PADDLE_BLOCK_LABEL_KEY: "inline_formula",
+                            PADDLE_BLOCK_BBOX_KEY: [20, 20, 50, 50],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    legacy_block.id,
+                ),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
             loaded = store.load_project(saved.id)
             store.save_project(loaded)
             reloaded = store.load_project(saved.id)
@@ -833,6 +851,8 @@ def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload
         assert migrated_block.paddle_binding is not None
         assert migrated_block.paddle_binding.to_dict()["text"] == "$ A $"
         assert PADDLE_BINDING_KEY not in migrated_block.app_payload
+        assert PADDLE_BLOCK_LABEL_KEY not in migrated_block.app_payload
+        assert PADDLE_BLOCK_BBOX_KEY not in migrated_block.app_payload
 
         print("test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload PASSED")
     finally:
@@ -3754,7 +3774,6 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 def test_table_text_layer_service_ignores_app_payload_html_source():
     from PIL import Image
 
-    from app.core.block_payload import PADDLE_BINDING_KEY, set_payload_entries
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.models import BBox, Block, BlockType, Page
     from app.services.table_text_layer_service import TableTextLayerService
@@ -3763,8 +3782,21 @@ def test_table_text_layer_service_ignores_app_payload_html_source():
         image_path = os.path.join(tmpdir, "page.png")
         Image.new("RGB", (240, 160), "white").save(image_path)
         html = "<table><tr><td>A</td><td>B</td></tr></table>"
-        block = Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 160, 70), order=0)
-        set_payload_entries(block, {PADDLE_BINDING_KEY: {"html": html}})
+        block = Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox(20, 30, 160, 70),
+            order=0,
+            app_payload={
+                TABLE_TEXT_LAYER_CELLS_KEY: [
+                    {
+                        "text": html,
+                        "bbox": {"x": 20, "y": 30, "w": 160, "h": 70},
+                        "row": 0,
+                        "col": 0,
+                    }
+                ]
+            },
+        )
         page = Page(image_path=image_path, width=240, height=160, blocks=[block])
 
         updated = TableTextLayerService().enrich_page(page)
