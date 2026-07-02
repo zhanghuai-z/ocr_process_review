@@ -970,7 +970,6 @@ def _is_inline_formula_element(element: ExportElement) -> bool:
     markers = [
         str(element.source.source_label or ""),
         str(element.source.semantic_label or ""),
-        str(element.source.raw_payload.get("block_label") or ""),
         str(element.layout_attributes.get("semantic_label") or ""),
         str(element.layout_attributes.get("source_label") or ""),
     ]

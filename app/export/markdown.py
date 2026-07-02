@@ -102,16 +102,12 @@ def _is_filtered_position_element(element: ExportElement, settings: MarkdownExpo
 
 def _element_labels(element: ExportElement) -> set[str]:
     attrs = element.layout_attributes or {}
-    raw_payload = attrs.get("raw_payload") if isinstance(attrs, dict) else {}
     labels = {
         element.source.source_label,
         element.source.semantic_label,
         element.source.semantic_block_type,
         attrs.get("source_label") if isinstance(attrs, dict) else "",
         attrs.get("semantic_label") if isinstance(attrs, dict) else "",
-        raw_payload.get("block_label") if isinstance(raw_payload, dict) else "",
-        raw_payload.get("label") if isinstance(raw_payload, dict) else "",
-        raw_payload.get("type") if isinstance(raw_payload, dict) else "",
     }
     return {_normalize_label(label) for label in labels if str(label or "").strip()}
 

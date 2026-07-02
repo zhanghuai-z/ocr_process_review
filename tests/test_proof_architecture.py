@@ -153,6 +153,30 @@ def test_block_attributes_do_not_derive_semantics_from_payloads():
     assert "raw_label and" not in source
 
 
+def test_export_semantic_filters_do_not_read_raw_payload_labels():
+    markdown_source = Path("app/export/markdown.py").read_text(encoding="utf-8")
+    markdown_tree = ast.parse(markdown_source, filename="app/export/markdown.py")
+    for node in ast.walk(markdown_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_element_labels":
+            fn_source = ast.get_source_segment(markdown_source, node) or ""
+            assert "raw_payload" not in fn_source
+            assert "block_label" not in fn_source
+            break
+    else:
+        raise AssertionError("_element_labels function not found")
+
+    pdf_source = Path("app/export/pdf.py").read_text(encoding="utf-8")
+    pdf_tree = ast.parse(pdf_source, filename="app/export/pdf.py")
+    for node in ast.walk(pdf_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_is_inline_formula_element":
+            fn_source = ast.get_source_segment(pdf_source, node) or ""
+            assert "raw_payload" not in fn_source
+            assert "block_label" not in fn_source
+            break
+    else:
+        raise AssertionError("_is_inline_formula_element function not found")
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (

@@ -2398,6 +2398,45 @@ def test_markdown_export_settings_filter_and_merge_layout_fragments():
     print("test_markdown_export_settings_filter_and_merge_layout_fragments PASSED")
 
 
+def test_markdown_filter_ignores_raw_payload_labels():
+    from app.export.markdown import MarkdownExporter
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        open(image_path, "wb").write(b"not-a-real-image")
+        out_path = os.path.join(tmpdir, "out.md")
+        page = Page(
+            image_path=image_path,
+            width=200,
+            height=120,
+            page_number=1,
+            blocks=[
+                Block(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox(0, 0, 120, 24),
+                    order=0,
+                    raw_payload={"block_label": "header"},
+                    lines=[Line(text="正文不能被 raw header 过滤", confidence=0.9, bbox=BBox(0, 0, 120, 24))],
+                ),
+                Block(
+                    block_type=BlockType.TEXT,
+                    source_label="header",
+                    bbox=BBox(0, 30, 120, 24),
+                    order=1,
+                    lines=[Line(text="结构化页眉应被过滤", confidence=0.9, bbox=BBox(0, 30, 120, 24))],
+                ),
+            ],
+        )
+        MarkdownExporter().export(OcrProject(name="MdRawLabelIgnored", pages=[page]), out_path)
+        content = open(out_path, encoding="utf-8").read()
+
+    assert "正文不能被 raw header 过滤" in content
+    assert "结构化页眉应被过滤" not in content
+
+    print("test_markdown_filter_ignores_raw_payload_labels PASSED")
+
+
 def test_export_formats_share_structured_blocks():
     from app.export import get_exporter
     from app.export.markdown import MarkdownExporter
@@ -3061,6 +3100,52 @@ def test_pdf_dual_skips_duplicate_inline_formula_equation_element():
     assert all(item.text != "$$ A $$ $$ A $$" for item in plan.text_items)
 
     print("test_pdf_dual_skips_duplicate_inline_formula_equation_element PASSED")
+
+
+def test_pdf_dual_dedup_ignores_raw_payload_inline_formula_label():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    formula = "$ A $"
+    formula_bbox = BBox(30, 18, 50, 24)
+    text_line = Line(text=f"甲{formula}乙", confidence=0.9, bbox=BBox(10, 20, 120, 24), chars=[
+        Char(char="甲", confidence=0.9, bbox=BBox(10, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+        Char(
+            char=formula,
+            confidence=1.0,
+            bbox=formula_bbox,
+            bbox_source="paddle_inline_formula",
+            bbox_granularity="formula",
+            token_text=formula,
+        ),
+        Char(char="乙", confidence=0.9, bbox=BBox(85, 20, 18, 22), bbox_source="ocr", bbox_granularity="char"),
+    ])
+    raw_only_formula_line = Line(
+        text="$$ A $$ $$ A $$",
+        confidence=1.0,
+        bbox=formula_bbox,
+    )
+    page = Page(image_path="/tmp/pdf-raw-inline-label-ignored.png", width=180, height=120, blocks=[
+        Block(block_type=BlockType.TEXT, bbox=BBox(10, 18, 120, 30), order=0, lines=[text_line]),
+        Block(
+            block_type=BlockType.EQUATION,
+            bbox=formula_bbox,
+            order=1,
+            lines=[raw_only_formula_line],
+            source_label="display_formula",
+            raw_payload={"block_label": "inline_formula"},
+        ),
+    ])
+
+    document = build_export_ir(OcrProject(name="PdfRawInlineIgnored", pages=[page]), "pdf-dual")
+    plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
+
+    assert [span.text for span in plan.text_spans] == ["甲", formula, "乙", "$$ A $$"]
+    assert [item.text for item in plan.text_items].count(formula) == 1
+    assert "$$ A $$" in [item.text for item in plan.text_items]
+
+    print("test_pdf_dual_dedup_ignores_raw_payload_inline_formula_label PASSED")
 
 
 def test_pdf_dual_equation_text_collapses_identical_formula_repeat():
@@ -19179,6 +19264,7 @@ if __name__ == "__main__":
     test_export_markdown_structure()
     test_markdown_fallback_assets_are_cropped_regions()
     test_markdown_export_settings_filter_and_merge_layout_fragments()
+    test_markdown_filter_ignores_raw_payload_labels()
     test_export_formats_share_structured_blocks()
     test_export_ir_rules_load_and_validate()
     test_project_to_export_ir_builder_maps_final_text_and_fallbacks()
@@ -19192,6 +19278,7 @@ if __name__ == "__main__":
     test_pdf_dual_text_bbox_ratio_can_be_profile_tuned()
     test_pdf_dual_text_layer_splits_inline_formula_as_atomic_span()
     test_pdf_dual_skips_duplicate_inline_formula_equation_element()
+    test_pdf_dual_dedup_ignores_raw_payload_inline_formula_label()
     test_pdf_dual_equation_text_collapses_identical_formula_repeat()
     test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox()
     test_pdf_dual_table_text_layer_uses_atomic_rows()
