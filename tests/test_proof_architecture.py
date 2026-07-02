@@ -397,6 +397,23 @@ def test_project_store_does_not_mutate_line_text_contract_on_save():
     assert "line_text_contract(" in source
 
 
+def test_paddle_binding_is_typed_state_not_app_payload_write_path():
+    artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    assert "PADDLE_BINDING_KEY" not in artifact_source
+    assert "PADDLE_BINDING_KEY" not in layout_source
+    assert "set_paddle_binding(block" in artifact_source
+    assert "set_paddle_binding(block" in layout_source
+    assert "set_paddle_binding(block" in hanwang_source
+    assert "paddle_binding_json" in store_source
+    assert "PaddleBinding.from_dict" in store_source
+    assert "app_payload[PADDLE_BINDING_KEY]" not in hanwang_source
+    assert "set_payload_entries(block, {\n        PADDLE_BINDING_KEY" not in hanwang_source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

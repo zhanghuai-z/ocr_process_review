@@ -16,7 +16,8 @@ from typing import Any, List, Optional
 
 from app.models import (
     BBox, Block, BlockOrigin, BlockSource, BlockType, Char, LayoutEditEvent, Line,
-    OcrPolicy, OcrProject, Page, PageStatus, ProofLineState, ProofStatus, RawOcrArtifact,
+    OcrPolicy, OcrProject, PaddleBinding, Page, PageStatus, ProofLineState, ProofStatus,
+    RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 
@@ -27,6 +28,7 @@ from app.core.model_validation import (
     validate_persistent_block_payloads,
 )
 from app.core.line_text_contract import line_text_contract
+from app.core.block_payload import PADDLE_BINDING_KEY
 
 logger = get_logger(__name__)
 
@@ -96,7 +98,8 @@ CREATE TABLE IF NOT EXISTS block (
     note            TEXT    NOT NULL DEFAULT '',
     source_label    TEXT    NOT NULL DEFAULT '',
     raw_payload_json TEXT   NOT NULL DEFAULT '{}',
-    app_payload_json TEXT   NOT NULL DEFAULT '{}'
+    app_payload_json TEXT   NOT NULL DEFAULT '{}',
+    paddle_binding_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS block_origin (
@@ -331,6 +334,9 @@ MIGRATIONS: dict[int, list[str]] = {
         "UNIQUE(project_id, uid));",
         "CREATE INDEX IF NOT EXISTS idx_layout_edit_event_project_page "
         "ON layout_edit_event(project_id, page_uid);",
+    ],
+    18: [
+        "ALTER TABLE block ADD COLUMN paddle_binding_json TEXT NOT NULL DEFAULT '{}';",
     ],
 }
 
@@ -1029,13 +1035,14 @@ class ProjectStore:
             block.note, block.source_label,
             json.dumps(block.raw_payload, ensure_ascii=False),
             json.dumps(block.app_payload, ensure_ascii=False),
+            json.dumps(block.paddle_binding.to_dict() if block.paddle_binding else {}, ensure_ascii=False),
         )
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
                 "source, ocr_policy, note, source_label, raw_payload_json, "
-                "app_payload_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "app_payload_json, paddle_binding_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
             )
             block.id = cur.lastrowid
@@ -1043,7 +1050,8 @@ class ProjectStore:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, ocr_policy=?, note=?, "
-                "source_label=?, raw_payload_json=?, app_payload_json=? "
+                "source_label=?, raw_payload_json=?, app_payload_json=?, "
+                "paddle_binding_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
             )
@@ -1607,6 +1615,15 @@ class ProjectStore:
                 if "app_payload_json" in r.keys()
                 else {}
             )
+            paddle_binding_payload = (
+                _json_to_dict(r["paddle_binding_json"], field="block.paddle_binding_json")
+                if "paddle_binding_json" in r.keys()
+                else {}
+            )
+            if not paddle_binding_payload:
+                legacy_binding = app_payload.pop(PADDLE_BINDING_KEY, None)
+                if isinstance(legacy_binding, dict):
+                    paddle_binding_payload = dict(legacy_binding)
             try:
                 validate_persistent_block_payloads(
                     raw_payload,
@@ -1629,6 +1646,7 @@ class ProjectStore:
                 raw_payload=raw_payload,
                 app_payload=app_payload,
                 origin=self._load_block_origin(project_id, str(r["uid"] or "")),
+                paddle_binding=PaddleBinding.from_dict(paddle_binding_payload),
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)

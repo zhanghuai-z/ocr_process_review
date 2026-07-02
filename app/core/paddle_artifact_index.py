@@ -5,12 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import (
-    PADDLE_BINDING_KEY,
-    PADDLE_BLOCK_BBOX_KEY,
-    PADDLE_BLOCK_LABEL_KEY,
-    set_payload_entries,
-)
+from app.core.block_payload import set_paddle_binding
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,
@@ -527,11 +522,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
         raw_json_path=existing_origin.raw_json_path if existing_origin else "",
         raw_index=binding.parent_index if binding.parent_index >= 0 else (existing_origin.raw_index if existing_origin else None),
     )
-    set_payload_entries(block, {
-        PADDLE_BINDING_KEY: binding.to_payload(),
-        PADDLE_BLOCK_LABEL_KEY: binding.source_label or block.block_type.value,
-        PADDLE_BLOCK_BBOX_KEY: list(block.bbox.to_xyxy()),
-    })
+    set_paddle_binding(block, binding.to_payload())
     block.source_label = binding.source_label or block.source_label or block.block_type.value
     block.ocr_policy = binding.ocr_policy
     if binding.text:

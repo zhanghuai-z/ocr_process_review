@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.models import PaddleBinding
+
 PADDLE_BINDING_KEY = "paddle_binding"
 PADDLE_BLOCK_LABEL_KEY = "block_label"
 PADDLE_BLOCK_BBOX_KEY = "block_bbox"
@@ -64,6 +66,25 @@ def payload_get(block: object, key: str, default: Any = None) -> Any:
 
 def payload_bool(block: object, key: str) -> bool:
     return bool(payload_get(block, key))
+
+
+def paddle_binding_dict(block: object) -> dict[str, Any]:
+    binding = getattr(block, "paddle_binding", None)
+    if isinstance(binding, PaddleBinding):
+        return binding.to_dict()
+    legacy = app_payload_dict(block).get(PADDLE_BINDING_KEY)
+    return dict(legacy) if isinstance(legacy, dict) else {}
+
+
+def set_paddle_binding(block: object, binding: Mapping[str, Any] | PaddleBinding | None) -> None:
+    if isinstance(binding, PaddleBinding):
+        setattr(block, "paddle_binding", binding)
+        return
+    setattr(block, "paddle_binding", PaddleBinding.from_dict(dict(binding or {})))
+
+
+def clear_paddle_binding(block: object) -> None:
+    setattr(block, "paddle_binding", None)
 
 
 def set_payload_entries(block: object, entries: Mapping[str, Any]) -> dict[str, Any]:

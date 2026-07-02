@@ -20,9 +20,6 @@ from app.core.block_payload import (
     MANUAL_MERGE_FROM_KEY,
     MANUAL_DRAW_BBOX_KEY,
     OCR_TEXT_INVALIDATED_KEY,
-    PADDLE_BINDING_KEY,
-    PADDLE_BLOCK_BBOX_KEY,
-    PADDLE_BLOCK_LABEL_KEY,
     UI_DELETED_INLINE_FORMULA_KEY,
     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
@@ -30,6 +27,8 @@ from app.core.block_payload import (
     payload_bool,
     payload_get,
     app_payload_dict,
+    paddle_binding_dict,
+    set_paddle_binding,
     set_payload_entries,
 )
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
@@ -1394,7 +1393,6 @@ class LayoutPanel(QWidget):
             return
         block.source = BlockSource.USER_EDITED
         set_payload_entries(block, {
-            PADDLE_BLOCK_BBOX_KEY: list(block.bbox.to_xyxy()),
             OCR_TEXT_INVALIDATED_KEY: True,
         })
         if not self._update_existing_manual_binding_bbox(block):
@@ -1405,8 +1403,8 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _update_existing_manual_binding_bbox(block: Block) -> bool:
-        binding = payload_get(block, PADDLE_BINDING_KEY)
-        if not isinstance(binding, dict) or not binding:
+        binding = paddle_binding_dict(block)
+        if not binding:
             return False
         status = str(binding.get("status") or "")
         if status in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}:
@@ -1428,11 +1426,7 @@ class LayoutPanel(QWidget):
         block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
         for line in block.lines:
             line.bbox = block.bbox
-        set_payload_entries(block, {
-            PADDLE_BINDING_KEY: next_binding,
-            PADDLE_BLOCK_LABEL_KEY: source_label,
-            PADDLE_BLOCK_BBOX_KEY: manual_bbox,
-        })
+        set_paddle_binding(block, next_binding)
         return True
 
     def _on_block_created(self, bbox: BBox) -> None:
@@ -1607,7 +1601,6 @@ class LayoutPanel(QWidget):
             "formula_number",
         }:
             block.source_label = explicit_source_label
-            set_payload_entries(block, {PADDLE_BLOCK_LABEL_KEY: explicit_source_label})
         if binding.status == BINDING_EMPTY_REVIEW:
             self._set_status_text("已创建校验框")
         elif binding.status == BINDING_AMBIGUOUS:
@@ -1622,12 +1615,12 @@ class LayoutPanel(QWidget):
         origin_bbox = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
         if not isinstance(origin_bbox, (list, tuple)) or len(origin_bbox) != 4:
             return
-        binding = payload_get(block, PADDLE_BINDING_KEY)
-        if not isinstance(binding, dict) or not binding or binding.get("candidate_bbox"):
+        binding = paddle_binding_dict(block)
+        if not binding or binding.get("candidate_bbox"):
             return
         next_binding = dict(binding)
         next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
-        set_payload_entries(block, {PADDLE_BINDING_KEY: next_binding})
+        set_paddle_binding(block, next_binding)
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
@@ -1853,8 +1846,6 @@ class LayoutPanel(QWidget):
                     **dict(subblock.get("raw_payload") if isinstance(subblock.get("raw_payload"), dict) else {}),
                 },
                 app_payload={
-                    PADDLE_BLOCK_LABEL_KEY: "inline_formula",
-                    PADDLE_BLOCK_BBOX_KEY: origin,
                     UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
                     UI_INLINE_FORMULA_ORIGIN_BBOX_KEY: origin,
                     UI_INLINE_FORMULA_PARENT_LABEL_KEY: str(parent.get("block_label") or parent.get("label") or ""),

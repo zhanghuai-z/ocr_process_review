@@ -3,7 +3,7 @@ from .enums import (
 )
 from .project import (
     BBox, Block, BlockOrigin, Char, LayoutEditEvent, Line, OcrProject, Page,
-    RawOcrArtifact,
+    PaddleBinding, RawOcrArtifact,
 )
 from .proof_line_state import ProofLineState
 from .entity_id import ensure_entity_uid, new_entity_uid, new_ulid
@@ -11,7 +11,7 @@ from .entity_id import ensure_entity_uid, new_entity_uid, new_ulid
 __all__ = [
     "BlockType", "OcrPolicy", "ProofStatus", "PageStatus", "BlockSource",
     "CanvasMode",
-    "BBox", "Char", "Line", "Block", "BlockOrigin", "LayoutEditEvent",
+    "BBox", "Char", "Line", "Block", "BlockOrigin", "PaddleBinding", "LayoutEditEvent",
     "Page", "OcrProject", "RawOcrArtifact",
     "ProofLineState",
     "ensure_entity_uid", "new_entity_uid", "new_ulid",

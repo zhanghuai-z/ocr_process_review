@@ -766,6 +766,73 @@ def test_project_store_persists_raw_layout_artifact():
         os.unlink(db_path)
 
 
+def test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload():
+    from app.core.block_payload import PADDLE_BINDING_KEY
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        binding_payload = {
+            "status": "paddle_geometry_hit",
+            "source": "paddle_geometry",
+            "block_type": "equation",
+            "source_label": "inline_formula",
+            "text": "$ A $",
+            "parent_index": 3,
+            "candidate_index": 1,
+            "score": 0.75,
+            "manual_bbox": [10, 20, 30, 40],
+            "candidate_bbox": [11, 21, 31, 41],
+            "review_flags": ["manual_paddle_binding"],
+        }
+        block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox.from_xyxy(10, 20, 30, 40),
+            paddle_binding=PaddleBinding.from_dict(binding_payload),
+        )
+        project = OcrProject(
+            name="paddle-binding",
+            pages=[Page(image_path="/tmp/binding.png", width=100, height=100, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
+
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.paddle_binding is not None
+        assert loaded_block.paddle_binding.to_dict()["text"] == "$ A $"
+        assert loaded_block.paddle_binding.parent_index == 3
+        assert PADDLE_BINDING_KEY not in loaded_block.app_payload
+
+        legacy_block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox.from_xyxy(20, 20, 50, 50),
+            app_payload={PADDLE_BINDING_KEY: binding_payload},
+        )
+        legacy_project = OcrProject(
+            name="legacy-paddle-binding",
+            pages=[Page(image_path="/tmp/legacy-binding.png", width=100, height=100, blocks=[legacy_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(legacy_project)
+            loaded = store.load_project(saved.id)
+            store.save_project(loaded)
+            reloaded = store.load_project(saved.id)
+
+        migrated_block = reloaded.pages[0].blocks[0]
+        assert migrated_block.paddle_binding is not None
+        assert migrated_block.paddle_binding.to_dict()["text"] == "$ A $"
+        assert PADDLE_BINDING_KEY not in migrated_block.app_payload
+
+        print("test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.core.project_store import ProjectStore
     from app.models import (
@@ -4461,7 +4528,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -4537,7 +4604,7 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -4630,7 +4697,7 @@ def test_layout_panel_formula_draw_touching_text_frame_stays_separate():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5626,7 +5693,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
 
     from PySide6.QtGui import QImage
 
-    from app.core.block_payload import PADDLE_BINDING_KEY, UI_DELETED_INLINE_FORMULA_KEY
+    from app.core.block_payload import UI_DELETED_INLINE_FORMULA_KEY
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockType, Page
@@ -5693,7 +5760,8 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline_blocks[0] is inline
             assert inline.bbox.to_xyxy() == (50, 0, 80, 30)
             assert inline.source.value == "user_edited"
-            assert inline.app_payload[PADDLE_BINDING_KEY]["manual_bbox"] == [50, 0, 80, 30]
+            assert inline.paddle_binding is not None
+            assert inline.paddle_binding.manual_bbox == [50, 0, 80, 30]
             assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
 
             ocr_blocks = _page_blocks_from_layout(page)
@@ -7407,7 +7475,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
     from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_record = {
         "block_label": "text",
@@ -7445,16 +7513,16 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
                 bbox=BBox.from_xyxy(110, 0, 140, 30),
                 source=BlockSource.MANUAL_DRAW,
                 source_label="inline_formula",
-                app_payload={
-                    "paddle_binding": {
+                paddle_binding=PaddleBinding.from_dict(
+                    {
                         "status": BINDING_PARENT_FORMULA_INFERRED,
                         "block_type": "equation",
                         "source_label": "inline_formula",
                         "text": "$ B $",
                         "parent_index": 0,
                         "manual_bbox": [110, 0, 140, 30],
-                    },
-                },
+                    }
+                ),
             ),
         ],
     )
@@ -7494,7 +7562,7 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
     from app.core.paddle_artifact_index import BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
     page = Page(
@@ -7542,8 +7610,8 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                 bbox=BBox.from_xyxy(445, 556, 653, 620),
                 source=BlockSource.USER_EDITED,
                 source_label="inline_formula",
-                app_payload={
-                    "paddle_binding": {
+                paddle_binding=PaddleBinding.from_dict(
+                    {
                         "status": BINDING_GEOMETRY_HIT,
                         "block_type": "equation",
                         "source_label": "inline_formula",
@@ -7551,8 +7619,8 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                         "parent_index": 0,
                         "candidate_bbox": [445, 556, 884, 620],
                         "manual_bbox": [445, 556, 653, 620],
-                    },
-                },
+                    }
+                ),
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -7593,7 +7661,7 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
     from app.core.paddle_artifact_index import BINDING_AMBIGUOUS, BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Page
+    from app.models import BBox, Block, BlockSource, BlockType, PaddleBinding, Page
 
     parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
     parent_record = {
@@ -7616,15 +7684,15 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
                 bbox=BBox.from_xyxy(680, 562, 883, 613),
                 source=BlockSource.USER_EDITED,
                 source_label="inline_formula",
-                app_payload={
-                    "paddle_binding": {
+                paddle_binding=PaddleBinding.from_dict(
+                    {
                         "status": BINDING_AMBIGUOUS,
                         "block_type": "equation",
                         "source_label": "inline_formula",
                         "parent_index": 0,
                         "manual_bbox": [680, 562, 883, 613],
-                    },
-                },
+                    }
+                ),
             ),
             Block(
                 block_type=BlockType.TEXT,
@@ -7636,8 +7704,8 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
                 bbox=BBox.from_xyxy(444, 556, 653, 620),
                 source=BlockSource.USER_EDITED,
                 source_label="inline_formula",
-                app_payload={
-                    "paddle_binding": {
+                paddle_binding=PaddleBinding.from_dict(
+                    {
                         "status": BINDING_GEOMETRY_HIT,
                         "block_type": "equation",
                         "source_label": "inline_formula",
@@ -7646,8 +7714,8 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
                         "candidate_index": 0,
                         "candidate_bbox": [445, 556, 884, 620],
                         "manual_bbox": [444, 556, 653, 620],
-                    },
-                },
+                    }
+                ),
             ),
         ],
     )
@@ -7738,7 +7806,7 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
 def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_record = {
         "block_label": "text",
@@ -7815,7 +7883,7 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
 
     captured = {}
 
@@ -7855,16 +7923,16 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
         source=BlockSource.MANUAL_DRAW,
         source_label="inline_formula",
         lines=[Line(text="$ B $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
-        app_payload={
-            "paddle_binding": {
+        paddle_binding=PaddleBinding.from_dict(
+            {
                 "status": BINDING_PARENT_FORMULA_INFERRED,
                 "block_type": "equation",
                 "source_label": "inline_formula",
                 "text": "$ B $",
                 "parent_index": 0,
                 "manual_bbox": [110, 0, 140, 30],
-            },
-        },
+            }
+        ),
     )
     page = Page(
         image_path="/tmp/manual-formula-preserve.png",
@@ -7902,7 +7970,8 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     assert [block.block_type for block in page.blocks] == [BlockType.TEXT, BlockType.EQUATION]
     assert page.blocks[1] is manual_formula
     assert page.blocks[1].source == BlockSource.MANUAL_DRAW
-    assert page.blocks[1].app_payload["paddle_binding"]["text"] == "$ B $"
+    assert page.blocks[1].paddle_binding is not None
+    assert page.blocks[1].paddle_binding.text == "$ B $"
 
     print("test_hanwang_recognize_preserves_parent_bound_manual_formula_block PASSED")
 
@@ -7912,7 +7981,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_artifact_index import BINDING_FORMULA_CROP_OCR, BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
 
     captured = {}
 
@@ -7971,8 +8040,9 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
         source=BlockSource.USER_EDITED,
         source_label="inline_formula",
         lines=[Line(text="$ B_{old} $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
-        app_payload={
-            "paddle_binding": {
+        app_payload={"ocr_text_invalidated": True},
+        paddle_binding=PaddleBinding.from_dict(
+            {
                 "status": BINDING_GEOMETRY_HIT,
                 "block_type": "equation",
                 "source_label": "inline_formula",
@@ -7980,9 +8050,8 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
                 "parent_index": 0,
                 "candidate_bbox": [100, 0, 150, 30],
                 "manual_bbox": [110, 0, 140, 30],
-            },
-            "ocr_text_invalidated": True,
-        },
+            }
+        ),
     )
     page = Page(
         image_path="/tmp/manual-formula-crop-ocr.png",
@@ -8024,8 +8093,9 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     assert subblocks[0]["block_bbox"] == [110, 0, 140, 30]
     assert subblocks[0]["block_content"] == "$ B_{new} $"
     assert formula.lines[0].text == "$ B_{new} $"
-    assert formula.app_payload["paddle_binding"]["status"] == BINDING_FORMULA_CROP_OCR
-    assert formula.app_payload["paddle_binding"]["text"] == "$ B_{new} $"
+    assert formula.paddle_binding is not None
+    assert formula.paddle_binding.status == BINDING_FORMULA_CROP_OCR
+    assert formula.paddle_binding.text == "$ B_{new} $"
 
     print("test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr PASSED")
 
@@ -11015,7 +11085,7 @@ def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
     print("test_paddle_artifact_index_binds_parent_table_and_empty_formula_review PASSED")
 
 
-def test_layout_panel_manual_formula_writes_paddle_binding_payload():
+def test_layout_panel_manual_formula_writes_typed_paddle_binding():
     from pathlib import Path
     import tempfile
 
@@ -11051,9 +11121,11 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
         try:
             panel._bind_manual_block_to_paddle(page, block)
 
-            binding = block.app_payload["paddle_binding"]
-            assert binding["status"] == BINDING_EMPTY_REVIEW
-            assert binding["text"] == ""
+            binding = block.paddle_binding
+            assert binding is not None
+            assert binding.status == BINDING_EMPTY_REVIEW
+            assert binding.text == ""
+            assert "paddle_binding" not in block.app_payload
             assert block.origin is not None
             assert block.origin.source_label == "inline_formula"
             assert block.origin.raw_index == 0
@@ -11064,7 +11136,7 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
             panel.close()
             app.processEvents()
 
-    print("test_layout_panel_manual_formula_writes_paddle_binding_payload PASSED")
+    print("test_layout_panel_manual_formula_writes_typed_paddle_binding PASSED")
 
 
 def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
@@ -19364,6 +19436,7 @@ if __name__ == "__main__":
     test_block_origin_label_is_authoritative_for_attributes_and_dispatch()
     test_project_store()
     test_project_store_persists_raw_layout_artifact()
+    test_project_store_persists_typed_paddle_binding_and_migrates_legacy_payload()
     test_project_store_persists_block_origin_separately_from_current_layout()
     test_project_store_persists_layout_edit_events()
     test_project_store_rejects_runtime_layout_routes_on_save_and_load()
@@ -19525,7 +19598,7 @@ if __name__ == "__main__":
     test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
     test_paddle_artifact_index_marks_missing_inline_formula_for_crop_ocr()
     test_paddle_artifact_index_binds_parent_table_and_empty_formula_review()
-    test_layout_panel_manual_formula_writes_paddle_binding_payload()
+    test_layout_panel_manual_formula_writes_typed_paddle_binding()
     test_layout_analyzer_reads_formula_geometry_boxes_for_routes()
     test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result()
     test_hanwang_group_chunk_cannot_readmit_skipped_subregions()

@@ -19,13 +19,10 @@ from app.core.block_payload import (
     OCR_TEXT_INVALIDATED_KEY,
     OCR_INVALIDATION_KIND_KEY,
     PADDLE_BINDING_KEY,
-    PADDLE_BLOCK_BBOX_KEY,
-    PADDLE_BLOCK_LABEL_KEY,
-    app_payload_dict,
     clear_payload_entries,
     payload_bool,
-    payload_get,
-    set_payload_entries,
+    paddle_binding_dict,
+    set_paddle_binding,
     strip_runtime_layout_payload,
 )
 from app.core.block_attributes import route_source_label
@@ -92,7 +89,7 @@ from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
 from app.core.raw_ocr_artifact import raw_block_payload, raw_layout_records
 from app.engines import OCR_BBOX_SPACE_PAGE
-from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolicy, Page
+from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolicy, PaddleBinding, Page
 
 from . import native_bridge
 
@@ -3009,13 +3006,11 @@ def _origin_raw_index(block: Block) -> int:
 
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     raw_payload = raw_block_payload(block)
-    app_payload = app_payload_dict(block)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-    app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     parent_index = _origin_raw_index(block)
     if parent_index < 0:
         parent_index = _parent_index_for_raw_payload(page, raw_payload)
-    binding = app_payload.get(PADDLE_BINDING_KEY)
+    binding = paddle_binding_dict(block)
     if parent_index < 0 and isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
     source_label = route_source_label(block)
@@ -3028,7 +3023,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_block_ocr_policy": block.ocr_policy.value,
     }
-    if isinstance(binding, dict) and binding:
+    if binding:
         row[PADDLE_BINDING_KEY] = dict(binding)
     records = raw_layout_records(page)
     if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
@@ -3040,7 +3035,9 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     return row
 
 
-def _persistent_payloads_from_route_row(raw_block: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _persistent_payloads_from_route_row(
+    raw_block: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], PaddleBinding | None]:
     """Split the current Hanwang route row into persisted raw/app payloads.
 
     Route rows temporarily carry app-owned data such as paddle binding and
@@ -3051,12 +3048,14 @@ def _persistent_payloads_from_route_row(raw_block: dict[str, Any]) -> tuple[dict
     raw_payload = dict(raw_block or {})
     app_payload: dict[str, Any] = {}
     binding = raw_payload.pop(PADDLE_BINDING_KEY, None)
-    if isinstance(binding, dict) and binding:
-        app_payload[PADDLE_BINDING_KEY] = dict(binding)
     audit = raw_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
     if isinstance(audit, dict) and audit:
         app_payload[HANWANG_BBOX_AUDIT_KEY] = dict(audit)
-    return strip_runtime_layout_payload(raw_payload), strip_runtime_layout_payload(app_payload)
+    return (
+        strip_runtime_layout_payload(raw_payload),
+        strip_runtime_layout_payload(app_payload),
+        PaddleBinding.from_dict(binding if isinstance(binding, dict) else None),
+    )
 
 
 def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = None) -> str:
@@ -3073,7 +3072,7 @@ def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = Non
 
 
 def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
-    binding = dict(payload_get(block, PADDLE_BINDING_KEY) or {})
+    binding = paddle_binding_dict(block)
     if not binding:
         return None
     status = str(binding.get("status") or "")
@@ -3437,8 +3436,8 @@ def _existing_parent_index(block: Block) -> int:
     origin_index = _origin_raw_index(block)
     if origin_index >= 0:
         return origin_index
-    binding = payload_get(block, PADDLE_BINDING_KEY)
-    if isinstance(binding, dict):
+    binding = paddle_binding_dict(block)
+    if binding:
         parent_index = _int_value(binding.get("parent_index"))
         if parent_index >= 0:
             return parent_index
@@ -3462,11 +3461,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
     }
     block.source_label = "inline_formula"
     block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
-    set_payload_entries(block, {
-        PADDLE_BINDING_KEY: binding,
-        PADDLE_BLOCK_LABEL_KEY: "inline_formula",
-        PADDLE_BLOCK_BBOX_KEY: bbox_xyxy,
-    })
+    set_paddle_binding(block, binding)
     clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
     block.lines = [
         Line(
@@ -3487,8 +3482,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
         flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
     block.source_label = "inline_formula"
     block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
-    set_payload_entries(block, {
-        PADDLE_BINDING_KEY: {
+    set_paddle_binding(block, {
             "status": BINDING_EMPTY_REVIEW,
             "source": "paddle_formula_crop_ocr_empty",
             "block_type": BlockType.EQUATION.value,
@@ -3499,9 +3493,6 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             "score": 0.0,
             "manual_bbox": bbox_xyxy,
             "review_flags": flags,
-        },
-        PADDLE_BLOCK_LABEL_KEY: "inline_formula",
-        PADDLE_BLOCK_BBOX_KEY: bbox_xyxy,
     })
     block.lines = [
         Line(
@@ -3516,7 +3507,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
 
 def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:
     for block in blocks:
-        binding = payload_get(block, PADDLE_BINDING_KEY)
+        binding = paddle_binding_dict(block)
         binding_source = str(binding.get("source") or "") if isinstance(binding, dict) else ""
         invalidated = payload_bool(block, OCR_TEXT_INVALIDATED_KEY)
         stale_parent_binding = "parent_text" in binding_source or binding_source == "paddle_geometry"
@@ -3648,7 +3639,7 @@ class HanwangMicroRecBlockEngine:
             ]
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
-            raw_payload, app_payload = _persistent_payloads_from_route_row(row.raw_block)
+            raw_payload, app_payload, paddle_binding = _persistent_payloads_from_route_row(row.raw_block)
             audit = app_payload.get(HANWANG_BBOX_AUDIT_KEY)
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
@@ -3666,6 +3657,7 @@ class HanwangMicroRecBlockEngine:
                 source_label=row.block_label,
                 raw_payload=raw_payload,
                 app_payload=app_payload,
+                paddle_binding=paddle_binding,
             )
             new_block.ocr_policy = default_ocr_policy_for_block(new_block)
             if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:

@@ -183,6 +183,94 @@ class BlockOrigin:
 
 
 @dataclass
+class PaddleBinding:
+    """人工框与 Paddle 原始事实的结构化绑定。
+
+    这是应用层 OCR/版面绑定状态，不属于 vendor raw payload，也不应再写入
+    block payload as the primary fact.
+    """
+    status: str = ""
+    source: str = ""
+    block_type: str = ""
+    source_label: str = ""
+    text: str = ""
+    parent_index: int = -1
+    candidate_index: int = -1
+    score: float = 0.0
+    candidate_bbox: List[int] = field(default_factory=list)
+    manual_bbox: List[int] = field(default_factory=list)
+    review_flags: List[str] = field(default_factory=list)
+    candidates: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "PaddleBinding | None":
+        if not isinstance(payload, dict) or not payload:
+            return None
+        return cls(
+            status=str(payload.get("status") or ""),
+            source=str(payload.get("source") or ""),
+            block_type=str(payload.get("block_type") or ""),
+            source_label=str(payload.get("source_label") or ""),
+            text=str(payload.get("text") or ""),
+            parent_index=_int_or_default(payload.get("parent_index"), -1),
+            candidate_index=_int_or_default(payload.get("candidate_index"), -1),
+            score=_float_or_default(payload.get("score"), 0.0),
+            candidate_bbox=_int_list(payload.get("candidate_bbox")),
+            manual_bbox=_int_list(payload.get("manual_bbox")),
+            review_flags=[str(value) for value in payload.get("review_flags", [])]
+            if isinstance(payload.get("review_flags"), list) else [],
+            candidates=[str(value) for value in payload.get("candidates", [])]
+            if isinstance(payload.get("candidates"), list) else [],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": self.status,
+            "source": self.source,
+            "block_type": self.block_type,
+            "source_label": self.source_label,
+            "text": self.text,
+            "parent_index": self.parent_index,
+            "candidate_index": self.candidate_index,
+            "score": round(float(self.score), 6),
+            "review_flags": list(self.review_flags),
+        }
+        if self.candidate_bbox:
+            payload["candidate_bbox"] = [int(value) for value in self.candidate_bbox]
+        if self.manual_bbox:
+            payload["manual_bbox"] = [int(value) for value in self.manual_bbox]
+        if self.candidates:
+            payload["candidates"] = list(self.candidates)
+        return payload
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int_list(value: Any) -> List[int]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[int] = []
+    for item in value:
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            return []
+    return result
+
+
+@dataclass
 class Block:
     """版面分析得到的一个内容块。"""
     block_type: BlockType
@@ -198,6 +286,7 @@ class Block:
     raw_payload: dict[str, Any] = field(default_factory=dict)  # 外部引擎原始块属性
     app_payload: dict[str, Any] = field(default_factory=dict)  # 应用派生状态/人工绑定
     origin: BlockOrigin | None = None               # 块来源事实；新代码优先读这里
+    paddle_binding: PaddleBinding | None = None     # 人工框与 Paddle 原始事实的结构化绑定
     uid: str = ""                                   # 稳定业务 ID
 
     def __post_init__(self) -> None:
