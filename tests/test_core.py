@@ -495,6 +495,7 @@ def test_block_payload_helpers_preserve_existing_entries():
     from app.core.block_payload import (
         OCR_INVALIDATION_KIND_KEY,
         OCR_TEXT_INVALIDATED_KEY,
+        clear_payload_entries,
         mark_ocr_text_invalidated,
         payload_bool,
         payload_get,
@@ -520,6 +521,9 @@ def test_block_payload_helpers_preserve_existing_entries():
     assert block.app_payload[OCR_TEXT_INVALIDATED_KEY] is True
     assert block.app_payload[OCR_INVALIDATION_KIND_KEY] == "block_moved"
     assert block.raw_payload["vendor"] == {"keep": True}
+    clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
+    assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
+    assert OCR_INVALIDATION_KIND_KEY not in block.app_payload
 
     print("test_block_payload_helpers_preserve_existing_entries PASSED")
 
@@ -3461,6 +3465,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 def test_table_text_layer_service_ignores_app_payload_html_source():
     from PIL import Image
 
+    from app.core.block_payload import PADDLE_BINDING_KEY, set_payload_entries
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.models import BBox, Block, BlockType, Page
     from app.services.table_text_layer_service import TableTextLayerService
@@ -3470,7 +3475,7 @@ def test_table_text_layer_service_ignores_app_payload_html_source():
         Image.new("RGB", (240, 160), "white").save(image_path)
         html = "<table><tr><td>A</td><td>B</td></tr></table>"
         block = Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 160, 70), order=0)
-        block.app_payload["html"] = html
+        set_payload_entries(block, {PADDLE_BINDING_KEY: {"html": html}})
         page = Page(image_path=image_path, width=240, height=160, blocks=[block])
 
         updated = TableTextLayerService().enrich_page(page)

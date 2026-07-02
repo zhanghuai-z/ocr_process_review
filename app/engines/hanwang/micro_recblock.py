@@ -21,6 +21,7 @@ from app.core.block_payload import (
     PADDLE_BINDING_KEY,
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
+    clear_payload_entries,
     set_payload_entries,
     strip_runtime_layout_payload,
 )
@@ -3076,7 +3077,7 @@ def _strip_cached_layout_line_routes_from_page(page: Page) -> None:
             record.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     for block in page.blocks:
         block.raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-        block.app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+        clear_payload_entries(block, LAYOUT_LINE_ROUTES_FIELD)
 
 
 def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = None) -> str:
@@ -3487,8 +3488,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         PADDLE_BLOCK_LABEL_KEY: "inline_formula",
         PADDLE_BLOCK_BBOX_KEY: bbox_xyxy,
     })
-    block.app_payload.pop(OCR_TEXT_INVALIDATED_KEY, None)
-    block.app_payload.pop(OCR_INVALIDATION_KIND_KEY, None)
+    clear_payload_entries(block, (OCR_TEXT_INVALIDATED_KEY, OCR_INVALIDATION_KIND_KEY))
     block.lines = [
         Line(
             text=text,

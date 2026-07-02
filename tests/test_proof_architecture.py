@@ -153,6 +153,26 @@ def test_block_attributes_do_not_derive_semantics_from_payloads():
     assert "raw_label and" not in source
 
 
+def test_app_payload_mutation_goes_through_block_payload_helpers():
+    offenders: list[str] = []
+    direct_mutation_patterns = (
+        ".app_payload.pop(",
+        ".app_payload.setdefault(",
+        ".app_payload.update(",
+    )
+    assignment_pattern = re.compile(r"\.app_payload\[[^\]]+\]\s*=")
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path == Path("app/core/block_payload.py"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        for pattern in direct_mutation_patterns:
+            if pattern in source:
+                offenders.append(f"{path}: {pattern}")
+        for match in assignment_pattern.finditer(source):
+            offenders.append(f"{path}: {match.group(0)}")
+    assert offenders == []
+
+
 def test_export_semantic_filters_do_not_read_raw_payload_labels():
     markdown_source = Path("app/export/markdown.py").read_text(encoding="utf-8")
     markdown_tree = ast.parse(markdown_source, filename="app/export/markdown.py")

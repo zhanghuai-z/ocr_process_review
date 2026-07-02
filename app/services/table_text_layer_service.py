@@ -1,7 +1,7 @@
 """Build hidden table text-layer geometry for export."""
 from __future__ import annotations
 
-from app.core.block_payload import set_payload_entries
+from app.core.block_payload import clear_payload_entries, set_payload_entries
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY, build_table_text_layer_cells
 from app.models import Block, BlockType, Page
 
@@ -16,7 +16,7 @@ class TableTextLayerService:
                 continue
             html = self._table_html(block)
             if not html:
-                block.app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY, None)
+                clear_payload_entries(block, TABLE_TEXT_LAYER_CELLS_KEY)
                 continue
             cells = build_table_text_layer_cells(
                 image_path=page.display_image_path,
@@ -29,7 +29,7 @@ class TableTextLayerService:
                 set_payload_entries(block, {TABLE_TEXT_LAYER_CELLS_KEY: cells})
                 updated += 1
             else:
-                block.app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY, None)
+                clear_payload_entries(block, TABLE_TEXT_LAYER_CELLS_KEY)
         return updated
 
     @staticmethod

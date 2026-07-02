@@ -74,6 +74,19 @@ def set_payload_entries(block: object, entries: Mapping[str, Any]) -> dict[str, 
     return payload
 
 
+def clear_payload_entries(block: object, keys: object) -> dict[str, Any]:
+    if isinstance(keys, str):
+        remove_keys = {keys}
+    else:
+        remove_keys = set(keys)
+    payload = app_payload_dict(block)
+    for key in remove_keys:
+        payload.pop(key, None)
+    validate_app_payload_keys(payload)
+    setattr(block, "app_payload", payload)
+    return payload
+
+
 def unknown_app_payload_keys(payload: Mapping[str, Any] | None) -> set[str]:
     return set(dict(payload or {})) - APP_PAYLOAD_KEYS
 
