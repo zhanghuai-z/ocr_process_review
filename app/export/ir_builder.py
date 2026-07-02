@@ -5,6 +5,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from app.core.block_attributes import block_attributes
+from app.core.block_payload import payload_get
 from app.core.proof_line_facts import ProofLineFacts, proof_line_facts, proof_status_value
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
 from app.export.ir import (
@@ -276,7 +277,7 @@ def _char_payload(char, fallback: int | str) -> dict[str, Any]:
 
 
 def _table_text_layer_cells(block: Block) -> list[dict[str, Any]]:
-    raw = block.app_payload.get(TABLE_TEXT_LAYER_CELLS_KEY)
+    raw = payload_get(block, TABLE_TEXT_LAYER_CELLS_KEY)
     if not isinstance(raw, list):
         return []
     cells: list[dict[str, Any]] = []

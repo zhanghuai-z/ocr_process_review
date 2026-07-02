@@ -197,6 +197,17 @@ def test_app_payload_mutation_goes_through_block_payload_helpers():
     assert offenders == []
 
 
+def test_app_payload_reads_go_through_block_payload_helpers():
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path == Path("app/core/block_payload.py"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        if ".app_payload.get(" in source:
+            offenders.append(f"{path}: .app_payload.get(")
+    assert offenders == []
+
+
 def test_export_semantic_filters_do_not_read_raw_payload_labels():
     markdown_source = Path("app/export/markdown.py").read_text(encoding="utf-8")
     markdown_tree = ast.parse(markdown_source, filename="app/export/markdown.py")

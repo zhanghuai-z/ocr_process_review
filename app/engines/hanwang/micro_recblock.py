@@ -22,6 +22,8 @@ from app.core.block_payload import (
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
     clear_payload_entries,
+    payload_bool,
+    payload_get,
     set_payload_entries,
     strip_runtime_layout_payload,
 )
@@ -3094,7 +3096,7 @@ def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = Non
 
 
 def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
-    binding = dict(block.app_payload.get(PADDLE_BINDING_KEY) or {})
+    binding = dict(payload_get(block, PADDLE_BINDING_KEY) or {})
     if not binding:
         return None
     status = str(binding.get("status") or "")
@@ -3458,7 +3460,7 @@ def _existing_parent_index(block: Block) -> int:
     origin_index = _origin_raw_index(block)
     if origin_index >= 0:
         return origin_index
-    binding = block.app_payload.get(PADDLE_BINDING_KEY)
+    binding = payload_get(block, PADDLE_BINDING_KEY)
     if isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
         if parent_index >= 0:
@@ -3537,9 +3539,9 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
 
 def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:
     for block in blocks:
-        binding = block.app_payload.get(PADDLE_BINDING_KEY)
+        binding = payload_get(block, PADDLE_BINDING_KEY)
         binding_source = str(binding.get("source") or "") if isinstance(binding, dict) else ""
-        invalidated = bool(block.app_payload.get(OCR_TEXT_INVALIDATED_KEY))
+        invalidated = payload_bool(block, OCR_TEXT_INVALIDATED_KEY)
         stale_parent_binding = "parent_text" in binding_source or binding_source == "paddle_geometry"
         if invalidated or stale_parent_binding or not proof_block_text(block):
             _mark_inline_formula_needs_text(block)
