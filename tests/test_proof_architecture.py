@@ -451,6 +451,27 @@ def test_manual_layout_merge_details_are_events_not_app_payload_state():
     assert "app_payload.pop(MANUAL_DRAW_BBOX_KEY" in store_source
 
 
+def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state():
+    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    app_keys_segment = block_payload_source.split("APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    legacy_segment = block_payload_source.split("LEGACY_APP_PAYLOAD_KEYS = frozenset({", 1)[1].split("})", 1)[0]
+    for key in (
+        "UI_GENERATED_INLINE_FORMULA_BLOCK_KEY",
+        "UI_INLINE_FORMULA_ORIGIN_BBOX_KEY",
+        "UI_INLINE_FORMULA_PARENT_LABEL_KEY",
+    ):
+        assert key not in app_keys_segment
+        assert key in legacy_segment
+        assert key not in layout_source
+        assert f"app_payload.pop({key}" in store_source
+    assert "origin=BlockOrigin(" in layout_source
+    assert "original_bbox=bbox" in layout_source
+    assert "_inline_formula_origin_bbox(block)" in layout_source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

@@ -18,13 +18,8 @@ from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
     UI_DELETED_INLINE_FORMULA_KEY,
-    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
-    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
-    UI_INLINE_FORMULA_PARENT_LABEL_KEY,
     is_ocr_text_invalidated,
     mark_ocr_text_invalidated,
-    payload_bool,
-    payload_get,
     app_payload_dict,
     paddle_binding_dict,
     set_paddle_binding,
@@ -46,7 +41,7 @@ from app.core.paddle_line_routing import (
     line_routes_for_block,
 )
 from app.core.ocr_ir import is_formula_marker_token
-from app.models import BBox, Block, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
+from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -1394,8 +1389,24 @@ class LayoutPanel(QWidget):
         if not self._update_existing_manual_binding_bbox(block):
             block.lines = []
             self._bind_manual_block_to_paddle(page, block)
-        if payload_bool(block, UI_GENERATED_INLINE_FORMULA_BLOCK_KEY):
+        if self._is_generated_inline_formula_block(block):
             self._mark_generated_inline_formula_handled(page, block)
+
+    @staticmethod
+    def _inline_formula_origin_bbox(block: Block) -> tuple[int, int, int, int] | None:
+        origin = block.origin
+        if origin is None or origin.original_bbox is None:
+            return None
+        if normalize_paddle_label(origin.source_label) != "inline_formula":
+            return None
+        return origin.original_bbox.to_xyxy()
+
+    @staticmethod
+    def _is_generated_inline_formula_block(block: Block) -> bool:
+        return (
+            normalize_paddle_label(block.source_label) == "inline_formula"
+            and LayoutPanel._inline_formula_origin_bbox(block) is not None
+        )
 
     @staticmethod
     def _update_existing_manual_binding_bbox(block: Block) -> bool:
@@ -1414,8 +1425,8 @@ class LayoutPanel(QWidget):
         manual_bbox = list(block.bbox.to_xyxy())
         next_binding = dict(binding)
         next_binding["manual_bbox"] = manual_bbox
-        origin_bbox = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
-        if not next_binding.get("candidate_bbox") and isinstance(origin_bbox, (list, tuple)) and len(origin_bbox) == 4:
+        origin_bbox = LayoutPanel._inline_formula_origin_bbox(block)
+        if not next_binding.get("candidate_bbox") and origin_bbox is not None:
             next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         block.source_label = source_label
@@ -1608,8 +1619,8 @@ class LayoutPanel(QWidget):
     def _preserve_inline_formula_origin_binding(block: Block) -> None:
         if normalize_paddle_label(block.source_label) != "inline_formula":
             return
-        origin_bbox = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
-        if not isinstance(origin_bbox, (list, tuple)) or len(origin_bbox) != 4:
+        origin_bbox = LayoutPanel._inline_formula_origin_bbox(block)
+        if origin_bbox is None:
             return
         binding = paddle_binding_dict(block)
         if not binding or binding.get("candidate_bbox"):
@@ -1841,11 +1852,14 @@ class LayoutPanel(QWidget):
                 raw_payload={
                     **dict(subblock.get("raw_payload") if isinstance(subblock.get("raw_payload"), dict) else {}),
                 },
-                app_payload={
-                    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
-                    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY: origin,
-                    UI_INLINE_FORMULA_PARENT_LABEL_KEY: str(parent.get("block_label") or parent.get("label") or ""),
-                },
+                origin=BlockOrigin(
+                    created_by=BlockSource.AUTO_LAYOUT.value,
+                    source_engine="paddleocr-vl",
+                    source_label="inline_formula",
+                    original_bbox=bbox,
+                    original_kind=BlockType.EQUATION,
+                    raw_artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+                ),
             ))
 
     def _iter_inline_formula_subblocks(self, page: Page):
@@ -1961,7 +1975,7 @@ class LayoutPanel(QWidget):
     def _has_inline_formula_origin_block(page: Page, origin_bbox: list[int]) -> bool:
         origin_tuple = tuple(origin_bbox)
         for block in page.blocks:
-            if tuple(payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY) or ()) == origin_tuple:
+            if LayoutPanel._inline_formula_origin_bbox(block) == origin_tuple:
                 return True
             if normalize_paddle_label(getattr(block, "source_label", "")) != "inline_formula":
                 continue
@@ -1970,8 +1984,8 @@ class LayoutPanel(QWidget):
         return False
 
     def _mark_generated_inline_formula_handled(self, page: Page, block: Block) -> None:
-        origin = payload_get(block, UI_INLINE_FORMULA_ORIGIN_BBOX_KEY)
-        if not origin:
+        origin = self._inline_formula_origin_bbox(block)
+        if origin is None:
             return
         origin_tuple = tuple(origin)
         for _parent, subblock, bbox in self._iter_inline_formula_subblocks(page):

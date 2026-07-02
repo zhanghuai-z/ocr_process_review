@@ -34,6 +34,9 @@ from app.core.block_payload import (
     OCR_INVALIDATION_KIND_KEY,
     OCR_TEXT_INVALIDATED_KEY,
     PADDLE_BINDING_KEY,
+    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
+    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
+    UI_INLINE_FORMULA_PARENT_LABEL_KEY,
 )
 
 logger = get_logger(__name__)
@@ -41,6 +44,15 @@ logger = get_logger(__name__)
 
 class ProjectDataError(RuntimeError):
     """Current schema project data violates model boundaries."""
+
+
+def _bbox_from_xyxy_payload(value: object) -> BBox | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        return BBox.from_xyxy(*(int(item) for item in value))
+    except (TypeError, ValueError):
+        return None
 
 # --------------------------------------------------------------------- schema v3
 DDL_V3 = """
@@ -1646,6 +1658,11 @@ class ProjectStore:
                 ocr_invalidated_reason = str(legacy_ocr_kind or "layout_changed")
             app_payload.pop(MANUAL_MERGE_FROM_KEY, None)
             app_payload.pop(MANUAL_DRAW_BBOX_KEY, None)
+            legacy_inline_generated = bool(app_payload.pop(UI_GENERATED_INLINE_FORMULA_BLOCK_KEY, False))
+            legacy_inline_bbox = _bbox_from_xyxy_payload(
+                app_payload.pop(UI_INLINE_FORMULA_ORIGIN_BBOX_KEY, None)
+            )
+            app_payload.pop(UI_INLINE_FORMULA_PARENT_LABEL_KEY, None)
             try:
                 validate_persistent_block_payloads(
                     raw_payload,
@@ -1655,6 +1672,15 @@ class ProjectStore:
                 )
             except ModelValidationError as exc:
                 _raise_project_data_error(exc)
+            origin = self._load_block_origin(project_id, str(r["uid"] or ""))
+            if origin is None and (legacy_inline_generated or legacy_inline_bbox is not None):
+                origin = BlockOrigin(
+                    created_by=str(r["source"] or BlockSource.AUTO_LAYOUT.value),
+                    source_engine="paddleocr-vl",
+                    source_label="inline_formula",
+                    original_bbox=legacy_inline_bbox,
+                    original_kind=BlockType.EQUATION,
+                )
             block = Block(
                 block_type=BlockType(r["block_type"]),
                 bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
@@ -1667,7 +1693,7 @@ class ProjectStore:
                 source_label=r["source_label"],
                 raw_payload=raw_payload,
                 app_payload=app_payload,
-                origin=self._load_block_origin(project_id, str(r["uid"] or "")),
+                origin=origin,
                 paddle_binding=PaddleBinding.from_dict(paddle_binding_payload),
                 ocr_invalidated_reason=ocr_invalidated_reason,
             )

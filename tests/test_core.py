@@ -955,6 +955,73 @@ def test_project_store_drops_legacy_manual_layout_payload_details():
         os.unlink(db_path)
 
 
+def test_project_store_migrates_legacy_inline_formula_payload_to_block_origin():
+    import sqlite3
+
+    from app.core.block_payload import (
+        UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
+        UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
+        UI_INLINE_FORMULA_PARENT_LABEL_KEY,
+    )
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox.from_xyxy(12, 4, 44, 24),
+            source_label="inline_formula",
+        )
+        project = OcrProject(
+            name="legacy-inline-formula-payload",
+            pages=[Page(image_path="/tmp/inline-formula.png", width=100, height=80, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+
+        legacy_payload = {
+            UI_GENERATED_INLINE_FORMULA_BLOCK_KEY: True,
+            UI_INLINE_FORMULA_ORIGIN_BBOX_KEY: [10, 3, 40, 23],
+            UI_INLINE_FORMULA_PARENT_LABEL_KEY: "text",
+        }
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "DELETE FROM block_origin WHERE block_uid=?",
+                (block.uid,),
+            )
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (json.dumps(legacy_payload, ensure_ascii=False), block.id),
+            )
+            conn.commit()
+
+        with ProjectStore(db_path) as store:
+            migrated = store.load_project(saved.id)
+            migrated_block = migrated.pages[0].blocks[0]
+            assert migrated_block.origin is not None
+            assert migrated_block.origin.source_label == "inline_formula"
+            assert migrated_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
+            assert migrated_block.origin.original_kind == BlockType.EQUATION
+            assert UI_GENERATED_INLINE_FORMULA_BLOCK_KEY not in migrated_block.app_payload
+            assert UI_INLINE_FORMULA_ORIGIN_BBOX_KEY not in migrated_block.app_payload
+            assert UI_INLINE_FORMULA_PARENT_LABEL_KEY not in migrated_block.app_payload
+            store.save_project(migrated)
+            reloaded = store.load_project(saved.id)
+
+        reloaded_block = reloaded.pages[0].blocks[0]
+        assert reloaded_block.origin is not None
+        assert reloaded_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
+        assert reloaded_block.app_payload == {}
+
+        print("test_project_store_migrates_legacy_inline_formula_payload_to_block_origin PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.core.project_store import ProjectStore
     from app.models import (
@@ -5864,6 +5931,10 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert len(inline_blocks) == 1
             inline = inline_blocks[0]
             assert inline.bbox.to_xyxy() == (40, 0, 70, 30)
+            assert inline.origin is not None
+            assert inline.origin.source_label == "inline_formula"
+            assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
+            assert inline.app_payload == {}
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
@@ -5884,6 +5955,9 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.source.value == "user_edited"
             assert inline.paddle_binding is not None
             assert inline.paddle_binding.manual_bbox == [50, 0, 80, 30]
+            assert inline.origin is not None
+            assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
+            assert inline.app_payload == {}
             assert _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0][UI_DELETED_INLINE_FORMULA_KEY] is True
 
             ocr_blocks = _page_blocks_from_layout(page)
