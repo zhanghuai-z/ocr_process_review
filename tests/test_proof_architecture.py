@@ -245,6 +245,21 @@ def test_project_model_does_not_own_proof_export_summary():
         assert retired_name not in source
 
 
+def test_block_type_enum_does_not_own_paddle_label_mapping():
+    source = Path("app/models/enums.py").read_text(encoding="utf-8")
+    assert "from_paddle" not in source
+    assert "map_paddle_label" not in source
+    assert "paragraph_text" not in source
+    assert "doc_title" not in source
+    assert "inline_formula" not in source
+    assert "formula_number" not in source
+    assert "table_cell" not in source
+
+    adapter_source = Path("app/adapters/paddle/layout_importer.py").read_text(encoding="utf-8")
+    assert "map_paddle_label_to_block_type" in adapter_source
+    assert "_PADDLE_LABEL_TO_BLOCK_TYPE" in adapter_source
+
+
 def test_project_store_exposes_only_scoped_proof_line_write_port():
     from app.core.project_store import ProjectStore
 
