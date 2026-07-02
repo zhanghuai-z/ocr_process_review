@@ -114,6 +114,34 @@ def semantic_label(block: Block) -> str:
     return block_attributes(block).normalized_semantic_label
 
 
+def current_source_label(block: Block, *, fallback_to_type: bool = True) -> str:
+    label = normalize_source_label(str(getattr(block, "source_label", "") or ""))
+    if label or not fallback_to_type:
+        return label
+    return normalize_source_label(block.block_type.value)
+
+
+def origin_source_label(block: Block) -> str:
+    origin = getattr(block, "origin", None)
+    return normalize_source_label(str(getattr(origin, "source_label", "") or ""))
+
+
+def route_source_label(block: Block) -> str:
+    """Label to emit into runtime OCR/layout rows.
+
+    Current user edits win over original source labels. If no explicit current
+    label exists, origin/semantic labels keep the OCR route tied to structured
+    provenance instead of falling back to raw/app payload guesses.
+    """
+    attrs = block_attributes(block)
+    return (
+        current_source_label(block, fallback_to_type=False)
+        or attrs.origin_label
+        or attrs.semantic_label
+        or normalize_source_label(block.block_type.value)
+    )
+
+
 def block_display_label(block: Block) -> str:
     return block_attributes(block).display_label
 

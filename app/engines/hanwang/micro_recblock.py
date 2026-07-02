@@ -21,12 +21,14 @@ from app.core.block_payload import (
     PADDLE_BINDING_KEY,
     PADDLE_BLOCK_BBOX_KEY,
     PADDLE_BLOCK_LABEL_KEY,
+    app_payload_dict,
     clear_payload_entries,
     payload_bool,
     payload_get,
     set_payload_entries,
     strip_runtime_layout_payload,
 )
+from app.core.block_attributes import route_source_label
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
@@ -83,7 +85,6 @@ from app.core.paddle_artifact_index import (
 from app.core.paddle_labels import (
     PADDLE_HANWANG_SKIP_LABELS,
     PADDLE_HANWANG_TEXT_LABELS,
-    authoritative_paddle_label,
     is_hanwang_skip_label,
     normalize_paddle_label,
 )
@@ -3006,14 +3007,9 @@ def _origin_raw_index(block: Block) -> int:
     return _int_value(getattr(origin, "raw_index", None))
 
 
-def _origin_source_label(block: Block) -> str:
-    origin = getattr(block, "origin", None)
-    return str(getattr(origin, "source_label", "") or "")
-
-
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     raw_payload = raw_block_payload(block)
-    app_payload = dict(block.app_payload)
+    app_payload = app_payload_dict(block)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     parent_index = _origin_raw_index(block)
@@ -3022,17 +3018,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     binding = app_payload.get(PADDLE_BINDING_KEY)
     if parent_index < 0 and isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
-    source_label = (
-        block.source_label
-        or _origin_source_label(block)
-        or authoritative_paddle_label(raw_payload)
-        or (
-            str(binding.get("source_label") or binding.get("block_type") or "")
-            if isinstance(binding, dict)
-            else ""
-        )
-        or block.block_type.value
-    )
+    source_label = route_source_label(block)
     row = {
         **raw_payload,
         "block_label": source_label,
@@ -3141,7 +3127,7 @@ def _route_subblock_overlaps_bbox(
 
 def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dict[str, Any]:
     manual_bbox = _manual_bbox_from_binding(block, binding)
-    label = str(binding.get("source_label") or block.source_label or block.block_type.value)
+    label = str(binding.get("source_label") or route_source_label(block))
     text_is_stale = _manual_binding_text_is_stale(manual_bbox, binding)
     text = "" if text_is_stale else str(binding.get("text") or proof_block_text(block) or "")
     payload = {
@@ -3170,7 +3156,7 @@ def _manual_binding_text_is_stale(
 
 def _manual_unbound_route_subblock(block: Block) -> dict[str, Any]:
     manual_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
-    label = block.source_label or block.block_type.value
+    label = route_source_label(block)
     if block.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
         label = "inline_formula"
     return {
@@ -3437,7 +3423,7 @@ def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
     for block in page.blocks:
         if block.block_type != BlockType.EQUATION:
             continue
-        label = normalize_paddle_label(block.source_label or block.block_type.value)
+        label = route_source_label(block)
         if label not in {"inline_formula", "formula"}:
             continue
         if block.bbox is None or block.bbox.area <= 0:

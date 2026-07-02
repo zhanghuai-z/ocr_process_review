@@ -208,6 +208,22 @@ def test_app_payload_reads_go_through_block_payload_helpers():
     assert offenders == []
 
 
+def test_app_payload_access_stays_at_storage_validation_or_payload_boundary():
+    allowed = {
+        Path("app/core/block_payload.py"),
+        Path("app/core/model_validation.py"),
+        Path("app/core/project_store.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if ".app_payload" in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_raw_payload_is_not_mutated_directly_by_app_code():
     offenders: list[str] = []
     direct_mutation_patterns = (
@@ -300,12 +316,29 @@ def test_hanwang_block_row_does_not_recover_parent_from_block_payloads():
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_layout_row_from_block":
             fn_source = ast.get_source_segment(source, node) or ""
+            assert "route_source_label(block)" in fn_source
+            assert "authoritative_paddle_label(raw_payload)" not in fn_source
             assert 'app_payload.get("_layout_paddle_parent_index"' not in fn_source
             assert 'raw_payload.get("_layout_paddle_parent_index"' not in fn_source
             assert 'app_payload.get("block_label"' not in fn_source
             break
     else:
         raise AssertionError("_layout_row_from_block function not found")
+
+
+def test_hanwang_runtime_routing_does_not_read_block_source_label_directly():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/engines/hanwang/micro_recblock.py")
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "source_label"
+            and isinstance(node.ctx, ast.Load)
+            and ast.unparse(node.value) == "block"
+        ):
+            offenders.append(f"line {node.lineno}: block.source_label")
+    assert offenders == []
 
 
 def test_hanwang_raw_payload_parent_matching_ignores_runtime_parent_index():
