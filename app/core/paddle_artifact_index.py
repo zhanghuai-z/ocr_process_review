@@ -23,7 +23,7 @@ from app.core.paddle_line_routing import (
     vertical_overlap_ratio,
 )
 from app.core.raw_ocr_artifact import raw_layout_records
-from app.models import BBox, Block, BlockType, Line, OcrPolicy
+from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrPolicy
 
 
 XYXY = tuple[int, int, int, int]
@@ -514,6 +514,19 @@ class PaddleArtifactIndex:
 
 def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) -> None:
     """Persist a binding on a layout block without changing its geometry."""
+    existing_origin = block.origin
+    block.origin = BlockOrigin(
+        created_by=existing_origin.created_by if existing_origin else block.source.value,
+        source_engine=existing_origin.source_engine if existing_origin else "paddleocr-vl",
+        source_run_id=existing_origin.source_run_id if existing_origin else "",
+        source_label=binding.source_label or (existing_origin.source_label if existing_origin else ""),
+        source_confidence=binding.score if binding.score else (existing_origin.source_confidence if existing_origin else None),
+        original_bbox=existing_origin.original_bbox if existing_origin and existing_origin.original_bbox else block.bbox,
+        original_kind=existing_origin.original_kind if existing_origin and existing_origin.original_kind else block.block_type,
+        raw_artifact_uid=existing_origin.raw_artifact_uid if existing_origin else "",
+        raw_json_path=existing_origin.raw_json_path if existing_origin else "",
+        raw_index=binding.parent_index if binding.parent_index >= 0 else (existing_origin.raw_index if existing_origin else None),
+    )
     set_payload_entries(block, {
         PADDLE_BINDING_KEY: binding.to_payload(),
         PADDLE_BLOCK_LABEL_KEY: binding.source_label or block.block_type.value,

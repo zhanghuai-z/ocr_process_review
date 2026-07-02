@@ -2982,11 +2982,6 @@ def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> in
     records = raw_layout_records(page)
     if not raw_payload or not records:
         return -1
-    explicit = _int_value(
-        raw_payload.get("_layout_paddle_parent_index", raw_payload.get("paddle_parent_index")),
-    )
-    if 0 <= explicit < len(records):
-        return explicit
 
     label = route_authority_label(raw_payload)
     bbox = _payload_bbox_xyxy(raw_payload, page.width, page.height)
@@ -3003,28 +2998,36 @@ def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> in
     return -1
 
 
+def _origin_raw_index(block: Block) -> int:
+    origin = getattr(block, "origin", None)
+    return _int_value(getattr(origin, "raw_index", None))
+
+
+def _origin_source_label(block: Block) -> str:
+    origin = getattr(block, "origin", None)
+    return str(getattr(origin, "source_label", "") or "")
+
+
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     raw_payload = dict(block.raw_payload)
     app_payload = dict(block.app_payload)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     app_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-    parent_index = _parent_index_for_raw_payload(page, raw_payload)
+    parent_index = _origin_raw_index(block)
     if parent_index < 0:
-        parent_index = _int_value(
-            app_payload.get("_layout_paddle_parent_index", app_payload.get("paddle_parent_index")),
-        )
+        parent_index = _parent_index_for_raw_payload(page, raw_payload)
     binding = app_payload.get(PADDLE_BINDING_KEY)
     if parent_index < 0 and isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
     source_label = (
-        authoritative_paddle_label(raw_payload)
-        or str(app_payload.get("block_label") or "")
+        block.source_label
+        or _origin_source_label(block)
+        or authoritative_paddle_label(raw_payload)
         or (
             str(binding.get("source_label") or binding.get("block_type") or "")
             if isinstance(binding, dict)
             else ""
         )
-        or block.source_label
         or block.block_type.value
     )
     row = {
@@ -3032,15 +3035,12 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "block_label": source_label,
         "block_bbox": list(block.bbox.to_xyxy()),
         "block_content": _layout_block_content(block, raw_payload),
-        "source_label": block.source_label or source_label,
+        "source_label": source_label,
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_block_ocr_policy": block.ocr_policy.value,
     }
     if isinstance(binding, dict) and binding:
         row[PADDLE_BINDING_KEY] = dict(binding)
-    for key in (ROUTE_SUBBLOCKS_FIELD,):
-        if key in app_payload:
-            row[key] = app_payload[key]
     records = raw_layout_records(page)
     if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
         parent_record = records[parent_index]
@@ -3443,11 +3443,7 @@ def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
     for block in page.blocks:
         if block.block_type != BlockType.EQUATION:
             continue
-        label = normalize_paddle_label(
-            block.source_label
-            or str(block.app_payload.get("block_label") or "")
-            or str(block.raw_payload.get("block_label") or "")
-        )
+        label = normalize_paddle_label(block.source_label or block.block_type.value)
         if label not in {"inline_formula", "formula"}:
             continue
         if block.bbox is None or block.bbox.area <= 0:
@@ -3458,12 +3454,15 @@ def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
 
 
 def _existing_parent_index(block: Block) -> int:
+    origin_index = _origin_raw_index(block)
+    if origin_index >= 0:
+        return origin_index
     binding = block.app_payload.get(PADDLE_BINDING_KEY)
     if isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
         if parent_index >= 0:
             return parent_index
-    return _int_value(block.app_payload.get("_layout_paddle_parent_index", block.raw_payload.get("_layout_paddle_parent_index")))
+    return -1
 
 
 def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:

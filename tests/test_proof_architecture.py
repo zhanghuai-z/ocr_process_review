@@ -191,6 +191,47 @@ def test_table_text_layer_html_source_does_not_scan_app_payload():
         raise AssertionError("_table_html function not found")
 
 
+def test_hanwang_formula_crop_targets_do_not_read_payload_labels():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/engines/hanwang/micro_recblock.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_inline_formula_crop_ocr_targets":
+            fn_source = ast.get_source_segment(source, node) or ""
+            assert "app_payload" not in fn_source
+            assert "raw_payload" not in fn_source
+            assert "block_label" not in fn_source
+            break
+    else:
+        raise AssertionError("_inline_formula_crop_ocr_targets function not found")
+
+
+def test_hanwang_block_row_does_not_recover_parent_from_block_payloads():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/engines/hanwang/micro_recblock.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_layout_row_from_block":
+            fn_source = ast.get_source_segment(source, node) or ""
+            assert 'app_payload.get("_layout_paddle_parent_index"' not in fn_source
+            assert 'raw_payload.get("_layout_paddle_parent_index"' not in fn_source
+            assert 'app_payload.get("block_label"' not in fn_source
+            break
+    else:
+        raise AssertionError("_layout_row_from_block function not found")
+
+
+def test_hanwang_raw_payload_parent_matching_ignores_runtime_parent_index():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/engines/hanwang/micro_recblock.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_parent_index_for_raw_payload":
+            fn_source = ast.get_source_segment(source, node) or ""
+            assert "_layout_paddle_parent_index" not in fn_source
+            assert "paddle_parent_index" not in fn_source
+            break
+    else:
+        raise AssertionError("_parent_index_for_raw_payload function not found")
+
+
 def test_project_model_does_not_own_proof_export_summary():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     for retired_name in (

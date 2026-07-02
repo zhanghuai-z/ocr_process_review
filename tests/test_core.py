@@ -7464,6 +7464,24 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                 "block_label": "text",
                 "block_bbox": [200, 550, 2050, 850],
                 "block_content": parent_text,
+                ROUTE_SUBBLOCKS_FIELD: [
+                    {
+                        "block_label": "inline_formula",
+                        "block_bbox": [445, 556, 653, 620],
+                        "block_content": "$ GGF_{it}^{Post-short} $",
+                        "_layout_manual_route_subblock": True,
+                    },
+                    {
+                        "block_label": "inline_formula",
+                        "block_bbox": [1242, 562, 1453, 620],
+                    },
+                    {
+                        "block_label": "inline_formula",
+                        "block_bbox": [686, 565, 884, 614],
+                        "_layout_manual_route_subblock": True,
+                        "_layout_manual_unbound_route_subblock": True,
+                    },
+                ],
             },
         ]),
         blocks=[
@@ -7475,26 +7493,6 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                     "block_label": "text",
                     "block_bbox": [200, 550, 2050, 850],
                     "block_content": parent_text,
-                },
-                app_payload={
-                    ROUTE_SUBBLOCKS_FIELD: [
-                        {
-                            "block_label": "inline_formula",
-                            "block_bbox": [445, 556, 653, 620],
-                            "block_content": "$ GGF_{it}^{Post-short} $",
-                            "_layout_manual_route_subblock": True,
-                        },
-                        {
-                            "block_label": "inline_formula",
-                            "block_bbox": [1242, 562, 1453, 620],
-                        },
-                        {
-                            "block_label": "inline_formula",
-                            "block_bbox": [686, 565, 884, 614],
-                            "_layout_manual_route_subblock": True,
-                            "_layout_manual_unbound_route_subblock": True,
-                        },
-                    ],
                 },
             ),
             Block(
@@ -7560,6 +7558,10 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
         "block_label": "text",
         "block_bbox": [200, 550, 2050, 850],
         "block_content": parent_text,
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [445, 556, 884, 620]},
+            {"block_label": "inline_formula", "block_bbox": [1242, 562, 1453, 620]},
+        ],
     }
     page = Page(
         image_path="/tmp/manual-formula-parent-steal.png",
@@ -7586,12 +7588,6 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(200, 550, 2050, 850),
                 raw_payload=dict(parent_record),
-                app_payload={
-                    ROUTE_SUBBLOCKS_FIELD: [
-                        {"block_label": "inline_formula", "block_bbox": [445, 556, 884, 620]},
-                        {"block_label": "inline_formula", "block_bbox": [1242, 562, 1453, 620]},
-                    ],
-                },
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -9428,6 +9424,16 @@ def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
         image_path="",
         width=150,
         height=60,
+        raw_layout_artifact=_paddle_layout_artifact([
+            {
+                "block_label": "text",
+                "block_bbox": [0, 0, 130, 40],
+                "block_content": "甲 $ A $ 乙",
+                "_route_subblocks": [
+                    {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 40]},
+                ],
+            },
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
@@ -9438,9 +9444,6 @@ def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
                     "block_content": "甲 $ A $ 乙",
                 },
                 app_payload={
-                    "_route_subblocks": [
-                        {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 40]},
-                    ],
                     LAYOUT_LINE_ROUTES_FIELD: [
                         {
                             "bbox": [80, 0, 130, 40],
@@ -11009,6 +11012,9 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
             binding = block.app_payload["paddle_binding"]
             assert binding["status"] == BINDING_EMPTY_REVIEW
             assert binding["text"] == ""
+            assert block.origin is not None
+            assert block.origin.source_label == "inline_formula"
+            assert block.origin.raw_index == 0
             assert block.source_label == "inline_formula"
             assert block.ocr_policy != OcrPolicy.TEXT_OCR
             assert block.lines == []
@@ -11017,6 +11023,36 @@ def test_layout_panel_manual_formula_writes_paddle_binding_payload():
             app.processEvents()
 
     print("test_layout_panel_manual_formula_writes_paddle_binding_payload PASSED")
+
+
+def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
+    from app.engines.hanwang.micro_recblock import _inline_formula_crop_ocr_targets
+    from app.models import BBox, Block, BlockType, Page
+
+    structured_display = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(10, 10, 50, 20),
+        source_label="display_formula",
+        raw_payload={"block_label": "inline_formula"},
+        app_payload={"block_label": "inline_formula"},
+    )
+    structured_inline = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox(70, 10, 50, 20),
+        source_label="inline_formula",
+        raw_payload={"block_label": "display_formula"},
+        app_payload={"block_label": "display_formula"},
+    )
+    page = Page(
+        image_path="/tmp/inline-target-labels.png",
+        width=200,
+        height=100,
+        blocks=[structured_display, structured_inline],
+    )
+
+    assert _inline_formula_crop_ocr_targets(page) == [structured_inline]
+
+    print("test_inline_formula_crop_targets_use_structured_label_not_payload_labels PASSED")
 
 
 def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
@@ -12104,7 +12140,7 @@ def test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to
     print("test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to_formula_text PASSED")
 
 
-def test_hanwang_ppvl_skip_uses_layout_authority_label():
+def test_hanwang_ppvl_skip_uses_current_layout_label_over_raw_payload_label():
     import numpy as np
 
     from app.engines.hanwang.micro_recblock import BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats
@@ -12114,17 +12150,17 @@ def test_hanwang_ppvl_skip_uses_layout_authority_label():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(ppvl_blocks)
-        assert ppvl_blocks[0]["block_label"] == "figure"
+        assert ppvl_blocks[0]["block_label"] == "text"
         return [
             BlockResult(
                 block_idx=0,
-                block_label="figure",
+                block_label="text",
                 block_bbox=(10, 10, 80, 40),
-                source="ppvl",
+                source="hanwang",
                 text="图",
-                ppvl_text="图",
+                ppvl_text="",
                 raw_block=dict(ppvl_blocks[0]),
-                lines=[LineResult(text="图", bbox=(10, 10, 80, 40), source="ppvl")],
+                lines=[LineResult(text="图", bbox=(10, 10, 80, 40), source="hanwang")],
             )
         ], RunStats(n_blocks_total=1, n_blocks_ppvl=1)
 
@@ -12149,11 +12185,11 @@ def test_hanwang_ppvl_skip_uses_layout_authority_label():
     )
 
     assert len(calls) == 1
-    assert page.blocks[0].block_type == BlockType.FIGURE
-    assert page.blocks[0].source_label == "figure"
-    assert page.blocks[0].ocr_policy != OcrPolicy.TEXT_OCR
+    assert page.blocks[0].block_type == BlockType.TEXT
+    assert page.blocks[0].source_label == "text"
+    assert page.blocks[0].ocr_policy == OcrPolicy.TEXT_OCR
 
-    print("test_hanwang_ppvl_skip_uses_layout_authority_label PASSED")
+    print("test_hanwang_ppvl_skip_uses_current_layout_label_over_raw_payload_label PASSED")
 
 
 def test_ocr_pipeline_records_failed_page_when_block_ocr_fails():
