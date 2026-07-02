@@ -1,8 +1,7 @@
 """Structured accessors for Paddle/PP-VL block attributes."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.paddle_labels import normalize_paddle_label
@@ -24,8 +23,6 @@ class BlockAttributes:
     raw_label: str = ""
     semantic_label: str = ""
     semantic_block_type: BlockType = BlockType.UNKNOWN
-    raw_payload: dict[str, Any] = field(default_factory=dict)
-    app_payload: dict[str, Any] = field(default_factory=dict)
 
     @property
     def normalized_source_label(self) -> str:
@@ -63,14 +60,10 @@ class BlockAttributes:
             "semantic_label": self.semantic_label,
             "semantic_block_type": self.semantic_block_type.value,
         }
-        if self.raw_payload:
-            payload["raw_payload"] = dict(self.raw_payload)
         return payload
 
 
 def block_attributes(block: Block) -> BlockAttributes:
-    raw_payload = dict(block.raw_payload)
-    app_payload = dict(block.app_payload)
     origin = getattr(block, "origin", None)
     origin_label = normalize_source_label(str(getattr(origin, "source_label", "") or ""))
     raw_label = ""
@@ -98,8 +91,6 @@ def block_attributes(block: Block) -> BlockAttributes:
         raw_label=raw_label,
         semantic_label=semantic_label,
         semantic_block_type=semantic_block_type,
-        raw_payload=raw_payload,
-        app_payload=app_payload,
     )
 
 

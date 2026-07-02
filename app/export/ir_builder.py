@@ -326,7 +326,6 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
         source_label=attrs.source_label,
         semantic_label=attrs.semantic_label,
         semantic_block_type=attrs.semantic_block_type.value,
-        raw_payload=dict(attrs.raw_payload),
         origin=_origin(block.source),
     )
 

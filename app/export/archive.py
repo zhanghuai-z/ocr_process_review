@@ -141,9 +141,6 @@ def _xml_source(source_el) -> dict[str, Any]:
         "semantic_label": source_el.get("semantic_label", ""),
         "semantic_block_type": source_el.get("semantic_block_type", ""),
     }
-    raw_payload = _fields(source_el.find("RawPayload"))
-    if raw_payload:
-        source["raw_payload"] = raw_payload
     return source
 
 

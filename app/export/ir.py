@@ -68,7 +68,6 @@ class ExportSource:
     source_label: str = ""
     semantic_label: str = ""
     semantic_block_type: str = ""
-    raw_payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

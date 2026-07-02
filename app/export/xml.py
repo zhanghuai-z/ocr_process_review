@@ -71,8 +71,6 @@ def _build_xml_archive(document: ExportDocument):
             source_el.set("source_label", element.source.source_label)
             source_el.set("semantic_label", element.source.semantic_label)
             source_el.set("semantic_block_type", element.source.semantic_block_type)
-            if element.source.raw_payload:
-                _append_mapping(etree.SubElement(source_el, "RawPayload"), element.source.raw_payload)
             _append_id_list(source_el, "BlockIds", "BlockId", element.source.block_ids)
             _append_id_list(source_el, "LineIds", "LineId", element.source.line_ids)
             _append_id_list(source_el, "CharIds", "CharId", element.source.char_ids)

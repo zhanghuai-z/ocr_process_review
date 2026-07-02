@@ -2713,7 +2713,8 @@ def test_export_ir_preserves_structured_block_attributes():
     assert element["source"]["source_label"] == "paragraph_title"
     assert element["source"]["semantic_label"] == "paragraph_title"
     assert element["source"]["semantic_block_type"] == "title"
-    assert element["source"]["raw_payload"]["block_label"] == "paragraph_title"
+    assert "raw_payload" not in element["source"]
+    assert "raw_payload" not in element["layout_attributes"]
     assert element["layout_attributes"]["semantic_block_type"] == "title"
 
     print("test_export_ir_preserves_structured_block_attributes PASSED")

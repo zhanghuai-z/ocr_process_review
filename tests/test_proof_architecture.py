@@ -151,6 +151,30 @@ def test_block_attributes_do_not_derive_semantics_from_payloads():
     assert "app_payload.get" not in source
     assert "raw_payload.get" not in source
     assert "raw_label and" not in source
+    assert "app_payload:" not in source
+    assert "raw_payload:" not in source
+    assert 'payload["raw_payload"]' not in source
+
+
+def test_export_ir_source_does_not_expose_raw_payload():
+    ir_source = Path("app/export/ir.py").read_text(encoding="utf-8")
+    tree = ast.parse(ir_source, filename="app/export/ir.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "ExportSource":
+            class_source = ast.get_source_segment(ir_source, node) or ""
+            assert "raw_payload" not in class_source
+            break
+    else:
+        raise AssertionError("ExportSource class not found")
+
+    builder_source = Path("app/export/ir_builder.py").read_text(encoding="utf-8")
+    assert "raw_payload=dict(attrs.raw_payload)" not in builder_source
+
+    xml_source = Path("app/export/xml.py").read_text(encoding="utf-8")
+    assert "RawPayload" not in xml_source
+
+    archive_source = Path("app/export/archive.py").read_text(encoding="utf-8")
+    assert "RawPayload" not in archive_source
 
 
 def test_app_payload_mutation_goes_through_block_payload_helpers():
