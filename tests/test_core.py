@@ -1042,6 +1042,70 @@ def test_project_store_migrates_legacy_inline_formula_payload_to_block_origin():
         os.unlink(db_path)
 
 
+def test_project_store_persists_ocr_audit_and_migrates_legacy_payload():
+    import sqlite3
+
+    from app.core.block_payload import HANWANG_BBOX_AUDIT_KEY
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        audit = {
+            "schema": "hanwang_bbox_audit.v1",
+            "layout_block_bbox": [0, 0, 40, 20],
+            "hanwang_recog_group_failed_count": 1,
+        }
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            ocr_audit=dict(audit),
+        )
+        project = OcrProject(
+            name="ocr-audit",
+            pages=[Page(image_path="/tmp/ocr-audit.png", width=100, height=80, blocks=[block])],
+        )
+
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+            loaded = store.load_project(saved.id)
+
+        loaded_block = loaded.pages[0].blocks[0]
+        assert loaded_block.ocr_audit["schema"] == "hanwang_bbox_audit.v1"
+        assert HANWANG_BBOX_AUDIT_KEY not in loaded_block.app_payload
+
+        legacy_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(10, 10, 50, 30))
+        legacy_project = OcrProject(
+            name="legacy-ocr-audit",
+            pages=[Page(image_path="/tmp/legacy-ocr-audit.png", width=100, height=80, blocks=[legacy_block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(legacy_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET app_payload_json=? WHERE id=?",
+                (json.dumps({HANWANG_BBOX_AUDIT_KEY: audit}, ensure_ascii=False), legacy_block.id),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            migrated = store.load_project(saved.id)
+            migrated_block = migrated.pages[0].blocks[0]
+            assert migrated_block.ocr_audit["hanwang_recog_group_failed_count"] == 1
+            assert HANWANG_BBOX_AUDIT_KEY not in migrated_block.app_payload
+            store.save_project(migrated)
+            reloaded = store.load_project(saved.id)
+
+        reloaded_block = reloaded.pages[0].blocks[0]
+        assert reloaded_block.ocr_audit["layout_block_bbox"] == [0, 0, 40, 20]
+        assert reloaded_block.app_payload == {}
+
+        print("test_project_store_persists_ocr_audit_and_migrates_legacy_payload PASSED")
+    finally:
+        os.unlink(db_path)
+
+
 def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.core.project_store import ProjectStore
     from app.models import (

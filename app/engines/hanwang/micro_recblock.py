@@ -3039,24 +3039,22 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
 
 def _persistent_payloads_from_route_row(
     raw_block: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], PaddleBinding | None]:
+) -> tuple[dict[str, Any], dict[str, Any], PaddleBinding | None, dict[str, Any]]:
     """Split the current Hanwang route row into persisted raw/app payloads.
 
     Route rows temporarily carry app-owned data such as paddle binding and
-    Hanwang bbox audit next to vendor fields. Persisted ``Block`` objects must
-    keep those fields in ``app_payload`` explicitly; this is not a legacy file
-    migration path.
+    Hanwang bbox audit next to vendor fields. Persisted ``Block`` objects keep
+    those fields in typed state; this is not a legacy file migration path.
     """
     raw_payload = dict(raw_block or {})
     app_payload: dict[str, Any] = {}
     binding = raw_payload.pop(PADDLE_BINDING_KEY, None)
     audit = raw_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
-    if isinstance(audit, dict) and audit:
-        app_payload[HANWANG_BBOX_AUDIT_KEY] = dict(audit)
     return (
         strip_runtime_layout_payload(raw_payload),
         strip_runtime_layout_payload(app_payload),
         PaddleBinding.from_dict(binding if isinstance(binding, dict) else None),
+        dict(audit) if isinstance(audit, dict) else {},
     )
 
 
@@ -3641,8 +3639,8 @@ class HanwangMicroRecBlockEngine:
             ]
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
-            raw_payload, app_payload, paddle_binding = _persistent_payloads_from_route_row(row.raw_block)
-            audit = app_payload.get(HANWANG_BBOX_AUDIT_KEY)
+            raw_payload, app_payload, paddle_binding, ocr_audit = _persistent_payloads_from_route_row(row.raw_block)
+            audit = ocr_audit
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
                 if failed_groups:
@@ -3660,6 +3658,7 @@ class HanwangMicroRecBlockEngine:
                 raw_payload=raw_payload,
                 app_payload=app_payload,
                 paddle_binding=paddle_binding,
+                ocr_audit=ocr_audit,
             )
             new_block.ocr_policy = default_ocr_policy_for_block(new_block)
             if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:

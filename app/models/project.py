@@ -288,6 +288,7 @@ class Block:
     origin: BlockOrigin | None = None               # 块来源事实；新代码优先读这里
     paddle_binding: PaddleBinding | None = None     # 人工框与 Paddle 原始事实的结构化绑定
     ocr_invalidated_reason: str = ""                # 块级 OCR 结果失效原因
+    ocr_audit: dict[str, Any] = field(default_factory=dict)  # OCR 调试/审计事实
     uid: str = ""                                   # 稳定业务 ID
 
     def __post_init__(self) -> None:

@@ -29,6 +29,7 @@ from app.core.model_validation import (
 )
 from app.core.line_text_contract import line_text_contract
 from app.core.block_payload import (
+    HANWANG_BBOX_AUDIT_KEY,
     MANUAL_DRAW_BBOX_KEY,
     MANUAL_MERGE_FROM_KEY,
     OCR_INVALIDATION_KIND_KEY,
@@ -120,7 +121,8 @@ CREATE TABLE IF NOT EXISTS block (
     raw_payload_json TEXT   NOT NULL DEFAULT '{}',
     app_payload_json TEXT   NOT NULL DEFAULT '{}',
     paddle_binding_json TEXT NOT NULL DEFAULT '{}',
-    ocr_invalidated_reason TEXT NOT NULL DEFAULT ''
+    ocr_invalidated_reason TEXT NOT NULL DEFAULT '',
+    ocr_audit_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS block_origin (
@@ -361,6 +363,9 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     19: [
         "ALTER TABLE block ADD COLUMN ocr_invalidated_reason TEXT NOT NULL DEFAULT '';",
+    ],
+    20: [
+        "ALTER TABLE block ADD COLUMN ocr_audit_json TEXT NOT NULL DEFAULT '{}';",
     ],
 }
 
@@ -1061,13 +1066,14 @@ class ProjectStore:
             json.dumps(block.app_payload, ensure_ascii=False),
             json.dumps(block.paddle_binding.to_dict() if block.paddle_binding else {}, ensure_ascii=False),
             block.ocr_invalidated_reason,
+            json.dumps(block.ocr_audit, ensure_ascii=False),
         )
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
                 "source, ocr_policy, note, source_label, raw_payload_json, "
-                "app_payload_json, paddle_binding_json, ocr_invalidated_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "app_payload_json, paddle_binding_json, ocr_invalidated_reason, ocr_audit_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
             )
             block.id = cur.lastrowid
@@ -1076,7 +1082,7 @@ class ProjectStore:
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, ocr_policy=?, note=?, "
                 "source_label=?, raw_payload_json=?, app_payload_json=?, "
-                "paddle_binding_json=?, ocr_invalidated_reason=? "
+                "paddle_binding_json=?, ocr_invalidated_reason=?, ocr_audit_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
             )
@@ -1645,10 +1651,18 @@ class ProjectStore:
                 if "paddle_binding_json" in r.keys()
                 else {}
             )
+            ocr_audit_payload = (
+                _json_to_dict(r["ocr_audit_json"], field="block.ocr_audit_json")
+                if "ocr_audit_json" in r.keys()
+                else {}
+            )
             if not paddle_binding_payload:
                 legacy_binding = app_payload.pop(PADDLE_BINDING_KEY, None)
                 if isinstance(legacy_binding, dict):
                     paddle_binding_payload = dict(legacy_binding)
+            legacy_ocr_audit = app_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
+            if not ocr_audit_payload and isinstance(legacy_ocr_audit, dict):
+                ocr_audit_payload = dict(legacy_ocr_audit)
             app_payload.pop(PADDLE_BLOCK_LABEL_KEY, None)
             app_payload.pop(PADDLE_BLOCK_BBOX_KEY, None)
             ocr_invalidated_reason = (
@@ -1700,6 +1714,7 @@ class ProjectStore:
                 origin=origin,
                 paddle_binding=PaddleBinding.from_dict(paddle_binding_payload),
                 ocr_invalidated_reason=ocr_invalidated_reason,
+                ocr_audit=ocr_audit_payload,
             )
             block.lines = self._load_lines(block.id)
             blocks.append(block)
