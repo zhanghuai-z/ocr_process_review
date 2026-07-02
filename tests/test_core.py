@@ -6778,7 +6778,8 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     footnote = Block(block_type=BlockType.TEXT, bbox=bb, source_label="vision_footnote")
     formula_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="inline_formula")
     equation = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
-    table_binding = Block(
+    table_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="table")
+    legacy_table_binding = Block(
         block_type=BlockType.TEXT,
         bbox=bb,
         app_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
@@ -6789,7 +6790,8 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     assert should_dispatch_to_text_ocr(footnote) is True
     assert should_dispatch_to_text_ocr(formula_label) is False
     assert should_dispatch_to_text_ocr(equation) is False
-    assert should_dispatch_to_text_ocr(table_binding) is False
+    assert should_dispatch_to_text_ocr(table_label) is False
+    assert should_dispatch_to_text_ocr(legacy_table_binding) is True
     assert is_text_ocr_candidate(disabled_text) is True
     assert should_dispatch_to_text_ocr(disabled_text) is False
 

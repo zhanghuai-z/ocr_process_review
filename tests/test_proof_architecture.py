@@ -238,6 +238,23 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
         raise AssertionError("Line class not found")
 
 
+def test_block_model_does_not_reconstruct_origin_from_payloads():
+    source = Path("app/models/project.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/models/project.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Block":
+            block_source = ast.get_source_segment(source, node) or ""
+            assert "_origin_from_legacy_fields" not in block_source
+            assert "_sync_legacy_source_fields_from_origin" not in block_source
+            assert "app_payload.get" not in block_source
+            assert "raw_payload.get" not in block_source
+            break
+    else:
+        raise AssertionError("Block class not found")
+    store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    assert "_origin_from_legacy_fields" not in store_source
+
+
 def test_proof_line_facts_does_not_reconstruct_state_from_retired_mirrors():
     source = Path("app/core/proof_line_facts.py").read_text(encoding="utf-8")
     assert "ProofLineState(" not in source

@@ -62,7 +62,7 @@ from app.core.paddle_v16_client import (
     build_paddle_v16_optional_payload,
     is_paddle_v16_endpoint,
 )
-from app.models import Block, BlockType, Page
+from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
 
 logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
@@ -84,6 +84,26 @@ def _display_image_path(page: Page) -> Path:
         return image_path
     normalized = Path(str(page.display_image_path).replace("\\", "/"))
     return normalized
+
+
+def _layout_block_origin(
+    *,
+    source_engine: str,
+    source_run_id: str,
+    source_label: str,
+    bbox,
+    block_type: BlockType,
+    confidence: float | None = None,
+) -> BlockOrigin:
+    return BlockOrigin(
+        created_by=BlockSource.AUTO_LAYOUT.value,
+        source_engine=source_engine,
+        source_run_id=source_run_id,
+        source_label=source_label,
+        source_confidence=confidence,
+        original_bbox=bbox,
+        original_kind=block_type,
+    )
 
 
 def _layout_worker_max_workers(total_pages: int) -> int:
@@ -363,14 +383,23 @@ class LayoutAnalyzer:
         raw_overlay_items.append((raw_type, bbox))
         raw_payload = strip_runtime_layout_payload(normalized.raw)
         app_payload = {}
+        block_type = map_paddle_label_to_block_type(raw_type)
         block = Block(
-            block_type=map_paddle_label_to_block_type(raw_type),
+            block_type=block_type,
             bbox=bbox,
             order=order,
             note=" | ".join(note_parts),
             source_label=normalized_type,
             raw_payload=raw_payload,
             app_payload=app_payload,
+            origin=_layout_block_origin(
+                source_engine="paddleocr-vl",
+                source_run_id=self._layout_batch_id,
+                source_label=normalized_type,
+                bbox=bbox,
+                block_type=block_type,
+                confidence=score,
+            ),
         )
         block.ocr_policy = default_ocr_policy_for_block(block)
         page_blocks.append(block)
@@ -813,12 +842,21 @@ class LayoutAnalyzer:
             if bbox.area <= 0:
                 continue
             raw_payload = strip_runtime_layout_payload(item)
+            block_type = map_paddle_label_to_block_type(raw_type)
+            normalized_type = normalize_paddle_label(raw_type)
             page.blocks.append(Block(
-                block_type=map_paddle_label_to_block_type(raw_type),
+                block_type=block_type,
                 bbox=bbox,
                 order=i,
-                source_label=raw_type,
+                source_label=normalized_type,
                 raw_payload=raw_payload,
+                origin=_layout_block_origin(
+                    source_engine="paddleocr-local",
+                    source_run_id=self._layout_batch_id,
+                    source_label=normalized_type,
+                    bbox=bbox,
+                    block_type=block_type,
+                ),
             ))
         self._rescale_blocks_if_suspicious(page)
         return page
@@ -934,6 +972,14 @@ class LayoutAnalyzer:
             b.order = i
             if not b.source_label:
                 b.source_label = b.block_type.value
+            if b.origin is None:
+                b.origin = _layout_block_origin(
+                    source_engine="hanwang-layout",
+                    source_run_id=self._layout_batch_id,
+                    source_label=normalize_paddle_label(b.source_label or b.block_type.value),
+                    bbox=b.bbox,
+                    block_type=b.block_type,
+                )
         page.blocks = blocks
         self._rescale_blocks_if_suspicious(page)
         return page

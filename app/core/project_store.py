@@ -378,6 +378,20 @@ def _json_to_dict(s: str, *, field: str) -> dict:
     return value
 
 
+def _origin_from_current_block(block: Block) -> BlockOrigin:
+    """Create a minimal origin for blocks that were built without provenance.
+
+    This is a storage boundary fallback, not legacy payload migration. It only
+    records the current block fields available on the active layout model.
+    """
+    return BlockOrigin(
+        created_by=getattr(block.source, "value", str(block.source or BlockSource.AUTO_LAYOUT.value)),
+        source_label=str(block.source_label or ""),
+        original_bbox=block.bbox,
+        original_kind=block.block_type,
+    )
+
+
 def _proof_alignment_state(line: Line) -> str:
     if not line.chars:
         return "line_only"
@@ -1067,10 +1081,8 @@ class ProjectStore:
         block: Block,
         project_id: int,
     ) -> None:
-        origin = block.origin
-        if origin is None:
-            origin = block._origin_from_legacy_fields()
-            block.origin = origin
+        origin = block.origin or _origin_from_current_block(block)
+        block.origin = origin
         bb = origin.original_bbox
         x, y, w, h = (bb.x, bb.y, bb.w, bb.h) if bb else (None, None, None, None)
         cur.execute(

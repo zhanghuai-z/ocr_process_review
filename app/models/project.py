@@ -194,24 +194,6 @@ class BlockOrigin:
         }
 
 
-def _payload_float(value: object) -> Optional[float]:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _payload_int(value: object) -> Optional[int]:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @dataclass
 class Block:
     """版面分析得到的一个内容块。"""
@@ -232,57 +214,8 @@ class Block:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
-        if self.origin is None:
-            self.origin = self._origin_from_legacy_fields()
-        self._sync_legacy_source_fields_from_origin()
         if self.ocr_policy == OcrPolicy.TEXT_OCR:
             self.ocr_policy = self._normalized_default_ocr_policy()
-
-    def _origin_from_legacy_fields(self) -> BlockOrigin:
-        binding = self.app_payload.get("paddle_binding")
-        binding_dict = binding if isinstance(binding, dict) else {}
-        label = (
-            self.source_label
-            or str(binding_dict.get("source_label") or binding_dict.get("block_type") or "")
-            or str(self.raw_payload.get("block_label") or self.raw_payload.get("label") or "")
-        )
-        confidence = _payload_float(
-            self.raw_payload.get("confidence", self.raw_payload.get("score"))
-        )
-        raw_index = _payload_int(
-            binding_dict.get("raw_index", binding_dict.get("index", self.raw_payload.get("index")))
-        )
-        raw_artifact_uid = str(
-            binding_dict.get("raw_artifact_uid")
-            or binding_dict.get("artifact_uid")
-            or self.raw_payload.get("raw_artifact_uid")
-            or ""
-        )
-        return BlockOrigin(
-            created_by=getattr(self.source, "value", str(self.source or BlockSource.AUTO_LAYOUT.value)),
-            source_engine=str(binding_dict.get("source_engine") or self.raw_payload.get("source_engine") or ""),
-            source_run_id=str(binding_dict.get("source_run_id") or self.raw_payload.get("run_id") or ""),
-            source_label=str(label or ""),
-            source_confidence=confidence,
-            original_bbox=self.bbox,
-            original_kind=self.block_type,
-            raw_artifact_uid=raw_artifact_uid,
-            raw_json_path=str(binding_dict.get("raw_json_path") or ""),
-            raw_index=raw_index,
-        )
-
-    def _sync_legacy_source_fields_from_origin(self) -> None:
-        origin = self.origin
-        if origin is None:
-            return
-        if not self.source_label and origin.source_label:
-            self.source_label = origin.source_label
-        if isinstance(self.source, BlockSource):
-            return
-        try:
-            self.source = BlockSource(str(origin.created_by or BlockSource.AUTO_LAYOUT.value))
-        except ValueError:
-            self.source = BlockSource.AUTO_LAYOUT
 
     def _normalized_default_ocr_policy(self) -> OcrPolicy:
         label = self._ocr_policy_label()
@@ -302,16 +235,7 @@ class Block:
         return OcrPolicy.TEXT_OCR
 
     def _ocr_policy_label(self) -> str:
-        values: list[object] = [self.source_label]
-        binding = self.app_payload.get("paddle_binding")
-        if isinstance(binding, dict):
-            values.extend([binding.get("source_label"), binding.get("block_type")])
-        values.extend([
-            self.app_payload.get("block_label"),
-            self.raw_payload.get("block_label"),
-            self.raw_payload.get("label"),
-            self.block_type.value,
-        ])
+        values: list[object] = [self.source_label, self.block_type.value]
         for value in values:
             text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
             if text:
