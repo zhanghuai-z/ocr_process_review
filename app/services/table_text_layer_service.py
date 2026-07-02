@@ -14,7 +14,7 @@ class TableTextLayerService:
         for block in page.blocks:
             if block.block_type != BlockType.TABLE:
                 continue
-            html = self._table_html(block)
+            html = self._table_html(page, block)
             if not html:
                 block.table_text_layer_cells = []
                 continue
@@ -33,11 +33,11 @@ class TableTextLayerService:
         return updated
 
     @staticmethod
-    def _table_html(block: Block) -> str:
+    def _table_html(page: Page, block: Block) -> str:
         candidates: list[str] = []
         candidates.extend(line.text for line in block.lines if line.text)
         candidates.extend(line.ocr_text for line in block.lines if line.ocr_text)
-        candidates.extend(raw_block_text_values(block, ("html", "table_html", "block_content")))
+        candidates.extend(raw_block_text_values(block, ("html", "table_html", "block_content"), page))
         for candidate in candidates:
             text = candidate.strip()
             if "<table" in text.lower() or "<tr" in text.lower():

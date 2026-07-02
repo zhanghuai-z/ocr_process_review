@@ -42,6 +42,37 @@ def _raw_layout_records(page):
     return raw_layout_records(page)
 
 
+def test_raw_block_payload_prefers_page_artifact_origin_record():
+    from app.core.raw_ocr_artifact import raw_block_payload, raw_block_text_values
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
+
+    page = Page(image_path="/tmp/raw-origin.png", width=100, height=80)
+    _attach_raw_layout_records(page, [
+        {
+            "block_label": "text",
+            "block_content": "artifact text",
+            "block_bbox": [1, 2, 30, 20],
+        },
+        {
+            "block_label": "table",
+            "block_content": "<table><tr><td>A</td></tr></table>",
+            "block_bbox": [5, 6, 40, 30],
+        },
+    ])
+    block = Block(
+        block_type=BlockType.TABLE,
+        bbox=BBox.from_xyxy(5, 6, 40, 30),
+        raw_payload={"block_content": "stale block payload"},
+        origin=BlockOrigin(source_label="table", raw_index=1),
+    )
+
+    assert raw_block_payload(block, page)["block_content"] == "<table><tr><td>A</td></tr></table>"
+    assert raw_block_text_values(block, ("block_content",), page) == ["<table><tr><td>A</td></tr></table>"]
+    assert raw_block_payload(block)["block_content"] == "stale block payload"
+
+    print("test_raw_block_payload_prefers_page_artifact_origin_record PASSED")
+
+
 # =====================================================================
 # 模型测试
 # =====================================================================
@@ -3728,7 +3759,7 @@ def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
     from PIL import Image
 
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3739,9 +3770,13 @@ def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
             block_type=BlockType.TABLE,
             bbox=BBox(20, 30, 160, 70),
             order=0,
-            raw_payload={"block_content": html},
+            raw_payload={"block_content": "<table><tr><td>STALE</td></tr></table>"},
+            origin=BlockOrigin(source_label="table", raw_index=0),
         )
         page = Page(image_path=image_path, width=240, height=160, blocks=[block])
+        _attach_raw_layout_records(page, [
+            {"block_label": "table", "block_bbox": [20, 30, 180, 100], "block_content": html}
+        ])
 
         updated = TableTextLayerService().enrich_page(page)
 
@@ -15880,6 +15915,8 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     line_routes = line_routes_for_block(_raw_layout_records(page)[0], page.width, page.height)
 
     assert blocks[0].block_type == BlockType.TEXT
+    assert blocks[0].origin is not None
+    assert blocks[0].origin.raw_index == 0
     assert "_route_subblocks" not in blocks[0].raw_payload
     assert "_route_subblocks" not in blocks[0].app_payload
     assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
@@ -15892,6 +15929,34 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     assert [label for label, _bbox in overlays] == ["text", "inline_formula", "table_region", "figure_caption"]
 
     print("test_layout_analyzer_forwards_route_subblocks_from_layout_det_res PASSED")
+
+
+def test_hanwang_layout_row_uses_page_artifact_origin_record():
+    from app.engines.hanwang.micro_recblock import _layout_row_from_block
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
+
+    page = Page(image_path="/tmp/hanwang-layout-row.png", width=200, height=120)
+    _attach_raw_layout_records(page, [
+        {
+            "block_label": "text",
+            "block_bbox": [0, 0, 100, 40],
+            "block_content": "artifact text",
+        }
+    ])
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(10, 12, 150, 52),
+        source_label="text",
+        raw_payload={"block_label": "text", "block_content": "stale raw text"},
+        origin=BlockOrigin(source_label="text", raw_index=0),
+    )
+
+    row = _layout_row_from_block(page, block)
+
+    assert row["block_content"] == "artifact text"
+    assert row["block_bbox"] == [10, 12, 150, 52]
+
+    print("test_hanwang_layout_row_uses_page_artifact_origin_record PASSED")
 
 
 def test_layout_analyzer_persists_raw_parsing_res_list():
@@ -19569,6 +19634,7 @@ def test_ppocr_v5_v6_compare_script_help():
 
 
 if __name__ == "__main__":
+    test_raw_block_payload_prefers_page_artifact_origin_record()
     test_models()
     test_workflow_state_keeps_project_and_page_ocr_state_separate()
     test_bbox_tools()
@@ -19807,6 +19873,7 @@ if __name__ == "__main__":
     test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere()
     test_layout_parsing_semantics_override_layout_det_when_both_exist()
     test_layout_analyzer_forwards_route_subblocks_from_layout_det_res()
+    test_hanwang_layout_row_uses_page_artifact_origin_record()
     test_layout_analyzer_persists_raw_parsing_res_list()
     test_layout_analyzer_does_not_promote_ocr_results_to_layout_blocks()
     test_layout_analyzer_uses_datainfo_canvas_scale()

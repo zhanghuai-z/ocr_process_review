@@ -3004,7 +3004,7 @@ def _origin_raw_index(block: Block) -> int:
 
 
 def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
-    raw_payload = raw_block_payload(block)
+    raw_payload = raw_block_payload(block, page)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     parent_index = _origin_raw_index(block)
     if parent_index < 0:

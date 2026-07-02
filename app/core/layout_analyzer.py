@@ -94,6 +94,7 @@ def _layout_block_origin(
     bbox,
     block_type: BlockType,
     confidence: float | None = None,
+    raw_index: int | None = None,
 ) -> BlockOrigin:
     return BlockOrigin(
         created_by=BlockSource.AUTO_LAYOUT.value,
@@ -103,6 +104,7 @@ def _layout_block_origin(
         source_confidence=confidence,
         original_bbox=bbox,
         original_kind=block_type,
+        raw_index=raw_index,
     )
 
 
@@ -343,6 +345,7 @@ class LayoutAnalyzer:
         page_blocks: List[Block],
         raw_overlay_items: List[tuple[str, object]],
         default_label: str = "unknown",
+        raw_index: int | None = None,
     ) -> int:
         normalized = normalize_paddle_layout_record(
             record,
@@ -399,6 +402,7 @@ class LayoutAnalyzer:
                 bbox=bbox,
                 block_type=block_type,
                 confidence=score,
+                raw_index=raw_index,
             ),
         )
         block.ocr_policy = default_ocr_policy_for_block(block)
@@ -535,9 +539,10 @@ class LayoutAnalyzer:
                     scale_x=scale_x,
                     scale_y=scale_y,
                 )
+            raw_index_base = len(artifact_records)
             artifact_records.extend(parsing_records)
 
-            for record in parsing_records:
+            for local_index, record in enumerate(parsing_records):
                 order = self._append_api_block(
                     page=page,
                     record=record,
@@ -547,6 +552,7 @@ class LayoutAnalyzer:
                     seen=seen,
                     page_blocks=page_blocks,
                     raw_overlay_items=raw_overlay_items,
+                    raw_index=raw_index_base + local_index,
                 )
             for record in geometry_records:
                 self._append_overlay_record(
@@ -856,6 +862,7 @@ class LayoutAnalyzer:
                     source_label=normalized_type,
                     bbox=bbox,
                     block_type=block_type,
+                    raw_index=i,
                 ),
             ))
         self._rescale_blocks_if_suspicious(page)

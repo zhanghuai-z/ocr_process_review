@@ -24,19 +24,41 @@ def set_paddle_raw_layout_records(page: Page, records: list[dict[str, Any]]) -> 
     return artifact
 
 
-def raw_block_payload(block: object) -> dict[str, Any]:
+def _raw_payload_from_origin(page: Page | None, block: object) -> dict[str, Any]:
+    if page is None:
+        return {}
+    origin = getattr(block, "origin", None)
+    try:
+        raw_index = int(getattr(origin, "raw_index", -1))
+    except (TypeError, ValueError):
+        return {}
+    records = raw_layout_records(page)
+    if raw_index < 0 or raw_index >= len(records):
+        return {}
+    record = records[raw_index]
+    return dict(record) if isinstance(record, dict) else {}
+
+
+def raw_block_payload(block: object, page: Page | None = None) -> dict[str, Any]:
     """Return a copy of a block's vendor payload.
 
     Raw payload is external evidence. Callers that still need it should read a
     copy through this module instead of treating ``Block`` as a mutable vendor
     JSON container.
     """
+    origin_payload = _raw_payload_from_origin(page, block)
+    if origin_payload:
+        return origin_payload
     payload = getattr(block, "raw_payload", None)
     return dict(payload) if isinstance(payload, dict) else {}
 
 
-def raw_block_text_values(block: object, keys: tuple[str, ...]) -> list[str]:
-    payload = raw_block_payload(block)
+def raw_block_text_values(
+    block: object,
+    keys: tuple[str, ...],
+    page: Page | None = None,
+) -> list[str]:
+    payload = raw_block_payload(block, page)
     values: list[str] = []
     for key in keys:
         value = payload.get(key)
