@@ -1011,6 +1011,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
     import pytest
     import sqlite3
 
+    from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, ROUTE_SUBBLOCKS_FIELD
     from app.core.project_store import ProjectDataError, ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -1036,6 +1037,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
             bbox=BBox.from_xyxy(0, 0, 140, 40),
             lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
             raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes, ROUTE_SUBBLOCKS_FIELD: route_subblocks},
+            app_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
         )
         page.blocks.append(block)
         project = OcrProject(name="runtime route cache", pages=[page])
@@ -1047,6 +1049,8 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
         assert block.lines[0].text == "旧OCR结果"
         assert LAYOUT_LINE_ROUTES_FIELD in block.raw_payload
         assert ROUTE_SUBBLOCKS_FIELD in block.raw_payload
+        assert LAYOUT_LINE_ROUTES_FIELD in block.app_payload
+        assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
 
         clean_block = Block(
             block_type=BlockType.TEXT,
