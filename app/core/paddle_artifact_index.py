@@ -18,7 +18,7 @@ from app.core.paddle_line_routing import (
     route_subblocks_for_block,
     vertical_overlap_ratio,
 )
-from app.core.raw_ocr_artifact import raw_layout_records
+from app.core.normalized_layout_artifact import LayoutRegion, normalized_layout_regions
 from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrPolicy
 
 
@@ -248,7 +248,9 @@ class PaddleArtifactIndex:
 
     @classmethod
     def from_page(cls, page) -> "PaddleArtifactIndex":
-        return cls(page.width, page.height, list(raw_layout_records(page)))
+        index = cls(page.width, page.height, [])
+        index._build_regions(list(normalized_layout_regions(page)))
+        return index
 
     def _build(self, records: list[dict[str, Any]]) -> None:
         for index, record in enumerate(records):
@@ -263,6 +265,19 @@ class PaddleArtifactIndex:
             )
             self.parents.append(parent)
             self._collect_formula_geometry(parent, record)
+
+    def _build_regions(self, regions: list[LayoutRegion]) -> None:
+        for region in regions:
+            raw = dict(region.raw or {})
+            parent = PaddleParentArtifact(
+                index=region.index,
+                label=region.label,
+                bbox=region.bbox,
+                text=region.text,
+                raw=raw,
+            )
+            self.parents.append(parent)
+            self._collect_formula_geometry_from_region(parent, region)
 
     def _collect_formula_geometry(self, parent: PaddleParentArtifact, record: dict[str, Any]) -> None:
         subblocks = [
@@ -289,6 +304,40 @@ class PaddleArtifactIndex:
                     bbox=tuple(subblock["bbox"]),
                     parent_index=parent.index,
                     raw=dict(subblock.get("raw") or {}),
+                    text=text,
+                    span_index=span_index,
+                )
+            )
+
+    def _collect_formula_geometry_from_region(
+        self,
+        parent: PaddleParentArtifact,
+        region: LayoutRegion,
+    ) -> None:
+        subblocks = [
+            subregion
+            for subregion in region.subregions
+            if is_formula_label(subregion.label)
+        ]
+        spans = parent.formula_spans
+        ordered = _reading_order([
+            {"bbox": subregion.bbox, "subblock": subregion}
+            for subregion in subblocks
+        ])
+        count_matches = len(spans) == len(ordered)
+        for local_index, item in enumerate(ordered):
+            subregion = item["subblock"]
+            text = str(subregion.text or "")
+            span_index = local_index if local_index < len(spans) else -1
+            if not text and count_matches and span_index >= 0:
+                text = spans[span_index]
+            self.formula_geometry.append(
+                PaddleGeometryArtifact(
+                    kind="formula",
+                    label=str(subregion.label),
+                    bbox=tuple(subregion.bbox),
+                    parent_index=parent.index,
+                    raw=dict(subregion.raw or {}),
                     text=text,
                     span_index=span_index,
                 )

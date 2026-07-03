@@ -652,6 +652,8 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
 def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+    index_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
+    normalized_source = Path("app/core/normalized_layout_artifact.py").read_text(encoding="utf-8")
 
     assert "LayoutOverlayService" in layout_source
     for forbidden in (
@@ -663,8 +665,14 @@ def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
         "bbox_from_variant",
     ):
         assert forbidden not in layout_source
-    assert "raw_layout_records" in overlay_service_source
-    assert "ROUTE_SUBBLOCKS_FIELD" in overlay_service_source
+    assert "normalized_layout_regions(page)" in overlay_service_source
+    assert "raw_layout_records" not in overlay_service_source
+    assert "ROUTE_SUBBLOCKS_FIELD" not in overlay_service_source
+    assert "normalized_layout_regions(page)" in index_source
+    assert "raw_layout_records" not in index_source
+    assert "class NormalizedLayoutArtifact" in normalized_source
+    assert "class LayoutRegion" in normalized_source
+    assert "class LayoutSubregion" in normalized_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

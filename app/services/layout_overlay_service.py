@@ -5,20 +5,18 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
-from app.core.bbox_extraction import bbox_from_variant
 from app.core.inline_formula_edit_state import (
     handled_inline_formula_origin_bboxes,
     inline_formula_origin_bbox,
 )
+from app.core.normalized_layout_artifact import LayoutRegion, LayoutSubregion, normalized_layout_regions
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.paddle_line_routing import (
-    ROUTE_SUBBLOCKS_FIELD,
     block_text,
     formula_texts_by_subblock_bbox,
     line_routes_for_block,
 )
-from app.core.raw_ocr_artifact import raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
 
 
@@ -31,8 +29,8 @@ INLINE_FORMULA_SPAN_RE = re.compile(
 @dataclass(frozen=True)
 class InlineFormulaOverlay:
     parent_index: int
-    parent: dict
-    subblock: dict
+    parent: LayoutRegion
+    subblock: LayoutSubregion
     bbox: BBox
 
 
@@ -70,53 +68,34 @@ class LayoutOverlayService:
         return created
 
     def iter_inline_formula_overlays(self, page: Page) -> Iterable[InlineFormulaOverlay]:
-        for parent_index, parent in enumerate(raw_layout_records(page)):
-            subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
-            if not isinstance(subblocks, list):
-                continue
-            for subblock in subblocks:
-                if not isinstance(subblock, dict):
-                    continue
-                label = str(
-                    subblock.get("block_label")
-                    or subblock.get("label")
-                    or subblock.get("type")
-                    or ""
-                )
+        for parent in normalized_layout_regions(page):
+            for subblock in parent.subregions:
+                label = str(subblock.label or "")
                 if normalize_paddle_label(label) != "inline_formula":
                     continue
-                bbox = bbox_from_variant(
-                    subblock.get("block_bbox") or subblock.get("bbox") or subblock.get("coordinate"),
-                    max_w=page.width,
-                    max_h=page.height,
-                )
-                if bbox is None or bbox.area <= 0:
-                    continue
+                bbox = BBox.from_xyxy(*subblock.bbox)
                 bbox = bbox.clamp(page.width, page.height)
                 formula_text = self.inline_formula_subblock_text(page, parent, bbox)
                 if formula_text and is_formula_marker_token(formula_text):
                     continue
-                yield InlineFormulaOverlay(parent_index, parent, subblock, bbox)
+                yield InlineFormulaOverlay(parent.index, parent, subblock, bbox)
 
-    def inline_formula_subblock_text(self, page: Page, parent: dict, bbox: BBox) -> str:
+    def inline_formula_subblock_text(self, page: Page, parent: LayoutRegion, bbox: BBox) -> str:
         target = bbox.clamp(page.width, page.height).to_xyxy()
         marker_text = self.inline_formula_marker_text_from_parent_order(page, parent, target)
         if marker_text:
             return marker_text
-        for route in line_routes_for_block(parent, page.width, page.height):
+        parent_raw = dict(parent.raw or {})
+        for route in line_routes_for_block(parent_raw, page.width, page.height):
             for segment in route.get("segments", []):
                 if segment.get("kind") != "formula":
                     continue
-                segment_bbox = bbox_from_variant(
-                    segment.get("bbox"),
-                    max_w=page.width,
-                    max_h=page.height,
-                )
+                segment_bbox = self.bbox_from_route_segment(segment.get("bbox"))
                 if segment_bbox is None:
                     continue
                 if self.same_inline_formula_route_span(segment_bbox.to_xyxy(), target):
                     return str(segment.get("text") or "")
-        for formula_bbox, text in formula_texts_by_subblock_bbox(parent, page.width, page.height).items():
+        for formula_bbox, text in formula_texts_by_subblock_bbox(parent_raw, page.width, page.height).items():
             if self.same_inline_formula_route_span(formula_bbox, target):
                 return text
         return ""
@@ -124,34 +103,18 @@ class LayoutOverlayService:
     def inline_formula_marker_text_from_parent_order(
         self,
         page: Page,
-        parent: dict,
+        parent: LayoutRegion,
         target: tuple[int, int, int, int],
     ) -> str:
-        spans = [match.group(0) for match in INLINE_FORMULA_SPAN_RE.finditer(block_text(parent))]
+        spans = [match.group(0) for match in INLINE_FORMULA_SPAN_RE.finditer(parent.text or block_text(dict(parent.raw or {})))]
         if not spans:
             return ""
-        subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
-        if not isinstance(subblocks, list):
-            return ""
         formula_bboxes: list[tuple[int, int, int, int]] = []
-        for subblock in subblocks:
-            if not isinstance(subblock, dict):
-                continue
-            label = str(
-                subblock.get("block_label")
-                or subblock.get("label")
-                or subblock.get("type")
-                or ""
-            )
+        for subblock in parent.subregions:
+            label = str(subblock.label or "")
             if normalize_paddle_label(label) != "inline_formula":
                 continue
-            bbox = bbox_from_variant(
-                subblock.get("block_bbox") or subblock.get("bbox") or subblock.get("coordinate"),
-                max_w=page.width,
-                max_h=page.height,
-            )
-            if bbox is None or bbox.area <= 0:
-                continue
+            bbox = BBox.from_xyxy(*subblock.bbox)
             formula_bboxes.append(bbox.clamp(page.width, page.height).to_xyxy())
         formula_bboxes.sort(key=lambda item: (item[1], item[0]))
         for index, formula_bbox in enumerate(formula_bboxes):
@@ -190,31 +153,27 @@ class LayoutOverlayService:
                 return True
         return False
 
+    @staticmethod
+    def bbox_from_route_segment(value: object) -> BBox | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            return None
+        try:
+            x1, y1, x2, y2 = (int(item) for item in value)
+        except (TypeError, ValueError):
+            return None
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return BBox.from_xyxy(x1, y1, x2, y2)
+
     def readonly_layout_overlays(self, page: Page) -> list[tuple[str, BBox]]:
         overlays: list[tuple[str, BBox]] = []
         seen: set[tuple[str, tuple[int, int, int, int]]] = set()
-        for parent in raw_layout_records(page):
-            subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
-            if not isinstance(subblocks, list):
-                continue
-            for subblock in subblocks:
-                if not isinstance(subblock, dict):
-                    continue
-                label = str(
-                    subblock.get("block_label")
-                    or subblock.get("label")
-                    or subblock.get("type")
-                    or ""
-                )
+        for parent in normalized_layout_regions(page):
+            for subblock in parent.subregions:
+                label = str(subblock.label or "")
                 if normalize_paddle_label(label) == "inline_formula":
                     continue
-                bbox = bbox_from_variant(
-                    subblock.get("block_bbox") or subblock.get("bbox") or subblock.get("coordinate"),
-                    max_w=page.width,
-                    max_h=page.height,
-                )
-                if bbox is None or bbox.area <= 0:
-                    continue
+                bbox = BBox.from_xyxy(*subblock.bbox)
                 bbox = bbox.clamp(page.width, page.height)
                 key = (label, bbox.to_xyxy())
                 if key in seen:
