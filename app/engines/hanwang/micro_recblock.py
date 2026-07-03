@@ -15,8 +15,6 @@ import numpy as np
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.block_payload import (
-    HANWANG_BBOX_AUDIT_KEY,
-    PADDLE_BINDING_KEY,
     clear_ocr_text_invalidation,
     is_ocr_text_invalidated,
     paddle_binding_dict,
@@ -93,6 +91,9 @@ from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolic
 from . import native_bridge
 
 logger = get_logger(__name__)
+
+ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
+ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
@@ -944,7 +945,7 @@ def _raw_block_with_bbox_audit(
     segimg_group_audits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     value = dict(raw)
-    value[HANWANG_BBOX_AUDIT_KEY] = _hanwang_bbox_audit(
+    value[ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY] = _hanwang_bbox_audit(
         raw,
         width,
         height,
@@ -3023,7 +3024,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "_layout_block_ocr_policy": block.ocr_policy.value,
     }
     if binding:
-        row[PADDLE_BINDING_KEY] = dict(binding)
+        row[ROUTE_ROW_PADDLE_BINDING_KEY] = dict(binding)
     records = raw_layout_records(page)
     if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
         parent_record = records[parent_index]
@@ -3048,8 +3049,8 @@ def _persistent_payloads_from_route_row(
     """
     raw_payload = dict(raw_block or {})
     app_payload: dict[str, Any] = {}
-    binding = raw_payload.pop(PADDLE_BINDING_KEY, None)
-    audit = raw_payload.pop(HANWANG_BBOX_AUDIT_KEY, None)
+    binding = raw_payload.pop(ROUTE_ROW_PADDLE_BINDING_KEY, None)
+    audit = raw_payload.pop(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, None)
     return (
         strip_runtime_layout_payload(raw_payload),
         strip_runtime_layout_payload(app_payload),
@@ -3133,7 +3134,7 @@ def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dic
         "block_label": label,
         "block_bbox": list(manual_bbox),
         "block_content": text,
-        PADDLE_BINDING_KEY: dict(binding),
+        ROUTE_ROW_PADDLE_BINDING_KEY: dict(binding),
         "_layout_block_source": getattr(block.source, "value", str(block.source)),
         "_layout_manual_route_subblock": True,
     }

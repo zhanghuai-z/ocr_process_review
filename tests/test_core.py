@@ -799,7 +799,6 @@ def test_project_store_persists_raw_layout_artifact():
 
 
 def test_project_store_persists_typed_paddle_binding():
-    from app.core.block_payload import PADDLE_BINDING_KEY
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
 
@@ -838,7 +837,7 @@ def test_project_store_persists_typed_paddle_binding():
         assert loaded_block.paddle_binding is not None
         assert loaded_block.paddle_binding.to_dict()["text"] == "$ A $"
         assert loaded_block.paddle_binding.parent_index == 3
-        assert PADDLE_BINDING_KEY not in loaded_block.app_payload
+        assert "paddle_binding" not in loaded_block.app_payload
 
         print("test_project_store_persists_typed_paddle_binding PASSED")
     finally:
@@ -1275,7 +1274,6 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
     import pytest
     import sqlite3
 
-    from app.core.block_payload import OCR_TEXT_INVALIDATED_KEY
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, ROUTE_SUBBLOCKS_FIELD
     from app.core.project_store import ProjectDataError, ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
@@ -1314,7 +1312,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
         assert LAYOUT_LINE_ROUTES_FIELD in block.raw_payload
         assert ROUTE_SUBBLOCKS_FIELD in block.raw_payload
         assert LAYOUT_LINE_ROUTES_FIELD in block.app_payload
-        assert OCR_TEXT_INVALIDATED_KEY not in block.app_payload
+        assert "ocr_text_invalidated" not in block.app_payload
 
         clean_block = Block(
             block_type=BlockType.TEXT,
@@ -1393,7 +1391,6 @@ def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
     import pytest
     import sqlite3
 
-    from app.core.block_payload import PADDLE_BINDING_KEY
     from app.core.project_store import ProjectDataError, ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, Page
 
@@ -1404,7 +1401,7 @@ def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
         block = Block(
             block_type=BlockType.TEXT,
             bbox=BBox.from_xyxy(0, 0, 40, 20),
-            raw_payload={PADDLE_BINDING_KEY: {"source_label": "text"}},
+            raw_payload={"paddle_binding": {"source_label": "text"}},
         )
         project = OcrProject(
             name="app-owned raw payload",
@@ -1424,7 +1421,7 @@ def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE block SET raw_payload_json=? WHERE id=?",
-                (json.dumps({PADDLE_BINDING_KEY: {"source_label": "text"}}, ensure_ascii=False), clean_block.id),
+                (json.dumps({"paddle_binding": {"source_label": "text"}}, ensure_ascii=False), clean_block.id),
             )
             conn.commit()
         with ProjectStore(db_path) as store:
@@ -1476,7 +1473,6 @@ def test_project_store_rejects_invalid_payload_json_on_load():
 def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     import pytest
 
-    from app.core.block_payload import PADDLE_BINDING_KEY
     from app.core.model_validation import ModelValidationError, validate_block_model, validate_page_model
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockType, Page
@@ -1494,7 +1490,7 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     with pytest.raises(ModelValidationError, match="runtime routing data"):
         validate_block_model(block)
 
-    block.raw_payload = {PADDLE_BINDING_KEY: {"source_label": "text"}}
+    block.raw_payload = {"paddle_binding": {"source_label": "text"}}
     with pytest.raises(ModelValidationError, match="app-owned payload keys"):
         validate_block_model(block)
 

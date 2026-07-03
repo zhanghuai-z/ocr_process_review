@@ -46,7 +46,7 @@ def _proof_ui_sources() -> list[Path]:
 
 def _app_payload_key_segment(source: str) -> str:
     app_match = re.search(
-        r"APP_PAYLOAD_KEYS\s*=\s*frozenset\((.*?)\)\s*\n\s*APP_OWNED_PAYLOAD_KEYS",
+        r"APP_PAYLOAD_KEYS\s*=\s*frozenset\((.*?)\)",
         source,
         flags=re.DOTALL,
     )

@@ -6,9 +6,6 @@ from typing import Any
 
 from app.models import PaddleBinding
 
-PADDLE_BINDING_KEY = "paddle_binding"
-TABLE_TEXT_LAYER_CELLS_KEY = "table_text_layer_cells"
-
 RUNTIME_LAYOUT_PAYLOAD_KEYS = frozenset({
     "_layout_line_routes",
     "_route_subblocks",
@@ -18,36 +15,21 @@ RUNTIME_LAYOUT_PAYLOAD_KEYS = frozenset({
     "_layout_manual_route_subblock",
 })
 
-OCR_TEXT_INVALIDATED_KEY = "ocr_text_invalidated"
-OCR_INVALIDATION_KIND_KEY = "ocr_invalidation_kind"
-
-MANUAL_MERGE_FROM_KEY = "manual_merge_from"
-MANUAL_DRAW_BBOX_KEY = "manual_draw_bbox"
-
-UI_GENERATED_INLINE_FORMULA_BLOCK_KEY = "ui_generated_inline_formula_block"
-UI_INLINE_FORMULA_ORIGIN_BBOX_KEY = "ui_inline_formula_origin_bbox"
-UI_INLINE_FORMULA_PARENT_LABEL_KEY = "ui_inline_formula_parent_label"
-UI_DELETED_INLINE_FORMULA_KEY = "_ui_deleted"
-
-HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
-
 APP_PAYLOAD_KEYS = frozenset()
 
-APP_OWNED_PAYLOAD_KEYS = frozenset({
-    PADDLE_BINDING_KEY,
-    OCR_TEXT_INVALIDATED_KEY,
-    OCR_INVALIDATION_KIND_KEY,
-    MANUAL_MERGE_FROM_KEY,
-    MANUAL_DRAW_BBOX_KEY,
-    UI_GENERATED_INLINE_FORMULA_BLOCK_KEY,
-    UI_INLINE_FORMULA_ORIGIN_BBOX_KEY,
-    UI_INLINE_FORMULA_PARENT_LABEL_KEY,
-    UI_DELETED_INLINE_FORMULA_KEY,
-    HANWANG_BBOX_AUDIT_KEY,
-    TABLE_TEXT_LAYER_CELLS_KEY,
+RAW_PAYLOAD_FORBIDDEN_APP_KEYS = frozenset({
+    "paddle_binding",
+    "ocr_text_invalidated",
+    "ocr_invalidation_kind",
+    "manual_merge_from",
+    "manual_draw_bbox",
+    "ui_generated_inline_formula_block",
+    "ui_inline_formula_origin_bbox",
+    "ui_inline_formula_parent_label",
+    "_ui_deleted",
+    "_hanwang_bbox_audit",
+    "table_text_layer_cells",
 })
-
-RAW_PAYLOAD_FORBIDDEN_APP_KEYS = APP_OWNED_PAYLOAD_KEYS
 
 
 def paddle_binding_dict(block: object) -> dict[str, Any]:
