@@ -15926,7 +15926,7 @@ def test_layout_analyzer_persists_raw_parsing_res_list():
     assert _raw_layout_records(page) == parsing_res_list
     assert _raw_layout_records(page)[0]["custom_raw"]["keep"] is True
     assert blocks[0].source_label == "text"
-    assert blocks[0].raw_payload["custom_raw"]["keep"] is True
+    assert blocks[0].raw_payload == {}
 
     print("test_layout_analyzer_persists_raw_parsing_res_list PASSED")
 

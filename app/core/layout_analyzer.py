@@ -34,7 +34,6 @@ from app.core.api_profiles import (
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
-from app.core.block_payload import strip_runtime_layout_payload
 from app.core.logging import get_logger
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_layout_schema import (
@@ -383,7 +382,6 @@ class LayoutAnalyzer:
             note_parts.append(f"source_label={normalized_type}")
 
         raw_overlay_items.append((raw_type, bbox))
-        raw_payload = strip_runtime_layout_payload(normalized.raw)
         block_type = map_paddle_label_to_block_type(raw_type)
         block = Block(
             block_type=block_type,
@@ -391,7 +389,6 @@ class LayoutAnalyzer:
             order=order,
             note=" | ".join(note_parts),
             source_label=normalized_type,
-            raw_payload=raw_payload,
             origin=_layout_block_origin(
                 source_engine="paddleocr-vl",
                 source_run_id=self._layout_batch_id,
@@ -844,7 +841,6 @@ class LayoutAnalyzer:
                 continue
             if bbox.area <= 0:
                 continue
-            raw_payload = strip_runtime_layout_payload(item)
             block_type = map_paddle_label_to_block_type(raw_type)
             normalized_type = normalize_paddle_label(raw_type)
             block = Block(
@@ -852,7 +848,6 @@ class LayoutAnalyzer:
                 bbox=bbox,
                 order=i,
                 source_label=normalized_type,
-                raw_payload=raw_payload,
                 origin=_layout_block_origin(
                     source_engine="paddleocr-local",
                     source_run_id=self._layout_batch_id,
