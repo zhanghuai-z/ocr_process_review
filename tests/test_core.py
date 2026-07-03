@@ -17956,7 +17956,7 @@ def test_hproof_save_all_persists_probe_only_correction():
 
 
 def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.proof.h_proof import HProofPanel
 
     _get_qapp()
@@ -17964,7 +17964,8 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
         block_type=BlockType.EQUATION,
         bbox=BBox(0, 0, 80, 20),
         lines=[],
-        raw_payload={"block_label": "display_formula", "block_content": "ORIGINAL"},
+        raw_payload={"block_label": "display_formula", "block_content": "STALE"},
+        origin=BlockOrigin(source_label="display_formula", raw_index=0),
     )
     page = Page(
         image_path="/tmp/hproof-synthetic-debug.png",
@@ -17973,6 +17974,13 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
         page_number=1,
         blocks=[block],
     )
+    _attach_raw_layout_records(page, [
+        {
+            "block_label": "display_formula",
+            "block_bbox": [0, 0, 80, 20],
+            "block_content": "ORIGINAL",
+        }
+    ])
 
     panel = HProofPanel()
     panel.load_pages([page])
@@ -17985,7 +17993,7 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
     panel._pairs[0]._editor.setPlainText("EDITED")
     panel._save_current(silent=True)
 
-    assert block.raw_payload["block_content"] == "ORIGINAL"
+    assert block.raw_payload["block_content"] == "STALE"
     assert block.app_payload == {}
 
     changes: list = []

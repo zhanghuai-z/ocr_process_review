@@ -489,15 +489,15 @@ def _line_is_formula_marker_only(line: Line) -> bool:
     return bool(formula_texts) and all(is_formula_marker_token(text) for text in formula_texts)
 
 
-def _block_debug_content(block: Block) -> str:
+def _block_debug_content(page: Page, block: Block) -> str:
     keys = ("block_content", "content", "text", "latex", "formula", "formula_latex")
-    for value in raw_block_text_values(block, keys):
+    for value in raw_block_text_values(block, keys, page):
         return value
     return proof_block_text(block)
 
 
-def _synthetic_block_debug_line(block: Block) -> Line | None:
-    text = _block_debug_content(block).strip()
+def _synthetic_block_debug_line(page: Page, block: Block) -> Line | None:
+    text = _block_debug_content(page, block).strip()
     if not text:
         return None
     return Line(
@@ -585,7 +585,7 @@ def iter_unique_page_hproof_debug_lines(
         formula_block = _is_debug_formula_block(block)
         table_block = _is_debug_table_block(block)
         if formulas and formula_block and not block.lines:
-            synthetic = _synthetic_block_debug_line(block)
+            synthetic = _synthetic_block_debug_line(page, block)
             if synthetic is not None and not _line_is_formula_marker_only(synthetic):
                 if not _is_duplicate_debug_line(synthetic, seen):
                     yield block, synthetic, -1
