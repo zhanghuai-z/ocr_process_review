@@ -43,9 +43,7 @@
     "app.engines.real_ocr_adapter -> app.core.paddle_response",
     "app.engines.real_ocr_adapter -> app.core.proof_status"
   ],
-  "models_to_core": [
-    "app.models.project -> app.core.ocr_dispatch_policy"
-  ],
+  "models_to_core": [],
   "ui_to_engines": [
     "app.ui.main_window -> app.engines.real_ocr_adapter"
   ]

@@ -434,10 +434,8 @@ class Page:
 
     @property
     def text_ocr_blocks(self) -> List[Block]:
-        """返回按统一 dispatch 策略应送文字 OCR 的块。"""
-        from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
-
-        return [b for b in self.blocks if should_dispatch_to_text_ocr(b)]
+        """返回当前策略明确应送文字 OCR 的块。"""
+        return [b for b in self.blocks if b.ocr_policy == OcrPolicy.TEXT_OCR]
 
     @property
     def total_lines(self) -> int:
