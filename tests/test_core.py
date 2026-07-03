@@ -1438,13 +1438,18 @@ def test_project_store_rejects_invalid_payload_json_on_load():
     import sqlite3
 
     from app.core.project_store import ProjectDataError, ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
 
     try:
-        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        line = Line(text="正文", confidence=0.9, bbox=BBox.from_xyxy(1, 2, 30, 20))
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            lines=[line],
+        )
         project = OcrProject(
             name="invalid payload json",
             pages=[Page(image_path="/tmp/invalid-payload-json.png", width=80, height=40, blocks=[block])],
@@ -1463,6 +1468,24 @@ def test_project_store_rejects_invalid_payload_json_on_load():
             conn.commit()
         with ProjectStore(db_path) as store:
             with pytest.raises(ProjectDataError, match="block.app_payload_json must be dict"):
+                store.load_project(saved.id)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET raw_payload_json=?, app_payload_json=? WHERE id=?",
+                ("{}", "{}", block.id),
+            )
+            conn.execute("UPDATE line SET review_flags_json=? WHERE id=?", ("[", line.id))
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="line.review_flags_json invalid json"):
+                store.load_project(saved.id)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE line SET review_flags_json=? WHERE id=?", ("{}", line.id))
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="line.review_flags_json must be list"):
                 store.load_project(saved.id)
     finally:
         os.unlink(db_path)

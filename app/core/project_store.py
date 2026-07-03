@@ -363,13 +363,16 @@ def _review_flags_to_json(flags: list[str]) -> str:
     return json.dumps(flags, ensure_ascii=False)
 
 
-def _json_to_review_flags(s: str) -> list[str]:
+def _json_to_review_flags(s: str, *, field: str = "line.review_flags_json") -> list[str]:
     if not s:
-        return []
+        raise ProjectDataError(f"{field} is empty")
     try:
-        return json.loads(s)
-    except (json.JSONDecodeError, TypeError):
-        return []
+        value = json.loads(s)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ProjectDataError(f"{field} invalid json") from exc
+    if not isinstance(value, list):
+        raise ProjectDataError(f"{field} must be list")
+    return [str(item) for item in value]
 
 
 def _json_to_list(s: str, *, field: str) -> list:
@@ -1732,7 +1735,10 @@ class ProjectStore:
                 id=r["id"],
                 uid=r["uid"],
                 ocr_text=r["ocr_text"] or r["text"],
-                review_flags=_json_to_review_flags(r["review_flags_json"]),
+                review_flags=_json_to_review_flags(
+                    r["review_flags_json"],
+                    field="line.review_flags_json",
+                ),
             )
             line.chars = self._load_chars(line.id)
             lines.append(line)
