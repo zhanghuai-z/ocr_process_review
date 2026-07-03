@@ -36,6 +36,10 @@
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
+  -> LayoutOverlayService
+     - 负责读取 Page.raw_layout_artifact 中的只读 raw overlay
+     - 负责把 Paddle inline_formula overlay 提升为可编辑公式 Block
+     - LayoutPanel 不直接解析 raw_layout_records 或 Paddle route dict
 
 路由构建
   -> _route_subblocks / _layout_line_routes
@@ -87,6 +91,7 @@ OCR Hanwang/CharOCR
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
 | 版面编辑写入口 | `LayoutEditService` | `LayoutPanel` 内部私有 helper 直接改 binding/invalidation | 用户新增、删除、改类型、合并、调框统一在服务内写当前 Block 和审计事件。 |
+| raw overlay 展示/提升 | `LayoutOverlayService` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；raw dict 解析集中在服务层。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
 | OCR 原文 | `line_text_contract(line).ocr_text` / `proof_ocr_text(line)` | `Line.text` 或 `Line.ocr_text` 单独判断 | `text` 仍是底层 OCR 行文本字段；proof/UI/export 不应自行解释双字段。 |
 | 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
@@ -307,7 +312,8 @@ OCR Hanwang/CharOCR
 
 4. UI 仍有局部视图状态和撤销恢复直接触碰对象。
    - LayoutPanel 的用户版面编辑入口已迁移到 `LayoutEditService`。
-   - LayoutPanel 仍会生成临时可编辑 inline formula overlay，并用 undo 快照恢复 `page.blocks`。
+   - LayoutPanel 的 Paddle raw overlay 解析已迁移到 `LayoutOverlayService`。
+   - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block，并用 undo 快照恢复 `page.blocks`。
    - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`，但两个面板仍各自维护编辑会话和 dirty/conflict gate。
    - 后续重点不是恢复旧 helper，而是抽出共享 `LayoutSnapshot` 和 `ProofEditSession`。
 

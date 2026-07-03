@@ -567,6 +567,7 @@ def test_manual_layout_merge_details_are_events_not_app_payload_state():
 
 def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
     for key in (
@@ -576,9 +577,28 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
     ):
         assert key not in layout_source
         assert f"app_payload.pop({key}" not in store_source
-    assert "origin=BlockOrigin(" in layout_source
-    assert "original_bbox=bbox" in layout_source
-    assert "_inline_formula_origin_bbox(block)" in layout_source
+    assert "origin=BlockOrigin(" not in layout_source
+    assert "origin=BlockOrigin(" in overlay_service_source
+    assert "original_bbox=overlay.bbox" in overlay_service_source
+    assert "inline_formula_origin_bbox(block)" in overlay_service_source
+
+
+def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+
+    assert "LayoutOverlayService" in layout_source
+    for forbidden in (
+        "raw_layout_records",
+        "raw_block_payload",
+        "ROUTE_SUBBLOCKS_FIELD",
+        "formula_texts_by_subblock_bbox",
+        "line_routes_for_block",
+        "bbox_from_variant",
+    ):
+        assert forbidden not in layout_source
+    assert "raw_layout_records" in overlay_service_source
+    assert "ROUTE_SUBBLOCKS_FIELD" in overlay_service_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

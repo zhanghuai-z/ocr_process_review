@@ -28,6 +28,7 @@
 | 裸 `Page.status` 写入 | `app.models.page_state` | Controller/Store 不再直接写 `Page.status`；当前仍保留单字段，后续状态机拆分从 helper 入口替换。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 | `LayoutPanel` 版面编辑私有业务 helper | `LayoutEditService` | 删除 `_apply_subtype_to_block`、`_merge_blocks_into_bbox`、`_bind_manual_block_to_paddle`、`_update_existing_manual_binding_bbox` 等 UI 内业务写入口；新增、删除、改类型、合并、调框统一经服务写 typed state 和 layout edit event。 |
+| `LayoutPanel` 直接解析 Paddle raw overlay | `LayoutOverlayService` | 删除 UI 内 `raw_layout_records`、`ROUTE_SUBBLOCKS_FIELD`、`bbox_from_variant` 等 raw artifact 解析；只读 overlay 和 inline formula 提升由服务统一产出。 |
 
 ## 删除顺序
 
@@ -61,6 +62,7 @@
 - UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditService`；UI 只负责采集用户动作、维护选择态和刷新画布。
+- `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 

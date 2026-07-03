@@ -5993,7 +5993,7 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
 
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BlockType, Page
-    from app.ui.recognize.layout_panel import LayoutPanel
+    from app.services.layout_overlay_service import LayoutOverlayService
 
     _get_qapp()
     project_root = Path(__file__).resolve().parents[1]
@@ -6011,14 +6011,10 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
     footnote = next(block for block in page.blocks if block.source_label == "footnote")
     assert footnote.block_type == BlockType.TEXT
 
-    panel = LayoutPanel()
-    try:
-        inline_bboxes = [
-            bbox.to_xyxy()
-            for _parent_index, _parent, _subblock, bbox in panel._iter_inline_formula_subblocks(page)
-        ]
-    finally:
-        panel.close()
+    inline_bboxes = [
+        overlay.bbox.to_xyxy()
+        for overlay in LayoutOverlayService().iter_inline_formula_overlays(page)
+    ]
 
     assert (372, 2022, 440, 2069) not in inline_bboxes  # $ ^{*} $
     assert (619, 2737, 672, 2785) not in inline_bboxes  # $ ^{②} $
