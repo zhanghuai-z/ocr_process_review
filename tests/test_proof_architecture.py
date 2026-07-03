@@ -636,6 +636,8 @@ def test_block_model_does_not_reconstruct_origin_from_payloads():
             assert "_sync_legacy_source_fields_from_origin" not in block_source
             assert "app_payload.get" not in block_source
             assert "raw_payload.get" not in block_source
+            assert "_normalized_default_ocr_policy" not in block_source
+            assert "_ocr_policy_label" not in block_source
             break
     else:
         raise AssertionError("Block class not found")

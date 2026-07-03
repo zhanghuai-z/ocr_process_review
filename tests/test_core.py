@@ -682,7 +682,7 @@ def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
 # =====================================================================
 
 def test_project_store():
-    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Char, Line, OcrPolicy, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -7207,6 +7207,10 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     table_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="table")
     text_without_structured_label = Block(block_type=BlockType.TEXT, bbox=bb)
     disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, ocr_policy=OcrPolicy.MANUAL_ONLY)
+    from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
+
+    formula_label.ocr_policy = default_ocr_policy_for_block(formula_label)
+    table_label.ocr_policy = default_ocr_policy_for_block(table_label)
 
     assert is_text_ocr_candidate(footnote) is True
     assert should_dispatch_to_text_ocr(footnote) is True
@@ -7263,7 +7267,13 @@ def test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks():
         cv2.imwrite(img_path, img)
 
     try:
-        equation = Block(block_type=BlockType.EQUATION, bbox=BBox(0, 0, 120, 60), lines=[make_line("旧公式", 5, 5)], order=0)
+        equation = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox(0, 0, 120, 60),
+            lines=[make_line("旧公式", 5, 5)],
+            order=0,
+            ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        )
         figure_caption = Block(block_type=BlockType.FIGURE_CAPTION, bbox=BBox(0, 60, 120, 60), lines=[make_line("旧", 5, 65)], order=1)
         table_caption = Block(block_type=BlockType.TABLE_CAPTION, bbox=BBox(0, 120, 120, 60), lines=[make_line("旧", 5, 125)], order=2)
         page = Page(
@@ -7299,7 +7309,7 @@ def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
         block_type=BlockType.EQUATION,
         bbox=BBox(50, 50, 50, 30),
         order=1,
-        ocr_policy=OcrPolicy.TEXT_OCR,
+        ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
     )
     normal_line = Line(text="文", confidence=0.95, bbox=BBox(10, 10, 10, 10))
     formula_line = Line(text="式", confidence=0.95, bbox=BBox(55, 55, 10, 10))

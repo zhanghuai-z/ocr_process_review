@@ -77,7 +77,7 @@ OCR Hanwang/CharOCR
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | `block.raw_payload`、旧 `block.app_payload` | `app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
-| 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测 | 公式、表格、图片通过明确 policy 阻断。 |
+| 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
 | OCR 原文 | `Line.ocr_text` | `Line.text` 单独判断 | `text` 仍有兼容属性；新逻辑应优先明确 ocr_text。 |
 | 校对终稿 | `proof_display_text(line)` / `Line.proof_state` | `final_text` 是否为空、`Line.text` 单独判断 | `final_text_set=True` 时空串也是有效终稿。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
@@ -120,10 +120,12 @@ OCR Hanwang/CharOCR
 - 运行时统一走 `should_dispatch_to_text_ocr(block)`。
 - page OCR 行分配时先检查 blocker，再分配到 text container。
 - 结构块作为 blocker，不应进入正文 proof line。
+- `Block` 模型不再在 `__post_init__` 中根据 `source_label/block_type` 自动改写 policy；默认策略必须由 importer/UI/service 显式调用 dispatch policy 推导。
 
 当前边界：
 
 - `recognizable` 已退役，OCR 入口不得恢复裸 bool 判断。
+- `Block` 构造不得恢复隐式 OCR policy 推导。
 
 ### 3. Paddle 路由：父文本块 + 子结构块
 

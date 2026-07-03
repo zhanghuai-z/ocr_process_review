@@ -35,6 +35,7 @@
 - app-owned 状态必须使用 typed 字段；禁止写入 `raw_payload` 或旧 `app_payload_json`。
 - Paddle 返回字段必须先经过 `paddle_layout_schema.py`。
 - OCR dispatch 必须先经过 `ocr_dispatch_policy.py`。
+- `Block` 模型不得在构造时根据外部 label 自动推导 OCR policy。
 
 完成状态：已完成；已登记兼容入口均已删除或收口为正式模型字段。
 

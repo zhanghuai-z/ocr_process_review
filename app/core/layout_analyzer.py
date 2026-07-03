@@ -847,7 +847,7 @@ class LayoutAnalyzer:
             raw_payload = strip_runtime_layout_payload(item)
             block_type = map_paddle_label_to_block_type(raw_type)
             normalized_type = normalize_paddle_label(raw_type)
-            page.blocks.append(Block(
+            block = Block(
                 block_type=block_type,
                 bbox=bbox,
                 order=i,
@@ -861,7 +861,9 @@ class LayoutAnalyzer:
                     block_type=block_type,
                     raw_index=i,
                 ),
-            ))
+            )
+            block.ocr_policy = default_ocr_policy_for_block(block)
+            page.blocks.append(block)
         self._rescale_blocks_if_suspicious(page)
         return page
 

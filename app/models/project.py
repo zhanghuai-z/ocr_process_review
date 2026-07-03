@@ -273,33 +273,6 @@ class Block:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
-        if self.ocr_policy == OcrPolicy.TEXT_OCR:
-            self.ocr_policy = self._normalized_default_ocr_policy()
-
-    def _normalized_default_ocr_policy(self) -> OcrPolicy:
-        label = self._ocr_policy_label()
-        if self.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION, BlockType.TITLE, BlockType.REFERENCE, BlockType.TEXT}:
-            if any(token in label for token in ("equation", "formula", "math")):
-                return OcrPolicy.PRESERVE_AS_FORMULA
-            if self.block_type in {BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION}:
-                return OcrPolicy.TEXT_OCR
-        if self.block_type == BlockType.EQUATION or any(token in label for token in ("equation", "formula", "math")):
-            return OcrPolicy.PRESERVE_AS_FORMULA
-        if self.block_type == BlockType.TABLE or "table" in label:
-            return OcrPolicy.PRESERVE_AS_TABLE
-        if self.block_type in {BlockType.FIGURE, BlockType.UNKNOWN}:
-            return OcrPolicy.SKIP
-        if any(token in label for token in ("figure", "image", "picture", "graphic", "photo", "chart", "seal", "stamp")):
-            return OcrPolicy.SKIP
-        return OcrPolicy.TEXT_OCR
-
-    def _ocr_policy_label(self) -> str:
-        values: list[object] = [self.source_label, self.block_type.value]
-        for value in values:
-            text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-            if text:
-                return text
-        return ""
 
     @property
     def avg_confidence(self) -> float:
