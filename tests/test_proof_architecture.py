@@ -234,6 +234,18 @@ def test_app_payload_access_stays_at_storage_validation_or_payload_boundary():
     assert offenders == []
 
 
+def test_block_active_model_has_no_app_payload_field():
+    source = Path("app/models/project.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/models/project.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Block":
+            block_source = ast.get_source_segment(source, node) or ""
+            assert "app_payload:" not in block_source
+            break
+    else:
+        raise AssertionError("Block class not found")
+
+
 def test_raw_payload_is_not_mutated_directly_by_app_code():
     offenders: list[str] = []
     direct_mutation_patterns = (

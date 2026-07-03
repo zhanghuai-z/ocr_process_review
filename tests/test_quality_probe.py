@@ -106,18 +106,12 @@ def test_block_eligibility_uses_dispatch_policy_for_source_labels():
     table_like.source_label = "table"
     table_like.ocr_policy = default_ocr_policy_for_block(table_like)
 
-    legacy_table_binding = _block(BlockType.TEXT, [line])
-    legacy_table_binding.app_payload = {
-        "paddle_binding": {
-            "source_label": "table",
-            "block_type": "table",
-        }
-    }
-    legacy_table_binding.ocr_policy = default_ocr_policy_for_block(legacy_table_binding)
+    text_without_structured_label = _block(BlockType.TEXT, [line])
+    text_without_structured_label.ocr_policy = default_ocr_policy_for_block(text_without_structured_label)
 
     assert not is_block_eligible(formula_like)
     assert not is_block_eligible(table_like)
-    assert is_block_eligible(legacy_table_binding)
+    assert is_block_eligible(text_without_structured_label)
     assert is_block_eligible(_block(BlockType.TEXT, [line]))
 
 

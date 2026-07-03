@@ -548,17 +548,14 @@ def test_block_payload_helpers_use_typed_state_only():
     set_paddle_binding(block, {"status": "paddle_geometry_hit", "text": "$ A $"})
     assert isinstance(block.paddle_binding, PaddleBinding)
     assert block.paddle_binding.text == "$ A $"
-    assert block.app_payload == {}
 
     mark_ocr_text_invalidated(block, "block_moved")
     assert is_ocr_text_invalidated(block) is True
     assert ocr_invalidation_reason(block) == "block_moved"
     assert block.ocr_invalidated_reason == "block_moved"
-    assert block.app_payload == {}
     assert block.raw_payload["vendor"] == {"keep": True}
     clear_ocr_text_invalidation(block)
     assert is_ocr_text_invalidated(block) is False
-    assert block.app_payload == {}
 
     print("test_block_payload_helpers_use_typed_state_only PASSED")
 
@@ -839,7 +836,6 @@ def test_project_store_persists_typed_paddle_binding():
         assert loaded_block.paddle_binding is not None
         assert loaded_block.paddle_binding.to_dict()["text"] == "$ A $"
         assert loaded_block.paddle_binding.parent_index == 3
-        assert "paddle_binding" not in loaded_block.app_payload
 
         print("test_project_store_persists_typed_paddle_binding PASSED")
     finally:
@@ -870,7 +866,6 @@ def test_project_store_persists_block_ocr_invalidation():
 
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.ocr_invalidated_reason == "block_moved"
-        assert loaded_block.app_payload == {}
 
         print("test_project_store_persists_block_ocr_invalidation PASSED")
     finally:
@@ -911,7 +906,6 @@ def test_project_store_persists_inline_formula_origin():
         assert loaded_block.origin.source_label == "inline_formula"
         assert loaded_block.origin.original_bbox == BBox.from_xyxy(10, 3, 40, 23)
         assert loaded_block.origin.original_kind == BlockType.EQUATION
-        assert loaded_block.app_payload == {}
 
         print("test_project_store_persists_inline_formula_origin PASSED")
     finally:
@@ -948,7 +942,6 @@ def test_project_store_persists_ocr_audit():
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.ocr_audit["schema"] == "hanwang_bbox_audit.v1"
         assert loaded_block.ocr_audit["layout_block_bbox"] == [0, 0, 40, 20]
-        assert loaded_block.app_payload == {}
 
         print("test_project_store_persists_ocr_audit PASSED")
     finally:
@@ -988,7 +981,6 @@ def test_project_store_persists_table_text_layer_cells():
 
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.table_text_layer_cells == cells
-        assert TABLE_TEXT_LAYER_CELLS_KEY not in loaded_block.app_payload
 
         print("test_project_store_persists_table_text_layer_cells PASSED")
     finally:
@@ -1301,7 +1293,6 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
             bbox=BBox.from_xyxy(0, 0, 140, 40),
             lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
             raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes, ROUTE_SUBBLOCKS_FIELD: route_subblocks},
-            app_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes},
         )
         page.blocks.append(block)
         project = OcrProject(name="runtime route cache", pages=[page])
@@ -1313,8 +1304,6 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
         assert block.lines[0].text == "旧OCR结果"
         assert LAYOUT_LINE_ROUTES_FIELD in block.raw_payload
         assert ROUTE_SUBBLOCKS_FIELD in block.raw_payload
-        assert LAYOUT_LINE_ROUTES_FIELD in block.app_payload
-        assert "ocr_text_invalidated" not in block.app_payload
 
         clean_block = Block(
             block_type=BlockType.TEXT,
@@ -1343,7 +1332,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
     print("test_project_store_rejects_runtime_layout_routes_on_save_and_load PASSED")
 
 
-def test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load():
+def test_project_store_rejects_unregistered_app_payload_keys_on_load():
     import pytest
     import sqlite3
 
@@ -1354,19 +1343,6 @@ def test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load():
         db_path = f.name
 
     try:
-        block = Block(
-            block_type=BlockType.TEXT,
-            bbox=BBox.from_xyxy(0, 0, 40, 20),
-            app_payload={"future_unregistered_key": True},
-        )
-        project = OcrProject(
-            name="unregistered app payload",
-            pages=[Page(image_path="/tmp/unregistered-app-payload.png", width=80, height=40, blocks=[block])],
-        )
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="unregistered app_payload keys"):
-                store.save_project(project)
-
         clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
         clean_project = OcrProject(
             name="unregistered app payload load",
@@ -1386,7 +1362,7 @@ def test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load():
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load PASSED")
+    print("test_project_store_rejects_unregistered_app_payload_keys_on_load PASSED")
 
 
 def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
@@ -1505,12 +1481,7 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     block = Block(
         block_type=BlockType.TEXT,
         bbox=BBox.from_xyxy(0, 0, 20, 20),
-        app_payload={"future_unregistered_key": True},
     )
-    with pytest.raises(ModelValidationError, match="unregistered app_payload keys"):
-        validate_block_model(block)
-
-    block.app_payload = {}
     block.raw_payload = {LAYOUT_LINE_ROUTES_FIELD: []}
     with pytest.raises(ModelValidationError, match="runtime routing data"):
         validate_block_model(block)
@@ -4737,20 +4708,18 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             raw_payload={
                 "block_label": "text",
             },
-            app_payload={
-                "_hanwang_bbox_audit": {
-                    "schema": "hanwang_bbox_audit.v1",
-                    "layout_block_bbox": [0, 0, 120, 40],
-                    "effective_block_bbox": [0, 0, 120, 40],
-                    "effective_block_bbox_source": "layout_line_routes_union",
-                    "layout_line_route_bboxes": [[0, 0, 120, 40]],
-                    "route_text_slice_bboxes": [[0, 0, 40, 40], [70, 0, 120, 40]],
-                    "hanwang_recog_group_bboxes": [[0, 2, 40, 38], [70, 2, 120, 38]],
-                    "hanwang_segimg_group_clipped_count": 1,
-                    "hanwang_segimg_group_dropped_count": 0,
-                    "route_text_slice_count": 2,
-                    "hanwang_recog_group_count": 2,
-                },
+            ocr_audit={
+                "schema": "hanwang_bbox_audit.v1",
+                "layout_block_bbox": [0, 0, 120, 40],
+                "effective_block_bbox": [0, 0, 120, 40],
+                "effective_block_bbox_source": "layout_line_routes_union",
+                "layout_line_route_bboxes": [[0, 0, 120, 40]],
+                "route_text_slice_bboxes": [[0, 0, 40, 40], [70, 0, 120, 40]],
+                "hanwang_recog_group_bboxes": [[0, 2, 40, 38], [70, 2, 120, 38]],
+                "hanwang_segimg_group_clipped_count": 1,
+                "hanwang_segimg_group_dropped_count": 0,
+                "route_text_slice_count": 2,
+                "hanwang_recog_group_count": 2,
             },
         )
         page = Page(image_path=str(image_path), width=160, height=80, blocks=[text_block])
@@ -4758,15 +4727,13 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             block_type=BlockType.TABLE,
             bbox=BBox.from_xyxy(10, 50, 80, 70),
             source=BlockSource.AUTO_LAYOUT,
-            app_payload={
-                "_hanwang_bbox_audit": {
-                    "schema": "hanwang_bbox_audit.v1",
-                    "layout_block_bbox": [10, 50, 80, 70],
-                    "effective_block_bbox": [10, 50, 80, 70],
-                    "effective_block_bbox_source": "layout_block_bbox",
-                    "route_text_slice_count": 0,
-                    "hanwang_recog_group_count": 0,
-                }
+            ocr_audit={
+                "schema": "hanwang_bbox_audit.v1",
+                "layout_block_bbox": [10, 50, 80, 70],
+                "effective_block_bbox": [10, 50, 80, 70],
+                "effective_block_bbox_source": "layout_block_bbox",
+                "route_text_slice_count": 0,
+                "hanwang_recog_group_count": 0,
             },
         )
         page.blocks.append(skip_block)
@@ -5927,10 +5894,6 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(0, 0, 200, 40),
                     raw_payload=dict(parent_record),
-                    app_payload={
-                        ROUTE_SUBBLOCKS_FIELD: [dict(parent_record[ROUTE_SUBBLOCKS_FIELD][0])],
-                        "_layout_line_routes": list(parent_record["_layout_line_routes"]),
-                    },
                 )
             ],
         )
@@ -5946,7 +5909,6 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.origin is not None
             assert inline.origin.source_label == "inline_formula"
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
-            assert inline.app_payload == {}
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
@@ -5976,7 +5938,6 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.paddle_binding.manual_bbox == [50, 0, 80, 30]
             assert inline.origin is not None
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
-            assert inline.app_payload == {}
             assert "_ui_deleted" not in _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0]
             claim_events = [
                 event for event in page.layout_edit_events
@@ -6032,10 +5993,6 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(0, 0, 220, 40),
                     raw_payload=dict(parent_record),
-                    app_payload={
-                        ROUTE_SUBBLOCKS_FIELD: [dict(parent_record[ROUTE_SUBBLOCKS_FIELD][0])],
-                        "_layout_line_routes": list(parent_record["_layout_line_routes"]),
-                    },
                 )
             ],
         )
@@ -7248,11 +7205,7 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     formula_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="inline_formula")
     equation = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     table_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="table")
-    legacy_table_binding = Block(
-        block_type=BlockType.TEXT,
-        bbox=bb,
-        app_payload={"paddle_binding": {"source_label": "table", "block_type": "table"}},
-    )
+    text_without_structured_label = Block(block_type=BlockType.TEXT, bbox=bb)
     disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, ocr_policy=OcrPolicy.MANUAL_ONLY)
 
     assert is_text_ocr_candidate(footnote) is True
@@ -7260,7 +7213,7 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     assert should_dispatch_to_text_ocr(formula_label) is False
     assert should_dispatch_to_text_ocr(equation) is False
     assert should_dispatch_to_text_ocr(table_label) is False
-    assert should_dispatch_to_text_ocr(legacy_table_binding) is True
+    assert should_dispatch_to_text_ocr(text_without_structured_label) is True
     assert is_text_ocr_candidate(disabled_text) is True
     assert should_dispatch_to_text_ocr(disabled_text) is False
 
@@ -7724,10 +7677,6 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
                     "block_bbox": [0, 0, 200, 40],
                     "block_content": "甲 $ A $ 乙 $ B $ 丙",
                 },
-                app_payload={
-                    ROUTE_SUBBLOCKS_FIELD: list(parent_record[ROUTE_SUBBLOCKS_FIELD]),
-                    "_layout_line_routes": list(parent_record["_layout_line_routes"]),
-                },
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -7999,12 +7948,6 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
                     "block_bbox": [0, 0, 240, 40],
                     "block_content": "甲 $ A $ 乙 $ B $ 丙",
                 },
-                app_payload={
-                    ROUTE_SUBBLOCKS_FIELD: [
-                        {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
-                        {"block_label": "inline_formula", "block_bbox": [120, 0, 150, 30]},
-                    ],
-                },
             ),
         ],
     )
@@ -8054,10 +7997,6 @@ def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
                     "block_label": "text",
                     "block_bbox": [0, 0, 220, 40],
                     "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                },
-                app_payload={
-                    ROUTE_SUBBLOCKS_FIELD: list(parent_record[ROUTE_SUBBLOCKS_FIELD]),
-                    "_layout_line_routes": list(parent_record["_layout_line_routes"]),
                 },
             ),
             Block(
@@ -9776,14 +9715,6 @@ def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
                     "block_bbox": [0, 0, 130, 40],
                     "block_content": "甲 $ A $ 乙",
                 },
-                app_payload={
-                    LAYOUT_LINE_ROUTES_FIELD: [
-                        {
-                            "bbox": [80, 0, 130, 40],
-                            "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
-                        },
-                    ],
-                },
             )
         ],
     )
@@ -9856,14 +9787,6 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 130, 40),
                 raw_payload={"block_label": "text", "block_bbox": [0, 0, 130, 40]},
-                app_payload={
-                    LAYOUT_LINE_ROUTES_FIELD: [
-                        {
-                            "bbox": [80, 0, 130, 40],
-                            "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
-                        }
-                    ],
-                },
             )
         ],
     )
@@ -9875,7 +9798,6 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
 
     assert LAYOUT_LINE_ROUTES_FIELD in _raw_layout_records(page)[0]
     assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].raw_payload
-    assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].app_payload
 
     print("test_hanwang_page_block_writeback_does_not_persist_layout_line_routes PASSED")
 
@@ -11324,7 +11246,6 @@ def test_layout_panel_manual_formula_writes_typed_paddle_binding():
             assert binding is not None
             assert binding.status == BINDING_EMPTY_REVIEW
             assert binding.text == ""
-            assert "paddle_binding" not in block.app_payload
             assert block.origin is not None
             assert block.origin.source_label == "inline_formula"
             assert block.origin.raw_index == 0
@@ -11347,14 +11268,12 @@ def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
         bbox=BBox(10, 10, 50, 20),
         source_label="display_formula",
         raw_payload={"block_label": "inline_formula"},
-        app_payload={"block_label": "inline_formula"},
     )
     structured_inline = Block(
         block_type=BlockType.EQUATION,
         bbox=BBox(70, 10, 50, 20),
         source_label="inline_formula",
         raw_payload={"block_label": "display_formula"},
-        app_payload={"block_label": "display_formula"},
     )
     page = Page(
         image_path="/tmp/inline-target-labels.png",
@@ -11397,7 +11316,6 @@ def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     subblocks = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD]
 
     assert ROUTE_SUBBLOCKS_FIELD not in blocks[0].raw_payload
-    assert ROUTE_SUBBLOCKS_FIELD not in blocks[0].app_payload
     assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
         ("inline_formula", [50, 10, 80, 32]),
     ]
@@ -12098,14 +12016,6 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(10, 20, 110, 60),
                     lines=[Line(text="已有行框", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)],
-                    app_payload={
-                        LAYOUT_LINE_ROUTES_FIELD: [
-                            {
-                                "bbox": [10, 20, 110, 60],
-                                "segments": [{"kind": "text", "bbox": [10, 20, 110, 60], "text": ""}],
-                            }
-                        ]
-                    },
                 )
             ],
             raw_layout_artifact=_paddle_layout_artifact([
@@ -15939,9 +15849,7 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     assert blocks[0].origin is not None
     assert blocks[0].origin.raw_index == 0
     assert "_route_subblocks" not in blocks[0].raw_payload
-    assert "_route_subblocks" not in blocks[0].app_payload
     assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
-    assert LAYOUT_LINE_ROUTES_FIELD not in blocks[0].app_payload
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
     assert subblocks[0]["raw_payload"]["label"] == "inline_formula"
@@ -18015,7 +17923,6 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
     panel._save_current(silent=True)
 
     assert block.raw_payload["block_content"] == "STALE"
-    assert block.app_payload == {}
 
     changes: list = []
     panel.proof_changed.connect(changes.append)

@@ -49,7 +49,7 @@ def validate_block_model(block: Block) -> None:
         raise ModelValidationError("block.ocr_policy must be OcrPolicy")
     if block.origin is not None and not isinstance(block.origin, BlockOrigin):
         raise ModelValidationError("block.origin must be BlockOrigin")
-    validate_persistent_block_payloads(block.raw_payload, block.app_payload)
+    validate_persistent_block_payloads(block.raw_payload, {})
 
 
 def validate_page_model(page: Page) -> None:

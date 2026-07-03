@@ -3654,7 +3654,7 @@ class HanwangMicroRecBlockEngine:
             ]
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
-            raw_payload, app_payload, paddle_binding, ocr_audit = _persistent_payloads_from_route_row(row.raw_block)
+            raw_payload, _app_payload, paddle_binding, ocr_audit = _persistent_payloads_from_route_row(row.raw_block)
             audit = ocr_audit
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
@@ -3671,7 +3671,6 @@ class HanwangMicroRecBlockEngine:
                 note=" | ".join(note_parts),
                 source_label=row.block_label,
                 raw_payload=raw_payload,
-                app_payload=app_payload,
                 paddle_binding=paddle_binding,
                 ocr_audit=ocr_audit,
             )

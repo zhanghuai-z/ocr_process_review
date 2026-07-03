@@ -384,7 +384,6 @@ class LayoutAnalyzer:
 
         raw_overlay_items.append((raw_type, bbox))
         raw_payload = strip_runtime_layout_payload(normalized.raw)
-        app_payload = {}
         block_type = map_paddle_label_to_block_type(raw_type)
         block = Block(
             block_type=block_type,
@@ -393,7 +392,6 @@ class LayoutAnalyzer:
             note=" | ".join(note_parts),
             source_label=normalized_type,
             raw_payload=raw_payload,
-            app_payload=app_payload,
             origin=_layout_block_origin(
                 source_engine="paddleocr-vl",
                 source_run_id=self._layout_batch_id,

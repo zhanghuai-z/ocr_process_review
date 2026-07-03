@@ -24,7 +24,7 @@
 | `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
 | `Line.text <-> final_text` 双向镜像 | `Line.proof_state` / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段。 |
-| `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `app_payload` 已退役为空；旧 app-owned payload 不再迁移，非空会被当前 schema 校验拒绝。 |
+| `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.app_payload` 已从 active model 删除；旧 `app_payload_json` 不再迁移，非空会被当前 schema 校验拒绝。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 
 ## 删除顺序
@@ -32,7 +32,7 @@
 ### Phase 1: 冻结兼容层
 
 - 所有新代码禁止直接新增裸兼容字段。
-- app-owned 状态必须使用 typed 字段；禁止写入 `raw_payload/app_payload`。
+- app-owned 状态必须使用 typed 字段；禁止写入 `raw_payload` 或旧 `app_payload_json`。
 - Paddle 返回字段必须先经过 `paddle_layout_schema.py`。
 - OCR dispatch 必须先经过 `ocr_dispatch_policy.py`。
 
@@ -50,9 +50,9 @@
 ### Phase 3: 数据模型替换
 
 - `paddle_binding` 已升为 `Block.paddle_binding` typed state。
-- `_route_subblocks` / `_layout_line_routes` 已限制为运行时 route dict，不进入 `Block.raw_payload/app_payload` 持久化模型。
+- `_route_subblocks` / `_layout_line_routes` 已限制为运行时 route dict，不进入 `Block.raw_payload` 或旧 `app_payload_json` 持久化模型。
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
-- `raw_payload` 已降级为 vendor 原始 payload；`app_payload` 已退役为空。
+- `raw_payload` 已降级为 vendor 原始 payload；`Block.app_payload` 已从 active model 删除。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 是后续增强，不再作为当前兼容入口。
 

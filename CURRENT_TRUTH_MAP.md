@@ -28,7 +28,7 @@
      - block_type 是程序大类
      - source_label 是 Paddle 细标签
      - raw_payload 保存外部 vendor fact
-     - app_payload 已退役为空；程序派生状态必须使用 typed 字段或事件
+     - app_payload 已从 active Block 模型删除；旧 SQLite 列只用于读取边界校验
 
 路由构建
   -> _route_subblocks / _layout_line_routes
@@ -73,8 +73,8 @@ OCR Hanwang/CharOCR
 | 块身份 | `Block.uid` | `Block.id`、order、bbox | order/bbox 可随编辑变化，不是身份。 |
 | 行身份 | `Line.uid` | `Line.id`、line index、bbox | HProof/VProof merge 必须 uid 优先，几何只能 fallback。 |
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
-| Paddle 原始事实 | `Page.raw_layout_artifact`、`block.raw_payload` | `block.note`、`block.app_payload` | raw_payload 应只放外部返回事实；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
-| 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | `block.raw_payload`、`block.app_payload` | `app_payload` 已退役为空，非空会被存储校验拒绝。 |
+| Paddle 原始事实 | `Page.raw_layout_artifact`、`block.raw_payload` | `block.note`、旧 `block.app_payload` | raw_payload 应只放外部返回事实；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
+| 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | `block.raw_payload`、旧 `block.app_payload` | `app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测 | 公式、表格、图片通过明确 policy 阻断。 |
@@ -140,7 +140,7 @@ OCR Hanwang/CharOCR
 
 当前边界：
 
-- `_route_subblocks`、`_layout_line_routes` 仍是运行时 dict 计划，但不再写入 `Block.raw_payload/app_payload` 持久化模型。
+- `_route_subblocks`、`_layout_line_routes` 仍是运行时 dict 计划，但不再写入 `Block.raw_payload` 或旧 `app_payload_json` 持久化模型。
 - 这是当前最需要抽象成 `RoutingPlan/DispatchPlan` 的地方。
 
 ### 4. Line 文本：空终稿与 fake probe
@@ -272,7 +272,7 @@ OCR Hanwang/CharOCR
 ### 兼容/过渡层
 
 - `Line.text`：仍作为 OCR 行文本字段；新逻辑不应把它当唯一 proof 真值。
-- `Block.app_payload`：退役空字段，仅保留 schema 边界；非空会被拒绝，不再迁移旧项目。
+- 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 - `proof_saved` 信号名：名称像“已保存”，实际仍是“proof changed，需要持久化”的遗留信号。
 
 ## 五、当前仍不健康的职责边界
@@ -281,7 +281,7 @@ OCR Hanwang/CharOCR
    - 同时承担 OCR 观察、人工终稿、UI 展示、存储 rowid、导出来源。
    - 后续应拆成 Observation / EditState / ViewModel / Persistence DTO。
 
-2. `raw_payload` 仍是外部证据容器，`app_payload` 已退役。
+2. `raw_payload` 仍是外部证据容器，旧 `app_payload_json` 已退出 active model。
    - vendor fact 和 app state 已分开，但 route plan 仍是运行时 dict。
    - 后续应抽 `PaddleArtifact`、`LayoutSnapshot`、`RoutingPlan`、`DispatchPlan`、`OcrRunResult`。
 
