@@ -263,7 +263,6 @@ class LayoutAnalyzer:
         status_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._engine = None
-        self._hanwang_layout_engine = None
         self._layout_batch_id = layout_batch_id
         self._cancel_callback = cancel_callback
         self._status_callback = status_callback
@@ -957,38 +956,6 @@ class LayoutAnalyzer:
                 suffix=".layout-app-overlay.png",
                 color=(80, 220, 80),
             )
-        return page
-
-    def _hanwang_analyze(self, page: Page) -> Page:
-        """调汉王 doc_seg.dll 跳过 PaddleOCR。
-
-        bbox 以 page 坐标返回，与 _local_analyze 一致。
-        """
-        import cv2
-
-        from app.engines.hanwang_layout_engine import HanwangLayoutEngine
-
-        img = cv2.imread(page.display_image_path)
-        if img is None:
-            raise RuntimeError(f"Cannot read image: {page.display_image_path}")
-        page.height, page.width = img.shape[:2]
-        if self._hanwang_layout_engine is None:
-            self._hanwang_layout_engine = HanwangLayoutEngine()
-        blocks = self._hanwang_layout_engine.analyze(page.display_image_path)
-        for i, b in enumerate(blocks):
-            b.order = i
-            if not b.source_label:
-                b.source_label = b.block_type.value
-            if b.origin is None:
-                b.origin = _layout_block_origin(
-                    source_engine="hanwang-layout",
-                    source_run_id=self._layout_batch_id,
-                    source_label=normalize_paddle_label(b.source_label or b.block_type.value),
-                    bbox=b.bbox,
-                    block_type=b.block_type,
-                )
-        page.blocks = blocks
-        self._rescale_blocks_if_suspicious(page)
         return page
 
     # ── common interface ─────────────────────────────
