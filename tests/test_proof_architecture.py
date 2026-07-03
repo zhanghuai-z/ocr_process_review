@@ -668,11 +668,30 @@ def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
     assert "normalized_layout_regions(page)" in overlay_service_source
     assert "raw_layout_records" not in overlay_service_source
     assert "ROUTE_SUBBLOCKS_FIELD" not in overlay_service_source
+    assert "line_routes_for_block" not in overlay_service_source
+    assert "routing_plan_for_block_record" in overlay_service_source
     assert "normalized_layout_regions(page)" in index_source
     assert "raw_layout_records" not in index_source
     assert "class NormalizedLayoutArtifact" in normalized_source
     assert "class LayoutRegion" in normalized_source
     assert "class LayoutSubregion" in normalized_source
+
+
+def test_hanwang_text_slice_routing_reads_routing_plan():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            functions[node.name] = ast.get_source_segment(source, node) or ""
+
+    text_route_source = functions["_text_route_bboxes_for_block"]
+    assert "routing_plan_for_block_record(block, width, height).text_slices" in text_route_source
+    assert "text_slice_routes_for_block(" not in text_route_source
+
+    has_routes_source = functions["_has_route_subblocks"]
+    assert "routing_plan_for_block_record(block, width, height).has_layout_routes" in has_routes_source
+    assert "has_layout_line_routes(" not in has_routes_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

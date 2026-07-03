@@ -56,17 +56,16 @@ from app.core.paddle_line_routing import (
     attach_page_ocr_line_routes,
     block_bbox_xyxy,
     block_text as paddle_block_text,
-    has_layout_line_routes,
     is_formula_label,
     is_formula_style_position_block,
     is_table_label,
     line_routes_for_block,
     route_authority_label,
     route_subblocks_for_block,
-    text_slice_routes_for_block,
     union_xyxy,
     vertical_overlap_ratio,
 )
+from app.services.layout_routing_plan import routing_plan_for_block_record
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -337,14 +336,14 @@ def _text_route_bboxes_for_block(
     width: int,
     height: int,
 ) -> list[_TextRoute]:
-    routes = text_slice_routes_for_block(block, width, height)
+    routes = routing_plan_for_block_record(block, width, height).text_slices
     return [
         _TextRoute(
             block_idx=block_idx,
-            line_idx=int(route.get("line_idx", -1)),
-            segment_idx=int(route.get("segment_idx", 0)),
-            bbox=tuple(route["bbox"]),
-            carved=bool(route.get("carved", False)),
+            line_idx=route.line_index,
+            segment_idx=route.segment_index,
+            bbox=route.bbox,
+            carved=route.carved,
         )
         for route in routes
     ]
@@ -450,7 +449,7 @@ def _refine_layout_text_route_bands_from_image(
 
 
 def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:
-    return has_layout_line_routes(block, width, height)
+    return routing_plan_for_block_record(block, width, height).has_layout_routes
 
 
 def _semantic_text_routes(
@@ -889,8 +888,11 @@ def _layout_block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, in
 
 
 def _layout_line_route_bboxes(raw: dict, width: int, height: int) -> list[tuple[int, int, int, int]]:
-    line_routes = line_routes_for_block(raw, width, height)
-    return [tuple(route["bbox"]) for route in line_routes if route.get("bbox")]
+    return [
+        route.bbox
+        for route in routing_plan_for_block_record(raw, width, height).lines
+        if route.bbox != (0, 0, 0, 0)
+    ]
 
 
 def _effective_block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, int, int]:

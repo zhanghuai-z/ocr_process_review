@@ -15,9 +15,9 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_text,
     formula_texts_by_subblock_bbox,
-    line_routes_for_block,
 )
 from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
+from app.services.layout_routing_plan import routing_plan_for_block_record
 
 
 INLINE_FORMULA_SPAN_RE = re.compile(
@@ -86,15 +86,14 @@ class LayoutOverlayService:
         if marker_text:
             return marker_text
         parent_raw = dict(parent.raw or {})
-        for route in line_routes_for_block(parent_raw, page.width, page.height):
-            for segment in route.get("segments", []):
-                if segment.get("kind") != "formula":
+        plan = routing_plan_for_block_record(parent_raw, page.width, page.height)
+        for route in plan.lines:
+            for segment in route.segments:
+                if segment.kind != "formula":
                     continue
-                segment_bbox = self.bbox_from_route_segment(segment.get("bbox"))
-                if segment_bbox is None:
-                    continue
+                segment_bbox = BBox.from_xyxy(*segment.bbox)
                 if self.same_inline_formula_route_span(segment_bbox.to_xyxy(), target):
-                    return str(segment.get("text") or "")
+                    return segment.text
         for formula_bbox, text in formula_texts_by_subblock_bbox(parent_raw, page.width, page.height).items():
             if self.same_inline_formula_route_span(formula_bbox, target):
                 return text
@@ -152,18 +151,6 @@ class LayoutOverlayService:
             if block.bbox.to_xyxy() == origin_tuple:
                 return True
         return False
-
-    @staticmethod
-    def bbox_from_route_segment(value: object) -> BBox | None:
-        if not isinstance(value, (list, tuple)) or len(value) != 4:
-            return None
-        try:
-            x1, y1, x2, y2 = (int(item) for item in value)
-        except (TypeError, ValueError):
-            return None
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return BBox.from_xyxy(x1, y1, x2, y2)
 
     def readonly_layout_overlays(self, page: Page) -> list[tuple[str, BBox]]:
         overlays: list[tuple[str, BBox]] = []
