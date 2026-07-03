@@ -474,6 +474,25 @@ def test_project_store_does_not_mutate_line_text_contract_on_save():
     assert "line_text_contract(" in source
 
 
+def test_project_store_save_block_has_no_layout_runtime_side_effects():
+    source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    save_block_source = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_save_block":
+            save_block_source = ast.get_source_segment(source, node) or ""
+            break
+
+    assert save_block_source
+    assert "_strip_runtime" not in source
+    assert "strip_runtime" not in save_block_source
+    assert ".lines = []" not in save_block_source
+    assert "mark_ocr_text_invalidated(" not in save_block_source
+    assert "ocr_invalidated_reason =" not in save_block_source
+    assert '"{}"' in save_block_source
+    assert "validate_block_model(block)" in save_block_source
+
+
 def test_proof_line_facts_reads_ocr_text_through_contract():
     source = Path("app/core/proof_line_facts.py").read_text(encoding="utf-8")
     assert "line_text_contract(line)" in source

@@ -65,6 +65,7 @@
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
 - `Block.source` 的判断已收口到 `app.models.layout_block_state`；生产模块不得各自比较 `BlockSource.USER_EDITED/MANUAL_DRAW`。
+- `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 

@@ -69,6 +69,8 @@ OCR Hanwang/CharOCR
      - id 是 rowid，仅是存储实现
      - uid 是业务身份
      - proof 增量保存必须按 scoped line 更新，不能全项目覆盖
+     - 保存路径只写当前模型事实；不得清空 `Block.lines`、不得清理 route 时顺手改 OCR invalidation
+     - 旧 `raw_payload_json/app_payload_json` 只允许为空对象；运行时 route 或旧 payload 泄漏会在加载边界报错
 
 导出
   -> Export IR / Markdown / PDF
@@ -306,6 +308,7 @@ OCR Hanwang/CharOCR
 
 2. `raw_payload` 已从 active `Block` 模型退出，仅保留旧 SQLite 列拒绝边界。
    - Paddle vendor fact 和 app state 已分开；route plan 仍是运行时 dict。
+   - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
    - 后续应抽 `PaddleArtifact`、`LayoutSnapshot`、`RoutingPlan`、`DispatchPlan`、`OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
