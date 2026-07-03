@@ -468,6 +468,15 @@ def test_page_status_mutation_stays_in_page_state_helper():
     assert offenders == []
 
 
+def test_proof_signal_contract_does_not_restore_proof_saved():
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        if "proof_saved" in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")

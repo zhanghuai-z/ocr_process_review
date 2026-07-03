@@ -86,7 +86,7 @@ OCR Hanwang/CharOCR
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
 | 字符索引 | `CharIndexService` 查询结果 | CharIndex 当作数据源 | 它是派生索引；错配行会被跳过，不能修复坏数据。 |
 | 质量探针 | active probe sidecar | UI 显示假字 | pending fake_char 只在锚点仍匹配 true_char 时注入。 |
-| proof 持久化 | `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 `proof_saved` 名称 | `proof_saved` 是遗留信号名；真正语义是 proof changed, please persist。 |
+| proof 持久化 | `proof_changed(ProofChangeSet)` + `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 bool 保存信号、无 scope 自动保存 | proof 信号语义是“校对事实已变更，需要持久化”，具体持久化范围由 `ProofChangeSet` 描述。 |
 | proof 写入口 | `ProofEditService` / `proof_line_mutation` | `Line.set_proof_text()` / `Line.set_proof_status()` | `Line` 模型不再持有 proof 写方法，后续写状态必须走显式 helper/service。 |
 
 ## 三、近期关键修补前后逻辑
@@ -280,7 +280,6 @@ OCR Hanwang/CharOCR
 - `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
 - `Block.lines`：仍是模型内部过渡存储；业务代码已改为通过 `app.models.ocr_observation` 访问。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
-- `proof_saved` 信号名：名称像“已保存”，实际仍是“proof changed，需要持久化”的遗留信号。
 
 ## 五、当前仍不健康的职责边界
 
