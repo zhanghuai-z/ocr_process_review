@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from app.models.proof_line_state import ProofLineState
+from app.models.proof_line_state_store import proof_state_for_line, set_proof_state_for_line
 
 
 @dataclass(frozen=True)
@@ -20,11 +21,8 @@ def line_text_contract(line: object) -> LineTextContract:
     ocr_text = str(getattr(line, "ocr_text", "") or text)
     normalized_text = text or ocr_text
 
-    state = getattr(line, "proof_state", None)
-    if isinstance(state, ProofLineState):
-        proof_state = state if state.line_uid == uid else replace(state, line_uid=uid)
-    else:
-        proof_state = ProofLineState(line_uid=uid)
+    state = proof_state_for_line(line)
+    proof_state = state if state.line_uid == uid else replace(state, line_uid=uid)
     return LineTextContract(
         text=normalized_text,
         ocr_text=ocr_text,
@@ -40,6 +38,6 @@ def ensure_line_text_contract(line: object) -> None:
     normalizing legacy or partially constructed line data.
     """
     contract = line_text_contract(line)
-    setattr(line, "proof_state", contract.proof_state)
+    set_proof_state_for_line(line, contract.proof_state)
     setattr(line, "text", contract.text)
     setattr(line, "ocr_text", contract.ocr_text)

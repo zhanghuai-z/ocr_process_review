@@ -9,6 +9,7 @@ import numpy as np
 
 from app.engines import OcrContext
 from app.models import BBox, Line, ProofLineState, ProofStatus
+from app.models.proof_line_state_store import set_proof_state_for_line
 
 
 class FakeOcrEngine:
@@ -48,8 +49,8 @@ class FakeOcrEngine:
                     w=min(w - 20, 200),
                     h=20,
                 ),
-                proof_state=ProofLineState(line_uid="", proof_status=proof),
             )
+            set_proof_state_for_line(line, ProofLineState(line_uid=line.uid, proof_status=proof))
             lines.append(line)
 
         return lines

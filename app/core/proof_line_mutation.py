@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.models import Line, ProofLineState, ProofStatus
+from app.models.proof_line_state_store import proof_state_for_line, set_proof_state_for_line
 
 
 def set_line_proof_text(
@@ -24,12 +25,8 @@ def set_line_proof_status(line: Line, status: ProofStatus) -> None:
 
 
 def apply_line_proof_state(line: Line, state: ProofLineState) -> None:
-    state.line_uid = line.uid
-    object.__setattr__(line, "proof_state", state)
+    set_proof_state_for_line(line, state)
 
 
 def _proof_state_for(line: Line) -> ProofLineState:
-    state = getattr(line, "proof_state", None)
-    if isinstance(state, ProofLineState):
-        return state
-    return ProofLineState(line_uid=line.uid)
+    return proof_state_for_line(line)

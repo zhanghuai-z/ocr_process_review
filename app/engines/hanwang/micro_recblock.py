@@ -98,6 +98,7 @@ from app.models import (
     Page,
     ProofLineState,
 )
+from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
 
@@ -2955,8 +2956,11 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
         chars=chars,
         ocr_text=line.text,
         review_flags=merged_review_flags,
-        proof_state=ProofLineState(
-            line_uid="",
+    )
+    set_proof_state_for_line(
+        model,
+        ProofLineState(
+            line_uid=model.uid,
             proof_status=proof_status_for(line.confidence, merged_review_flags),
         ),
     )

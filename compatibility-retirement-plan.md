@@ -23,7 +23,7 @@
 | `LayoutAnalyzer._extract_*_from_record()` | `paddle_layout_schema.py` | 删除旧私有 shim；字段解析直接走 schema adapter。 |
 | `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
-| `Line.text <-> final_text` 双向镜像 | `Line.proof_state` / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段。 |
+| `Line.text <-> final_text` 双向镜像 | external `ProofLineState` store / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段；active `Line` 不再携带 proof_state。 |
 | `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.app_payload` 已从 active model 删除；旧 `app_payload_json` 不再迁移，非空会被当前 schema 校验拒绝。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 
@@ -43,7 +43,7 @@
 
 - `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
 - `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
-- `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入 `ProofLineState`。已完成。
+- `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入外部 `ProofLineState` store。已完成。
 - controller 中业务 gate 直接调用 `workflow_state.page_gate_info()`。已完成。
 
 完成状态：已完成。

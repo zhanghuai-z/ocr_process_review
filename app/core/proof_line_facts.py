@@ -1,14 +1,15 @@
 """Read-only proof facts derived from the current project model.
 
-``Line`` carries a ``ProofLineState`` runtime object. Code outside proof
-editing/storage should read proof text/status through this module so the
-eventual model split has a single adapter point.
+``Line`` carries OCR observation fields only. Code outside proof editing/storage
+should read proof text/status through this module so the proof state remains an
+external runtime fact keyed by the line object.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from app.models import Line, ProofLineState, ProofStatus
+from app.models.proof_line_state_store import proof_state_for_line
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,7 @@ def proof_line_facts(line: object) -> ProofLineFacts:
 
 
 def proof_runtime_state(line: object) -> ProofLineState:
-    state = getattr(line, "proof_state", None)
-    if not isinstance(state, ProofLineState):
-        raise TypeError("proof line facts require Line.proof_state")
-    return state
+    return proof_state_for_line(line)
 
 
 def proof_final_text(line: Line) -> str:

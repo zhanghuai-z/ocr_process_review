@@ -627,6 +627,9 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
     tree = ast.parse(source, filename="app/models/project.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "Line":
+            line_source = ast.get_source_segment(source, node) or ""
+            assert "proof_state:" not in line_source
+            assert "ProofLineState" not in line_source
             line_methods = {
                 child.name for child in node.body
                 if isinstance(child, ast.FunctionDef)
@@ -668,7 +671,6 @@ def test_proof_line_facts_does_not_reconstruct_state_from_retired_mirrors():
 
 def test_proof_field_writes_stay_inside_approved_boundaries():
     allowed_files = {
-        Path("app/models/project.py"),
         Path("app/core/project_store.py"),
         Path("app/core/ocr_proof_projection.py"),
         Path("app/services/proof_edit_service.py"),

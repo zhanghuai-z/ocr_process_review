@@ -7,7 +7,6 @@ from .enums import (
     BlockSource, BlockType, OcrPolicy, PageStatus,
 )
 from .entity_id import ensure_entity_uid
-from .proof_line_state import ProofLineState
 
 
 OCR_AVAILABLE_PAGE_STATUSES = {
@@ -119,15 +118,11 @@ class Line:
     ocr_text: str = ""                    # OCR 原始文本
     review_flags: List[str] = field(default_factory=list)  # 疑点标签
     uid: str = ""                         # 稳定业务 ID
-    proof_state: ProofLineState | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "line")
         if not self.ocr_text:
             self.ocr_text = self.text
-        state = self.proof_state or ProofLineState(line_uid=self.uid)
-        state.line_uid = self.uid
-        object.__setattr__(self, "proof_state", state)
 
 @dataclass
 class BlockOrigin:

@@ -42,7 +42,7 @@ OCR Hanwang/CharOCR
      - Line.chars 是字符/词/公式 carrier 的几何与文本观察
 
 校对 HProof/VProof
-  -> Line.proof_state / ProofLineState
+  -> external ProofLineState store
      - 人工校对后的文本事实
      - proof_display_text(line) 是统一显示文本入口
   -> Line.chars
@@ -79,7 +79,7 @@ OCR Hanwang/CharOCR
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
 | OCR 原文 | `Line.ocr_text` | `Line.text` 单独判断 | `text` 仍有兼容属性；新逻辑应优先明确 ocr_text。 |
-| 校对终稿 | `proof_display_text(line)` / `Line.proof_state` | `final_text` 是否为空、`Line.text` 单独判断 | `final_text_set=True` 时空串也是有效终稿。 |
+| 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
 | 字符索引 | `CharIndexService` 查询结果 | CharIndex 当作数据源 | 它是派生索引；错配行会被跳过，不能修复坏数据。 |

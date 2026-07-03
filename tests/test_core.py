@@ -21,7 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.models import OcrPolicy
 
 from app.core.line_text_contract import ensure_line_text_contract
-from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_facts import (
+    proof_display_text,
+    proof_final_text,
+    proof_final_text_set,
+    proof_runtime_state,
+    proof_status,
+)
 from app.core.proof_line_mutation import apply_line_proof_state, set_line_proof_status, set_line_proof_text
 
 
@@ -118,11 +124,13 @@ def test_models():
     assert line.uid.startswith("line_")
     assert proof_status(line) == ProofStatus.UNCHECKED
     assert line.review_flags == []
+    assert not hasattr(line, "proof_state")
     set_line_proof_text(line, "修改文字")
     assert proof_status(line) == ProofStatus.MODIFIED
-    assert line.proof_state.final_text == "修改文字"
-    assert line.proof_state.final_text_set is True
-    assert line.proof_state.proof_status == ProofStatus.MODIFIED
+    state = proof_runtime_state(line)
+    assert state.final_text == "修改文字"
+    assert state.final_text_set is True
+    assert state.proof_status == ProofStatus.MODIFIED
     apply_line_proof_state(
         line,
         ProofLineState(
@@ -136,7 +144,8 @@ def test_models():
     assert proof_display_text(line) == "状态对象终稿"
     assert proof_final_text(line) == "状态对象终稿"
     assert not hasattr(line, "final_text")
-    assert line.proof_state.final_text == "状态对象终稿"
+    assert not hasattr(line, "proof_state")
+    assert proof_runtime_state(line).final_text == "状态对象终稿"
     assert proof_display_text(line) == "状态对象终稿"
     set_line_proof_text(line, "修改文字")
 
@@ -1204,7 +1213,7 @@ def test_project_store_serializes_line_contract_without_mutating_line():
     try:
         bb = BBox(0, 0, 100, 20)
         line = Line(text="", ocr_text="OCR补全文本", confidence=0.9, bbox=bb)
-        line.proof_state = None
+        assert not hasattr(line, "proof_state")
         project = OcrProject(
             name="line-contract-no-mutate",
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
@@ -1214,7 +1223,7 @@ def test_project_store_serializes_line_contract_without_mutating_line():
             store.save_project(project)
             assert line.text == ""
             assert line.ocr_text == "OCR补全文本"
-            assert line.proof_state is None
+            assert not hasattr(line, "proof_state")
 
             loaded = store.load_project(project_id=1)
             loaded_line = loaded.pages[0].blocks[0].lines[0]
