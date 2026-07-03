@@ -53,7 +53,7 @@
 - `paddle_binding` 已升为 `Block.paddle_binding` typed state。
 - `_route_subblocks` / `_layout_line_routes` 已限制为运行时 route dict，不进入 `Block.raw_payload` 或旧 `app_payload_json` 持久化模型。
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
-- 新 Paddle layout block 不再复制 vendor JSON 到 `Block.raw_payload`；原始事实通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取。
+- 新导入和 Hanwang OCR 后重建的 block 不再复制 vendor JSON 到 `Block.raw_payload`；原始事实通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取。
 - `Block.app_payload` 已从 active model 删除。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 是后续增强，不再作为当前兼容入口。

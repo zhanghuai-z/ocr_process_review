@@ -19,7 +19,6 @@ from app.core.block_payload import (
     is_ocr_text_invalidated,
     paddle_binding_dict,
     set_paddle_binding,
-    strip_runtime_layout_payload,
 )
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
@@ -89,6 +88,7 @@ from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import (
     BBox,
     Block,
+    BlockOrigin,
     BlockSource,
     BlockType,
     Char,
@@ -3052,24 +3052,47 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     return row
 
 
-def _persistent_payloads_from_route_row(
+def _persistent_state_from_route_row(
     raw_block: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], PaddleBinding | None, dict[str, Any]]:
-    """Split the current Hanwang route row into persisted raw/app payloads.
+) -> tuple[PaddleBinding | None, dict[str, Any]]:
+    """Extract typed persisted state from the current Hanwang route row.
 
     Route rows temporarily carry app-owned data such as paddle binding and
     Hanwang bbox audit next to vendor fields. Persisted ``Block`` objects keep
-    those fields in typed state; this is not a legacy file migration path.
+    those fields in typed state; route rows are not copied back into
+    ``Block.raw_payload``.
     """
-    raw_payload = dict(raw_block or {})
-    app_payload: dict[str, Any] = {}
-    binding = raw_payload.pop(ROUTE_ROW_PADDLE_BINDING_KEY, None)
-    audit = raw_payload.pop(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, None)
+    route_row = dict(raw_block or {})
+    binding = route_row.pop(ROUTE_ROW_PADDLE_BINDING_KEY, None)
+    audit = route_row.pop(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, None)
     return (
-        strip_runtime_layout_payload(raw_payload),
-        strip_runtime_layout_payload(app_payload),
         PaddleBinding.from_dict(binding if isinstance(binding, dict) else None),
         dict(audit) if isinstance(audit, dict) else {},
+    )
+
+
+def _origin_from_route_row(
+    page: Page,
+    row: LayoutRouteRow,
+    *,
+    block_type: BlockType,
+    bbox: BBox,
+) -> BlockOrigin:
+    raw_block = dict(row.raw_block or {})
+    raw_index = _int_value(raw_block.get("_layout_paddle_parent_index"))
+    if raw_index < 0:
+        raw_index = _parent_index_for_raw_payload(page, raw_block)
+    artifact = page.raw_layout_artifact
+    return BlockOrigin(
+        created_by=BlockSource.AUTO_LAYOUT.value,
+        source_engine=str(getattr(artifact, "engine", "") or "paddleocr-vl"),
+        source_run_id=str(getattr(artifact, "run_id", "") or ""),
+        source_label=row.block_label,
+        original_bbox=bbox,
+        original_kind=block_type,
+        raw_artifact_uid=str(getattr(artifact, "uid", "") or ""),
+        raw_json_path=str(getattr(artifact, "artifact_path", "") or ""),
+        raw_index=raw_index if raw_index >= 0 else None,
     )
 
 
@@ -3654,7 +3677,7 @@ class HanwangMicroRecBlockEngine:
             ]
             if row.ppvl_text:
                 note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
-            raw_payload, _app_payload, paddle_binding, ocr_audit = _persistent_payloads_from_route_row(row.raw_block)
+            paddle_binding, ocr_audit = _persistent_state_from_route_row(row.raw_block)
             audit = ocr_audit
             if isinstance(audit, dict):
                 failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
@@ -3670,7 +3693,7 @@ class HanwangMicroRecBlockEngine:
                 source=BlockSource.AUTO_LAYOUT,
                 note=" | ".join(note_parts),
                 source_label=row.block_label,
-                raw_payload=raw_payload,
+                origin=_origin_from_route_row(page, row, block_type=block_type, bbox=bbox),
                 paddle_binding=paddle_binding,
                 ocr_audit=ocr_audit,
             )

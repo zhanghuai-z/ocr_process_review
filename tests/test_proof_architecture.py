@@ -264,6 +264,20 @@ def test_raw_payload_is_not_mutated_directly_by_app_code():
     assert offenders == []
 
 
+def test_raw_payload_constructor_writes_stay_at_storage_boundary():
+    allowed = {
+        Path("app/core/project_store.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "raw_payload=" in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_raw_payload_reads_stay_at_storage_validation_or_raw_artifact_boundary():
     allowed = {
         Path("app/core/model_validation.py"),

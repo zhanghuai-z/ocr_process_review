@@ -5909,6 +5909,8 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.origin is not None
             assert inline.origin.source_label == "inline_formula"
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
+            assert inline.origin.raw_index == 0
+            assert inline.raw_payload == {}
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
@@ -6057,7 +6059,7 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
     try:
         inline_bboxes = [
             bbox.to_xyxy()
-            for _parent, _subblock, bbox in panel._iter_inline_formula_subblocks(page)
+            for _parent_index, _parent, _subblock, bbox in panel._iter_inline_formula_subblocks(page)
         ]
     finally:
         panel.close()
@@ -11951,14 +11953,20 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         ]
         assert out_page.blocks[0].lines[0].text == "汉王"
         assert out_page.blocks[0].source_label == "text"
-        assert out_page.blocks[0].raw_payload["extra"]["role"] == "body"
+        assert out_page.blocks[0].raw_payload == {}
+        assert out_page.blocks[0].origin is not None
+        assert out_page.blocks[0].origin.raw_index == 0
         assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
         assert out_page.blocks[1].lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].ocr_policy != OcrPolicy.TEXT_OCR
-        assert out_page.blocks[1].raw_payload["formula_format"] == "latex"
+        assert out_page.blocks[1].raw_payload == {}
+        assert out_page.blocks[1].origin is not None
+        assert out_page.blocks[1].origin.raw_index == 1
         assert "fallback_reason=" not in out_page.blocks[2].note
         assert out_page.blocks[2].lines == []
-        assert out_page.blocks[2].raw_payload["ref_level"] == 1
+        assert out_page.blocks[2].raw_payload == {}
+        assert out_page.blocks[2].origin is not None
+        assert out_page.blocks[2].origin.raw_index == 2
     finally:
         os.unlink(img_path)
 

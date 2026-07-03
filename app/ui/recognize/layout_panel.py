@@ -1835,7 +1835,7 @@ class LayoutPanel(QWidget):
     def _ensure_inline_formula_blocks(self, page: Page) -> None:
         """Promote Paddle inline_formula subblocks to editable equation blocks."""
         handled_origins = handled_inline_formula_origin_bboxes(page)
-        for parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
+        for parent_index, parent, subblock, bbox in self._iter_inline_formula_subblocks(page):
             origin_tuple = bbox.to_xyxy()
             if origin_tuple in handled_origins:
                 continue
@@ -1848,9 +1848,6 @@ class LayoutPanel(QWidget):
                 order=len(page.blocks),
                 source=BlockSource.AUTO_LAYOUT,
                 source_label="inline_formula",
-                raw_payload={
-                    **dict(subblock.get("raw_payload") if isinstance(subblock.get("raw_payload"), dict) else {}),
-                },
                 origin=BlockOrigin(
                     created_by=BlockSource.AUTO_LAYOUT.value,
                     source_engine="paddleocr-vl",
@@ -1858,11 +1855,12 @@ class LayoutPanel(QWidget):
                     original_bbox=bbox,
                     original_kind=BlockType.EQUATION,
                     raw_artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+                    raw_index=parent_index,
                 ),
             ))
 
     def _iter_inline_formula_subblocks(self, page: Page):
-        for parent in raw_layout_records(page):
+        for parent_index, parent in enumerate(raw_layout_records(page)):
             subblocks = parent.get(ROUTE_SUBBLOCKS_FIELD)
             if not isinstance(subblocks, list):
                 continue
@@ -1887,7 +1885,7 @@ class LayoutPanel(QWidget):
                 formula_text = self._inline_formula_subblock_text(page, parent, bbox)
                 if formula_text and is_formula_marker_token(formula_text):
                     continue
-                yield parent, subblock, bbox.clamp(page.width, page.height)
+                yield parent_index, parent, subblock, bbox.clamp(page.width, page.height)
 
     @staticmethod
     def _inline_formula_subblock_text(page: Page, parent: dict, bbox: BBox) -> str:
