@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
-from app.core.block_payload import is_ocr_text_invalidated
+from app.models.block_state import is_ocr_text_invalidated
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
     should_block_page_ocr_line,

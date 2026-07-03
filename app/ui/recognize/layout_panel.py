@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import (
+from app.models.block_state import (
     is_ocr_text_invalidated,
     mark_ocr_text_invalidated,
     paddle_binding_dict,

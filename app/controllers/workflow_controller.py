@@ -15,7 +15,7 @@ from typing import Callable, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from app.core.block_payload import mark_ocr_text_invalidated
+from app.models.block_state import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
 from app.core.proof_line_utils import iter_unique_page_text_lines

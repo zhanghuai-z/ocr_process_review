@@ -531,17 +531,17 @@ def test_block_type_mapping():
     print("test_block_type_mapping PASSED")
 
 
-def test_block_payload_helpers_use_typed_state_only():
+def test_block_state_helpers_use_typed_state_only():
     import pytest
 
-    from app.core.block_payload import (
+    from app.models.block_state import (
         clear_ocr_text_invalidation,
         is_ocr_text_invalidated,
         mark_ocr_text_invalidated,
         ocr_invalidation_reason,
         set_paddle_binding,
-        validate_app_payload_keys,
     )
+    from app.core.model_validation import validate_persistent_block_payloads
     from app.models import BBox, Block, BlockType, PaddleBinding
 
     block = Block(
@@ -549,8 +549,8 @@ def test_block_payload_helpers_use_typed_state_only():
         bbox=BBox(0, 0, 10, 10),
     )
 
-    with pytest.raises(ValueError, match="unregistered app_payload keys"):
-        validate_app_payload_keys({"custom": 1})
+    with pytest.raises(ValueError, match="retired app payload"):
+        validate_persistent_block_payloads({}, {"custom": 1})
 
     set_paddle_binding(block, {"status": "paddle_geometry_hit", "text": "$ A $"})
     assert isinstance(block.paddle_binding, PaddleBinding)
@@ -563,7 +563,7 @@ def test_block_payload_helpers_use_typed_state_only():
     clear_ocr_text_invalidation(block)
     assert is_ocr_text_invalidated(block) is False
 
-    print("test_block_payload_helpers_use_typed_state_only PASSED")
+    print("test_block_state_helpers_use_typed_state_only PASSED")
 
 
 def test_paddle_layout_schema_normalizes_record_fields():
@@ -1306,7 +1306,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
     print("test_project_store_rejects_runtime_layout_routes_on_save_and_load PASSED")
 
 
-def test_project_store_rejects_unregistered_app_payload_keys_on_load():
+def test_project_store_rejects_retired_app_payload_on_load():
     import pytest
     import sqlite3
 
@@ -1319,7 +1319,7 @@ def test_project_store_rejects_unregistered_app_payload_keys_on_load():
     try:
         clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
         clean_project = OcrProject(
-            name="unregistered app payload load",
+            name="retired app payload load",
             pages=[Page(image_path="/tmp/unregistered-app-payload.png", width=80, height=40, blocks=[clean_block])],
         )
         with ProjectStore(db_path) as store:
@@ -1331,12 +1331,12 @@ def test_project_store_rejects_unregistered_app_payload_keys_on_load():
             )
             conn.commit()
         with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="unregistered app_payload keys"):
+            with pytest.raises(ProjectDataError, match="retired app payload"):
                 store.load_project(saved.id)
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_rejects_unregistered_app_payload_keys_on_load PASSED")
+    print("test_project_store_rejects_retired_app_payload_on_load PASSED")
 
 
 def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
@@ -19498,7 +19498,7 @@ if __name__ == "__main__":
     test_workflow_state_keeps_project_and_page_ocr_state_separate()
     test_bbox_tools()
     test_block_type_mapping()
-    test_block_payload_helpers_use_typed_state_only()
+    test_block_state_helpers_use_typed_state_only()
     test_paddle_layout_schema_normalizes_record_fields()
     test_ocr_run_wraps_ir_lines_without_proof_model()
     test_block_origin_label_is_authoritative_for_attributes_and_dispatch()
@@ -19512,7 +19512,7 @@ if __name__ == "__main__":
     test_project_store_persists_block_origin_separately_from_current_layout()
     test_project_store_persists_layout_edit_events()
     test_project_store_rejects_runtime_layout_routes_on_save_and_load()
-    test_project_store_rejects_unregistered_app_payload_keys_on_save_and_load()
+    test_project_store_rejects_retired_app_payload_on_load()
     test_project_store_rejects_invalid_payload_json_on_load()
     test_model_validation_rejects_legacy_page_and_runtime_payloads()
     test_line_final_text_contract_and_project_store_roundtrip()

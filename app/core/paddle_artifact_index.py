@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import set_paddle_binding
+from app.models.block_state import set_paddle_binding
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,

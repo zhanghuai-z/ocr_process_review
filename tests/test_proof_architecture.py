@@ -44,16 +44,6 @@ def _proof_ui_sources() -> list[Path]:
     return sorted(PROOF_UI_DIR.glob("*.py"))
 
 
-def _app_payload_key_segment(source: str) -> str:
-    app_match = re.search(
-        r"APP_PAYLOAD_KEYS\s*=\s*frozenset\((.*?)\)",
-        source,
-        flags=re.DOTALL,
-    )
-    assert app_match is not None
-    return app_match.group(1)
-
-
 def _assigned_attr_targets(tree: ast.AST) -> list[ast.Attribute]:
     targets: list[ast.Attribute] = []
     for node in ast.walk(tree):
@@ -145,6 +135,10 @@ def test_retired_legacy_raw_payload_splitter_is_not_restored():
     assert offenders == []
 
 
+def test_retired_block_payload_helper_is_not_restored():
+    assert not Path("app/core/block_payload.py").exists()
+
+
 def test_ocr_dispatch_policy_uses_block_attributes_not_payload_guessing():
     source = Path("app/core/ocr_dispatch_policy.py").read_text(encoding="utf-8")
     assert "block_attributes(" in source
@@ -187,7 +181,7 @@ def test_export_ir_source_does_not_expose_raw_payload():
     assert "RawPayload" not in archive_source
 
 
-def test_app_payload_mutation_goes_through_block_payload_helpers():
+def test_app_payload_is_not_mutated_by_active_app_code():
     offenders: list[str] = []
     direct_mutation_patterns = (
         ".app_payload.pop(",
@@ -196,8 +190,6 @@ def test_app_payload_mutation_goes_through_block_payload_helpers():
     )
     assignment_pattern = re.compile(r"\.app_payload\[[^\]]+\]\s*=")
     for path in sorted(APP_DIR.rglob("*.py")):
-        if path == Path("app/core/block_payload.py"):
-            continue
         source = path.read_text(encoding="utf-8")
         for pattern in direct_mutation_patterns:
             if pattern in source:
@@ -207,11 +199,9 @@ def test_app_payload_mutation_goes_through_block_payload_helpers():
     assert offenders == []
 
 
-def test_app_payload_reads_go_through_block_payload_helpers():
+def test_app_payload_is_not_read_by_active_app_code():
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
-        if path == Path("app/core/block_payload.py"):
-            continue
         source = path.read_text(encoding="utf-8")
         if ".app_payload.get(" in source:
             offenders.append(f"{path}: .app_payload.get(")
@@ -220,7 +210,6 @@ def test_app_payload_reads_go_through_block_payload_helpers():
 
 def test_app_payload_access_stays_at_storage_validation_or_payload_boundary():
     allowed = {
-        Path("app/core/block_payload.py"),
         Path("app/core/model_validation.py"),
         Path("app/core/project_store.py"),
     }
@@ -430,14 +419,15 @@ def test_project_store_does_not_mutate_line_text_contract_on_save():
 
 
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "PADDLE_BINDING_KEY" not in app_keys_segment
+    assert "paddle_binding_dict(block" in block_state_source
+    assert "set_paddle_binding(block" in block_state_source
+    assert "APP_PAYLOAD_KEYS" not in block_state_source
     assert "PADDLE_BINDING_KEY" not in artifact_source
     assert "PADDLE_BINDING_KEY" not in layout_source
     assert "set_paddle_binding(block" in artifact_source
@@ -451,27 +441,22 @@ def test_paddle_binding_is_typed_state_not_app_payload_write_path():
 
 
 def test_paddle_raw_label_fields_are_not_app_payload_state():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
     for key in ("PADDLE_BLOCK_LABEL_KEY", "PADDLE_BLOCK_BBOX_KEY"):
-        assert key not in app_keys_segment
-        assert key not in block_payload_source
         assert f"app_payload.pop({key}" not in store_source
 
 
 def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
+    block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     ocr_source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "OCR_TEXT_INVALIDATED_KEY" not in app_keys_segment
-    assert "OCR_INVALIDATION_KIND_KEY" not in app_keys_segment
-    assert "setattr(block, \"ocr_invalidated_reason\"" in block_payload_source
+    assert "OCR_TEXT_INVALIDATED_KEY" not in block_state_source
+    assert "OCR_INVALIDATION_KIND_KEY" not in block_state_source
+    assert "setattr(block, \"ocr_invalidated_reason\"" in block_state_source
     assert "mark_ocr_text_invalidated(block" in layout_source
     assert "is_ocr_text_invalidated(block)" in layout_source
     assert "is_ocr_text_invalidated(block)" in ocr_source
@@ -482,13 +467,9 @@ def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
 
 
 def test_manual_layout_merge_details_are_events_not_app_payload_state():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "MANUAL_MERGE_FROM_KEY" not in app_keys_segment
-    assert "MANUAL_DRAW_BBOX_KEY" not in app_keys_segment
     assert "MANUAL_MERGE_FROM_KEY" not in layout_source
     assert "MANUAL_DRAW_BBOX_KEY" not in layout_source
     assert "app_payload.pop(MANUAL_MERGE_FROM_KEY" not in store_source
@@ -496,17 +477,14 @@ def test_manual_layout_merge_details_are_events_not_app_payload_state():
 
 
 def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
     for key in (
         "UI_GENERATED_INLINE_FORMULA_BLOCK_KEY",
         "UI_INLINE_FORMULA_ORIGIN_BBOX_KEY",
         "UI_INLINE_FORMULA_PARENT_LABEL_KEY",
     ):
-        assert key not in app_keys_segment
         assert key not in layout_source
         assert f"app_payload.pop({key}" not in store_source
     assert "origin=BlockOrigin(" in layout_source
@@ -515,12 +493,9 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "UI_DELETED_INLINE_FORMULA_KEY" not in app_keys_segment
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in layout_source
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in hanwang_source
     assert "mark_inline_formula_origin_handled" in layout_source
@@ -528,13 +503,10 @@ def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
 
 
 def test_hanwang_bbox_audit_is_typed_ocr_audit_not_app_payload_state():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     model_source = Path("app/models/project.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "HANWANG_BBOX_AUDIT_KEY" not in app_keys_segment
     assert "ocr_audit:" in model_source
     assert "ocr_audit_json" in store_source
     assert "app_payload.pop(HANWANG_BBOX_AUDIT_KEY" not in store_source
@@ -544,14 +516,11 @@ def test_hanwang_bbox_audit_is_typed_ocr_audit_not_app_payload_state():
 
 
 def test_table_text_layer_cells_are_typed_state_not_app_payload_state():
-    block_payload_source = Path("app/core/block_payload.py").read_text(encoding="utf-8")
     model_source = Path("app/models/project.py").read_text(encoding="utf-8")
     service_source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
     ir_source = Path("app/export/ir_builder.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
 
-    app_keys_segment = _app_payload_key_segment(block_payload_source)
-    assert "TABLE_TEXT_LAYER_CELLS_KEY" not in app_keys_segment
     assert "table_text_layer_cells:" in model_source
     assert "table_text_layer_cells_json" in store_source
     assert "app_payload.pop(TABLE_TEXT_LAYER_CELLS_KEY" not in store_source

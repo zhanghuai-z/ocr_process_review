@@ -3,17 +3,21 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from app.core.block_payload import (
-    RAW_PAYLOAD_FORBIDDEN_APP_KEYS,
-    RUNTIME_LAYOUT_PAYLOAD_KEYS,
-    validate_app_payload_keys,
-)
 from app.models import Block, BlockOrigin, OcrPolicy, Page
 
 
 class ModelValidationError(ValueError):
     """Current in-memory model violates application boundaries."""
 
+
+RUNTIME_LAYOUT_PAYLOAD_KEYS = frozenset({
+    "_layout_line_routes",
+    "_route_subblocks",
+    "_layout_block_source",
+    "_layout_block_ocr_policy",
+    "_layout_paddle_parent_index",
+    "_layout_manual_route_subblock",
+})
 
 def validate_persistent_block_payloads(
     raw_payload: Mapping[str, Any] | None,
@@ -33,17 +37,11 @@ def validate_persistent_block_payloads(
             raise ModelValidationError(
                 f"{app_field} contains runtime routing data: {runtime_field}"
             )
-    try:
-        validate_app_payload_keys(app, field=app_field)
-    except ValueError as exc:
-        raise ModelValidationError(str(exc)) from exc
+    if app:
+        unknown = sorted(app)
+        raise ModelValidationError(f"{app_field} contains retired app payload: {unknown}")
     if raw:
         raise ModelValidationError(f"{raw_field} contains retired raw payload")
-    forbidden_app_keys = sorted(set(raw) & RAW_PAYLOAD_FORBIDDEN_APP_KEYS)
-    if forbidden_app_keys:
-        raise ModelValidationError(
-            f"{raw_field} contains app-owned payload keys: {forbidden_app_keys}"
-        )
 
 
 def validate_block_model(block: Block) -> None:

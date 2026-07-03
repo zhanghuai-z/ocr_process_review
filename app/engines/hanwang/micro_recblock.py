@@ -14,7 +14,7 @@ import numpy as np
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.block_payload import (
+from app.models.block_state import (
     clear_ocr_text_invalidation,
     is_ocr_text_invalidated,
     paddle_binding_dict,
