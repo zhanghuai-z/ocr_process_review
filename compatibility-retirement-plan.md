@@ -43,7 +43,7 @@
 
 - `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
 - `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
-- `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入外部 `ProofLineState` store。已完成。
+- `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入外部 `ProofLineState` store；OCR 文本读取统一经 `line_text_contract()` / `proof_ocr_text()`。已完成。
 - controller 中业务 gate 直接调用 `workflow_state.page_gate_info()`。已完成。
 
 完成状态：已完成。
@@ -56,6 +56,7 @@
 - active `Block` 不再携带 `raw_payload`；新导入和 Hanwang OCR 后重建的 block 通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取原始事实。
 - `Block.app_payload` 已从 active model 删除。
 - `Block.lines` 的业务访问已迁移到 `app.models.ocr_observation`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
+- UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 

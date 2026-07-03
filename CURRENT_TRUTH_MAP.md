@@ -79,7 +79,7 @@ OCR Hanwang/CharOCR
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
-| OCR 原文 | `Line.ocr_text` | `Line.text` 单独判断 | `text` 仍有兼容属性；新逻辑应优先明确 ocr_text。 |
+| OCR 原文 | `line_text_contract(line).ocr_text` / `proof_ocr_text(line)` | `Line.text` 或 `Line.ocr_text` 单独判断 | `text` 仍是底层 OCR 行文本字段；proof/UI/export 不应自行解释双字段。 |
 | 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
@@ -260,7 +260,7 @@ OCR Hanwang/CharOCR
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
 - `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储。
-- `Line.ocr_text`：OCR 原始文本。
+- `line_text_contract(line).ocr_text` / `proof_ocr_text(line)`：OCR 原始文本读取口径。
 - `proof_display_text(line)`：当前校对文本事实。
 - `Line.chars`：字符/词/公式 carrier 几何事实，前提是与 display_text 可对齐。
 - `quality_probe` sidecar：质量探针事实。
@@ -275,7 +275,7 @@ OCR Hanwang/CharOCR
 
 ### 兼容/过渡层
 
-- `Line.text`：仍作为 OCR 行文本字段；新逻辑不应把它当唯一 proof 真值。
+- `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
 - `Block.lines`：仍是模型内部过渡存储；业务代码已改为通过 `app.models.ocr_observation` 访问。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 - `proof_saved` 信号名：名称像“已保存”，实际仍是“proof changed，需要持久化”的遗留信号。

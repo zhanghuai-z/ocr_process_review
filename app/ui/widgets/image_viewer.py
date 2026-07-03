@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.block_attributes import block_attributes
+from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
 
 
@@ -434,7 +435,7 @@ class ImageViewer(QGraphicsView):
             item = BBoxItem(
                 QRectF(0, 0, bb.w, bb.h),
                 color,
-                f"{label} {char.char or char.token_text}",
+                f"{label} {char_display_text(char)}",
                 pen_width=1.0,
             )
             item.setPos(bb.x, bb.y)

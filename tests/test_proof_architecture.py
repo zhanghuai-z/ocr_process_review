@@ -255,6 +255,17 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
     assert offenders == []
 
 
+def test_ui_char_display_uses_text_contract_helper():
+    ui_sources = {
+        Path("app/ui/widgets/image_viewer.py"),
+        Path("app/ui/recognize/layout_panel.py"),
+    }
+    for path in ui_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "char_display_text" in source
+        assert "char.char or char.token_text" not in source
+
+
 def test_raw_payload_is_not_mutated_directly_by_app_code():
     offenders: list[str] = []
     direct_mutation_patterns = (
@@ -435,6 +446,13 @@ def test_project_store_does_not_mutate_line_text_contract_on_save():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     assert "ensure_line_text_contract" not in source
     assert "line_text_contract(" in source
+
+
+def test_proof_line_facts_reads_ocr_text_through_contract():
+    source = Path("app/core/proof_line_facts.py").read_text(encoding="utf-8")
+    assert "line_text_contract(line)" in source
+    assert 'getattr(line, "text"' not in source
+    assert 'getattr(line, "ocr_text"' not in source
 
 
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():

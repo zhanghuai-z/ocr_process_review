@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.line_text_contract import line_text_contract
 from app.models import Line, ProofLineState, ProofStatus
 from app.models.ocr_observation import block_ocr_lines
-from app.models.proof_line_state_store import proof_state_for_line
 
 
 @dataclass(frozen=True)
@@ -40,11 +40,12 @@ class ProofLineFacts:
 
 
 def proof_line_facts(line: object) -> ProofLineFacts:
-    state = proof_runtime_state(line)
-    text = _display_text_from_state(line, state)
+    contract = line_text_contract(line)
+    state = contract.proof_state
+    text = _display_text_from_state(contract.text, state)
     return ProofLineFacts(
         text=text,
-        ocr_text=str(getattr(line, "ocr_text", "") or ""),
+        ocr_text=contract.ocr_text,
         status=state.proof_status,
         confidence=float(getattr(line, "confidence", 0.0) or 0.0),
         review_flags=tuple(getattr(line, "review_flags", ()) or ()),
@@ -53,7 +54,7 @@ def proof_line_facts(line: object) -> ProofLineFacts:
 
 
 def proof_runtime_state(line: object) -> ProofLineState:
-    return proof_state_for_line(line)
+    return line_text_contract(line).proof_state
 
 
 def proof_final_text(line: Line) -> str:
@@ -90,8 +91,7 @@ def proof_search_texts(line: Line) -> list[str]:
     return [value for value in values if value]
 
 
-def _display_text_from_state(line: object, state: ProofLineState) -> str:
-    base_text = str(getattr(line, "text", "") or "")
+def _display_text_from_state(base_text: str, state: ProofLineState) -> str:
     if state.final_text_set:
         return state.final_text
     return state.final_text or base_text

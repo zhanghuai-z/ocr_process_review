@@ -44,6 +44,7 @@ from app.core.paddle_line_routing import (
     line_routes_for_block,
 )
 from app.core.ocr_ir import is_formula_marker_token
+from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
@@ -1577,7 +1578,7 @@ class LayoutPanel(QWidget):
                     if (
                         char.bbox is not None
                         and char.bbox_source != "paddle_inline_formula"
-                        and (char.char or char.token_text)
+                        and char_display_text(char)
                     )
                 ])
         return chars
