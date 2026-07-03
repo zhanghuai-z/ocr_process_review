@@ -2,6 +2,12 @@
   "core_to_engines": [
     "app.core.layout_analyzer -> app.engines.hanwang_layout_engine"
   ],
+  "core_qt_imports": [
+    "app.core.app_config -> PySide6.QtCore",
+    "app.core.layout_analyzer -> PySide6.QtCore",
+    "app.core.page_image_cache -> PySide6.QtCore",
+    "app.core.page_image_cache -> PySide6.QtGui"
+  ],
   "engines_to_core": [
     "app.engines.hanwang.micro_recblock -> app.core.api_profiles",
     "app.engines.hanwang.micro_recblock -> app.core.app_config",

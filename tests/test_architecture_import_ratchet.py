@@ -37,6 +37,24 @@ def test_no_new_package_import_violations():
     assert unexpected == []
 
 
+def test_no_new_core_qt_imports():
+    baseline = set(
+        json.loads(BASELINE_PATH.read_text(encoding="utf-8")).get(
+            "core_qt_imports",
+            [],
+        )
+    )
+    current = {
+        f"{source_module} -> {target}"
+        for path in sorted((APP_DIR / "core").rglob("*.py"))
+        for source_module in [_module_name(path)]
+        for target in _imported_modules(path, source_module)
+        if _matches_prefix(target, "PySide6")
+    }
+
+    assert sorted(current - baseline) == []
+
+
 def _current_violations() -> dict[str, set[str]]:
     violations: dict[str, set[str]] = {name: set() for name in RULES}
     for path in sorted(APP_DIR.rglob("*.py")):
