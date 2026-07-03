@@ -692,6 +692,14 @@ def test_api_layout_blocks_are_projected_from_layout_snapshot():
     assert "Block(" not in api_source
 
 
+def test_truth_map_records_layout_snapshot_as_current_boundary():
+    source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
+
+    assert "LayoutSnapshot`：当前采用的版面真值" in source
+    assert "LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界" in source
+    assert "后续应抽 `PaddleArtifact`、`LayoutSnapshot`" not in source
+
+
 def test_hanwang_text_slice_routing_reads_routing_plan():
     source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     tree = ast.parse(source)

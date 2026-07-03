@@ -44,7 +44,7 @@
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
   -> LayoutOverlayService
-     - 负责读取 Page.raw_layout_artifact 中的只读 raw overlay
+     - 负责读取 Page.raw_layout_artifact 经归一化后的只读 overlay
      - 负责把 Paddle inline_formula overlay 提升为可编辑公式 Block
      - LayoutPanel 不直接解析 raw_layout_records 或 Paddle route dict
 
@@ -94,7 +94,7 @@ OCR Hanwang/CharOCR
 | 块身份 | `Block.uid` | `Block.id`、order、bbox | order/bbox 可随编辑变化，不是身份。 |
 | 行身份 | `Line.uid` | `Line.id`、line index、bbox | HProof/VProof merge 必须 uid 优先，几何只能 fallback。 |
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
-| 外部版面原始事实 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
+| 外部版面证据 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；artifact 里的 bbox 已归一到工作图坐标；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
 | 当前版面真值 | `LayoutSnapshot` | `Page.blocks` 直接当导入真值 | API 版面分析现在从归一化 artifact 编译 snapshot，再投影到 `Page.blocks` 供旧链路消费。 |
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
@@ -284,7 +284,9 @@ OCR Hanwang/CharOCR
 ### 真值层
 
 - `Page.display_image_path`：几何坐标对应的工作图。
-- `Page.raw_layout_artifact`：Paddle VL1.6 原始版面事实。
+- `Page.raw_layout_artifact`：Paddle VL1.6 版面证据包，bbox 已归一到当前工作图坐标。
+- `NormalizedLayoutArtifact`：外部版面事实的统一读模型。
+- `LayoutSnapshot`：当前采用的版面真值；API 版面分析已从它投影到旧 `Page.blocks`。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
@@ -317,10 +319,10 @@ OCR Hanwang/CharOCR
    - `Block.lines` 尚未物理外置，但直接访问已经被架构测试约束到持久化/模型边界。
 
 2. `raw_payload` 已从 active `Block` 模型退出，仅保留旧 SQLite 列拒绝边界。
-- Paddle vendor fact 和 app state 已分开；route plan 仍是运行时 dict。
+- Paddle vendor evidence 和 app state 已分开；route plan 仍有运行时 dict 生产形态。
 - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
 - `NormalizedLayoutArtifact` 已作为读取侧归一化 contract；`LayoutOverlayService` 和 `PaddleArtifactIndex.from_page()` 不再直接遍历 `raw_layout_records`。
-- 后续应抽 `PaddleArtifact`、`LayoutSnapshot`、`RoutingPlan`、`DispatchPlan`、`OcrRunResult`。
+- `LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界；后续应把人工编辑也迁到 snapshot，并继续抽 `DispatchPlan/OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
    - VProof 有 edit session。
@@ -333,7 +335,7 @@ OCR Hanwang/CharOCR
    - LayoutPanel 仍维护 undo 快照，但恢复 `page.blocks` 已通过 `LayoutEditCommand.restore_blocks` 进入服务层。
    - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block。
    - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`，但两个面板仍各自维护编辑会话和 dirty/conflict gate。
-   - 后续重点不是恢复旧 helper，而是抽出共享 `LayoutSnapshot` 和 `ProofEditSession`。
+   - 后续重点不是恢复旧 helper，而是让人工编辑直接作用于 `LayoutSnapshot`，并抽出共享 `ProofEditSession`。
 
 5. 已坏项目数据不会自动修复。
    - CharIndex 只会过滤错配，不会改项目文件。
@@ -343,8 +345,8 @@ OCR Hanwang/CharOCR
 
 1. 保留当前补丁成果，不继续扩大局部补丁。
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
-3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `LayoutSnapshot/DispatchPlan/OcrRunResult`，把 route dict 从核心调度接口中移出。
-4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是从命令结果继续抽 `LayoutSnapshot`。
+3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从核心调度接口中移出。
+4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
 5. 抽统一 `ProofEditSession/ProofSaveResult`，让 HProof/VProof 共用保存、冲突、重建 gate。
 6. 做项目诊断工具，专门检查并报告已持久化错配数据。
 
