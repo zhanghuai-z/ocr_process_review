@@ -29,6 +29,7 @@
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 | `LayoutPanel` 版面编辑私有业务 helper / 散参 mutation 调用 / 撤销直写 `page.blocks` | `LayoutEditCommand` + `LayoutEditService.apply()` | 删除 `_apply_subtype_to_block`、`_merge_blocks_into_bbox`、`_bind_manual_block_to_paddle`、`_update_existing_manual_binding_bbox` 等 UI 内业务写入口；新增、删除、改类型、合并、调框、撤销恢复统一经命令入口写 typed state 和 layout edit event。 |
 | `LayoutPanel` 直接解析 Paddle raw overlay | `LayoutOverlayService` | 删除 UI 内 `raw_layout_records`、`ROUTE_SUBBLOCKS_FIELD`、`bbox_from_variant` 等 raw artifact 解析；只读 overlay 和 inline formula 提升由服务统一产出。 |
+| Hanwang/Export/BlockAttributes 分散解释 `Block.source` | `app.models.layout_block_state` | 人工编辑来源、导出 origin、路由手工结构判断集中到 helper；`Block.source` 字段仍保留为后续迁移入口。 |
 
 ## 删除顺序
 
@@ -63,6 +64,7 @@
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
+- `Block.source` 的判断已收口到 `app.models.layout_block_state`；生产模块不得各自比较 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 

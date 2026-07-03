@@ -433,6 +433,32 @@ def test_block_type_enum_does_not_own_paddle_label_mapping():
     assert "_PADDLE_LABEL_TO_BLOCK_TYPE" in adapter_source
 
 
+def test_block_source_semantics_are_centralized():
+    helper_source = Path("app/models/layout_block_state.py").read_text(encoding="utf-8")
+    assert "def is_user_authored_layout_block" in helper_source
+    assert "def export_origin_for_block" in helper_source
+
+    for path in (
+        Path("app/core/block_attributes.py"),
+        Path("app/export/ir_builder.py"),
+        Path("app/engines/hanwang/micro_recblock.py"),
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert "BlockSource.MANUAL_DRAW" not in source
+        assert "BlockSource.USER_EDITED" not in source
+        assert "BlockSource.AUTO_TIGHTENED" not in source
+        assert "block.source not in" not in source
+        assert "block.source in" not in source
+        assert "getattr(block.source" not in source
+        assert "str(block.source" not in source
+
+    assert "is_user_authored_layout_block(block)" in Path("app/core/block_attributes.py").read_text(encoding="utf-8")
+    assert "export_origin_for_block(block)" in Path("app/export/ir_builder.py").read_text(encoding="utf-8")
+    hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    assert "is_user_authored_layout_block(block)" in hanwang_source
+    assert "block_source_value(block)" in hanwang_source
+
+
 def test_project_store_exposes_only_scoped_proof_line_write_port():
     from app.core.project_store import ProjectStore
 

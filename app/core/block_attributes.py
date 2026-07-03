@@ -5,7 +5,8 @@ from dataclasses import dataclass
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.paddle_labels import normalize_paddle_label
-from app.models import Block, BlockSource, BlockType
+from app.models import Block, BlockType
+from app.models.layout_block_state import is_user_authored_layout_block
 
 
 def normalize_source_label(label: object) -> str:
@@ -69,7 +70,7 @@ def block_attributes(block: Block) -> BlockAttributes:
     raw_label = ""
     current_label = normalize_source_label(block.source_label or block.block_type.value)
     source_label = origin_label or current_label
-    user_authored_label = block.source in {BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED}
+    user_authored_label = is_user_authored_layout_block(block)
     semantic_source = (
         current_label
         if user_authored_label

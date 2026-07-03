@@ -21,7 +21,8 @@ from app.export.ir import (
     ExportSource,
 )
 from app.export.rules import ExportRules, load_export_rules, normalize_export_format
-from app.models import BBox, Block, BlockSource, Line, OcrPolicy, OcrProject, Page
+from app.models import BBox, Block, Line, OcrPolicy, OcrProject, Page
+from app.models.layout_block_state import export_origin_for_block
 from app.services.export_service import (
     build_export_summary,
     iter_export_blocks,
@@ -326,21 +327,13 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
         source_label=attrs.source_label,
         semantic_label=attrs.semantic_label,
         semantic_block_type=attrs.semantic_block_type.value,
-        origin=_origin(block.source),
+        origin=export_origin_for_block(block),
     )
 
 
 def _entity_source_id(entity: Any, fallback: int | str) -> int | str:
     uid = str(getattr(entity, "uid", "") or "").strip()
     return uid or fallback
-
-
-def _origin(source: BlockSource) -> str:
-    if source in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
-        return "project_model"
-    if source == BlockSource.AUTO_TIGHTENED:
-        return "derived"
-    return "project_model"
 
 
 def _proof(lines: list[Line]) -> ExportProof:

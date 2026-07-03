@@ -99,6 +99,11 @@ from app.models import (
     Page,
     ProofLineState,
 )
+from app.models.layout_block_state import (
+    block_source_value,
+    is_user_authored_layout_block,
+    is_user_authored_layout_source,
+)
 from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
@@ -3039,7 +3044,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
         "block_bbox": list(block.bbox.to_xyxy()),
         "block_content": _layout_block_content(block, raw_payload),
         "source_label": source_label,
-        "_layout_block_source": getattr(block.source, "value", str(block.source)),
+        "_layout_block_source": block_source_value(block),
         "_layout_block_ocr_policy": block.ocr_policy.value,
     }
     if binding:
@@ -3177,7 +3182,7 @@ def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dic
         "block_bbox": list(manual_bbox),
         "block_content": text,
         ROUTE_ROW_PADDLE_BINDING_KEY: dict(binding),
-        "_layout_block_source": getattr(block.source, "value", str(block.source)),
+        "_layout_block_source": block_source_value(block),
         "_layout_manual_route_subblock": True,
     }
     if text_is_stale:
@@ -3205,7 +3210,7 @@ def _manual_unbound_route_subblock(block: Block) -> dict[str, Any]:
         "block_label": label,
         "block_bbox": list(manual_bbox),
         "block_content": proof_block_text(block),
-        "_layout_block_source": getattr(block.source, "value", str(block.source)),
+        "_layout_block_source": block_source_value(block),
         "_layout_manual_route_subblock": True,
         "_layout_manual_unbound_route_subblock": True,
     }
@@ -3285,7 +3290,7 @@ def _manual_structure_parent_row(
 ) -> dict[str, Any] | None:
     if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
         return None
-    if block.source not in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
+    if not is_user_authored_layout_block(block):
         return None
     block_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
     best: tuple[float, dict[str, Any]] | None = None
@@ -3448,7 +3453,7 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
     for block, row in entries:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             continue
-        if block.source not in (BlockSource.MANUAL_DRAW, BlockSource.USER_EDITED):
+        if not is_user_authored_layout_block(block):
             continue
         binding = _binding_payload_from_block(block)
         parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
@@ -3654,10 +3659,7 @@ class HanwangMicroRecBlockEngine:
             if (
                 block_type == BlockType.EQUATION
                 and not row.text
-                and str(row.raw_block.get("_layout_block_source") or "") in {
-                    BlockSource.MANUAL_DRAW.value,
-                    BlockSource.USER_EDITED.value,
-                }
+                and is_user_authored_layout_source(row.raw_block.get("_layout_block_source"))
             ):
                 flags.append("manual_formula_needs_text")
             lines = [_line_to_model(line, width, height, flags) for line in row.lines if line.text]
