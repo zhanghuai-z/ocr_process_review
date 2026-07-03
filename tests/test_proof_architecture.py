@@ -501,8 +501,17 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
         "self._layout_edit_service.persist_user_block_geometry(",
     ):
         assert direct_service_call not in layout_source
+    for direct_blocks_write in (
+        ".blocks =",
+        ".blocks.append(",
+        ".blocks.remove(",
+        ".blocks.pop(",
+        ".blocks.clear(",
+    ):
+        assert direct_blocks_write not in layout_source
     assert "class LayoutEditCommand" in edit_service_source
     assert "def apply(" in edit_service_source
+    assert "restore_blocks" in edit_service_source
     for internal_mutation in (
         "def _create_block(",
         "def _delete_block(",

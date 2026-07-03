@@ -33,7 +33,7 @@
 人工版面编辑
   -> LayoutEditCommand / LayoutEditService
      - UI 提交 create/delete/change_kind/merge/geometry_update 命令
-     - create/delete/change_kind/merge/geometry_update 是当前用户编辑写入口
+     - create/delete/change_kind/merge/geometry_update/restore_blocks 是当前用户编辑写入口
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
@@ -91,7 +91,7 @@ OCR Hanwang/CharOCR
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
-| 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper 或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框统一表达为命令，服务内写当前 Block 和审计事件。 |
+| 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；raw dict 解析集中在服务层。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
 | OCR 原文 | `line_text_contract(line).ocr_text` / `proof_ocr_text(line)` | `Line.text` 或 `Line.ocr_text` 单独判断 | `text` 仍是底层 OCR 行文本字段；proof/UI/export 不应自行解释双字段。 |
@@ -311,10 +311,11 @@ OCR Hanwang/CharOCR
    - HProof 有 line key、flush gate、dirty/conflict 判断。
    - 两者应该共享 `ProofEditSession` 和 `SaveResult`，否则下次还会出现入口绕过。
 
-4. UI 仍有局部视图状态和撤销恢复直接触碰对象。
+4. UI 仍有局部视图状态，但版面对象写入已收口。
    - LayoutPanel 的用户版面编辑入口已迁移到 `LayoutEditCommand` + `LayoutEditService.apply()`。
    - LayoutPanel 的 Paddle raw overlay 解析已迁移到 `LayoutOverlayService`。
-   - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block，并用 undo 快照恢复 `page.blocks`。
+   - LayoutPanel 仍维护 undo 快照，但恢复 `page.blocks` 已通过 `LayoutEditCommand.restore_blocks` 进入服务层。
+   - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block。
    - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`，但两个面板仍各自维护编辑会话和 dirty/conflict gate。
    - 后续重点不是恢复旧 helper，而是抽出共享 `LayoutSnapshot` 和 `ProofEditSession`。
 

@@ -44,6 +44,30 @@ def test_layout_edit_service_delete_block_records_event_and_removes_block():
     assert page.layout_edit_events[-1].before["block"]["uid"] == block.uid
 
 
+def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
+    old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=9)
+    restored_a = Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 30, 20), order=4)
+    restored_b = Block(block_type=BlockType.FIGURE, bbox=BBox(40, 10, 30, 20), order=2)
+    page = Page(image_path="", width=200, height=100, blocks=[old_block])
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.restore_blocks(
+        page,
+        [restored_a, restored_b],
+        before={"blocks": [LayoutEditService.block_state(old_block)]},
+    ))
+
+    assert result.op == "restore_blocks"
+    assert page.blocks == [restored_a, restored_b]
+    assert [block.order for block in page.blocks] == [0, 1]
+    assert page.layout_edit_events[-1].op == "restore_blocks"
+    assert page.layout_edit_events[-1].before["blocks"][0]["uid"] == old_block.uid
+    assert [item["uid"] for item in page.layout_edit_events[-1].after["blocks"]] == [
+        restored_a.uid,
+        restored_b.uid,
+    ]
+
+
 def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 30, 20), source_label="text")
     page = Page(image_path="", width=200, height=100, blocks=[block])

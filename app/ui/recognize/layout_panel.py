@@ -1511,7 +1511,12 @@ class LayoutPanel(QWidget):
         for page_idx, blocks in snapshots:
             if not (0 <= page_idx < len(self._pages)):
                 continue
-            self._pages[page_idx].blocks = copy.deepcopy(blocks)
+            page = self._pages[page_idx]
+            self._layout_edit_service.apply(LayoutEditCommand.restore_blocks(
+                page,
+                copy.deepcopy(blocks),
+                before={"blocks": [self._layout_block_state(block) for block in page.blocks]},
+            ))
             restored_page_indices.append(page_idx)
         if not restored_page_indices:
             self._btn_undo.setEnabled(bool(self._undo_stack))

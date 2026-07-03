@@ -109,6 +109,16 @@ class LayoutEditCommand:
     def update_geometry(cls, page: Page, block: Block, *, before: dict | None = None) -> "LayoutEditCommand":
         return cls("resize_block", page, block=block, before=before)
 
+    @classmethod
+    def restore_blocks(
+        cls,
+        page: Page,
+        blocks: Iterable[Block],
+        *,
+        before: dict | None = None,
+    ) -> "LayoutEditCommand":
+        return cls("restore_blocks", page, blocks=tuple(blocks), before=before)
+
 
 @dataclass(frozen=True)
 class LayoutEditResult:
@@ -162,6 +172,8 @@ class LayoutEditService:
                 self._require_block(command),
                 before=command.before,
             )
+        if command.op == "restore_blocks":
+            return self._restore_blocks(command.page, command.blocks, before=command.before)
         raise ValueError(f"Unsupported layout edit command: {command.op}")
 
     @staticmethod
@@ -280,6 +292,22 @@ class LayoutEditService:
         page.blocks = [candidate for candidate in page.blocks if candidate is not block]
         self.record_edit(page, "delete_block", block, before=before, after={})
         return LayoutEditResult(op="delete_block", block=block, before=before, after={})
+
+    def _restore_blocks(
+        self,
+        page: Page,
+        blocks: Iterable[Block],
+        *,
+        before: dict | None,
+    ) -> LayoutEditResult:
+        next_blocks = list(blocks)
+        before = before or {"blocks": [self.block_state(block) for block in page.blocks]}
+        page.blocks = next_blocks
+        for order, block in enumerate(page.blocks):
+            block.order = order
+        after = {"blocks": [self.block_state(block) for block in page.blocks]}
+        self.record_edit(page, "restore_blocks", None, before=before, after=after)
+        return LayoutEditResult(op="restore_blocks", before=before, after=after)
 
     def _change_block_kind(
         self,
