@@ -477,9 +477,34 @@ def test_proof_signal_contract_does_not_restore_proof_saved():
     assert offenders == []
 
 
+def test_layout_panel_user_edits_go_through_layout_edit_service():
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+
+    assert "LayoutEditService" in layout_source
+    for retired_helper in (
+        "def _apply_subtype_to_block",
+        "def _merge_blocks_into_bbox",
+        "def _update_existing_manual_binding_bbox",
+        "def _bind_manual_block_to_paddle",
+        "def _preserve_inline_formula_origin_binding",
+        "def _mark_generated_inline_formula_handled",
+    ):
+        assert retired_helper not in layout_source
+    for mutation_port in (
+        "create_block(",
+        "delete_block(",
+        "change_block_kind(",
+        "merge_blocks_into_bbox(",
+        "persist_user_block_geometry(",
+    ):
+        assert f"def {mutation_port}" in edit_service_source
+
+
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
+    edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
@@ -490,7 +515,10 @@ def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     assert "PADDLE_BINDING_KEY" not in artifact_source
     assert "PADDLE_BINDING_KEY" not in layout_source
     assert "set_paddle_binding(block" in artifact_source
-    assert "set_paddle_binding(block" in layout_source
+    assert "set_paddle_binding(block" in edit_service_source
+    assert "set_paddle_binding(block" not in layout_source
+    assert "PaddleArtifactIndex" in edit_service_source
+    assert "PaddleArtifactIndex" not in layout_source
     assert "set_paddle_binding(block" in hanwang_source
     assert "paddle_binding_json" in store_source
     assert "PaddleBinding.from_dict" in store_source
@@ -508,6 +536,7 @@ def test_paddle_raw_label_fields_are_not_app_payload_state():
 
 def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
     block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
+    edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     ocr_source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
@@ -516,7 +545,8 @@ def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
     assert "OCR_TEXT_INVALIDATED_KEY" not in block_state_source
     assert "OCR_INVALIDATION_KIND_KEY" not in block_state_source
     assert "setattr(block, \"ocr_invalidated_reason\"" in block_state_source
-    assert "mark_ocr_text_invalidated(block" in layout_source
+    assert "mark_ocr_text_invalidated(block" in edit_service_source
+    assert "mark_ocr_text_invalidated(block" not in layout_source
     assert "is_ocr_text_invalidated(block)" in layout_source
     assert "is_ocr_text_invalidated(block)" in ocr_source
     assert "is_ocr_text_invalidated(block)" in hanwang_source
@@ -553,11 +583,13 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
 
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in layout_source
     assert "UI_DELETED_INLINE_FORMULA_KEY" not in hanwang_source
-    assert "mark_inline_formula_origin_handled" in layout_source
+    assert "mark_inline_formula_origin_handled" in edit_service_source
+    assert "mark_inline_formula_origin_handled" not in layout_source
     assert "filter_handled_inline_formula_subblocks" in hanwang_source
 
 

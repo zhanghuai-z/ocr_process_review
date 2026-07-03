@@ -16,23 +16,10 @@ from PySide6.QtWidgets import (
 
 from app.utils.icon_manager import get_icon
 from app.core.bbox_extraction import bbox_from_variant
-from app.models.block_state import (
-    is_ocr_text_invalidated,
-    mark_ocr_text_invalidated,
-    paddle_binding_dict,
-    set_paddle_binding,
-)
+from app.models.block_state import is_ocr_text_invalidated
 from app.core.inline_formula_edit_state import (
     handled_inline_formula_origin_bboxes,
     inline_formula_origin_bbox,
-    mark_inline_formula_origin_handled,
-)
-from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
-from app.core.paddle_artifact_index import (
-    BINDING_AMBIGUOUS,
-    BINDING_EMPTY_REVIEW,
-    PaddleArtifactIndex,
-    apply_paddle_binding_to_block,
 )
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
@@ -45,8 +32,9 @@ from app.core.paddle_line_routing import (
 )
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.proof_char_text import char_display_text
-from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
-from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines
+from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
+from app.models.ocr_observation import block_ocr_lines
+from app.services.layout_edit_service import LayoutEditResult, LayoutEditService
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -235,6 +223,7 @@ class LayoutPanel(QWidget):
         self._selected_block: Optional[Block] = None
         self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
+        self._layout_edit_service = LayoutEditService()
         self._undo_stack: list[list[tuple[int, list[Block]]]] = []
         self._layout_edit_start_state: dict[str, dict] = {}
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
@@ -1065,7 +1054,20 @@ class LayoutPanel(QWidget):
         for page_idx, blocks in affected.items():
             page = self._pages[page_idx]
             for block in blocks:
-                if self._apply_subtype_to_block(page, block, subtype):
+                source_label = self._source_label_for_subtype(page, block, subtype)
+                is_changed = (
+                    block.block_type != subtype.block_type
+                    or normalize_paddle_label(block.source_label) != normalize_paddle_label(source_label)
+                )
+                if not is_changed:
+                    continue
+                self._layout_edit_service.change_block_kind(
+                    page,
+                    block,
+                    block_type=subtype.block_type,
+                    source_label=source_label,
+                )
+                if is_changed:
                     changed += 1
             for order, block in enumerate(page.blocks):
                 block.order = order
@@ -1336,14 +1338,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _layout_block_state(block: Block) -> dict:
-        return {
-            "uid": block.uid,
-            "block_type": getattr(block.block_type, "value", str(block.block_type)),
-            "bbox": list(block.bbox.to_xyxy()),
-            "order": block.order,
-            "source_label": block.source_label,
-            "ocr_policy": getattr(block.ocr_policy, "value", str(block.ocr_policy)),
-        }
+        return LayoutEditService.block_state(block)
 
     def _record_layout_edit(
         self,
@@ -1354,16 +1349,7 @@ class LayoutPanel(QWidget):
         before: dict,
         after: dict,
     ) -> None:
-        page.layout_edit_events.append(
-            LayoutEditEvent(
-                page_uid=page.uid,
-                target_uid=block.uid if block is not None else "",
-                op=op,
-                before=before,
-                after=after,
-                actor="user",
-            )
-        )
+        self._layout_edit_service.record_edit(page, op, block, before=before, after=after)
 
     def _on_block_edit_started(self, block: Block) -> None:
         self._push_undo_snapshot()
@@ -1386,15 +1372,7 @@ class LayoutPanel(QWidget):
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
 
     def _persist_user_block_geometry(self, page: Page, block: Block) -> None:
-        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
-            return
-        block.source = BlockSource.USER_EDITED
-        mark_ocr_text_invalidated(block, "block_geometry_changed")
-        if not self._update_existing_manual_binding_bbox(block):
-            clear_block_ocr_lines(block)
-            self._bind_manual_block_to_paddle(page, block)
-        if self._is_generated_inline_formula_block(block):
-            self._mark_generated_inline_formula_handled(page, block)
+        self._layout_edit_service.persist_user_block_geometry(page, block)
 
     @staticmethod
     def _inline_formula_origin_bbox(block: Block) -> tuple[int, int, int, int] | None:
@@ -1402,38 +1380,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _is_generated_inline_formula_block(block: Block) -> bool:
-        return (
-            normalize_paddle_label(block.source_label) == "inline_formula"
-            and LayoutPanel._inline_formula_origin_bbox(block) is not None
-        )
-
-    @staticmethod
-    def _update_existing_manual_binding_bbox(block: Block) -> bool:
-        binding = paddle_binding_dict(block)
-        if not binding:
-            return False
-        status = str(binding.get("status") or "")
-        if status in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}:
-            return False
-        try:
-            if int(binding.get("parent_index", -1)) < 0:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-        manual_bbox = list(block.bbox.to_xyxy())
-        next_binding = dict(binding)
-        next_binding["manual_bbox"] = manual_bbox
-        origin_bbox = LayoutPanel._inline_formula_origin_bbox(block)
-        if not next_binding.get("candidate_bbox") and origin_bbox is not None:
-            next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
-        source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
-        block.source_label = source_label
-        block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
-        for line in block_ocr_lines(block):
-            line.bbox = block.bbox
-        set_paddle_binding(block, next_binding)
-        return True
+        return LayoutEditService.is_generated_inline_formula_block(block)
 
     def _on_block_created(self, bbox: BBox) -> None:
         if not self._pages:
@@ -1451,15 +1398,16 @@ class LayoutPanel(QWidget):
             bt,
         )
         if intersecting:
-            before = {"blocks": [self._layout_block_state(block) for block in intersecting]}
-            merged = self._merge_blocks_into_bbox(page, intersecting, bbox, bt, source_label)
-            self._record_layout_edit(
+            result = self._layout_edit_service.merge_blocks_into_bbox(
                 page,
-                "merge_blocks",
-                merged,
-                before=before,
-                after={"block": self._layout_block_state(merged)},
+                intersecting,
+                bbox,
+                block_type=bt,
+                source_label=source_label,
             )
+            merged = result.block
+            if merged is None:
+                return
             self._show_page_layers(page)
             self._select_block_for_edit(merged)
             self._set_status_text("已合并框，需重新识别")
@@ -1469,22 +1417,16 @@ class LayoutPanel(QWidget):
             self.geometry_changed.emit()
             self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
-        new_block = Block(
-            block_type=bt,
-            bbox=bbox,
-            source=BlockSource.MANUAL_DRAW,
-            source_label=source_label,
-        )
-        new_block.ocr_policy = default_ocr_policy_for_block(new_block)
-        self._bind_manual_block_to_paddle(page, new_block)
-        page.blocks.append(new_block)
-        self._record_layout_edit(
+        result = self._layout_edit_service.create_block(
             page,
-            "create_block",
-            new_block,
-            before={},
-            after={"block": self._layout_block_state(new_block)},
+            bbox,
+            bt,
+            source_label,
         )
+        new_block = result.block
+        if new_block is None:
+            return
+        self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
         self._select_block_for_edit(new_block)
         self._rebuild_heading_outline()
@@ -1499,16 +1441,7 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        before = self._layout_block_state(block)
-        self._mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
-        page.blocks = [b for b in page.blocks if b is not block]
-        self._record_layout_edit(
-            page,
-            "delete_block",
-            block,
-            before={"block": before},
-            after={},
-        )
+        self._layout_edit_service.delete_block(page, block)
         if self._selected_block is block:
             self._selected_block = None
             self._selected_char_box_index = -1
@@ -1537,19 +1470,14 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        before = self._layout_block_state(self._selected_block)
-        self._apply_subtype_to_block(
+        source_label = self._source_label_for_subtype(page, self._selected_block, new_subtype)
+        result = self._layout_edit_service.change_block_kind(
             page,
             self._selected_block,
-            new_subtype,
+            block_type=new_subtype.block_type,
+            source_label=source_label,
         )
-        self._record_layout_edit(
-            page,
-            "change_kind",
-            self._selected_block,
-            before={"block": before},
-            after={"block": self._layout_block_state(self._selected_block)},
-        )
+        self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
         self._viewer.select_block(self._selected_block)
         self._sync_selected_type_buttons(self._selected_block)
@@ -1594,39 +1522,13 @@ class LayoutPanel(QWidget):
         self._viewer.select_block(block)
         self._on_block_clicked(block)
 
-    def _bind_manual_block_to_paddle(self, page: Page, block: Block) -> None:
-        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
-            return
-        explicit_source_label = block.source_label
-        binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
-        apply_paddle_binding_to_block(block, binding)
-        self._preserve_inline_formula_origin_binding(block)
-        if normalize_paddle_label(explicit_source_label) in DEFAULT_SUBTYPE_BY_SOURCE_LABEL or normalize_paddle_label(explicit_source_label) in {
-            "display_formula",
-            "inline_formula",
-            "formula_number",
-        }:
-            block.source_label = explicit_source_label
-        if binding.status == BINDING_EMPTY_REVIEW:
+    def _set_status_text_for_layout_edit_result(self, result: LayoutEditResult) -> None:
+        if result.binding_empty_review:
             self._set_status_text("已创建校验框")
-        elif binding.status == BINDING_AMBIGUOUS:
+        elif result.binding_ambiguous:
             self._set_status_text("已创建校验框，需确认")
-        elif binding.text:
+        elif result.binding_text:
             self._set_status_text("已绑定识别结果")
-
-    @staticmethod
-    def _preserve_inline_formula_origin_binding(block: Block) -> None:
-        if normalize_paddle_label(block.source_label) != "inline_formula":
-            return
-        origin_bbox = LayoutPanel._inline_formula_origin_bbox(block)
-        if origin_bbox is None:
-            return
-        binding = paddle_binding_dict(block)
-        if not binding or binding.get("candidate_bbox"):
-            return
-        next_binding = dict(binding)
-        next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
-        set_paddle_binding(block, next_binding)
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
@@ -1982,28 +1884,6 @@ class LayoutPanel(QWidget):
                 return True
         return False
 
-    def _mark_generated_inline_formula_handled(
-        self,
-        page: Page,
-        block: Block,
-        *,
-        op: str = "claim_inline_formula",
-    ) -> None:
-        mark_inline_formula_origin_handled(page, block, op=op)
-
-    def _apply_subtype_to_block(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> bool:
-        source_label = self._source_label_for_subtype(page, block, subtype)
-        changed = (
-            block.block_type != subtype.block_type
-            or normalize_paddle_label(block.source_label) != normalize_paddle_label(source_label)
-        )
-        block.block_type = subtype.block_type
-        block.source_label = source_label
-        block.source = BlockSource.USER_EDITED
-        block.ocr_policy = default_ocr_policy_for_block(block)
-        self._bind_manual_block_to_paddle(page, block)
-        return changed
-
     def _source_label_for_subtype(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> str:
         if normalize_paddle_label(subtype.source_label) == "formula":
             return self._infer_formula_source_label_for_bbox(page, block.bbox, exclude=block)
@@ -2064,38 +1944,6 @@ class LayoutPanel(QWidget):
             return ""
         spec = DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block.block_type)
         return spec.source_label if spec is not None else ""
-
-    def _merge_blocks_into_bbox(
-        self,
-        page: Page,
-        blocks: list[Block],
-        bbox: BBox,
-        block_type: BlockType,
-        source_label: str = "",
-    ) -> Block:
-        blocks.sort(key=lambda block: (block.order, block.bbox.y, block.bbox.x))
-        primary = blocks[0]
-        x1 = min([bbox.x1, *(block.bbox.x1 for block in blocks)])
-        y1 = min([bbox.y1, *(block.bbox.y1 for block in blocks)])
-        x2 = max([bbox.x2, *(block.bbox.x2 for block in blocks)])
-        y2 = max([bbox.y2, *(block.bbox.y2 for block in blocks)])
-        primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
-        primary.block_type = block_type
-        primary.source_label = source_label
-        clear_block_ocr_lines(primary)
-        primary.source = BlockSource.USER_EDITED
-        primary.ocr_policy = default_ocr_policy_for_block(primary)
-        primary.note = "manual_draw_merge_requires_ocr_rerun"
-        mark_ocr_text_invalidated(primary, "manual_draw_merge")
-        self._bind_manual_block_to_paddle(page, primary)
-        for block in blocks[1:]:
-            self._mark_generated_inline_formula_handled(page, block, op="merge_inline_formula")
-        remove_ids = {id(block) for block in blocks[1:]}
-        page.blocks = [block for block in page.blocks if id(block) not in remove_ids]
-        for order, block in enumerate(page.blocks):
-            block.order = order
-        self._selected_block = primary
-        return primary
 
     def _collect_readonly_layout_overlays(self, page: Page) -> List[tuple[str, BBox]]:
         overlays: List[tuple[str, BBox]] = []

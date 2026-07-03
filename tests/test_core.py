@@ -261,7 +261,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
         page_gate_info,
         pending_ocr_pages,
     )
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
     from app.models.page_state import invalidate_page_ocr
 
     done_page = Page(
@@ -11138,57 +11138,42 @@ def test_paddle_artifact_index_binds_parent_table_and_empty_formula_review():
     print("test_paddle_artifact_index_binds_parent_table_and_empty_formula_review PASSED")
 
 
-def test_layout_panel_manual_formula_writes_typed_paddle_binding():
-    from pathlib import Path
-    import tempfile
-
-    from PySide6.QtGui import QImage
-
+def test_layout_edit_service_manual_formula_writes_typed_paddle_binding():
     from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
     from app.models import BBox, Block, BlockSource, BlockType, Page
-    from app.ui.recognize.layout_panel import LayoutPanel
+    from app.services.layout_edit_service import LayoutEditService
 
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    app = _get_qapp()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        image_path = Path(tmpdir) / "page.png"
-        QImage(300, 120, QImage.Format.Format_RGB888).save(str(image_path))
-        page = Page(image_path=str(image_path), width=300, height=120)
-        _attach_raw_layout_records(page, [
-            {
-                "block_label": "text",
-                "block_bbox": [10, 10, 260, 70],
-                "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                "_route_subblocks": [
-                    {"block_label": "inline_formula", "block_bbox": [60, 12, 90, 40]},
-                ],
-            }
-        ])
-        block = Block(
-            block_type=BlockType.EQUATION,
-            bbox=BBox.from_xyxy(120, 12, 150, 42),
-            source=BlockSource.MANUAL_DRAW,
-        )
+    page = Page(image_path="/tmp/page.png", width=300, height=120)
+    _attach_raw_layout_records(page, [
+        {
+            "block_label": "text",
+            "block_bbox": [10, 10, 260, 70],
+            "block_content": "甲 $ A $ 乙 $ B $ 丙",
+            "_route_subblocks": [
+                {"block_label": "inline_formula", "block_bbox": [60, 12, 90, 40]},
+            ],
+        }
+    ])
+    block = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(120, 12, 150, 42),
+        source=BlockSource.MANUAL_DRAW,
+    )
 
-        panel = LayoutPanel()
-        try:
-            panel._bind_manual_block_to_paddle(page, block)
+    LayoutEditService().bind_manual_block_to_paddle(page, block)
 
-            binding = block.paddle_binding
-            assert binding is not None
-            assert binding.status == BINDING_EMPTY_REVIEW
-            assert binding.text == ""
-            assert block.origin is not None
-            assert block.origin.source_label == "inline_formula"
-            assert block.origin.raw_index == 0
-            assert block.source_label == "inline_formula"
-            assert block.ocr_policy != OcrPolicy.TEXT_OCR
-            assert block.lines == []
-        finally:
-            panel.close()
-            app.processEvents()
+    binding = block.paddle_binding
+    assert binding is not None
+    assert binding.status == BINDING_EMPTY_REVIEW
+    assert binding.text == ""
+    assert block.origin is not None
+    assert block.origin.source_label == "inline_formula"
+    assert block.origin.raw_index == 0
+    assert block.source_label == "inline_formula"
+    assert block.ocr_policy != OcrPolicy.TEXT_OCR
+    assert block.lines == []
 
-    print("test_layout_panel_manual_formula_writes_typed_paddle_binding PASSED")
+    print("test_layout_edit_service_manual_formula_writes_typed_paddle_binding PASSED")
 
 
 def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
