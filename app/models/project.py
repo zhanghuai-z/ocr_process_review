@@ -258,7 +258,6 @@ class Block:
     ocr_policy: OcrPolicy = OcrPolicy.TEXT_OCR      # OCR 调度策略
     note: str = ""                                  # 用户备注或系统说明
     source_label: str = ""                          # 原始 PP-VL/Paddle label
-    raw_payload: dict[str, Any] = field(default_factory=dict)  # 外部引擎原始块属性
     origin: BlockOrigin | None = None               # 块来源事实；新代码优先读这里
     paddle_binding: PaddleBinding | None = None     # 人工框与 Paddle 原始事实的结构化绑定
     ocr_invalidated_reason: str = ""                # 块级 OCR 结果失效原因

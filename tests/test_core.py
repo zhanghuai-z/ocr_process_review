@@ -69,13 +69,12 @@ def test_raw_block_payload_prefers_page_artifact_origin_record():
     block = Block(
         block_type=BlockType.TABLE,
         bbox=BBox.from_xyxy(5, 6, 40, 30),
-        raw_payload={"block_content": "stale block payload"},
         origin=BlockOrigin(source_label="table", raw_index=1),
     )
 
     assert raw_block_payload(block, page)["block_content"] == "<table><tr><td>A</td></tr></table>"
     assert raw_block_text_values(block, ("block_content",), page) == ["<table><tr><td>A</td></tr></table>"]
-    assert raw_block_payload(block)["block_content"] == "stale block payload"
+    assert raw_block_payload(block) == {}
 
     print("test_raw_block_payload_prefers_page_artifact_origin_record PASSED")
 
@@ -548,7 +547,6 @@ def test_block_payload_helpers_use_typed_state_only():
     block = Block(
         block_type=BlockType.TEXT,
         bbox=BBox(0, 0, 10, 10),
-        raw_payload={"vendor": {"keep": True}},
     )
 
     with pytest.raises(ValueError, match="unregistered app_payload keys"):
@@ -562,7 +560,6 @@ def test_block_payload_helpers_use_typed_state_only():
     assert is_ocr_text_invalidated(block) is True
     assert ocr_invalidation_reason(block) == "block_moved"
     assert block.ocr_invalidated_reason == "block_moved"
-    assert block.raw_payload["vendor"] == {"keep": True}
     clear_ocr_text_invalidation(block)
     assert is_ocr_text_invalidated(block) is False
 
@@ -665,7 +662,6 @@ def test_block_origin_label_is_authoritative_for_attributes_and_dispatch():
         block_type=BlockType.TEXT,
         bbox=BBox(0, 0, 100, 20),
         source_label="stale_text",
-        raw_payload={"block_label": "stale_raw"},
         origin=BlockOrigin(source_label="footnote"),
     )
 
@@ -745,8 +741,9 @@ def test_project_store():
 
 
 def test_project_store_persists_raw_layout_artifact():
+    from app.core.raw_ocr_artifact import raw_block_payload
     from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.models import BBox, Block, BlockOrigin, BlockType, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -777,11 +774,7 @@ def test_project_store_persists_raw_layout_artifact():
                             block_type=BlockType.TEXT,
                             bbox=BBox(10, 20, 100, 40),
                             source_label="paragraph_title",
-                            raw_payload={
-                                "block_label": "paragraph_title",
-                                "block_content": "属性保真",
-                                "attributes": {"level": 2},
-                            },
+                            origin=BlockOrigin(source_label="text", raw_index=0),
                         )
                     ],
                 )
@@ -799,7 +792,7 @@ def test_project_store_persists_raw_layout_artifact():
         assert _raw_layout_records(loaded.pages[0]) == parsing_res_list
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.source_label == "paragraph_title"
-        assert loaded_block.raw_payload["attributes"]["level"] == 2
+        assert raw_block_payload(loaded_block, loaded.pages[0])["block_content"] == "天地玄黄"
 
         print("test_project_store_persists_raw_layout_artifact PASSED")
     finally:
@@ -853,7 +846,7 @@ def test_project_store_persists_typed_paddle_binding():
 
 def test_project_store_persists_block_ocr_invalidation():
     from app.core.project_store import ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, OcrProject, Page
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -1103,7 +1096,7 @@ def test_project_store_persists_layout_edit_events():
 
 
 def test_line_final_text_contract_and_project_store_roundtrip():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -1172,7 +1165,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
 
 
 def test_project_store_preserves_empty_final_text_roundtrip():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -1204,7 +1197,7 @@ def test_project_store_preserves_empty_final_text_roundtrip():
 
 
 def test_project_store_serializes_line_contract_without_mutating_line():
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -1236,7 +1229,7 @@ def test_project_store_serializes_line_contract_without_mutating_line():
 
 def test_project_store_clean_on_resave():
     """重新保存时旧 block 不残留。"""
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -1277,7 +1270,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
     import pytest
     import sqlite3
 
-    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, ROUTE_SUBBLOCKS_FIELD
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.core.project_store import ProjectDataError, ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
 
@@ -1285,35 +1278,7 @@ def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
         db_path = f.name
 
     try:
-        stale_routes = [
-            {
-                "bbox": [80, 0, 120, 30],
-                "segments": [{"kind": "text", "bbox": [80, 0, 120, 30], "text": ""}],
-            }
-        ]
         route_subblocks = [{"block_label": "inline_formula", "block_bbox": [10, 10, 20, 20]}]
-        page = Page(
-            image_path="/tmp/runtime-route-cache.png",
-            width=160,
-            height=80,
-        )
-        block = Block(
-            block_type=BlockType.TEXT,
-            bbox=BBox.from_xyxy(0, 0, 140, 40),
-            lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
-            raw_payload={LAYOUT_LINE_ROUTES_FIELD: stale_routes, ROUTE_SUBBLOCKS_FIELD: route_subblocks},
-        )
-        page.blocks.append(block)
-        project = OcrProject(name="runtime route cache", pages=[page])
-
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="runtime routing data"):
-                store.save_project(project)
-
-        assert block.lines[0].text == "旧OCR结果"
-        assert LAYOUT_LINE_ROUTES_FIELD in block.raw_payload
-        assert ROUTE_SUBBLOCKS_FIELD in block.raw_payload
-
         clean_block = Block(
             block_type=BlockType.TEXT,
             bbox=BBox.from_xyxy(0, 0, 140, 40),
@@ -1385,19 +1350,6 @@ def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
         db_path = f.name
 
     try:
-        block = Block(
-            block_type=BlockType.TEXT,
-            bbox=BBox.from_xyxy(0, 0, 40, 20),
-            raw_payload={"paddle_binding": {"source_label": "text"}},
-        )
-        project = OcrProject(
-            name="app-owned raw payload",
-            pages=[Page(image_path="/tmp/app-owned-raw-payload.png", width=80, height=40, blocks=[block])],
-        )
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="app-owned payload keys"):
-                store.save_project(project)
-
         clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
         clean_project = OcrProject(
             name="app-owned raw payload load",
@@ -1412,7 +1364,7 @@ def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
             )
             conn.commit()
         with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="app-owned payload keys"):
+            with pytest.raises(ProjectDataError, match="retired raw payload"):
                 store.load_project(saved.id)
     finally:
         os.unlink(db_path)
@@ -1483,24 +1435,27 @@ def test_project_store_rejects_invalid_payload_json_on_load():
 def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     import pytest
 
-    from app.core.model_validation import ModelValidationError, validate_block_model, validate_page_model
+    from app.core.model_validation import (
+        ModelValidationError,
+        validate_block_model,
+        validate_page_model,
+        validate_persistent_block_payloads,
+    )
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
 
     block = Block(
         block_type=BlockType.TEXT,
         bbox=BBox.from_xyxy(0, 0, 20, 20),
     )
     block.raw_payload = {LAYOUT_LINE_ROUTES_FIELD: []}
+    with pytest.raises(ModelValidationError, match="must not expose raw_payload"):
+        validate_block_model(block)
+
     with pytest.raises(ModelValidationError, match="runtime routing data"):
-        validate_block_model(block)
-
-    block.raw_payload = {"paddle_binding": {"source_label": "text"}}
-    with pytest.raises(ModelValidationError, match="app-owned payload keys"):
-        validate_block_model(block)
-
-    block.raw_payload = {"block_label": "text"}
-    validate_block_model(block)
+        validate_persistent_block_payloads({LAYOUT_LINE_ROUTES_FIELD: []}, {})
+    with pytest.raises(ModelValidationError, match="retired raw payload"):
+        validate_persistent_block_payloads({"block_label": "text"}, {})
 
     page = Page(image_path="/tmp/model-validation.png", width=20, height=20)
     page.ppvl_parsing_res_list = []
@@ -2680,14 +2635,13 @@ def test_markdown_filter_ignores_raw_payload_labels():
             width=200,
             height=120,
             page_number=1,
-            blocks=[
-                Block(
-                    block_type=BlockType.TEXT,
-                    bbox=BBox(0, 0, 120, 24),
-                    order=0,
-                    raw_payload={"block_label": "header"},
-                    lines=[Line(text="正文不能被 raw header 过滤", confidence=0.9, bbox=BBox(0, 0, 120, 24))],
-                ),
+                blocks=[
+                    Block(
+                        block_type=BlockType.TEXT,
+                        bbox=BBox(0, 0, 120, 24),
+                        order=0,
+                        lines=[Line(text="正文不能被 raw header 过滤", confidence=0.9, bbox=BBox(0, 0, 120, 24))],
+                    ),
                 Block(
                     block_type=BlockType.TEXT,
                     source_label="header",
@@ -2962,7 +2916,6 @@ def test_export_ir_preserves_structured_block_attributes():
         order=0,
         lines=[Line(text="标题文本", confidence=0.95, bbox=BBox(1, 2, 30, 10))],
         source_label="text",
-        raw_payload={"block_label": "paragraph_title", "block_bbox": [1, 2, 31, 42]},
         origin=BlockOrigin(source_label="paragraph_title"),
     )
     page = Page(image_path="/tmp/attrs-page.png", width=100, height=100, blocks=[block])
@@ -3358,7 +3311,6 @@ def test_pdf_dual_skips_duplicate_inline_formula_equation_element():
             order=1,
             lines=[duplicate_formula_line],
             source_label="inline_formula",
-            raw_payload={"block_label": "inline_formula"},
         ),
     ])
 
@@ -3404,7 +3356,6 @@ def test_pdf_dual_dedup_ignores_raw_payload_inline_formula_label():
             order=1,
             lines=[raw_only_formula_line],
             source_label="display_formula",
-            raw_payload={"block_label": "inline_formula"},
         ),
     ])
 
@@ -3430,7 +3381,6 @@ def test_pdf_dual_equation_text_collapses_identical_formula_repeat():
             order=0,
             lines=[Line(text="$$ A $$ $$ A $$", confidence=1.0, bbox=BBox(20, 30, 100, 30))],
             source_label="display_formula",
-            raw_payload={"block_label": "display_formula"},
         ),
     ])
 
@@ -3471,7 +3421,6 @@ def test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox
             order=1,
             lines=[Line(text=display_formula, confidence=1.0, bbox=bbox)],
             source_label="display_formula",
-            raw_payload={"block_label": "display_formula"},
         ),
     ])
 
@@ -3727,7 +3676,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 def test_table_text_layer_service_clears_stale_cells_without_table_html_source():
     from PIL import Image
 
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3771,7 +3720,6 @@ def test_table_text_layer_service_accepts_raw_vendor_table_html_source():
             block_type=BlockType.TABLE,
             bbox=BBox(20, 30, 160, 70),
             order=0,
-            raw_payload={"block_content": "<table><tr><td>STALE</td></tr></table>"},
             origin=BlockOrigin(source_label="table", raw_index=0),
         )
         page = Page(image_path=image_path, width=240, height=160, blocks=[block])
@@ -3915,7 +3863,6 @@ def test_pdf_dual_generated_pdf_deduplicates_inline_formula_equation_text():
                     order=1,
                     lines=[Line(text="$ GGF_{it} $ $ GGF_{it} $", confidence=1.0, bbox=BBox(50, 35, 100, 42))],
                     source_label="inline_formula",
-                    raw_payload={"block_label": "inline_formula"},
                 ),
             ]),
         ])
@@ -4565,7 +4512,7 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -4702,7 +4649,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -4714,9 +4661,6 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             bbox=BBox.from_xyxy(0, 0, 120, 40),
             source=BlockSource.AUTO_LAYOUT,
             lines=[Line(text="甲$ A $乙", confidence=0.9, bbox=BBox.from_xyxy(0, 0, 120, 40))],
-            raw_payload={
-                "block_label": "text",
-            },
             ocr_audit={
                 "schema": "hanwang_bbox_audit.v1",
                 "layout_block_bbox": [0, 0, 120, 40],
@@ -5080,7 +5024,7 @@ def test_layout_panel_delete_selected_removes_unlocked_box():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5393,7 +5337,7 @@ def test_layout_panel_formula_button_infers_inline_formula_inside_text_block():
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5575,7 +5519,6 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
                 bbox=BBox(10, 150, 120, 20),
                 source_label="text",
                 lines=[Line(text="正文包含2024数字", confidence=0.9, bbox=BBox(10, 150, 120, 20))],
-                raw_payload={"bbox": [2024, 10, 120, 20]},
             ),
         ]
         page = Page(image_path=str(image_path), width=180, height=200, blocks=blocks)
@@ -5873,7 +5816,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
     from app.core.inline_formula_edit_state import HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5902,7 +5845,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
                 Block(
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(0, 0, 200, 40),
-                    raw_payload=dict(parent_record),
+                    origin=BlockOrigin(source_label="text", raw_index=0),
                 )
             ],
         )
@@ -5919,7 +5862,6 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.origin.source_label == "inline_formula"
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
             assert inline.origin.raw_index == 0
-            assert inline.raw_payload == {}
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
@@ -5974,7 +5916,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
 
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -6003,7 +5945,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
                 Block(
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(0, 0, 220, 40),
-                    raw_payload=dict(parent_record),
+                    origin=BlockOrigin(source_label="text", raw_index=0),
                 )
             ],
         )
@@ -7670,7 +7612,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
     from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_record = {
         "block_label": "text",
@@ -7693,11 +7635,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 200, 40),
                 lines=[Line(text="bad active ocr", confidence=0.0, bbox=BBox.from_xyxy(0, 0, 200, 40))],
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 200, 40],
-                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -7753,7 +7691,7 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
     from app.core.paddle_artifact_index import BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
     page = Page(
@@ -7790,11 +7728,7 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(200, 550, 2050, 850),
                 lines=[Line(text="stale", confidence=0.0, bbox=BBox.from_xyxy(200, 550, 2050, 620))],
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [200, 550, 2050, 850],
-                    "block_content": parent_text,
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -7852,7 +7786,7 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
     from app.core.paddle_artifact_index import BINDING_AMBIGUOUS, BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, PaddleBinding, Page
 
     parent_text = "其中， $ GGF_{it}^{Post-short} $、 $ GGF_{it}^{Post-long} $ 均为虚拟变量， $ GGF_{it}^{Post-short} $ 在企业获得政府引导基金"
     parent_record = {
@@ -7888,7 +7822,7 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(200, 550, 2050, 850),
-                raw_payload=dict(parent_record),
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -7936,7 +7870,7 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
 def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, Page
 
     page = Page(
         image_path="/tmp/raw-parent-formula-text.png",
@@ -7964,11 +7898,7 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
                         bbox=BBox.from_xyxy(0, 0, 240, 40),
                     )
                 ],
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 240, 40],
-                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
         ],
     )
@@ -7991,7 +7921,7 @@ def test_hanwang_layout_routes_use_raw_parent_formula_text_not_stale_ocr_text():
 def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
 
     parent_record = {
         "block_label": "text",
@@ -8014,11 +7944,7 @@ def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 220, 40),
                 lines=[Line(text="bad active ocr", confidence=0.0, bbox=BBox.from_xyxy(0, 0, 220, 40))],
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 220, 40],
-                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             Block(
                 block_type=BlockType.EQUATION,
@@ -8064,7 +7990,7 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_artifact_index import BINDING_PARENT_FORMULA_INFERRED
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
 
     captured = {}
 
@@ -8131,11 +8057,7 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 200, 40),
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 200, 40],
-                    "block_content": "甲 $ B $ 乙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             manual_formula,
         ],
@@ -8162,7 +8084,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_artifact_index import BINDING_FORMULA_CROP_OCR, BINDING_GEOMETRY_HIT
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.models import BBox, Block, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
 
     captured = {}
 
@@ -8250,11 +8172,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 200, 40),
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 200, 40],
-                    "block_content": "甲 $ B $ 乙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             formula,
         ],
@@ -8285,7 +8203,7 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, Page
 
     captured = {}
     manual_formula = Block(
@@ -8343,11 +8261,7 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 220, 40),
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 220, 40],
-                    "block_content": "甲 $ A $ 乙 $ B $ 丙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             ),
             manual_formula,
         ],
@@ -9711,7 +9625,7 @@ def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hi
 def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
 
     page = Page(
         image_path="",
@@ -9731,11 +9645,7 @@ def test_hanwang_layout_row_ignores_stale_persisted_layout_routes():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 130, 40),
-                raw_payload={
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 130, 40],
-                    "block_content": "甲 $ A $ 乙",
-                },
+                origin=BlockOrigin(source_label="text", raw_index=0),
             )
         ],
     )
@@ -9760,7 +9670,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         HanwangMicroRecBlockEngine,
         LineResult,
     )
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
 
     def fake_runner(image_bgr, ppvl_blocks, **_kwargs):
         ppvl_blocks[0][LAYOUT_LINE_ROUTES_FIELD] = [
@@ -9807,7 +9717,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(0, 0, 130, 40),
-                raw_payload={"block_label": "text", "block_bbox": [0, 0, 130, 40]},
+                origin=BlockOrigin(source_label="text", raw_index=0),
             )
         ],
     )
@@ -9818,7 +9728,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
     )
 
     assert LAYOUT_LINE_ROUTES_FIELD in _raw_layout_records(page)[0]
-    assert LAYOUT_LINE_ROUTES_FIELD not in page.blocks[0].raw_payload
+    assert not hasattr(page.blocks[0], "raw_payload")
 
     print("test_hanwang_page_block_writeback_does_not_persist_layout_line_routes PASSED")
 
@@ -10306,7 +10216,7 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
     import app.engines.hanwang.micro_recblock as micro_module
 
     from app.engines.hanwang.micro_recblock import HanwangMicroRecBlockEngine
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
     def code(ch):
@@ -10379,11 +10289,7 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(0, 0, 190, 50),
                     source_label="text",
-                    raw_payload={
-                        "block_label": "text",
-                        "block_bbox": [0, 0, 190, 50],
-                        "block_content": "甲 $ A $ 乙",
-                    },
+                    origin=BlockOrigin(source_label="text", raw_index=0),
                 )
             ],
             raw_layout_artifact=_paddle_layout_artifact([{
@@ -11288,13 +11194,11 @@ def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
         block_type=BlockType.EQUATION,
         bbox=BBox(10, 10, 50, 20),
         source_label="display_formula",
-        raw_payload={"block_label": "inline_formula"},
     )
     structured_inline = Block(
         block_type=BlockType.EQUATION,
         bbox=BBox(70, 10, 50, 20),
         source_label="inline_formula",
-        raw_payload={"block_label": "display_formula"},
     )
     page = Page(
         image_path="/tmp/inline-target-labels.png",
@@ -11336,7 +11240,7 @@ def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     blocks, overlays = LayoutAnalyzer()._extract_api_blocks(page, data)
     subblocks = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD]
 
-    assert ROUTE_SUBBLOCKS_FIELD not in blocks[0].raw_payload
+    assert not hasattr(blocks[0], "raw_payload")
     assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
         ("inline_formula", [50, 10, 80, 32]),
     ]
@@ -11831,6 +11735,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BlockOrigin
     from app.services.ocr_pipeline import OcrPipeline
 
     calls = []
@@ -11908,19 +11813,19 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                     block_type=BlockType.TEXT,
                     bbox=BBox.from_xyxy(10, 20, 110, 60),
                     source_label="text",
-                    raw_payload=dict(ppvl_records[0]),
+                    origin=BlockOrigin(source_label="text", raw_index=0),
                 ),
                 Block(
                     block_type=BlockType.EQUATION,
                     bbox=BBox.from_xyxy(20, 80, 180, 120),
                     source_label="display_formula",
-                    raw_payload=dict(ppvl_records[1]),
+                    origin=BlockOrigin(source_label="display_formula", raw_index=1),
                 ),
                 Block(
                     block_type=BlockType.REFERENCE,
                     bbox=BBox.from_xyxy(20, 140, 180, 180),
                     source_label="reference",
-                    raw_payload=dict(ppvl_records[2]),
+                    origin=BlockOrigin(source_label="reference", raw_index=2),
                 ),
             ],
             raw_layout_artifact=_paddle_layout_artifact(ppvl_records),
@@ -11962,18 +11867,18 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         ]
         assert out_page.blocks[0].lines[0].text == "汉王"
         assert out_page.blocks[0].source_label == "text"
-        assert out_page.blocks[0].raw_payload == {}
+        assert not hasattr(out_page.blocks[0], "raw_payload")
         assert out_page.blocks[0].origin is not None
         assert out_page.blocks[0].origin.raw_index == 0
         assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
         assert out_page.blocks[1].lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].ocr_policy != OcrPolicy.TEXT_OCR
-        assert out_page.blocks[1].raw_payload == {}
+        assert not hasattr(out_page.blocks[1], "raw_payload")
         assert out_page.blocks[1].origin is not None
         assert out_page.blocks[1].origin.raw_index == 1
         assert "fallback_reason=" not in out_page.blocks[2].note
         assert out_page.blocks[2].lines == []
-        assert out_page.blocks[2].raw_payload == {}
+        assert not hasattr(out_page.blocks[2], "raw_payload")
         assert out_page.blocks[2].origin is not None
         assert out_page.blocks[2].origin.raw_index == 2
     finally:
@@ -12168,6 +12073,7 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
     from app.models import BBox, Block, BlockType, OcrProject, Page
+    from app.models import BlockOrigin
     from app.services.ocr_pipeline import OcrPipeline
 
     barrier = threading.Barrier(2, timeout=5)
@@ -12229,7 +12135,7 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
                         block_type=BlockType.TEXT,
                         bbox=BBox.from_xyxy(0, 0, 80, 40),
                         source_label="text",
-                        raw_payload=dict(ppvl_records[0]),
+                        origin=BlockOrigin(source_label="text", raw_index=0),
                     )
                 ],
                 raw_layout_artifact=_paddle_layout_artifact([ppvl_records[0]]),
@@ -12244,7 +12150,7 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
                         block_type=BlockType.TEXT,
                         bbox=BBox.from_xyxy(0, 0, 80, 40),
                         source_label="text",
-                        raw_payload=dict(ppvl_records[1]),
+                        origin=BlockOrigin(source_label="text", raw_index=0),
                     )
                 ],
                 raw_layout_artifact=_paddle_layout_artifact([ppvl_records[1]]),
@@ -12281,24 +12187,27 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
 
 def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Page
 
     page = Page(
         image_path="/tmp/raw-label.png",
         width=200,
         height=100,
+        raw_layout_artifact=_paddle_layout_artifact([
+            {
+                "block_label": "paragraph_title",
+                "block_bbox": [1, 2, 3, 4],
+                "block_content": "raw text",
+                "custom_attr": {"level": 2},
+            }
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(11, 22, 133, 88),
                 note="active text",
                 source_label="paragraph_title",
-                raw_payload={
-                    "block_label": "paragraph_title",
-                    "block_bbox": [1, 2, 3, 4],
-                    "block_content": "raw text",
-                    "custom_attr": {"level": 2},
-                },
+                origin=BlockOrigin(source_label="paragraph_title", raw_index=0),
             )
         ],
     )
@@ -12316,7 +12225,7 @@ def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
 
 def test_hanwang_current_layout_blocks_for_ocr_uses_current_blocks_not_ppvl_source():
     from app.engines.hanwang.micro_recblock import _current_layout_blocks_for_ocr
-    from app.models import BBox, Block, BlockType, Page
+    from app.models import BBox, Block, BlockType, Line, Page
 
     page = Page(
         image_path="/tmp/current-layout-source.png",
@@ -12334,10 +12243,7 @@ def test_hanwang_current_layout_blocks_for_ocr_uses_current_blocks_not_ppvl_sour
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(20, 30, 160, 90),
                 source_label="text",
-                raw_payload={
-                    "block_label": "text",
-                    "block_content": "current layout text",
-                },
+                lines=[Line(text="current layout text", confidence=0.9, bbox=BBox.from_xyxy(20, 30, 160, 90))],
             )
         ],
     )
@@ -12368,7 +12274,6 @@ def test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to
                 source=BlockSource.USER_EDITED,
                 note="manual_draw_merge_requires_ocr_rerun",
                 source_label="inline_formula",
-                raw_payload={"block_label": "inline_formula"},
             ),
             Block(
                 block_type=BlockType.TEXT,
@@ -12376,7 +12281,6 @@ def test_hanwang_page_blocks_from_layout_does_not_promote_internal_merge_note_to
                 source=BlockSource.USER_EDITED,
                 note="active text",
                 source_label="text",
-                raw_payload={"block_label": "text"},
             ),
         ],
     )
@@ -12395,6 +12299,7 @@ def test_hanwang_ppvl_skip_uses_current_layout_label_over_raw_payload_label():
 
     from app.engines.hanwang.micro_recblock import BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats
     from app.models import BBox, Block, BlockType, Page
+    from app.models import BlockOrigin
 
     calls = []
 
@@ -12418,13 +12323,15 @@ def test_hanwang_ppvl_skip_uses_current_layout_label_over_raw_payload_label():
         image_path="/tmp/ppvl-skip-authority.png",
         width=100,
         height=100,
-        raw_layout_artifact=_paddle_layout_artifact([]),
+        raw_layout_artifact=_paddle_layout_artifact([
+            {"block_label": "figure", "label": "text", "block_content": "图", "block_bbox": [10, 10, 80, 40]},
+        ]),
         blocks=[
             Block(
                 block_type=BlockType.TEXT,
                 bbox=BBox.from_xyxy(10, 10, 80, 40),
                 source_label="text",
-                raw_payload={"block_label": "figure", "label": "text", "block_content": "图"},
+                origin=BlockOrigin(source_label="figure", raw_index=0),
             )
         ],
     )
@@ -15875,7 +15782,7 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     assert blocks[0].block_type == BlockType.TEXT
     assert blocks[0].origin is not None
     assert blocks[0].origin.raw_index == 0
-    assert "_route_subblocks" not in blocks[0].raw_payload
+    assert not hasattr(blocks[0], "raw_payload")
     assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
     assert [item["block_label"] for item in subblocks] == ["inline_formula", "table_region"]
     assert subblocks[0]["block_bbox"] == [60, 20, 90, 42]
@@ -15903,7 +15810,6 @@ def test_hanwang_layout_row_uses_page_artifact_origin_record():
         block_type=BlockType.TEXT,
         bbox=BBox.from_xyxy(10, 12, 150, 52),
         source_label="text",
-        raw_payload={"block_label": "text", "block_content": "stale raw text"},
         origin=BlockOrigin(source_label="text", raw_index=0),
     )
 
@@ -15943,7 +15849,7 @@ def test_layout_analyzer_persists_raw_parsing_res_list():
     assert _raw_layout_records(page) == parsing_res_list
     assert _raw_layout_records(page)[0]["custom_raw"]["keep"] is True
     assert blocks[0].source_label == "text"
-    assert blocks[0].raw_payload == {}
+    assert not hasattr(blocks[0], "raw_payload")
 
     print("test_layout_analyzer_persists_raw_parsing_res_list PASSED")
 
@@ -17245,7 +17151,6 @@ def test_char_index_service_does_not_repopulate_equation_chars():
             lines=[eq_line],
             order=0,
             source_label="formula",
-            raw_payload={"block_label": "footer", "block_content": "$  \\frac{1}{2}  $"},
         ),
         Block(
             block_type=BlockType.TEXT,
@@ -17325,7 +17230,6 @@ def test_hproof_line_iterator_excludes_position_source_labels():
             lines=[Line(text="12", confidence=0.9, bbox=BBox(1, 1, 20, 10))],
             note="score=0.99 | source_label=text",
             source_label="page_number",
-            raw_payload={"block_label": "page_number"},
         ),
         Block(
             block_type=BlockType.TEXT,
@@ -17333,14 +17237,12 @@ def test_hproof_line_iterator_excludes_position_source_labels():
             lines=[Line(text="正文", confidence=0.9, bbox=BBox(1, 20, 60, 12))],
             note="source_label=page_number",
             source_label="text",
-            raw_payload={"block_label": "text"},
         ),
         Block(
             block_type=BlockType.TEXT,
             bbox=BBox(1, 40, 80, 12),
             lines=[Line(text="脚注", confidence=0.9, bbox=BBox(1, 40, 80, 12))],
             source_label="footnote",
-            raw_payload={"block_label": "footnote"},
         ),
     ]
 
@@ -17359,7 +17261,6 @@ def test_block_attributes_use_origin_or_current_label_not_raw_payload():
         block_type=BlockType.TEXT,
         bbox=BBox(1, 1, 20, 10),
         note="source_label=text",
-        raw_payload={"block_label": "paragraph_title", "score": 0.99},
         origin=BlockOrigin(source_label="paragraph_title"),
     )
     attrs = block_attributes(title_like)
@@ -17374,7 +17275,6 @@ def test_block_attributes_use_origin_or_current_label_not_raw_payload():
         block_type=BlockType.TEXT,
         bbox=BBox(1, 1, 20, 10),
         note="source_label=text",
-        raw_payload={"block_label": "page_number"},
         source_label="page_number",
     )
     assert is_position_only_block(position)
@@ -17382,7 +17282,6 @@ def test_block_attributes_use_origin_or_current_label_not_raw_payload():
     footnote = Block(
         block_type=BlockType.TEXT,
         bbox=BBox(1, 20, 80, 10),
-        raw_payload={"block_label": "footnote"},
         source_label="footnote",
     )
     assert not is_position_only_block(footnote)
@@ -17391,7 +17290,6 @@ def test_block_attributes_use_origin_or_current_label_not_raw_payload():
     raw_only = Block(
         block_type=BlockType.TEXT,
         bbox=BBox(1, 40, 80, 10),
-        raw_payload={"block_label": "paragraph_title"},
     )
     raw_attrs = block_attributes(raw_only)
     assert raw_attrs.semantic_label == "text"
@@ -17920,7 +17818,6 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
         block_type=BlockType.EQUATION,
         bbox=BBox(0, 0, 80, 20),
         lines=[],
-        raw_payload={"block_label": "display_formula", "block_content": "STALE"},
         origin=BlockOrigin(source_label="display_formula", raw_index=0),
     )
     page = Page(
@@ -17949,7 +17846,7 @@ def test_hproof_synthetic_debug_line_is_readonly_and_not_persisted():
     panel._pairs[0]._editor.setPlainText("EDITED")
     panel._save_current(silent=True)
 
-    assert block.raw_payload["block_content"] == "STALE"
+    assert _raw_layout_records(page)[0]["block_content"] == "ORIGINAL"
 
     changes: list = []
     panel.proof_changed.connect(changes.append)
@@ -19472,7 +19369,6 @@ def test_ui_block_labels_use_structured_semantic_label():
         block_type=BlockType.TEXT,
         bbox=BBox(5, 6, 30, 20),
         lines=[Line(text="标题", confidence=0.9, bbox=BBox(5, 6, 30, 10))],
-        raw_payload={"block_label": "legacy_ignored"},
         origin=BlockOrigin(source_label="paragraph_title"),
     )
 

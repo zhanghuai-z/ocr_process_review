@@ -43,14 +43,10 @@ def raw_block_payload(block: object, page: Page | None = None) -> dict[str, Any]
     """Return a copy of a block's vendor payload.
 
     Raw payload is external evidence. Callers that still need it should read a
-    copy through this module instead of treating ``Block`` as a mutable vendor
-    JSON container.
+    copy through this module instead of treating ``Block`` as a vendor JSON
+    container.
     """
-    origin_payload = _raw_payload_from_origin(page, block)
-    if origin_payload:
-        return origin_payload
-    payload = getattr(block, "raw_payload", None)
-    return dict(payload) if isinstance(payload, dict) else {}
+    return _raw_payload_from_origin(page, block)
 
 
 def raw_block_text_values(

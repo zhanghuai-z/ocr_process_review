@@ -37,6 +37,8 @@ def validate_persistent_block_payloads(
         validate_app_payload_keys(app, field=app_field)
     except ValueError as exc:
         raise ModelValidationError(str(exc)) from exc
+    if raw:
+        raise ModelValidationError(f"{raw_field} contains retired raw payload")
     forbidden_app_keys = sorted(set(raw) & RAW_PAYLOAD_FORBIDDEN_APP_KEYS)
     if forbidden_app_keys:
         raise ModelValidationError(
@@ -49,7 +51,8 @@ def validate_block_model(block: Block) -> None:
         raise ModelValidationError("block.ocr_policy must be OcrPolicy")
     if block.origin is not None and not isinstance(block.origin, BlockOrigin):
         raise ModelValidationError("block.origin must be BlockOrigin")
-    validate_persistent_block_payloads(block.raw_payload, {})
+    if hasattr(block, "raw_payload"):
+        raise ModelValidationError("Block active model must not expose raw_payload")
 
 
 def validate_page_model(page: Page) -> None:

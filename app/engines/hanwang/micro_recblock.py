@@ -3063,8 +3063,8 @@ def _persistent_state_from_route_row(
 
     Route rows temporarily carry app-owned data such as paddle binding and
     Hanwang bbox audit next to vendor fields. Persisted ``Block`` objects keep
-    those fields in typed state; route rows are not copied back into
-    ``Block.raw_payload``.
+    those fields in typed state; route rows are not copied back into a raw
+    payload attribute.
     """
     route_row = dict(raw_block or {})
     binding = route_row.pop(ROUTE_ROW_PADDLE_BINDING_KEY, None)

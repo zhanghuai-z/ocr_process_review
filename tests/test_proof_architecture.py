@@ -241,6 +241,7 @@ def test_block_active_model_has_no_app_payload_field():
         if isinstance(node, ast.ClassDef) and node.name == "Block":
             block_source = ast.get_source_segment(source, node) or ""
             assert "app_payload:" not in block_source
+            assert "raw_payload:" not in block_source
             break
     else:
         raise AssertionError("Block class not found")
@@ -265,13 +266,8 @@ def test_raw_payload_is_not_mutated_directly_by_app_code():
 
 
 def test_raw_payload_constructor_writes_stay_at_storage_boundary():
-    allowed = {
-        Path("app/core/project_store.py"),
-    }
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
-        if path in allowed:
-            continue
         source = path.read_text(encoding="utf-8")
         if "raw_payload=" in source:
             offenders.append(str(path))

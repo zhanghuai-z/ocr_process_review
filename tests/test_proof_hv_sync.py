@@ -14,7 +14,8 @@ from PySide6.QtWidgets import QApplication
 from app.core.proof_state import TOPIC_LINE_PROOF_CHANGED, ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
-from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
+from app.models import BBox, Block, BlockOrigin, BlockType, Char, Line, OcrProject, Page
 
 
 @pytest.fixture(autouse=True)
@@ -1441,31 +1442,25 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
             bbox=BBox(86, 32, 14, 12),
             lines=[formula_number_line],
             source_label="formula_number",
-            raw_payload={"block_label": "formula_number"},
         ),
         Block(
             block_type=BlockType.EQUATION,
             bbox=BBox(0, 48, 80, 12),
             lines=[formula_line],
             source_label="display_formula",
-            raw_payload={"block_label": "display_formula"},
         ),
         Block(
             block_type=BlockType.EQUATION,
             bbox=BBox(0, 58, 100, 12),
             lines=[],
             source_label="display_formula",
-            raw_payload={
-                "block_label": "display_formula",
-                "block_content": line_less_formula,
-            },
+            origin=BlockOrigin(source_label="display_formula", raw_index=0),
         ),
         Block(
             block_type=BlockType.TABLE,
             bbox=BBox(0, 64, 80, 12),
             lines=[table_line],
             source_label="table_region",
-            raw_payload={"block_label": "table_region"},
         ),
         Block(
             block_type=BlockType.TEXT,
@@ -1473,6 +1468,13 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
             lines=[route_table_line],
         ),
     ]
+    set_paddle_raw_layout_records(page, [
+        {
+            "block_label": "display_formula",
+            "block_bbox": [0, 58, 100, 70],
+            "block_content": line_less_formula,
+        }
+    ])
 
     h = HProofPanel()
     h.load_pages([page])
@@ -1580,7 +1582,6 @@ def test_hproof_formula_visual_uses_experimental_pixmap(monkeypatch):
         bbox=BBox(0, 0, 90, 20),
         lines=[line],
         source_label="display_formula",
-        raw_payload={"block_label": "display_formula"},
     )
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
 
@@ -1625,7 +1626,6 @@ def test_hproof_display_formula_source_editor_updates_rendered_source(monkeypatc
         bbox=BBox(0, 0, 90, 20),
         lines=[line],
         source_label="display_formula",
-        raw_payload={"block_label": "display_formula"},
     )
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
 
@@ -1741,7 +1741,6 @@ def test_hproof_display_formula_cjk_fallback_can_open_source_panel(monkeypatch):
         bbox=BBox(0, 0, 120, 30),
         lines=[line],
         source_label="display_formula",
-        raw_payload={"block_label": "display_formula"},
     )
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=160, height=40)
 
@@ -1818,7 +1817,6 @@ def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
             bbox=BBox(0, 32, 20, 12),
             lines=[marker_block_line],
             source_label="inline_formula",
-            raw_payload={"block_label": "inline_formula"},
         ),
     ]
 
