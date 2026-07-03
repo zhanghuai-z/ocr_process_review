@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import OcrProject, ProofStatus
+from app.models.ocr_observation import block_ocr_lines
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ class ProofStatsService:
 
         for page in project.pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     facts = proof_line_facts(line)
                     total += 1
                     if facts.status == ProofStatus.OK:

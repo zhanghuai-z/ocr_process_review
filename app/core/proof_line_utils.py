@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from app.core.block_attributes import is_position_only_block, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
+from app.models.ocr_observation import block_ocr_lines
 
 
 PROOF_LINE_BLOCK_TYPES = {
@@ -42,7 +43,7 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
             continue
         if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
             continue
-        for line_idx, line in enumerate(block.lines):
+        for line_idx, line in enumerate(block_ocr_lines(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line.review_flags):
                 continue
             if _is_duplicate_line(line, seen):
@@ -65,7 +66,7 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
             continue
         if is_position_only_block(block):
             continue
-        for line_idx, line in enumerate(block.lines):
+        for line_idx, line in enumerate(block_ocr_lines(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line.review_flags):
                 continue
             if _is_duplicate_line(line, seen):

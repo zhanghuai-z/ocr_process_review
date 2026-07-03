@@ -20,6 +20,7 @@ from app.models.block_state import (
     paddle_binding_dict,
     set_paddle_binding,
 )
+from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
@@ -3420,7 +3421,7 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
     return [
         line
         for block in page.blocks
-        for line in block.lines
+        for line in block_ocr_lines(block)
         if line.bbox is not None
         and line.bbox.area > 0
         and is_ppocr_page_line_hint(line)
@@ -3505,7 +3506,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
     block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
-    block.lines = [
+    replace_block_ocr_lines(block, [
         Line(
             text=text,
             confidence=1.0,
@@ -3513,7 +3514,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
             ocr_text=text,
             review_flags=[FORMULA_CROP_OCR_REVIEW_FLAG],
         )
-    ]
+    ])
 
 
 def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
@@ -3536,7 +3537,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             "manual_bbox": bbox_xyxy,
             "review_flags": flags,
     })
-    block.lines = [
+    replace_block_ocr_lines(block, [
         Line(
             text="",
             confidence=0.0,
@@ -3544,7 +3545,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             ocr_text="",
             review_flags=flags,
         )
-    ]
+    ])
 
 
 def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:

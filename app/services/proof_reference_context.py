@@ -6,6 +6,7 @@ from typing import Optional
 
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import Block, Line, Page
+from app.models.ocr_observation import line_belongs_to_block
 from app.services.proof_probe_text_service import displayed_text as proof_displayed_text
 
 
@@ -40,7 +41,7 @@ class ProofReferenceContext:
 
     def first_slot_for_block(self, block: Block) -> Optional[ProofTextSlot]:
         for slot in self.slots:
-            if any(slot.line is line for line in block.lines):
+            if line_belongs_to_block(block, slot.line):
                 return slot
         return None
 

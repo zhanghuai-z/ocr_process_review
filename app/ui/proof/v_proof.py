@@ -41,6 +41,12 @@ from PySide6.QtWidgets import (
 
 from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
+from app.models.ocr_observation import (
+    block_ocr_line_at,
+    block_ocr_line_count,
+    block_ocr_lines,
+    line_belongs_to_block,
+)
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_line_facts import proof_display_text, proof_ocr_text, proof_status
@@ -983,19 +989,19 @@ class VProofPanel(QWidget):
         line: Optional[Line] = None
         line_index = -1
         if edit.line_uid:
-            for idx, candidate in enumerate(block.lines):
+            for idx, candidate in enumerate(block_ocr_lines(block)):
                 if candidate.uid == edit.line_uid:
                     line = candidate
                     line_index = idx
                     break
         if line is None and edit.line_id is not None:
-            for idx, candidate in enumerate(block.lines):
+            for idx, candidate in enumerate(block_ocr_lines(block)):
                 if candidate.id == edit.line_id:
                     line = candidate
                     line_index = idx
                     break
-        if line is None and 0 <= edit.line_index < len(block.lines):
-            line = block.lines[edit.line_index]
+        if line is None and 0 <= edit.line_index < block_ocr_line_count(block):
+            line = block_ocr_line_at(block, edit.line_index)
             line_index = edit.line_index
         if line is None:
             return None
@@ -2086,9 +2092,9 @@ class VProofPanel(QWidget):
             for block in page.blocks:
                 if block.order != entry.block_order:
                     continue
-                if not (0 <= entry.line_idx < len(block.lines)):
+                if not (0 <= entry.line_idx < block_ocr_line_count(block)):
                     continue
-                line = block.lines[entry.line_idx]
+                line = block_ocr_line_at(block, entry.line_idx)
                 txt = proof_display_text(line)
                 if 0 <= entry.char_idx < len(txt):
                     return txt[entry.char_idx]
@@ -2280,7 +2286,7 @@ class VProofPanel(QWidget):
         if context is None:
             return
         for slot in context.slots:
-            if any(slot.line is ln for ln in block.lines):
+            if line_belongs_to_block(block, slot.line):
                 cursor = self._text_edit.textCursor()
                 cursor.setPosition(slot.start)
                 self._text_edit.setTextCursor(cursor)

@@ -34,6 +34,13 @@ from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
+from app.models.ocr_observation import (
+    append_block_ocr_line,
+    block_ocr_line_count,
+    block_ocr_lines,
+    clear_block_ocr_lines,
+    replace_block_ocr_lines,
+)
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 from app.services.table_text_layer_service import TableTextLayerService
@@ -226,7 +233,7 @@ class OcrPipeline:
 
                     try:
                         lines = self._process_block(img, block, page, page_idx)
-                        block.lines = lines
+                        replace_block_ocr_lines(block, lines)
                     except Exception as e:
                         logger.error(
                             "OCR failed: page=%d block=%d: %s",
@@ -577,7 +584,7 @@ class OcrPipeline:
                 mark_page_line_hints=True,
             )
             if progress_callback:
-                line_count = sum(len(block.lines) for block in page.blocks)
+                line_count = sum(block_ocr_line_count(block) for block in page.blocks)
                 progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")
@@ -612,7 +619,7 @@ class OcrPipeline:
             line.bbox is not None
             and line.bbox.area > 0
             and is_ppocr_page_line_hint(line)
-            for line in block.lines
+            for line in block_ocr_lines(block)
         )
 
     def _reusable_page_line_hint_summary(self, page: Page) -> str:
@@ -620,7 +627,7 @@ class OcrPipeline:
         marked_lines = sum(
             1
             for block in text_blocks
-            for line in block.lines
+            for line in block_ocr_lines(block)
             if line.bbox is not None
             and line.bbox.area > 0
             and is_ppocr_page_line_hint(line)
@@ -653,7 +660,7 @@ class OcrPipeline:
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         for block in page.blocks:
             if should_dispatch_to_text_ocr(block):
-                block.lines = []
+                clear_block_ocr_lines(block)
 
         containers = [
             block for block in page.blocks
@@ -672,7 +679,7 @@ class OcrPipeline:
             if block is None:
                 unmatched.append(line)
             else:
-                block.lines.append(line)
+                append_block_ocr_line(block, line)
 
         if not unmatched:
             return
@@ -701,12 +708,12 @@ class OcrPipeline:
             if should_dispatch_to_text_ocr(block)
         ]
         for block in containers:
-            block.lines = []
+            clear_block_ocr_lines(block)
 
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
             block = select_container_block_for_line(line, containers)
             if block is not None:
-                block.lines.append(line)
+                append_block_ocr_line(block, line)
 
     def assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Public wrapper used when PP-OCRv5 proof lines finish before layout."""
@@ -736,7 +743,7 @@ class OcrPipeline:
             blocks=[block],
         )
         lines = self._process_block(img, block, page, 0)
-        block.lines = lines
+        replace_block_ocr_lines(block, lines)
         self._normalize_proof_crops(
             page,
             page_idx=0,

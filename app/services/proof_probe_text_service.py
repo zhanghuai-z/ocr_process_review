@@ -24,6 +24,7 @@ from difflib import SequenceMatcher
 from typing import Optional, Tuple
 
 from app.models import Block, Line, Page
+from app.models.ocr_observation import block_ocr_lines
 from app.core import quality_probe as qp
 from app.core.proof_char_text import chars_display_spans, is_display_carrier
 from app.core.proof_change import ProofChangeSet
@@ -37,7 +38,7 @@ def resolve_block_line_index(
     """返回 (block_index, line_index) 或 None（line/block 已不在 page 中）。"""
     try:
         bi = page.blocks.index(block)
-        li = block.lines.index(line)
+        li = block_ocr_lines(block).index(line)
     except ValueError:
         return None
     return bi, li

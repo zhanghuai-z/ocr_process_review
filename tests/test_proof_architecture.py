@@ -236,6 +236,25 @@ def test_block_active_model_has_no_app_payload_field():
         raise AssertionError("Block class not found")
 
 
+def test_block_ocr_lines_access_goes_through_observation_boundary():
+    allowed = {
+        Path("app/core/project_store.py"),
+        Path("app/export/docx_exporter.py"),
+        Path("app/export/html.py"),
+        Path("app/export/rtf.py"),
+        Path("app/models/ocr_observation.py"),
+        Path("app/models/project.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if "block.lines" in source:
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_raw_payload_is_not_mutated_directly_by_app_code():
     offenders: list[str] = []
     direct_mutation_patterns = (

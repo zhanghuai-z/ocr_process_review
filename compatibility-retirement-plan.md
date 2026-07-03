@@ -55,8 +55,9 @@
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
 - active `Block` 不再携带 `raw_payload`；新导入和 Hanwang OCR 后重建的 block 通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取原始事实。
 - `Block.app_payload` 已从 active model 删除。
+- `Block.lines` 的业务访问已迁移到 `app.models.ocr_observation`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
 
-完成状态：第一阶段完成；page 级 `LayoutSnapshot` 是后续增强，不再作为当前兼容入口。
+完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 
 ### Phase 4: 删除兼容入口
 

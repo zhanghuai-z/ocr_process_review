@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_display_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
+from app.models.ocr_observation import block_ocr_line_count, block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -110,9 +111,9 @@ class OcrPanel(QWidget):
         self._populate_tree(pages)
         flagged = sum(
             1 for p in pages for b in p.blocks
-            for l in b.lines if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
+            for l in block_ocr_lines(b) if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
         )
-        total_lines = sum(len(b.lines) for p in pages for b in p.blocks)
+        total_lines = sum(block_ocr_line_count(b) for p in pages for b in p.blocks)
         self._status_lbl.setText(
             f"识别完成：{total_lines} 行，其中 {flagged} 行置信度偏低（已自动标记）"
         )
@@ -131,7 +132,7 @@ class OcrPanel(QWidget):
                     [f"[{block_display_label(block)}]", f"{block.avg_confidence:.2f}", ""],
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     facts = proof_line_facts(line)
                     line_text = facts.text
                     preview = line_text[:40] + ("…" if len(line_text) > 40 else "")

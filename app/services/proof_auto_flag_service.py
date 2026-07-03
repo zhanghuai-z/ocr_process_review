@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from app.core.proof_line_facts import proof_status
 from app.models import Page, ProofStatus
+from app.models.ocr_observation import block_ocr_lines
 from app.services.proof_edit_service import ProofEditService
 
 LOW_CONFIDENCE = 0.80
@@ -19,7 +20,7 @@ class ProofAutoFlagService:
         count = 0
         for page in pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     if proof_status(line) in (ProofStatus.MODIFIED, ProofStatus.OK):
                         continue
                     if line.confidence >= self.threshold:

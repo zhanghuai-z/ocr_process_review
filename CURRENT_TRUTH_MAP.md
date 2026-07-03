@@ -36,10 +36,11 @@
      - 作用是让正文块进入 Hanwang/CharOCR 前扣除或插入公式等结构段
 
 OCR Hanwang/CharOCR
-  -> block.lines
+  -> ocr_observation 边界（当前落点仍是 Block.lines）
      - Line 是可校对文本行
      - Line.bbox 是行几何
      - Line.chars 是字符/词/公式 carrier 的几何与文本观察
+     - 业务代码必须通过 app.models.ocr_observation 读写，不能继续裸读写 block.lines
 
 校对 HProof/VProof
   -> external ProofLineState store
@@ -258,6 +259,7 @@ OCR Hanwang/CharOCR
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
+- `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储。
 - `Line.ocr_text`：OCR 原始文本。
 - `proof_display_text(line)`：当前校对文本事实。
 - `Line.chars`：字符/词/公式 carrier 几何事实，前提是与 display_text 可对齐。
@@ -274,6 +276,7 @@ OCR Hanwang/CharOCR
 ### 兼容/过渡层
 
 - `Line.text`：仍作为 OCR 行文本字段；新逻辑不应把它当唯一 proof 真值。
+- `Block.lines`：仍是模型内部过渡存储；业务代码已改为通过 `app.models.ocr_observation` 访问。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 - `proof_saved` 信号名：名称像“已保存”，实际仍是“proof changed，需要持久化”的遗留信号。
 
@@ -282,6 +285,7 @@ OCR Hanwang/CharOCR
 1. `Page/Block/Line/Char` 是大一统模型。
    - 同时承担 OCR 观察、人工终稿、UI 展示、存储 rowid、导出来源。
    - 后续应拆成 Observation / EditState / ViewModel / Persistence DTO。
+   - `Block.lines` 尚未物理外置，但直接访问已经被架构测试约束到持久化/模型边界。
 
 2. `raw_payload` 已从 active `Block` 模型退出，仅保留旧 SQLite 列拒绝边界。
    - Paddle vendor fact 和 app state 已分开；route plan 仍是运行时 dict。

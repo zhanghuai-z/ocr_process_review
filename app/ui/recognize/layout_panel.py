@@ -45,6 +45,7 @@ from app.core.paddle_line_routing import (
 )
 from app.core.ocr_ir import is_formula_marker_token
 from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
+from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -863,7 +864,7 @@ class LayoutPanel(QWidget):
             getattr(block.block_type, "value", str(block.block_type)),
             block.note,
         ]
-        for line in block.lines:
+        for line in block_ocr_lines(block):
             parts.extend(proof_search_texts(line))
         parts.extend(LayoutPanel._payload_strings(raw_block_payload(block)))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
@@ -871,7 +872,7 @@ class LayoutPanel(QWidget):
     @staticmethod
     def _block_text_search_fields(block: Block) -> list[str]:
         parts: list[str] = []
-        for line in block.lines:
+        for line in block_ocr_lines(block):
             parts.extend(proof_search_texts(line))
         if block.note:
             parts.append(block.note.split("|", 1)[0])
@@ -883,7 +884,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _block_preview_text(block: Block) -> str:
-        for line in block.lines:
+        for line in block_ocr_lines(block):
             text = proof_display_text(line)
             if text:
                 return _compact_status_text(text)
@@ -1389,7 +1390,7 @@ class LayoutPanel(QWidget):
         block.source = BlockSource.USER_EDITED
         mark_ocr_text_invalidated(block, "block_geometry_changed")
         if not self._update_existing_manual_binding_bbox(block):
-            block.lines = []
+            clear_block_ocr_lines(block)
             self._bind_manual_block_to_paddle(page, block)
         if self._is_generated_inline_formula_block(block):
             self._mark_generated_inline_formula_handled(page, block)
@@ -1428,7 +1429,7 @@ class LayoutPanel(QWidget):
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         block.source_label = source_label
         block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
-        for line in block.lines:
+        for line in block_ocr_lines(block):
             line.bbox = block.bbox
         set_paddle_binding(block, next_binding)
         return True
@@ -1569,7 +1570,7 @@ class LayoutPanel(QWidget):
         for block in page.blocks:
             if is_ocr_text_invalidated(block):
                 continue
-            for line in block.lines:
+            for line in block_ocr_lines(block):
                 chars.extend([
                     char
                     for char in line.chars
@@ -2080,7 +2081,7 @@ class LayoutPanel(QWidget):
         primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
         primary.block_type = block_type
         primary.source_label = source_label
-        primary.lines = []
+        clear_block_ocr_lines(primary)
         primary.source = BlockSource.USER_EDITED
         primary.ocr_policy = default_ocr_policy_for_block(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"

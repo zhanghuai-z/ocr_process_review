@@ -15,6 +15,7 @@ from typing import Iterable, List
 from app.core.block_attributes import block_attributes, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, BlockType, Line, OcrProject, Page
+from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.services.proof_stats_service import ProofStatsService
 
 
@@ -134,13 +135,13 @@ def iter_export_blocks(page: Page, *, include_empty: bool = False) -> Iterable[B
         key=lambda block: (block.order, block.bbox.y, block.bbox.x),
     )
     for block in blocks:
-        if include_empty or block.lines or block.note:
+        if include_empty or block_has_ocr_lines(block) or block.note:
             yield block
 
 
 def iter_export_lines(block: Block) -> Iterable[Line]:
     """输出块内行，统一文本来源由 get_export_text 控制。"""
-    return block.lines
+    return block_ocr_lines(block)
 
 
 def build_export_summary(project: OcrProject) -> dict:
@@ -154,7 +155,7 @@ def build_export_summary(project: OcrProject) -> dict:
         "flagged_lines": proof_stats.flagged_lines,
         "unrecognized_blocks": sum(
             1 for page in project.pages for block in page.text_ocr_blocks
-            if not block.lines
+            if not block_has_ocr_lines(block)
         ),
     }
 

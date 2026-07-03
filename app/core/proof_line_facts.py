@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.models import Line, ProofLineState, ProofStatus
+from app.models.ocr_observation import block_ocr_lines
 from app.models.proof_line_state_store import proof_state_for_line
 
 
@@ -72,7 +73,7 @@ def proof_ocr_text(line: Line) -> str:
 
 
 def proof_block_text(block) -> str:
-    return "\n".join(proof_display_text(line) for line in block.lines)
+    return "\n".join(proof_display_text(line) for line in block_ocr_lines(block))
 
 
 def proof_status(line: Line) -> ProofStatus:

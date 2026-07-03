@@ -7,6 +7,7 @@ from app.core import quality_probe as qp
 from app.core.proof_change import ProofChangeSet, ProofLineRef
 from app.core.project_store import ProjectStore
 from app.models import Block, Line, OcrProject, Page
+from app.models.ocr_observation import block_ocr_lines
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ class ProofPersistenceService:
         updates: list[tuple[Line, bool]] = []
         for page in self._project.pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     if not line.id:
                         continue
                     updates.append((line, True))
@@ -122,5 +123,5 @@ class ProofPersistenceService:
     def _iter_project_lines(self):
         for page in self._project.pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     yield page, block, line

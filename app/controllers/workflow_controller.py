@@ -40,6 +40,7 @@ from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page, PageStatus,
 )
+from app.models.ocr_observation import block_ocr_lines
 from app.services.ocr_pipeline import OcrPipeline, OcrProgress
 from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService
@@ -1101,7 +1102,7 @@ class WorkflowController(QObject):
         return [
             line
             for block in page.blocks
-            for line in block.lines
+            for line in block_ocr_lines(block)
         ]
 
     def _make_parallel_page_key(self, page: Page, index: int) -> tuple[int, str, str, int, int]:

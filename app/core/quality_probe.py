@@ -51,6 +51,12 @@ from app.core.proof_line_facts import proof_display_text
 from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
+from app.models.ocr_observation import (
+    block_has_ocr_lines,
+    block_ocr_line_at,
+    block_ocr_line_count,
+    block_ocr_lines,
+)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -192,7 +198,7 @@ def is_block_eligible(block: Block) -> bool:
         return False
     if block.block_type in EXCLUDED_BLOCK_TYPES:
         return False
-    if not block.lines:
+    if not block_has_ocr_lines(block):
         return False
     return True
 
@@ -430,7 +436,7 @@ class ProbeSampler:
             for bi, block in enumerate(page.blocks):
                 if not is_block_eligible(block):
                     continue
-                for li, line in enumerate(block.lines):
+                for li, line in enumerate(block_ocr_lines(block)):
                     total_cut_cjk += count_existing_cjk_crop_chars(line)
                     text = proof_display_text(line)
                     for idx in candidate_indices_with_existing_crops(line):
@@ -831,9 +837,9 @@ def detect_corrections(
         if not (0 <= probe.key.block_index < len(page.blocks)):
             continue
         block = page.blocks[probe.key.block_index]
-        if not (0 <= probe.key.line_index < len(block.lines)):
+        if not (0 <= probe.key.line_index < block_ocr_line_count(block)):
             continue
-        line = block.lines[probe.key.line_index]
+        line = block_ocr_line_at(block, probe.key.line_index)
         text = proof_display_text(line)
         ci = probe.key.char_index
         if ci < 0 or ci >= len(text):
