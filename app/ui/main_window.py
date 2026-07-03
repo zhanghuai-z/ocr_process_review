@@ -1107,9 +1107,6 @@ class MainWindow(QMainWindow):
 
     def _show_ocr_settings(self) -> None:
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
-        from app.core.app_config import get_config
-        from app.engines.real_ocr_adapter import get_engine_description
         dlg = ApiSettingsDialog(self)
         if dlg.exec():
-            cfg = get_config()
-            self._set_status_message(f"OCR 引擎：{get_engine_description(cfg['mode'])}")
+            self._set_status_message(f"OCR 引擎：{self._controller.ocr_engine_description()}")

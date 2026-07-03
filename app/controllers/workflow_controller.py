@@ -36,7 +36,7 @@ from app.core.workflow_state import (
 )
 from app.core import quality_probe as qp
 from app.engines.hanwang import native_cache
-from app.engines.real_ocr_adapter import create_engine
+from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page, PageStatus,
 )
@@ -228,6 +228,9 @@ class WorkflowController(QObject):
 
     def is_hanwang_mode(self) -> bool:
         return self._current_ocr_mode() == "hanwang"
+
+    def ocr_engine_description(self) -> str:
+        return get_engine_description(self._current_ocr_mode())
 
     # ── proof 面板同步：把"merge vs load"判定从 MainWindow 收回 ──────
     # 之前 MainWindow 自己 sum(total_lines) 决定 load 还是 merge，并维护

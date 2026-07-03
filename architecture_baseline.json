@@ -42,7 +42,5 @@
     "app.engines.real_ocr_adapter -> app.core.proof_status"
   ],
   "models_to_core": [],
-  "ui_to_engines": [
-    "app.ui.main_window -> app.engines.real_ocr_adapter"
-  ]
+  "ui_to_engines": []
 }
