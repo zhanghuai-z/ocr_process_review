@@ -51,6 +51,66 @@ _PRESERVE_EXPLICIT_SOURCE_LABELS = {
 
 
 @dataclass(frozen=True)
+class LayoutEditCommand:
+    op: str
+    page: Page
+    block: Block | None = None
+    blocks: tuple[Block, ...] = ()
+    bbox: BBox | None = None
+    block_type: BlockType | None = None
+    source_label: str = ""
+    before: dict | None = None
+
+    @classmethod
+    def create_block(
+        cls,
+        page: Page,
+        bbox: BBox,
+        block_type: BlockType,
+        source_label: str,
+    ) -> "LayoutEditCommand":
+        return cls("create_block", page, bbox=bbox, block_type=block_type, source_label=source_label)
+
+    @classmethod
+    def delete_block(cls, page: Page, block: Block) -> "LayoutEditCommand":
+        return cls("delete_block", page, block=block)
+
+    @classmethod
+    def change_kind(
+        cls,
+        page: Page,
+        block: Block,
+        *,
+        block_type: BlockType,
+        source_label: str,
+    ) -> "LayoutEditCommand":
+        return cls("change_kind", page, block=block, block_type=block_type, source_label=source_label)
+
+    @classmethod
+    def merge_blocks(
+        cls,
+        page: Page,
+        blocks: Iterable[Block],
+        bbox: BBox,
+        *,
+        block_type: BlockType,
+        source_label: str,
+    ) -> "LayoutEditCommand":
+        return cls(
+            "merge_blocks",
+            page,
+            blocks=tuple(blocks),
+            bbox=bbox,
+            block_type=block_type,
+            source_label=source_label,
+        )
+
+    @classmethod
+    def update_geometry(cls, page: Page, block: Block, *, before: dict | None = None) -> "LayoutEditCommand":
+        return cls("resize_block", page, block=block, before=before)
+
+
+@dataclass(frozen=True)
 class LayoutEditResult:
     op: str
     block: Block | None = None
@@ -70,6 +130,57 @@ class LayoutEditResult:
 
 class LayoutEditService:
     """Apply layout edit commands and record their audit events."""
+
+    def apply(self, command: LayoutEditCommand) -> LayoutEditResult:
+        if command.op == "create_block":
+            return self._create_block(
+                command.page,
+                self._require_bbox(command),
+                self._require_block_type(command),
+                command.source_label,
+            )
+        if command.op == "delete_block":
+            return self._delete_block(command.page, self._require_block(command))
+        if command.op == "change_kind":
+            return self._change_block_kind(
+                command.page,
+                self._require_block(command),
+                block_type=self._require_block_type(command),
+                source_label=command.source_label,
+            )
+        if command.op == "merge_blocks":
+            return self._merge_blocks_into_bbox(
+                command.page,
+                command.blocks,
+                self._require_bbox(command),
+                block_type=self._require_block_type(command),
+                source_label=command.source_label,
+            )
+        if command.op == "resize_block":
+            return self._update_block_geometry(
+                command.page,
+                self._require_block(command),
+                before=command.before,
+            )
+        raise ValueError(f"Unsupported layout edit command: {command.op}")
+
+    @staticmethod
+    def _require_block(command: LayoutEditCommand) -> Block:
+        if command.block is None:
+            raise ValueError(f"{command.op} requires a block")
+        return command.block
+
+    @staticmethod
+    def _require_bbox(command: LayoutEditCommand) -> BBox:
+        if command.bbox is None:
+            raise ValueError(f"{command.op} requires a bbox")
+        return command.bbox
+
+    @staticmethod
+    def _require_block_type(command: LayoutEditCommand) -> BlockType:
+        if command.block_type is None:
+            raise ValueError(f"{command.op} requires a block type")
+        return command.block_type
 
     @staticmethod
     def block_state(block: Block) -> dict:
@@ -102,7 +213,7 @@ class LayoutEditService:
             )
         )
 
-    def persist_user_block_geometry(self, page: Page, block: Block) -> dict:
+    def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:
         if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
             return {}
         block.source = BlockSource.USER_EDITED
@@ -116,7 +227,27 @@ class LayoutEditService:
             self.mark_generated_inline_formula_handled(page, block)
         return binding
 
-    def create_block(
+    def _update_block_geometry(
+        self,
+        page: Page,
+        block: Block,
+        *,
+        before: dict | None,
+    ) -> LayoutEditResult:
+        before = before or self.block_state(block)
+        binding = self._persist_user_block_geometry(page, block)
+        after = self.block_state(block)
+        self.record_edit(page, "resize_block", block, before=before, after=after)
+        return LayoutEditResult(
+            op="resize_block",
+            block=block,
+            before=before,
+            after=after,
+            binding_status=str(binding.get("status") or ""),
+            binding_text=str(binding.get("text") or ""),
+        )
+
+    def _create_block(
         self,
         page: Page,
         bbox: BBox,
@@ -143,14 +274,14 @@ class LayoutEditService:
             binding_text=str(binding.get("text") or ""),
         )
 
-    def delete_block(self, page: Page, block: Block) -> LayoutEditResult:
+    def _delete_block(self, page: Page, block: Block) -> LayoutEditResult:
         before = {"block": self.block_state(block)}
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
         page.blocks = [candidate for candidate in page.blocks if candidate is not block]
         self.record_edit(page, "delete_block", block, before=before, after={})
         return LayoutEditResult(op="delete_block", block=block, before=before, after={})
 
-    def change_block_kind(
+    def _change_block_kind(
         self,
         page: Page,
         block: Block,
@@ -175,7 +306,7 @@ class LayoutEditService:
             binding_text=str(binding.get("text") or ""),
         )
 
-    def merge_blocks_into_bbox(
+    def _merge_blocks_into_bbox(
         self,
         page: Page,
         blocks: Iterable[Block],

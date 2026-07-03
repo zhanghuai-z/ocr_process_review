@@ -21,7 +21,7 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.models.ocr_observation import block_ocr_lines
-from app.services.layout_edit_service import LayoutEditResult, LayoutEditService
+from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -1030,12 +1030,12 @@ class LayoutPanel(QWidget):
                 )
                 if not is_changed:
                     continue
-                self._layout_edit_service.change_block_kind(
+                self._layout_edit_service.apply(LayoutEditCommand.change_kind(
                     page,
                     block,
                     block_type=subtype.block_type,
                     source_label=source_label,
-                )
+                ))
                 if is_changed:
                     changed += 1
             for order, block in enumerate(page.blocks):
@@ -1309,17 +1309,6 @@ class LayoutPanel(QWidget):
     def _layout_block_state(block: Block) -> dict:
         return LayoutEditService.block_state(block)
 
-    def _record_layout_edit(
-        self,
-        page: Page,
-        op: str,
-        block: Block | None,
-        *,
-        before: dict,
-        after: dict,
-    ) -> None:
-        self._layout_edit_service.record_edit(page, op, block, before=before, after=after)
-
     def _on_block_edit_started(self, block: Block) -> None:
         self._push_undo_snapshot()
         self._layout_edit_start_state[block.uid] = self._layout_block_state(block)
@@ -1328,20 +1317,10 @@ class LayoutPanel(QWidget):
         bb = block.bbox
         page = self._pages[self._current_page_idx]
         before = self._layout_edit_start_state.pop(block.uid, self._layout_block_state(block))
-        self._persist_user_block_geometry(page, block)
-        self._record_layout_edit(
-            page,
-            "resize_block",
-            block,
-            before=before,
-            after=self._layout_block_state(block),
-        )
+        self._layout_edit_service.apply(LayoutEditCommand.update_geometry(page, block, before=before))
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
-
-    def _persist_user_block_geometry(self, page: Page, block: Block) -> None:
-        self._layout_edit_service.persist_user_block_geometry(page, block)
 
     @staticmethod
     def _is_generated_inline_formula_block(block: Block) -> bool:
@@ -1363,13 +1342,13 @@ class LayoutPanel(QWidget):
             bt,
         )
         if intersecting:
-            result = self._layout_edit_service.merge_blocks_into_bbox(
+            result = self._layout_edit_service.apply(LayoutEditCommand.merge_blocks(
                 page,
                 intersecting,
                 bbox,
                 block_type=bt,
                 source_label=source_label,
-            )
+            ))
             merged = result.block
             if merged is None:
                 return
@@ -1382,12 +1361,12 @@ class LayoutPanel(QWidget):
             self.geometry_changed.emit()
             self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
-        result = self._layout_edit_service.create_block(
+        result = self._layout_edit_service.apply(LayoutEditCommand.create_block(
             page,
             bbox,
             bt,
             source_label,
-        )
+        ))
         new_block = result.block
         if new_block is None:
             return
@@ -1406,7 +1385,7 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        self._layout_edit_service.delete_block(page, block)
+        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block))
         if self._selected_block is block:
             self._selected_block = None
             self._selected_char_box_index = -1
@@ -1436,12 +1415,12 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
         source_label = self._source_label_for_subtype(page, self._selected_block, new_subtype)
-        result = self._layout_edit_service.change_block_kind(
+        result = self._layout_edit_service.apply(LayoutEditCommand.change_kind(
             page,
             self._selected_block,
             block_type=new_subtype.block_type,
             source_label=source_label,
-        )
+        ))
         self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
         self._viewer.select_block(self._selected_block)

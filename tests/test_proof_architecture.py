@@ -482,6 +482,8 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
 
     assert "LayoutEditService" in layout_source
+    assert "LayoutEditCommand" in layout_source
+    assert "self._layout_edit_service.apply(" in layout_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",
@@ -491,14 +493,24 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
         "def _mark_generated_inline_formula_handled",
     ):
         assert retired_helper not in layout_source
-    for mutation_port in (
-        "create_block(",
-        "delete_block(",
-        "change_block_kind(",
-        "merge_blocks_into_bbox(",
-        "persist_user_block_geometry(",
+    for direct_service_call in (
+        "self._layout_edit_service.create_block(",
+        "self._layout_edit_service.delete_block(",
+        "self._layout_edit_service.change_block_kind(",
+        "self._layout_edit_service.merge_blocks_into_bbox(",
+        "self._layout_edit_service.persist_user_block_geometry(",
     ):
-        assert f"def {mutation_port}" in edit_service_source
+        assert direct_service_call not in layout_source
+    assert "class LayoutEditCommand" in edit_service_source
+    assert "def apply(" in edit_service_source
+    for internal_mutation in (
+        "def _create_block(",
+        "def _delete_block(",
+        "def _change_block_kind(",
+        "def _merge_blocks_into_bbox(",
+        "def _persist_user_block_geometry(",
+    ):
+        assert internal_mutation in edit_service_source
 
 
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():

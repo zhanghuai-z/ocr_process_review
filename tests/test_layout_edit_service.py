@@ -3,19 +3,19 @@ from __future__ import annotations
 from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
 from app.models import BBox, Block, BlockSource, BlockType, Line, Page
 from app.models.ocr_observation import block_ocr_lines
-from app.services.layout_edit_service import LayoutEditService
+from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
 
 def test_layout_edit_service_create_block_records_event_and_binding():
     page = Page(image_path="", width=200, height=100)
     service = LayoutEditService()
 
-    result = service.create_block(
+    result = service.apply(LayoutEditCommand.create_block(
         page,
         BBox.from_xyxy(10, 20, 60, 40),
         BlockType.EQUATION,
         "inline_formula",
-    )
+    ))
 
     assert result.op == "create_block"
     assert result.block is page.blocks[0]
@@ -36,7 +36,7 @@ def test_layout_edit_service_delete_block_records_event_and_removes_block():
     page = Page(image_path="", width=200, height=100, blocks=[block])
     service = LayoutEditService()
 
-    result = service.delete_block(page, block)
+    result = service.apply(LayoutEditCommand.delete_block(page, block))
 
     assert result.op == "delete_block"
     assert page.blocks == []
@@ -49,12 +49,12 @@ def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     page = Page(image_path="", width=200, height=100, blocks=[block])
     service = LayoutEditService()
 
-    result = service.change_block_kind(
+    result = service.apply(LayoutEditCommand.change_kind(
         page,
         block,
         block_type=BlockType.TABLE,
         source_label="table",
-    )
+    ))
 
     assert result.op == "change_kind"
     assert block.block_type == BlockType.TABLE
@@ -72,12 +72,12 @@ def test_layout_edit_service_preserves_explicit_structural_subtype_label():
     page = Page(image_path="", width=200, height=100, blocks=[block])
     service = LayoutEditService()
 
-    service.change_block_kind(
+    service.apply(LayoutEditCommand.change_kind(
         page,
         block,
         block_type=BlockType.FIGURE,
         source_label="chart",
-    )
+    ))
 
     assert block.block_type == BlockType.FIGURE
     assert block.source_label == "chart"
@@ -102,13 +102,13 @@ def test_layout_edit_service_merge_blocks_invalidates_primary_and_clears_ocr_lin
     page = Page(image_path="", width=200, height=100, blocks=[primary, secondary])
     service = LayoutEditService()
 
-    result = service.merge_blocks_into_bbox(
+    result = service.apply(LayoutEditCommand.merge_blocks(
         page,
         [secondary, primary],
         BBox.from_xyxy(10, 10, 90, 40),
         block_type=BlockType.EQUATION,
         source_label="display_formula",
-    )
+    ))
 
     assert result.op == "merge_blocks"
     assert result.block is primary
@@ -136,12 +136,18 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
     )
     page = Page(image_path="", width=200, height=100, blocks=[block])
     service = LayoutEditService()
-    service.create_block(page, block.bbox, block.block_type, block.source_label)
+    service.apply(LayoutEditCommand.create_block(page, block.bbox, block.block_type, block.source_label))
     bound = page.blocks[-1]
     bound.bbox = BBox.from_xyxy(12, 10, 42, 30)
 
-    binding = service.persist_user_block_geometry(page, bound)
+    result = service.apply(LayoutEditCommand.update_geometry(
+        page,
+        bound,
+        before=LayoutEditService.block_state(bound),
+    ))
 
-    assert binding["manual_bbox"] == [12, 10, 42, 30]
+    assert result.op == "resize_block"
+    assert bound.paddle_binding is not None
+    assert bound.paddle_binding.manual_bbox == [12, 10, 42, 30]
     assert bound.source == BlockSource.USER_EDITED
     assert bound.ocr_invalidated_reason == "block_geometry_changed"
