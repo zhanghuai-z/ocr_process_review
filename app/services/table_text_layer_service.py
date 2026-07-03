@@ -1,6 +1,7 @@
 """Build hidden table text-layer geometry for export."""
 from __future__ import annotations
 
+from app.core.proof_line_facts import proof_ocr_text
 from app.core.raw_ocr_artifact import raw_block_text_values
 from app.core.table_text_layer import build_table_text_layer_cells
 from app.models import Block, BlockType, Page
@@ -37,8 +38,10 @@ class TableTextLayerService:
     def _table_html(page: Page, block: Block) -> str:
         candidates: list[str] = []
         lines = block_ocr_lines(block)
-        candidates.extend(line.text for line in lines if line.text)
-        candidates.extend(line.ocr_text for line in lines if line.ocr_text)
+        for line in lines:
+            ocr_text = proof_ocr_text(line)
+            if ocr_text:
+                candidates.append(ocr_text)
         candidates.extend(raw_block_text_values(block, ("html", "table_html", "block_content"), page))
         for candidate in candidates:
             text = candidate.strip()

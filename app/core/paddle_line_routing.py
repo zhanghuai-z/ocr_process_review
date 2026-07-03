@@ -477,24 +477,24 @@ def attach_page_ocr_line_routes(
         parent_entries.append((block_idx, block, block_bbox_xyxy(block, width, height)))
 
     assigned: dict[int, list[PageOcrLineHint]] = {block_idx: [] for block_idx, _block, _bbox in parent_entries}
-    for line in line_hints:
+    for hint in line_hints:
         best_idx: int | None = None
         best_score = 0.0
         for block_idx, _block, block_bbox in parent_entries:
-            score = _line_assignment_score(line.bbox, block_bbox)
+            score = _line_assignment_score(hint.bbox, block_bbox)
             if score > best_score:
                 best_score = score
                 best_idx = block_idx
         if best_idx is not None and best_score >= 0.1:
-            assigned[best_idx].append(line)
+            assigned[best_idx].append(hint)
 
     for block_idx, block, block_bbox in parent_entries:
         lines = []
-        for line in assigned.get(block_idx, []):
-            clipped_bbox = intersect_xyxy(line.bbox, block_bbox)
+        for hint in assigned.get(block_idx, []):
+            clipped_bbox = intersect_xyxy(hint.bbox, block_bbox)
             if clipped_bbox is None:
                 continue
-            lines.append(PageOcrLineHint(text=line.text, bbox=clipped_bbox))
+            lines.append(PageOcrLineHint(text=hint.text, bbox=clipped_bbox))
         lines.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
         if not lines:
             block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
@@ -515,10 +515,10 @@ def attach_page_ocr_line_routes(
         formula_subblocks = [subblock for subblock in routed_subblocks if _is_route_formula_label(subblock["label"])]
         line_hints_for_formula = [
             PaddleRouteLineHint(
-                text=line.text,
-                bbox=line.bbox,
+                text=hint.text,
+                bbox=hint.bbox,
             )
-            for line in lines
+            for hint in lines
         ]
         recovered = recover_inline_formula_segments(
             parent_text=block_text(block),
@@ -673,7 +673,7 @@ def _infer_formula_spans_by_line(
     """Infer which physical OCR line each parent LaTeX span belongs to.
 
     PP-OCR/Hanwang line text usually does not preserve ``$...$`` formula
-    delimiters, so direct ``_formula_spans(line.text)`` is often empty.  We use
+    delimiters, so direct formula-span parsing on hint text is often empty.  We use
     non-formula context around each parent span instead and keep inline formula
     boxes as word/token-level geometry evidence.  The box counts are used only
     as a tie-breaker so one missing Paddle box does not shift all later spans.
