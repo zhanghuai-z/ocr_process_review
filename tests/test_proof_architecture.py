@@ -606,6 +606,9 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
                 if isinstance(child, ast.FunctionDef)
             }
             assert "to_dict" not in line_methods
+            assert "set_proof_text" not in line_methods
+            assert "set_proof_status" not in line_methods
+            assert "apply_proof_state" not in line_methods
             break
     else:
         raise AssertionError("Line class not found")
@@ -666,7 +669,7 @@ def test_proof_field_writes_stay_inside_approved_boundaries():
     assert offenders == []
 
 
-def test_application_code_uses_proof_state_methods_for_line_proof_writes():
+def test_application_code_uses_proof_mutation_helpers_for_line_proof_writes():
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
         if path == Path("app/models/project.py"):
@@ -682,9 +685,16 @@ def test_application_code_uses_proof_state_methods_for_line_proof_writes():
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
-            if not isinstance(func, ast.Attribute) or func.attr != "update_final_text":
+            if not isinstance(func, ast.Attribute):
                 continue
-            offenders.append(f"{path}:{node.lineno}: {ast.unparse(func.value)}.update_final_text()")
+            if func.attr == "update_final_text":
+                offenders.append(f"{path}:{node.lineno}: {ast.unparse(func.value)}.update_final_text()")
+            if func.attr in {
+                "set_proof_text",
+                "set_proof_status",
+                "apply_proof_state",
+            }:
+                offenders.append(f"{path}:{node.lineno}: {ast.unparse(func.value)}.{func.attr}()")
     assert offenders == []
 
 

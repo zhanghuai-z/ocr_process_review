@@ -17,6 +17,7 @@ from app.core.ocr_ir_builder import (
     CHAR_BBOX_GRANULARITY_FALLBACK,
     CHAR_BBOX_SOURCE_FALLBACK,
 )
+from app.core.proof_line_mutation import set_line_proof_status
 from app.models import Char, Line
 
 
@@ -127,7 +128,7 @@ def project_ocr_line_to_proof_line(
         review_flags=list(ir_line.review_flags),
     )
     if proof_status is not None:
-        line.set_proof_status(proof_status)
+        set_line_proof_status(line, proof_status)
     return line
 
 

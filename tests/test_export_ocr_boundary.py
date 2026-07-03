@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.core.proof_line_facts import proof_line_facts
+from app.core.proof_line_mutation import set_line_proof_text
 from app.export.ir_builder import _is_line_corrected
 from app.models import BBox, Line
 
@@ -20,5 +21,5 @@ def test_export_correction_uses_proof_display_text_vs_ocr_text() -> None:
         confidence=0.91,
         bbox=BBox(0, 0, 120, 20),
     )
-    line.set_proof_text("人工改正文本")
+    set_line_proof_text(line, "人工改正文本")
     assert _is_line_corrected(proof_line_facts(line)) is True

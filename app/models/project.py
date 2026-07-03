@@ -4,7 +4,7 @@ from typing import Any, List, Optional
 import time
 
 from .enums import (
-    BlockSource, BlockType, OcrPolicy, PageStatus, ProofStatus,
+    BlockSource, BlockType, OcrPolicy, PageStatus,
 )
 from .entity_id import ensure_entity_uid
 from .proof_line_state import ProofLineState
@@ -126,26 +126,6 @@ class Line:
         if not self.ocr_text:
             self.ocr_text = self.text
         state = self.proof_state or ProofLineState(line_uid=self.uid)
-        self.apply_proof_state(state)
-
-    def set_proof_text(
-        self,
-        new_text: str,
-        *,
-        status: ProofStatus = ProofStatus.MODIFIED,
-    ) -> None:
-        state = getattr(self, "proof_state", None) or ProofLineState(line_uid=self.uid)
-        state.final_text = new_text
-        state.final_text_set = True
-        state.proof_status = status
-        self.apply_proof_state(state)
-
-    def set_proof_status(self, status: ProofStatus) -> None:
-        state = getattr(self, "proof_state", None) or ProofLineState(line_uid=self.uid)
-        state.proof_status = status
-        self.apply_proof_state(state)
-
-    def apply_proof_state(self, state: ProofLineState) -> None:
         state.line_uid = self.uid
         object.__setattr__(self, "proof_state", state)
 

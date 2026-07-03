@@ -42,7 +42,7 @@
 
 - `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
 - `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
-- `Line.text` 写入点收口到 OCR/legacy 源字段，普通 UI 写入 `final_text`。已完成。
+- `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入 `ProofLineState`。已完成。
 - controller 中业务 gate 直接调用 `workflow_state.page_gate_info()`。已完成。
 
 完成状态：已完成。

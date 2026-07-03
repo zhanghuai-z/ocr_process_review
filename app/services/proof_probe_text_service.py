@@ -28,6 +28,7 @@ from app.core import quality_probe as qp
 from app.core.proof_char_text import chars_display_spans, is_display_carrier
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_line_facts import proof_display_text
+from app.core.proof_line_mutation import set_line_proof_text
 
 
 def resolve_block_line_index(
@@ -110,7 +111,7 @@ def save_displayed_edit_result(
 
     if new_true == proof_display_text(line):
         return ProofChangeSet(text_changed=False, probe_changed=probe_changed)
-    line.set_proof_text(new_true)
+    set_line_proof_text(line, new_true)
     _sync_chars_glyphs(line, new_true)
     return ProofChangeSet(text_changed=True, probe_changed=probe_changed, index_changed=True)
 

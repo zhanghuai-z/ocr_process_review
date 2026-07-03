@@ -8,7 +8,7 @@ from typing import List
 import numpy as np
 
 from app.engines import OcrContext
-from app.models import BBox, Line, ProofStatus
+from app.models import BBox, Line, ProofLineState, ProofStatus
 
 
 class FakeOcrEngine:
@@ -48,8 +48,8 @@ class FakeOcrEngine:
                     w=min(w - 20, 200),
                     h=20,
                 ),
+                proof_state=ProofLineState(line_uid="", proof_status=proof),
             )
-            line.set_proof_status(proof)
             lines.append(line)
 
         return lines

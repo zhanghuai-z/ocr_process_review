@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_mutation import set_line_proof_text
 
 import os
 
@@ -94,7 +95,7 @@ def test_round18_displayed_text_does_not_mask_stale_probe_anchor():
     page, block, line = _make_pages()
     _store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
 
-    line.set_proof_text("己巳")
+    set_line_proof_text(line, "己巳")
 
     assert displayed_text(line, page, block) == "己巳"
     result = save_displayed_edit_result(line, page, block, "己巳")
@@ -191,7 +192,7 @@ def test_round18_detect_corrections_picks_up_bypass_path_edits():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     # 模拟 batch-replace / 其它绕过 bridge 的路径：直接改 line.text
-    line.set_proof_text("己巳")
+    set_line_proof_text(line, "己巳")
     # detect_corrections 应捕获这处 mutate 并把 probe 标 corrected
     n = qp.detect_corrections(store, [page])
     assert n == 1
@@ -210,7 +211,7 @@ def test_round18_detect_corrections_accepts_project_or_pages():
     page, block, line = _make_pages()
     store, probe = _plant_probe(line, page, block, true_ch="已", fake_ch="己", char_index=1)
     project = OcrProject(name="round18", pages=[page])
-    line.set_proof_text("己巳")
+    set_line_proof_text(line, "己巳")
     assert qp.detect_corrections(store, project) == 1
 
 
@@ -234,7 +235,7 @@ def test_round18_dialog_has_refresh_button_and_uses_detect_corrections(monkeypat
     assert dlg._btn_refresh.text() == "立刻刷新"
 
     # 模拟绕过 bridge 的真实编辑
-    line.set_proof_text("己巳")
+    set_line_proof_text(line, "己巳")
     # 点刷新前 probe 还是 pending；点之后被 detect_corrections 抓到
     assert probe.observation == "pending"
     dlg._on_manual_refresh()

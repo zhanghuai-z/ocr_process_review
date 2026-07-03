@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_mutation import set_line_proof_status, set_line_proof_text
 
 import os
 
@@ -156,7 +157,7 @@ def test_h_proof_external_refresh_does_not_overwrite_dirty_current_line():
     pair = h._pairs[0]
 
     pair._editor.setPlainText("CCCC")
-    line.set_proof_text("DDDD")
+    set_line_proof_text(line, "DDDD")
 
     h._on_external_line_changed(
         ProofUpdateRequest(
@@ -194,7 +195,7 @@ def test_h_proof_save_current_rejects_stale_line_signature_before_external_refre
     h.proof_changed.connect(changes.append)
 
     pair._editor.setPlainText("CCCC")
-    line.set_proof_text("DDDD")
+    set_line_proof_text(line, "DDDD")
 
     result = h._save_current(silent=True)
 
@@ -218,7 +219,7 @@ def test_h_proof_flag_rejects_stale_line_signature_before_external_refresh():
     changes: list = []
     h.proof_changed.connect(changes.append)
 
-    line.set_proof_text("DDDD")
+    set_line_proof_text(line, "DDDD")
 
     h._toggle_flag()
 
@@ -409,7 +410,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     page2.id = 9102
     page2.page_number = 2
     line2 = page2.blocks[0].lines[0]
-    line2.set_proof_text("BB")
+    set_line_proof_text(line2, "BB")
     for char in line2.chars:
         char.char = "B"
         char.token_text = "B"
@@ -423,7 +424,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     orig_load = v._load_page
     v._load_page = lambda i, _o=orig_load: (calls.__setitem__("load", calls["load"] + 1), _o(i))[1]  # type: ignore
 
-    line2.set_proof_text("CC")
+    set_line_proof_text(line2, "CC")
     for char in line2.chars:
         char.char = "C"
         char.token_text = "C"
@@ -669,7 +670,7 @@ def test_v_proof_external_refresh_does_not_write_reference_text_to_model():
     v.load_pages(proj.pages)
     v._text_edit.setPlainText("STALE_PAGE_TEXT\n")
 
-    line1.set_proof_text("L1_HEDIT")
+    set_line_proof_text(line1, "L1_HEDIT")
     v._bus.publish_line_update(ProofUpdateRequest(
         page_id=page.id,
         line_id=line1.id,
@@ -700,7 +701,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
     changes: list = []
     v.proof_changed.connect(changes.append)
 
-    line0.set_proof_text("DDDD")
+    set_line_proof_text(line0, "DDDD")
     for char in line0.chars:
         char.char = "D"
     v._bus.publish_line_update(ProofUpdateRequest(
@@ -1302,10 +1303,10 @@ def test_hproof_right_dock_updates_progress_and_status_counts():
 
     proj = _make_project_with_char_crops("甲乙", lines_per_page=4)
     lines = proj.pages[0].blocks[0].lines
-    lines[0].set_proof_status(ProofStatus.OK)
-    lines[1].set_proof_status(ProofStatus.MODIFIED)
-    lines[2].set_proof_status(ProofStatus.AUTO_FLAGGED)
-    lines[3].set_proof_status(ProofStatus.UNCHECKED)
+    set_line_proof_status(lines[0], ProofStatus.OK)
+    set_line_proof_status(lines[1], ProofStatus.MODIFIED)
+    set_line_proof_status(lines[2], ProofStatus.AUTO_FLAGGED)
+    set_line_proof_status(lines[3], ProofStatus.UNCHECKED)
 
     h = HProofPanel()
     h.load_pages(proj.pages)

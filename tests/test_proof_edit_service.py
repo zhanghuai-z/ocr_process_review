@@ -1,4 +1,5 @@
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_mutation import set_line_proof_text
 from app.core.proof_occurrence import line_signature
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 from app.services.char_index_service import CharIndexService
@@ -54,7 +55,7 @@ def test_proof_edit_service_replaces_span_and_scopes_line_change():
 def test_proof_edit_service_rejects_stale_signature():
     page, block, line = _page_with_line()
     stale_signature = line_signature(line)
-    line.set_proof_text("甲丁")
+    set_line_proof_text(line, "甲丁")
 
     result = ProofEditService.replace_spans(
         page,

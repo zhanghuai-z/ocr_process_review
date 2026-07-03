@@ -22,6 +22,7 @@ from app.models import OcrPolicy
 
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_mutation import apply_line_proof_state, set_line_proof_status, set_line_proof_text
 
 
 def _paddle_layout_artifact(records):
@@ -117,12 +118,13 @@ def test_models():
     assert line.uid.startswith("line_")
     assert proof_status(line) == ProofStatus.UNCHECKED
     assert line.review_flags == []
-    line.set_proof_text("修改文字")
+    set_line_proof_text(line, "修改文字")
     assert proof_status(line) == ProofStatus.MODIFIED
     assert line.proof_state.final_text == "修改文字"
     assert line.proof_state.final_text_set is True
     assert line.proof_state.proof_status == ProofStatus.MODIFIED
-    line.apply_proof_state(
+    apply_line_proof_state(
+        line,
         ProofLineState(
             line_uid=line.uid,
             final_text="状态对象终稿",
@@ -136,7 +138,7 @@ def test_models():
     assert not hasattr(line, "final_text")
     assert line.proof_state.final_text == "状态对象终稿"
     assert proof_display_text(line) == "状态对象终稿"
-    line.set_proof_text("修改文字")
+    set_line_proof_text(line, "修改文字")
 
     # Line with new fields
     line2 = Line(
@@ -1109,7 +1111,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
     try:
         bb = BBox(0, 0, 100, 20)
         line = Line(text="OCR text", confidence=0.9, bbox=bb)
-        line.set_proof_text("人工终稿")
+        set_line_proof_text(line, "人工终稿")
         assert line.text == "OCR text"
         assert proof_final_text(line) == "人工终稿"
         assert proof_display_text(line) == "人工终稿"
@@ -1124,13 +1126,13 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert proof_display_text(line) == "人工终稿"
         assert not hasattr(line, "final_text_set")
         assert proof_display_text(line) == "人工终稿"
-        line.set_proof_text("最终真值")
-        line.set_proof_text("")
+        set_line_proof_text(line, "最终真值")
+        set_line_proof_text(line, "")
         ensure_line_text_contract(line)
         assert proof_final_text(line) == ""
         assert proof_final_text_set(line) is True
         assert proof_display_text(line) == ""
-        line.set_proof_text("最终真值")
+        set_line_proof_text(line, "最终真值")
 
         line_without_text = Line(
             text="",
@@ -1144,7 +1146,7 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert line_without_text.ocr_text == "OCR补全文本"
 
         final_only = Line(text="", confidence=0.8, bbox=bb)
-        final_only.set_proof_text("人工终稿")
+        set_line_proof_text(final_only, "人工终稿")
         final_only.ocr_text = ""
         ensure_line_text_contract(final_only)
         assert proof_display_text(final_only) == "人工终稿"
@@ -1178,7 +1180,7 @@ def test_project_store_preserves_empty_final_text_roundtrip():
     try:
         bb = BBox(0, 0, 100, 20)
         line = Line(text="OCR原文", confidence=0.9, bbox=bb)
-        line.set_proof_text("")
+        set_line_proof_text(line, "")
         ensure_line_text_contract(line)
         assert proof_final_text(line) == ""
         assert proof_display_text(line) == ""
@@ -1572,7 +1574,7 @@ def test_project_store_save_project_preserves_child_rowids():
                 "char": line1.chars[0].uid,
             }
 
-            line1.set_proof_text("第一行已校对")
+            set_line_proof_text(line1, "第一行已校对")
             line1.chars[0].char = "一"
             block.note = "updated without id churn"
             block.lines = [line1]
@@ -1663,7 +1665,7 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
             p2_block.id = p1_block.id
             p2_line.id = p1_line.id
             p2_char.id = p1_char.id
-            p2_line.set_proof_text("乙已改")
+            set_line_proof_text(p2_line, "乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -1750,7 +1752,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
             p2_block.id, p2_block.uid = p1_block.id, p1_block.uid
             p2_line.id, p2_line.uid = p1_line.id, p1_line.uid
             p2_char.id, p2_char.uid = p1_char.id, p1_char.uid
-            p2_line.set_proof_text("乙已改")
+            set_line_proof_text(p2_line, "乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -1841,7 +1843,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
             p2_block.uid = p1_block.uid
             p2_line.uid = p1_line.uid
             p2_char.uid = p1_char.uid
-            p2_line.set_proof_text("乙已改")
+            set_line_proof_text(p2_line, "乙已改")
             p2_char.char = "乙"
 
             store.save_project(project2)
@@ -1925,7 +1927,7 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
             block2.id = block1.id
             line2.id = line1.id
             block2.note = "第二块已更新"
-            line2.set_proof_text("第二行已更新")
+            set_line_proof_text(line2, "第二行已更新")
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
 
@@ -1970,7 +1972,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         line2 = copy.deepcopy(line1)
         line2.text = "乙"
         line2.ocr_text = "乙"
-        line2.set_proof_text("乙")
+        set_line_proof_text(line2, "乙")
         line2.chars[0].char = "乙"
 
         line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
@@ -1978,7 +1980,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         block_copy.order = 1
         block_copy.lines[0].text = "丙"
         block_copy.lines[0].ocr_text = "丙"
-        block_copy.lines[0].set_proof_text("丙")
+        set_line_proof_text(block_copy.lines[0], "丙")
         block_copy.lines[0].chars[0].char = "丙"
 
         project = OcrProject(
@@ -2201,8 +2203,8 @@ def test_project_store_update_proof_lines_rolls_back_as_single_transaction():
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
-            line1.set_proof_text("第一行已改")
-            line2.set_proof_text("第二行已改")
+            set_line_proof_text(line1, "第一行已改")
+            set_line_proof_text(line2, "第二行已改")
             line2.id = -999999
             try:
                 store.update_proof_lines([(line1, False), (line2, False)])
@@ -2256,7 +2258,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
             line2_uid = line2.uid
 
             line2.id = line1_id
-            line2.set_proof_text("不应写入第一行")
+            set_line_proof_text(line2, "不应写入第一行")
             try:
                 store.update_proof_lines([(line2, False)])
             except RuntimeError:
@@ -2275,7 +2277,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
 
             line2.id = line1_id
             line2.uid = ""
-            line2.set_proof_text("仍不应写入第一行")
+            set_line_proof_text(line2, "仍不应写入第一行")
             try:
                 store.update_proof_lines([(line2, False)])
             except RuntimeError:
@@ -2294,7 +2296,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
 
             line1.id = line1_id
             line1.uid = ""
-            line1.set_proof_text("第一行已改")
+            set_line_proof_text(line1, "第一行已改")
             try:
                 store.update_proof_lines([(line1, False)])
             except RuntimeError:
@@ -2811,10 +2813,10 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
 
     bb = BBox(1, 2, 30, 40)
     edited = Line(text="OCR原文", confidence=0.9, bbox=bb)
-    edited.set_proof_status(ProofStatus.MODIFIED)
+    set_line_proof_status(edited, ProofStatus.MODIFIED)
     edited.ocr_text = "OCR原文"
     edited.chars = [Char(char="O", confidence=0.9, bbox=bb)]
-    edited.set_proof_text("人工终审")
+    set_line_proof_text(edited, "人工终审")
     table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
     page = Page(
         image_path="/tmp/page.png",
@@ -4012,9 +4014,9 @@ def test_xml_authority_and_json_mirror_archive_parity():
         bbox=bb,
         review_flags=["low_confidence"],
     )
-    edited.set_proof_status(ProofStatus.AUTO_FLAGGED)
+    set_line_proof_status(edited, ProofStatus.AUTO_FLAGGED)
     edited.ocr_text = "OCR旧文"
-    edited.set_proof_text("人工终文")
+    set_line_proof_text(edited, "人工终文")
     table_line = Line(text="表格文本", confidence=0.8, bbox=bb)
     page = Page(
         image_path="/tmp/archive.png",
@@ -13623,7 +13625,7 @@ def test_workflow_controller_auto_save_persists_flag_status_change():
         project = store.save_project(project)
 
         saved_line = project.pages[0].blocks[0].lines[0]
-        saved_line.set_proof_status(ProofStatus.AUTO_FLAGGED)
+        set_line_proof_status(saved_line, ProofStatus.AUTO_FLAGGED)
         controller = WorkflowController()
         controller._project = project
         controller._store = store
@@ -13851,7 +13853,7 @@ def test_project_store_update_proof_lines_does_not_move_foreign_char_uid():
         line1_original_uid = saved_line1.chars[0].uid
         line2_uid = saved_line2.chars[0].uid
 
-        saved_line1.set_proof_text("丙")
+        set_line_proof_text(saved_line1, "丙")
         saved_line1.chars[0].char = "丙"
         saved_line1.chars[0].token_text = "丙"
         saved_line1.chars[0].uid = line2_uid
@@ -13889,8 +13891,8 @@ def test_project_store_creates_and_loads_proof_line_state():
     store = None
     try:
         line = Line(text="OCR文本", confidence=0.9, bbox=BBox(1, 2, 40, 12))
-        line.set_proof_text("人工文本")
-        line.set_proof_status(ProofStatus.OK)
+        set_line_proof_text(line, "人工文本")
+        set_line_proof_status(line, ProofStatus.OK)
         page = Page(
             image_path="/tmp/proof-line-state.png",
             width=100,
@@ -13956,8 +13958,8 @@ def test_project_store_update_proof_lines_writes_proof_line_state():
         project = store.save_project(project)
         saved_line = project.pages[0].blocks[0].lines[0]
 
-        saved_line.set_proof_text("")
-        saved_line.set_proof_status(ProofStatus.MODIFIED)
+        set_line_proof_text(saved_line, "")
+        set_line_proof_status(saved_line, ProofStatus.MODIFIED)
         store.update_proof_lines([(saved_line, False)])
 
         row = store.conn.execute(
@@ -14072,7 +14074,7 @@ def test_proof_persistence_scoped_status_does_not_overwrite_other_db_lines():
         )
         store.conn.commit()
 
-        saved_line1.set_proof_status(ProofStatus.AUTO_FLAGGED)
+        set_line_proof_status(saved_line1, ProofStatus.AUTO_FLAGGED)
         controller = WorkflowController()
         controller._project = project
         controller._store = store
@@ -14256,7 +14258,7 @@ def test_export_service():
     # 测试 get_export_text
     line = Line(text="最终文本", confidence=0.9, bbox=bb)
     assert get_export_text(line) == "最终文本"
-    line.set_proof_text("人工最终真值")
+    set_line_proof_text(line, "人工最终真值")
     assert get_export_text(line) == "人工最终真值"
 
     # 测试空项目
@@ -15234,9 +15236,9 @@ def test_proof_stats_service():
     bb = BBox(0, 0, 100, 20)
     page = Page(image_path="/tmp/proof.png", width=400, height=300)
     confirmed = Line(text="确认", confidence=0.9, bbox=bb)
-    confirmed.set_proof_status(ProofStatus.OK)
+    set_line_proof_status(confirmed, ProofStatus.OK)
     modified = Line(text="修改", confidence=0.9, bbox=bb)
-    modified.set_proof_status(ProofStatus.MODIFIED)
+    set_line_proof_status(modified, ProofStatus.MODIFIED)
     flagged = Line(text="疑点", confidence=0.6, bbox=bb, review_flags=["low_confidence"])
     pending = Line(text="待处理", confidence=0.9, bbox=bb)
     page.blocks = [
@@ -16145,7 +16147,7 @@ def test_char_index_uses_display_text_for_existing_positional_boxes():
             Char(char="乙", confidence=0.9, bbox=BBox(40, 20, 20, 24), bbox_source="hanwang:CharRcg", bbox_granularity="char"),
         ],
     )
-    line.set_proof_text("甲丙")
+    set_line_proof_text(line, "甲丙")
     page = Page(
         image_path="/tmp/display-text-index.png",
         width=120,
@@ -16178,7 +16180,7 @@ def test_char_index_skips_grossly_mismatched_geometry_instead_of_showing_wrong_c
             Char(char="有", confidence=0.9, bbox=BBox(360, 10, 20, 30), bbox_source="fallback", bbox_granularity="fallback"),
         ],
     )
-    line.set_proof_text("甲二丙")
+    set_line_proof_text(line, "甲二丙")
     page = Page(
         image_path="/tmp/gross-mismatch-index.png",
         width=120,
@@ -16209,7 +16211,7 @@ def test_char_index_skips_two_char_full_mismatch_geometry():
             Char(char="产", confidence=0.9, bbox=BBox(330, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
         ],
     )
-    line.set_proof_text("二三")
+    set_line_proof_text(line, "二三")
     page = Page(
         image_path="/tmp/two-char-full-mismatch-index.png",
         width=120,
@@ -16240,7 +16242,7 @@ def test_char_index_skips_existing_chars_when_display_length_changed():
             Char(char="旧", confidence=0.9, bbox=BBox(360, 10, 20, 30), bbox_source="hanwang:micro_recblock", bbox_granularity="char"),
         ],
     )
-    line.set_proof_text("甲二丙丁")
+    set_line_proof_text(line, "甲二丙丁")
     page = Page(
         image_path="/tmp/length-mismatch-index.png",
         width=160,
@@ -17542,7 +17544,7 @@ def test_hproof_page_filter_blocks_switch_when_current_editor_has_conflict():
     panel = HProofPanel()
     panel.load_pages([page1, page2])
     panel._pairs[0]._editor.setPlainText("CCCC")
-    line1.set_proof_text("DDDD")
+    set_line_proof_text(line1, "DDDD")
     assert panel._pairs[0].refresh_text() == "conflict"
 
     panel.set_current_page_number(2)
@@ -17879,7 +17881,7 @@ def test_hproof_debug_filter_blocks_rebuild_when_current_editor_has_conflict():
     panel = HProofPanel()
     panel.load_pages([page])
     panel._pairs[0]._editor.setPlainText("CCCC")
-    line.set_proof_text("DDDD")
+    set_line_proof_text(line, "DDDD")
     assert panel._pairs[0].refresh_text() == "conflict"
 
     panel._btn_debug_formula.setChecked(True)
@@ -17913,7 +17915,7 @@ def test_hproof_save_all_emits_only_when_current_line_is_saved():
     assert changes == []
 
     panel._pairs[0]._editor.setPlainText("CCCC")
-    line.set_proof_text("DDDD")
+    set_line_proof_text(line, "DDDD")
     assert panel._pairs[0].refresh_text() == "conflict"
     panel._save_all()
     assert changes == []
@@ -18215,7 +18217,7 @@ def test_vproof_refresh_reference_context_persists_stale_probe_anchor_correction
     store.add(probe)
     qp.set_active_store(store)
     try:
-        line.set_proof_text("巳")
+        set_line_proof_text(line, "巳")
         panel = VProofPanel()
         panel.load_pages([page])
         changes = []
@@ -18370,7 +18372,7 @@ def test_vproof_external_refresh_invalidates_undo_history_before_restore():
     assert panel._apply_replacement_to_selected("B", fallback_entry=entry) == 1
     assert panel._vproof_undo_stack
 
-    line.set_proof_text("CCCC")
+    set_line_proof_text(line, "CCCC")
     panel._session.pending_external_lines.add(line.uid)
     panel._do_external_refresh()
 
@@ -18447,7 +18449,7 @@ def test_char_index_service_replace_pages_preserves_other_page_entries():
     page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line2])]
 
     service = CharIndexService(include_non_cjk=True, include_fallback=True).build([page1, page2])
-    line1.set_proof_text("丙")
+    set_line_proof_text(line1, "丙")
     line1.chars = [
         Char(char="丙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
     ]

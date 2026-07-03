@@ -85,6 +85,7 @@ OCR Hanwang/CharOCR
 | 字符索引 | `CharIndexService` 查询结果 | CharIndex 当作数据源 | 它是派生索引；错配行会被跳过，不能修复坏数据。 |
 | 质量探针 | active probe sidecar | UI 显示假字 | pending fake_char 只在锚点仍匹配 true_char 时注入。 |
 | proof 持久化 | `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 `proof_saved` 名称 | `proof_saved` 是遗留信号名；真正语义是 proof changed, please persist。 |
+| proof 写入口 | `ProofEditService` / `proof_line_mutation` | `Line.set_proof_text()` / `Line.set_proof_status()` | `Line` 模型不再持有 proof 写方法，后续写状态必须走显式 helper/service。 |
 
 ## 三、近期关键修补前后逻辑
 

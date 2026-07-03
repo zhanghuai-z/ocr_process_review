@@ -19,7 +19,7 @@ from app.core.paddle_response import iter_ocr_preferred_items
 from app.core.proof_status import normalize_confidence, proof_status_for
 from app.engines import OcrContext
 from app.core.logging import get_logger
-from app.models import BBox, Line
+from app.models import BBox, Line, ProofLineState
 from app.core.app_config import get_config
 
 logger = get_logger(__name__)
@@ -94,8 +94,11 @@ class LocalOcrEngine:
                 text=text,
                 confidence=float(score),
                 bbox=bbox,
+                proof_state=ProofLineState(
+                    line_uid="",
+                    proof_status=proof_status_for(score),
+                ),
             )
-            line.set_proof_status(proof_status_for(score))
             lines.append(line)
         return lines
 

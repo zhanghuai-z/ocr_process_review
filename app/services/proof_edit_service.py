@@ -7,6 +7,7 @@ from typing import Iterable
 
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_line_facts import proof_display_text, proof_status
+from app.core.proof_line_mutation import set_line_proof_status
 from app.core.proof_occurrence import ProofOccurrence, line_signature
 from app.models import Block, Line, Page, ProofStatus
 from app.services.proof_probe_text_service import save_displayed_edit_result
@@ -163,7 +164,7 @@ class ProofEditService:
             return validation
         if proof_status(line) == status:
             return ProofEditResult(ProofEditStatus.NOOP)
-        line.set_proof_status(status)
+        set_line_proof_status(line, status)
         change = ProofChangeSet(status_changed=True).scoped_to_line(
             page,
             block,

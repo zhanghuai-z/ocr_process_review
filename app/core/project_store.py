@@ -28,6 +28,7 @@ from app.core.model_validation import (
     validate_persistent_block_payloads,
 )
 from app.core.line_text_contract import line_text_contract
+from app.core.proof_line_mutation import apply_line_proof_state
 
 logger = get_logger(__name__)
 
@@ -1614,7 +1615,8 @@ class ProjectStore:
                         proof_status = ProofStatus(row["proof_status"])
                     except ValueError:
                         proof_status = ProofStatus.UNCHECKED
-                    line.apply_proof_state(
+                    apply_line_proof_state(
+                        line,
                         ProofLineState(
                             line_uid=line.uid,
                             final_text=row["final_text"],

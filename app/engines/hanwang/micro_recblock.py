@@ -86,7 +86,18 @@ from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
 from app.core.raw_ocr_artifact import raw_block_payload, raw_layout_records
 from app.engines import OCR_BBOX_SPACE_PAGE
-from app.models import BBox, Block, BlockSource, BlockType, Char, Line, OcrPolicy, PaddleBinding, Page
+from app.models import (
+    BBox,
+    Block,
+    BlockSource,
+    BlockType,
+    Char,
+    Line,
+    OcrPolicy,
+    PaddleBinding,
+    Page,
+    ProofLineState,
+)
 
 from . import native_bridge
 
@@ -2944,8 +2955,11 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
         chars=chars,
         ocr_text=line.text,
         review_flags=merged_review_flags,
+        proof_state=ProofLineState(
+            line_uid="",
+            proof_status=proof_status_for(line.confidence, merged_review_flags),
+        ),
     )
-    model.set_proof_status(proof_status_for(line.confidence, merged_review_flags))
     return model
 
 
