@@ -455,6 +455,19 @@ def test_proof_line_facts_reads_ocr_text_through_contract():
     assert 'getattr(line, "ocr_text"' not in source
 
 
+def test_page_status_mutation_stays_in_page_state_helper():
+    allowed = {Path("app/models/page_state.py")}
+    offenders: list[str] = []
+    assignment_pattern = re.compile(r"\.\s*status\s*=\s*PageStatus\.")
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if assignment_pattern.search(source):
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_paddle_binding_is_typed_state_not_app_payload_write_path():
     block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     artifact_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")

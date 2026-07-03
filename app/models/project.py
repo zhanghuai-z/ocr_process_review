@@ -402,22 +402,6 @@ class Page:
         """版面变更后，已有 OCR 结果是否被显式标记为失效。"""
         return bool(self.ocr_invalidated_reason)
 
-    def invalidate_ocr(self, reason: str) -> None:
-        self.ocr_invalidated_reason = str(reason or "layout_changed")
-
-    def clear_ocr_invalidation(self) -> None:
-        self.ocr_invalidated_reason = ""
-
-    def reconcile_ocr_done_from_result(self) -> None:
-        """Promote loaded OCR content into explicit page state."""
-        if (
-            self.has_ocr_result
-            and not self.is_ocr_done
-            and not self.needs_ocr_rerun
-            and not self.error_message
-        ):
-            self.status = PageStatus.OCR_DONE
-
 
 @dataclass
 class OcrProject:

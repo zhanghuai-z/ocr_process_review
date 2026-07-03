@@ -88,6 +88,7 @@ def test_models():
         BBox, Block, BlockSource, BlockType, Char, Line,
         OcrProject, Page, PageStatus, ProofLineState, ProofStatus,
     )
+    from app.models.page_state import clear_page_ocr_invalidation, invalidate_page_ocr
 
     # BBox
     bb = BBox(10, 20, 100, 30)
@@ -216,10 +217,10 @@ def test_models():
     page.status = PageStatus.PROOFING
     assert page.is_ocr_done is True
     assert project.all_pages_ocr_done is True
-    page.invalidate_ocr("block_moved")
+    invalidate_page_ocr(page, "block_moved")
     assert page.needs_ocr_rerun is True
     assert page.ocr_invalidated_reason == "block_moved"
-    page.clear_ocr_invalidation()
+    clear_page_ocr_invalidation(page)
     assert page.needs_ocr_rerun is False
 
     # Export summary lives outside the project model; proof stats are service-owned.
@@ -260,7 +261,8 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
         page_gate_info,
         pending_ocr_pages,
     )
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models.page_state import invalidate_page_ocr
 
     done_page = Page(
         image_path="/tmp/done.png",
@@ -337,7 +339,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     assert ocr_error_gate.action_enabled is True
     assert pending_ocr_pages(OcrProject(name="ocr-error-page", pages=[ocr_error_page])) == [ocr_error_page]
 
-    pending_page.invalidate_ocr("block_moved")
+    invalidate_page_ocr(pending_page, "block_moved")
     invalidated = page_gate_info(pending_page)
     assert invalidated.page_state == "ocr_invalidated"
     assert invalidated.action_enabled is True
@@ -1377,7 +1379,7 @@ def test_project_store_rejects_invalid_payload_json_on_load():
     import sqlite3
 
     from app.core.project_store import ProjectDataError, ProjectStore
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -2077,6 +2079,7 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
 
 def test_project_store_persists_page_ocr_invalidation_reason():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.models.page_state import invalidate_page_ocr
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -2097,7 +2100,7 @@ def test_project_store_persists_page_ocr_invalidation_reason():
                 )
             ],
         )
-        page.invalidate_ocr("block_type_changed")
+        invalidate_page_ocr(page, "block_type_changed")
         project = OcrProject(name="invalidate", pages=[page])
 
         with ProjectStore(db_path) as store:
@@ -4650,6 +4653,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
     from PySide6.QtGui import QImage
 
     from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Line, PaddleBinding, Page
+    from app.models.page_state import invalidate_page_ocr
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -4703,7 +4707,7 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
             assert not hasattr(panel, "_inspector")
 
             text_block.ocr_invalidated_reason = "block_moved"
-            page.invalidate_ocr("block_moved")
+            invalidate_page_ocr(page, "block_moved")
             panel._refresh_current_page_layers()
             assert len(panel._viewer._readonly_overlay_items) == 0
         finally:
@@ -5117,6 +5121,7 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
     from PySide6.QtGui import QImage
 
     from app.models import BBox, Block, BlockType, Char, Line, Page
+    from app.models.page_state import invalidate_page_ocr
     from app.ui.recognize.layout_panel import LayoutPanel
 
     _get_qapp()
@@ -5149,7 +5154,7 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
             assert panel._viewer._char_items == []
 
             block.ocr_invalidated_reason = ""
-            page.invalidate_ocr("block_moved")
+            invalidate_page_ocr(page, "block_moved")
             panel._refresh_current_page_layers()
             assert panel._viewer._char_items == []
         finally:
@@ -12822,7 +12827,7 @@ def test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirec
 def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
     import app.controllers.workflow_controller as workflow_module
     import app.core.layout_analyzer as layout_module
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
 
     class DummySignal:
         def __init__(self):
@@ -12895,7 +12900,7 @@ def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
         assert ok is True
         assert finished
         assert finished[0][0].blocks[0].lines[0].text == "税"
-        assert finished[0][0].status == workflow_module.PageStatus.OCR_DONE
+        assert finished[0][0].status == PageStatus.OCR_DONE
     finally:
         layout_module.LayoutWorker = original_layout_worker
         workflow_module.OcrPipelineWorker = original_ocr_worker

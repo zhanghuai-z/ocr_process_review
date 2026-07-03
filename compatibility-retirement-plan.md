@@ -25,6 +25,7 @@
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
 | `Line.text <-> final_text` 双向镜像 | external `ProofLineState` store / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段；active `Line` 不再携带 proof_state。 |
 | `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.raw_payload/app_payload` 已从 active model 删除；旧 `raw_payload_json/app_payload_json` 不再迁移，非空会被当前 schema 校验拒绝。 |
+| 裸 `Page.status` 写入 | `app.models.page_state` | Controller/Store 不再直接写 `Page.status`；当前仍保留单字段，后续状态机拆分从 helper 入口替换。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 
 ## 删除顺序
@@ -57,6 +58,7 @@
 - `Block.app_payload` 已从 active model 删除。
 - `Block.lines` 的业务访问已迁移到 `app.models.ocr_observation`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
 - UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
+- `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 
 完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
 

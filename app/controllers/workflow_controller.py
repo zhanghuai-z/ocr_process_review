@@ -38,9 +38,18 @@ from app.core import quality_probe as qp
 from app.engines.hanwang import native_cache
 from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
-    BBox, Block, BlockType, OcrProject, Page, PageStatus,
+    BBox, Block, BlockType, OcrProject, Page,
 )
 from app.models.ocr_observation import block_ocr_lines
+from app.models.page_state import (
+    invalidate_page_ocr,
+    mark_page_imported,
+    mark_page_layout_done,
+    mark_page_layout_failed,
+    mark_page_ocr_done,
+    mark_page_ocr_failed,
+    reconcile_page_ocr_done_from_result,
+)
 from app.services.ocr_pipeline import OcrPipeline, OcrProgress
 from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService
@@ -710,8 +719,8 @@ class WorkflowController(QObject):
         for block in page.blocks:
             mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:
-            page.invalidate_ocr(change_kind)
-        page.status = PageStatus.LAYOUT_DONE
+            invalidate_page_ocr(page, change_kind)
+        mark_page_layout_done(page)
         self.set_current_page_number(page_number)
         self._update_max_step()
         self._emit_page_gate_state(page)
@@ -817,7 +826,7 @@ class WorkflowController(QObject):
 
         # 更新页面状态
         for page in pages:
-            page.status = PageStatus.IMPORTED
+            mark_page_imported(page)
 
         self._update_max_step()
         self.project_changed.emit(self._project)
@@ -831,7 +840,10 @@ class WorkflowController(QObject):
         self._project.pages = pages
 
         for page in pages:
-            page.status = PageStatus.ERROR if page.error_message else PageStatus.LAYOUT_DONE
+            if page.error_message:
+                mark_page_layout_failed(page)
+            else:
+                mark_page_layout_done(page)
 
         self._update_max_step()
         self.layout_finished.emit(pages)
@@ -918,10 +930,9 @@ class WorkflowController(QObject):
         )
         for page in processed_pages:
             if page.error_message:
-                page.status = PageStatus.ERROR
+                mark_page_ocr_failed(page)
             else:
-                page.status = PageStatus.OCR_DONE
-                page.clear_ocr_invalidation()
+                mark_page_ocr_done(page)
 
         proof_stats = self._proof_crop_service.normalize_pages(processed_pages)
 
@@ -1165,7 +1176,7 @@ class WorkflowController(QObject):
         completed_pages = max(0, int(progress.completed_pages))
         if completed_pages != self._last_ocr_progress_completed_pages and self._project:
             for page in self._project.pages:
-                page.reconcile_ocr_done_from_result()
+                reconcile_page_ocr_done_from_result(page)
             if self._project.has_any_ocr_done_page and self._max_step < STEP_VPROOF:
                 self._update_max_step()
             self._last_ocr_progress_completed_pages = completed_pages

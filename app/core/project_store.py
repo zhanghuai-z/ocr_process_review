@@ -20,6 +20,7 @@ from app.models import (
     RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
+from app.models.page_state import reconcile_page_ocr_done_from_result
 
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 from app.core.model_validation import (
@@ -1532,7 +1533,7 @@ class ProjectStore:
                 layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
             page.blocks = self._load_blocks(page.id, project.id)
-            page.reconcile_ocr_done_from_result()
+            reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
         self._apply_proof_line_states(project)
