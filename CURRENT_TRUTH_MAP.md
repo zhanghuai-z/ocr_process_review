@@ -300,7 +300,7 @@ OCR Hanwang/CharOCR
 ## 六、后续重构优先级
 
 1. 保留当前补丁成果，不继续扩大局部补丁。
-2. 先做 architecture ratchet，只防新增依赖恶化。
+2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
 3. 引入 `LayoutEditCommand/LayoutEditService`，收口版面编辑入口。
 4. 抽 `PaddleArtifact/LayoutSnapshot/RoutingPlan/DispatchPlan/OcrRunResult`，把 route dict 从 payload 中移出。
 5. 抽统一 `ProofEditSession/ProofSaveResult`，让 HProof/VProof 共用保存、冲突、重建 gate。
