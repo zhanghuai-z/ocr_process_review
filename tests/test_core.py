@@ -16279,6 +16279,7 @@ def test_layout_analyzer_uses_datainfo_canvas_scale():
 
     assert len(blocks) == 1
     assert blocks[0].bbox == BBox(20, 40, 200, 100)
+    assert _raw_layout_records(page)[0]["block_bbox"] == [20, 40, 220, 140]
 
     print("test_layout_analyzer_uses_datainfo_canvas_scale PASSED")
 

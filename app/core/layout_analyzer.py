@@ -62,6 +62,11 @@ from app.core.paddle_v16_client import (
     is_paddle_v16_endpoint,
 )
 from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
+from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
+from app.services.layout_snapshot import (
+    layout_snapshot_from_normalized_artifact,
+    project_layout_snapshot_to_blocks,
+)
 
 logger = get_logger(__name__)
 LOCAL_LAYOUT_CANVAS_W = 800
@@ -331,78 +336,6 @@ class LayoutAnalyzer:
             found = True
         return (max_x, max_y) if found else None
 
-    def _append_api_block(
-        self,
-        *,
-        page: Page,
-        record: dict,
-        scale_x: float,
-        scale_y: float,
-        order: int,
-        seen: set[tuple],
-        page_blocks: List[Block],
-        raw_overlay_items: List[tuple[str, object]],
-        default_label: str = "unknown",
-        raw_index: int | None = None,
-    ) -> int:
-        normalized = normalize_paddle_layout_record(
-            record,
-            page_width=page.width,
-            page_height=page.height,
-            scale_x=scale_x,
-            scale_y=scale_y,
-            default_label=default_label,
-        )
-        if normalized is None:
-            return order
-
-        bbox = normalized.bbox
-        raw_type = normalized.label
-        if normalized.signature in seen:
-            return order
-        seen.add(normalized.signature)
-
-        preview = normalized.text
-        score = normalized.score
-        note_parts = []
-        if preview:
-            note_parts.append(preview[:120])
-        if score is not None:
-            note_parts.append(f"score={score:.3f}")
-        normalized_type = normalize_paddle_label(raw_type)
-        if normalized_type in {
-            "page_number",
-            "number",
-            "formula_number",
-            "header",
-            "footer",
-            "footnote",
-            "sidebar_text",
-        }:
-            note_parts.append(f"source_label={normalized_type}")
-
-        raw_overlay_items.append((raw_type, bbox))
-        block_type = map_paddle_label_to_block_type(raw_type)
-        block = Block(
-            block_type=block_type,
-            bbox=bbox,
-            order=order,
-            note=" | ".join(note_parts),
-            source_label=normalized_type,
-            origin=_layout_block_origin(
-                source_engine="paddleocr-vl",
-                source_run_id=self._layout_batch_id,
-                source_label=normalized_type,
-                bbox=bbox,
-                block_type=block_type,
-                confidence=score,
-                raw_index=raw_index,
-            ),
-        )
-        block.ocr_policy = default_ocr_policy_for_block(block)
-        page_blocks.append(block)
-        return order + 1
-
     def _append_overlay_record(
         self,
         *,
@@ -438,6 +371,33 @@ class LayoutAnalyzer:
             scale_y=scale_y,
         )
         return normalized.bbox if normalized is not None else None
+
+    def _page_space_artifact_record(
+        self,
+        *,
+        page: Page,
+        record: dict,
+        scale_x: float,
+        scale_y: float,
+    ) -> dict | None:
+        """Return a layout artifact record whose bbox is in page image space."""
+        normalized = normalize_paddle_layout_record(
+            record,
+            page_width=page.width,
+            page_height=page.height,
+            scale_x=scale_x,
+            scale_y=scale_y,
+        )
+        if normalized is None:
+            return None
+        payload = dict(record)
+        payload["block_label"] = normalized.label
+        payload["block_bbox"] = list(normalized.bbox.to_xyxy())
+        if normalized.text:
+            payload["block_content"] = normalized.text
+        if normalized.score is not None:
+            payload["score"] = normalized.score
+        return payload
 
     def _attach_route_subblocks(
         self,
@@ -509,11 +469,8 @@ class LayoutAnalyzer:
         result = result_dict(data)
         layout_results = result_items(data, "layoutParsingResults")
         data_info = result.get("dataInfo") if isinstance(result, dict) else None
-        page_blocks: List[Block] = []
         raw_overlay_items: List[tuple[str, object]] = []
         artifact_records: list[dict] = []
-        seen: set[tuple] = set()
-        order = 0
 
         for item in layout_results:
             parsing_records = parsing_records_from_item(item)
@@ -533,20 +490,27 @@ class LayoutAnalyzer:
                     scale_x=scale_x,
                     scale_y=scale_y,
                 )
-            raw_index_base = len(artifact_records)
-            artifact_records.extend(parsing_records)
+            artifact_records.extend(
+                record
+                for record in (
+                    self._page_space_artifact_record(
+                        page=page,
+                        record=parsing_record,
+                        scale_x=scale_x,
+                        scale_y=scale_y,
+                    )
+                    for parsing_record in parsing_records
+                )
+                if record is not None
+            )
 
-            for local_index, record in enumerate(parsing_records):
-                order = self._append_api_block(
+            for record in parsing_records:
+                self._append_overlay_record(
                     page=page,
                     record=record,
                     scale_x=scale_x,
                     scale_y=scale_y,
-                    order=order,
-                    seen=seen,
-                    page_blocks=page_blocks,
                     raw_overlay_items=raw_overlay_items,
-                    raw_index=raw_index_base + local_index,
                 )
             for record in geometry_records:
                 self._append_overlay_record(
@@ -557,7 +521,12 @@ class LayoutAnalyzer:
                     raw_overlay_items=raw_overlay_items,
                 )
 
-        set_paddle_raw_layout_records(page, artifact_records)
+        set_paddle_raw_layout_records(page, artifact_records, run_id=self._layout_batch_id)
+        snapshot = layout_snapshot_from_normalized_artifact(
+            normalized_layout_artifact_from_page(page),
+            source_run_id=self._layout_batch_id,
+        )
+        page_blocks = project_layout_snapshot_to_blocks(snapshot)
         return page_blocks, raw_overlay_items
 
     def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:

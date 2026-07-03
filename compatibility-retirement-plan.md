@@ -67,9 +67,10 @@
 - `Block.source` 的判断已收口到 `app.models.layout_block_state`；生产模块不得各自比较 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
+- 当前采用版面新增 `LayoutSnapshot`；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
 - layout route 新增 `RoutingPlan` 读取视图；overlay 公式文本读取和 Hanwang 文本切片入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict。
 
-完成状态：第一阶段完成；page 级 `LayoutSnapshot` 和物理 OCR observation store 是后续增强，不再作为当前兼容入口。
+完成状态：第一阶段完成；`LayoutSnapshot` 已成为 API 版面分析到旧 `Page.blocks` 的投影边界。人工编辑服务和物理 OCR observation store 仍是后续增强，不再作为当前兼容入口。
 
 ### Phase 4: 删除兼容入口
 

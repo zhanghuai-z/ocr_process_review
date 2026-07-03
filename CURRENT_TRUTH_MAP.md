@@ -20,14 +20,20 @@
 
 版面分析 Paddle VL1.6
   -> Page.raw_layout_artifact
-     - Paddle 原始版面事实列表
+     - Paddle 版面事实列表，bbox 已归一到当前 Page 工作图坐标
      - 主要含 block_label、block_bbox、block_content 等
      - 通过 raw_ocr_artifact.raw_layout_records(page) 读取
+  -> NormalizedLayoutArtifact
+     - 对外部版面事实的统一读模型
+     - Paddle、未来矢量 PDF 等输入源都应先转成 LayoutRegion/LayoutSubregion
+  -> LayoutSnapshot
+     - 当前程序采用的版面真值
+     - 从 NormalizedLayoutArtifact 编译而来
   -> page.blocks
-     - 程序理解后的 Block
+     - 当前仍供旧 UI/OCR/导出读取的兼容投影
      - block_type 是程序大类
      - source_label 是 Paddle 细标签
-     - raw_payload 是旧/存储边界 vendor fact；新导入/OCR 运行时块通过 raw_layout_artifact + origin.raw_index 回溯
+     - 新导入/OCR 运行时块通过 raw_layout_artifact + origin.raw_index 回溯外部事实
      - app_payload 已从 active Block 模型删除；旧 SQLite 列只用于读取边界校验
 
 人工版面编辑
@@ -90,6 +96,8 @@ OCR Hanwang/CharOCR
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
 | 外部版面原始事实 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
+| 当前版面真值 | `LayoutSnapshot` | `Page.blocks` 直接当导入真值 | API 版面分析现在从归一化 artifact 编译 snapshot，再投影到 `Page.blocks` 供旧链路消费。 |
+| 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | 旧 `block.raw_payload`、旧 `block.app_payload` | `raw_payload/app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |

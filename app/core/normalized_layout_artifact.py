@@ -35,6 +35,7 @@ class LayoutRegion:
     label: str
     bbox: XYXY
     text: str = ""
+    confidence: float | None = None
     raw: dict[str, Any] | None = None
     subregions: tuple[LayoutSubregion, ...] = ()
 
@@ -89,6 +90,7 @@ def normalized_layout_artifact_from_raw(
                 label=route_authority_label(raw),
                 bbox=block_bbox_xyxy(raw, page.width, page.height),
                 text=block_text(raw),
+                confidence=_record_confidence(raw),
                 raw=raw,
                 subregions=subregions,
             )
@@ -106,6 +108,16 @@ def normalized_layout_artifact_from_raw(
 
 def normalized_layout_regions(page: Page) -> tuple[LayoutRegion, ...]:
     return normalized_layout_artifact_from_page(page).regions
+
+
+def _record_confidence(record: dict[str, Any]) -> float | None:
+    try:
+        value = record.get("score")
+        if value is not None:
+            return float(value)
+    except (TypeError, ValueError):
+        return None
+    return None
 
 
 __all__ = [

@@ -677,6 +677,21 @@ def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
     assert "class LayoutSubregion" in normalized_source
 
 
+def test_api_layout_blocks_are_projected_from_layout_snapshot():
+    source = Path("app/core/layout_analyzer.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            functions[node.name] = ast.get_source_segment(source, node) or ""
+
+    api_source = functions["_extract_api_blocks"]
+    assert "def _append_api_block" not in source
+    assert "layout_snapshot_from_normalized_artifact(" in api_source
+    assert "project_layout_snapshot_to_blocks(" in api_source
+    assert "Block(" not in api_source
+
+
 def test_hanwang_text_slice_routing_reads_routing_plan():
     source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
