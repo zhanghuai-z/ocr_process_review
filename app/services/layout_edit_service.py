@@ -20,6 +20,7 @@ from app.models.layout_block_state import (
     mark_layout_block_user_edited,
     set_layout_block_ocr_policy,
     set_layout_block_source_label,
+    set_layout_block_type,
 )
 from app.models.layout_projection import (
     append_page_layout_block,
@@ -332,7 +333,7 @@ class LayoutEditService:
         source_label: str,
     ) -> LayoutEditResult:
         before = {"block": self.block_state(block)}
-        block.block_type = block_type
+        set_layout_block_type(block, block_type)
         set_layout_block_source_label(block, source_label)
         mark_layout_block_user_edited(block)
         set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
@@ -367,7 +368,7 @@ class LayoutEditService:
         x2 = max([bbox.x2, *(block.bbox.x2 for block in ordered)])
         y2 = max([bbox.y2, *(block.bbox.y2 for block in ordered)])
         primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
-        primary.block_type = block_type
+        set_layout_block_type(primary, block_type)
         set_layout_block_source_label(primary, source_label)
         clear_block_ocr_lines(primary)
         mark_layout_block_user_edited(primary)
