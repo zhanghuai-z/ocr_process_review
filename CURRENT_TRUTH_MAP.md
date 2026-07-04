@@ -249,7 +249,8 @@ OCR Hanwang/CharOCR
 当前边界：
 
 - CharIndex 只能防止错误继续展示。
-- 已保存进项目文件的坏 `final_text/chars` 不会自动修复，需要单独诊断工具。
+- 已保存进项目文件的坏 `final_text/chars` 不会自动修复。
+- 只读诊断入口已落地：`app.services.project_diagnostics.diagnose_project()` 和 `scripts/diagnose_project.py` 会报告 proof 文本/char carrier 错配、重复 uid、缺失/非法 bbox、quality-probe stale anchor；它只输出报告，不做修复。
 
 ### 8. Worker 错误与进度状态
 
@@ -339,7 +340,7 @@ OCR Hanwang/CharOCR
 
 5. 已坏项目数据不会自动修复。
    - CharIndex 只会过滤错配，不会改项目文件。
-   - 需要独立诊断工具扫描 `proof_display_text(line)`、`chars_display_text`、bbox、uid 重复、probe sidecar。
+   - `project_diagnostics` 已提供只读扫描：`proof_display_text(line)`、`chars_display_text`、bbox、uid 重复、probe sidecar；修复仍需单独工具或人工确认。
 
 ## 六、后续重构优先级
 
