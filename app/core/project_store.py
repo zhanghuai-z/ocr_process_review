@@ -419,11 +419,25 @@ def _route_attachments_to_json_dict(
 ) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = {}
     for index, values in dict(attachments or {}).items():
-        result[str(int(index))] = [
-            dict(value)
-            for value in values
-            if isinstance(value, dict)
-        ]
+        try:
+            normalized_index = int(index)
+        except (TypeError, ValueError) as exc:
+            raise ProjectDataError("raw_ocr_artifact.route_attachments key must be int-like") from exc
+        result[str(normalized_index)] = _route_attachment_dicts(
+            values,
+            field=f"raw_ocr_artifact.route_attachments[{index!r}]",
+        )
+    return result
+
+
+def _route_attachment_dicts(values: object, *, field: str) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        raise ProjectDataError(f"{field} must be list")
+    result: list[dict[str, Any]] = []
+    for item_index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ProjectDataError(f"{field}[{item_index}] must be dict")
+        result.append(dict(value))
     return result
 
 
@@ -435,13 +449,7 @@ def _json_to_route_attachments(s: str, *, field: str) -> dict[int, list[dict[str
             index = int(key)
         except (TypeError, ValueError) as exc:
             raise ProjectDataError(f"{field} key must be int-like") from exc
-        if not isinstance(values, list):
-            raise ProjectDataError(f"{field}[{key!r}] must be list")
-        result[index] = [
-            dict(value)
-            for value in values
-            if isinstance(value, dict)
-        ]
+        result[index] = _route_attachment_dicts(values, field=f"{field}[{key!r}]")
     return result
 
 
@@ -1701,8 +1709,11 @@ class ProjectStore:
                 continue
             try:
                 proof_status = ProofStatus(row["proof_status"])
-            except ValueError:
-                proof_status = ProofStatus.UNCHECKED
+            except ValueError as exc:
+                raise ProjectDataError(
+                    f"proof_line_state.proof_status invalid value for line_uid={line.uid!r}: "
+                    f"{row['proof_status']!r}"
+                ) from exc
             apply_line_proof_state(
                 line,
                 ProofLineState(

@@ -998,6 +998,94 @@ def test_project_store_persists_raw_layout_artifact():
         os.unlink(db_path)
 
 
+def test_raw_ocr_artifact_rejects_malformed_route_subblocks():
+    import pytest
+
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.models import RawOcrArtifact
+
+    with pytest.raises(ValueError, match=r"records\[0\]\._route_subblocks\[0\] must be dict"):
+        RawOcrArtifact.from_paddle_layout_records([
+            {
+                "block_label": "text",
+                "block_bbox": [10, 20, 110, 60],
+                ROUTE_SUBBLOCKS_FIELD: ["not-a-dict"],
+            }
+        ])
+
+    with pytest.raises(ValueError, match=r"route_attachments\[0\]\[0\] must be dict"):
+        RawOcrArtifact.from_paddle_layout_records(
+            [{"block_label": "text", "block_bbox": [10, 20, 110, 60]}],
+            route_attachments={0: ["not-a-dict"]},
+        )
+
+    print("test_raw_ocr_artifact_rejects_malformed_route_subblocks PASSED")
+
+
+def test_project_store_rejects_malformed_route_attachments_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page, RawOcrArtifact
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bad_artifact = RawOcrArtifact(
+            engine="paddleocr-vl",
+            engine_version="1.6",
+            records=[{"block_label": "text", "block_bbox": [10, 20, 110, 60]}],
+            route_attachments={0: ["not-a-dict"]},
+        )
+        bad_project = OcrProject(
+            name="bad-route-attachments-save",
+            pages=[
+                Page(
+                    image_path="/tmp/bad-route-save.png",
+                    width=120,
+                    height=80,
+                    raw_layout_artifact=bad_artifact,
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 100, 40))],
+                )
+            ],
+        )
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.route_attachments\[0\]\[0\] must be dict"):
+                store.save_project(bad_project)
+
+        good_project = OcrProject(
+            name="bad-route-attachments-load",
+            pages=[
+                Page(
+                    image_path="/tmp/bad-route-load.png",
+                    width=120,
+                    height=80,
+                    raw_layout_artifact=RawOcrArtifact.from_paddle_layout_records([
+                        {"block_label": "text", "block_bbox": [10, 20, 110, 60]}
+                    ]),
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 100, 40))],
+                )
+            ],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(good_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE raw_ocr_artifact SET route_attachments_json=?",
+                (json.dumps({"0": ["not-a-dict"]}, ensure_ascii=False),),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.route_attachments_json\['0'\]\[0\] must be dict"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_malformed_route_attachments_on_save_and_load PASSED")
+
+
 def test_project_store_persists_typed_paddle_binding():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
@@ -14038,6 +14126,51 @@ def test_project_store_update_proof_lines_writes_proof_line_state():
             pass
 
     print("test_project_store_update_proof_lines_writes_proof_line_state PASSED")
+
+
+def test_project_store_rejects_invalid_proof_line_state_status_on_load():
+    import os
+    import tempfile
+
+    import pytest
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
+        db_path = db_file.name
+    store = None
+    try:
+        line = Line(text="OCR文本", confidence=0.9, bbox=BBox(1, 2, 40, 12))
+        page = Page(
+            image_path="/tmp/invalid-proof-status.png",
+            width=100,
+            height=100,
+            page_number=1,
+            blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
+        )
+        project = OcrProject(name="invalid-proof-status", pages=[page], db_path=db_path)
+        store = ProjectStore(db_path)
+        store.open()
+        project = store.save_project(project)
+        saved_line = project.pages[0].blocks[0].lines[0]
+        store.conn.execute(
+            "UPDATE proof_line_state SET proof_status=? WHERE line_uid=?",
+            ("not-a-status", saved_line.uid),
+        )
+        store.conn.commit()
+
+        with pytest.raises(ProjectDataError, match="proof_line_state.proof_status invalid value"):
+            store.load_project(project.id)
+    finally:
+        if store is not None:
+            store.close()
+        try:
+            os.unlink(db_path)
+        except FileNotFoundError:
+            pass
+
+    print("test_project_store_rejects_invalid_proof_line_state_status_on_load PASSED")
 
 
 def test_project_store_save_project_prunes_stale_proof_line_state():

@@ -300,7 +300,10 @@ class RawOcrArtifact:
         merged_attachments = dict(lifted_attachments)
         if route_attachments:
             for index, values in route_attachments.items():
-                merged_attachments[int(index)] = [dict(value) for value in values]
+                merged_attachments[int(index)] = _route_attachment_dicts(
+                    values,
+                    field=f"route_attachments[{index!r}]",
+                )
         return cls(
             engine="paddleocr-vl",
             engine_version="1.6",
@@ -323,13 +326,23 @@ def _split_paddle_layout_route_attachments(
         values = copied.pop("_route_subblocks", None)
         copied.pop("_layout_line_routes", None)
         pure_records.append(copied)
-        if isinstance(values, list):
-            route_attachments[index] = [
-                dict(value)
-                for value in values
-                if isinstance(value, dict)
-            ]
+        if values is not None:
+            route_attachments[index] = _route_attachment_dicts(
+                values,
+                field=f"records[{index}]._route_subblocks",
+            )
     return pure_records, route_attachments
+
+
+def _route_attachment_dicts(values: Any, *, field: str) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        raise ValueError(f"{field} must be list")
+    result: list[dict[str, Any]] = []
+    for item_index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ValueError(f"{field}[{item_index}] must be dict")
+        result.append(dict(value))
+    return result
 
 
 @dataclass
