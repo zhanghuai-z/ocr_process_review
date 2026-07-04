@@ -776,6 +776,16 @@ def test_proof_refresh_signatures_use_line_signature_contract():
         assert forbidden not in char_index_signature_source
 
 
+def test_proof_fallback_warning_is_owned_by_proof_crop_service():
+    controller_source = Path("app/controllers/workflow_controller.py").read_text(encoding="utf-8")
+    service_source = Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
+
+    assert "def _proof_fallback_warning" not in controller_source
+    assert "line_ocr_chars" not in controller_source
+    assert "proof_fallback_warning(" in controller_source
+    assert "def proof_fallback_warning" in service_source
+
+
 def test_ui_char_display_uses_text_contract_helper():
     ui_sources = {
         Path("app/ui/widgets/image_viewer.py"),

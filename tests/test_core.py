@@ -9505,10 +9505,9 @@ def test_proof_crop_service_reports_fallback_geometry(tmp_path):
     print("test_proof_crop_service_reports_fallback_geometry PASSED")
 
 
-def test_workflow_controller_fallback_warning_scans_existing_chars():
-    from app.controllers.workflow_controller import WorkflowController
+def test_proof_fallback_warning_scans_existing_chars():
     from app.models import BBox, Block, BlockType, Char, Line, Page
-    from app.services.proof_crop_service import ProofCropStats
+    from app.services.proof_crop_service import ProofCropStats, proof_fallback_warning
 
     line = Line(
         text="甲乙",
@@ -9526,11 +9525,11 @@ def test_workflow_controller_fallback_warning_scans_existing_chars():
         blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 60), lines=[line])],
     )
 
-    warning = WorkflowController._proof_fallback_warning(ProofCropStats(), [page])
+    warning = proof_fallback_warning(ProofCropStats(), [page])
 
     assert warning == "警告：proof fallback 1 行/2 字，字框为估算或不可用"
 
-    print("test_workflow_controller_fallback_warning_scans_existing_chars PASSED")
+    print("test_proof_fallback_warning_scans_existing_chars PASSED")
 
 
 def test_hanwang_pre_page_ocr_lines_split_before_recog():

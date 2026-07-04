@@ -41,7 +41,6 @@ from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
-from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     line_ocr_bbox,
@@ -67,7 +66,7 @@ from app.services.ocr_pipeline import OcrPipeline
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.ocr_run_result import OcrProgress
 from app.services.proof_auto_flag_service import ProofAutoFlagService
-from app.services.proof_crop_service import ProofCropService
+from app.services.proof_crop_service import ProofCropService, proof_fallback_warning
 from app.services.proof_persistence_service import ProofPersistenceService
 
 logger = get_logger(__name__)
@@ -446,7 +445,7 @@ class WorkflowController(QObject):
             self.project_changed.emit(self._project)
             self.step_enabled_changed.emit(self._max_step)
             self._emit_view_state()
-            fallback_warning = self._proof_fallback_warning(proof_stats, self._project.pages)
+            fallback_warning = proof_fallback_warning(proof_stats, self._project.pages)
             if fallback_warning:
                 self.status_message.emit(f"已打开：{db_path}；{fallback_warning}")
             else:
@@ -947,7 +946,7 @@ class WorkflowController(QObject):
             page for page in pages
             if page_has_error(page)
         ]
-        fallback_warning = self._proof_fallback_warning(proof_stats, processed_pages)
+        fallback_warning = proof_fallback_warning(proof_stats, processed_pages)
         self.status_message.emit(
             f"文字识别完成：自动标记 {flagged} 行；可进入校对"
             + (f"（{len(failed_pages)} 页失败）" if failed_pages else "")
@@ -1190,35 +1189,6 @@ class WorkflowController(QObject):
         self.ocr_progress.emit(progress)
         if progress.message:
             self.status_message.emit(self._ocr_public_progress_message(progress))
-
-    @staticmethod
-    def _proof_fallback_warning(stats, pages: list[Page] | None = None) -> str:
-        fallback_total = (
-            int(getattr(stats, "fallback_chars", 0))
-            + int(getattr(stats, "unavailable_chars", 0))
-        )
-        fallback_lines = int(getattr(stats, "fallback_lines", 0))
-        if fallback_total <= 0 and pages:
-            seen_lines: set[int] = set()
-            for page in pages:
-                for _block, line, _line_idx in iter_unique_page_text_lines(page):
-                    line_fallback_chars = 0
-                    for char in line_ocr_chars(line):
-                        source = (char.bbox_source or "").strip().lower()
-                        granularity = (char.bbox_granularity or "").strip().lower()
-                        if source in {"fallback", "unavailable"} or granularity in {"fallback", "unavailable", "line"}:
-                            line_fallback_chars += 1
-                    if line_fallback_chars:
-                        fallback_total += line_fallback_chars
-                        if id(line) not in seen_lines:
-                            fallback_lines += 1
-                            seen_lines.add(id(line))
-        if fallback_total <= 0:
-            return ""
-        return (
-            f"警告：proof fallback {fallback_lines} 行/"
-            f"{fallback_total} 字，字框为估算或不可用"
-        )
 
     def _on_worker_error(self, msg: str) -> None:
         self._discard_parallel_proof_result = True

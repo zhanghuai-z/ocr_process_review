@@ -12,6 +12,7 @@ from app.core.char_bbox_utils import (
     split_line_bbox_into_char_bboxes,
 )
 from app.core.proof_line_facts import proof_display_text
+from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines, line_ocr_bbox
@@ -65,6 +66,34 @@ class ProofCropStats:
     fallback_lines: int = 0
     fallback_chars: int = 0
     unavailable_chars: int = 0
+
+
+def proof_fallback_warning(stats: ProofCropStats, pages: Iterable[Page] | None = None) -> str:
+    """Return a user-visible warning for proof geometry fallback state."""
+
+    fallback_total = int(stats.fallback_chars) + int(stats.unavailable_chars)
+    fallback_lines = int(stats.fallback_lines)
+    if fallback_total <= 0 and pages:
+        seen_lines: set[int] = set()
+        for page in pages:
+            for _block, line, _line_idx in iter_unique_page_text_lines(page):
+                line_fallback_chars = 0
+                for char in line_ocr_chars(line):
+                    source = (char.bbox_source or "").strip().lower()
+                    granularity = (char.bbox_granularity or "").strip().lower()
+                    if source in {"fallback", "unavailable"} or granularity in {"fallback", "unavailable", "line"}:
+                        line_fallback_chars += 1
+                if line_fallback_chars:
+                    fallback_total += line_fallback_chars
+                    if id(line) not in seen_lines:
+                        fallback_lines += 1
+                        seen_lines.add(id(line))
+    if fallback_total <= 0:
+        return ""
+    return (
+        f"警告：proof fallback {fallback_lines} 行/"
+        f"{fallback_total} 字，字框为估算或不可用"
+    )
 
 
 class ProofCropService:
