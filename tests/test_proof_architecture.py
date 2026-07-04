@@ -995,6 +995,7 @@ def test_hproof_uses_projection_as_single_line_runtime_fact():
         assert retired_attr not in source
     assert "class _HProofSaveResult" not in source
     assert "ProofEditStatus" in source
+    assert "proof_rebuild_gate_for_save_status" in source
     assert "HProofRuntimeSession" in source
     assert "HProofLineEditSession" in source
     assert "self._session.projections" in source
@@ -1028,6 +1029,7 @@ def test_vproof_uses_named_slots_and_shared_identity_helpers():
     assert "CharIndexService._page_key" not in source
     assert "proof_page_identity_key" in source
     assert "VProofOccurrenceSession" in source
+    assert "allow_proof_rebuild" in source
 
     reference_source = Path("app/services/proof_reference_context.py").read_text(encoding="utf-8")
     assert "ProofTextSlot" in reference_source

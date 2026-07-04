@@ -75,6 +75,10 @@ from app.services.proof_hproof_session import (
     HProofRuntimeSession,
 )
 from app.services.proof_image_service import clamp_line_box_pixels
+from app.services.proof_rebuild_gate import (
+    block_proof_rebuild,
+    proof_rebuild_gate_for_save_status,
+)
 from app.ui.proof.confidence_utils import char_confidence
 from app.ui.proof import char_verdict as _cv
 # NOTE: AlignmentRibbon 已从布局中移除（proof-layout-collections 第 1 任务）。
@@ -3712,11 +3716,17 @@ class HProofPanel(QWidget):
         pair = self._pairs[current_index]
         if pair.has_external_conflict():
             pair._refresh_status()
+            gate = block_proof_rebuild("当前行存在保存冲突，处理后再切换页面")
             if hasattr(self, "_stat_lbl"):
-                self._stat_lbl.setText("当前行存在保存冲突，处理后再切换页面")
-            return False
-        self._save_current(silent=True)
-        return True
+                self._stat_lbl.setText(gate.message)
+            return gate.allow_rebuild
+        gate = proof_rebuild_gate_for_save_status(
+            self._save_current(silent=True),
+            conflict_message="当前行存在保存冲突，处理后再切换页面",
+        )
+        if not gate.allow_rebuild and hasattr(self, "_stat_lbl"):
+            self._stat_lbl.setText(gate.message)
+        return gate.allow_rebuild
 
     def _clear_pending_external_refresh(self) -> None:
         self._external_refresh_timer.stop()

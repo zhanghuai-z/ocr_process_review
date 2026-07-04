@@ -114,6 +114,7 @@ OCR Hanwang/CharOCR
 | 质量探针 | active probe sidecar | UI 显示假字 | pending fake_char 只在锚点仍匹配 true_char 时注入。 |
 | proof 持久化 | `proof_changed(ProofChangeSet)` + `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 bool 保存信号、无 scope 自动保存 | proof 信号语义是“校对事实已变更，需要持久化”，具体持久化范围由 `ProofChangeSet` 描述。 |
 | proof 写入口 | `ProofEditService` / `proof_line_mutation` | `Line.set_proof_text()` / `Line.set_proof_status()` | `Line` 模型不再持有 proof 写方法，后续写状态必须走显式 helper/service。 |
+| proof 重建门禁 | `proof_rebuild_gate` | HProof/VProof 各自解释保存状态 | 视图销毁/重建前是否允许继续，由共享 gate 根据 `ProofEditStatus` 判断。 |
 
 ## 三、近期关键修补前后逻辑
 
@@ -331,7 +332,8 @@ OCR Hanwang/CharOCR
    - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
    - HProof 有 `HProofRuntimeSession` / `HProofLineEditSession`。
    - VProof 有 `VProofOccurrenceSession` / `ProofReferenceContext` / named text slots。
-   - 未收口的是两者的 rebuild gate、dirty/conflict 决策和 save result 语义仍各自维护；后续应抽共享 session/gate，而不是再补 UI 单点判断。
+   - `proof_rebuild_gate` 已统一“保存状态是否允许视图重建”的第一层决策。
+   - 未收口的是两者的 dirty/conflict 状态采集和 external refresh 合并策略仍各自维护；后续应继续抽共享 session/gate，而不是再补 UI 单点判断。
 
 4. UI 仍有局部视图状态，但版面对象写入已收口。
    - LayoutPanel 的用户版面编辑入口已迁移到 `LayoutEditCommand` + `LayoutEditService.apply()`。
@@ -351,7 +353,7 @@ OCR Hanwang/CharOCR
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
 3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从生产/cache 层继续压缩。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
-5. 抽统一 proof rebuild gate，让 HProof/VProof 共用 dirty、conflict、reload、external refresh 决策。
+5. 扩大 `proof_rebuild_gate` 到 dirty、conflict、reload、external refresh 的完整采集层。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
 
 ## 七、审查时的判断口诀

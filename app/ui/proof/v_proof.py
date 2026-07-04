@@ -78,6 +78,7 @@ from app.services.proof_edit_service import (
 )
 from app.services.proof_image_service import verified_char_crop
 from app.services.proof_occurrence_session import VProofOccurrenceSession
+from app.services.proof_rebuild_gate import allow_proof_rebuild
 from app.ui.proof.confidence_utils import line_confidence, normalize_confidence
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -1430,7 +1431,9 @@ class VProofPanel(QWidget):
         self._status_lbl.setStyleSheet("")
 
     def _flush_dirty_before_reload(self) -> bool:
-        return bool(self._session.pages)
+        if not self._session.pages:
+            return False
+        return allow_proof_rebuild().allow_rebuild
 
     def _safe_load_page(self, idx: int) -> bool:
         if not self._flush_dirty_before_reload():
