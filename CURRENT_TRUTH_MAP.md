@@ -124,7 +124,7 @@ OCR Hanwang/CharOCR
 | 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` / `set_layout_block_ocr_policy()` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks`、各模块直接写 `block.ocr_policy` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line；策略计算仍在规则层，写回 Block 必须走 layout_block_state helper。 |
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
-| 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
+| 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI/Worker/Pipeline 直接写 `Page.status/error_message/ocr_invalidated_reason` | 当前仍是单字段 `Page.status`，但状态流转、后台错误消息和 OCR invalidation 入口已收口，后续拆状态机从该 helper 切入。 |
 | OCR 原文 | `create_ocr_text_line()` 写入；`line_text_contract(line).ocr_text` / `proof_ocr_text(line)` 读取 | 各 OCR producer 直接 `Line(text=..., ocr_text=...)` 或单独判断 `Line.text` / `Line.ocr_text` | `text` 仍是底层 OCR 行文本字段；OCR 生产写入口和 proof/UI/export 读取口径都已收口。 |
 | OCR 行观察汇总 | `app.models.ocr_observation` helpers：`block_avg_confidence`、`page_ocr_line_count`、`project_ocr_line_count`、`page_has_ocr_result`、`replace_block_ocr_lines` 等 | `Block.avg_confidence`、`Page.total_lines`、`Page.has_ocr_result`、`OcrProject.total_lines`、`OcrProject.has_any_ocr_result`、`OcrProject.all_pages_ocr_done`、生产代码 `Block(lines=...)` | OCR 行仍暂存于 `Block.lines`，但 Block/Page/Project 模型不再负责解释置信度、行数、是否有 OCR 或项目 OCR 完成状态；生产投影必须经 observation 边界写入。 |
 | OCR 字符观察 | `app.models.ocr_character_observation` helpers：`line_ocr_chars`、`replace_line_ocr_chars`、`iter_line_ocr_char_occurrences` 等 | 非 UI 业务层直接 `Line.chars`、生产代码 `Line(chars=...)` | 字符/词/公式 carrier 仍暂存于 `Line.chars`，但 ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe、OCR IR/Hanwang 投影等不再直接读取或构造物理字段。 |
@@ -319,7 +319,7 @@ OCR Hanwang/CharOCR
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
-- `Page.status/error_message/ocr_invalidated_reason`：当前页面流程状态字段；写入必须经 `app.models.page_state`。
+- `Page.status/error_message/ocr_invalidated_reason`：当前页面流程状态字段；Controller、Worker、Pipeline 写入必须经 `app.models.page_state`。
 - `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储，ProjectStore、业务代码和 proof 行 occurrence 查找都从这里读写。
 - `line_text_contract(line).ocr_text` / `proof_ocr_text(line)`：OCR 原始文本读取口径。
 - `proof_display_text(line)`：当前校对文本事实。

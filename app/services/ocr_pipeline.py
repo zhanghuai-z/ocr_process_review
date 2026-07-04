@@ -42,6 +42,7 @@ from app.models.ocr_observation import (
     page_ocr_line_count,
     replace_block_ocr_lines,
 )
+from app.models.page_state import clear_page_error_message, mark_page_ocr_failed
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 from app.services.table_text_layer_service import TableTextLayerService
@@ -116,7 +117,7 @@ class OcrPipeline:
                 img = cv2.imread(page.display_image_path)
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)
-                    page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
+                    mark_page_ocr_failed(page, f"OCR 图像读取失败：{page.display_image_path}")
                     for target in dispatch_plan.text_blocks:
                         result.failed_blocks.append(
                             (page_idx, target.block.order, f"Cannot read image: {page.display_image_path}")
@@ -157,7 +158,7 @@ class OcrPipeline:
                             "Page hybrid OCR failed: page=%d: %s",
                             page_idx, e,
                         )
-                        page.error_message = f"OCR 失败：{e}"
+                        mark_page_ocr_failed(page, f"OCR 失败：{e}")
                         result.failed_blocks.append((page_idx, -1, str(e)))
                     if progress_callback:
                         progress_callback(OcrProgress(
@@ -186,7 +187,7 @@ class OcrPipeline:
                             "Page OCR failed: page=%d: %s",
                             page_idx, e,
                         )
-                        page.error_message = f"OCR 失败：{e}"
+                        mark_page_ocr_failed(page, f"OCR 失败：{e}")
                         result.failed_blocks.append((page_idx, -1, str(e)))
                     if progress_callback:
                         progress_callback(OcrProgress(
@@ -251,7 +252,7 @@ class OcrPipeline:
                     summary = "；".join(page_failures[:3])
                     if len(page_failures) > 3:
                         summary += "；…"
-                    page.error_message = f"OCR 失败：{summary}"
+                    mark_page_ocr_failed(page, f"OCR 失败：{summary}")
 
                 self._normalize_proof_crops(
                     page,
@@ -316,7 +317,7 @@ class OcrPipeline:
                 except Exception as exc:
                     page = project.pages[page_idx]
                     logger.error("Page hybrid OCR worker crashed: page=%d: %s", page_idx, exc)
-                    page.error_message = f"OCR 失败：{exc}"
+                    mark_page_ocr_failed(page, f"OCR 失败：{exc}")
                     work = PageOcrRunResult(
                         page_idx=page_idx,
                         page=page,
@@ -364,7 +365,7 @@ class OcrPipeline:
         img = cv2.imread(page.display_image_path)
         if img is None:
             logger.warning("Cannot read image: %s", page.display_image_path)
-            page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
+            mark_page_ocr_failed(page, f"OCR 图像读取失败：{page.display_image_path}")
             failed = [
                 (page_idx, target.block.order, f"Cannot read image: {page.display_image_path}")
                 for target in dispatch_plan.text_blocks
@@ -399,7 +400,7 @@ class OcrPipeline:
             )
         except Exception as exc:
             logger.error("Page hybrid OCR failed: page=%d: %s", page_idx, exc)
-            page.error_message = f"OCR 失败：{exc}"
+            mark_page_ocr_failed(page, f"OCR 失败：{exc}")
             failed.append((page_idx, -1, str(exc)))
 
         stats = self._proof_crop_service.normalize_pages([page])
@@ -445,7 +446,7 @@ class OcrPipeline:
     def _clear_ocr_error(page: Page) -> None:
         """Clear stale OCR-owned errors before retrying OCR on a page."""
         if is_ocr_error_message(page.error_message):
-            page.error_message = ""
+            clear_page_error_message(page)
 
     def _normalize_proof_crops(
         self,

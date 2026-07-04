@@ -30,9 +30,13 @@ def clear_page_ocr_invalidation(page: Page) -> None:
     page.ocr_invalidated_reason = ""
 
 
+def clear_page_error_message(page: Page) -> None:
+    page.error_message = ""
+
+
 def mark_page_ocr_done(page: Page) -> None:
     page.status = PageStatus.OCR_DONE
-    page.error_message = ""
+    clear_page_error_message(page)
     clear_page_ocr_invalidation(page)
 
 

@@ -68,6 +68,7 @@ from app.models.layout_projection import (
     page_layout_blocks,
     replace_page_layout_blocks,
 )
+from app.models.page_state import clear_page_error_message, mark_page_layout_failed
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.services.layout_snapshot import (
     layout_snapshot_from_normalized_artifact,
@@ -174,7 +175,7 @@ class LayoutWorker(QThread):
             analyzer.analyze(page)
             if self._is_cancelled():
                 return index, None
-            page.error_message = ""
+            clear_page_error_message(page)
             return index, None
         except PaddleV16RequestCancelled:
             return index, None
@@ -183,7 +184,7 @@ class LayoutWorker(QThread):
                 return index, None
             logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
             replace_page_layout_blocks(page, [])
-            page.error_message = f"版面分析失败：{e}"
+            mark_page_layout_failed(page, f"版面分析失败：{e}")
             return index, f"第 {page.page_number} 页：{e}"
 
     def run(self) -> None:
@@ -236,7 +237,7 @@ class LayoutWorker(QThread):
                                 page = self._pages[page_idx]
                                 logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
                                 replace_page_layout_blocks(page, [])
-                                page.error_message = f"版面分析失败：{exc}"
+                                mark_page_layout_failed(page, f"版面分析失败：{exc}")
                                 error_message = f"第 {page.page_number} 页：{exc}"
                         if self._is_cancelled():
                             for pending_future in pending:

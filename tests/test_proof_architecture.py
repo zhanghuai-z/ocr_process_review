@@ -900,16 +900,19 @@ def test_proof_line_facts_reads_ocr_text_through_contract():
     assert 'getattr(line, "ocr_text"' not in source
 
 
-def test_page_status_mutation_stays_in_page_state_helper():
+def test_page_workflow_state_mutation_stays_in_page_state_helper():
     allowed = {Path("app/models/page_state.py")}
     offenders: list[str] = []
-    assignment_pattern = re.compile(r"\.\s*status\s*=\s*PageStatus\.")
+    status_assignment_pattern = re.compile(r"\.\s*status\s*=\s*PageStatus\.")
+    workflow_attr_assignment_pattern = re.compile(r"\.\s*(error_message|ocr_invalidated_reason)\s*=")
     for path in sorted(APP_DIR.rglob("*.py")):
         if path in allowed:
             continue
         source = path.read_text(encoding="utf-8")
-        if assignment_pattern.search(source):
-            offenders.append(str(path))
+        if status_assignment_pattern.search(source):
+            offenders.append(f"{path}: PageStatus assignment")
+        for match in workflow_attr_assignment_pattern.finditer(source):
+            offenders.append(f"{path}: {match.group(0)}")
     assert offenders == []
 
 
