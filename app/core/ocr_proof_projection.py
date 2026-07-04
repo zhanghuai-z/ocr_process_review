@@ -19,6 +19,7 @@ from app.core.ocr_ir_builder import (
 )
 from app.core.proof_line_mutation import set_line_proof_status
 from app.models import Char, Line
+from app.models.ocr_character_observation import replace_line_ocr_chars
 
 
 ProofStatusFactory = Callable[[OcrIrLine], object | None]
@@ -118,14 +119,17 @@ def project_ocr_line_to_proof_line(
         text=ir_line.text,
         confidence=float(ir_line.confidence),
         bbox=ir_line.bbox,
-        chars=project_ocr_tokens_to_proof_chars(
+        ocr_text=ir_line.source_text or ir_line.text,
+        review_flags=list(ir_line.review_flags),
+    )
+    replace_line_ocr_chars(
+        line,
+        project_ocr_tokens_to_proof_chars(
             page_image=page_image,
             line_text=ir_line.text,
             line_confidence=float(ir_line.confidence),
             tokens=ir_line.tokens,
         ),
-        ocr_text=ir_line.source_text or ir_line.text,
-        review_flags=list(ir_line.review_flags),
     )
     if proof_status is not None:
         set_line_proof_status(line, proof_status)

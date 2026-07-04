@@ -107,6 +107,7 @@ from app.models.layout_block_state import (
     is_user_authored_layout_block,
     is_user_authored_layout_source,
 )
+from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
@@ -2949,10 +2950,10 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
         text=line.text,
         confidence=line.confidence,
         bbox=_bbox_from_xyxy_tuple(line.bbox, width, height),
-        chars=chars,
         ocr_text=line.text,
         review_flags=merged_review_flags,
     )
+    replace_line_ocr_chars(model, chars)
     set_proof_state_for_line(
         model,
         ProofLineState(
@@ -3685,7 +3686,6 @@ class HanwangMicroRecBlockEngine:
             new_block = Block(
                 block_type=block_type,
                 bbox=bbox,
-                lines=lines,
                 order=order,
                 source=BlockSource.AUTO_LAYOUT,
                 note=" | ".join(note_parts),
@@ -3694,6 +3694,7 @@ class HanwangMicroRecBlockEngine:
                 paddle_binding=paddle_binding,
                 ocr_audit=ocr_audit,
             )
+            replace_block_ocr_lines(new_block, lines)
             new_block.ocr_policy = default_ocr_policy_for_block(new_block)
             if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:
                 new_block.ocr_policy = OcrPolicy.MANUAL_ONLY

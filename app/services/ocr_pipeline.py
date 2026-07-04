@@ -668,10 +668,10 @@ class OcrPipeline:
         synthetic = Block(
             block_type=BlockType.TEXT,
             bbox=merged,
-            lines=unmatched,
             order=(max((block.order for block in page_layout_blocks(page)), default=-1) + 1),
             note="PP-OCRv5 unmatched proof lines",
         )
+        replace_block_ocr_lines(synthetic, unmatched)
         append_page_layout_block(page, synthetic)
 
     def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
