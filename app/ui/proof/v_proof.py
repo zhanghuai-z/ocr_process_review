@@ -78,7 +78,7 @@ from app.services.proof_edit_service import (
 )
 from app.services.proof_image_service import verified_char_crop
 from app.services.proof_occurrence_session import VProofOccurrenceSession
-from app.services.proof_rebuild_gate import allow_proof_rebuild
+from app.services.proof_rebuild_gate import proof_rebuild_gate_for_reference_context
 from app.ui.proof.confidence_utils import line_confidence, normalize_confidence
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
@@ -1432,7 +1432,9 @@ class VProofPanel(QWidget):
     def _flush_dirty_before_reload(self) -> bool:
         if not self._session.pages:
             return False
-        return allow_proof_rebuild().allow_rebuild
+        return proof_rebuild_gate_for_reference_context(
+            dirty=self._text_edit.toPlainText() != self._session.loaded_text,
+        ).allow_rebuild
 
     def _safe_load_page(self, idx: int) -> bool:
         if not self._flush_dirty_before_reload():
@@ -2406,7 +2408,10 @@ class VProofPanel(QWidget):
             self._refresh_char_index_for_pages(affected_pages)
         if not plan.reload_current_page:
             return
-        if not allow_proof_rebuild().allow_rebuild:
+        gate = proof_rebuild_gate_for_reference_context(
+            dirty=self._text_edit.toPlainText() != self._session.loaded_text,
+        )
+        if not gate.allow_rebuild:
             return
         selected_tokens = self._selected_tokens_for_restore()
         selected_occurrence_keys = tuple(self._session.selected_occurrence_keys)

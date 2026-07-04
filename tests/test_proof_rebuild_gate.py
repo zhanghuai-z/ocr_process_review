@@ -7,6 +7,7 @@ from app.services.proof_rebuild_gate import (
     allow_proof_rebuild,
     block_proof_rebuild,
     proof_rebuild_gate_for_editor_state,
+    proof_rebuild_gate_for_reference_context,
     proof_rebuild_gate_for_save_status,
 )
 
@@ -92,3 +93,10 @@ def test_editor_rebuild_state_delegates_dirty_save_status():
     assert blocked.message == "invalid"
     assert saved.allow_rebuild is True
     assert saved.save_status == ProofEditStatus.SAVED
+
+
+def test_reference_context_rebuild_treats_dirty_text_as_readonly_projection():
+    result = proof_rebuild_gate_for_reference_context(dirty=True)
+
+    assert result.allow_rebuild is True
+    assert result.save_status == ProofEditStatus.READONLY

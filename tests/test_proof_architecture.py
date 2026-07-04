@@ -1048,7 +1048,8 @@ def test_vproof_uses_named_slots_and_shared_identity_helpers():
     assert "CharIndexService._page_key" not in source
     assert "proof_page_identity_key" in source
     assert "VProofOccurrenceSession" in source
-    assert "allow_proof_rebuild" in source
+    assert "allow_proof_rebuild" not in source
+    assert "proof_rebuild_gate_for_reference_context" in source
     assert "pending_external_lines" not in source
     assert "pending_external_page_keys" not in source
     assert "queue_external_refresh" in source

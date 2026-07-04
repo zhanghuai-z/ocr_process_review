@@ -89,6 +89,21 @@ def proof_rebuild_gate_for_editor_state(
     )
 
 
+def proof_rebuild_gate_for_reference_context(
+    *,
+    dirty: bool = False,
+) -> ProofRebuildGateResult:
+    """Gate rebuilds for read-only reference text surfaces.
+
+    VProof's page text area is a reference projection, not the write surface for
+    proof edits. Direct text differences are therefore reloadable display state,
+    while actual writes must go through ProofEditService.
+    """
+    return proof_rebuild_gate_for_editor_state(
+        ProofEditorRebuildState(editable=False, dirty=dirty),
+    )
+
+
 __all__ = [
     "ProofEditorRebuildState",
     "ProofRebuildDecision",
@@ -96,5 +111,6 @@ __all__ = [
     "allow_proof_rebuild",
     "block_proof_rebuild",
     "proof_rebuild_gate_for_editor_state",
+    "proof_rebuild_gate_for_reference_context",
     "proof_rebuild_gate_for_save_status",
 ]
