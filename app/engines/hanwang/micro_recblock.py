@@ -407,11 +407,12 @@ def _refine_layout_text_route_bands_from_image(
     ppvl_blocks: list[dict],
     width: int,
     height: int,
-) -> None:
+) -> dict[int, list[dict[str, Any]]]:
     """Tighten text route vertical bands using page pixels, not formula-heavy PP-OCR rows."""
     if image_bgr.size == 0:
-        return
-    for block in ppvl_blocks:
+        return {}
+    refined_by_block_index: dict[int, list[dict[str, Any]]] = {}
+    for block_idx, block in enumerate(ppvl_blocks):
         routes = routing_plan_for_block_record(block, width, height).lines
         if not routes:
             continue
@@ -444,10 +445,20 @@ def _refine_layout_text_route_bands_from_image(
             else:
                 refined_routes.append(route)
         if changed:
-            block[LAYOUT_LINE_ROUTES_FIELD] = [
+            refined_by_block_index[block_idx] = [
                 routing_line_to_record(route)
                 for route in refined_routes
             ]
+    return refined_by_block_index
+
+
+def _apply_layout_line_route_records(
+    ppvl_blocks: list[dict],
+    route_records_by_block_index: dict[int, list[dict[str, Any]]],
+) -> None:
+    for block_idx, records in route_records_by_block_index.items():
+        if 0 <= block_idx < len(ppvl_blocks):
+            ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD] = records
 
 
 def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:
@@ -2438,7 +2449,10 @@ def run_micro_recblock(
     height, width = image_bgr.shape[:2]
     if page_ocr_lines:
         attach_page_ocr_line_routes(ppvl_blocks, page_ocr_lines, width, height)
-        _refine_layout_text_route_bands_from_image(image_bgr, ppvl_blocks, width, height)
+        _apply_layout_line_route_records(
+            ppvl_blocks,
+            _refine_layout_text_route_bands_from_image(image_bgr, ppvl_blocks, width, height),
+        )
     else:
         _drop_cached_layout_line_routes(ppvl_blocks)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))

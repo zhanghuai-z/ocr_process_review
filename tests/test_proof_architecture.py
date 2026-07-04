@@ -1269,6 +1269,9 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     assert "routing_plan_for_block_record(block, width, height).lines" in refine_routes_source
     assert "line_routes_for_block(block" not in refine_routes_source
     assert "routing_line_to_record(route)" in refine_routes_source
+    assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in refine_routes_source
+    apply_routes_source = functions["_apply_layout_line_route_records"]
+    assert "ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD]" in apply_routes_source
 
     assert "line_routes_for_block" not in source
 
