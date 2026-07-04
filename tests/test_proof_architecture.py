@@ -177,6 +177,30 @@ def test_current_truth_docs_do_not_reintroduce_stale_projection_terms():
     assert "CURRENT_TRUTH_MAP.md" in baseline_source
 
 
+def test_fallback_strategy_register_covers_current_boundaries():
+    source = Path("fallback-strategy-register.md").read_text(encoding="utf-8")
+
+    for marker in (
+        "_request_with_network_fallback",
+        "MISSING_LINE_BBOX_FLAG",
+        "ProofCropService.normalize_pages",
+        "ensure_line_char_bboxes",
+        "proof_fallback_warning",
+        "is_char_index_hidden_geometry",
+        "hanwang:CharRcg:char_fallback",
+        "bind_latin_tokens_to_engcut_chars",
+        "LATIN_ENGCUT_WORD_FALLBACK_STATUS",
+        "latin_token_engcut_word_fallback",
+        "equal_grid_fallback",
+        "ExportFallback",
+        "image_fallback",
+    ):
+        assert marker in source
+
+    assert "PPVL 不再作为正文 OCR fallback" in source
+    assert "不得因为正文切片 fallback 再被送入 Hanwang 普通文字识别" in source
+
+
 def test_retired_block_payload_helper_is_not_restored():
     assert not Path("app/core/block_payload.py").exists()
 
