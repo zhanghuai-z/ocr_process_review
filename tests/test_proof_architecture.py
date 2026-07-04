@@ -463,6 +463,19 @@ def test_character_observation_boundary_is_used_by_core_consumers():
         assert "app.models.ocr_character_observation" in source
 
 
+def test_carrier_detection_uses_proof_char_text_contract():
+    service_paths = {
+        Path("app/services/char_index_service.py"),
+        Path("app/services/proof_crop_service.py"),
+        Path("app/services/proof_probe_text_service.py"),
+    }
+    for path in service_paths:
+        source = path.read_text(encoding="utf-8")
+        assert "is_display_carrier" in source
+        assert "def _is_tokenized_char" not in source
+        assert 'bbox_granularity == "word" or len(char.char or "") > 1' not in source
+
+
 def test_ocr_observation_geometry_writes_stay_at_observation_boundaries():
     allowed_by_pattern = {
         r"\bline\.bbox\s*=(?!=)": {Path("app/models/ocr_observation.py")},

@@ -11,6 +11,7 @@ from app.core.char_bbox_utils import (
     MISSING_LINE_BBOX_FLAG,
     split_line_bbox_into_char_bboxes,
 )
+from app.core.proof_char_text import is_display_carrier
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
@@ -20,10 +21,6 @@ from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_c
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
-
-
-def _is_tokenized_char(char: Char) -> bool:
-    return char.bbox_granularity == "word" or len(char.char or "") > 1
 
 
 def _fallback_char(glyph: str, line: Line, bbox: BBox | None, source: str, granularity: str) -> Char:
@@ -128,7 +125,7 @@ class ProofCropService:
                 ]
 
                 chars = line_ocr_chars(line)
-                has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
+                has_tokenized_chars = any(is_display_carrier(char) for char in chars)
                 needs_fallback_chars = (
                     not chars
                     or (

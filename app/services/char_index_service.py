@@ -15,7 +15,7 @@ from app.core.char_bbox_utils import (
     split_line_bbox_into_char_bboxes,
 )
 from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
-from app.core.proof_char_text import chars_display_text
+from app.core.proof_char_text import chars_display_text, is_display_carrier
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_occurrence import (
@@ -103,13 +103,9 @@ def _bbox_granularity_for_index(char: Char) -> str:
     return "char" if char.bbox is not None and char.bbox.area > 0 else "fallback"
 
 
-def _is_tokenized_char(char: Char) -> bool:
-    return char.bbox_granularity == "word" or len(char.char or "") > 1
-
-
 def _display_width(char: Char) -> int:
     raw = char.char or ""
-    return max(1, len(raw)) if _is_tokenized_char(char) else 1
+    return max(1, len(raw)) if is_display_carrier(char) else 1
 
 
 def _span_display_width(chars: List[Char]) -> int:
@@ -251,7 +247,7 @@ class CharIndexService:
         if not text:
             return False
         chars = line_ocr_chars(line)
-        has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
+        has_tokenized_chars = any(is_display_carrier(char) for char in chars)
         if not chars or (len(chars) != len(text) and not has_tokenized_chars):
             return True
         return any(self._explicit_bbox_needs_validation(char.bbox) for char in chars)
@@ -337,7 +333,7 @@ class CharIndexService:
             return
 
         chars = line_ocr_chars(line)
-        has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
+        has_tokenized_chars = any(is_display_carrier(char) for char in chars)
         if not chars:
             self._index_fallback_line(
                 text=text,
@@ -505,7 +501,7 @@ class CharIndexService:
         while idx < len(chars):
             char_obj = chars[idx]
             raw_glyph = char_obj.char or ""
-            glyph = raw_glyph if _is_tokenized_char(char_obj) else (text[display_idx] if display_idx < len(text) else raw_glyph)
+            glyph = raw_glyph if is_display_carrier(char_obj) else (text[display_idx] if display_idx < len(text) else raw_glyph)
             if not glyph or glyph.isspace():
                 display_idx += _display_width(char_obj)
                 idx += 1
