@@ -23,7 +23,6 @@ from app.core.coordinate_seam import CropCoordinateSeam
 from app.models.block_state import is_ocr_text_invalidated
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
-    should_block_page_ocr_line,
     should_dispatch_to_text_ocr,
 )
 from app.core.ocr_line_hints import is_ppocr_page_line_hint, mark_ppocr_page_line_hint
@@ -44,6 +43,9 @@ from app.models.ocr_observation import (
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 from app.services.table_text_layer_service import TableTextLayerService
+from app.services.ocr_dispatch_plan import (
+    build_text_ocr_dispatch_plan,
+)
 
 logger = get_logger(__name__)
 OCR_PAGE_CONCURRENCY_CAP = 20
@@ -120,6 +122,7 @@ class OcrPipeline:
 
             for page_idx, page in enumerate(project.pages):
                 self._clear_ocr_error(page)
+                dispatch_plan = build_text_ocr_dispatch_plan(page)
                 if progress_callback:
                     progress_callback(OcrProgress(
                         current_page=page_idx + 1,
@@ -133,11 +136,10 @@ class OcrPipeline:
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)
                     page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
-                    for block in page.blocks:
-                        if should_dispatch_to_text_ocr(block):
-                            result.failed_blocks.append(
-                                (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
-                            )
+                    for target in dispatch_plan.text_blocks:
+                        result.failed_blocks.append(
+                            (page_idx, target.block.order, f"Cannot read image: {page.display_image_path}")
+                        )
                     if progress_callback:
                         progress_callback(OcrProgress(
                             current_page=page_idx + 1,
@@ -149,7 +151,7 @@ class OcrPipeline:
                         ))
                     continue
 
-                total_blocks = len([b for b in page.blocks if should_dispatch_to_text_ocr(b)])
+                total_blocks = dispatch_plan.total_text_blocks
 
                 if self._prefers_page_hybrid_blocks():
                     def emit_hybrid_progress(current: int, total: int, message: str) -> None:
@@ -227,9 +229,8 @@ class OcrPipeline:
                 block_idx = 0
                 page_failures: list[str] = []
 
-                for block in page.blocks:
-                    if not should_dispatch_to_text_ocr(block):
-                        continue
+                for target in dispatch_plan.text_blocks:
+                    block = target.block
 
                     try:
                         lines = self._process_block(img, block, page, page_idx)
@@ -369,6 +370,7 @@ class OcrPipeline:
         emit: Callable[[OcrProgress], None],
     ) -> _PageOcrWorkResult:
         self._clear_ocr_error(page)
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
         emit(OcrProgress(
             current_page=page_idx + 1,
             total_pages=total_pages,
@@ -383,9 +385,8 @@ class OcrPipeline:
             logger.warning("Cannot read image: %s", page.display_image_path)
             page.error_message = f"OCR 图像读取失败：{page.display_image_path}"
             failed = [
-                (page_idx, block.order, f"Cannot read image: {page.display_image_path}")
-                for block in page.blocks
-                if should_dispatch_to_text_ocr(block)
+                (page_idx, target.block.order, f"Cannot read image: {page.display_image_path}")
+                for target in dispatch_plan.text_blocks
             ]
             return _PageOcrWorkResult(
                 page_idx=page_idx,
@@ -394,7 +395,7 @@ class OcrPipeline:
                 completion_message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页图像读取失败",
             )
 
-        total_blocks = len([b for b in page.blocks if should_dispatch_to_text_ocr(b)])
+        total_blocks = dispatch_plan.total_text_blocks
 
         def emit_hybrid_progress(current: int, total: int, message: str) -> None:
             stage_message = message.replace("Hanwang micro-recblock", "CharOCR")
@@ -562,11 +563,13 @@ class OcrPipeline:
         page_idx: int = 0,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ) -> None:
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
+        total_text_blocks = max(1, dispatch_plan.total_text_blocks)
         if self._has_reusable_page_line_hints(page):
             if progress_callback:
                 progress_callback(
                     0,
-                    max(1, len(page.blocks)),
+                    total_text_blocks,
                     "PP-OCRv5 page-line prepass skipped: "
                     f"{self._reusable_page_line_hint_summary(page)}",
                 )
@@ -575,7 +578,7 @@ class OcrPipeline:
             if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
                 raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
             if progress_callback:
-                progress_callback(0, max(1, len(page.blocks)), "PP-OCRv5 page-line prepass 中…")
+                progress_callback(0, total_text_blocks, "PP-OCRv5 page-line prepass 中…")
             self._process_page_with_page_ocr(
                 img,
                 page,
@@ -585,7 +588,7 @@ class OcrPipeline:
             )
             if progress_callback:
                 line_count = sum(block_ocr_line_count(block) for block in page.blocks)
-                progress_callback(0, max(1, len(page.blocks)), f"PP-OCRv5 page-line prepass complete: {line_count} lines")
+                progress_callback(0, total_text_blocks, f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")
         self._engine.recognize_page_blocks(
@@ -602,10 +605,11 @@ class OcrPipeline:
         original PP-OCRv5 row. Reusing them would feed derived geometry back
         into the next OCR run and can make formula regions affect text crops.
         """
-        text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
-        if not text_blocks:
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
+        if not dispatch_plan.text_blocks:
             return True
-        for block in text_blocks:
+        for target in dispatch_plan.text_blocks:
+            block = target.block
             if is_ocr_text_invalidated(block):
                 return False
             if self._has_marked_page_line_hints(block):
@@ -623,10 +627,11 @@ class OcrPipeline:
         )
 
     def _reusable_page_line_hint_summary(self, page: Page) -> str:
-        text_blocks = [block for block in page.blocks if should_dispatch_to_text_ocr(block)]
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
         marked_lines = sum(
             1
-            for block in text_blocks
+            for target in dispatch_plan.text_blocks
+            for block in (target.block,)
             for line in block_ocr_lines(block)
             if line.bbox is not None
             and line.bbox.area > 0
@@ -658,18 +663,11 @@ class OcrPipeline:
             ensure_line_text_contract(line)
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
-        for block in page.blocks:
-            if should_dispatch_to_text_ocr(block):
-                clear_block_ocr_lines(block)
-
-        containers = [
-            block for block in page.blocks
-            if should_dispatch_to_text_ocr(block)
-        ]
-        blockers = [
-            block for block in page.blocks
-            if should_block_page_ocr_line(block)
-        ]
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
+        containers = list(dispatch_plan.text_block_models)
+        blockers = list(dispatch_plan.blocker_block_models)
+        for block in containers:
+            clear_block_ocr_lines(block)
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
             blocker = select_container_block_for_line(line, blockers)
@@ -703,10 +701,8 @@ class OcrPipeline:
         not drop the whole row here.  Structural regions are carved out later by
         the route builder.
         """
-        containers = [
-            block for block in page.blocks
-            if should_dispatch_to_text_ocr(block)
-        ]
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
+        containers = list(dispatch_plan.text_block_models)
         for block in containers:
             clear_block_ocr_lines(block)
 

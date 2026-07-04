@@ -102,7 +102,7 @@ OCR Hanwang/CharOCR
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 块来源/编辑态解释 | `app.models.layout_block_state` helper | 各模块直接比较 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑、导出 origin 等语义集中解释。 |
-| 是否进文本 OCR | `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用 | 公式、表格、图片通过明确 policy 阻断；policy 由 importer/UI/service 显式设置。 |
+| 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line。 |
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
@@ -147,6 +147,7 @@ OCR Hanwang/CharOCR
 修改后：
 
 - 运行时统一走 `should_dispatch_to_text_ocr(block)`。
+- 页级 OCR 入口先构建 `DispatchPlan`，统一暴露 text blocks 和 blockers。
 - page OCR 行分配时先检查 blocker，再分配到 text container。
 - 结构块作为 blocker，不应进入正文 proof line。
 - `Block` 模型不再在 `__post_init__` 中根据 `source_label/block_type` 自动改写 policy；默认策略必须由 importer/UI/service 显式调用 dispatch policy 推导。
@@ -155,6 +156,7 @@ OCR Hanwang/CharOCR
 
 - `recognizable` 已退役，OCR 入口不得恢复裸 bool 判断。
 - `Block` 构造不得恢复隐式 OCR policy 推导。
+- 页级 OCR 统计、图像读取失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用都应读取同一个 `DispatchPlan`。
 - `Block.source` 的人工编辑/导出来源语义不得在 Hanwang、Export、BlockAttributes 内分散解释，必须经 `app.models.layout_block_state` helper。
 
 ### 3. Paddle 路由：父文本块 + 子结构块
@@ -174,7 +176,7 @@ OCR Hanwang/CharOCR
 
 - `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute` 已作为生产和读取侧 typed contract；overlay 和 Hanwang 文本切片不应直接消费 route dict。
 - `_route_subblocks` 仍是 Paddle 子结构绑定的运行时 dict 输入；`_layout_line_routes` 只允许作为 legacy/cache serialization，不应成为业务读取入口。
-- 后续还需要继续抽 `DispatchPlan`，并加入列模型/阅读顺序模型承接双栏。
+- `DispatchPlan` 已收口页级文字 OCR 调度；后续还需要继续抽 `OcrRunResult`，并加入列模型/阅读顺序模型承接双栏。
 
 ### 4. Line 文本：空终稿与 fake probe
 
@@ -326,7 +328,7 @@ OCR Hanwang/CharOCR
 - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
 - `NormalizedLayoutArtifact` 已作为读取侧归一化 contract；`LayoutOverlayService` 和 `PaddleArtifactIndex.from_page()` 不再直接遍历 `raw_layout_records`。
 - `RoutingPlan` 已作为 overlay 与 Hanwang route 消费端的读取边界；`paddle_line_routing.build_layout_routing_plan()` 是 typed 生产入口，旧 route dict API 只做序列化兼容。
-- `LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界；后续应把人工编辑也迁到 snapshot，并继续抽 `DispatchPlan/OcrRunResult`。
+- `DispatchPlan` 已作为页级文字 OCR 调度边界；`LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界。后续应把人工编辑也迁到 snapshot，并继续抽 `OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
    - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
@@ -354,7 +356,7 @@ OCR Hanwang/CharOCR
 
 1. 保留当前补丁成果，不继续扩大局部补丁。
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
-3. 继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从子结构输入/cache 层继续压缩。
+3. `DispatchPlan` 已落地；继续抽 `OcrRunResult`，把 OCR 输出、失败、审计和 route dict 从子结构输入/cache 层继续压缩。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
 5. 扩大 `proof_rebuild_gate` 到 HProof/VProof external refresh 的完整共享采集层。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
@@ -362,7 +364,7 @@ OCR Hanwang/CharOCR
 ## 七、审查时的判断口诀
 
 - 要判断“这个框是谁说的”：先看 Paddle raw，再看人工 binding，再看 route 派生。
-- 要判断“这行该不该 OCR”：只看 `should_dispatch_to_text_ocr()`。
+- 要判断“这一页哪些块该 OCR”：看 `DispatchPlan`；要判断“单块策略是什么”：看 `should_dispatch_to_text_ocr()`。
 - 要判断“这行最终文本是什么”：只看 `proof_display_text(line)`。
 - 要判断“这个字符框能不能信”：先比较 `chars_display_text(line.chars)` 与 `line.display_text`。
 - 要判断“这个对象是谁”：uid 优先，rowid 只辅助存储。

@@ -1,0 +1,76 @@
+"""Typed OCR dispatch plan for page text-recognition work."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
+from app.models import Block, Page
+
+
+@dataclass(frozen=True)
+class DispatchBlock:
+    """A layout block plus its stable page-local position in the dispatch plan."""
+
+    index: int
+    block: Block
+    reason: str
+
+
+@dataclass(frozen=True)
+class DispatchPlan:
+    """Read model for deciding which page blocks enter text OCR."""
+
+    page: Page
+    text_blocks: tuple[DispatchBlock, ...]
+    blocked_blocks: tuple[DispatchBlock, ...]
+
+    @property
+    def total_text_blocks(self) -> int:
+        return len(self.text_blocks)
+
+    @property
+    def has_text_work(self) -> bool:
+        return bool(self.text_blocks)
+
+    @property
+    def text_block_models(self) -> tuple[Block, ...]:
+        return tuple(target.block for target in self.text_blocks)
+
+    @property
+    def blocker_block_models(self) -> tuple[Block, ...]:
+        return tuple(target.block for target in self.blocked_blocks)
+
+
+def build_text_ocr_dispatch_plan(page: Page) -> DispatchPlan:
+    """Build the authoritative text OCR dispatch view for a page."""
+    text_blocks: list[DispatchBlock] = []
+    blocked_blocks: list[DispatchBlock] = []
+    for index, block in enumerate(page.blocks):
+        if should_dispatch_to_text_ocr(block):
+            text_blocks.append(
+                DispatchBlock(
+                    index=index,
+                    block=block,
+                    reason="policy:text_ocr",
+                )
+            )
+        else:
+            blocked_blocks.append(
+                DispatchBlock(
+                    index=index,
+                    block=block,
+                    reason=f"policy:{block.ocr_policy.value}",
+                )
+            )
+    return DispatchPlan(
+        page=page,
+        text_blocks=tuple(text_blocks),
+        blocked_blocks=tuple(blocked_blocks),
+    )
+
+
+__all__ = [
+    "DispatchBlock",
+    "DispatchPlan",
+    "build_text_ocr_dispatch_plan",
+]

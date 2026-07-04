@@ -38,7 +38,7 @@
 - 所有新代码禁止直接新增裸兼容字段。
 - app-owned 状态必须使用 typed 字段；禁止写入 `raw_payload` 或旧 `app_payload_json`。
 - Paddle 返回字段必须先经过 `paddle_layout_schema.py`。
-- OCR dispatch 必须先经过 `ocr_dispatch_policy.py`。
+- OCR dispatch 单块策略必须先经过 `ocr_dispatch_policy.py`；页级 OCR 调度必须先经过 `DispatchPlan`。
 - `Block` 模型不得在构造时根据外部 label 自动推导 OCR policy。
 
 完成状态：已完成；已登记兼容入口均已删除或收口为正式模型字段。
@@ -69,6 +69,7 @@
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `LayoutSnapshot`；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
 - layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。
+- OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。
 
 完成状态：第一阶段完成；`LayoutSnapshot` 已成为 API 版面分析到旧 `Page.blocks` 的投影边界。人工编辑服务和物理 OCR observation store 仍是后续增强，不再作为当前兼容入口。
 

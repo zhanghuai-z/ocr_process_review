@@ -156,6 +156,22 @@ def test_ocr_dispatch_policy_uses_block_attributes_not_payload_guessing():
     assert "PADDLE_BINDING_KEY" not in source
 
 
+def test_page_scoped_ocr_pipeline_selection_uses_dispatch_plan():
+    source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
+    required_functions = [
+        "process_project",
+        "_process_page_hybrid_work",
+        "_process_page_with_hybrid_blocks",
+        "_has_reusable_page_line_hints",
+        "_reusable_page_line_hint_summary",
+        "_assign_page_ocr_lines_to_blocks",
+        "_assign_page_ocr_line_hints_to_blocks",
+    ]
+    for function_name in required_functions:
+        function_source = _function_source(source, function_name)
+        assert "build_text_ocr_dispatch_plan(page)" in function_source
+
+
 def test_block_attributes_do_not_derive_semantics_from_payloads():
     source = Path("app/core/block_attributes.py").read_text(encoding="utf-8")
     assert "authoritative_paddle_label" not in source
