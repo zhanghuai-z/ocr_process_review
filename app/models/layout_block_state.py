@@ -37,6 +37,10 @@ def set_layout_block_ocr_policy(block: Block, policy: OcrPolicy) -> None:
     block.ocr_policy = policy
 
 
+def set_layout_block_source_label(block: Block, source_label: str) -> None:
+    block.source_label = str(source_label or "")
+
+
 def is_auto_tightened_layout_block(block: Block) -> bool:
     return getattr(block, "source", None) == BlockSource.AUTO_TIGHTENED
 

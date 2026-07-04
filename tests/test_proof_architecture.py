@@ -859,6 +859,23 @@ def test_layout_ocr_policy_writes_go_through_layout_block_state_helper():
     assert offenders == []
 
 
+def test_layout_source_label_writes_go_through_layout_block_state_helper():
+    allowed = {Path("app/models/layout_block_state.py")}
+    offenders: list[str] = []
+    helper_source = Path("app/models/layout_block_state.py").read_text(encoding="utf-8")
+    assert "def set_layout_block_source_label" in helper_source
+
+    for path in APP_DIR.rglob("*.py"):
+        if path in allowed:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for target in _assigned_attr_targets(tree):
+            if target.attr == "source_label":
+                offenders.append(f"{path}:{target.lineno}: direct source_label assignment")
+
+    assert offenders == []
+
+
 def test_project_store_exposes_only_scoped_proof_line_write_port():
     from app.core.project_store import ProjectStore
 

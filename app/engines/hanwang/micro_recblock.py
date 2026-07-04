@@ -107,6 +107,7 @@ from app.models.layout_block_state import (
     is_user_authored_layout_block,
     is_user_authored_layout_source,
     set_layout_block_ocr_policy,
+    set_layout_block_source_label,
 )
 from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_text_observation import create_ocr_text_line
@@ -3500,7 +3501,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         "manual_bbox": bbox_xyxy,
         "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
     }
-    block.source_label = "inline_formula"
+    set_layout_block_source_label(block, "inline_formula")
     set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
@@ -3521,7 +3522,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
     flags = ["manual_formula_needs_text"]
     if reason:
         flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
-    block.source_label = "inline_formula"
+    set_layout_block_source_label(block, "inline_formula")
     set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, {
             "status": BINDING_EMPTY_REVIEW,

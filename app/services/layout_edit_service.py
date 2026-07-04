@@ -19,6 +19,7 @@ from app.models.layout_block_state import (
     mark_layout_block_manual_draw,
     mark_layout_block_user_edited,
     set_layout_block_ocr_policy,
+    set_layout_block_source_label,
 )
 from app.models.layout_projection import (
     append_page_layout_block,
@@ -332,7 +333,7 @@ class LayoutEditService:
     ) -> LayoutEditResult:
         before = {"block": self.block_state(block)}
         block.block_type = block_type
-        block.source_label = source_label
+        set_layout_block_source_label(block, source_label)
         mark_layout_block_user_edited(block)
         set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
         binding = self.bind_manual_block_to_paddle(page, block)
@@ -367,7 +368,7 @@ class LayoutEditService:
         y2 = max([bbox.y2, *(block.bbox.y2 for block in ordered)])
         primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
         primary.block_type = block_type
-        primary.source_label = source_label
+        set_layout_block_source_label(primary, source_label)
         clear_block_ocr_lines(primary)
         mark_layout_block_user_edited(primary)
         set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
@@ -402,7 +403,7 @@ class LayoutEditService:
         apply_paddle_binding_to_block(block, binding)
         self._preserve_inline_formula_origin_binding(block)
         if normalize_source_label(explicit_source_label) in _PRESERVE_EXPLICIT_SOURCE_LABELS:
-            block.source_label = explicit_source_label
+            set_layout_block_source_label(block, explicit_source_label)
         return paddle_binding_dict(block)
 
     @staticmethod
@@ -442,7 +443,7 @@ class LayoutEditService:
         if not next_binding.get("candidate_bbox") and origin_bbox is not None:
             next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
-        block.source_label = source_label
+        set_layout_block_source_label(block, source_label)
         set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
         for line in block_ocr_lines(block):
             line.bbox = block.bbox

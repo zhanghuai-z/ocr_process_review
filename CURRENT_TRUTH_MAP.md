@@ -46,6 +46,7 @@
      - create/delete/change_kind/merge/geometry_update/restore_blocks 是当前用户编辑写入口
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
      - Block.source 的人工来源标记通过 layout_block_state helper 写入
+     - Block.source_label 的运行时改写通过 layout_block_state helper 写入
      - Block.ocr_policy 的策略落点通过 layout_block_state helper 写入
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
@@ -119,7 +120,7 @@ OCR Hanwang/CharOCR
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | 旧 `block.raw_payload`、旧 `block.app_payload` | `raw_payload/app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
-| Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
+| Paddle 细标签 | `Block.source_label` / raw label / `set_layout_block_source_label()` | `Block.block_type` 反推、各模块直接写 `block.source_label` | 页眉、脚注、公式序号等细分来自 source_label；运行时改写必须经 layout_block_state helper。 |
 | 块来源/编辑态 | `app.models.layout_block_state` helper | 各模块直接比较或写入 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑来源、导出 origin 等语义的解释和用户编辑写入都集中到 helper。 |
 | 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` / `set_layout_block_ocr_policy()` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks`、各模块直接写 `block.ocr_policy` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line；策略计算仍在规则层，写回 Block 必须走 layout_block_state helper。 |
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |

@@ -21,7 +21,7 @@ from app.core.paddle_line_routing import (
 )
 from app.core.normalized_layout_artifact import LayoutRegion, normalized_layout_regions
 from app.models import BBox, Block, BlockOrigin, BlockType, OcrPolicy
-from app.models.layout_block_state import set_layout_block_ocr_policy
+from app.models.layout_block_state import set_layout_block_ocr_policy, set_layout_block_source_label
 
 
 XYXY = tuple[int, int, int, int]
@@ -575,7 +575,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
         raw_index=binding.parent_index if binding.parent_index >= 0 else (existing_origin.raw_index if existing_origin else None),
     )
     set_paddle_binding(block, binding.to_payload())
-    block.source_label = binding.source_label or block.source_label or block.block_type.value
+    set_layout_block_source_label(block, binding.source_label or block.source_label or block.block_type.value)
     set_layout_block_ocr_policy(block, binding.ocr_policy)
     if binding.text:
         replace_block_ocr_lines(block, [
