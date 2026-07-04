@@ -20,6 +20,8 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
+from app.models.layout_projection import page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
@@ -795,12 +797,12 @@ class LayoutPanel(QWidget):
         total_pages = len(self._pages)
         analyzed_pages = sum(1 for page in self._pages if page.is_analyzed)
         failed_pages = sum(1 for page in self._pages if page.error_message)
-        total_blocks = sum(len(page.blocks) for page in self._pages)
+        total_blocks = sum(len(page_layout_blocks(page)) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
         total_lines = sum(page_ocr_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
         for page in self._pages:
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 label = _block_type_label(block.block_type)
                 counts[label] = counts.get(label, 0) + 1
         count_text = "，".join(
@@ -906,7 +908,7 @@ class LayoutPanel(QWidget):
             needle = query if self._search_case.isChecked() else query.lower()
 
         for page_idx, page in enumerate(self._pages):
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 if not self._block_matches_search_source_filter(block, str(source_filter or "any")):
                     continue
                 fields = (
@@ -1039,7 +1041,7 @@ class LayoutPanel(QWidget):
                 ))
                 if is_changed:
                     changed += 1
-            for order, block in enumerate(page.blocks):
+            for order, block in enumerate(page_layout_blocks(page)):
                 block.order = order
             self.block_contract_changed.emit(page.page_number, "block_type_changed")
         self._show_page_layers(self._pages[self._current_page_idx])
@@ -1223,7 +1225,10 @@ class LayoutPanel(QWidget):
         self._outline_tree.clear()
         stack: list[tuple[int, QTreeWidgetItem]] = []
         for page_idx, page in enumerate(self._pages):
-            heading_blocks = [block for block in page.blocks if self._is_title_like_block(block)]
+            heading_blocks = [
+                block for block in page_layout_blocks(page)
+                if self._is_title_like_block(block)
+            ]
             if not heading_blocks:
                 continue
             for block in sorted(heading_blocks, key=lambda item: (item.bbox.y, item.bbox.x, item.order)):
@@ -1441,13 +1446,13 @@ class LayoutPanel(QWidget):
         if page.needs_ocr_rerun:
             return []
         chars = []
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if is_ocr_text_invalidated(block):
                 continue
             for line in block_ocr_lines(block):
                 chars.extend([
                     char
-                    for char in line.chars
+                    for char in line_ocr_chars(line)
                     if (
                         char.bbox is not None
                         and char.bbox_source != "paddle_inline_formula"
@@ -1458,7 +1463,7 @@ class LayoutPanel(QWidget):
 
     def _show_page_layers(self, page: Page) -> None:
         self._ensure_inline_formula_blocks(page)
-        self._viewer.show_blocks(page.blocks)
+        self._viewer.show_blocks(page_layout_blocks(page))
         self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)
@@ -1495,7 +1500,7 @@ class LayoutPanel(QWidget):
                 continue
             seen.add(page_idx)
             page = self._pages[page_idx]
-            snapshots.append((page_idx, copy.deepcopy(page.blocks)))
+            snapshots.append((page_idx, copy.deepcopy(page_layout_blocks(page))))
         if not snapshots:
             return
         self._undo_stack.append(snapshots)
@@ -1516,7 +1521,7 @@ class LayoutPanel(QWidget):
             self._layout_edit_service.apply(LayoutEditCommand.restore_blocks(
                 page,
                 copy.deepcopy(blocks),
-                before={"blocks": [self._layout_block_state(block) for block in page.blocks]},
+                before={"blocks": [self._layout_block_state(block) for block in page_layout_blocks(page)]},
             ))
             restored_page_indices.append(page_idx)
         if not restored_page_indices:
@@ -1669,7 +1674,7 @@ class LayoutPanel(QWidget):
 
     def _blocks_intersecting_bbox(self, page: Page, bbox: BBox) -> list[Block]:
         return [
-            block for block in page.blocks
+            block for block in page_layout_blocks(page)
             if self._bbox_hits_frame(bbox, block.bbox)
         ]
 
@@ -1702,7 +1707,7 @@ class LayoutPanel(QWidget):
     def _infer_formula_source_label_for_bbox(self, page: Page, bbox: BBox, *, exclude: Block | None = None) -> str:
         cx = (bbox.x1 + bbox.x2) / 2.0
         cy = (bbox.y1 + bbox.y2) / 2.0
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if block is exclude or block.block_type != BlockType.TEXT:
                 continue
             if not (block.bbox.x1 <= cx <= block.bbox.x2 and block.bbox.y1 <= cy <= block.bbox.y2):

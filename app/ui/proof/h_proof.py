@@ -45,6 +45,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import Block, BlockType, Line, Page, ProofStatus
+from app.models.layout_projection import page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
 from app.core.ocr_ir import is_formula_marker_token
@@ -470,7 +472,7 @@ def _debug_block_labels(block: Block) -> set[str]:
 def _line_has_formula_source(line: Line) -> bool:
     has_formula_route = any(flag in _DEBUG_FORMULA_LINE_FLAGS for flag in line.review_flags)
     formula_texts: list[str] = []
-    for char in line.chars or []:
+    for char in line_ocr_chars(line):
         source = normalize_source_label(getattr(char, "bbox_source", ""))
         if source == "paddle_inline_formula":
             formula_texts.append(str(getattr(char, "token_text", "") or getattr(char, "char", "") or ""))
@@ -487,7 +489,7 @@ def _line_is_formula_marker_only(line: Line) -> bool:
         return True
     formula_texts = [
         str(getattr(char, "token_text", "") or getattr(char, "char", "") or "")
-        for char in line.chars or []
+        for char in line_ocr_chars(line)
         if normalize_source_label(getattr(char, "bbox_source", "")) == "paddle_inline_formula"
     ]
     return bool(formula_texts) and all(is_formula_marker_token(text) for text in formula_texts)
@@ -585,7 +587,7 @@ def iter_unique_page_hproof_debug_lines(
     if not formulas and not tables:
         return
     seen: list[tuple[str, object]] = []
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         formula_block = _is_debug_formula_block(block)
         table_block = _is_debug_table_block(block)
         if formulas and formula_block and not block_has_ocr_lines(block):
@@ -661,7 +663,7 @@ def _canonicalize_text_to_slots(text: str, chars) -> tuple[str, bool]:
 class _RowEditor(QPlainTextEdit):
     """嵌入行内的单行文本编辑器，拦截专用快捷键。
 
-    当 ``self._fixed_length`` 不为 None 时（= 行有 ``line.chars``，图像元素数固定），
+    当 ``self._fixed_length`` 不为 None 时（= 行有固定 OCR 字符观测，图像元素数固定），
     输入行为强制为"覆写模式"：
 
     - 普通字符输入：若无 selection，自动选中光标处的下一字 → 由 super 替换；
@@ -690,7 +692,7 @@ class _RowEditor(QPlainTextEdit):
         self._last_hover_idx: int = -1
         # 启用鼠标跟踪：无需按下也能收到 mouseMoveEvent，用于图字 hover 联动
         self.setMouseTracking(True)
-        # 每个字的 x 坐标由 line.chars[i].bbox 映射到 editor 像素空间。
+        # 每个字的 x 坐标由 OCR 字符观测 bbox 映射到 editor 像素空间。
         # _LinePair 在每次 _render_line_image 后推入 x_centers / widths。
         # None / 空列表表示降级为 QPlainTextEdit 原生渲染。
         self._slot_x_centers: Optional[List[Optional[float]]] = None
@@ -892,7 +894,7 @@ class _RowEditor(QPlainTextEdit):
 
         if self._is_fixed():
             # 固定槽位语义：删除/剪切只把槽位填空，普通输入覆写当前槽位，
-            # 所有路径都保持 line.chars 数量和文本槽位数量一致。
+            # 所有路径都保持 OCR 字符观测数量和文本槽位数量一致。
             blank = " "
             if key == Qt.Key.Key_Backspace:
                 cur = self.textCursor()
@@ -1038,7 +1040,7 @@ class _SlotLineEditor(QWidget):
     """横校逐字 slot 编辑器。
 
     这个控件只把 ``QTextDocument`` 当作文本状态容器，不使用 Qt 原生文本布局。
-    屏幕上的字符、命中区域、选中背景都按 ``line.chars[i].bbox`` 传入的
+    屏幕上的字符、命中区域、选中背景都按 OCR 字符观测 bbox 传入的
     slot geometry 绘制，避免“视觉字位”和 Qt 文本光标坐标不一致。
     """
 
@@ -2144,7 +2146,7 @@ class _LinePair(QFrame):
         # 初始填入显示空间文本
         # 加载时把文本规范化到槽位数；仅在可锁定时补空，超长不动。
         _initial_disp = _displayed_text(self._line, self._page, self._block)
-        _canon, _ = _canonicalize_text_to_slots(_initial_disp, self._line.chars or [])
+        _canon, _ = _canonicalize_text_to_slots(_initial_disp, self._line_chars())
         self._editor.setPlainText(_canon)
         self._edit_session.mark_saved(_canon, line_signature(self._line))
         self._apply_editor_visual_override()
@@ -2243,7 +2245,8 @@ class _LinePair(QFrame):
         self,
         text: str,
     ) -> tuple[list[_AtomVisualOverlay], list[Optional[float]] | None, list[float] | None]:
-        if self._unit is None or not self._unit.atoms or not self._line.chars:
+        chars = self._line_chars()
+        if self._unit is None or not self._unit.atoms or not chars:
             return self._fallback_formula_visual_data(text), None, None
         span_by_char_index = self._span_by_char_index_for_formula_text(text)
         if span_by_char_index is None:
@@ -2306,8 +2309,9 @@ class _LinePair(QFrame):
         self,
         text: str,
     ) -> dict[int, tuple[int, int]] | None:
-        old_text = chars_display_text(self._line.chars or [])
-        spans = chars_display_spans(self._line.chars or [])
+        chars = self._line_chars()
+        old_text = chars_display_text(chars)
+        spans = chars_display_spans(chars)
         if text == old_text:
             return {
                 char_index: (span.start, span.end)
@@ -2567,7 +2571,7 @@ class _LinePair(QFrame):
 
     def _canonical_model_display_text(self) -> str:
         text = _displayed_text(self._line, self._page, self._block)
-        text, _ = _canonicalize_text_to_slots(text, self._line.chars or [])
+        text, _ = _canonicalize_text_to_slots(text, self._line_chars())
         return text
 
     def _set_editor_text(self, text: str) -> None:
@@ -2693,12 +2697,12 @@ class _LinePair(QFrame):
             self.text_saved.emit(self._idx, new_text)
 
     def _apply_fixed_length_to_editor(self) -> None:
-        """按当前 line.chars 状态启用/关闭固定长度覆写模式。
+        """按当前 OCR 字符观测状态启用/关闭固定长度覆写模式。
 
         不给 editor 设置 tooltip，避免空白 hover 框残影；固定模式本身仍启用，
         Backspace/Delete 走“填空字”路径，而不是拒绝输入。
         """
-        chars = self._line.chars or []
+        chars = self._line_chars()
         text_len = len(self._editor.toPlainText())
         fixed = len(chars) if chars and text_len == len(chars) else None
         self._editor.set_fixed_length(fixed)
@@ -2711,7 +2715,7 @@ class _LinePair(QFrame):
         if not self._chars_aligned():
             new_idx = -1
         else:
-            new_idx = idx if 0 <= idx < len(self._line.chars) else -1
+            new_idx = idx if 0 <= idx < len(self._line_chars()) else -1
         if new_idx == self._hover_char_idx:
             return
         self._hover_char_idx = new_idx
@@ -2720,14 +2724,14 @@ class _LinePair(QFrame):
     # ── 弱光标 + 逐字高亮 ───────────────
 
     def _chars_aligned(self) -> bool:
-        """Editor 文本是否与 ``line.chars`` 严格一一对应。
+        """Editor 文本是否与 OCR 字符观测严格一一对应。
 
         图像 char.bbox 与文本下标的映射只有在 ``len(text) == len(chars)`` 且
         每个 ``char.char`` 恰好一个字符时才可靠。word/token granularity 或
         结构性编辑会让第 i 个文本字与第 i 个 bbox 错位，此时必须降级，不画
         逐字高亮。
         """
-        chars = self._line.chars
+        chars = self._line_chars()
         if not chars:
             return False
         if len(self._editor.toPlainText()) != len(chars):
@@ -2745,7 +2749,7 @@ class _LinePair(QFrame):
 
     def _classify_char_verdict(self, i: int) -> Optional[_cv.CharVerdict]:
         """返回第 i 个字的 verdict；下标越界 / 未对齐 → None。"""
-        chars = self._line.chars or []
+        chars = self._line_chars()
         if not (0 <= i < len(chars)):
             return None
         text = self._editor.toPlainText()
@@ -2779,7 +2783,7 @@ class _LinePair(QFrame):
         aligned = self._chars_aligned()
         # 1) 前景色：仅在图字严格一一对应时绘制
         if aligned:
-            chars = self._line.chars or []
+            chars = self._line_chars()
             n = min(len(chars), len(doc_text))
             for i in range(n):
                 verdict = self._classify_char_verdict(i)
@@ -2843,7 +2847,7 @@ class _LinePair(QFrame):
         scale = self._render_scale or 1.0
         orig_x = ox + click_x / scale
         target_idx = None
-        for i, ch in enumerate(self._line.chars):
+        for i, ch in enumerate(self._line_chars()):
             if ch.bbox is None:
                 continue
             if ch.bbox.x <= orig_x <= ch.bbox.x2:
@@ -2851,7 +2855,7 @@ class _LinePair(QFrame):
                 break
         if target_idx is None:
             best_dist = float("inf")
-            for i, ch in enumerate(self._line.chars):
+            for i, ch in enumerate(self._line_chars()):
                 if ch.bbox is None:
                     continue
                 cx = (ch.bbox.x + ch.bbox.x2) / 2.0
@@ -2920,13 +2924,14 @@ class _LinePair(QFrame):
                 highlight_range = (start, end)
             else:
                 pos = cursor.position()
-                if 0 <= pos < len(self._line.chars):
+                if 0 <= pos < len(self._line_chars()):
                     highlight_range = (pos, pos + 1)
         if highlight_range is not None:
             start, end = highlight_range
             ox, oy = self._line_crop_origin
-            for idx in range(start, min(end, len(self._line.chars))):
-                char = self._line.chars[idx]
+            chars = self._line_chars()
+            for idx in range(start, min(end, len(chars))):
+                char = chars[idx]
                 if char.bbox is None:
                     continue
                 x1 = max(0, char.bbox.x - ox)
@@ -2943,10 +2948,10 @@ class _LinePair(QFrame):
         # 此处的绿框会叠在外侧 1px，仍能看出"鼠标正在指这个字"）。
         if (
             self._chars_aligned()
-            and 0 <= self._hover_char_idx < len(self._line.chars)
+            and 0 <= self._hover_char_idx < len(self._line_chars())
         ):
             ox, oy = self._line_crop_origin
-            char = self._line.chars[self._hover_char_idx]
+            char = self._line_chars()[self._hover_char_idx]
             if char.bbox is not None:
                 x1 = max(0, char.bbox.x - ox)
                 y1 = max(0, char.bbox.y - oy)
@@ -2979,7 +2984,7 @@ class _LinePair(QFrame):
         self._sync_editor_slot_geometry()
 
     def _sync_editor_slot_geometry(self) -> None:
-        """按 line.chars[i].bbox + _render_scale + _line_crop_origin 推算
+        """按 OCR 字符观测 bbox + _render_scale + _line_crop_origin 推算
         每字在 editor 视口内的 x 中心 & 宽度；交给 editor 自绘文本。
 
         chars 未对齐 / 缺 bbox → 清空 → editor 走原生渲染（降级）。
@@ -3009,7 +3014,7 @@ class _LinePair(QFrame):
         widths: list = []
         fm = QFontMetrics(editor.font())
         text = editor.toPlainText()
-        for idx, ch in enumerate(self._line.chars):
+        for idx, ch in enumerate(self._line_chars()):
             if ch.bbox is None:
                 x_centers.append(None)
                 widths.append(0.0)
@@ -3108,6 +3113,9 @@ class _LinePair(QFrame):
 
     # ── 私有 ──────────────────────────────────────────────────
 
+    def _line_chars(self):
+        return line_ocr_chars(self._line)
+
     def _on_click(self, event) -> None:
         if hasattr(event, "button") and event.button() == Qt.MouseButton.RightButton:
             if self._exit_formula_edit_mode():
@@ -3130,7 +3138,7 @@ class _LinePair(QFrame):
         self._editor.blockSignals(True)
         # 还原后也按槽位规则补空。
         _rev_canon, _ = _canonicalize_text_to_slots(
-            original_true, self._line.chars or []
+            original_true, self._line_chars()
         )
         self._editor.setPlainText(_rev_canon)
         self._editor.apply_inline_y_axis_metrics()
@@ -3154,8 +3162,9 @@ class _LinePair(QFrame):
             return
         # 这里只在真正异常时给 ⚠ 提示；正常情况下不显示额外 hover 文案。
         text_n = len(self._editor.toPlainText()) if hasattr(self, "_editor") else 0
-        char_n = len(self._line.chars) if self._line.chars else 0
-        unaligned = bool(self._line.chars) and text_n != char_n
+        chars = self._line_chars()
+        char_n = len(chars) if chars else 0
+        unaligned = bool(chars) and text_n != char_n
         glyph = _STATUS_GLYPH.get(status, "○")
         if unaligned:
             color = "#c62828"

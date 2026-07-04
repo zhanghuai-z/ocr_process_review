@@ -41,6 +41,8 @@ from PySide6.QtWidgets import (
 
 from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
+from app.models.layout_projection import page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_line_at,
     block_ocr_line_count,
@@ -933,7 +935,7 @@ class VProofPanel(QWidget):
             page_id=page.id,
             block_uid=block.uid,
             block_id=block.id,
-            block_index=page.blocks.index(block) if block in page.blocks else -1,
+            block_index=page_layout_blocks(page).index(block) if block in page_layout_blocks(page) else -1,
             line_uid=line.uid,
             line_id=line.id,
             line_index=line_index,
@@ -979,11 +981,11 @@ class VProofPanel(QWidget):
                 return resolved_page, block, line, line_index
         block: Optional[Block] = None
         if edit.block_uid:
-            block = next((b for b in page.blocks if b.uid == edit.block_uid), None)
+            block = next((b for b in page_layout_blocks(page) if b.uid == edit.block_uid), None)
         if block is None and edit.block_id is not None:
-            block = next((b for b in page.blocks if b.id == edit.block_id), None)
-        if block is None and 0 <= edit.block_index < len(page.blocks):
-            block = page.blocks[edit.block_index]
+            block = next((b for b in page_layout_blocks(page) if b.id == edit.block_id), None)
+        if block is None and 0 <= edit.block_index < len(page_layout_blocks(page)):
+            block = page_layout_blocks(page)[edit.block_index]
         if block is None:
             return None
 
@@ -1346,7 +1348,7 @@ class VProofPanel(QWidget):
                 self._bbox_signature(line.bbox),
                 tuple(line.review_flags),
             ))
-            for char_idx, char in enumerate(line.chars):
+            for char_idx, char in enumerate(line_ocr_chars(line)):
                 parts.append((
                     "char",
                     char.uid,
@@ -2093,7 +2095,7 @@ class VProofPanel(QWidget):
         for page in self._session.pages:
             if page.page_number != entry.page_number:
                 continue
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 if block.order != entry.block_order:
                     continue
                 if not (0 <= entry.line_idx < block_ocr_line_count(block)):
@@ -2240,7 +2242,7 @@ class VProofPanel(QWidget):
         for page in self._session.pages:
             if page.page_number != entry.page_number:
                 continue
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 if block.order == entry.block_order:
                     return block
         return None

@@ -441,6 +441,34 @@ def test_character_observation_boundary_is_used_by_core_consumers():
         assert "app.models.ocr_character_observation" in source
 
 
+def test_recognize_ui_uses_layout_and_char_observation_boundaries():
+    recognize_sources = [
+        Path("app/ui/recognize/ocr_panel.py"),
+        Path("app/ui/recognize/layout_panel.py"),
+    ]
+    for path in recognize_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "page.blocks" not in source
+        assert "line.chars" not in source
+
+    assert "app.models.layout_projection" in Path("app/ui/recognize/ocr_panel.py").read_text(
+        encoding="utf-8"
+    )
+    layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+    assert "app.models.layout_projection" in layout_source
+    assert "app.models.ocr_character_observation" in layout_source
+
+
+def test_proof_ui_does_not_reach_legacy_layout_or_char_storage_directly():
+    offenders: list[str] = []
+    for path in sorted(PROOF_UI_DIR.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for forbidden in ("page.blocks", "line.chars", "_line.chars"):
+            if forbidden in source:
+                offenders.append(f"{path}:{forbidden}")
+    assert offenders == []
+
+
 def test_line_text_facts_access_goes_through_text_contract_boundary():
     allowed = {
         Path("app/core/line_text_contract.py"),

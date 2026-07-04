@@ -13,7 +13,7 @@
 本 widget 是一条窄条（约 26 px 高），位于 _img_lbl 的正下方、editor 的正上方，
 宽度与图像 pixmap 完全相同。
 
-它按 ``line.chars[i].bbox`` 的 x 坐标（经过 _line_crop_origin 平移 + _render_scale
+它按 OCR 字符观测 bbox 的 x 坐标（经过 _line_crop_origin 平移 + _render_scale
 缩放后，落在 widget 像素坐标）绘制对应的文本字 text[i]：
 
   ─────────────────────────────────────────────
@@ -33,7 +33,7 @@
 
 满足以下任何一条 → 进入降级模式，**不画**字符 x 对应，只画提示语：
 
-  - line.chars 为空 / 任一 char 缺 bbox
+  - OCR 字符观测为空 / 任一 char 缺 bbox
   - len(text) != len(chars)（用户编辑导致长度不一致；本轮 editor 已有 fixed-length
     保护，但仍可能在极端 case 下出现）
   - render_scale 未就绪（图像尚未渲染）

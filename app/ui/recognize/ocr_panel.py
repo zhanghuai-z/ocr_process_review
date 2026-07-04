@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_display_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_avg_confidence, block_ocr_line_count, block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -110,10 +111,10 @@ class OcrPanel(QWidget):
         self._progress.setVisible(False)
         self._populate_tree(pages)
         flagged = sum(
-            1 for p in pages for b in p.blocks
+            1 for p in pages for b in page_layout_blocks(p)
             for l in block_ocr_lines(b) if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
         )
-        total_lines = sum(block_ocr_line_count(b) for p in pages for b in p.blocks)
+        total_lines = sum(block_ocr_line_count(b) for p in pages for b in page_layout_blocks(p))
         self._status_lbl.setText(
             f"识别完成：{total_lines} 行，其中 {flagged} 行置信度偏低（已自动标记）"
         )
@@ -126,7 +127,7 @@ class OcrPanel(QWidget):
         for page in pages:
             page_item = QTreeWidgetItem(self._tree, [f"第 {page.page_number} 页", "", ""])
             page_item.setData(0, Qt.ItemDataRole.UserRole, page)
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 block_item = QTreeWidgetItem(
                     page_item,
                     [f"[{block_display_label(block)}]", f"{block_avg_confidence(block):.2f}", ""],
@@ -158,11 +159,11 @@ class OcrPanel(QWidget):
         from app.models import Line, Page as PageModel
         if isinstance(obj, PageModel):
             self._viewer.set_image(obj.display_image_path)
-            self._viewer.show_blocks(obj.blocks)
+            self._viewer.show_blocks(page_layout_blocks(obj))
         elif isinstance(obj, Block):
             # 找到对应页面
             for page in self._pages:
-                if obj in page.blocks:
+                if obj in page_layout_blocks(page):
                     self._viewer.set_image(page.display_image_path)
                     self._viewer.show_blocks([obj])
                     break
