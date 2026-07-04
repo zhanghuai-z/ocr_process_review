@@ -750,6 +750,32 @@ def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
     assert "iter_project_ocr_line_occurrences" in persist_source
 
 
+def test_proof_refresh_signatures_use_line_signature_contract():
+    controller_source = Path("app/controllers/workflow_controller.py").read_text(encoding="utf-8")
+    controller_signature_source = _function_source(controller_source, "_proof_pages_signature")
+    assert "line_signature(line)" in controller_signature_source
+    for forbidden in (
+        "iter_line_ocr_char_occurrences",
+        "char.token_text",
+        "char.confidence",
+        "char.bbox_source",
+        "char.bbox_granularity",
+    ):
+        assert forbidden not in controller_signature_source
+
+    vproof_source = Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
+    char_index_signature_source = _function_source(vproof_source, "_char_index_page_signature")
+    assert "line_signature(line)" in char_index_signature_source
+    for forbidden in (
+        "line_ocr_chars(line)",
+        "char.token_text",
+        "char.confidence",
+        "char.bbox_source",
+        "char.bbox_granularity",
+    ):
+        assert forbidden not in char_index_signature_source
+
+
 def test_ui_char_display_uses_text_contract_helper():
     ui_sources = {
         Path("app/ui/widgets/image_viewer.py"),

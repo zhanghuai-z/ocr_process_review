@@ -42,12 +42,12 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.models.layout_projection import page_layout_blocks
-from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_line_at,
     block_ocr_line_count,
     block_ocr_lines,
     line_belongs_to_block,
+    line_ocr_bbox,
 )
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
@@ -1344,21 +1344,8 @@ class VProofPanel(QWidget):
                 line.uid,
                 line.id,
                 line_idx,
-                proof_display_text(line),
-                self._bbox_signature(line.bbox),
-                tuple(line.review_flags),
-            ))
-            for char_idx, char in enumerate(line_ocr_chars(line)):
-                parts.append((
-                    "char",
-                    char.uid,
-                    char_idx,
-                    char.char,
-                    self._bbox_signature(char.bbox),
-                    char.bbox_source,
-                    char.bbox_granularity,
-                    char.token_text,
-                    round(float(char.confidence), 6),
+                line_signature(line),
+                self._bbox_signature(line_ocr_bbox(line)),
                 ))
         return tuple(parts)
 

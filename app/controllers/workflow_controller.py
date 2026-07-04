@@ -19,7 +19,7 @@ from app.models.block_state import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
 from app.core.proof_line_utils import iter_unique_page_text_lines
-from app.core.proof_line_facts import proof_display_text
+from app.core.proof_occurrence import line_signature
 from app.core.project_store import ProjectStore
 from app.core.proof_change import ProofChangeSet
 from app.core.workflow_state import (
@@ -41,8 +41,7 @@ from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
-from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
-from app.models.ocr_text_observation import line_ocr_review_flags
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     line_ocr_bbox,
@@ -299,23 +298,9 @@ class WorkflowController(QObject):
                     line.uid,
                     line.id,
                     line_idx,
-                    proof_display_text(line),
+                    line_signature(line),
                     self._bbox_signature(line_ocr_bbox(line)),
-                    line_ocr_review_flags(line),
                 ))
-                for char_occurrence in iter_line_ocr_char_occurrences(line):
-                    char = char_occurrence.char
-                    parts.append((
-                        "char",
-                        char.uid,
-                        char_occurrence.char_index,
-                        char.char,
-                        self._bbox_signature(char.bbox),
-                        char.bbox_source,
-                        char.bbox_granularity,
-                        char.token_text,
-                        round(float(char.confidence), 6),
-                    ))
         return tuple(parts)
 
     def sync_proof_panels(self, *, force_load: bool = False) -> None:
