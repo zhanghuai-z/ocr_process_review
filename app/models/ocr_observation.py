@@ -16,7 +16,7 @@ from .layout_projection import (
     iter_project_layout_block_occurrences,
     page_layout_blocks,
 )
-from .project import Block, Line, OcrProject, Page
+from .project import BBox, Block, Line, OcrProject, Page
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,10 @@ def block_avg_confidence(block: Block) -> float:
 
 def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:
     block.lines = list(lines)
+
+
+def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
+    line.bbox = bbox
 
 
 def clear_block_ocr_lines(block: Block) -> None:

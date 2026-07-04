@@ -34,7 +34,7 @@ from app.models import (
 )
 from app.models.layout_block_state import append_layout_block_note_once, set_layout_block_bbox
 from app.models.layout_projection import append_page_layout_block, page_layout_blocks
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
 from app.models.ocr_observation import (
     append_block_ocr_line,
     block_ocr_line_count,
@@ -42,6 +42,7 @@ from app.models.ocr_observation import (
     clear_block_ocr_lines,
     page_ocr_line_count,
     replace_block_ocr_lines,
+    set_ocr_line_bbox,
 )
 from app.models.page_state import clear_page_error_message, mark_page_ocr_failed
 from app.core.logging import get_logger
@@ -628,17 +629,11 @@ class OcrPipeline:
         bbox_space: str,
     ) -> None:
         for line in lines:
-            line.bbox = seam.to_page_bbox(
-                line.bbox,
-                source_space=bbox_space,
-            )
+            set_ocr_line_bbox(line, seam.to_page_bbox(line.bbox, source_space=bbox_space))
             for char in line_ocr_chars(line):
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
-                char.bbox = seam.to_page_bbox(
-                    char.bbox,
-                    source_space=bbox_space,
-                )
+                set_ocr_char_bbox(char, seam.to_page_bbox(char.bbox, source_space=bbox_space))
             ensure_line_text_contract(line)
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:

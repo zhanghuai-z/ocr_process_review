@@ -35,7 +35,7 @@
 | `LayoutPanel` 直接解析 Paddle raw overlay | `LayoutOverlayService` | 删除 UI 内 `raw_layout_records`、`ROUTE_SUBBLOCKS_FIELD`、`bbox_from_variant` 等 raw artifact 解析；只读 overlay 和 inline formula 提升由服务统一产出。 |
 | Hanwang/Export/BlockAttributes/LayoutEditService 分散解释或写入 `Block.source` | `app.models.layout_block_state` | 人工编辑来源、导出 origin、路由手工结构判断、用户编辑来源标记集中到 helper；`Block.source` 字段仍保留为后续迁移入口。 |
 | 非 UI 业务层直接读写 `Page.blocks` | `app.models.layout_projection` | 当前 `Page.blocks` 仍是物理运行投影；OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块经 projection helper 访问，避免对象树继续扩散为领域模型。 |
-| 非 UI/非 OCR producer 业务层直接读写 `Line.chars` | `app.models.ocr_character_observation` | 当前 `Line.chars` 仍是物理字符观察投影；ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe 等经 character observation helper 访问。 |
+| 非 UI/非 OCR producer 业务层直接读写 `Line.chars` | `app.models.ocr_character_observation` | 当前 `Line.chars` 仍是物理字符观察投影；ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe 等经 character observation helper 访问；运行时 span 替换和 `Char.bbox` 写入也经该边界。 |
 
 ## 删除顺序
 
@@ -66,8 +66,8 @@
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
 - active `Block` 不再携带 `raw_payload`；新导入和 Hanwang OCR 后重建的 block 通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取原始事实。
 - `Block.app_payload` 已从 active model 删除。
-- `Block.lines` 的业务访问、ProjectStore 读写、proof 行定位和 OCR 生产投影已迁移到 `app.models.ocr_observation`；生产代码不再用 `Block(lines=...)` 构造 OCR 行观察；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
-- `Line.chars` 的业务访问、ProjectStore 读写、ProofAtom 构建、CharIndex 构建、Export IR、ProofCrop 补框、OCR IR 投影和 Hanwang 投影已迁移到 `app.models.ocr_character_observation`；生产代码不再用 `Line(chars=...)` 构造 OCR 字符观察；当前字段仍作为内部字符观察投影，后续可替换为独立 char observation store。
+- `Block.lines` 的业务访问、ProjectStore 读写、proof 行定位和 OCR 生产投影已迁移到 `app.models.ocr_observation`；生产代码不再用 `Block(lines=...)` 构造 OCR 行观察；`Line.bbox` 运行时写入也经 `set_ocr_line_bbox()`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
+- `Line.chars` 的业务访问、ProjectStore 读写、ProofAtom 构建、CharIndex 构建、Export IR、ProofCrop 补框、OCR IR 投影和 Hanwang 投影已迁移到 `app.models.ocr_character_observation`；生产代码不再用 `Line(chars=...)` 构造 OCR 字符观察；`Char.bbox` 和 span 替换也经该边界；当前字段仍作为内部字符观察投影，后续可替换为独立 char observation store。
 - `Line.text/ocr_text` 的 OCR 生产写入口已收口到 `app.models.ocr_text_observation.create_ocr_text_line()`；OCR IR、Hanwang、fake/local OCR、Paddle manual binding 不再手写 `Line(text=..., ocr_text=...)`。
 - UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`；LayoutWorker/OcrPipeline 不再直接写后台错误消息。

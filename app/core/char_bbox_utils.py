@@ -7,6 +7,7 @@ import numpy as np
 
 from app.models import BBox, Char, Line
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+from app.models.ocr_observation import set_ocr_line_bbox
 from app.core.proof_line_facts import proof_display_text
 
 
@@ -504,7 +505,7 @@ def ensure_line_char_bboxes(
         if page_image is not None
         else line.bbox.normalize()
     )
-    line.bbox = refined_line_bbox
+    set_ocr_line_bbox(line, refined_line_bbox)
     split_bboxes = (
         refine_line_char_bboxes(refined_line_bbox, text, page_image)
         if page_image is not None

@@ -441,6 +441,34 @@ def test_character_observation_boundary_is_used_by_core_consumers():
         assert "app.models.ocr_character_observation" in source
 
 
+def test_ocr_observation_geometry_writes_stay_at_observation_boundaries():
+    allowed_by_pattern = {
+        r"\bline\.bbox\s*=(?!=)": {Path("app/models/ocr_observation.py")},
+        r"\bchar\.bbox\s*=(?!=)": {Path("app/models/ocr_character_observation.py")},
+        r"\bline\.chars\s*=(?!=)": {Path("app/models/ocr_character_observation.py")},
+        r"\bline\.chars\[[^\n]+\]\s*=(?!=)": {Path("app/models/ocr_character_observation.py")},
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for pattern, allowed_paths in allowed_by_pattern.items():
+            if path in allowed_paths:
+                continue
+            for match in re.finditer(pattern, source):
+                line_no = source.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path}:{line_no}: {match.group(0)}")
+    assert offenders == []
+
+    assert "def set_ocr_line_bbox" in Path("app/models/ocr_observation.py").read_text(
+        encoding="utf-8"
+    )
+    char_boundary_source = Path("app/models/ocr_character_observation.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def set_ocr_char_bbox" in char_boundary_source
+    assert "def replace_line_ocr_char_span" in char_boundary_source
+
+
 def test_production_code_does_not_construct_line_with_chars_storage():
     allowed = {
         Path("app/models/project.py"),

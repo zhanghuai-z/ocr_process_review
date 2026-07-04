@@ -30,7 +30,7 @@ from app.models.layout_projection import (
     page_layout_blocks,
     replace_page_layout_blocks,
 )
-from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines
+from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines, set_ocr_line_bbox
 
 
 STRUCTURAL_BINDING_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
@@ -450,7 +450,7 @@ class LayoutEditService:
         set_layout_block_source_label(block, source_label)
         set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
         for line in block_ocr_lines(block):
-            line.bbox = block.bbox
+            set_ocr_line_bbox(line, block.bbox)
         set_paddle_binding(block, next_binding)
         return True
 

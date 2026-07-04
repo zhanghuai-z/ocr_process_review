@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-from .project import Char, Line
+from .project import BBox, Char, Line
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,14 @@ def line_has_ocr_chars(line: Line) -> bool:
 
 def replace_line_ocr_chars(line: Line, chars: Iterable[Char]) -> None:
     line.chars = list(chars)
+
+
+def replace_line_ocr_char_span(line: Line, start: int, end: int, chars: Iterable[Char]) -> None:
+    line.chars[start:end] = list(chars)
+
+
+def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
+    char.bbox = bbox
 
 
 def clear_line_ocr_chars(line: Line) -> None:

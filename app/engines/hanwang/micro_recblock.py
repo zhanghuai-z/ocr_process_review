@@ -110,7 +110,10 @@ from app.models.layout_block_state import (
     set_layout_block_order,
     set_layout_block_source_label,
 )
-from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_character_observation import (
+    replace_line_ocr_char_span,
+    replace_line_ocr_chars,
+)
 from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 
@@ -1412,7 +1415,7 @@ def _refine_overlap_fragments_with_recrop(
                 timeout=timeout,
             )
             if _cluster_replacement_accepted(old_chars, replacement):
-                line.chars[start:end] = replacement
+                replace_line_ocr_char_span(line, start, end, replacement)
                 stats.overlap_merge_replacements += 1
             else:
                 continue
@@ -1956,7 +1959,7 @@ def _replace_line_span_with_binding(line: LineResult, binding: _TokenBinding) ->
         )
         for idx, char in enumerate(binding.chars)
     ]
-    line.chars[start:end] = replacement
+    replace_line_ocr_char_span(line, start, end, replacement)
     line.text = "".join(char.text for char in line.chars)
     return True
 
@@ -1986,17 +1989,22 @@ def _replace_line_span_with_word_binding(line: LineResult, binding: _TokenBindin
     if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
         if not all(_low_confidence_latin_rewrite_candidate(char) for char in current_chars):
             return False
-    line.chars[start:end] = [
-        CharResult(
-            text=token_text,
-            confidence=line.confidence,
-            bbox=binding_bbox,
-            candidates=[token_text],
-            source=LATIN_ENGCUT_WORD_BBOX_SOURCE,
-            bbox_granularity=LATIN_ENGCUT_WORD_BBOX_GRANULARITY,
-            token_text=token_text,
-        )
-    ]
+    replace_line_ocr_char_span(
+        line,
+        start,
+        end,
+        [
+            CharResult(
+                text=token_text,
+                confidence=line.confidence,
+                bbox=binding_bbox,
+                candidates=[token_text],
+                source=LATIN_ENGCUT_WORD_BBOX_SOURCE,
+                bbox_granularity=LATIN_ENGCUT_WORD_BBOX_GRANULARITY,
+                token_text=token_text,
+            )
+        ],
+    )
     line.text = "".join(char.text for char in line.chars)
     return True
 
