@@ -53,7 +53,7 @@ from app.core.ocr_ir import is_formula_marker_token
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_atom import ProofAtom, ProofAtomKind
-from app.core.proof_char_text import chars_display_spans, chars_display_text
+from app.core.proof_char_text import char_display_text, chars_display_spans, chars_display_text
 from app.core.proof_line_facts import proof_block_text, proof_display_text, proof_ocr_text, proof_status
 from app.core.proof_occurrence import line_signature
 from app.core.proof_projection import ProofLineProjection, build_proof_line_projection
@@ -475,7 +475,7 @@ def _line_has_formula_source(line: Line) -> bool:
     for char in line_ocr_chars(line):
         source = normalize_source_label(getattr(char, "bbox_source", ""))
         if source == "paddle_inline_formula":
-            formula_texts.append(str(getattr(char, "token_text", "") or getattr(char, "char", "") or ""))
+            formula_texts.append(char_display_text(char))
     if formula_texts:
         return any(not is_formula_marker_token(text) for text in formula_texts)
     if has_formula_route:
@@ -488,7 +488,7 @@ def _line_is_formula_marker_only(line: Line) -> bool:
     if text and is_formula_marker_token(text):
         return True
     formula_texts = [
-        str(getattr(char, "token_text", "") or getattr(char, "char", "") or "")
+        char_display_text(char)
         for char in line_ocr_chars(line)
         if normalize_source_label(getattr(char, "bbox_source", "")) == "paddle_inline_formula"
     ]

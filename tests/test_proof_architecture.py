@@ -850,6 +850,12 @@ def test_vproof_uses_char_entry_display_contract():
     assert "(entry.token_text or entry.char)" not in vproof_source
 
 
+def test_hproof_formula_debug_uses_char_display_contract():
+    hproof_source = Path("app/ui/proof/h_proof.py").read_text(encoding="utf-8")
+    assert "char_display_text" in hproof_source
+    assert 'getattr(char, "token_text"' not in hproof_source
+
+
 def test_proof_fallback_warning_is_owned_by_proof_crop_service():
     controller_source = Path("app/controllers/workflow_controller.py").read_text(encoding="utf-8")
     service_source = Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
