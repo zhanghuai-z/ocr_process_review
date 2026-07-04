@@ -89,7 +89,7 @@ def route_authority_label(block: dict[str, Any], default: str = "unknown") -> st
 
 
 def block_text(block: dict[str, Any]) -> str:
-    return paddle_record_text(block, include_markdown=False)
+    return paddle_record_text(block)
 
 
 def is_formula_style_text(text: str) -> bool:

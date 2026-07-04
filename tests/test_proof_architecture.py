@@ -1479,6 +1479,13 @@ def test_layout_routing_service_uses_typed_producer_not_route_dict_apis():
     assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in build_attachment_source
 
 
+def test_paddle_layout_schema_does_not_restore_markdown_text_alias():
+    schema_source = Path("app/core/paddle_layout_schema.py").read_text(encoding="utf-8")
+
+    assert "include_markdown" not in schema_source
+    assert 'PADDLE_TEXT_KEYS = ("block_content",)' in schema_source
+
+
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")

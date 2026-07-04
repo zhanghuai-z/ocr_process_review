@@ -45,7 +45,7 @@ def paddle_record_label(record: dict[str, Any], default: str = "unknown") -> str
     return authoritative_paddle_label(record, default)
 
 
-def paddle_record_text(record: dict[str, Any], *, include_markdown: bool = True) -> str:
+def paddle_record_text(record: dict[str, Any]) -> str:
     for key in PADDLE_TEXT_KEYS:
         value = record.get(key)
         if isinstance(value, str) and value.strip():
