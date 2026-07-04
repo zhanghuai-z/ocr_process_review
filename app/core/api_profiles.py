@@ -140,7 +140,7 @@ def _profile_from_explicit_or_profile_url(api_url: str, profile: str | None) -> 
 
 
 # 主链 layout 角色固定走 PaddleOCR-VL-1.6；OCR proof 角色固定走 PP-OCRv5。
-# 旧 /layout-parsing 只在 normalize_api_base_url() 中作为历史配置后缀剥离，
+# /layout-parsing 只在 normalize_api_base_url() 中作为已退役配置后缀剥离，
 # 不再作为可请求的 layout endpoint。
 LAYOUT_DEFAULT_PROFILE = "paddleocr-vl-1.6"
 

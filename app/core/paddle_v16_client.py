@@ -59,7 +59,7 @@ def normalize_paddle_v16_jsonl_response(
     job_id: str = "",
     job_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Convert the VL1.6 JSONL result into the legacy layout result envelope."""
+    """Convert the VL1.6 JSONL result into the application layout envelope."""
     raw_pages: list[dict[str, Any]] = []
     layout_results: list[dict[str, Any]] = []
     for line in jsonl_text.splitlines():

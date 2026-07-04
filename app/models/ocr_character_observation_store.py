@@ -1,8 +1,8 @@
 """Runtime store for OCR character observations.
 
-``Line.chars`` remains as a compatibility projection. Active code should go
+``Line.chars`` remains as the current runtime projection. Active code should go
 through ``ocr_character_observation`` helpers, which use this store as the
-current character observation boundary and keep the old field in sync.
+current character observation boundary and keep the projection in sync.
 """
 from __future__ import annotations
 

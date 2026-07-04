@@ -1,4 +1,4 @@
-"""Project OCR observations into proof-facing compatibility models.
+"""Project OCR observations into proof-facing runtime models.
 
 OCR engines should produce ``OcrIrLine``/``OcrIrToken`` observations first.
 This module is the single adapter that turns those observations into the

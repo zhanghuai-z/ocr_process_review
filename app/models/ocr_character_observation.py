@@ -1,6 +1,6 @@
 """Access boundary for OCR character observations.
 
-``Line.chars`` is a compatibility projection. Application code should use this
+``Line.chars`` is a current runtime projection. Application code should use this
 module so character, word, and formula carriers live behind one boundary instead
 of being owned directly by the mutable line model.
 """

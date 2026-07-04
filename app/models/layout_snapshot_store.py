@@ -1,6 +1,6 @@
 """Runtime store for adopted page layout snapshots.
 
-The active ``Page`` dataclass still exposes ``blocks`` as a compatibility
+The active ``Page`` dataclass still exposes ``blocks`` as the current runtime
 projection.  This store keeps the adopted ``LayoutSnapshot`` outside that object
 tree so layout truth can move without adding another field to ``Page``.
 """

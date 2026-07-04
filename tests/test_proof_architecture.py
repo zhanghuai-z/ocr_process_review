@@ -201,6 +201,40 @@ def test_fallback_strategy_register_covers_current_boundaries():
     assert "不得因为正文切片 fallback 再被送入 Hanwang 普通文字识别" in source
 
 
+def test_current_runtime_projection_terminology_is_not_described_as_legacy():
+    files = [
+        Path("app/models/ocr_observation.py"),
+        Path("app/models/ocr_character_observation.py"),
+        Path("app/models/ocr_character_observation_store.py"),
+        Path("app/models/layout_snapshot_store.py"),
+        Path("app/core/ocr_proof_projection.py"),
+        Path("app/core/line_text_contract.py"),
+        Path("app/core/paddle_v16_client.py"),
+        Path("app/core/paddle_line_routing.py"),
+        Path("app/core/layout_analyzer.py"),
+        Path("app/core/app_config.py"),
+        Path("app/core/api_profiles.py"),
+    ]
+    stale_terms = (
+        "compatibility projection",
+        "compatibility models",
+        "legacy layout result envelope",
+        "legacy route caches",
+        "normalizing legacy",
+        "兼容不同 Paddle",
+        "兼容 API 返回",
+        "历史配置字段",
+        "旧 /layout-parsing",
+    )
+    offenders: list[str] = []
+    for path in files:
+        source = path.read_text(encoding="utf-8")
+        for term in stale_terms:
+            if term in source:
+                offenders.append(f"{path}: {term}")
+    assert offenders == []
+
+
 def test_retired_block_payload_helper_is_not_restored():
     assert not Path("app/core/block_payload.py").exists()
 

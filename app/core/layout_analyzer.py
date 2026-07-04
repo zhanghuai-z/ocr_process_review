@@ -306,7 +306,7 @@ class LayoutAnalyzer:
         return self._engine
 
     def _unwrap_layout_items(self, result) -> List[dict]:
-        """兼容不同 Paddle 结果包装结构。"""
+        """归一化不同 Paddle 结果包装结构。"""
         if result is None:
             return []
         if isinstance(result, dict):
@@ -326,7 +326,7 @@ class LayoutAnalyzer:
         return []
 
     def _extract_bbox_from_coordinate(self, coord, page: Page):
-        """兼容 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
+        """归一化 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
         return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
 
     def _raw_bbox_max_from_item(self, item: dict) -> tuple[float, float] | None:

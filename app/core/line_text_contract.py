@@ -42,7 +42,7 @@ def ensure_line_text_contract(line: object) -> None:
 
     This is intentionally a workflow helper, not a ``Line`` method. It keeps
     model objects passive while storage/OCR boundaries remain responsible for
-    normalizing legacy or partially constructed line data.
+    normalizing partially constructed line data.
     """
     contract = line_text_contract(line)
     set_proof_state_for_line(line, contract.proof_state)

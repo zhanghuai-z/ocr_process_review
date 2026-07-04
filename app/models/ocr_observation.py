@@ -1,6 +1,6 @@
 """Access boundary for OCR line observations.
 
-``Block.lines`` is a compatibility projection. Application code should use
+``Block.lines`` is a current runtime projection. Application code should use
 these helpers so OCR observations live behind one boundary instead of being
 owned by the layout block model.
 """

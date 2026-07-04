@@ -1153,7 +1153,7 @@ def build_layout_line_routes(
     width: int,
     height: int,
 ) -> list[dict[str, Any]]:
-    """Serialize the typed layout routing plan for legacy route caches."""
+    """Serialize the typed layout routing plan for transient route records."""
     return [
         routing_line_to_record(line, source_field=LAYOUT_ROUTE_SOURCE_FIELD)
         for line in build_layout_routing_plan(block, width, height).lines
