@@ -1273,6 +1273,10 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     apply_routes_source = functions["_apply_layout_line_route_records"]
     assert "ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD]" in apply_routes_source
 
+    run_source = functions["run_micro_recblock"]
+    assert "build_page_ocr_line_route_attachment(" in run_source
+    assert "apply_page_ocr_line_route_attachment(" in run_source
+    assert "attach_page_ocr_line_routes(" not in run_source
     assert "line_routes_for_block" not in source
 
 
@@ -1299,6 +1303,12 @@ def test_layout_routing_service_uses_typed_producer_not_route_dict_apis():
     read_source = _function_source(producer_source, "layout_routing_plan_for_block")
     assert "block.pop(" not in read_source
     assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in read_source
+    attach_source = _function_source(producer_source, "attach_page_ocr_line_routes")
+    assert "build_page_ocr_line_route_attachment(" in attach_source
+    assert "apply_page_ocr_line_route_attachment(" in attach_source
+    build_attachment_source = _function_source(producer_source, "build_page_ocr_line_route_attachment")
+    assert "block.pop(" not in build_attachment_source
+    assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in build_attachment_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

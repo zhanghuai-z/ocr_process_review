@@ -10,9 +10,12 @@ from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     LAYOUT_ROUTE_SOURCE_FIELD,
     LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+    PageOcrLineHint,
     ROUTE_SUBBLOCKS_FIELD,
+    apply_page_ocr_line_route_attachment,
     build_layout_line_routes,
     build_layout_routing_plan,
+    build_page_ocr_line_route_attachment,
     layout_routing_plan_for_block,
 )
 
@@ -140,3 +143,54 @@ def test_layout_routing_plan_ignores_stale_cache_without_mutating_block():
         for segment in line.segments
         if segment.kind == "formula"
     ] == ["$ B $"]
+
+
+def test_page_ocr_line_route_attachment_builds_without_mutating_blocks():
+    stale_cache = [
+        {
+            "bbox": [0, 0, 90, 30],
+            LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+            "segments": [{"kind": "text", "bbox": [0, 0, 90, 30], "text": ""}],
+        }
+    ]
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 180, 50],
+        "block_content": "甲 $ A $ 乙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [55, 0, 95, 35]},
+        ],
+        LAYOUT_LINE_ROUTES_FIELD: stale_cache,
+    }
+
+    attachment = build_page_ocr_line_route_attachment(
+        [parent],
+        [PageOcrLineHint(text="甲 A 乙", bbox=(0, 0, 180, 40))],
+        200,
+        80,
+    )
+
+    assert parent[LAYOUT_LINE_ROUTES_FIELD] is stale_cache
+    assert 0 in attachment.route_records_by_block_index
+    apply_page_ocr_line_route_attachment([parent], attachment)
+    assert parent[LAYOUT_LINE_ROUTES_FIELD] is attachment.route_records_by_block_index[0]
+
+
+def test_page_ocr_line_route_attachment_clears_stale_routes_explicitly():
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 100, 40],
+        LAYOUT_LINE_ROUTES_FIELD: [{"bbox": [0, 0, 100, 40], "segments": []}],
+    }
+
+    attachment = build_page_ocr_line_route_attachment(
+        [parent],
+        [PageOcrLineHint(text="unrelated", bbox=(200, 200, 260, 230))],
+        300,
+        300,
+    )
+
+    assert 0 in attachment.clear_block_indices
+    assert LAYOUT_LINE_ROUTES_FIELD in parent
+    apply_page_ocr_line_route_attachment([parent], attachment)
+    assert LAYOUT_LINE_ROUTES_FIELD not in parent

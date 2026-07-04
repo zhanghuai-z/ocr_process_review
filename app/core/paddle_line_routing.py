@@ -78,6 +78,12 @@ class PageOcrLineHint:
     bbox: tuple[int, int, int, int]
 
 
+@dataclass(frozen=True)
+class PageOcrLineRouteAttachment:
+    route_records_by_block_index: dict[int, list[dict[str, Any]]]
+    clear_block_indices: frozenset[int]
+
+
 def route_authority_label(block: dict[str, Any], default: str = "unknown") -> str:
     return normalize_paddle_label(paddle_record_label(block, default))
 
@@ -469,12 +475,24 @@ def attach_page_ocr_line_routes(
     width: int,
     height: int,
 ) -> None:
+    apply_page_ocr_line_route_attachment(
+        ppvl_blocks,
+        build_page_ocr_line_route_attachment(ppvl_blocks, page_ocr_lines, width, height),
+    )
+
+
+def build_page_ocr_line_route_attachment(
+    ppvl_blocks: list[dict[str, Any]],
+    page_ocr_lines: list[Any],
+    width: int,
+    height: int,
+) -> PageOcrLineRouteAttachment:
     line_hints = [
         hint for value in page_ocr_lines
         if (hint := _line_hint_from_value(value, width, height)) is not None
     ]
     if not line_hints:
-        return
+        return PageOcrLineRouteAttachment({}, frozenset())
     line_hints = _bbox_only_physical_line_hints(line_hints)
 
     parent_entries: list[tuple[int, dict[str, Any], tuple[int, int, int, int]]] = []
@@ -496,6 +514,8 @@ def attach_page_ocr_line_routes(
         if best_idx is not None and best_score >= 0.1:
             assigned[best_idx].append(hint)
 
+    route_records_by_block_index: dict[int, list[dict[str, Any]]] = {}
+    clear_block_indices: set[int] = set()
     for block_idx, block, block_bbox in parent_entries:
         lines = []
         for hint in assigned.get(block_idx, []):
@@ -505,7 +525,7 @@ def attach_page_ocr_line_routes(
             lines.append(PageOcrLineHint(text=hint.text, bbox=clipped_bbox))
         lines.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
         if not lines:
-            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
+            clear_block_indices.add(block_idx)
             continue
         subblocks = route_subblocks_for_block(block, width, height)
         formula_subblocks = [subblock for subblock in subblocks if _is_route_formula_label(subblock["label"])]
@@ -550,7 +570,23 @@ def attach_page_ocr_line_routes(
             for line in lines
         ]
         if routes:
-            block[LAYOUT_LINE_ROUTES_FIELD] = routes
+            route_records_by_block_index[block_idx] = routes
+    return PageOcrLineRouteAttachment(
+        route_records_by_block_index=route_records_by_block_index,
+        clear_block_indices=frozenset(clear_block_indices),
+    )
+
+
+def apply_page_ocr_line_route_attachment(
+    ppvl_blocks: list[dict[str, Any]],
+    attachment: PageOcrLineRouteAttachment,
+) -> None:
+    for block_idx in attachment.clear_block_indices:
+        if 0 <= block_idx < len(ppvl_blocks):
+            ppvl_blocks[block_idx].pop(LAYOUT_LINE_ROUTES_FIELD, None)
+    for block_idx, routes in attachment.route_records_by_block_index.items():
+        if 0 <= block_idx < len(ppvl_blocks):
+            ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD] = routes
 
 
 def _route_subblock_text(subblock: dict[str, Any]) -> str:
@@ -1304,13 +1340,16 @@ __all__ = [
     "LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS",
     "PaddleRouteLineHint",
     "PageOcrLineHint",
+    "PageOcrLineRouteAttachment",
     "ROUTE_INLINE_FORMULA_FLAG",
     "ROUTE_SUBBLOCKS_FIELD",
     "ROUTE_TABLE_FLAG",
     "RecoveredInlineFormulaSegment",
     "attach_page_ocr_line_routes",
+    "apply_page_ocr_line_route_attachment",
     "block_bbox_xyxy",
     "block_text",
+    "build_page_ocr_line_route_attachment",
     "build_layout_line_routes",
     "build_layout_routing_plan",
     "formula_texts_by_subblock_bbox",

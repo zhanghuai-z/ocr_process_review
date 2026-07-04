@@ -54,9 +54,10 @@ from app.core.paddle_line_routing import (
     ROUTE_INLINE_FORMULA_FLAG,
     ROUTE_SUBBLOCKS_FIELD,
     ROUTE_TABLE_FLAG,
-    attach_page_ocr_line_routes,
+    apply_page_ocr_line_route_attachment,
     block_bbox_xyxy,
     block_text as paddle_block_text,
+    build_page_ocr_line_route_attachment,
     is_formula_label,
     is_formula_style_position_block,
     is_table_label,
@@ -2448,7 +2449,10 @@ def run_micro_recblock(
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
     if page_ocr_lines:
-        attach_page_ocr_line_routes(ppvl_blocks, page_ocr_lines, width, height)
+        apply_page_ocr_line_route_attachment(
+            ppvl_blocks,
+            build_page_ocr_line_route_attachment(ppvl_blocks, page_ocr_lines, width, height),
+        )
         _apply_layout_line_route_records(
             ppvl_blocks,
             _refine_layout_text_route_bands_from_image(image_bgr, ppvl_blocks, width, height),
