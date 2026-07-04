@@ -328,7 +328,7 @@ OCR Hanwang/CharOCR
 - `LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界；后续应把人工编辑也迁到 snapshot，并继续抽 `DispatchPlan/OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
-   - proof 写入已经统一到 `ProofEditService`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
+   - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
    - HProof 有 `HProofRuntimeSession` / `HProofLineEditSession`。
    - VProof 有 `VProofOccurrenceSession` / `ProofReferenceContext` / named text slots。
    - 未收口的是两者的 rebuild gate、dirty/conflict 决策和 save result 语义仍各自维护；后续应抽共享 session/gate，而不是再补 UI 单点判断。
@@ -351,7 +351,7 @@ OCR Hanwang/CharOCR
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
 3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从生产/cache 层继续压缩。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
-5. 抽统一 proof rebuild gate / save result，让 HProof/VProof 共用 dirty、conflict、reload、external refresh 决策。
+5. 抽统一 proof rebuild gate，让 HProof/VProof 共用 dirty、conflict、reload、external refresh 决策。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
 
 ## 七、审查时的判断口诀

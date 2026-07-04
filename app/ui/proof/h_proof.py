@@ -69,7 +69,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.services.proof_probe_text_service import (
     displayed_text as _displayed_text,
 )
-from app.services.proof_edit_service import ProofEditService
+from app.services.proof_edit_service import ProofEditService, ProofEditStatus
 from app.services.proof_hproof_session import (
     HProofLineEditSession,
     HProofRuntimeSession,
@@ -1817,13 +1817,6 @@ class ProofUnitKind(str, Enum):
     TABLE = "table"
     IMAGE = "image"
     CAPTION = "caption"
-
-
-class _HProofSaveResult(Enum):
-    SAVED = "saved"
-    NOOP = "noop"
-    CONFLICT = "conflict"
-    READ_ONLY = "read_only"
 
 
 @dataclass(frozen=True)
@@ -4003,7 +3996,7 @@ class HProofPanel(QWidget):
             return
         # 先保存文本
         save_result = self._save_current(silent=True)
-        if save_result == _HProofSaveResult.CONFLICT:
+        if save_result == ProofEditStatus.CONFLICT:
             return
         status_result = ProofEditService.set_line_status(
             page,
@@ -4066,17 +4059,17 @@ class HProofPanel(QWidget):
                 pair.mark_editor_saved()
             self._emit_proof_change(result.change)
 
-    def _save_current(self, *, silent: bool = False) -> _HProofSaveResult:
+    def _save_current(self, *, silent: bool = False) -> ProofEditStatus:
         """将当前编辑器内容保存到 line 对象。"""
         current_index = self._session.current_projection_index
         if not self._pairs or current_index >= len(self._pairs):
-            return _HProofSaveResult.NOOP
+            return ProofEditStatus.NOOP
         pair = self._pairs[current_index]
         if pair.has_external_conflict():
             pair._refresh_status()
-            return _HProofSaveResult.CONFLICT
+            return ProofEditStatus.CONFLICT
         if not pair.is_editable:
-            return _HProofSaveResult.READ_ONLY
+            return ProofEditStatus.READONLY
         # editor 始终可见，直接读其当前文本与 line 比较保存。
         new_text = pair._editor.toPlainText()
         projection = self._session.projections[current_index]
@@ -4095,7 +4088,7 @@ class HProofPanel(QWidget):
         )
         if result.blocked:
             pair.mark_external_conflict()
-            return _HProofSaveResult.CONFLICT
+            return ProofEditStatus.CONFLICT
         if result.changed:
             self._publish_line_update(
                 page=page, block=block, line=line, line_index=li,
@@ -4104,8 +4097,8 @@ class HProofPanel(QWidget):
             pair.refresh_text(force=True)
             self._update_stats()
             self._emit_proof_change(result.change)
-            return _HProofSaveResult.SAVED
-        return _HProofSaveResult.NOOP
+            return ProofEditStatus.SAVED
+        return ProofEditStatus.NOOP
 
     def _save_all(self) -> None:
         self._save_current()

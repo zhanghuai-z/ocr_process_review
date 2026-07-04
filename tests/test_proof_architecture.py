@@ -993,6 +993,8 @@ def test_hproof_uses_projection_as_single_line_runtime_fact():
         "self._external_conflict",
     ):
         assert retired_attr not in source
+    assert "class _HProofSaveResult" not in source
+    assert "ProofEditStatus" in source
     assert "HProofRuntimeSession" in source
     assert "HProofLineEditSession" in source
     assert "self._session.projections" in source
