@@ -42,6 +42,7 @@ from app.models import (
 )
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
+from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     page_has_ocr_result,
@@ -296,7 +297,7 @@ class WorkflowController(QObject):
                     line_idx,
                     proof_display_text(line),
                     self._bbox_signature(line.bbox),
-                    tuple(line.review_flags),
+                    line_ocr_review_flags(line),
                 ))
                 for char_occurrence in iter_line_ocr_char_occurrences(line):
                     char = char_occurrence.char

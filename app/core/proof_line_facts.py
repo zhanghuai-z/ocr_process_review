@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from app.core.line_text_contract import line_text_contract
 from app.models import Line, ProofLineState, ProofStatus
 from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_text_observation import line_ocr_review_flags
 
 
 @dataclass(frozen=True)
@@ -48,7 +49,7 @@ def proof_line_facts(line: object) -> ProofLineFacts:
         ocr_text=contract.ocr_text,
         status=state.proof_status,
         confidence=float(getattr(line, "confidence", 0.0) or 0.0),
-        review_flags=tuple(getattr(line, "review_flags", ()) or ()),
+        review_flags=line_ocr_review_flags(line),
         char_count=len(text),
     )
 

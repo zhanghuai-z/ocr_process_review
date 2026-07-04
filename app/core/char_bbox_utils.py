@@ -8,6 +8,7 @@ import numpy as np
 from app.models import BBox, Char, Line
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import set_ocr_line_bbox
+from app.models.ocr_text_observation import line_has_ocr_review_flag
 from app.core.proof_line_facts import proof_display_text
 
 
@@ -485,7 +486,7 @@ def ensure_line_char_bboxes(
         replace_line_ocr_chars(line, [])
         return []
 
-    if MISSING_LINE_BBOX_FLAG in line.review_flags:
+    if line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
         chars = [
             Char(
                 char=glyph,

@@ -508,6 +508,43 @@ def test_ocr_text_observation_boundary_is_used_by_producers():
         assert "app.models.ocr_text_observation" in source
 
 
+def test_ocr_review_flags_go_through_text_observation_boundary():
+    required_sources = {
+        Path("app/core/char_bbox_utils.py"),
+        Path("app/core/ocr_line_hints.py"),
+        Path("app/core/proof_line_facts.py"),
+        Path("app/core/proof_line_utils.py"),
+        Path("app/core/project_store.py"),
+        Path("app/export/ir_builder.py"),
+        Path("app/services/char_index_service.py"),
+        Path("app/services/proof_crop_service.py"),
+    }
+    for path in required_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "app.models.ocr_text_observation" in source
+
+    allowed = {
+        Path("app/models/project.py"),
+        Path("app/models/ocr_text_observation.py"),
+    }
+    checked_roots = [
+        Path("app/core"),
+        Path("app/services"),
+        Path("app/export"),
+        Path("app/controllers"),
+    ]
+    offenders: list[str] = []
+    for root in checked_roots:
+        for path in sorted(root.rglob("*.py")):
+            if path in allowed:
+                continue
+            source = path.read_text(encoding="utf-8")
+            for match in re.finditer(r"\bline\.review_flags\b", source):
+                line_no = source.count("\n", 0, match.start()) + 1
+                offenders.append(f"{path}:{line_no}")
+    assert offenders == []
+
+
 def test_production_code_uses_ocr_text_observation_creator_for_line_text_fields():
     allowed = {
         Path("app/models/project.py"),

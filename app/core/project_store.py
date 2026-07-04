@@ -28,6 +28,7 @@ from app.models.ocr_observation import (
     iter_project_ocr_line_occurrences,
     replace_block_ocr_lines,
 )
+from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.page_state import reconcile_page_ocr_done_from_result
 
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
@@ -1251,7 +1252,7 @@ class ProjectStore:
             block_id, contract.text, line.confidence,
             bb.x, bb.y, bb.w, bb.h,
             contract.ocr_text,
-            _review_flags_to_json(line.review_flags),
+            _review_flags_to_json(list(line_ocr_review_flags(line))),
         )
         if line.id is None:
             cur.execute(
@@ -1439,7 +1440,7 @@ class ProjectStore:
             (
                 contract.text,
                 contract.ocr_text,
-                _review_flags_to_json(line.review_flags),
+                _review_flags_to_json(list(line_ocr_review_flags(line))),
                 line.id,
                 line.uid,
             ),

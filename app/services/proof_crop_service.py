@@ -15,6 +15,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_text_observation import line_has_ocr_review_flag
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
@@ -106,9 +107,9 @@ class ProofCropService:
                         and len(chars) != len(proof_display_text(line))
                     )
                 )
-                if needs_fallback_chars and INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
+                if needs_fallback_chars and not line_has_ocr_review_flag(line, INLINE_FORMULA_REVIEW_FLAG):
                     text = proof_display_text(line)
-                    if text and MISSING_LINE_BBOX_FLAG in line.review_flags:
+                    if text and line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
                         stats.fallback_lines += 1
                         stats.unavailable_chars += len(text)
                         replace_line_ocr_chars(line, [

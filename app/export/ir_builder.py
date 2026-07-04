@@ -24,6 +24,7 @@ from app.export.rules import ExportRules, load_export_rules, normalize_export_fo
 from app.models import BBox, Block, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_block_state import export_origin_for_block
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
+from app.models.ocr_text_observation import line_ocr_review_flags
 from app.services.export_service import (
     build_export_summary,
     iter_export_blocks,
@@ -342,7 +343,7 @@ def _proof(lines: list[Line]) -> ExportProof:
         return ExportProof()
     facts = [proof_line_facts(line) for line in lines]
     confidence = sum(item.confidence for item in facts) / len(facts)
-    flags = sorted({flag for line in lines for flag in line.review_flags})
+    flags = sorted({flag for line in lines for flag in line_ocr_review_flags(line)})
     corrected = any(_is_line_corrected(facts_line) for facts_line in facts)
     status_order = ["auto_flagged", "unchecked", "modified", "ok"]
     statuses = [proof_status_value(line) for line in lines]

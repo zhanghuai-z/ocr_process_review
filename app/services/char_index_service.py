@@ -25,6 +25,7 @@ from app.core.proof_occurrence import (
 )
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars
+from app.models.ocr_text_observation import line_has_ocr_review_flag
 
 try:
     from pypinyin import Style, lazy_pinyin  # type: ignore
@@ -322,7 +323,7 @@ class CharIndexService:
         seen: Set[Tuple[int, int, str]],
         block_uid: str = "",
     ) -> None:
-        if MISSING_LINE_BBOX_FLAG in line.review_flags:
+        if line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
             return
 
         text = proof_display_text(line)
