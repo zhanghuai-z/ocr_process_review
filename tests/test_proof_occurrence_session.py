@@ -29,8 +29,7 @@ def test_vproof_occurrence_session_consumes_external_refresh_for_current_page():
     assert plan.has_work is True
     assert plan.affected_page_keys == (proof_page_identity_key(page1),)
     assert plan.reload_current_page is True
-    assert session.pending_external_lines == set()
-    assert session.pending_external_page_keys == set()
+    assert session.has_pending_external_refresh is False
 
 
 def test_vproof_occurrence_session_consumes_external_refresh_for_offscreen_page():
@@ -58,15 +57,14 @@ def test_vproof_occurrence_session_clears_pending_refresh_without_pages():
 
     assert plan.has_work is False
     assert plan.reload_current_page is False
-    assert session.pending_external_lines == set()
-    assert session.pending_external_page_keys == set()
+    assert session.has_pending_external_refresh is False
 
 
 def test_vproof_occurrence_session_legacy_line_only_refresh_targets_current_page():
     page1 = _page(1)
     session = VProofOccurrenceSession()
     session.set_pages([page1])
-    session.pending_external_lines.add("legacy-line-only")
+    session.queue_external_refresh(line_key="legacy-line-only", page_keys=[])
 
     plan = session.consume_external_refresh_plan()
 

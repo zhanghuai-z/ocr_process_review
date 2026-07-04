@@ -333,16 +333,16 @@ OCR Hanwang/CharOCR
    - HProof 有 `HProofRuntimeSession` / `HProofLineEditSession`。
    - VProof 有 `VProofOccurrenceSession` / `ProofReferenceContext` / named text slots。
    - `proof_rebuild_gate` 已统一“editor state + 保存状态是否允许视图重建”的第一层决策；HProof 重建前 dirty/conflict 判断已接入该 gate。
-   - HProof 外部刷新 request 匹配和 touched projection 计划已收口到 `HProofRuntimeSession`。
-   - VProof 外部刷新 pending 合并和当前页 reload 计划已收口到 `VProofOccurrenceSession`。
-   - 未收口的是 HProof/VProof external refresh 仍是两套 session 计划；后续应继续抽共享 session/gate，而不是再补 UI 单点判断。
+   - HProof/VProof 外部刷新 pending 身份合并已共用 `ProofExternalRefreshQueue`。
+   - HProof 外部刷新 touched projection 计划由 `HProofRuntimeSession` 产出；VProof 当前页 reload 计划由 `VProofOccurrenceSession` 产出。
+   - 未收口的是 HProof/VProof external refresh 的执行计划仍按视图形态分开；后续应继续抽共享 gate，而不是再补 UI 单点判断。
 
 4. UI 仍有局部视图状态，但版面对象写入已收口。
    - LayoutPanel 的用户版面编辑入口已迁移到 `LayoutEditCommand` + `LayoutEditService.apply()`。
    - LayoutPanel 的 Paddle raw overlay 解析已迁移到 `LayoutOverlayService`。
    - LayoutPanel 仍维护 undo 快照，但恢复 `page.blocks` 已通过 `LayoutEditCommand.restore_blocks` 进入服务层。
    - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block。
-   - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`；HProof 重建 gate 已收口，HProof/VProof 外部刷新计划均已进各自 session，完整跨面板 external refresh gate 仍需继续收口。
+   - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`；HProof 重建 gate 已收口，HProof/VProof 外部刷新 pending 队列已共享、计划均已进各自 session，完整跨面板 external refresh gate 仍需继续收口。
    - 后续重点不是恢复旧 helper，而是让人工编辑直接作用于 `LayoutSnapshot`，并抽出共享 `ProofEditSession`。
 
 5. 已坏项目数据不会自动修复。

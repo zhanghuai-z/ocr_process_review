@@ -11,8 +11,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.core.proof_projection import ProofLineProjection
-from app.core.proof_state import ProofUpdateRequest, proof_request_matches_line
+from app.core.proof_state import ProofUpdateRequest
 from app.models import Page
+from app.services.proof_external_refresh import (
+    ProofExternalRefreshQueue,
+    ProofExternalLineRef,
+)
 
 
 PagePredicate = Callable[[Page], bool]
@@ -38,10 +42,7 @@ class HProofRuntimeSession:
     selected_page_number: int | None = None
     show_formula_debug: bool = False
     show_table_debug: bool = False
-    _pending_external_requests: list[ProofUpdateRequest] = field(
-        default_factory=list,
-        repr=False,
-    )
+    _external_refresh_queue: ProofExternalRefreshQueue = field(default_factory=ProofExternalRefreshQueue)
 
     def reset(self) -> None:
         self.pages = []
@@ -105,32 +106,34 @@ class HProofRuntimeSession:
         return " / ".join(labels)
 
     def clear_pending_external_refresh(self) -> None:
-        self._pending_external_requests.clear()
+        self._external_refresh_queue.clear()
 
     @property
     def has_pending_external_refresh(self) -> bool:
-        return bool(self._pending_external_requests)
+        return self._external_refresh_queue.has_pending
 
     def has_projection_for_request(self, request: ProofUpdateRequest) -> bool:
+        line_ref = ProofExternalLineRef.from_request(request)
+        if not line_ref.is_valid:
+            return False
         return any(
-            proof_request_matches_line(request, projection.line)
+            line_ref.matches_line(projection.line)
             for projection in self.projections
         )
 
     def queue_external_refresh(self, request: ProofUpdateRequest) -> None:
-        self._pending_external_requests.append(request)
+        self._external_refresh_queue.queue_request(request)
 
     def consume_external_refresh_plan(self) -> HProofExternalRefreshPlan:
-        if not self._pending_external_requests:
+        batch = self._external_refresh_queue.consume()
+        if not batch.line_refs:
             return HProofExternalRefreshPlan()
-        requests = self._pending_external_requests
-        self._pending_external_requests = []
         touched_indexes = {
             index
             for index, projection in enumerate(self.projections)
             if any(
-                proof_request_matches_line(request, projection.line)
-                for request in requests
+                line_ref.matches_line(projection.line)
+                for line_ref in batch.line_refs
             )
         }
         return HProofExternalRefreshPlan(

@@ -18220,7 +18220,7 @@ def test_vproof_external_refresh_invalidates_undo_history_before_restore():
     assert panel._vproof_undo_stack
 
     set_line_proof_text(line, "CCCC")
-    panel._session.pending_external_lines.add(line.uid)
+    panel._session.queue_external_refresh(line_key=line.uid, page_keys=[])
     panel._do_external_refresh()
 
     assert proof_display_text(line) == "CCCC"

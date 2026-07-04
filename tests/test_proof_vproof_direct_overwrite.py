@@ -260,11 +260,9 @@ def test_external_refresh_timer_is_single_shot():
 def test_external_refresh_clears_pending_when_no_pages():
     v, _ = _load_vproof("甲乙丙")
     v._session.pages = []
-    v._session.pending_external_lines.add(123)
-    v._session.pending_external_page_keys.add(("page", 1))
+    v._session.queue_external_refresh(line_key=123, page_keys=[("page", 1)])
     v._do_external_refresh()
-    assert v._session.pending_external_lines == set()
-    assert v._session.pending_external_page_keys == set()
+    assert v._session.has_pending_external_refresh is False
 
 
 def test_external_refresh_does_not_reload_new_current_page_after_page_switch():
@@ -289,7 +287,7 @@ def test_external_refresh_does_not_reload_new_current_page_after_page_switch():
             origin=99999,
         )
     )
-    assert v._session.pending_external_lines
+    assert v._session.has_pending_external_refresh is True
 
     assert v._safe_load_page(1) is True
     assert calls["load"] == 1
@@ -298,5 +296,4 @@ def test_external_refresh_does_not_reload_new_current_page_after_page_switch():
     assert calls["load"] == 1
     assert v._session.current_page_index() == 1
     assert v._text_edit.toPlainText() == "乙乙\n"
-    assert v._session.pending_external_lines == set()
-    assert v._session.pending_external_page_keys == set()
+    assert v._session.has_pending_external_refresh is False

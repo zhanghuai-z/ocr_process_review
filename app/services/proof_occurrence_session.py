@@ -10,6 +10,7 @@ from app.core.proof_occurrence import (
     proof_page_identity_key,
 )
 from app.models import Page
+from app.services.proof_external_refresh import ProofExternalRefreshQueue
 from app.services.proof_reference_context import (
     ProofReferenceContext,
     build_proof_reference_context,
@@ -37,8 +38,7 @@ class VProofOccurrenceSession:
     selected_tokens: list[str] = field(default_factory=list)
     selected_occurrence_key: tuple[object, ...] | None = None
     selected_occurrence_keys: list[tuple[object, ...]] = field(default_factory=list)
-    pending_external_lines: set[int | str] = field(default_factory=set)
-    pending_external_page_keys: set[tuple[object, ...]] = field(default_factory=set)
+    _external_refresh_queue: ProofExternalRefreshQueue = field(default_factory=ProofExternalRefreshQueue)
 
     def reset(self) -> None:
         self.pages = []
@@ -48,8 +48,7 @@ class VProofOccurrenceSession:
         self.selected_tokens = []
         self.selected_occurrence_key = None
         self.selected_occurrence_keys = []
-        self.pending_external_lines.clear()
-        self.pending_external_page_keys.clear()
+        self.clear_pending_external_refresh()
 
     def set_pages(
         self,
@@ -127,8 +126,11 @@ class VProofOccurrenceSession:
         self.selected_occurrence_keys = []
 
     def clear_pending_external_refresh(self) -> None:
-        self.pending_external_lines.clear()
-        self.pending_external_page_keys.clear()
+        self._external_refresh_queue.clear()
+
+    @property
+    def has_pending_external_refresh(self) -> bool:
+        return self._external_refresh_queue.has_pending
 
     def queue_external_refresh(
         self,
@@ -136,17 +138,16 @@ class VProofOccurrenceSession:
         line_key: int | str,
         page_keys: Iterable[tuple[object, ...]],
     ) -> None:
-        self.pending_external_lines.add(line_key)
-        self.pending_external_page_keys.update(page_keys)
+        self._external_refresh_queue.queue_line_key(line_key, page_keys=page_keys)
 
     def consume_external_refresh_plan(self) -> VProofExternalRefreshPlan:
         if not self.pages:
             self.clear_pending_external_refresh()
             return VProofExternalRefreshPlan()
-        if not self.pending_external_lines:
+        batch = self._external_refresh_queue.consume()
+        if not batch.line_refs:
             return VProofExternalRefreshPlan()
-        pending_page_keys = tuple(self.pending_external_page_keys)
-        self.clear_pending_external_refresh()
+        pending_page_keys = tuple(batch.page_keys)
         current_key = self.current_page_key
         if not pending_page_keys and current_key is not None:
             pending_page_keys = (current_key,)
