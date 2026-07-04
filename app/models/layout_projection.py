@@ -1,9 +1,11 @@
 """Access boundary for the current layout block projection.
 
-``Page.blocks`` is still the physical runtime storage used by existing UI,
-OCR, and export code.  Application services should go through this module so
-the current projection can later move behind ``LayoutSnapshot`` without another
-broad rewrite.
+``Page.blocks`` is still the physical runtime projection used by existing UI,
+OCR, and export code. New production code should not construct
+``Page(blocks=...)`` as a layout fact source; it should produce or consume
+``LayoutSnapshot`` and use this module only when bridging to the current
+block-tree projection.  This keeps the remaining physical projection removable
+without another broad rewrite.
 """
 from __future__ import annotations
 

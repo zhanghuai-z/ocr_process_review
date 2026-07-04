@@ -697,6 +697,26 @@ def test_production_code_does_not_construct_block_with_lines_storage():
     assert offenders == []
 
 
+def test_production_code_does_not_construct_page_with_blocks_storage():
+    allowed = {
+        Path("app/models/project.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Name) or node.func.id != "Page":
+                continue
+            if any(keyword.arg == "blocks" for keyword in node.keywords):
+                offenders.append(f"{path}:{node.lineno}")
+    assert offenders == []
+
+
 def test_recognize_ui_uses_layout_and_char_observation_boundaries():
     recognize_sources = [
         Path("app/ui/recognize/ocr_panel.py"),

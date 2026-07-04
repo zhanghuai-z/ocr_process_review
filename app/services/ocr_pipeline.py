@@ -33,7 +33,11 @@ from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
 from app.models.layout_block_state import append_layout_block_note_once, set_layout_block_bbox
-from app.models.layout_projection import append_page_layout_block, page_layout_blocks
+from app.models.layout_projection import (
+    append_page_layout_block,
+    page_layout_blocks,
+    replace_page_layout_blocks,
+)
 from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
 from app.models.ocr_observation import (
     append_block_ocr_line,
@@ -711,8 +715,8 @@ class OcrPipeline:
             image_path=page_image_path,
             width=img.shape[1],
             height=img.shape[0],
-            blocks=[block],
         )
+        replace_page_layout_blocks(page, [block])
         lines = self._process_block(img, block, page, 0)
         replace_block_ocr_lines(block, lines)
         self._normalize_proof_crops(
