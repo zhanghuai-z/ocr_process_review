@@ -51,6 +51,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import (
     block_has_ocr_lines,
     block_ocr_line_at,
@@ -433,7 +434,7 @@ class ProbeSampler:
         pool: list[_Candidate] = []
         total_cut_cjk = 0
         for page in project.pages:
-            for bi, block in enumerate(page.blocks):
+            for bi, block in enumerate(page_layout_blocks(page)):
                 if not is_block_eligible(block):
                     continue
                 for li, line in enumerate(block_ocr_lines(block)):
@@ -833,9 +834,10 @@ def detect_corrections(
         page = pages_by_no.get(probe.key.page_number)
         if page is None:
             continue
-        if not (0 <= probe.key.block_index < len(page.blocks)):
+        blocks = page_layout_blocks(page)
+        if not (0 <= probe.key.block_index < len(blocks)):
             continue
-        block = page.blocks[probe.key.block_index]
+        block = blocks[probe.key.block_index]
         if not (0 <= probe.key.line_index < block_ocr_line_count(block)):
             continue
         line = block_ocr_line_at(block, probe.key.line_index)

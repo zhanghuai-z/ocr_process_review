@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 from collections.abc import Iterator
 
+from .layout_projection import (
+    find_page_layout_block_index,
+    iter_page_layout_block_occurrences,
+    iter_project_layout_block_occurrences,
+    page_layout_blocks,
+)
 from .project import Block, Line, OcrProject, Page
 
 
@@ -66,8 +72,10 @@ def find_block_ocr_line_index(
     block: Block,
     line: Line,
 ) -> tuple[int, int] | None:
+    block_index = find_page_layout_block_index(page, block)
+    if block_index is None:
+        return None
     try:
-        block_index = page.blocks.index(block)
         line_index = block_ocr_lines(block).index(line)
     except ValueError:
         return None
@@ -93,13 +101,14 @@ def find_block_ocr_line_occurrence(
 
 
 def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
-    for block_index, block in enumerate(page.blocks):
+    for block_occurrence in iter_page_layout_block_occurrences(page):
+        block = block_occurrence.block
         for line_index, line in enumerate(block_ocr_lines(block)):
             yield OcrLineOccurrence(
                 page=page,
                 block=block,
                 line=line,
-                block_index=block_index,
+                block_index=block_occurrence.block_index,
                 line_index=line_index,
             )
 
@@ -107,12 +116,20 @@ def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
 def iter_project_ocr_line_occurrences(
     project: OcrProject,
 ) -> Iterator[OcrLineOccurrence]:
-    for page in project.pages:
-        yield from iter_page_ocr_line_occurrences(page)
+    for block_occurrence in iter_project_layout_block_occurrences(project):
+        block = block_occurrence.block
+        for line_index, line in enumerate(block_ocr_lines(block)):
+            yield OcrLineOccurrence(
+                page=block_occurrence.page,
+                block=block,
+                line=line,
+                block_index=block_occurrence.block_index,
+                line_index=line_index,
+            )
 
 
 def page_ocr_line_count(page: Page) -> int:
-    return sum(block_ocr_line_count(block) for block in page.blocks)
+    return sum(block_ocr_line_count(block) for block in page_layout_blocks(page))
 
 
 def page_has_ocr_result(page: Page) -> bool:

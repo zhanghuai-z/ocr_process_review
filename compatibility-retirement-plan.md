@@ -34,6 +34,7 @@
 | `LayoutPanel` 版面编辑私有业务 helper / 散参 mutation 调用 / 撤销直写 `page.blocks` | `LayoutEditCommand` + `LayoutEditService.apply()` | 删除 `_apply_subtype_to_block`、`_merge_blocks_into_bbox`、`_bind_manual_block_to_paddle`、`_update_existing_manual_binding_bbox` 等 UI 内业务写入口；新增、删除、改类型、合并、调框、撤销恢复统一经命令入口写 typed state 和 layout edit event。 |
 | `LayoutPanel` 直接解析 Paddle raw overlay | `LayoutOverlayService` | 删除 UI 内 `raw_layout_records`、`ROUTE_SUBBLOCKS_FIELD`、`bbox_from_variant` 等 raw artifact 解析；只读 overlay 和 inline formula 提升由服务统一产出。 |
 | Hanwang/Export/BlockAttributes 分散解释 `Block.source` | `app.models.layout_block_state` | 人工编辑来源、导出 origin、路由手工结构判断集中到 helper；`Block.source` 字段仍保留为后续迁移入口。 |
+| 非 UI 业务层直接读写 `Page.blocks` | `app.models.layout_projection` | 当前 `Page.blocks` 仍是物理运行投影；OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块经 projection helper 访问，避免对象树继续扩散为领域模型。 |
 
 ## 删除顺序
 
@@ -75,6 +76,7 @@
 - quality probe 设置不再读取旧 `quality_probe_target_ratio`；AppConfig 只接受 `quality_probe_sand_count` 和 `quality_probe_sand_unit_chars` 作为用户密度真值。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `LayoutSnapshot`；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
+- 当前版面投影新增 `app.models.layout_projection` 边界；非 UI 业务层不再直接读写 `Page.blocks`，而是通过 `page_layout_blocks`、`replace_page_layout_blocks` 等 helper 消费或替换当前运行投影。
 - layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。
 - OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。
 - OCR 运行结果新增 `OcrRunResult` / `OcrProgress` contract；Pipeline 文件不再定义结果模型，worker/controller/tests 改为依赖服务边界。

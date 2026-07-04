@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import OcrProject, ProofStatus
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import iter_project_ocr_line_occurrences
 
 
 @dataclass(frozen=True)
@@ -25,19 +25,17 @@ class ProofStatsService:
     def summarize(self, project: OcrProject) -> ProofStats:
         total = confirmed = modified = flagged = pending = 0
 
-        for page in project.pages:
-            for block in page.blocks:
-                for line in block_ocr_lines(block):
-                    facts = proof_line_facts(line)
-                    total += 1
-                    if facts.status == ProofStatus.OK:
-                        confirmed += 1
-                    elif facts.status == ProofStatus.MODIFIED:
-                        modified += 1
-                    elif facts.is_auto_flagged:
-                        flagged += 1
-                    else:
-                        pending += 1
+        for occurrence in iter_project_ocr_line_occurrences(project):
+            facts = proof_line_facts(occurrence.line)
+            total += 1
+            if facts.status == ProofStatus.OK:
+                confirmed += 1
+            elif facts.status == ProofStatus.MODIFIED:
+                modified += 1
+            elif facts.is_auto_flagged:
+                flagged += 1
+            else:
+                pending += 1
 
         return ProofStats(
             total_lines=total,

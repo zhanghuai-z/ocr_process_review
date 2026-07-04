@@ -12,6 +12,7 @@ from typing import Any, Iterable
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines
 
 
@@ -124,7 +125,7 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
     }
     for page_idx, page in enumerate(project.pages):
         _record_uid(buckets["page"], page.uid, page, page_idx)
-        for block_idx, block in enumerate(page.blocks):
+        for block_idx, block in enumerate(page_layout_blocks(page)):
             _record_uid(buckets["block"], block.uid, page, page_idx, block, block_idx)
             for line_idx, line in enumerate(block_ocr_lines(block)):
                 _record_uid(
@@ -274,7 +275,8 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        if key.block_index < 0 or key.block_index >= len(page.blocks):
+        blocks = page_layout_blocks(page)
+        if key.block_index < 0 or key.block_index >= len(blocks):
             issues.append(_probe_issue(
                 "warning",
                 "probe_anchor_missing_block",
@@ -283,7 +285,7 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        block = page.blocks[key.block_index]
+        block = blocks[key.block_index]
         lines = block_ocr_lines(block)
         if key.line_index < 0 or key.line_index >= len(lines):
             issues.append(_probe_issue(
@@ -326,7 +328,7 @@ def _diagnose_probe_anchors(
 
 def _iter_lines(project: OcrProject) -> Iterable[tuple[Page, Block, Line, int, int]]:
     for page in project.pages:
-        for block_idx, block in enumerate(page.blocks):
+        for block_idx, block in enumerate(page_layout_blocks(page)):
             for line_idx, line in enumerate(block_ocr_lines(block)):
                 yield page, block, line, block_idx, line_idx
 
@@ -427,4 +429,3 @@ def _excerpt(text: str, limit: int = 80) -> str:
 
 def _escape_markdown_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
-

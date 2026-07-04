@@ -62,6 +62,11 @@ from app.core.paddle_v16_client import (
     is_paddle_v16_endpoint,
 )
 from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
+from app.models.layout_projection import (
+    append_page_layout_block,
+    page_layout_blocks,
+    replace_page_layout_blocks,
+)
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.services.layout_snapshot import (
     layout_snapshot_from_normalized_artifact,
@@ -176,7 +181,7 @@ class LayoutWorker(QThread):
             if self._is_cancelled():
                 return index, None
             logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
-            page.blocks = []
+            replace_page_layout_blocks(page, [])
             page.error_message = f"版面分析失败：{e}"
             return index, f"第 {page.page_number} 页：{e}"
 
@@ -229,7 +234,7 @@ class LayoutWorker(QThread):
                             else:
                                 page = self._pages[page_idx]
                                 logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
-                                page.blocks = []
+                                replace_page_layout_blocks(page, [])
                                 page.error_message = f"版面分析失败：{exc}"
                                 error_message = f"第 {page.page_number} 页：{exc}"
                         if self._is_cancelled():
@@ -738,7 +743,7 @@ class LayoutAnalyzer:
 
     def _rescale_blocks_if_suspicious(self, page: Page) -> None:
         """当所有框都像落在较小坐标系上时，做一次统一比例修正。"""
-        valid_blocks = [block for block in page.blocks if block.bbox.area > 0]
+        valid_blocks = [block for block in page_layout_blocks(page) if block.bbox.area > 0]
         if len(valid_blocks) < 2 or page.width <= 0 or page.height <= 0:
             return
 
@@ -765,7 +770,7 @@ class LayoutAnalyzer:
                 scale_x,
                 scale_y,
             )
-            for block in page.blocks:
+            for block in page_layout_blocks(page):
                 block.bbox = scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height)
             return
 
@@ -788,7 +793,7 @@ class LayoutAnalyzer:
             "for %s: scale_x=%.3f scale_y=%.3f page=%dx%d max_bbox=(%d,%d)",
             page.display_image_path, scale_x, scale_y, page.width, page.height, max_x2, max_y2,
         )
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             block.bbox = scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height)
 
     def _local_analyze(self, page: Page) -> Page:
@@ -801,7 +806,7 @@ class LayoutAnalyzer:
         page.height, page.width = img.shape[:2]
         result = engine.predict(page.display_image_path)
         items = self._unwrap_layout_items(result)
-        page.blocks = []
+        replace_page_layout_blocks(page, [])
         for i, item in enumerate(items):
             raw_type = item.get("type", "unknown")
             bbox_raw = item.get("bbox", [0, 0, 0, 0])
@@ -827,7 +832,7 @@ class LayoutAnalyzer:
                 ),
             )
             block.ocr_policy = default_ocr_policy_for_block(block)
-            page.blocks.append(block)
+            append_page_layout_block(page, block)
         self._rescale_blocks_if_suspicious(page)
         return page
 
@@ -901,7 +906,8 @@ class LayoutAnalyzer:
                 telemetry.get("submit_network_mode") or telemetry.get("network_mode") or "",
                 telemetry.get("batch_id") or "",
             )
-        page.blocks, raw_overlay_items = self._extract_api_blocks(page, data)
+        blocks, raw_overlay_items = self._extract_api_blocks(page, data)
+        replace_page_layout_blocks(page, blocks)
         self._write_paddle_raw_artifact(page, data)
         # 注意：不再调用 _rescale_blocks_if_suspicious()——
         # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，
@@ -916,7 +922,7 @@ class LayoutAnalyzer:
             )
             self._write_bbox_overlay(
                 page,
-                items=[(block.block_type.value, block.bbox) for block in page.blocks],
+                items=[(block.block_type.value, block.bbox) for block in page_layout_blocks(page)],
                 suffix=".layout-app-overlay.png",
                 color=(80, 220, 80),
             )

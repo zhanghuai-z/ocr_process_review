@@ -20,7 +20,12 @@ from app.models import (
     RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
-from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
+from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.ocr_observation import (
+    block_ocr_lines,
+    iter_project_ocr_line_occurrences,
+    replace_block_ocr_lines,
+)
 from app.models.page_state import reconcile_page_ocr_done_from_result
 
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
@@ -908,7 +913,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             self._ensure_unique_child_uid(
                 cur,
                 block,
@@ -1169,13 +1174,12 @@ class ProjectStore:
         if project.id is None:
             return
         current_line_uids: set[str] = set()
-        for page in project.pages:
-            for block in page.blocks:
-                for line in block_ocr_lines(block):
-                    if not str(line.uid or "").strip():
-                        continue
-                    current_line_uids.add(line.uid)
-                    self._upsert_proof_line_state_no_commit(cur, project.id, line)
+        for occurrence in iter_project_ocr_line_occurrences(project):
+            line = occurrence.line
+            if not str(line.uid or "").strip():
+                continue
+            current_line_uids.add(line.uid)
+            self._upsert_proof_line_state_no_commit(cur, project.id, line)
         if not current_line_uids:
             cur.execute("DELETE FROM proof_line_state WHERE project_id=?", (project.id,))
             return
@@ -1538,7 +1542,7 @@ class ProjectStore:
                 raw_layout_artifact=raw_layout_artifact,
                 layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
-            page.blocks = self._load_blocks(page.id, project.id)
+            replace_page_layout_blocks(page, self._load_blocks(page.id, project.id))
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
@@ -1612,25 +1616,24 @@ class ProjectStore:
         states = {str(row["line_uid"] or ""): row for row in rows}
         if not states:
             return
-        for page in project.pages:
-            for block in page.blocks:
-                for line in block_ocr_lines(block):
-                    row = states.get(line.uid)
-                    if row is None:
-                        continue
-                    try:
-                        proof_status = ProofStatus(row["proof_status"])
-                    except ValueError:
-                        proof_status = ProofStatus.UNCHECKED
-                    apply_line_proof_state(
-                        line,
-                        ProofLineState(
-                            line_uid=line.uid,
-                            final_text=row["final_text"],
-                            final_text_set=bool(row["final_text_set"]),
-                            proof_status=proof_status,
-                        )
-                    )
+        for occurrence in iter_project_ocr_line_occurrences(project):
+            line = occurrence.line
+            row = states.get(line.uid)
+            if row is None:
+                continue
+            try:
+                proof_status = ProofStatus(row["proof_status"])
+            except ValueError:
+                proof_status = ProofStatus.UNCHECKED
+            apply_line_proof_state(
+                line,
+                ProofLineState(
+                    line_uid=line.uid,
+                    final_text=row["final_text"],
+                    final_text_set=bool(row["final_text_set"]),
+                    proof_status=proof_status,
+                )
+            )
 
     def _load_blocks(self, page_id: int, project_id: int) -> List[Block]:
         rows = self.conn.execute(

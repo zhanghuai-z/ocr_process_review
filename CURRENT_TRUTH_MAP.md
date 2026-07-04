@@ -35,6 +35,10 @@
      - source_label 是 Paddle 细标签
      - 新导入/OCR 运行时块通过 raw_layout_artifact + origin.raw_index 回溯外部事实
      - app_payload 已从 active Block 模型删除；旧 SQLite 列只用于读取边界校验
+  -> layout_projection 边界
+     - Page.blocks 仍是当前物理存储，但业务层不再直接把它当领域模型入口
+     - 非 UI 的 OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块通过 page_layout_blocks/replace_page_layout_blocks 等 helper 访问当前投影
+     - 后续把 LayoutSnapshot/AnnotationLayer 升为真实版面模型时，替换点集中在该边界和 LayoutEditService
 
 人工版面编辑
   -> LayoutEditCommand / LayoutEditService
@@ -102,6 +106,7 @@ OCR Hanwang/CharOCR
 | 外部版面证据 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；artifact 里的 bbox 已归一到工作图坐标；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
 | 当前版面真值 | `LayoutSnapshot` | `Page.blocks` 直接当导入真值 | API 版面分析现在从归一化 artifact 编译 snapshot，再投影到 `Page.blocks` 供旧链路消费。 |
+| 当前版面投影访问 | `app.models.layout_projection` | 非 UI 业务层直接 `page.blocks` | `Page.blocks` 暂时还是物理运行对象；非 UI 读取/替换当前投影必须走 projection helper，避免把物理对象树继续扩散成领域模型。 |
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | 旧 `block.raw_payload`、旧 `block.app_payload` | `raw_payload/app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |

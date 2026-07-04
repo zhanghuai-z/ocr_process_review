@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from app.core.block_attributes import is_position_only_block, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines
 
 
@@ -19,6 +20,7 @@ PROOF_LINE_BLOCK_TYPES = {
 PROOF_SKIP_LINE_FLAGS = {
     "hanwang_route_table",
 }
+
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
     text = proof_display_text(line)
@@ -38,7 +40,7 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
     while preserving repeated text at different page positions.
     """
     seen: list[tuple[str, BBox]] = []
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         if block.block_type == BlockType.EQUATION:
             continue
         if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
@@ -59,7 +61,7 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
     position-only blocks are not useful in row-by-row proofreading.
     """
     seen: list[tuple[str, BBox]] = []
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         if block.block_type == BlockType.EQUATION:
             continue
         if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:

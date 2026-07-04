@@ -5,6 +5,7 @@ from app.core.proof_line_facts import proof_ocr_text
 from app.core.raw_ocr_artifact import raw_block_text_values
 from app.core.table_text_layer import build_table_text_layer_cells
 from app.models import Block, BlockType, Page
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines
 
 
@@ -13,7 +14,7 @@ class TableTextLayerService:
 
     def enrich_page(self, page: Page) -> int:
         updated = 0
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if block.block_type != BlockType.TABLE:
                 continue
             html = self._table_html(page, block)

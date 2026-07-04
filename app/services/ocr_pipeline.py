@@ -32,6 +32,7 @@ from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
+from app.models.layout_projection import append_page_layout_block, page_layout_blocks
 from app.models.ocr_observation import (
     append_block_ocr_line,
     block_ocr_line_count,
@@ -667,10 +668,10 @@ class OcrPipeline:
             block_type=BlockType.TEXT,
             bbox=merged,
             lines=unmatched,
-            order=(max((block.order for block in page.blocks), default=-1) + 1),
+            order=(max((block.order for block in page_layout_blocks(page)), default=-1) + 1),
             note="PP-OCRv5 unmatched proof lines",
         )
-        page.blocks.append(synthetic)
+        append_page_layout_block(page, synthetic)
 
     def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Assign PP-OCRv5 geometry hints to text containers for Hanwang routing.

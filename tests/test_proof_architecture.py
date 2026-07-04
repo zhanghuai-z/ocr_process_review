@@ -355,6 +355,49 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
     assert offenders == []
 
 
+def test_page_layout_blocks_access_goes_through_projection_boundary():
+    allowed = {
+        Path("app/models/layout_projection.py"),
+        Path("app/models/project.py"),
+    }
+    page_like_names = {
+        "page",
+        "pg",
+        "source_page",
+        "target_page",
+        "proof_page",
+        "current_page",
+        "out_page",
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed or path.parts[:2] == ("app", "ui"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "blocks":
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id in page_like_names:
+                offenders.append(f"{path}:{node.lineno}")
+    assert offenders == []
+
+
+def test_layout_projection_boundary_is_used_by_core_consumers():
+    required_sources = {
+        Path("app/models/ocr_observation.py"),
+        Path("app/services/ocr_dispatch_plan.py"),
+        Path("app/core/project_store.py"),
+        Path("app/services/layout_edit_service.py"),
+        Path("app/services/ocr_pipeline.py"),
+        Path("app/engines/hanwang/micro_recblock.py"),
+    }
+    for path in required_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "app.models.layout_projection" in source or "from .layout_projection" in source
+
+
 def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
     probe_source = Path("app/services/proof_probe_text_service.py").read_text(encoding="utf-8")
     persist_source = Path("app/services/proof_persistence_service.py").read_text(encoding="utf-8")

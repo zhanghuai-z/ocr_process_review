@@ -17,6 +17,11 @@ from app.core.paddle_line_routing import (
     formula_texts_by_subblock_bbox,
 )
 from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
+from app.models.layout_projection import (
+    append_page_layout_block,
+    page_layout_block_count,
+    page_layout_blocks,
+)
 from app.services.layout_routing_plan import routing_plan_for_block_record
 
 
@@ -48,10 +53,10 @@ class LayoutOverlayService:
             origin = list(origin_tuple)
             if self.has_inline_formula_origin_block(page, origin):
                 continue
-            page.blocks.append(Block(
+            append_page_layout_block(page, Block(
                 block_type=BlockType.EQUATION,
                 bbox=overlay.bbox,
-                order=len(page.blocks),
+                order=page_layout_block_count(page),
                 source=BlockSource.AUTO_LAYOUT,
                 source_label="inline_formula",
                 origin=BlockOrigin(
@@ -143,7 +148,7 @@ class LayoutOverlayService:
     @staticmethod
     def has_inline_formula_origin_block(page: Page, origin_bbox: list[int]) -> bool:
         origin_tuple = tuple(origin_bbox)
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if inline_formula_origin_bbox(block) == origin_tuple:
                 return True
             if normalize_paddle_label(getattr(block, "source_label", "")) != "inline_formula":

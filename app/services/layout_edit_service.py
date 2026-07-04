@@ -15,6 +15,11 @@ from app.core.paddle_artifact_index import (
 )
 from app.models import BBox, Block, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dict, set_paddle_binding
+from app.models.layout_projection import (
+    append_page_layout_block,
+    page_layout_blocks,
+    replace_page_layout_blocks,
+)
 from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines
 
 
@@ -274,7 +279,7 @@ class LayoutEditService:
         )
         new_block.ocr_policy = default_ocr_policy_for_block(new_block)
         binding = self.bind_manual_block_to_paddle(page, new_block)
-        page.blocks.append(new_block)
+        append_page_layout_block(page, new_block)
         after = {"block": self.block_state(new_block)}
         self.record_edit(page, "create_block", new_block, before={}, after=after)
         return LayoutEditResult(
@@ -289,7 +294,10 @@ class LayoutEditService:
     def _delete_block(self, page: Page, block: Block) -> LayoutEditResult:
         before = {"block": self.block_state(block)}
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
-        page.blocks = [candidate for candidate in page.blocks if candidate is not block]
+        replace_page_layout_blocks(
+            page,
+            [candidate for candidate in page_layout_blocks(page) if candidate is not block],
+        )
         self.record_edit(page, "delete_block", block, before=before, after={})
         return LayoutEditResult(op="delete_block", block=block, before=before, after={})
 
@@ -301,11 +309,11 @@ class LayoutEditService:
         before: dict | None,
     ) -> LayoutEditResult:
         next_blocks = list(blocks)
-        before = before or {"blocks": [self.block_state(block) for block in page.blocks]}
-        page.blocks = next_blocks
-        for order, block in enumerate(page.blocks):
+        before = before or {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
+        replace_page_layout_blocks(page, next_blocks)
+        for order, block in enumerate(page_layout_blocks(page)):
             block.order = order
-        after = {"blocks": [self.block_state(block) for block in page.blocks]}
+        after = {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
         self.record_edit(page, "restore_blocks", None, before=before, after=after)
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
 
@@ -364,8 +372,11 @@ class LayoutEditService:
         for block in ordered[1:]:
             self.mark_generated_inline_formula_handled(page, block, op="merge_inline_formula")
         remove_ids = {id(block) for block in ordered[1:]}
-        page.blocks = [block for block in page.blocks if id(block) not in remove_ids]
-        for order, block in enumerate(page.blocks):
+        replace_page_layout_blocks(
+            page,
+            [block for block in page_layout_blocks(page) if id(block) not in remove_ids],
+        )
+        for order, block in enumerate(page_layout_blocks(page)):
             block.order = order
         after = {"block": self.block_state(primary)}
         self.record_edit(page, "merge_blocks", primary, before=before, after=after)

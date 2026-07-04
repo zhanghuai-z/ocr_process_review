@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines, line_belongs_to_block
 
 
@@ -233,12 +234,12 @@ def resolve_entry_owner(
     for page in pages:
         if not _entry_matches_page(entry, page):
             continue
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if not _entry_matches_block(entry, block):
                 continue
             if _entry_line_in_block(entry, block):
                 return page, block
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             if _entry_matches_block_order(entry, block) and _entry_line_in_block(entry, block):
                 return page, block
     return None
@@ -348,7 +349,7 @@ def _resolve_line_in_matching_blocks(
     block_identity: tuple[object, ...],
     line_identity: tuple[object, ...],
 ) -> tuple[Page, Block, Line, int] | None:
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         if not _matches_block_identity(block, block_identity):
             continue
         for line_idx, line in enumerate(block_ocr_lines(block)):
@@ -364,7 +365,7 @@ def _resolve_line_any_block(
     kind = line_identity[0] if line_identity else ""
     if kind not in {"uid", "id"}:
         return None
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         for line_idx, line in enumerate(block_ocr_lines(block)):
             if _matches_line_identity(line, line_idx, line_identity):
                 return page, block, line, line_idx

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
 from app.models import Block, Page
+from app.models.layout_projection import iter_page_layout_block_occurrences
 
 
 @dataclass(frozen=True)
@@ -46,11 +47,12 @@ def build_text_ocr_dispatch_plan(page: Page) -> DispatchPlan:
     """Build the authoritative text OCR dispatch view for a page."""
     text_blocks: list[DispatchBlock] = []
     blocked_blocks: list[DispatchBlock] = []
-    for index, block in enumerate(page.blocks):
+    for occurrence in iter_page_layout_block_occurrences(page):
+        block = occurrence.block
         if should_dispatch_to_text_ocr(block):
             text_blocks.append(
                 DispatchBlock(
-                    index=index,
+                    index=occurrence.block_index,
                     block=block,
                     reason="policy:text_ocr",
                 )
@@ -58,7 +60,7 @@ def build_text_ocr_dispatch_plan(page: Page) -> DispatchPlan:
         else:
             blocked_blocks.append(
                 DispatchBlock(
-                    index=index,
+                    index=occurrence.block_index,
                     block=block,
                     reason=f"policy:{block.ocr_policy.value}",
                 )

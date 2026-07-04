@@ -15,6 +15,7 @@ from typing import Iterable, List
 from app.core.block_attributes import block_attributes, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, BlockType, Line, OcrProject, Page
+from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
 from app.services.proof_stats_service import ProofStatsService
@@ -132,7 +133,7 @@ def iter_export_pages(project: OcrProject) -> Iterable[Page]:
 def iter_export_blocks(page: Page, *, include_empty: bool = False) -> Iterable[Block]:
     """按统一阅读顺序输出块。"""
     blocks = sorted(
-        page.blocks,
+        page_layout_blocks(page),
         key=lambda block: (block.order, block.bbox.y, block.bbox.x),
     )
     for block in blocks:

@@ -40,8 +40,9 @@ from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
+from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.ocr_observation import (
-    block_ocr_lines,
+    iter_page_ocr_line_occurrences,
     page_has_ocr_result,
     project_all_pages_ocr_done,
     project_has_any_ocr_done_page,
@@ -725,7 +726,7 @@ class WorkflowController(QObject):
         if page is None:
             return
         had_ocr = page_has_ocr_result(page) or page.is_ocr_done
-        for block in page.blocks:
+        for block in page_layout_blocks(page):
             mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:
             invalidate_page_ocr(page, change_kind)
@@ -1100,14 +1101,14 @@ class WorkflowController(QObject):
             setattr(source_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
             setattr(proof_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
         for page in proof_pages:
-            page.blocks = [
+            replace_page_layout_blocks(page, [
                 Block(
                     block_type=BlockType.TEXT,
                     bbox=BBox(0, 0, max(1, int(page.width)), max(1, int(page.height))),
                     order=0,
                     note=f"Parallel {self._proof_ocr_status_label()} container",
                 )
-            ]
+            ])
         return proof_pages
 
     def _on_parallel_proof_done(self, pages: List[Page]) -> None:
@@ -1120,9 +1121,8 @@ class WorkflowController(QObject):
 
     def _collect_proof_lines(self, page: Page):
         return [
-            line
-            for block in page.blocks
-            for line in block_ocr_lines(block)
+            occurrence.line
+            for occurrence in iter_page_ocr_line_occurrences(page)
         ]
 
     def _make_parallel_page_key(self, page: Page, index: int) -> tuple[int, str, str, int, int]:

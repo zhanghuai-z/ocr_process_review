@@ -56,6 +56,39 @@ def _raw_layout_records(page):
     return raw_layout_records(page)
 
 
+def test_layout_projection_boundary_tracks_current_page_blocks():
+    from app.models import BBox, Block, BlockType, Page
+    from app.models.layout_projection import (
+        append_page_layout_block,
+        block_belongs_to_page,
+        find_page_layout_block_index,
+        iter_page_layout_block_occurrences,
+        page_has_layout_blocks,
+        page_layout_block_count,
+        page_layout_blocks,
+        replace_page_layout_blocks,
+    )
+
+    page = Page(image_path="/tmp/layout-projection.png", width=100, height=80)
+    text = Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 10), order=0)
+    formula = Block(block_type=BlockType.EQUATION, bbox=BBox(40, 2, 20, 10), order=1)
+
+    assert not page_has_layout_blocks(page)
+    append_page_layout_block(page, text)
+    assert page_layout_blocks(page) == [text]
+    assert page_layout_block_count(page) == 1
+    assert find_page_layout_block_index(page, text) == 0
+    assert block_belongs_to_page(page, text)
+
+    replace_page_layout_blocks(page, [formula, text])
+    assert page_layout_blocks(page) == [formula, text]
+    assert find_page_layout_block_index(page, text) == 1
+    assert [
+        (occurrence.block, occurrence.block_index)
+        for occurrence in iter_page_layout_block_occurrences(page)
+    ] == [(formula, 0), (text, 1)]
+
+
 def test_raw_block_payload_prefers_page_artifact_origin_record():
     from app.core.raw_ocr_artifact import raw_block_payload, raw_block_text_values
     from app.models import BBox, Block, BlockOrigin, BlockType, Page

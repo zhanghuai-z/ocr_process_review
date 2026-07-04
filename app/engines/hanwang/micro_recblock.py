@@ -20,6 +20,7 @@ from app.models.block_state import (
     paddle_binding_dict,
     set_paddle_binding,
 )
+from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
@@ -3355,7 +3356,7 @@ def _apply_manual_unbound_parent_route(
 def _page_blocks_from_layout(page: Page) -> list[dict]:
     entries: list[tuple[Block, dict[str, Any]]] = [
         (block, _layout_row_from_block(page, block))
-        for block in page.blocks
+        for block in page_layout_blocks(page)
     ]
     parent_rows: dict[int, dict[str, Any]] = {}
     for _block, row in entries:
@@ -3393,7 +3394,7 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
         skip_block_ids.add(id(block))
 
     blocks: list[dict] = []
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         if id(block) in skip_block_ids:
             continue
         row = next(entry_row for entry_block, entry_row in entries if entry_block is block)
@@ -3414,7 +3415,7 @@ def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
 def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
     return [
         line
-        for block in page.blocks
+        for block in page_layout_blocks(page)
         for line in block_ocr_lines(block)
         if line.bbox is not None
         and line.bbox.area > 0
@@ -3426,7 +3427,7 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
     """Manual structural boxes consumed by parent routing must survive OCR writeback."""
     entries: list[tuple[Block, dict[str, Any]]] = [
         (block, _layout_row_from_block(page, block))
-        for block in page.blocks
+        for block in page_layout_blocks(page)
     ]
     parent_rows: dict[int, dict[str, Any]] = {}
     for _block, row in entries:
@@ -3456,7 +3457,7 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
 
 def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
     targets: list[Block] = []
-    for block in page.blocks:
+    for block in page_layout_blocks(page):
         if block.block_type != BlockType.EQUATION:
             continue
         label = route_source_label(block)
@@ -3702,7 +3703,7 @@ class HanwangMicroRecBlockEngine:
             new_blocks.extend(preserved_manual_blocks)
         for order, block in enumerate(new_blocks):
             block.order = order
-        page.blocks = new_blocks
+        replace_page_layout_blocks(page, new_blocks)
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
