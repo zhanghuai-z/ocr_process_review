@@ -159,6 +159,24 @@ def test_retirement_plan_names_active_physical_projections():
     assert "新代码必须经过对应 boundary/helper 访问" in source
 
 
+def test_current_truth_docs_do_not_reintroduce_stale_projection_terms():
+    truth_source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
+    retirement_source = Path("compatibility-retirement-plan.md").read_text(encoding="utf-8")
+    baseline_source = Path("baseline-2026-06-12.md").read_text(encoding="utf-8")
+
+    for stale in (
+        "旧链路投影",
+        "旧 UI/存储投影",
+        "旧 `Page.blocks`",
+        "旧 block tree",
+        "旧 route dict API",
+    ):
+        assert stale not in truth_source
+        assert stale not in retirement_source
+    assert "归档说明" in baseline_source
+    assert "CURRENT_TRUTH_MAP.md" in baseline_source
+
+
 def test_retired_block_payload_helper_is_not_restored():
     assert not Path("app/core/block_payload.py").exists()
 
