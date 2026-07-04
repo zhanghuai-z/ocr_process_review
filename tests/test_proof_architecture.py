@@ -856,6 +856,21 @@ def test_raw_payload_reads_stay_at_storage_validation_or_raw_artifact_boundary()
     assert offenders == []
 
 
+def test_current_store_schema_does_not_persist_retired_block_payload_columns():
+    source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    validation_source = Path("app/core/model_validation.py").read_text(encoding="utf-8")
+    ddl_source = source.split("MIGRATIONS:", 1)[0]
+    save_block_source = _function_source(source, "_save_block")
+    load_blocks_source = _function_source(source, "_load_blocks")
+
+    for retired in ("raw_payload_json", "app_payload_json"):
+        assert f"{retired} TEXT" not in ddl_source
+        assert retired not in save_block_source
+        assert retired not in load_blocks_source
+    assert "def _migrate_v23_drop_retired_block_payload_columns" in source
+    assert "validate_persistent_block_payloads" not in validation_source
+
+
 def test_export_semantic_filters_do_not_read_raw_payload_labels():
     markdown_source = Path("app/export/markdown.py").read_text(encoding="utf-8")
     markdown_tree = ast.parse(markdown_source, filename="app/export/markdown.py")
@@ -1184,7 +1199,8 @@ def test_project_store_save_block_has_no_layout_runtime_side_effects():
     assert ".lines = []" not in save_block_source
     assert "mark_ocr_text_invalidated(" not in save_block_source
     assert "ocr_invalidated_reason =" not in save_block_source
-    assert '"{}"' in save_block_source
+    assert "raw_payload_json" not in save_block_source
+    assert "app_payload_json" not in save_block_source
     assert "validate_block_model(block)" in save_block_source
 
 

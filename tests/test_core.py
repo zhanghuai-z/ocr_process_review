@@ -721,8 +721,6 @@ def test_block_type_mapping():
 
 
 def test_block_state_helpers_use_typed_state_only():
-    import pytest
-
     from app.models.block_state import (
         clear_ocr_text_invalidation,
         is_ocr_text_invalidated,
@@ -730,16 +728,12 @@ def test_block_state_helpers_use_typed_state_only():
         ocr_invalidation_reason,
         set_paddle_binding,
     )
-    from app.core.model_validation import validate_persistent_block_payloads
     from app.models import BBox, Block, BlockType, PaddleBinding
 
     block = Block(
         block_type=BlockType.TEXT,
         bbox=BBox(0, 0, 10, 10),
     )
-
-    with pytest.raises(ValueError, match="retired app payload"):
-        validate_persistent_block_payloads({}, {"custom": 1})
 
     set_paddle_binding(block, {"status": "paddle_geometry_hit", "text": "$ A $"})
     assert isinstance(block.paddle_binding, PaddleBinding)
@@ -1481,47 +1475,69 @@ def test_project_store_clean_on_resave():
         os.unlink(db_path)
 
 
-def test_project_store_rejects_runtime_layout_routes_on_save_and_load():
-    import pytest
+def test_project_store_current_schema_omits_retired_block_payload_columns():
     import sqlite3
 
-    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
-    from app.core.project_store import ProjectDataError, ProjectStore
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
 
     try:
-        route_subblocks = [{"block_label": "inline_formula", "block_bbox": [10, 10, 20, 20]}]
-        clean_block = Block(
-            block_type=BlockType.TEXT,
-            bbox=BBox.from_xyxy(0, 0, 140, 40),
-            lines=[Line(text="旧OCR结果", confidence=0.8, bbox=BBox.from_xyxy(80, 0, 120, 30))],
-        )
-        clean_project = OcrProject(
-            name="runtime route load",
-            pages=[Page(image_path="/tmp/runtime-route-cache.png", width=160, height=80, blocks=[clean_block])],
-        )
         with ProjectStore(db_path) as store:
-            saved = store.save_project(clean_project)
+            store.conn.execute("SELECT 1").fetchone()
         with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET raw_payload_json=? WHERE id=?",
-                (json.dumps({ROUTE_SUBBLOCKS_FIELD: route_subblocks}, ensure_ascii=False), clean_block.id),
-            )
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="runtime routing data"):
-                store.load_project(saved.id)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(block)").fetchall()}
+        assert "raw_payload_json" not in columns
+        assert "app_payload_json" not in columns
 
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_rejects_runtime_layout_routes_on_save_and_load PASSED")
+    print("test_project_store_current_schema_omits_retired_block_payload_columns PASSED")
 
 
-def test_project_store_rejects_retired_app_payload_on_load():
+def test_project_store_migration_drops_empty_retired_block_payload_columns():
+    import sqlite3
+
+    from app.core.logging import SCHEMA_VERSION
+    from app.core.project_store import ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
+        clean_project = OcrProject(
+            name="retired payload empty migration",
+            pages=[Page(image_path="/tmp/empty-retired-payload.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            store.save_project(clean_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("ALTER TABLE block ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT '{}'")
+            conn.execute("ALTER TABLE block ADD COLUMN app_payload_json TEXT NOT NULL DEFAULT '{}'")
+            conn.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION - 1),),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            store.conn.execute("SELECT 1").fetchone()
+        with sqlite3.connect(db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(block)").fetchall()}
+            meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        assert "raw_payload_json" not in columns
+        assert "app_payload_json" not in columns
+        assert int(meta["schema_version"]) == SCHEMA_VERSION
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_migration_drops_empty_retired_block_payload_columns PASSED")
+
+
+def test_project_store_migration_rejects_nonempty_retired_block_payload_columns():
     import pytest
     import sqlite3
 
@@ -1534,60 +1550,34 @@ def test_project_store_rejects_retired_app_payload_on_load():
     try:
         clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
         clean_project = OcrProject(
-            name="retired app payload load",
-            pages=[Page(image_path="/tmp/unregistered-app-payload.png", width=80, height=40, blocks=[clean_block])],
+            name="retired payload nonempty migration",
+            pages=[Page(image_path="/tmp/nonempty-retired-payload.png", width=80, height=40, blocks=[clean_block])],
         )
         with ProjectStore(db_path) as store:
-            saved = store.save_project(clean_project)
+            store.save_project(clean_project)
         with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET app_payload_json=? WHERE id=?",
-                (json.dumps({"future_unregistered_key": True}, ensure_ascii=False), clean_block.id),
-            )
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="retired app payload"):
-                store.load_project(saved.id)
-    finally:
-        os.unlink(db_path)
-
-    print("test_project_store_rejects_retired_app_payload_on_load PASSED")
-
-
-def test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load():
-    import pytest
-    import sqlite3
-
-    from app.core.project_store import ProjectDataError, ProjectStore
-    from app.models import BBox, Block, BlockType, OcrProject, Page
-
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
-        db_path = f.name
-
-    try:
-        clean_block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(0, 0, 40, 20))
-        clean_project = OcrProject(
-            name="app-owned raw payload load",
-            pages=[Page(image_path="/tmp/app-owned-raw-payload.png", width=80, height=40, blocks=[clean_block])],
-        )
-        with ProjectStore(db_path) as store:
-            saved = store.save_project(clean_project)
-        with sqlite3.connect(db_path) as conn:
+            conn.execute("ALTER TABLE block ADD COLUMN raw_payload_json TEXT NOT NULL DEFAULT '{}'")
+            conn.execute("ALTER TABLE block ADD COLUMN app_payload_json TEXT NOT NULL DEFAULT '{}'")
             conn.execute(
                 "UPDATE block SET raw_payload_json=? WHERE id=?",
                 (json.dumps({"paddle_binding": {"source_label": "text"}}, ensure_ascii=False), clean_block.id),
             )
+            conn.execute("UPDATE meta SET value='22' WHERE key='schema_version'")
             conn.commit()
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="retired raw payload"):
-                store.load_project(saved.id)
+        with pytest.raises(ProjectDataError, match="retired payload"):
+            store = ProjectStore(db_path)
+            store.open()
     finally:
+        try:
+            store.close()
+        except Exception:
+            pass
         os.unlink(db_path)
 
-    print("test_project_store_rejects_app_owned_keys_in_raw_payload_on_save_and_load PASSED")
+    print("test_project_store_migration_rejects_nonempty_retired_block_payload_columns PASSED")
 
 
-def test_project_store_rejects_invalid_payload_json_on_load():
+def test_project_store_rejects_invalid_review_flags_json_on_load():
     import pytest
     import sqlite3
 
@@ -1611,24 +1601,6 @@ def test_project_store_rejects_invalid_payload_json_on_load():
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
         with sqlite3.connect(db_path) as conn:
-            conn.execute("UPDATE block SET raw_payload_json=? WHERE id=?", ("[", block.id))
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="block.raw_payload_json invalid json"):
-                store.load_project(saved.id)
-
-        with sqlite3.connect(db_path) as conn:
-            conn.execute("UPDATE block SET raw_payload_json=?, app_payload_json=? WHERE id=?", ("{}", "[]", block.id))
-            conn.commit()
-        with ProjectStore(db_path) as store:
-            with pytest.raises(ProjectDataError, match="block.app_payload_json must be dict"):
-                store.load_project(saved.id)
-
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(
-                "UPDATE block SET raw_payload_json=?, app_payload_json=? WHERE id=?",
-                ("{}", "{}", block.id),
-            )
             conn.execute("UPDATE line SET review_flags_json=? WHERE id=?", ("[", line.id))
             conn.commit()
         with ProjectStore(db_path) as store:
@@ -1644,17 +1616,16 @@ def test_project_store_rejects_invalid_payload_json_on_load():
     finally:
         os.unlink(db_path)
 
-    print("test_project_store_rejects_invalid_payload_json_on_load PASSED")
+    print("test_project_store_rejects_invalid_review_flags_json_on_load PASSED")
 
 
-def test_model_validation_rejects_legacy_page_and_runtime_payloads():
+def test_model_validation_rejects_legacy_page_and_block_payload_attr():
     import pytest
 
     from app.core.model_validation import (
         ModelValidationError,
         validate_block_model,
         validate_page_model,
-        validate_persistent_block_payloads,
     )
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockOrigin, BlockType, Page
@@ -1667,17 +1638,12 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     with pytest.raises(ModelValidationError, match="must not expose raw_payload"):
         validate_block_model(block)
 
-    with pytest.raises(ModelValidationError, match="runtime routing data"):
-        validate_persistent_block_payloads({LAYOUT_LINE_ROUTES_FIELD: []}, {})
-    with pytest.raises(ModelValidationError, match="retired raw payload"):
-        validate_persistent_block_payloads({"block_label": "text"}, {})
-
     page = Page(image_path="/tmp/model-validation.png", width=20, height=20)
     page.ppvl_parsing_res_list = []
     with pytest.raises(ModelValidationError, match="ppvl_parsing_res_list"):
         validate_page_model(page)
 
-    print("test_model_validation_rejects_legacy_page_and_runtime_payloads PASSED")
+    print("test_model_validation_rejects_legacy_page_and_block_payload_attr PASSED")
 
 
 def test_project_store_rejects_legacy_page_model_on_save():
@@ -19753,10 +19719,11 @@ if __name__ == "__main__":
     test_project_store_persists_table_text_layer_cells()
     test_project_store_persists_block_origin_separately_from_current_layout()
     test_project_store_persists_layout_edit_events()
-    test_project_store_rejects_runtime_layout_routes_on_save_and_load()
-    test_project_store_rejects_retired_app_payload_on_load()
-    test_project_store_rejects_invalid_payload_json_on_load()
-    test_model_validation_rejects_legacy_page_and_runtime_payloads()
+    test_project_store_current_schema_omits_retired_block_payload_columns()
+    test_project_store_migration_drops_empty_retired_block_payload_columns()
+    test_project_store_migration_rejects_nonempty_retired_block_payload_columns()
+    test_project_store_rejects_invalid_review_flags_json_on_load()
+    test_model_validation_rejects_legacy_page_and_block_payload_attr()
     test_project_store_rejects_legacy_page_model_on_save()
     test_line_final_text_contract_and_project_store_roundtrip()
     test_project_store_preserves_empty_final_text_roundtrip()

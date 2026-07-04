@@ -25,7 +25,7 @@
 | `Block.lines` | `app.models.ocr_observation` / `ocr_observation_store` | 旧 UI 和 SQLite `line` 表仍需要行对象投影；业务读写已经收口到 OCR observation boundary。 | HProof/VProof、导出、ProjectStore 和 Hanwang 回写都只读写 OCR observation store；`Block` 不再持有 lines。 |
 | `Line.chars` | `app.models.ocr_character_observation` / `ocr_character_observation_store` | 字符/词/公式 carrier 仍要投影给 proof UI、导出和存储；直接访问已经由架构测试限制。 | CharIndex、ProofAtom、PDF text layer、ProjectStore 都只消费 character observation store；`Line` 不再持有 chars。 |
 | `Line.text` / `Line.ocr_text` / `Line.confidence` / `Line.review_flags` | `app.models.ocr_text_observation` / `line_text_contract()` | 当前 SQLite 行表和部分 OCR producer 仍以 Line 为投影目标；读取口径已收口。 | OCR 原文、置信度、review flags 进入独立 OCR text observation table/store；Line 仅保留 uid/bbox/order 或被视图模型替代。 |
-| `block.raw_payload_json` / `block.app_payload_json` SQLite 列 | `validate_persistent_block_payloads()` 拒绝非空旧 payload | 旧 schema 列仍在数据库中，当前保存固定写 `{}`，加载非空旧 payload 会报错，不再迁移。 | 新项目 schema 不再创建这两列，迁移测试改为验证旧库被拒绝或显式升级工具处理。 |
+| `block.raw_payload_json` / `block.app_payload_json` SQLite 旧列 | schema 23 迁移 | 当前 schema 不再创建这两列；schema 23 迁移会删除空旧列，非空旧 payload 会拒绝打开。 | 已完成；后续只保留迁移拒绝测试，不能重新在保存/加载 SQL 中读取或写入。 |
 
 ## 已清理
 
@@ -42,7 +42,7 @@
 | `Line.text <-> final_text` 双向镜像 | external `ProofLineState` store / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段；active `Line` 不再携带 proof_state。 |
 | 旧 `line.proof_state` runtime attr 兼容消费 | external `ProofLineState` store | `proof_line_state_store` 不再消费或清理旧 attr；active Line 出现 `proof_state` 会被视为模型污染并报错。 |
 | `quality_probe_target_ratio` AppConfig 旧比例键 | `quality_probe_sand_count` + `quality_probe_sand_unit_chars` | 设置路径只保留“每 N 字投放几个沙子”的密度模型；程序化 `SamplerConfig(target_ratio=...)` 仍可用于测试，但不再从 AppConfig 读取。 |
-| `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.raw_payload/app_payload` 已从 active model 删除；旧 `raw_payload_json/app_payload_json` 不再迁移，非空会被当前 schema 校验拒绝。 |
+| `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.raw_payload/app_payload` 已从 active model 删除；旧 `raw_payload_json/app_payload_json` 已从当前 schema 退出，非空旧列在 schema 23 迁移时拒绝打开。 |
 | 裸 `Page.status` 写入 | `app.models.page_state` | Controller/Store 不再直接写 `Page.status`；当前仍保留单字段，后续状态机拆分从 helper 入口替换。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 | `LayoutPanel` 版面编辑私有业务 helper / 散参 mutation 调用 / 撤销直写 `page.blocks` | `LayoutEditCommand` + `LayoutEditService.apply()` | 删除 `_apply_subtype_to_block`、`_merge_blocks_into_bbox`、`_bind_manual_block_to_paddle`、`_update_existing_manual_binding_bbox` 等 UI 内业务写入口；新增、删除、改类型、合并、调框、撤销恢复统一经命令入口写 typed state 和 layout edit event。 |
@@ -94,7 +94,7 @@
 - `Block.source` 的判断和用户编辑写入已收口到 `app.models.layout_block_state`；生产模块不得各自比较或直接写 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `Block.source_label` 的生产写入已收口到 `app.models.layout_block_state.set_layout_block_source_label()`；导入/投影构造可传初始值，运行时不得直接赋值。
 - `Block.ocr_policy` 的生产写入已收口到 `app.models.layout_block_state.set_layout_block_ocr_policy()`；策略计算仍由 `ocr_dispatch_policy` 负责，业务模块不得直接赋值。
-- `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
+- `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 不再出现在当前 schema 和保存/加载 SQL 中，运行时 route/旧 payload 不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
 - `proof_line_state_store` 不再兼容读取旧 `line.proof_state` attr；proof runtime state 只存在于 external store。
 - quality probe 设置不再读取旧 `quality_probe_target_ratio`；AppConfig 只接受 `quality_probe_sand_count` 和 `quality_probe_sand_unit_chars` 作为用户密度真值。
 - quality probe bus topic 不再从 `app.core.quality_probe` 兼容导出；订阅方统一从 `app.core.proof_state` 读取。

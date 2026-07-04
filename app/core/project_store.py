@@ -37,7 +37,6 @@ from app.core.model_validation import (
     ModelValidationError,
     validate_block_model,
     validate_page_model,
-    validate_persistent_block_payloads,
 )
 from app.core.line_text_contract import line_text_contract
 from app.core.proof_line_mutation import apply_line_proof_state
@@ -111,8 +110,6 @@ CREATE TABLE IF NOT EXISTS block (
     ocr_policy      TEXT    NOT NULL DEFAULT 'text_ocr',
     note            TEXT    NOT NULL DEFAULT '',
     source_label    TEXT    NOT NULL DEFAULT '',
-    raw_payload_json TEXT   NOT NULL DEFAULT '{}',
-    app_payload_json TEXT   NOT NULL DEFAULT '{}',
     paddle_binding_json TEXT NOT NULL DEFAULT '{}',
     ocr_invalidated_reason TEXT NOT NULL DEFAULT '',
     ocr_audit_json TEXT NOT NULL DEFAULT '{}',
@@ -367,6 +364,7 @@ MIGRATIONS: dict[int, list[str]] = {
     22: [
         "ALTER TABLE raw_ocr_artifact ADD COLUMN route_attachments_json TEXT NOT NULL DEFAULT '{}';",
     ],
+    23: [],
 }
 
 
@@ -545,6 +543,8 @@ class ProjectStore:
                 stmts = MIGRATIONS[ver]
                 logger.info("Running schema migration v%d -> v%d", ver - 1, ver)
                 try:
+                    if ver == 23:
+                        self._migrate_v23_drop_retired_block_payload_columns()
                     for stmt in stmts:
                         try:
                             self.conn.execute(stmt)
@@ -569,6 +569,34 @@ class ProjectStore:
                     self.conn.rollback()
                     logger.error("Migration to v%d failed: %s", ver, e)
                     raise
+
+    def _migrate_v23_drop_retired_block_payload_columns(self) -> None:
+        """Remove retired block payload columns from the current schema.
+
+        These columns previously carried mixed vendor/app state. Current code
+        stores typed fields instead; non-empty legacy payload means the project
+        needs an explicit repair path, not silent migration.
+        """
+        columns = self._table_columns("block")
+        retired_columns = ("raw_payload_json", "app_payload_json")
+        present = [col for col in retired_columns if col in columns]
+        if not present:
+            return
+        for col in present:
+            rows = self.conn.execute(f"SELECT id, {col} FROM block").fetchall()
+            for row in rows:
+                raw = str(row[col] or "").strip()
+                if raw in {"", "{}"}:
+                    continue
+                raise ProjectDataError(
+                    f"block.{col} contains retired payload; "
+                    "open a clean project or run an explicit repair tool"
+                )
+        for col in present:
+            self.conn.execute(f"ALTER TABLE block DROP COLUMN {col}")
+
+    def _table_columns(self, table: str) -> set[str]:
+        return {str(row["name"]) for row in self.conn.execute(f"PRAGMA table_info({table})")}
 
     def _ensure_entity_uids(self) -> None:
         """Backfill stable business IDs and enforce per-entity uniqueness."""
@@ -1104,8 +1132,6 @@ class ProjectStore:
             page_id, block.block_type.value, bb.x, bb.y, bb.w, bb.h, block.order,
             block.source.value, block.ocr_policy.value,
             block.note, block.source_label,
-            "{}",
-            "{}",
             json.dumps(block.paddle_binding.to_dict() if block.paddle_binding else {}, ensure_ascii=False),
             block.ocr_invalidated_reason,
             json.dumps(block.ocr_audit, ensure_ascii=False),
@@ -1114,10 +1140,10 @@ class ProjectStore:
         if block.id is None:
             cur.execute(
                 "INSERT INTO block (uid, page_id, block_type, x, y, w, h, block_order, "
-                "source, ocr_policy, note, source_label, raw_payload_json, "
-                "app_payload_json, paddle_binding_json, ocr_invalidated_reason, "
+                "source, ocr_policy, note, source_label, "
+                "paddle_binding_json, ocr_invalidated_reason, "
                 "ocr_audit_json, table_text_layer_cells_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (block.uid, *values),
             )
             block.id = cur.lastrowid
@@ -1125,8 +1151,8 @@ class ProjectStore:
             cur.execute(
                 "UPDATE block SET page_id=?, block_type=?, x=?, y=?, w=?, h=?, "
                 "block_order=?, source=?, ocr_policy=?, note=?, "
-                "source_label=?, raw_payload_json=?, app_payload_json=?, "
-                "paddle_binding_json=?, ocr_invalidated_reason=?, ocr_audit_json=?, "
+                "source_label=?, paddle_binding_json=?, "
+                "ocr_invalidated_reason=?, ocr_audit_json=?, "
                 "table_text_layer_cells_json=? "
                 "WHERE id=? AND uid=?",
                 (*values, block.id, block.uid),
@@ -1693,12 +1719,6 @@ class ProjectStore:
         ).fetchall()
         blocks = []
         for r in rows:
-            raw_payload = _json_to_dict(r["raw_payload_json"], field="block.raw_payload_json")
-            app_payload = (
-                _json_to_dict(r["app_payload_json"], field="block.app_payload_json")
-                if "app_payload_json" in r.keys()
-                else {}
-            )
             paddle_binding_payload = (
                 _json_to_dict(r["paddle_binding_json"], field="block.paddle_binding_json")
                 if "paddle_binding_json" in r.keys()
@@ -1722,15 +1742,6 @@ class ProjectStore:
                 if "ocr_invalidated_reason" in r.keys()
                 else ""
             )
-            try:
-                validate_persistent_block_payloads(
-                    raw_payload,
-                    app_payload,
-                    raw_field="block.raw_payload_json",
-                    app_field="block.app_payload_json",
-                )
-            except ModelValidationError as exc:
-                _raise_project_data_error(exc)
             origin = self._load_block_origin(project_id, str(r["uid"] or ""))
             block = Block(
                 block_type=BlockType(r["block_type"]),
