@@ -893,6 +893,51 @@ def test_layout_block_type_writes_go_through_layout_block_state_helper():
     assert offenders == []
 
 
+def test_layout_block_note_writes_go_through_layout_block_state_helper():
+    allowed = {Path("app/models/layout_block_state.py")}
+    offenders: list[str] = []
+    helper_source = Path("app/models/layout_block_state.py").read_text(encoding="utf-8")
+    assert "def set_layout_block_note" in helper_source
+    assert "def append_layout_block_note_once" in helper_source
+
+    for path in APP_DIR.rglob("*.py"):
+        if path in allowed:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for target in _assigned_attr_targets(tree):
+            if target.attr == "note":
+                offenders.append(f"{path}:{target.lineno}: direct note assignment")
+
+    assert offenders == []
+
+
+def test_layout_block_geometry_and_order_writes_go_through_layout_block_state_helper():
+    helper_source = Path("app/models/layout_block_state.py").read_text(encoding="utf-8")
+    assert "def set_layout_block_bbox" in helper_source
+    assert "def set_layout_block_order" in helper_source
+
+    direct_patterns = (
+        r"\bblock\.bbox\s*=(?!=)",
+        r"\bprimary\.bbox\s*=(?!=)",
+        r"\bnew_block\.bbox\s*=(?!=)",
+        r"\bbi\._block\.bbox\s*=(?!=)",
+        r"\bself\._block\.bbox\s*=(?!=)",
+        r"\bblock\.order\s*=(?!=)",
+        r"\bprimary\.order\s*=(?!=)",
+        r"\bnew_block\.order\s*=(?!=)",
+    )
+    offenders: list[str] = []
+    for path in APP_DIR.rglob("*.py"):
+        if path == Path("app/models/layout_block_state.py"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        for pattern in direct_patterns:
+            if re.search(pattern, source):
+                offenders.append(f"{path}: {pattern}")
+
+    assert offenders == []
+
+
 def test_project_store_exposes_only_scoped_proof_line_write_port():
     from app.core.project_store import ProjectStore
 

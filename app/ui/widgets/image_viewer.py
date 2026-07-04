@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_attributes
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
+from app.models.layout_block_state import set_layout_block_bbox
 from app.models.ocr_observation import block_avg_confidence
 
 
@@ -147,7 +148,7 @@ class _ResizeHandle(QGraphicsRectItem):
             h.update_position()
         # 同步 block
         if bi._block is not None and hasattr(bi._block, "bbox"):
-            bi._block.bbox = BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height()))
+            set_layout_block_bbox(bi._block, BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height())))
             bi.signals.moved.emit(bi._block)
         event.accept()
 
@@ -252,11 +253,14 @@ class BBoxItem(QGraphicsRectItem):
                 pos = self.scenePos()
                 r = self.rect()
                 bb = self._block.bbox
-                self._block.bbox = BBox(
-                    int(pos.x() + r.x()),
-                    int(pos.y() + r.y()),
-                    bb.w,
-                    bb.h,
+                set_layout_block_bbox(
+                    self._block,
+                    BBox(
+                        int(pos.x() + r.x()),
+                        int(pos.y() + r.y()),
+                        bb.w,
+                        bb.h,
+                    ),
                 )
                 self.signals.moved.emit(self._block)
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:

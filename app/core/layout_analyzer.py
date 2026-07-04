@@ -62,7 +62,7 @@ from app.core.paddle_v16_client import (
     is_paddle_v16_endpoint,
 )
 from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
-from app.models.layout_block_state import set_layout_block_ocr_policy
+from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
 from app.models.layout_projection import (
     append_page_layout_block,
     page_layout_blocks,
@@ -773,7 +773,7 @@ class LayoutAnalyzer:
                 scale_y,
             )
             for block in page_layout_blocks(page):
-                block.bbox = scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height)
+                set_layout_block_bbox(block, scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height))
             return
 
         scale_x = page.width / max_x2
@@ -796,7 +796,7 @@ class LayoutAnalyzer:
             page.display_image_path, scale_x, scale_y, page.width, page.height, max_x2, max_y2,
         )
         for block in page_layout_blocks(page):
-            block.bbox = scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height)
+            set_layout_block_bbox(block, scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height))
 
     def _local_analyze(self, page: Page) -> Page:
         import cv2

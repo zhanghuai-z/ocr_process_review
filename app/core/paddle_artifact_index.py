@@ -21,7 +21,11 @@ from app.core.paddle_line_routing import (
 )
 from app.core.normalized_layout_artifact import LayoutRegion, normalized_layout_regions
 from app.models import BBox, Block, BlockOrigin, BlockType, OcrPolicy
-from app.models.layout_block_state import set_layout_block_ocr_policy, set_layout_block_source_label
+from app.models.layout_block_state import (
+    set_layout_block_note,
+    set_layout_block_ocr_policy,
+    set_layout_block_source_label,
+)
 
 
 XYXY = tuple[int, int, int, int]
@@ -590,9 +594,9 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
     else:
         clear_block_ocr_lines(block)
     if binding.status == BINDING_EMPTY_REVIEW:
-        block.note = binding.source
+        set_layout_block_note(block, binding.source)
     elif binding.status == BINDING_AMBIGUOUS:
-        block.note = "manual_binding_ambiguous"
+        set_layout_block_note(block, "manual_binding_ambiguous")
 
 
 __all__ = [

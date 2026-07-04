@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .enums import BlockSource, BlockType, OcrPolicy
-from .project import Block
+from .project import BBox, Block
 
 
 USER_AUTHORED_LAYOUT_SOURCES = frozenset({
@@ -43,6 +43,29 @@ def set_layout_block_source_label(block: Block, source_label: str) -> None:
 
 def set_layout_block_type(block: Block, block_type: BlockType) -> None:
     block.block_type = block_type
+
+
+def set_layout_block_note(block: Block, note: str) -> None:
+    block.note = str(note or "")
+
+
+def set_layout_block_bbox(block: Block, bbox: BBox) -> None:
+    block.bbox = bbox
+
+
+def set_layout_block_order(block: Block, order: int) -> None:
+    block.order = int(order)
+
+
+def append_layout_block_note_once(block: Block, note: str) -> None:
+    text = str(note or "")
+    if not text:
+        return
+    if not block.note:
+        set_layout_block_note(block, text)
+        return
+    if text not in block.note:
+        set_layout_block_note(block, f"{block.note}\n{text}")
 
 
 def is_auto_tightened_layout_block(block: Block) -> bool:

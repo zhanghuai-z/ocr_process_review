@@ -45,6 +45,7 @@
      - UI 提交 create/delete/change_kind/merge/geometry_update 命令
      - create/delete/change_kind/merge/geometry_update/restore_blocks 是当前用户编辑写入口
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
+     - Block.bbox/order 的运行时改写通过 layout_block_state helper 写入
      - Block.block_type 的运行时改写通过 layout_block_state helper 写入
      - Block.source 的人工来源标记通过 layout_block_state helper 写入
      - Block.source_label 的运行时改写通过 layout_block_state helper 写入
@@ -119,7 +120,9 @@ OCR Hanwang/CharOCR
 | 当前版面真值 | `LayoutSnapshot` | `Page.blocks` 直接当导入真值 | API 版面分析现在从归一化 artifact 编译 snapshot，再投影到 `Page.blocks` 供旧链路消费。 |
 | 当前版面投影访问 | `app.models.layout_projection` | 非 UI 业务层直接 `page.blocks` | `Page.blocks` 暂时还是物理运行对象；非 UI 读取/替换当前投影必须走 projection helper，避免把物理对象树继续扩散成领域模型。 |
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
+| 块几何/顺序 | `Block.bbox` / `Block.order` / `set_layout_block_bbox()` / `set_layout_block_order()` | 各模块直接写 `block.bbox/order`、把 bbox/order 当身份 | bbox/order 是当前投影状态，可随编辑、缩放和 OCR clamp 改变；运行时写入必须经 layout_block_state helper。 |
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | 旧 `block.raw_payload`、旧 `block.app_payload` | `raw_payload/app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
+| 块提示/调试说明 | `Block.note` / `set_layout_block_note()` / `append_layout_block_note_once()` | 各模块直接写 `block.note`、用 note 做关键判断 | `block.note` 只保留为提示/调试说明，不参与关键路由或导出真值；运行时写入必须经 layout_block_state helper。 |
 | 块大类 | `Block.block_type` / `set_layout_block_type()` | Paddle 原始 label 直接判断、各模块直接写 `block.block_type` | UI 和导出看大类；运行时改写必须经 layout_block_state helper。 |
 | Paddle 细标签 | `Block.source_label` / raw label / `set_layout_block_source_label()` | `Block.block_type` 反推、各模块直接写 `block.source_label` | 页眉、脚注、公式序号等细分来自 source_label；运行时改写必须经 layout_block_state helper。 |
 | 块来源/编辑态 | `app.models.layout_block_state` helper | 各模块直接比较或写入 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑来源、导出 origin 等语义的解释和用户编辑写入都集中到 helper。 |
@@ -319,6 +322,7 @@ OCR Hanwang/CharOCR
 - `NormalizedLayoutArtifact`：外部版面事实的统一读模型。
 - `LayoutSnapshot`：当前采用的版面真值；API 版面分析已从它投影到旧 `Page.blocks`。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
+- `Block.bbox/order`：当前版面投影状态，不是身份；运行时写入必须经 `app.models.layout_block_state`。
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
 - `Page.status/error_message/ocr_invalidated_reason`：当前页面流程状态字段；Controller、Worker、Pipeline 写入必须经 `app.models.page_state`。
@@ -335,7 +339,7 @@ OCR Hanwang/CharOCR
 - `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute`：当前路线计划的 typed 生产/读取口径。
 - `_route_subblocks` / `_layout_line_routes`：当前路线计划的运行时输入/cache 序列化；只能由 route adapter/legacy serialization 解释。
 - `ProofLineViewModel` / UI 状态标签：展示投影。
-- `block.note`：提示/调试说明，不应参与关键判断。
+- `block.note`：提示/调试说明，不应参与关键判断；写入必须经 `app.models.layout_block_state`。
 
 ### 兼容/过渡层
 

@@ -107,6 +107,7 @@ from app.models.layout_block_state import (
     is_user_authored_layout_block,
     is_user_authored_layout_source,
     set_layout_block_ocr_policy,
+    set_layout_block_order,
     set_layout_block_source_label,
 )
 from app.models.ocr_character_observation import replace_line_ocr_chars
@@ -3706,7 +3707,7 @@ class HanwangMicroRecBlockEngine:
         if preserved_manual_blocks:
             new_blocks.extend(preserved_manual_blocks)
         for order, block in enumerate(new_blocks):
-            block.order = order
+            set_layout_block_order(block, order)
         replace_page_layout_blocks(page, new_blocks)
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "

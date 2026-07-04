@@ -18,7 +18,10 @@ from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dic
 from app.models.layout_block_state import (
     mark_layout_block_manual_draw,
     mark_layout_block_user_edited,
+    set_layout_block_bbox,
+    set_layout_block_note,
     set_layout_block_ocr_policy,
+    set_layout_block_order,
     set_layout_block_source_label,
     set_layout_block_type,
 )
@@ -319,7 +322,7 @@ class LayoutEditService:
         before = before or {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
         replace_page_layout_blocks(page, next_blocks)
         for order, block in enumerate(page_layout_blocks(page)):
-            block.order = order
+            set_layout_block_order(block, order)
         after = {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
         self.record_edit(page, "restore_blocks", None, before=before, after=after)
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
@@ -367,13 +370,13 @@ class LayoutEditService:
         y1 = min([bbox.y1, *(block.bbox.y1 for block in ordered)])
         x2 = max([bbox.x2, *(block.bbox.x2 for block in ordered)])
         y2 = max([bbox.y2, *(block.bbox.y2 for block in ordered)])
-        primary.bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
+        set_layout_block_bbox(primary, BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height))
         set_layout_block_type(primary, block_type)
         set_layout_block_source_label(primary, source_label)
         clear_block_ocr_lines(primary)
         mark_layout_block_user_edited(primary)
         set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
-        primary.note = "manual_draw_merge_requires_ocr_rerun"
+        set_layout_block_note(primary, "manual_draw_merge_requires_ocr_rerun")
         mark_ocr_text_invalidated(primary, "manual_draw_merge")
         binding = self.bind_manual_block_to_paddle(page, primary)
         for block in ordered[1:]:
@@ -384,7 +387,7 @@ class LayoutEditService:
             [block for block in page_layout_blocks(page) if id(block) not in remove_ids],
         )
         for order, block in enumerate(page_layout_blocks(page)):
-            block.order = order
+            set_layout_block_order(block, order)
         after = {"block": self.block_state(primary)}
         self.record_edit(page, "merge_blocks", primary, before=before, after=after)
         return LayoutEditResult(

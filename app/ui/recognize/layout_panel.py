@@ -20,6 +20,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
+from app.models.layout_block_state import set_layout_block_order
 from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
@@ -1042,7 +1043,7 @@ class LayoutPanel(QWidget):
                 if is_changed:
                     changed += 1
             for order, block in enumerate(page_layout_blocks(page)):
-                block.order = order
+                set_layout_block_order(block, order)
             self.block_contract_changed.emit(page.page_number, "block_type_changed")
         self._show_page_layers(self._pages[self._current_page_idx])
         self._rebuild_heading_outline()

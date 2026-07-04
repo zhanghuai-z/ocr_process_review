@@ -32,6 +32,7 @@ from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
+from app.models.layout_block_state import append_layout_block_note_once, set_layout_block_bbox
 from app.models.layout_projection import append_page_layout_block, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
@@ -485,11 +486,7 @@ class OcrPipeline:
 
     def _append_block_failure_note(self, block: Block, message: str) -> None:
         note = f"OCR failed: {message}"
-        if not block.note:
-            block.note = note
-            return
-        if note not in block.note:
-            block.note = f"{block.note}\n{note}"
+        append_layout_block_note_once(block, note)
 
     def _process_page_with_page_ocr(
         self,
@@ -742,7 +739,7 @@ class OcrPipeline:
             return []
 
         bb = block.bbox.normalize().clamp(img.shape[1], img.shape[0])
-        block.bbox = bb
+        set_layout_block_bbox(block, bb)
         # clamp to image boundaries
         x1 = max(0, bb.x)
         y1 = max(0, bb.y)

@@ -73,7 +73,9 @@
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`；LayoutWorker/OcrPipeline 不再直接写后台错误消息。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
+- `Block.bbox/order` 的生产运行时写入已收口到 `app.models.layout_block_state`；bbox/order 不得作为业务身份。
 - `Block.block_type` 的生产运行时写入已收口到 `app.models.layout_block_state.set_layout_block_type()`；导入/投影构造可传初始值，运行时不得直接赋值。
+- `Block.note` 的生产写入已收口到 `app.models.layout_block_state`；它只作为提示/调试说明，不得恢复为关键判断字段。
 - `Block.source` 的判断和用户编辑写入已收口到 `app.models.layout_block_state`；生产模块不得各自比较或直接写 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `Block.source_label` 的生产写入已收口到 `app.models.layout_block_state.set_layout_block_source_label()`；导入/投影构造可传初始值，运行时不得直接赋值。
 - `Block.ocr_policy` 的生产写入已收口到 `app.models.layout_block_state.set_layout_block_ocr_policy()`；策略计算仍由 `ocr_dispatch_policy` 负责，业务模块不得直接赋值。
