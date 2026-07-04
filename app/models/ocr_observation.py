@@ -17,7 +17,8 @@ from .layout_projection import (
     page_layout_blocks,
 )
 from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
-from .project import BBox, Block, Line, OCR_AVAILABLE_PAGE_STATUSES, OcrProject, Page
+from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
+from .project import BBox, Block, Line, OcrProject, Page
 from .ocr_text_observation import line_ocr_confidence
 
 

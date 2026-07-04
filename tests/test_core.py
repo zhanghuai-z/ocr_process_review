@@ -261,7 +261,12 @@ def test_models():
         BBox, Block, BlockSource, BlockType, Char, Line,
         OcrProject, Page, PageStatus, ProofLineState, ProofStatus,
     )
-    from app.models.page_state import clear_page_ocr_invalidation, invalidate_page_ocr
+    from app.models.page_state import (
+        clear_page_ocr_invalidation,
+        invalidate_page_ocr,
+        page_is_ocr_done,
+        page_needs_ocr_rerun,
+    )
 
     # BBox
     bb = BBox(10, 20, 100, 30)
@@ -390,15 +395,15 @@ def test_models():
     assert project_all_pages_ocr_done(project) is False
     page.status = PageStatus.OCR_DONE
     assert page_has_ocr_result(page) is True
-    assert page.is_ocr_done is True
+    assert page_is_ocr_done(page) is True
     page.status = PageStatus.PROOFING
-    assert page.is_ocr_done is True
+    assert page_is_ocr_done(page) is True
     assert project_all_pages_ocr_done(project) is True
     invalidate_page_ocr(page, "block_moved")
-    assert page.needs_ocr_rerun is True
+    assert page_needs_ocr_rerun(page) is True
     assert page.ocr_invalidated_reason == "block_moved"
     clear_page_ocr_invalidation(page)
-    assert page.needs_ocr_rerun is False
+    assert page_needs_ocr_rerun(page) is False
 
     # Export summary lives outside the project model; proof stats are service-owned.
     from app.services.export_service import build_export_summary
@@ -451,7 +456,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
         pending_ocr_pages,
     )
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
-    from app.models.page_state import invalidate_page_ocr
+    from app.models.page_state import invalidate_page_ocr, page_is_ocr_done
 
     done_page = Page(
         image_path="/tmp/done.png",
@@ -496,7 +501,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
         ],
     )
     assert page_has_ocr_result(lines_without_done_status) is True
-    assert lines_without_done_status.is_ocr_done is False
+    assert page_is_ocr_done(lines_without_done_status) is False
     assert compute_max_step(OcrProject(name="lines-only", pages=[lines_without_done_status])) == STEP_OCR
     assert page_gate_info(lines_without_done_status).page_state == "ocr_ready"
 
@@ -2687,7 +2692,7 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
 
 def test_project_store_persists_page_ocr_invalidation_reason():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
-    from app.models.page_state import invalidate_page_ocr
+    from app.models.page_state import invalidate_page_ocr, page_needs_ocr_rerun
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -2716,7 +2721,7 @@ def test_project_store_persists_page_ocr_invalidation_reason():
             loaded = store.load_project(project_id=1)
 
         assert loaded.pages[0].ocr_invalidated_reason == "block_type_changed"
-        assert loaded.pages[0].needs_ocr_rerun is True
+        assert page_needs_ocr_rerun(loaded.pages[0]) is True
         assert loaded.pages[0].status == PageStatus.LAYOUT_DONE
     finally:
         os.unlink(db_path)
@@ -13328,6 +13333,7 @@ def test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_
 def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
+    from app.models.page_state import page_needs_ocr_rerun
 
     original_get_config = workflow_module.get_config
     workflow_module.get_config = lambda: {"mode": "hanwang"}
@@ -13350,7 +13356,7 @@ def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
         assert page_ocr_line_count(page1) == 1
         assert page1.blocks[0].lines[0].text == "第一页"
         assert page1.status == PageStatus.LAYOUT_DONE
-        assert page1.needs_ocr_rerun is True
+        assert page_needs_ocr_rerun(page1) is True
         assert page1.ocr_invalidated_reason == "block_moved"
         assert page_ocr_line_count(page2) == 1
         assert page2.status == PageStatus.OCR_DONE

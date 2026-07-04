@@ -24,7 +24,7 @@ from app.models.layout_block_state import set_layout_block_order
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
-from app.models.page_state import page_error_message, page_has_error
+from app.models.page_state import page_error_message, page_has_error, page_needs_ocr_rerun
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
@@ -1448,7 +1448,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _collect_page_chars(page: Page):
-        if page.needs_ocr_rerun:
+        if page_needs_ocr_rerun(page):
             return []
         chars = []
         for block in page_layout_blocks(page):

@@ -2,15 +2,9 @@
 from __future__ import annotations
 
 from app.models import Page, PageStatus
+from app.models.page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
 from app.models.layout_projection import page_has_layout_blocks
 from app.models.ocr_observation import page_has_ocr_result
-
-
-OCR_AVAILABLE_PAGE_STATUSES = {
-    PageStatus.OCR_DONE,
-    PageStatus.PROOFING,
-    PageStatus.PROOF_DONE,
-}
 
 
 def page_is_layout_analyzed(page: Page) -> bool:

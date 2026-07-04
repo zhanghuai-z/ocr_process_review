@@ -3,17 +3,8 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional
 import time
 
-from .enums import (
-    BlockSource, BlockType, OcrPolicy, PageStatus,
-)
+from .enums import BlockSource, BlockType, OcrPolicy, PageStatus
 from .entity_id import ensure_entity_uid
-
-
-OCR_AVAILABLE_PAGE_STATUSES = {
-    PageStatus.OCR_DONE,
-    PageStatus.PROOFING,
-    PageStatus.PROOF_DONE,
-}
 
 
 @dataclass
@@ -422,16 +413,6 @@ class Page:
         property 为准，确保 bbox 坐标始终落在同一张工作图上。
         """
         return self.cache_image_path or self.image_path
-
-    @property
-    def is_ocr_done(self) -> bool:
-        """当前页是否已通过 OCR 阶段，可进入或继续校对。"""
-        return self.status in OCR_AVAILABLE_PAGE_STATUSES
-
-    @property
-    def needs_ocr_rerun(self) -> bool:
-        """版面变更后，已有 OCR 结果是否被显式标记为失效。"""
-        return bool(self.ocr_invalidated_reason)
 
 
 @dataclass

@@ -658,13 +658,15 @@ def test_workflow_page_state_reads_go_through_page_state_boundary():
     assert offenders == []
 
 
-def test_page_model_does_not_restore_layout_status_interpretation_properties():
+def test_page_model_does_not_restore_workflow_interpretation_properties():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="app/models/project.py")
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == "Page":
             page_source = ast.get_source_segment(source, node) or ""
             assert "def is_analyzed" not in page_source
+            assert "def is_ocr_done" not in page_source
+            assert "def needs_ocr_rerun" not in page_source
             break
     else:
         raise AssertionError("Page class not found")
