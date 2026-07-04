@@ -127,6 +127,54 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
     assert line.chars is line_ocr_chars(line)
 
 
+def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
+    from app.models import BBox, Line
+    from app.models.ocr_text_observation import (
+        append_line_ocr_review_flag_once,
+        line_has_ocr_review_flag,
+        line_ocr_review_flags,
+        line_ocr_text,
+        line_ocr_text_observation,
+        set_line_ocr_text_observation,
+    )
+    from app.models.ocr_text_observation_store import OcrTextObservation
+
+    line = Line(text="OCR", confidence=0.8, bbox=BBox(0, 0, 20, 10), ocr_text="OCR源")
+
+    observation = line_ocr_text_observation(line)
+    assert observation.text == "OCR"
+    assert observation.ocr_text == "OCR源"
+    assert line_ocr_text(line) == "OCR源"
+
+    set_line_ocr_text_observation(
+        line,
+        OcrTextObservation(
+            text="新OCR",
+            ocr_text="新OCR源",
+            confidence=0.9,
+            review_flags=("flag-a", "flag-a", "flag-b"),
+        ),
+    )
+    assert line.text == "新OCR"
+    assert line.ocr_text == "新OCR源"
+    assert line.confidence == 0.9
+    assert line.review_flags == ["flag-a", "flag-b"]
+    assert line_ocr_review_flags(line) == ("flag-a", "flag-b")
+
+    line.text = "旧投影直改"
+    line.ocr_text = "旧投影源"
+    line.review_flags = ["legacy"]
+    adopted = line_ocr_text_observation(line)
+    assert adopted.text == "旧投影直改"
+    assert adopted.ocr_text == "旧投影源"
+    assert line_ocr_review_flags(line) == ("legacy",)
+
+    append_line_ocr_review_flag_once(line, "legacy")
+    append_line_ocr_review_flag_once(line, "new-flag")
+    assert line_has_ocr_review_flag(line, "new-flag")
+    assert line.review_flags == ["legacy", "new-flag"]
+
+
 def test_ocr_observation_runtime_store_keeps_block_projection_in_sync():
     from app.models import BBox, Block, BlockType, Line
     from app.models.ocr_observation import (

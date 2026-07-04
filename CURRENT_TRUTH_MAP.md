@@ -135,8 +135,7 @@ OCR Hanwang/CharOCR
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI/Worker/Pipeline 直接写 `Page.status/error_message/ocr_invalidated_reason` | 当前仍是单字段 `Page.status`，但状态流转、后台错误消息和 OCR invalidation 入口已收口，后续拆状态机从该 helper 切入。 |
-| OCR 原文 | `create_ocr_text_line()` 写入；`line_text_contract(line).ocr_text` / `proof_ocr_text(line)` 读取 | 各 OCR producer 直接 `Line(text=..., ocr_text=...)` 或单独判断 `Line.text` / `Line.ocr_text` | `text` 仍是底层 OCR 行文本字段；OCR 生产写入口和 proof/UI/export 读取口径都已收口。 |
-| OCR 行疑点标签 | `app.models.ocr_text_observation.line_ocr_review_flags()` / `line_has_ocr_review_flag()` / `append_line_ocr_review_flag_once()` | core/service/export/controller 直接读写 `line.review_flags` | `review_flags` 是 OCR/路由观察的疑点标签，不是 proof 状态；`Line.review_flags` 只剩存储投影和 OCR producer 写入目标。 |
+| OCR 文本观察 | `app.models.ocr_text_observation` helpers + `ocr_text_observation_store`：`create_ocr_text_line()`、`line_ocr_text_observation()`、`line_ocr_text()`、`line_ocr_review_flags()`、`line_has_ocr_review_flag()` | 各 OCR producer 直接 `Line(text=..., ocr_text=...)` 或业务层直接判断 `Line.text` / `Line.ocr_text` / `Line.review_flags` | `text/ocr_text/confidence/review_flags` 是 OCR 文本观察；运行时事实已进入 text observation store，同时投影到 `Line` 供旧 UI/存储读取。 |
 | OCR 行观察汇总 | `app.models.ocr_observation` helpers + `ocr_observation_store`：`block_avg_confidence`、`page_ocr_line_count`、`project_ocr_line_count`、`page_has_ocr_result`、`replace_block_ocr_lines`、`set_ocr_line_bbox` 等 | `Block.avg_confidence`、`Page.total_lines`、`Page.has_ocr_result`、`OcrProject.total_lines`、`OcrProject.has_any_ocr_result`、`OcrProject.all_pages_ocr_done`、生产代码 `Block(lines=...)`、各模块直接 `line.bbox = ...` | OCR 行事实已进入运行时 observation store，同时投影到 `Block.lines` 供旧 UI/存储读取；Block/Page/Project 模型不再负责解释置信度、行数、是否有 OCR 或项目 OCR 完成状态。 |
 | OCR 字符观察 | `app.models.ocr_character_observation` helpers + `ocr_character_observation_store`：`line_ocr_chars`、`replace_line_ocr_chars`、`replace_line_ocr_char_span`、`set_ocr_char_bbox`、`iter_line_ocr_char_occurrences` 等 | 非 UI 业务层直接 `Line.chars`、生产代码 `Line(chars=...)`、各模块直接 `line.chars[...] = ...` 或 `char.bbox = ...` | 字符/词/公式 carrier 已进入运行时 observation store，同时投影到 `Line.chars` 供旧 UI/存储读取；ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe、OCR IR/Hanwang 投影等不再直接读取、构造或改写物理字段。 |
 | 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
@@ -335,6 +334,7 @@ OCR Hanwang/CharOCR
 - `ocr_observation`：OCR 行观察访问边界；当前内部使用 `ocr_observation_store` 作为运行时事实并同步投影到 `Block.lines`，ProjectStore、业务代码和 proof 行 occurrence 查找都从这里读写。
 - `line_text_contract(line).ocr_text` / `proof_ocr_text(line)`：OCR 原始文本读取口径。
 - `proof_display_text(line)`：当前校对文本事实。
+- `Line.text` / `Line.ocr_text` / `Line.review_flags`：OCR 文本观察旧投影；运行时事实由 `ocr_text_observation_store` 持有。
 - `Line.chars`：字符/词/公式 carrier 旧投影，前提是与 display_text 可对齐；运行时事实由 `ocr_character_observation_store` 持有。
 - `quality_probe` sidecar：质量探针事实。
 

@@ -506,6 +506,13 @@ def test_ocr_text_observation_boundary_is_used_by_producers():
     for path in required_sources:
         source = path.read_text(encoding="utf-8")
         assert "app.models.ocr_text_observation" in source
+    boundary_source = Path("app/models/ocr_text_observation.py").read_text(encoding="utf-8")
+    store_source = Path("app/models/ocr_text_observation_store.py").read_text(encoding="utf-8")
+    line_contract_source = Path("app/core/line_text_contract.py").read_text(encoding="utf-8")
+    assert "ocr_text_observation_for_line(" in boundary_source
+    assert "set_ocr_text_observation_for_line(" in boundary_source
+    assert "_TEXT_BY_LINE_OBJECT" in store_source
+    assert "line_ocr_text_observation(line)" in line_contract_source
 
 
 def test_ocr_review_flags_go_through_text_observation_boundary():

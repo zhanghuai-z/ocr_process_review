@@ -5,6 +5,10 @@ from dataclasses import dataclass, replace
 
 from app.models.proof_line_state import ProofLineState
 from app.models.proof_line_state_store import proof_state_for_line, set_proof_state_for_line
+from app.models.ocr_text_observation import (
+    line_ocr_text_observation,
+    set_line_ocr_text_observation,
+)
 
 
 @dataclass(frozen=True)
@@ -17,8 +21,9 @@ class LineTextContract:
 def line_text_contract(line: object) -> LineTextContract:
     """Return normalized OCR/proof line facts without mutating ``line``."""
     uid = str(getattr(line, "uid", "") or "")
-    text = str(getattr(line, "text", "") or "")
-    ocr_text = str(getattr(line, "ocr_text", "") or text)
+    observation = line_ocr_text_observation(line)
+    text = observation.text
+    ocr_text = observation.ocr_text or text
     normalized_text = text or ocr_text
 
     state = proof_state_for_line(line)
@@ -39,5 +44,8 @@ def ensure_line_text_contract(line: object) -> None:
     """
     contract = line_text_contract(line)
     set_proof_state_for_line(line, contract.proof_state)
-    setattr(line, "text", contract.text)
-    setattr(line, "ocr_text", contract.ocr_text)
+    observation = line_ocr_text_observation(line)
+    set_line_ocr_text_observation(
+        line,
+        replace(observation, text=contract.text, ocr_text=contract.ocr_text),
+    )
