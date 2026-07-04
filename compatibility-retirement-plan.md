@@ -26,6 +26,7 @@
 | `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
 | `Line.text <-> final_text` 双向镜像 | external `ProofLineState` store / `proof_display_text(line)` / `Line.ocr_text` | 删除 `__setattr__` 镜像；校对和导出读取 ProofLineState/display helper，`text` 保留为 OCR 行文本字段；active `Line` 不再携带 proof_state。 |
+| 旧 `line.proof_state` runtime attr 兼容消费 | external `ProofLineState` store | `proof_line_state_store` 不再消费或清理旧 attr；active Line 出现 `proof_state` 会被视为模型污染并报错。 |
 | `Block.raw_payload/app_payload` app-owned keys | typed 字段：`paddle_binding` / `ocr_invalidated_reason` / `origin` / `ocr_audit` / `table_text_layer_cells` / `layout_edit_events` | `Block.raw_payload/app_payload` 已从 active model 删除；旧 `raw_payload_json/app_payload_json` 不再迁移，非空会被当前 schema 校验拒绝。 |
 | 裸 `Page.status` 写入 | `app.models.page_state` | Controller/Store 不再直接写 `Page.status`；当前仍保留单字段，后续状态机拆分从 helper 入口替换。 |
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
@@ -69,6 +70,7 @@
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
 - `Block.source` 的判断已收口到 `app.models.layout_block_state`；生产模块不得各自比较 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
+- `proof_line_state_store` 不再兼容读取旧 `line.proof_state` attr；proof runtime state 只存在于 external store。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `LayoutSnapshot`；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
 - layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。

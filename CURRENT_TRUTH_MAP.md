@@ -321,6 +321,7 @@ OCR Hanwang/CharOCR
 ### 兼容/过渡层
 
 - `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
+- 旧 `line.proof_state`：已退出兼容路径；runtime store 不再消费该 attr，active Line 出现它会被视为模型污染。
 - `Block.lines`：仍是模型内部过渡存储；业务代码、ProjectStore 和 proof 行定位已改为通过 `app.models.ocr_observation` 访问。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 

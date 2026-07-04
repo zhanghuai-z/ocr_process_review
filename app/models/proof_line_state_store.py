@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import weakref
-from typing import Any
 
 from .proof_line_state import ProofLineState
 
@@ -23,7 +22,7 @@ def proof_state_for_line(line: object) -> ProofLineState:
             return state
         _STATE_BY_OBJECT_ID.pop(key, None)
 
-    state = _consume_legacy_state_attr(line) or ProofLineState(line_uid=_line_uid(line))
+    state = ProofLineState(line_uid=_line_uid(line))
     set_proof_state_for_line(line, state)
     return state
 
@@ -44,12 +43,6 @@ def set_proof_state_for_line(line: object, state: ProofLineState) -> None:
     except TypeError as exc:
         raise TypeError("proof_state store requires a weak-referenceable Line object") from exc
     _STATE_BY_OBJECT_ID[key] = (line_ref, state)
-    _remove_legacy_state_attr(line)
-
-
-def clear_proof_state_for_line(line: object) -> None:
-    _STATE_BY_OBJECT_ID.pop(id(line), None)
-    _remove_legacy_state_attr(line)
 
 
 def _ensure_state_uid(line: object, state: ProofLineState) -> None:
@@ -62,21 +55,13 @@ def _line_uid(line: object) -> str:
 
 def _ensure_line_like(line: object) -> None:
     values = _line_dict(line)
+    if "proof_state" in values:
+        raise TypeError("Line proof_state field is retired")
     if "text" in values and "confidence" in values and "bbox" in values:
         return
     raise TypeError("proof_state store requires a Line object")
 
 
-def _consume_legacy_state_attr(line: object) -> ProofLineState | None:
-    values = _line_dict(line)
-    state = values.pop("proof_state", None)
-    return state if isinstance(state, ProofLineState) else None
-
-
-def _remove_legacy_state_attr(line: object) -> None:
-    _line_dict(line).pop("proof_state", None)
-
-
-def _line_dict(line: object) -> dict[str, Any]:
+def _line_dict(line: object) -> dict[str, object]:
     values = getattr(line, "__dict__", None)
     return values if isinstance(values, dict) else {}

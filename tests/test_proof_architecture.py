@@ -969,6 +969,14 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
         raise AssertionError("Line class not found")
 
 
+def test_proof_state_store_does_not_consume_retired_line_attr():
+    source = Path("app/models/proof_line_state_store.py").read_text(encoding="utf-8")
+    assert "_consume_legacy_state_attr" not in source
+    assert "_remove_legacy_state_attr" not in source
+    assert "values.pop(\"proof_state\"" not in source
+    assert "ProofLineState(line_uid=_line_uid(line))" in source
+
+
 def test_block_model_does_not_reconstruct_origin_from_payloads():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="app/models/project.py")

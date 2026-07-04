@@ -261,6 +261,19 @@ def test_proof_line_facts_rejects_legacy_field_only_objects():
         proof_runtime_state(legacy_like)
 
 
+def test_proof_state_store_rejects_retired_line_proof_state_attr():
+    import pytest
+
+    from app.core.proof_line_facts import proof_runtime_state
+    from app.models import BBox, Line, ProofLineState
+
+    line = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+    line.__dict__["proof_state"] = ProofLineState(line_uid=line.uid)
+
+    with pytest.raises(TypeError, match="retired"):
+        proof_runtime_state(line)
+
+
 def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     from app.core.workflow_state import (
         STEP_OCR,
