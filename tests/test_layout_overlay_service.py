@@ -65,6 +65,32 @@ def test_layout_overlay_service_skips_handled_inline_formula_origin():
     assert page.blocks == []
 
 
+def test_layout_overlay_service_does_not_treat_legacy_type_as_inline_formula():
+    page = Page(image_path="", width=200, height=80)
+    set_paddle_raw_layout_records(page, [
+        {
+            "block_label": "text",
+            "block_bbox": [0, 0, 180, 40],
+            "block_content": "甲 $ A $ 乙",
+            ROUTE_SUBBLOCKS_FIELD: [
+                {"type": "inline_formula", "block_bbox": [40, 0, 70, 30]},
+            ],
+        }
+    ])
+    handled = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(40, 0, 70, 30),
+        source_label="inline_formula",
+        origin=BlockOrigin(source_label="inline_formula", original_bbox=BBox.from_xyxy(40, 0, 70, 30), raw_index=0),
+    )
+    mark_inline_formula_origin_handled(page, handled, op="delete_inline_formula")
+
+    created = LayoutOverlayService().ensure_inline_formula_blocks(page)
+
+    assert created == 0
+    assert page.blocks == []
+
+
 def test_layout_overlay_service_readonly_overlays_skip_inline_formula_and_deduplicate():
     page = Page(image_path="", width=200, height=100)
     set_paddle_raw_layout_records(page, [

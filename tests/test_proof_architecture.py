@@ -1317,6 +1317,7 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    inline_state_source = Path("app/core/inline_formula_edit_state.py").read_text(encoding="utf-8")
 
     for key in (
         "UI_GENERATED_INLINE_FORMULA_BLOCK_KEY",
@@ -1329,6 +1330,7 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
     assert "origin=BlockOrigin(" in overlay_service_source
     assert "original_bbox=overlay.bbox" in overlay_service_source
     assert "inline_formula_origin_bbox(block)" in overlay_service_source
+    assert 'get("type")' not in inline_state_source
 
 
 def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():

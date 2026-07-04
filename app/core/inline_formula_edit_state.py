@@ -72,7 +72,7 @@ def _event_handled_origin_bbox(event: LayoutEditEvent) -> tuple[int, int, int, i
 
 
 def _inline_formula_subblock_bbox(page: Page, value: dict[str, Any]) -> tuple[int, int, int, int] | None:
-    label = str(value.get("block_label") or value.get("label") or value.get("type") or "")
+    label = str(value.get("block_label") or value.get("label") or "")
     if normalize_paddle_label(label) != "inline_formula":
         return None
     bbox = bbox_from_variant(
