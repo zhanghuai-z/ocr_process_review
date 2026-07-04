@@ -441,6 +441,31 @@ def test_character_observation_boundary_is_used_by_core_consumers():
         assert "app.models.ocr_character_observation" in source
 
 
+def test_line_text_facts_access_goes_through_text_contract_boundary():
+    allowed = {
+        Path("app/core/line_text_contract.py"),
+        Path("app/models/project.py"),
+    }
+    forbidden_attrs = {"text", "ocr_text", "final_text", "original_text"}
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if (
+            path in allowed
+            or path.parts[:2] == ("app", "ui")
+            or path.parts[:2] == ("app", "engines")
+        ):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in forbidden_attrs:
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id == "line":
+                offenders.append(f"{path}:{node.lineno}: line.{node.attr}")
+    assert offenders == []
+
+
 def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
     probe_source = Path("app/services/proof_probe_text_service.py").read_text(encoding="utf-8")
     persist_source = Path("app/services/proof_persistence_service.py").read_text(encoding="utf-8")

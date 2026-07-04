@@ -3,8 +3,8 @@
 这两个 service 是从 h_proof / v_proof 抽出的共享层。本文件覆盖：
 
 1. probe text service：
-   - 未启用评测时退化（displayed_text == line.text、save_displayed_edit_result 仅在差异时落盘）
-   - 启用评测时显示叠加 fake_char，但 line.text 永不被污染
+   - 未启用评测时退化（displayed_text == proof_display_text、save_displayed_edit_result 仅在差异时落盘）
+   - 启用评测时显示叠加 fake_char，但 OCR 底文本永不被污染
    - OCR observation 解析 block/line 索引：成功路径 + line/block 不在 page 中时返回 None
 
 2. image service：
@@ -15,7 +15,13 @@
 """
 from __future__ import annotations
 
-from app.core.proof_line_facts import proof_display_text, proof_final_text, proof_final_text_set, proof_status
+from app.core.proof_line_facts import (
+    proof_display_text,
+    proof_final_text,
+    proof_final_text_set,
+    proof_ocr_text,
+    proof_status,
+)
 
 from typing import Optional
 
@@ -105,7 +111,7 @@ def test_displayed_text_active_store_no_probes_returns_line_text():
 
 
 def test_displayed_text_with_probe_does_NOT_overlay_line_text():
-    """Round 15 后：probe 不再修改显示文本， line.text 原样返回。"""
+    """Round 15 后：probe 不再污染 OCR 底文本。"""
     line = _line("今天我们来学习己经发生过的历史")
     block = _block([line])
     page = _page(1, [block])
@@ -114,8 +120,8 @@ def test_displayed_text_with_probe_does_NOT_overlay_line_text():
     store.add(Probe(ProbeKey(1, 0, 0, 7), true_char="已", fake_char="己"))
     set_active_store(store)
     shown = displayed_text(line, page, block)
-    assert shown == line.text
-    assert line.text[7] == "己"
+    assert shown == proof_display_text(line)
+    assert proof_ocr_text(line)[7] == "己"
 
 
 def test_save_displayed_edit_result_no_store_propagates_change():
@@ -135,7 +141,7 @@ def test_save_displayed_edit_result_no_store_no_change_returns_empty_change():
     page = _page(1, [block])
     change = save_displayed_edit_result(line, page, block, "abc")
     assert change.changed is False
-    assert line.text == "abc"
+    assert proof_display_text(line) == "abc"
 
 
 def test_save_displayed_edit_result_with_probe_does_not_touch_unrelated_text():
@@ -153,7 +159,7 @@ def test_save_displayed_edit_result_with_probe_does_not_touch_unrelated_text():
     assert change.probe_changed is True
     assert change.changed is True
     assert probe.observation == "corrected"
-    assert line.text[7] == "己"
+    assert proof_ocr_text(line)[7] == "己"
 
 
 def test_save_displayed_edit_result_block_not_in_page_is_cancelled():

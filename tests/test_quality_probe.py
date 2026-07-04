@@ -1,7 +1,7 @@
 """校对质量评测系统单元测试 — Round 15 语义。
 
 关键不变量：
-- line.text 永不被修改。
+- OCR 底文本不被 probe 污染；校对文本通过 proof_display_text 读取。
 - 假象字（fake_char）始终来自文档真实位置；true_char 也必须在文档中出现过。
 - 找不到合适的"文中近形字"时跳过候选，不硬造错配。
 - score 用 corrected/total 计算 A/B/C/D 段；总数 < min_observed 时报 INSUFFICIENT。
@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from app.core import quality_probe as qp
+from app.core.proof_line_facts import proof_display_text, proof_ocr_text
 from app.core.quality_probe import (
     CONFUSION_MAP,
     EXCLUDED_BLOCK_TYPES,
@@ -132,7 +133,7 @@ def test_candidate_indices_skip_edges_and_short_runs():
     # CONFUSION_MAP 里的字 "体" 出现在内部位置应能被选
     line = _line("这本书要靠身体力行去理解")
     cands = candidate_indices_in_line(line)
-    text = line.text
+    text = proof_display_text(line)
     assert all(0 < i < len(text) - 1 for i in cands)
     assert any(text[i] in CONFUSION_MAP for i in cands)
 
@@ -142,7 +143,7 @@ def test_candidate_indices_avoid_name_quotes():
     line = _line("人物「体力很好」之类的描述要被书名号守卫")
     # 不强断言条数，只保证不会把书名号内的 "体" 选成候选
     cands = candidate_indices_in_line(line)
-    text = line.text
+    text = proof_display_text(line)
     # 确保没有任何候选落在 「」 内紧邻
     for i in cands:
         if i - 1 >= 0:
@@ -172,12 +173,12 @@ def test_sampler_only_plants_pairs_both_in_doc():
     store = ProbeSampler(cfg).sample(project)
     assert len(store) > 0
     for probe in store.all():
-        # Round 18：true_char 是 line.text 中 key 位置的原字符；
+        # Round 18：true_char 是 proof_display_text 中 key 位置的原字符；
         # fake_char 是要注入"显示空间"的近形字，也必须在文档别处出现过。
         page = project.pages[0]
         block = page.blocks[probe.key.block_index]
         line = block.lines[probe.key.line_index]
-        assert line.text[probe.key.char_index] == probe.true_char
+        assert proof_display_text(line)[probe.key.char_index] == probe.true_char
         all_text = "".join(
             l.text for b in page.blocks for l in b.lines
         )
@@ -188,11 +189,12 @@ def test_sampler_only_plants_pairs_both_in_doc():
 
 def test_sampler_skips_when_no_in_doc_confusable_exists():
     # fake_char 候选 "拼"（CONFUSION 是 "并"），但文档里没有 "并"
-    # → sampler 应跳过，store 为空（且 line.text 当然没被改）
+    # → sampler 应跳过，store 为空（且 OCR 底文本当然没被改）
     line = _line("拼起来读读看再拼一次拼写练习好不好")
     project = _project([_page(1, [_block(BlockType.TEXT, [line])])])
     store = ProbeSampler(SamplerConfig(target_ratio=1.0, seed=1)).sample(project)
     assert len(store) == 0
+    assert proof_ocr_text(line) == "拼起来读读看再拼一次拼写练习好不好"
 
 
 def test_sampler_max_per_true_char_respects_explicit_cap():

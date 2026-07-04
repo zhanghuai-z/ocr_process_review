@@ -33,7 +33,7 @@ def _build_pages_with_planted_probe():
     block.order = 0
     page = Page(page_number=1, blocks=[block],
                 image_path="/tmp/probe-blocker.png", width=100, height=100)
-    # Round 18：probe.true_char 必须 == line.text[char_index]；fake_char 是近形字
+    # Round 18：probe.true_char 必须 == proof_display_text(line)[char_index]；fake_char 是近形字
     store = qp.ProbeStore()
     probe = qp.Probe(
         key=qp.ProbeKey(page_number=1, block_index=0, line_index=0, char_index=1),

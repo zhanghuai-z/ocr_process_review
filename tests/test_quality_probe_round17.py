@@ -128,8 +128,8 @@ def test_round17_corrected_probe_uses_char_index_without_gallery_extras():
     panel = VProofPanel()
     panel.load_pages([page])
 
-    # Round 18：gallery extras 已删除。corrected 通过 line.text 锚点反映；
-    # gallery 集合归位由 CharIndexService.query(line.text[i]) 自然完成。
+    # Round 18：gallery extras 已删除。corrected 通过 proof_display_text 锚点反映；
+    # gallery 集合归位由 CharIndexService.query(proof_display_text(line)[i]) 自然完成。
     entries = list(panel._char_svc.query("己"))
     assert [entry.char_idx for entry in entries] == [0]
     probe.observation = "corrected"
