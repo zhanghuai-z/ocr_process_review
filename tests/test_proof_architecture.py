@@ -242,13 +242,27 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
         Path("app/models/ocr_observation.py"),
         Path("app/models/project.py"),
     }
+    block_like_names = {
+        "b",
+        "blk",
+        "block",
+        "primary",
+        "secondary",
+        "source_block",
+        "target_block",
+    }
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
         if path in allowed:
             continue
         source = path.read_text(encoding="utf-8")
-        if "block.lines" in source:
-            offenders.append(str(path))
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "lines":
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id in block_like_names:
+                offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
 
 
