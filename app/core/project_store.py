@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS raw_ocr_artifact (
     artifact_path   TEXT    NOT NULL DEFAULT '',
     artifact_hash   TEXT    NOT NULL DEFAULT '',
     records_json    TEXT    NOT NULL DEFAULT '[]',
+    route_attachments_json TEXT NOT NULL DEFAULT '{}',
     created_at      REAL    NOT NULL DEFAULT 0.0,
     UNIQUE(project_id, uid)
 );
@@ -363,6 +364,9 @@ MIGRATIONS: dict[int, list[str]] = {
     21: [
         "ALTER TABLE block ADD COLUMN table_text_layer_cells_json TEXT NOT NULL DEFAULT '[]';",
     ],
+    22: [
+        "ALTER TABLE raw_ocr_artifact ADD COLUMN route_attachments_json TEXT NOT NULL DEFAULT '{}';",
+    ],
 }
 
 
@@ -410,6 +414,37 @@ def _json_to_dict(s: str, *, field: str) -> dict:
     if not isinstance(value, dict):
         raise ProjectDataError(f"{field} must be dict")
     return value
+
+
+def _route_attachments_to_json_dict(
+    attachments: dict[int, list[dict[str, Any]]] | None,
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for index, values in dict(attachments or {}).items():
+        result[str(int(index))] = [
+            dict(value)
+            for value in values
+            if isinstance(value, dict)
+        ]
+    return result
+
+
+def _json_to_route_attachments(s: str, *, field: str) -> dict[int, list[dict[str, Any]]]:
+    raw = _json_to_dict(s, field=field)
+    result: dict[int, list[dict[str, Any]]] = {}
+    for key, values in raw.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ProjectDataError(f"{field} key must be int-like") from exc
+        if not isinstance(values, list):
+            raise ProjectDataError(f"{field}[{key!r}] must be list")
+        result[index] = [
+            dict(value)
+            for value in values
+            if isinstance(value, dict)
+        ]
+    return result
 
 
 def _origin_from_current_block(block: Block) -> BlockOrigin:
@@ -997,6 +1032,7 @@ class ProjectStore:
             artifact.artifact_path,
             artifact.artifact_hash,
             json.dumps(artifact.records, ensure_ascii=False),
+            json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
             artifact.created_at,
         )
         if artifact.id is None:
@@ -1010,15 +1046,16 @@ class ProjectStore:
             cur.execute(
                 "INSERT INTO raw_ocr_artifact ("
                 "uid, project_id, page_uid, engine, engine_version, run_id, "
-                "artifact_path, artifact_hash, records_json, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "artifact_path, artifact_hash, records_json, route_attachments_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
             artifact.id = cur.lastrowid
         else:
             cur.execute(
                 "UPDATE raw_ocr_artifact SET page_uid=?, engine=?, engine_version=?, "
-                "run_id=?, artifact_path=?, artifact_hash=?, records_json=?, created_at=? "
+                "run_id=?, artifact_path=?, artifact_hash=?, records_json=?, "
+                "route_attachments_json=?, created_at=? "
                 "WHERE id=? AND project_id=? AND uid=?",
                 (
                     artifact.page_uid,
@@ -1028,6 +1065,7 @@ class ProjectStore:
                     artifact.artifact_path,
                     artifact.artifact_hash,
                     json.dumps(artifact.records, ensure_ascii=False),
+                    json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
                     artifact.created_at,
                     artifact.id,
                     project_id,
@@ -1582,6 +1620,10 @@ class ProjectStore:
             artifact_path=row["artifact_path"],
             artifact_hash=row["artifact_hash"],
             records=_json_to_list(row["records_json"], field="raw_ocr_artifact.records_json"),
+            route_attachments=_json_to_route_attachments(
+                row["route_attachments_json"] if "route_attachments_json" in row.keys() else "{}",
+                field="raw_ocr_artifact.route_attachments_json",
+            ),
             created_at=row["created_at"],
         )
 

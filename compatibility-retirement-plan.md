@@ -62,7 +62,7 @@
 ### Phase 3: 数据模型替换
 
 - `paddle_binding` 已升为 `Block.paddle_binding` typed state。
-- `_route_subblocks` / `_layout_line_routes` 已限制为运行时 route dict，不进入 `Block.raw_payload` 或旧 `app_payload_json` 持久化模型。
+- `_route_subblocks` / `_layout_line_routes` 已限制为临时 route input/cache dict，不进入 `Block.raw_payload`、旧 `app_payload_json` 或 `RawOcrArtifact.records` 持久化模型；Paddle 子结构绑定持久化到 `RawOcrArtifact.route_attachments` / `route_attachments_json`。
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
 - active `Block` 不再携带 `raw_payload`；新导入和 Hanwang OCR 后重建的 block 通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取原始事实。
 - `Block.app_payload` 已从 active model 删除。
@@ -88,7 +88,7 @@
 - 当前采用版面新增 `app.models.layout_snapshot.LayoutSnapshot` contract；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
 - 当前版面 snapshot 新增外部 `layout_snapshot_store`；`LayoutEditService` 人工编辑后同步 snapshot，`ProjectStore` 加载后也从持久化 block 投影重建 snapshot，再保留 `Page.blocks` 作为旧 UI/OCR/导出投影。
 - 当前版面投影新增 `app.models.layout_projection` 边界；非 UI 业务层不再直接读写 `Page.blocks`，而是通过 `page_layout_blocks`、`replace_page_layout_blocks` 等 helper 消费或替换当前运行投影。
-- layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。
+- layout route 新增 `RoutingPlan` 生产/读取 contract；Paddle geometry 子结构绑定从 raw records 拆到 `route_attachments_json`；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费持久化 raw dict，旧 `_route_subblocks` dict 只由 `layout_records_with_route_attachments()` / `layout_region_route_record()` 临时合成给 route compiler。
 - OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。
 - OCR 运行结果新增 `OcrRunResult` / `OcrProgress` contract；Pipeline 文件不再定义结果模型，worker/controller/tests 改为依赖服务边界。
 - HProof/VProof 外部刷新新增共享 `ProofExternalRefreshPlan`；pending 队列和 plan contract 不再按横校/纵校各自定义。

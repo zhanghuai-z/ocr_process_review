@@ -9,7 +9,12 @@ from app.core.inline_formula_edit_state import (
     handled_inline_formula_origin_bboxes,
     inline_formula_origin_bbox,
 )
-from app.core.normalized_layout_artifact import LayoutRegion, LayoutSubregion, normalized_layout_regions
+from app.core.normalized_layout_artifact import (
+    LayoutRegion,
+    LayoutSubregion,
+    layout_region_route_record,
+    normalized_layout_regions,
+)
 from app.core.ocr_ir import is_formula_marker_token
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.paddle_line_routing import (
@@ -90,7 +95,7 @@ class LayoutOverlayService:
         marker_text = self.inline_formula_marker_text_from_parent_order(page, parent, target)
         if marker_text:
             return marker_text
-        parent_raw = dict(parent.raw or {})
+        parent_raw = layout_region_route_record(parent)
         plan = routing_plan_for_block_record(parent_raw, page.width, page.height)
         for route in plan.lines:
             for segment in route.segments:

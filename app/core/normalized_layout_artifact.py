@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.paddle_line_routing import (
+    ROUTE_SUBBLOCKS_FIELD,
     block_bbox_xyxy,
     block_text,
     route_authority_label,
@@ -71,10 +72,15 @@ def normalized_layout_artifact_from_raw(
     artifact: RawOcrArtifact,
 ) -> NormalizedLayoutArtifact:
     regions: list[LayoutRegion] = []
+    route_attachments = {
+        int(index): [dict(item) for item in values]
+        for index, values in dict(artifact.route_attachments or {}).items()
+    }
     for index, record in enumerate(artifact.records):
         if not isinstance(record, dict):
             continue
         raw = dict(record)
+        route_record = _route_record_from_raw(raw, route_attachments.get(index))
         subregions = tuple(
             LayoutSubregion(
                 label=str(subregion["label"]),
@@ -82,7 +88,7 @@ def normalized_layout_artifact_from_raw(
                 text=str(subregion.get("text") or ""),
                 raw=dict(subregion.get("raw") or {}),
             )
-            for subregion in route_subblocks_for_block(raw, page.width, page.height)
+            for subregion in route_subblocks_for_block(route_record, page.width, page.height)
         )
         regions.append(
             LayoutRegion(
@@ -110,6 +116,32 @@ def normalized_layout_regions(page: Page) -> tuple[LayoutRegion, ...]:
     return normalized_layout_artifact_from_page(page).regions
 
 
+def layout_region_route_record(region: LayoutRegion) -> dict[str, Any]:
+    """Return a transient routing input record for existing route compilers."""
+    record = dict(region.raw or {})
+    if region.subregions:
+        record[ROUTE_SUBBLOCKS_FIELD] = [
+            dict(subregion.raw or {
+                "block_label": subregion.label,
+                "block_bbox": list(subregion.bbox),
+                "block_content": subregion.text,
+            })
+            for subregion in region.subregions
+        ]
+    return record
+
+
+def _route_record_from_raw(
+    raw: dict[str, Any],
+    attachments: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    if not attachments:
+        return raw
+    route_record = dict(raw)
+    route_record[ROUTE_SUBBLOCKS_FIELD] = [dict(item) for item in attachments]
+    return route_record
+
+
 def _record_confidence(record: dict[str, Any]) -> float | None:
     try:
         value = record.get("score")
@@ -124,6 +156,7 @@ __all__ = [
     "LayoutRegion",
     "LayoutSubregion",
     "NormalizedLayoutArtifact",
+    "layout_region_route_record",
     "normalized_layout_artifact_from_page",
     "normalized_layout_artifact_from_raw",
     "normalized_layout_regions",

@@ -276,6 +276,7 @@ class RawOcrArtifact:
     artifact_path: str = ""
     artifact_hash: str = ""
     records: List[dict[str, Any]] = field(default_factory=list)
+    route_attachments: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     page_uid: str = ""
     uid: str = ""
@@ -289,20 +290,46 @@ class RawOcrArtifact:
         cls,
         records: List[dict[str, Any]],
         *,
+        route_attachments: dict[int, list[dict[str, Any]]] | None = None,
         page_uid: str = "",
         run_id: str = "",
         artifact_path: str = "",
         artifact_hash: str = "",
     ) -> "RawOcrArtifact":
+        pure_records, lifted_attachments = _split_paddle_layout_route_attachments(records)
+        merged_attachments = dict(lifted_attachments)
+        if route_attachments:
+            for index, values in route_attachments.items():
+                merged_attachments[int(index)] = [dict(value) for value in values]
         return cls(
             engine="paddleocr-vl",
             engine_version="1.6",
             run_id=run_id,
             artifact_path=artifact_path,
             artifact_hash=artifact_hash,
-            records=list(records),
+            records=pure_records,
+            route_attachments=merged_attachments,
             page_uid=page_uid,
         )
+
+
+def _split_paddle_layout_route_attachments(
+    records: List[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+    pure_records: list[dict[str, Any]] = []
+    route_attachments: dict[int, list[dict[str, Any]]] = {}
+    for index, record in enumerate(records):
+        copied = dict(record)
+        values = copied.pop("_route_subblocks", None)
+        copied.pop("_layout_line_routes", None)
+        pure_records.append(copied)
+        if isinstance(values, list):
+            route_attachments[index] = [
+                dict(value)
+                for value in values
+                if isinstance(value, dict)
+            ]
+    return pure_records, route_attachments
 
 
 @dataclass

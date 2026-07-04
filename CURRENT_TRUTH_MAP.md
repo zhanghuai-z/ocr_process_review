@@ -23,9 +23,11 @@
      - Paddle 版面事实列表，bbox 已归一到当前 Page 工作图坐标
      - 主要含 block_label、block_bbox、block_content 等
      - 通过 raw_ocr_artifact.raw_layout_records(page) 读取
+     - route 子结构不再写入 records；`route_attachments_json` 单独保存由程序绑定出的公式/表格/图片子框
   -> NormalizedLayoutArtifact
      - 对外部版面事实的统一读模型
      - Paddle、未来矢量 PDF 等输入源都应先转成 LayoutRegion/LayoutSubregion
+     - 读取时会把 raw records 与 route attachments 合并为 LayoutSubregion
   -> LayoutSnapshot
      - 当前程序采用的版面真值
      - 从 NormalizedLayoutArtifact 编译而来
@@ -60,8 +62,10 @@
      - LayoutPanel 不直接解析 raw_layout_records 或 Paddle route dict
 
 路由构建
-  -> _route_subblocks / _layout_line_routes
+  -> route attachments / transient route records / RoutingPlan
      - 由 Paddle 的公式、表格、图片等结构框推导出文本切片路线
+     - route attachments 按 raw record index 单独持久化，不再污染 raw layout records
+     - `layout_records_with_route_attachments(page)` 只在喂给旧 route compiler 时合成临时 dict
      - 作用是让正文块进入 Hanwang/CharOCR 前扣除或插入公式等结构段
 
 OCR Hanwang/CharOCR
@@ -204,13 +208,16 @@ OCR Hanwang/CharOCR
 修改后：
 
 - Paddle geometry_records 中公式、表格、图片等结构框会绑定到父 parsing record。
-- 生成 typed `RoutingPlan`，旧 `_route_subblocks` 和 `_layout_line_routes` 仅作为运行时原始绑定/缓存序列化形态。
+- route 子结构绑定进入 `RawOcrArtifact.route_attachments` / `route_attachments_json`，raw `records` 保持纯外部事实。
+- 生成 typed `RoutingPlan`；`_route_subblocks` 只作为临时 route input record 的字段，`_layout_line_routes` 只作为运行时 cache 形态。
 - Hanwang/CharOCR 前按 route 切文本片段，并把公式 carrier 插回 line。
 
 当前边界：
 
 - `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute` 已作为生产和读取侧 typed contract；overlay 和 Hanwang 文本切片不应直接消费 route dict。
-- `_route_subblocks` 仍是 Paddle 子结构绑定的运行时 dict 输入；`_layout_line_routes` 只允许作为 legacy/cache serialization，不应成为业务读取入口。
+- raw artifact records 不得持久化 `_route_subblocks`；子结构绑定必须走 route attachments。
+- `_route_subblocks` 只允许在 `layout_records_with_route_attachments()` / `layout_region_route_record()` 合成的临时 dict 中出现。
+- `_layout_line_routes` 只允许作为 OCR 运行时 cache，不应成为业务读取入口或持久化事实。
 - `DispatchPlan` 已收口页级文字 OCR 调度；`OcrRunResult` 已收口 OCR 运行结果和进度 contract；后续还需要加入列模型/阅读顺序模型承接双栏。
 
 ### 4. Line 文本：空终稿与 fake probe
@@ -324,6 +331,7 @@ OCR Hanwang/CharOCR
 
 - `Page.display_image_path`：几何坐标对应的工作图。
 - `Page.raw_layout_artifact`：Paddle VL1.6 版面证据包，bbox 已归一到当前工作图坐标。
+- `RawOcrArtifact.route_attachments` / `route_attachments_json`：程序从 Paddle geometry records 绑定出的子结构 route 事实，按父 raw record index 存储。
 - `NormalizedLayoutArtifact`：外部版面事实的统一读模型。
 - `LayoutSnapshot`：当前采用的版面真值 contract，定义在 `app.models.layout_snapshot`；API 版面分析、LayoutEditService 人工编辑和 ProjectStore 加载已同步到 `layout_snapshot_store`，再投影到旧 `Page.blocks`。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
@@ -343,7 +351,8 @@ OCR Hanwang/CharOCR
 - `ProofAtom`：proof UI 渲染单元。
 - `CharIndexService`：相同字/字符 gallery 索引。
 - `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute`：当前路线计划的 typed 生产/读取口径。
-- `_route_subblocks` / `_layout_line_routes`：当前路线计划的运行时输入/cache 序列化；只能由 route adapter/legacy serialization 解释。
+- `layout_records_with_route_attachments()` / `layout_region_route_record()`：为现有 route compiler 合成的临时输入 dict。
+- `_route_subblocks` / `_layout_line_routes`：当前路线计划的临时输入/cache 字段；不得进入 raw layout records。
 - `ProofLineViewModel` / UI 状态标签：展示投影。
 - `block.note`：提示/调试说明，不应参与关键判断；写入必须经 `app.models.layout_block_state`。
 

@@ -930,7 +930,12 @@ def test_project_store():
 
 
 def test_project_store_persists_raw_layout_artifact():
-    from app.core.raw_ocr_artifact import raw_block_payload
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.core.raw_ocr_artifact import (
+        layout_records_with_route_attachments,
+        layout_route_attachments,
+        raw_block_payload,
+    )
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockOrigin, BlockType, OcrProject, Page
 
@@ -943,6 +948,9 @@ def test_project_store_persists_raw_layout_artifact():
                 "block_label": "text",
                 "block_bbox": [10, 20, 110, 60],
                 "block_content": "天地玄黄",
+                ROUTE_SUBBLOCKS_FIELD: [
+                    {"block_label": "inline_formula", "block_bbox": [30, 24, 50, 42]},
+                ],
             },
             {
                 "block_label": "display_formula",
@@ -978,7 +986,15 @@ def test_project_store_persists_raw_layout_artifact():
         assert artifact is not None
         assert artifact.engine == "paddleocr-vl"
         assert artifact.engine_version == "1.6"
-        assert _raw_layout_records(loaded.pages[0]) == parsing_res_list
+        expected_records = [dict(record) for record in parsing_res_list]
+        expected_records[0].pop(ROUTE_SUBBLOCKS_FIELD)
+        assert _raw_layout_records(loaded.pages[0]) == expected_records
+        assert layout_route_attachments(loaded.pages[0])[0] == [
+            {"block_label": "inline_formula", "block_bbox": [30, 24, 50, 42]},
+        ]
+        assert layout_records_with_route_attachments(loaded.pages[0])[0][ROUTE_SUBBLOCKS_FIELD] == [
+            {"block_label": "inline_formula", "block_bbox": [30, 24, 50, 42]},
+        ]
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.source_label == "paragraph_title"
         assert raw_block_payload(loaded_block, loaded.pages[0])["block_content"] == "天地玄黄"
@@ -6092,7 +6108,10 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
 
             inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
             panel._on_block_moved(inline)
-            raw_subblock = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0]
+            from app.core.raw_ocr_artifact import layout_route_attachments
+
+            assert ROUTE_SUBBLOCKS_FIELD not in _raw_layout_records(page)[0]
+            raw_subblock = layout_route_attachments(page)[0][0]
             assert "_ui_deleted" not in raw_subblock
             claim_events = [
                 event for event in page.layout_edit_events
@@ -6118,7 +6137,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.paddle_binding.manual_bbox == [50, 0, 80, 30]
             assert inline.origin is not None
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
-            assert "_ui_deleted" not in _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD][0]
+            assert "_ui_deleted" not in layout_route_attachments(page)[0][0]
             claim_events = [
                 event for event in page.layout_edit_events
                 if event.op == "claim_inline_formula"
@@ -9954,7 +9973,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         page,
     )
 
-    assert LAYOUT_LINE_ROUTES_FIELD in _raw_layout_records(page)[0]
+    assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
     assert not hasattr(page.blocks[0], "raw_payload")
 
     print("test_hanwang_page_block_writeback_does_not_persist_layout_line_routes PASSED")
@@ -11428,6 +11447,7 @@ def test_inline_formula_crop_targets_use_structured_label_not_payload_labels():
 def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+    from app.core.raw_ocr_artifact import layout_route_attachments, layout_records_with_route_attachments
     from app.models import Page
 
     page = Page(image_path="/tmp/formula-geometry-key.png", width=160, height=80)
@@ -11451,12 +11471,15 @@ def test_layout_analyzer_reads_formula_geometry_boxes_for_routes():
     }
 
     blocks, overlays = LayoutAnalyzer()._extract_api_blocks(page, data)
-    subblocks = _raw_layout_records(page)[0][ROUTE_SUBBLOCKS_FIELD]
+    assert ROUTE_SUBBLOCKS_FIELD not in _raw_layout_records(page)[0]
+    subblocks = layout_route_attachments(page)[0]
+    routed_records = layout_records_with_route_attachments(page)
 
     assert not hasattr(blocks[0], "raw_payload")
     assert [(item["block_label"], item["block_bbox"]) for item in subblocks] == [
         ("inline_formula", [50, 10, 80, 32]),
     ]
+    assert routed_records[0][ROUTE_SUBBLOCKS_FIELD] == subblocks
     assert [label for label, _bbox in overlays] == ["text", "inline_formula"]
 
     print("test_layout_analyzer_reads_formula_geometry_boxes_for_routes PASSED")
@@ -15961,6 +15984,7 @@ def test_layout_parsing_semantics_override_layout_det_when_both_exist():
 def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD, line_routes_for_block
+    from app.core.raw_ocr_artifact import layout_route_attachments, layout_records_with_route_attachments
     from app.models import BlockType, Page
 
     analyzer = LayoutAnalyzer()
@@ -15987,8 +16011,10 @@ def test_layout_analyzer_forwards_route_subblocks_from_layout_det_res():
     }
 
     blocks, overlays = analyzer._extract_api_blocks(page, data)
-    subblocks = _raw_layout_records(page)[0]["_route_subblocks"]
-    line_routes = line_routes_for_block(_raw_layout_records(page)[0], page.width, page.height)
+    assert "_route_subblocks" not in _raw_layout_records(page)[0]
+    subblocks = layout_route_attachments(page)[0]
+    routed_record = layout_records_with_route_attachments(page)[0]
+    line_routes = line_routes_for_block(routed_record, page.width, page.height)
 
     assert blocks[0].block_type == BlockType.TEXT
     assert blocks[0].origin is not None

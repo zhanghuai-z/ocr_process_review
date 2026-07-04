@@ -88,7 +88,11 @@ from app.core.paddle_labels import (
 )
 from app.core.proof_line_facts import proof_block_text
 from app.core.proof_status import proof_status_for
-from app.core.raw_ocr_artifact import raw_block_payload, raw_layout_records
+from app.core.raw_ocr_artifact import (
+    layout_records_with_route_attachments,
+    raw_block_payload,
+    raw_layout_records,
+)
 from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import (
     BBox,
@@ -3076,7 +3080,7 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     }
     if binding:
         row[ROUTE_ROW_PADDLE_BINDING_KEY] = dict(binding)
-    records = raw_layout_records(page)
+    records = layout_records_with_route_attachments(page)
     if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
         parent_record = records[parent_index]
         if isinstance(parent_record, dict) and ROUTE_SUBBLOCKS_FIELD in parent_record:

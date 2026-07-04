@@ -42,7 +42,6 @@ from app.core.paddle_layout_schema import (
     raw_bbox_max_from_record,
     route_subblock_payload,
 )
-from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
 from app.core.paddle_labels import (
     is_hanwang_skip_label,
     normalize_paddle_label,
@@ -414,7 +413,7 @@ class LayoutAnalyzer:
         geometry_records: list[dict],
         scale_x: float,
         scale_y: float,
-    ) -> None:
+    ) -> dict[int, list[dict]]:
         route_records = []
         for record in geometry_records:
             normalized = normalize_paddle_layout_record(
@@ -428,25 +427,25 @@ class LayoutAnalyzer:
                 continue
             route_records.append(normalized)
         if not route_records:
-            return
+            return {}
 
-        parent_entries: list[tuple[dict, object]] = []
+        parent_entries: list[tuple[int, dict, object]] = []
         subblocks_by_parent: dict[int, list[dict]] = {}
-        for parent in parsing_records:
+        for parent_index, parent in enumerate(parsing_records):
             parent_label = paddle_record_label(parent)
             if is_hanwang_skip_label(parent_label):
                 continue
             parent_bbox = self._record_bbox_in_page_space(parent, page, scale_x, scale_y)
             if parent_bbox is None:
                 continue
-            parent_entries.append((parent, parent_bbox))
-            subblocks_by_parent[id(parent)] = []
+            parent_entries.append((parent_index, parent, parent_bbox))
+            subblocks_by_parent[parent_index] = []
 
         for child in route_records:
             bbox = child.bbox
-            best_parent: dict | None = None
+            best_parent_index: int | None = None
             best_score = 0.0
-            for parent, parent_bbox in parent_entries:
+            for parent_index, _parent, parent_bbox in parent_entries:
                 x1 = max(parent_bbox.x1, bbox.x1)
                 y1 = max(parent_bbox.y1, bbox.y1)
                 x2 = min(parent_bbox.x2, bbox.x2)
@@ -463,14 +462,15 @@ class LayoutAnalyzer:
                 score = (inter_area / max(1, bbox.area)) + (0.25 if center_inside else 0.0)
                 if score > best_score:
                     best_score = score
-                    best_parent = parent
-            if best_parent is not None:
-                subblocks_by_parent[id(best_parent)].append(route_subblock_payload(child))
+                    best_parent_index = parent_index
+            if best_parent_index is not None:
+                subblocks_by_parent[best_parent_index].append(route_subblock_payload(child))
 
-        for parent, _parent_bbox in parent_entries:
-            subblocks = subblocks_by_parent.get(id(parent), [])
-            if subblocks:
-                parent[ROUTE_SUBBLOCKS_FIELD] = subblocks
+        return {
+            parent_index: subblocks
+            for parent_index, subblocks in subblocks_by_parent.items()
+            if subblocks
+        }
 
     def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
         result = result_dict(data)
@@ -478,9 +478,11 @@ class LayoutAnalyzer:
         data_info = result.get("dataInfo") if isinstance(result, dict) else None
         raw_overlay_items: List[tuple[str, object]] = []
         artifact_records: list[dict] = []
+        route_attachments: dict[int, list[dict]] = {}
 
         for item in layout_results:
             parsing_records = parsing_records_from_item(item)
+            parsing_record_base_index = len(artifact_records)
             scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
             if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
                 logger.info(
@@ -490,13 +492,15 @@ class LayoutAnalyzer:
 
             geometry_records = layout_geometry_records_from_item(item)
             if parsing_records:
-                self._attach_route_subblocks(
+                item_route_attachments = self._attach_route_subblocks(
                     page=page,
                     parsing_records=parsing_records,
                     geometry_records=geometry_records,
                     scale_x=scale_x,
                     scale_y=scale_y,
                 )
+                for local_index, subblocks in item_route_attachments.items():
+                    route_attachments[parsing_record_base_index + local_index] = subblocks
             artifact_records.extend(
                 record
                 for record in (
@@ -528,7 +532,12 @@ class LayoutAnalyzer:
                     raw_overlay_items=raw_overlay_items,
                 )
 
-        set_paddle_raw_layout_records(page, artifact_records, run_id=self._layout_batch_id)
+        set_paddle_raw_layout_records(
+            page,
+            artifact_records,
+            route_attachments=route_attachments,
+            run_id=self._layout_batch_id,
+        )
         snapshot = layout_snapshot_from_normalized_artifact(
             normalized_layout_artifact_from_page(page),
             source_run_id=self._layout_batch_id,

@@ -20,14 +20,36 @@ def raw_layout_records(page: Page) -> list[dict[str, Any]]:
     return artifact.records
 
 
+def layout_route_attachments(page: Page) -> dict[int, list[dict[str, Any]]]:
+    artifact = page.raw_layout_artifact
+    if artifact is None:
+        return {}
+    return {
+        int(index): [dict(item) for item in values]
+        for index, values in dict(artifact.route_attachments or {}).items()
+    }
+
+
+def layout_records_with_route_attachments(page: Page) -> list[dict[str, Any]]:
+    from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
+
+    records = [dict(record) for record in raw_layout_records(page)]
+    for index, values in layout_route_attachments(page).items():
+        if 0 <= index < len(records) and values:
+            records[index][ROUTE_SUBBLOCKS_FIELD] = [dict(item) for item in values]
+    return records
+
+
 def set_paddle_raw_layout_records(
     page: Page,
     records: list[dict[str, Any]],
     *,
+    route_attachments: dict[int, list[dict[str, Any]]] | None = None,
     run_id: str = "",
 ) -> RawOcrArtifact:
     artifact = RawOcrArtifact.from_paddle_layout_records(
         records,
+        route_attachments=route_attachments,
         page_uid=page.uid,
         run_id=run_id,
     )
