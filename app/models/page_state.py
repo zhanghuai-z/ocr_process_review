@@ -2,7 +2,27 @@
 from __future__ import annotations
 
 from app.models import Page, PageStatus
+from app.models.layout_projection import page_has_layout_blocks
 from app.models.ocr_observation import page_has_ocr_result
+
+
+OCR_AVAILABLE_PAGE_STATUSES = {
+    PageStatus.OCR_DONE,
+    PageStatus.PROOFING,
+    PageStatus.PROOF_DONE,
+}
+
+
+def page_is_layout_analyzed(page: Page) -> bool:
+    return page_has_layout_blocks(page)
+
+
+def page_is_ocr_done(page: Page) -> bool:
+    return page.status in OCR_AVAILABLE_PAGE_STATUSES
+
+
+def page_needs_ocr_rerun(page: Page) -> bool:
+    return bool(page.ocr_invalidated_reason)
 
 
 def mark_page_imported(page: Page) -> None:
@@ -50,8 +70,8 @@ def reconcile_page_ocr_done_from_result(page: Page) -> None:
     """Promote loaded OCR content into explicit page state."""
     if (
         page_has_ocr_result(page)
-        and not page.is_ocr_done
-        and not page.needs_ocr_rerun
+        and not page_is_ocr_done(page)
+        and not page_needs_ocr_rerun(page)
         and not page.error_message
     ):
         mark_page_ocr_done(page)

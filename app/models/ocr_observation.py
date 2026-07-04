@@ -17,7 +17,7 @@ from .layout_projection import (
     page_layout_blocks,
 )
 from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
-from .project import BBox, Block, Line, OcrProject, Page
+from .project import BBox, Block, Line, OCR_AVAILABLE_PAGE_STATUSES, OcrProject, Page
 from .ocr_text_observation import line_ocr_confidence
 
 
@@ -157,8 +157,11 @@ def project_has_any_ocr_result(project: OcrProject) -> bool:
 
 
 def project_all_pages_ocr_done(project: OcrProject) -> bool:
-    return bool(project.pages) and all(page.is_ocr_done for page in project.pages)
+    return bool(project.pages) and all(
+        page.status in OCR_AVAILABLE_PAGE_STATUSES
+        for page in project.pages
+    )
 
 
 def project_has_any_ocr_done_page(project: OcrProject) -> bool:
-    return any(page.is_ocr_done for page in project.pages)
+    return any(page.status in OCR_AVAILABLE_PAGE_STATUSES for page in project.pages)

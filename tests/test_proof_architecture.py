@@ -501,6 +501,27 @@ def test_ocr_line_bbox_reads_go_through_observation_boundary():
     assert offenders == []
 
 
+def test_workflow_page_state_reads_go_through_page_state_boundary():
+    allowed = {
+        Path("app/models/page_state.py"),
+        Path("app/models/project.py"),
+    }
+    forbidden_attrs = {"is_analyzed", "is_ocr_done", "needs_ocr_rerun"}
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed or path.parts[:2] == ("app", "ui"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in forbidden_attrs:
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id in {"page", "p"}:
+                offenders.append(f"{path}:{node.lineno}: {owner.id}.{node.attr}")
+    assert offenders == []
+
+
 def test_production_code_does_not_construct_line_with_chars_storage():
     allowed = {
         Path("app/models/project.py"),

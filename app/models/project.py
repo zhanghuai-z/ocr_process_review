@@ -388,10 +388,3 @@ class OcrProject:
     @property
     def page_count(self) -> int:
         return len(self.pages)
-
-    @property
-    def has_pending_ocr_pages(self) -> bool:
-        return any(
-            p.is_analyzed and (not p.is_ocr_done or p.needs_ocr_rerun)
-            for p in self.pages
-        )

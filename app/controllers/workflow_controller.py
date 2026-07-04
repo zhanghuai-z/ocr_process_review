@@ -59,6 +59,8 @@ from app.models.page_state import (
     mark_page_layout_failed,
     mark_page_ocr_done,
     mark_page_ocr_failed,
+    page_is_layout_analyzed,
+    page_is_ocr_done,
     reconcile_page_ocr_done_from_result,
 )
 from app.services.ocr_pipeline import OcrPipeline
@@ -189,7 +191,7 @@ class WorkflowController(QObject):
         """所有 page 都已完成版面分析；无 page 时返回 False。"""
         if not self._project or not self._project.pages:
             return False
-        return all(p.is_analyzed for p in self._project.pages)
+        return all(page_is_layout_analyzed(page) for page in self._project.pages)
 
     @property
     def has_any_ocr_result(self) -> bool:
@@ -729,7 +731,7 @@ class WorkflowController(QObject):
         page = self.page_by_number(page_number)
         if page is None:
             return
-        had_ocr = page_has_ocr_result(page) or page.is_ocr_done
+        had_ocr = page_has_ocr_result(page) or page_is_ocr_done(page)
         for block in page_layout_blocks(page):
             mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:

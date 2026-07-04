@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from app.core.page_errors import is_ocr_error_message
 from app.models import OcrProject, Page
 from app.models.ocr_observation import project_has_any_ocr_done_page
+from app.models.page_state import (
+    page_is_layout_analyzed,
+    page_is_ocr_done,
+    page_needs_ocr_rerun,
+)
 
 # 步骤索引（与 stacked widget 顺序一致）
 STEP_IMPORT = 0
@@ -58,7 +63,7 @@ def compute_max_step(project: OcrProject | None) -> int:
     if project is None or not project.pages:
         return STEP_IMPORT
 
-    has_blocks = any(page.is_analyzed for page in project.pages)
+    has_blocks = any(page_is_layout_analyzed(page) for page in project.pages)
     if project_has_any_ocr_done_page(project):
         return STEP_VPROOF
     if has_blocks:
@@ -88,7 +93,7 @@ def page_gate_info(page: Page) -> PageGateInfo:
             action_label="提交并进入 OCR",
             action_enabled=False,
         )
-    if not page.is_analyzed:
+    if not page_is_layout_analyzed(page):
         return PageGateInfo(
             page_state="layout_pending",
             is_pending=True,
@@ -98,7 +103,7 @@ def page_gate_info(page: Page) -> PageGateInfo:
             action_label="提交并进入 OCR",
             action_enabled=False,
         )
-    if page.needs_ocr_rerun:
+    if page_needs_ocr_rerun(page):
         return PageGateInfo(
             page_state="ocr_invalidated",
             is_pending=True,
@@ -108,7 +113,7 @@ def page_gate_info(page: Page) -> PageGateInfo:
             action_label="重新进入 OCR",
             action_enabled=True,
         )
-    if page.is_ocr_done:
+    if page_is_ocr_done(page):
         return PageGateInfo(
             page_state="ocr_complete",
             is_pending=False,
