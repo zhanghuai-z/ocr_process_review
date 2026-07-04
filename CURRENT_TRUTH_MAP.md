@@ -114,7 +114,7 @@ OCR Hanwang/CharOCR
 | 质量探针 | active probe sidecar | UI 显示假字 | pending fake_char 只在锚点仍匹配 true_char 时注入。 |
 | proof 持久化 | `proof_changed(ProofChangeSet)` + `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 bool 保存信号、无 scope 自动保存 | proof 信号语义是“校对事实已变更，需要持久化”，具体持久化范围由 `ProofChangeSet` 描述。 |
 | proof 写入口 | `ProofEditService` / `proof_line_mutation` | `Line.set_proof_text()` / `Line.set_proof_status()` | `Line` 模型不再持有 proof 写方法，后续写状态必须走显式 helper/service。 |
-| proof 重建门禁 | `proof_rebuild_gate` | HProof/VProof 各自解释保存状态 | 视图销毁/重建前是否允许继续，由共享 gate 根据 `ProofEditStatus` 判断。 |
+| proof 重建门禁 | `proof_rebuild_gate` | HProof/VProof 各自解释保存状态 | 视图销毁/重建前是否允许继续，由共享 gate 根据 editor state 与 `ProofEditStatus` 判断。 |
 
 ## 三、近期关键修补前后逻辑
 
@@ -332,15 +332,15 @@ OCR Hanwang/CharOCR
    - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
    - HProof 有 `HProofRuntimeSession` / `HProofLineEditSession`。
    - VProof 有 `VProofOccurrenceSession` / `ProofReferenceContext` / named text slots。
-   - `proof_rebuild_gate` 已统一“保存状态是否允许视图重建”的第一层决策。
-   - 未收口的是两者的 dirty/conflict 状态采集和 external refresh 合并策略仍各自维护；后续应继续抽共享 session/gate，而不是再补 UI 单点判断。
+   - `proof_rebuild_gate` 已统一“editor state + 保存状态是否允许视图重建”的第一层决策；HProof 重建前 dirty/conflict 判断已接入该 gate。
+   - 未收口的是 VProof 的重载语义和两者的 external refresh 合并策略仍各自维护；后续应继续抽共享 session/gate，而不是再补 UI 单点判断。
 
 4. UI 仍有局部视图状态，但版面对象写入已收口。
    - LayoutPanel 的用户版面编辑入口已迁移到 `LayoutEditCommand` + `LayoutEditService.apply()`。
    - LayoutPanel 的 Paddle raw overlay 解析已迁移到 `LayoutOverlayService`。
    - LayoutPanel 仍维护 undo 快照，但恢复 `page.blocks` 已通过 `LayoutEditCommand.restore_blocks` 进入服务层。
    - LayoutPanel 仍会通过服务生成临时可编辑 inline formula Block。
-   - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`，但两个面板仍各自维护编辑会话和 dirty/conflict gate。
+   - HProof/VProof 的文本写入已走 `ProofEditService` / `ProofChangeSet`；HProof 重建 gate 已收口，VProof 重载和外部刷新 gate 仍需继续收口。
    - 后续重点不是恢复旧 helper，而是让人工编辑直接作用于 `LayoutSnapshot`，并抽出共享 `ProofEditSession`。
 
 5. 已坏项目数据不会自动修复。
@@ -353,7 +353,7 @@ OCR Hanwang/CharOCR
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
 3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从生产/cache 层继续压缩。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
-5. 扩大 `proof_rebuild_gate` 到 dirty、conflict、reload、external refresh 的完整采集层。
+5. 扩大 `proof_rebuild_gate` 到 VProof reload 与 HProof/VProof external refresh 的完整采集层。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
 
 ## 七、审查时的判断口诀

@@ -76,8 +76,8 @@ from app.services.proof_hproof_session import (
 )
 from app.services.proof_image_service import clamp_line_box_pixels
 from app.services.proof_rebuild_gate import (
-    block_proof_rebuild,
-    proof_rebuild_gate_for_save_status,
+    ProofEditorRebuildState,
+    proof_rebuild_gate_for_editor_state,
 )
 from app.ui.proof.confidence_utils import char_confidence
 from app.ui.proof import char_verdict as _cv
@@ -3714,18 +3714,23 @@ class HProofPanel(QWidget):
         if not self._pairs or not (0 <= current_index < len(self._pairs)):
             return True
         pair = self._pairs[current_index]
-        if pair.has_external_conflict():
-            pair._refresh_status()
-            gate = block_proof_rebuild("当前行存在保存冲突，处理后再切换页面")
-            if hasattr(self, "_stat_lbl"):
-                self._stat_lbl.setText(gate.message)
-            return gate.allow_rebuild
-        gate = proof_rebuild_gate_for_save_status(
-            self._save_current(silent=True),
+        state = ProofEditorRebuildState(
+            editable=pair.is_editable,
+            external_conflict=pair.has_external_conflict(),
+            dirty=pair.is_editor_dirty(),
+        )
+        save_status = ProofEditStatus.NOOP
+        if state.needs_save:
+            save_status = self._save_current(silent=True)
+        gate = proof_rebuild_gate_for_editor_state(
+            state,
+            save_status=save_status,
             conflict_message="当前行存在保存冲突，处理后再切换页面",
         )
-        if not gate.allow_rebuild and hasattr(self, "_stat_lbl"):
-            self._stat_lbl.setText(gate.message)
+        if not gate.allow_rebuild:
+            pair._refresh_status()
+            if hasattr(self, "_stat_lbl"):
+                self._stat_lbl.setText(gate.message)
         return gate.allow_rebuild
 
     def _clear_pending_external_refresh(self) -> None:

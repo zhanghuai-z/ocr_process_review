@@ -28,6 +28,17 @@ class ProofRebuildGateResult:
         return self.decision == ProofRebuildDecision.ALLOW
 
 
+@dataclass(frozen=True)
+class ProofEditorRebuildState:
+    editable: bool = True
+    external_conflict: bool = False
+    dirty: bool = False
+
+    @property
+    def needs_save(self) -> bool:
+        return self.editable and self.dirty and not self.external_conflict
+
+
 def allow_proof_rebuild(
     *,
     save_status: ProofEditStatus = ProofEditStatus.NOOP,
@@ -60,10 +71,30 @@ def proof_rebuild_gate_for_save_status(
     return allow_proof_rebuild(save_status=status)
 
 
+def proof_rebuild_gate_for_editor_state(
+    state: ProofEditorRebuildState,
+    *,
+    save_status: ProofEditStatus = ProofEditStatus.NOOP,
+    conflict_message: str = "当前校对内容存在保存冲突，处理后再切换视图",
+) -> ProofRebuildGateResult:
+    if state.external_conflict:
+        return block_proof_rebuild(conflict_message, save_status=ProofEditStatus.CONFLICT)
+    if not state.editable:
+        return allow_proof_rebuild(save_status=ProofEditStatus.READONLY)
+    if not state.dirty:
+        return allow_proof_rebuild(save_status=ProofEditStatus.NOOP)
+    return proof_rebuild_gate_for_save_status(
+        save_status,
+        conflict_message=conflict_message,
+    )
+
+
 __all__ = [
+    "ProofEditorRebuildState",
     "ProofRebuildDecision",
     "ProofRebuildGateResult",
     "allow_proof_rebuild",
     "block_proof_rebuild",
+    "proof_rebuild_gate_for_editor_state",
     "proof_rebuild_gate_for_save_status",
 ]

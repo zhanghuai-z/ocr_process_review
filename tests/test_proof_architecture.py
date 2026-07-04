@@ -1009,7 +1009,8 @@ def test_hproof_uses_projection_as_single_line_runtime_fact():
         assert retired_attr not in source
     assert "class _HProofSaveResult" not in source
     assert "ProofEditStatus" in source
-    assert "proof_rebuild_gate_for_save_status" in source
+    assert "ProofEditorRebuildState" in source
+    assert "proof_rebuild_gate_for_editor_state" in source
     assert "HProofRuntimeSession" in source
     assert "HProofLineEditSession" in source
     assert "self._session.projections" in source
