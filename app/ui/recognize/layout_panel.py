@@ -20,7 +20,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_lines, page_ocr_line_count
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
@@ -797,7 +797,7 @@ class LayoutPanel(QWidget):
         failed_pages = sum(1 for page in self._pages if page.error_message)
         total_blocks = sum(len(page.blocks) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
-        total_lines = sum(page.total_lines for page in self._pages)
+        total_lines = sum(page_ocr_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
         for page in self._pages:
             for block in page.blocks:

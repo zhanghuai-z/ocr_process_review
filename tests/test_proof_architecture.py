@@ -291,6 +291,29 @@ def test_page_dispatch_policy_properties_are_not_restored():
         raise AssertionError("OcrProject class not found")
 
 
+def test_page_and_project_ocr_observation_summary_properties_are_not_restored():
+    source = Path("app/models/project.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/models/project.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Page":
+            page_source = ast.get_source_segment(source, node) or ""
+            assert "def total_lines" not in page_source
+            assert "def has_ocr_result" not in page_source
+            break
+    else:
+        raise AssertionError("Page class not found")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "OcrProject":
+            project_source = ast.get_source_segment(source, node) or ""
+            assert "def total_lines" not in project_source
+            assert "def has_any_ocr_result" not in project_source
+            assert "def all_pages_ocr_done" not in project_source
+            assert "def has_any_ocr_done_page" not in project_source
+            break
+    else:
+        raise AssertionError("OcrProject class not found")
+
+
 def test_block_ocr_lines_access_goes_through_observation_boundary():
     allowed = {
         Path("app/core/project_store.py"),

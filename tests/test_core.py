@@ -19,6 +19,13 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.models import OcrPolicy
+from app.models.ocr_observation import (
+    page_has_ocr_result,
+    page_ocr_line_count,
+    project_all_pages_ocr_done,
+    project_has_any_ocr_result,
+    project_ocr_line_count,
+)
 
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import (
@@ -210,15 +217,15 @@ def test_models():
     # Project
     project = OcrProject(name="测试项目", pages=[page])
     assert project.page_count == 1
-    assert project.total_lines == 2
-    assert project.has_any_ocr_result is True
-    assert project.all_pages_ocr_done is False
+    assert project_ocr_line_count(project) == 2
+    assert project_has_any_ocr_result(project) is True
+    assert project_all_pages_ocr_done(project) is False
     page.status = PageStatus.OCR_DONE
-    assert page.has_ocr_result is True
+    assert page_has_ocr_result(page) is True
     assert page.is_ocr_done is True
     page.status = PageStatus.PROOFING
     assert page.is_ocr_done is True
-    assert project.all_pages_ocr_done is True
+    assert project_all_pages_ocr_done(project) is True
     invalidate_page_ocr(page, "block_moved")
     assert page.needs_ocr_rerun is True
     assert page.ocr_invalidated_reason == "block_moved"
@@ -287,8 +294,8 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
     )
     project = OcrProject(name="mixed", pages=[done_page, pending_page])
 
-    assert project.has_any_ocr_result is True
-    assert project.all_pages_ocr_done is False
+    assert project_has_any_ocr_result(project) is True
+    assert project_all_pages_ocr_done(project) is False
     assert compute_max_step(project) == STEP_VPROOF
     assert page_gate_info(done_page).is_pending is False
     assert page_gate_info(pending_page).page_state == "ocr_ready"
@@ -307,7 +314,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
             )
         ],
     )
-    assert lines_without_done_status.has_ocr_result is True
+    assert page_has_ocr_result(lines_without_done_status) is True
     assert lines_without_done_status.is_ocr_done is False
     assert compute_max_step(OcrProject(name="lines-only", pages=[lines_without_done_status])) == STEP_OCR
     assert page_gate_info(lines_without_done_status).page_state == "ocr_ready"
@@ -12753,12 +12760,12 @@ def test_workflow_controller_hanwang_block_edit_invalidates_only_that_page():
 
         controller.handle_block_contract_changed(1, "block_moved")
 
-        assert page1.total_lines == 1
+        assert page_ocr_line_count(page1) == 1
         assert page1.blocks[0].lines[0].text == "第一页"
         assert page1.status == PageStatus.LAYOUT_DONE
         assert page1.needs_ocr_rerun is True
         assert page1.ocr_invalidated_reason == "block_moved"
-        assert page2.total_lines == 1
+        assert page_ocr_line_count(page2) == 1
         assert page2.status == PageStatus.OCR_DONE
     finally:
         workflow_module.get_config = original_get_config
@@ -13212,7 +13219,7 @@ def test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines
 
     controller.on_ocr_done([page])
 
-    assert page.total_lines == 1
+    assert page_ocr_line_count(page) == 1
     assert page.status == PageStatus.ERROR
     gate = page_gate_info(page)
     assert gate.page_state == "ocr_error"

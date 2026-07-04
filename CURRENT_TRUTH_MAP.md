@@ -110,6 +110,7 @@ OCR Hanwang/CharOCR
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
 | OCR 原文 | `line_text_contract(line).ocr_text` / `proof_ocr_text(line)` | `Line.text` 或 `Line.ocr_text` 单独判断 | `text` 仍是底层 OCR 行文本字段；proof/UI/export 不应自行解释双字段。 |
+| OCR 行观察汇总 | `app.models.ocr_observation` helpers：`page_ocr_line_count`、`project_ocr_line_count`、`page_has_ocr_result` 等 | `Page.total_lines`、`Page.has_ocr_result`、`OcrProject.total_lines`、`OcrProject.has_any_ocr_result`、`OcrProject.all_pages_ocr_done` | OCR 行仍暂存于 `Block.lines`，但 Page/Project 模型不再负责解释行数、是否有 OCR 或项目 OCR 完成状态。 |
 | 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
@@ -161,6 +162,7 @@ OCR Hanwang/CharOCR
 - `Block` 构造不得恢复隐式 OCR policy 推导。
 - 页级 OCR 统计、图像读取失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用都应读取同一个 `DispatchPlan`。
 - Page/Project 模型不得恢复 `text_blocks`、`text_ocr_blocks`、`has_unrecognized_blocks` 这类策略 property；统计和导出状态由服务读取 `DispatchPlan`。
+- Page/Project 模型不得恢复 `total_lines`、`has_ocr_result`、`has_any_ocr_result`、`all_pages_ocr_done` 这类 OCR observation summary property；这些读取统一走 `ocr_observation` helper。
 - `Block.source` 的人工编辑/导出来源语义不得在 Hanwang、Export、BlockAttributes 内分散解释，必须经 `app.models.layout_block_state` helper。
 
 ### 3. Paddle 路由：父文本块 + 子结构块

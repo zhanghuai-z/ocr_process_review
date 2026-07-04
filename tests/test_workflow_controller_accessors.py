@@ -14,6 +14,7 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_HPROOF, STEP_LAYOUT,
 )
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_observation import project_ocr_line_count
 
 
 # ── 辅助 ───────────────────────────────────────────────────────
@@ -87,8 +88,8 @@ def test_total_line_count_sums_pages(ctrl):
     p1 = _page(1, [_block([_line()])])              # 1 line
     p2 = _page(2, [_block([_line(), _line()])])     # 2 lines
     ctrl._project = OcrProject(name="t", pages=[p1, p2])
-    # 与 sum(p.total_lines) 等价
-    assert ctrl.total_line_count == sum(p.total_lines for p in [p1, p2])
+    # 与 OCR observation summary 等价
+    assert ctrl.total_line_count == project_ocr_line_count(ctrl._project)
 
 
 def test_page_number_at_returns_correct_value(ctrl):

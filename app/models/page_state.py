@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app.models import Page, PageStatus
+from app.models.ocr_observation import page_has_ocr_result
 
 
 def mark_page_imported(page: Page) -> None:
@@ -44,7 +45,7 @@ def mark_page_ocr_failed(page: Page, message: str | None = None) -> None:
 def reconcile_page_ocr_done_from_result(page: Page) -> None:
     """Promote loaded OCR content into explicit page state."""
     if (
-        page.has_ocr_result
+        page_has_ocr_result(page)
         and not page.is_ocr_done
         and not page.needs_ocr_rerun
         and not page.error_message

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from app.core.page_errors import is_ocr_error_message
 from app.models import OcrProject, Page
+from app.models.ocr_observation import project_has_any_ocr_done_page
 
 # 步骤索引（与 stacked widget 顺序一致）
 STEP_IMPORT = 0
@@ -58,7 +59,7 @@ def compute_max_step(project: OcrProject | None) -> int:
         return STEP_IMPORT
 
     has_blocks = any(page.is_analyzed for page in project.pages)
-    if project.has_any_ocr_done_page:
+    if project_has_any_ocr_done_page(project):
         return STEP_VPROOF
     if has_blocks:
         return STEP_OCR

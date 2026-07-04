@@ -373,15 +373,6 @@ class Page:
         return self.cache_image_path or self.image_path
 
     @property
-    def total_lines(self) -> int:
-        return sum(len(b.lines) for b in self.blocks)
-
-    @property
-    def has_ocr_result(self) -> bool:
-        """当前页是否已有可展示/校对的 OCR 行。"""
-        return self.total_lines > 0
-
-    @property
     def is_ocr_done(self) -> bool:
         """当前页是否已通过 OCR 阶段，可进入或继续校对。"""
         return self.status in OCR_AVAILABLE_PAGE_STATUSES
@@ -405,22 +396,6 @@ class OcrProject:
     @property
     def page_count(self) -> int:
         return len(self.pages)
-
-    @property
-    def total_lines(self) -> int:
-        return sum(p.total_lines for p in self.pages)
-
-    @property
-    def has_any_ocr_result(self) -> bool:
-        return any(p.has_ocr_result for p in self.pages)
-
-    @property
-    def all_pages_ocr_done(self) -> bool:
-        return bool(self.pages) and all(p.is_ocr_done for p in self.pages)
-
-    @property
-    def has_any_ocr_done_page(self) -> bool:
-        return any(p.is_ocr_done for p in self.pages)
 
     @property
     def has_pending_ocr_pages(self) -> bool:

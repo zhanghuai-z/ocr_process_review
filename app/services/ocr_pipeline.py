@@ -37,6 +37,7 @@ from app.models.ocr_observation import (
     block_ocr_line_count,
     block_ocr_lines,
     clear_block_ocr_lines,
+    page_ocr_line_count,
     replace_block_ocr_lines,
 )
 from app.core.logging import get_logger
@@ -244,7 +245,7 @@ class OcrPipeline:
                         completed_pages=page_idx + 1,
                             message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
                     ))
-                elif page.total_lines == 0 and page_failures and not page.error_message:
+                elif page_ocr_line_count(page) == 0 and page_failures and not page.error_message:
                     summary = "；".join(page_failures[:3])
                     if len(page_failures) > 3:
                         summary += "；…"

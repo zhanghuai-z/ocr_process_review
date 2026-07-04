@@ -40,7 +40,14 @@ from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import (
+    block_ocr_lines,
+    page_has_ocr_result,
+    project_all_pages_ocr_done,
+    project_has_any_ocr_done_page,
+    project_has_any_ocr_result,
+    project_ocr_line_count,
+)
 from app.models.page_state import (
     invalidate_page_ocr,
     mark_page_imported,
@@ -171,7 +178,7 @@ class WorkflowController(QObject):
         """所有 page 的 total_lines 之和；无项目时返回 0。"""
         if self._project is None:
             return 0
-        return sum(p.total_lines for p in self._project.pages)
+        return project_ocr_line_count(self._project)
 
     @property
     def is_fully_analyzed(self) -> bool:
@@ -185,14 +192,14 @@ class WorkflowController(QObject):
         """项目是否已有任意 OCR 结果；无项目时 False。"""
         if self._project is None:
             return False
-        return self._project.has_any_ocr_result
+        return project_has_any_ocr_result(self._project)
 
     @property
     def all_pages_ocr_done(self) -> bool:
         """所有页面是否都已完成 OCR；无项目时 False。"""
         if self._project is None:
             return False
-        return self._project.all_pages_ocr_done
+        return project_all_pages_ocr_done(self._project)
 
     @property
     def cache_dir(self) -> "Path":
@@ -613,7 +620,7 @@ class WorkflowController(QObject):
                 return False
         except Exception:
             pass
-        if not self._project.all_pages_ocr_done:
+        if not project_all_pages_ocr_done(self._project):
             return False
         try:
             cfg = qp.sampler_config_from_app_config()
@@ -717,7 +724,7 @@ class WorkflowController(QObject):
         page = self.page_by_number(page_number)
         if page is None:
             return
-        had_ocr = page.has_ocr_result or page.is_ocr_done
+        had_ocr = page_has_ocr_result(page) or page.is_ocr_done
         for block in page.blocks:
             mark_ocr_text_invalidated(block, change_kind)
         if had_ocr:
@@ -1179,7 +1186,7 @@ class WorkflowController(QObject):
         if completed_pages != self._last_ocr_progress_completed_pages and self._project:
             for page in self._project.pages:
                 reconcile_page_ocr_done_from_result(page)
-            if self._project.has_any_ocr_done_page and self._max_step < STEP_VPROOF:
+            if project_has_any_ocr_done_page(self._project) and self._max_step < STEP_VPROOF:
                 self._update_max_step()
             self._last_ocr_progress_completed_pages = completed_pages
         self.progress_state_changed.emit(WorkflowProgressState(
