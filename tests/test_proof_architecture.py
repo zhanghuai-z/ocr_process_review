@@ -446,10 +446,14 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
         Path("app/ui/recognize/ocr_panel.py"),
         Path("app/ui/recognize/layout_panel.py"),
     ]
+    offenders: list[str] = []
     for path in recognize_sources:
         source = path.read_text(encoding="utf-8")
-        assert "page.blocks" not in source
-        assert "line.chars" not in source
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {"blocks", "chars"}:
+                offenders.append(f"{path}:{node.lineno}: .{node.attr}")
+    assert offenders == []
 
     assert "app.models.layout_projection" in Path("app/ui/recognize/ocr_panel.py").read_text(
         encoding="utf-8"
@@ -463,9 +467,10 @@ def test_proof_ui_does_not_reach_legacy_layout_or_char_storage_directly():
     offenders: list[str] = []
     for path in sorted(PROOF_UI_DIR.glob("*.py")):
         source = path.read_text(encoding="utf-8")
-        for forbidden in ("page.blocks", "line.chars", "_line.chars"):
-            if forbidden in source:
-                offenders.append(f"{path}:{forbidden}")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {"blocks", "chars"}:
+                offenders.append(f"{path}:{node.lineno}: .{node.attr}")
     assert offenders == []
 
 

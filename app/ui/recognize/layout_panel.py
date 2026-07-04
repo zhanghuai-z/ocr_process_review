@@ -693,7 +693,7 @@ class LayoutPanel(QWidget):
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
         self._update_page_nav()
-        total_blocks = sum(len(p.blocks) for p in pages)
+        total_blocks = sum(len(page_layout_blocks(page)) for page in pages)
         failed = sum(1 for page in pages if page.error_message)
         if failed:
             self._set_status_text(
@@ -1255,7 +1255,10 @@ class LayoutPanel(QWidget):
         page_idx, block_identity = payload
         if not isinstance(page_idx, int) or not (0 <= page_idx < len(self._pages)):
             return
-        block = next((candidate for candidate in self._pages[page_idx].blocks if id(candidate) == block_identity), None)
+        block = next(
+            (candidate for candidate in page_layout_blocks(self._pages[page_idx]) if id(candidate) == block_identity),
+            None,
+        )
         if block is not None:
             self._focus_block(page_idx, block)
 
