@@ -1086,6 +1086,126 @@ def test_project_store_rejects_malformed_route_attachments_on_save_and_load():
     print("test_project_store_rejects_malformed_route_attachments_on_save_and_load PASSED")
 
 
+def test_project_store_rejects_non_dict_raw_layout_records_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page, RawOcrArtifact
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bad_project = OcrProject(
+            name="bad-raw-records-save",
+            pages=[
+                Page(
+                    image_path="/tmp/bad-record-save.png",
+                    width=120,
+                    height=80,
+                    raw_layout_artifact=RawOcrArtifact(
+                        engine="paddleocr-vl",
+                        engine_version="1.6",
+                        records=["not-a-dict"],
+                    ),
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 100, 40))],
+                )
+            ],
+        )
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.records\[0\] must be dict"):
+                store.save_project(bad_project)
+
+        good_project = OcrProject(
+            name="bad-raw-records-load",
+            pages=[
+                Page(
+                    image_path="/tmp/bad-record-load.png",
+                    width=120,
+                    height=80,
+                    raw_layout_artifact=RawOcrArtifact.from_paddle_layout_records([
+                        {"block_label": "text", "block_bbox": [10, 20, 110, 60]}
+                    ]),
+                    blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 100, 40))],
+                )
+            ],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(good_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE raw_ocr_artifact SET records_json=?",
+                (json.dumps(["not-a-dict"], ensure_ascii=False),),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.records_json\[0\] must be dict"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_non_dict_raw_layout_records_on_save_and_load PASSED")
+
+
+def test_project_store_rejects_non_dict_table_text_layer_cells_on_save_and_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        bad_block = Block(
+            block_type=BlockType.TABLE,
+            bbox=BBox(10, 20, 100, 40),
+            table_text_layer_cells=["not-a-dict"],
+        )
+        bad_project = OcrProject(
+            name="bad-table-cells-save",
+            pages=[Page(image_path="/tmp/bad-table-save.png", width=120, height=80, blocks=[bad_block])],
+        )
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"block\.table_text_layer_cells\[0\] must be dict"):
+                store.save_project(bad_project)
+
+        good_project = OcrProject(
+            name="bad-table-cells-load",
+            pages=[
+                Page(
+                    image_path="/tmp/bad-table-load.png",
+                    width=120,
+                    height=80,
+                    blocks=[
+                        Block(
+                            block_type=BlockType.TABLE,
+                            bbox=BBox(10, 20, 100, 40),
+                            table_text_layer_cells=[{"text": "A", "bbox": {"x": 1, "y": 2, "w": 3, "h": 4}}],
+                        )
+                    ],
+                )
+            ],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(good_project)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET table_text_layer_cells_json=?",
+                (json.dumps(["not-a-dict"], ensure_ascii=False),),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"block\.table_text_layer_cells_json\[0\] must be dict"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_non_dict_table_text_layer_cells_on_save_and_load PASSED")
+
+
 def test_project_store_persists_typed_paddle_binding():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
@@ -1700,6 +1820,13 @@ def test_project_store_rejects_invalid_review_flags_json_on_load():
             conn.commit()
         with ProjectStore(db_path) as store:
             with pytest.raises(ProjectDataError, match="line.review_flags_json must be list"):
+                store.load_project(saved.id)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("UPDATE line SET review_flags_json=? WHERE id=?", (json.dumps([1]), line.id))
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"line\.review_flags_json\[0\] must be str"):
                 store.load_project(saved.id)
     finally:
         os.unlink(db_path)

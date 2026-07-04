@@ -387,7 +387,23 @@ def _json_to_review_flags(s: str, *, field: str = "line.review_flags_json") -> l
         raise ProjectDataError(f"{field} invalid json") from exc
     if not isinstance(value, list):
         raise ProjectDataError(f"{field} must be list")
-    return [str(item) for item in value]
+    result: list[str] = []
+    for item_index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ProjectDataError(f"{field}[{item_index}] must be str")
+        result.append(item)
+    return result
+
+
+def _dict_list(values: object, *, field: str) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        raise ProjectDataError(f"{field} must be list")
+    result: list[dict[str, Any]] = []
+    for item_index, value in enumerate(values):
+        if not isinstance(value, dict):
+            raise ProjectDataError(f"{field}[{item_index}] must be dict")
+        result.append(dict(value))
+    return result
 
 
 def _json_to_list(s: str, *, field: str) -> list:
@@ -431,14 +447,7 @@ def _route_attachments_to_json_dict(
 
 
 def _route_attachment_dicts(values: object, *, field: str) -> list[dict[str, Any]]:
-    if not isinstance(values, list):
-        raise ProjectDataError(f"{field} must be list")
-    result: list[dict[str, Any]] = []
-    for item_index, value in enumerate(values):
-        if not isinstance(value, dict):
-            raise ProjectDataError(f"{field}[{item_index}] must be dict")
-        result.append(dict(value))
-    return result
+    return _dict_list(values, field=field)
 
 
 def _json_to_route_attachments(s: str, *, field: str) -> dict[int, list[dict[str, Any]]]:
@@ -1067,7 +1076,7 @@ class ProjectStore:
             artifact.run_id,
             artifact.artifact_path,
             artifact.artifact_hash,
-            json.dumps(artifact.records, ensure_ascii=False),
+            json.dumps(_dict_list(artifact.records, field="raw_ocr_artifact.records"), ensure_ascii=False),
             json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
             artifact.created_at,
         )
@@ -1100,7 +1109,7 @@ class ProjectStore:
                     artifact.run_id,
                     artifact.artifact_path,
                     artifact.artifact_hash,
-                    json.dumps(artifact.records, ensure_ascii=False),
+                    json.dumps(_dict_list(artifact.records, field="raw_ocr_artifact.records"), ensure_ascii=False),
                     json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
                     artifact.created_at,
                     artifact.id,
@@ -1143,7 +1152,10 @@ class ProjectStore:
             json.dumps(block.paddle_binding.to_dict() if block.paddle_binding else {}, ensure_ascii=False),
             block.ocr_invalidated_reason,
             json.dumps(block.ocr_audit, ensure_ascii=False),
-            json.dumps(block.table_text_layer_cells, ensure_ascii=False),
+            json.dumps(
+                _dict_list(block.table_text_layer_cells, field="block.table_text_layer_cells"),
+                ensure_ascii=False,
+            ),
         )
         if block.id is None:
             cur.execute(
@@ -1653,7 +1665,10 @@ class ProjectStore:
             run_id=row["run_id"],
             artifact_path=row["artifact_path"],
             artifact_hash=row["artifact_hash"],
-            records=_json_to_list(row["records_json"], field="raw_ocr_artifact.records_json"),
+            records=_dict_list(
+                _json_to_list(row["records_json"], field="raw_ocr_artifact.records_json"),
+                field="raw_ocr_artifact.records_json",
+            ),
             route_attachments=_json_to_route_attachments(
                 row["route_attachments_json"] if "route_attachments_json" in row.keys() else "{}",
                 field="raw_ocr_artifact.route_attachments_json",
@@ -1741,8 +1756,11 @@ class ProjectStore:
                 else {}
             )
             table_text_layer_cells = (
-                _json_to_list(
-                    r["table_text_layer_cells_json"],
+                _dict_list(
+                    _json_to_list(
+                        r["table_text_layer_cells_json"],
+                        field="block.table_text_layer_cells_json",
+                    ),
                     field="block.table_text_layer_cells_json",
                 )
                 if "table_text_layer_cells_json" in r.keys()
