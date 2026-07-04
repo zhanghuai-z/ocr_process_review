@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Iterable
 
 from app.core.proof_occurrence import (
     ProofOccurrence,
@@ -13,6 +14,16 @@ from app.services.proof_reference_context import (
     ProofReferenceContext,
     build_proof_reference_context,
 )
+
+
+@dataclass(frozen=True)
+class VProofExternalRefreshPlan:
+    affected_page_keys: tuple[tuple[object, ...], ...] = tuple()
+    reload_current_page: bool = False
+
+    @property
+    def has_work(self) -> bool:
+        return bool(self.affected_page_keys)
 
 
 @dataclass
@@ -114,3 +125,36 @@ class VProofOccurrenceSession:
     def clear_selection(self) -> None:
         self.selected_occurrence_key = None
         self.selected_occurrence_keys = []
+
+    def clear_pending_external_refresh(self) -> None:
+        self.pending_external_lines.clear()
+        self.pending_external_page_keys.clear()
+
+    def queue_external_refresh(
+        self,
+        *,
+        line_key: int | str,
+        page_keys: Iterable[tuple[object, ...]],
+    ) -> None:
+        self.pending_external_lines.add(line_key)
+        self.pending_external_page_keys.update(page_keys)
+
+    def consume_external_refresh_plan(self) -> VProofExternalRefreshPlan:
+        if not self.pages:
+            self.clear_pending_external_refresh()
+            return VProofExternalRefreshPlan()
+        if not self.pending_external_lines:
+            return VProofExternalRefreshPlan()
+        pending_page_keys = tuple(self.pending_external_page_keys)
+        self.clear_pending_external_refresh()
+        current_key = self.current_page_key
+        if not pending_page_keys and current_key is not None:
+            pending_page_keys = (current_key,)
+        return VProofExternalRefreshPlan(
+            affected_page_keys=pending_page_keys,
+            reload_current_page=bool(
+                pending_page_keys
+                and current_key is not None
+                and current_key in pending_page_keys
+            ),
+        )

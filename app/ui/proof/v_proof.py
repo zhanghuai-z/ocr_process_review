@@ -1242,8 +1242,7 @@ class VProofPanel(QWidget):
     def load_pages(self, pages: List[Page]) -> None:
         self._clear_vproof_history()
         self._session.set_pages(pages)
-        self._session.pending_external_lines.clear()
-        self._session.pending_external_page_keys.clear()
+        self._session.clear_pending_external_refresh()
         self._rebuild_full_char_index(pages)
         if pages:
             self._load_page(0)
@@ -2380,9 +2379,10 @@ class VProofPanel(QWidget):
         if not affected_pages:
             return
         line_key = line_uid if line_uid is not None else request.line_id
-        self._session.pending_external_lines.add(line_key)
-        for page in affected_pages:
-            self._session.pending_external_page_keys.add(self._char_index_page_key(page))
+        self._session.queue_external_refresh(
+            line_key=line_key,
+            page_keys=[self._char_index_page_key(page) for page in affected_pages],
+        )
         self._external_refresh_timer.start()  # 80ms 内的 N 次 publish 合并成 1 次
 
     def _do_external_refresh(self) -> None:
@@ -2391,25 +2391,22 @@ class VProofPanel(QWidget):
         从 _on_external_line_changed 累积的 pending 事件里只触发一次重建。
         与原先的同步路径相比，重建本身的代价没变，但 N→1 折叠掉了重复。
         """
-        if not self._session.pages:
-            self._session.pending_external_lines.clear()
-            self._session.pending_external_page_keys.clear()
+        plan = self._session.consume_external_refresh_plan()
+        if not plan.has_work:
             return
-        if not self._session.pending_external_lines:
-            return
-        pending_page_keys = set(self._session.pending_external_page_keys)
-        self._session.pending_external_lines.clear()
-        self._session.pending_external_page_keys.clear()
         current_page = self._session.current_page()
         if current_page is None:
             return
+        pending_page_keys = set(plan.affected_page_keys)
         affected_pages = [
             page for page in self._session.pages
             if self._char_index_page_key(page) in pending_page_keys
         ]
         if affected_pages:
             self._refresh_char_index_for_pages(affected_pages)
-        if pending_page_keys and self._char_index_page_key(current_page) not in pending_page_keys:
+        if not plan.reload_current_page:
+            return
+        if not allow_proof_rebuild().allow_rebuild:
             return
         selected_tokens = self._selected_tokens_for_restore()
         selected_occurrence_keys = tuple(self._session.selected_occurrence_keys)

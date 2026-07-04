@@ -1045,6 +1045,10 @@ def test_vproof_uses_named_slots_and_shared_identity_helpers():
     assert "proof_page_identity_key" in source
     assert "VProofOccurrenceSession" in source
     assert "allow_proof_rebuild" in source
+    assert "pending_external_lines" not in source
+    assert "pending_external_page_keys" not in source
+    assert "queue_external_refresh" in source
+    assert "consume_external_refresh_plan" in source
 
     reference_source = Path("app/services/proof_reference_context.py").read_text(encoding="utf-8")
     assert "ProofTextSlot" in reference_source
