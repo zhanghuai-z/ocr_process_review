@@ -353,6 +353,9 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
             if isinstance(owner, ast.Name) and owner.id in block_like_names:
                 offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
+    source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
+    assert "ocr_lines_for_block(block, block.lines)" in source
+    assert "set_ocr_lines_for_block(block, projected)" in source
 
 
 def test_page_layout_blocks_access_goes_through_projection_boundary():
@@ -424,6 +427,9 @@ def test_line_ocr_chars_access_goes_through_character_observation_boundary():
             if isinstance(owner, ast.Name) and owner.id in line_like_names:
                 offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
+    source = Path("app/models/ocr_character_observation.py").read_text(encoding="utf-8")
+    assert "ocr_chars_for_line(line, line.chars)" in source
+    assert "set_ocr_chars_for_line(line, projected)" in source
 
 
 def test_character_observation_boundary_is_used_by_core_consumers():

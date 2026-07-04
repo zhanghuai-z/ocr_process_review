@@ -67,28 +67,29 @@ OCR Hanwang/CharOCR
   -> OcrRunResult / OcrProgress
      - 本轮 OCR 的页结果、失败块和进度事件
      - OcrPipeline 只产出该 typed contract，不再在 pipeline 文件内定义结果模型
-  -> ocr_observation 边界（当前落点仍是 Block.lines）
+  -> ocr_observation 边界 + ocr_observation_store（当前仍投影到 Block.lines）
      - Line 是可校对文本行
      - Line.bbox 是行几何
      - Line.bbox 的运行时写入必须通过 `set_ocr_line_bbox()`，不能由 pipeline/Hanwang/校对补框链路裸写
      - OCR 文本行必须通过 `create_ocr_text_line()` 构造，不能由各 OCR producer 手写 `Line(text=..., ocr_text=...)`
-     - Line.chars 是字符/词/公式 carrier 的几何与文本观察
      - 业务代码必须通过 app.models.ocr_observation 读写，不能继续裸读写 block.lines
+     - ocr_observation_store 是运行时 OCR 行事实边界，Block.lines 只作为旧 UI/存储投影
      - 生产代码不得用 `Block(lines=...)` 构造 OCR 行观察；必须先建 Block，再通过 `replace_block_ocr_lines()` 写入
      - 行的 page/block/line index 查找通过 OcrLineOccurrence helper 表达，不再由 proof 服务私有推导
-     - ProjectStore 也通过该边界读写，`Block.lines` 只剩模型物理字段和 observation helper 内部实现
-  -> ocr_character_observation 边界（当前落点仍是 Line.chars）
+     - ProjectStore 也通过该边界读写，`Block.lines` 只剩旧投影和 observation helper 内部同步目标
+  -> ocr_character_observation 边界 + ocr_character_observation_store（当前仍投影到 Line.chars）
      - Char 是字符、词、公式 carrier 的 OCR 几何观察
      - 非 UI、非 OCR producer 的 core/service/export/controller 代码通过 line_ocr_chars/replace_line_ocr_chars 等 helper 访问
      - 生产代码不得用 `Line(chars=...)` 构造 OCR 字符观察；OCR IR 和 Hanwang 投影都先建 Line，再通过 `replace_line_ocr_chars()` 写入
      - Char.bbox 和局部 span 替换必须通过 `set_ocr_char_bbox()` / `replace_line_ocr_char_span()` 写入
      - ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe 等不再直接依赖 `Line.chars` 物理字段
+     - ocr_character_observation_store 是运行时字符/词/公式 carrier 事实边界，Line.chars 只作为旧 UI/存储投影
 
 校对 HProof/VProof
   -> external ProofLineState store
      - 人工校对后的文本事实
      - proof_display_text(line) 是统一显示文本入口
-  -> Line.chars
+  -> ocr_character_observation_store / Line.chars 旧投影
      - 等长或可对齐编辑时同步字符事实
      - 不能同步时，下游 ProofAtom/CharIndex 必须降级或跳过
   -> ProofChangeSet
@@ -134,8 +135,8 @@ OCR Hanwang/CharOCR
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI/Worker/Pipeline 直接写 `Page.status/error_message/ocr_invalidated_reason` | 当前仍是单字段 `Page.status`，但状态流转、后台错误消息和 OCR invalidation 入口已收口，后续拆状态机从该 helper 切入。 |
 | OCR 原文 | `create_ocr_text_line()` 写入；`line_text_contract(line).ocr_text` / `proof_ocr_text(line)` 读取 | 各 OCR producer 直接 `Line(text=..., ocr_text=...)` 或单独判断 `Line.text` / `Line.ocr_text` | `text` 仍是底层 OCR 行文本字段；OCR 生产写入口和 proof/UI/export 读取口径都已收口。 |
-| OCR 行观察汇总 | `app.models.ocr_observation` helpers：`block_avg_confidence`、`page_ocr_line_count`、`project_ocr_line_count`、`page_has_ocr_result`、`replace_block_ocr_lines`、`set_ocr_line_bbox` 等 | `Block.avg_confidence`、`Page.total_lines`、`Page.has_ocr_result`、`OcrProject.total_lines`、`OcrProject.has_any_ocr_result`、`OcrProject.all_pages_ocr_done`、生产代码 `Block(lines=...)`、各模块直接 `line.bbox = ...` | OCR 行仍暂存于 `Block.lines`，但 Block/Page/Project 模型不再负责解释置信度、行数、是否有 OCR 或项目 OCR 完成状态；生产投影和行几何改写必须经 observation 边界写入。 |
-| OCR 字符观察 | `app.models.ocr_character_observation` helpers：`line_ocr_chars`、`replace_line_ocr_chars`、`replace_line_ocr_char_span`、`set_ocr_char_bbox`、`iter_line_ocr_char_occurrences` 等 | 非 UI 业务层直接 `Line.chars`、生产代码 `Line(chars=...)`、各模块直接 `line.chars[...] = ...` 或 `char.bbox = ...` | 字符/词/公式 carrier 仍暂存于 `Line.chars`，但 ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe、OCR IR/Hanwang 投影等不再直接读取、构造或改写物理字段。 |
+| OCR 行观察汇总 | `app.models.ocr_observation` helpers + `ocr_observation_store`：`block_avg_confidence`、`page_ocr_line_count`、`project_ocr_line_count`、`page_has_ocr_result`、`replace_block_ocr_lines`、`set_ocr_line_bbox` 等 | `Block.avg_confidence`、`Page.total_lines`、`Page.has_ocr_result`、`OcrProject.total_lines`、`OcrProject.has_any_ocr_result`、`OcrProject.all_pages_ocr_done`、生产代码 `Block(lines=...)`、各模块直接 `line.bbox = ...` | OCR 行事实已进入运行时 observation store，同时投影到 `Block.lines` 供旧 UI/存储读取；Block/Page/Project 模型不再负责解释置信度、行数、是否有 OCR 或项目 OCR 完成状态。 |
+| OCR 字符观察 | `app.models.ocr_character_observation` helpers + `ocr_character_observation_store`：`line_ocr_chars`、`replace_line_ocr_chars`、`replace_line_ocr_char_span`、`set_ocr_char_bbox`、`iter_line_ocr_char_occurrences` 等 | 非 UI 业务层直接 `Line.chars`、生产代码 `Line(chars=...)`、各模块直接 `line.chars[...] = ...` 或 `char.bbox = ...` | 字符/词/公式 carrier 已进入运行时 observation store，同时投影到 `Line.chars` 供旧 UI/存储读取；ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe、OCR IR/Hanwang 投影等不再直接读取、构造或改写物理字段。 |
 | 校对终稿 | `proof_display_text(line)` / external `ProofLineState` store | `final_text` 是否为空、`Line.text` 单独判断、`Line.proof_state` | `final_text_set=True` 时空串也是有效终稿；active `Line` 不再携带 proof_state 字段。 |
 | 字符可视文本 | `proof_char_text.char_display_text()` | 无条件用 `token_text` | EngCut char bbox 中 token_text 可能是整词元信息，不等于单字显示文本。 |
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
@@ -329,10 +330,10 @@ OCR Hanwang/CharOCR
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
 - `Page.status/error_message/ocr_invalidated_reason`：当前页面流程状态字段；Controller、Worker、Pipeline 写入必须经 `app.models.page_state`。
-- `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储，ProjectStore、业务代码和 proof 行 occurrence 查找都从这里读写。
+- `ocr_observation`：OCR 行观察访问边界；当前内部使用 `ocr_observation_store` 作为运行时事实并同步投影到 `Block.lines`，ProjectStore、业务代码和 proof 行 occurrence 查找都从这里读写。
 - `line_text_contract(line).ocr_text` / `proof_ocr_text(line)`：OCR 原始文本读取口径。
 - `proof_display_text(line)`：当前校对文本事实。
-- `Line.chars`：字符/词/公式 carrier 几何事实，前提是与 display_text 可对齐。
+- `Line.chars`：字符/词/公式 carrier 旧投影，前提是与 display_text 可对齐；运行时事实由 `ocr_character_observation_store` 持有。
 - `quality_probe` sidecar：质量探针事实。
 
 ### 派生层
@@ -348,7 +349,7 @@ OCR Hanwang/CharOCR
 
 - `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
 - 旧 `line.proof_state`：已退出兼容路径；runtime store 不再消费该 attr，active Line 出现它会被视为模型污染。
-- `Block.lines`：仍是模型内部过渡存储；业务代码、ProjectStore 和 proof 行定位已改为通过 `app.models.ocr_observation` 访问。
+- `Block.lines`：仍是旧 UI/存储投影；业务代码、ProjectStore 和 proof 行定位已改为通过 `app.models.ocr_observation` 访问，运行时事实在 `ocr_observation_store`。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 
 ## 五、当前仍不健康的职责边界

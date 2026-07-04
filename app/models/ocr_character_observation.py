@@ -1,9 +1,8 @@
-"""Access boundary for OCR character observations currently attached to lines.
+"""Access boundary for OCR character observations.
 
-``Line.chars`` is still the physical runtime storage for character, word, and
-formula carriers.  Application code should use this module so character
-observations can later move out of the mutable line model without another broad
-rewrite.
+``Line.chars`` is a compatibility projection. Application code should use this
+module so character, word, and formula carriers live behind one boundary instead
+of being owned directly by the mutable line model.
 """
 from __future__ import annotations
 
@@ -11,6 +10,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from .project import BBox, Char, Line
+from .ocr_character_observation_store import ocr_chars_for_line, set_ocr_chars_for_line
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class OcrCharOccurrence:
 
 
 def line_ocr_chars(line: Line) -> list[Char]:
-    return line.chars
+    return ocr_chars_for_line(line, line.chars)
 
 
 def line_ocr_char_count(line: Line) -> int:
@@ -33,11 +33,13 @@ def line_has_ocr_chars(line: Line) -> bool:
 
 
 def replace_line_ocr_chars(line: Line, chars: Iterable[Char]) -> None:
-    line.chars = list(chars)
+    projected = list(chars)
+    line.chars = projected
+    set_ocr_chars_for_line(line, projected)
 
 
 def replace_line_ocr_char_span(line: Line, start: int, end: int, chars: Iterable[Char]) -> None:
-    line.chars[start:end] = list(chars)
+    line_ocr_chars(line)[start:end] = list(chars)
 
 
 def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
@@ -45,7 +47,7 @@ def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
 
 
 def clear_line_ocr_chars(line: Line) -> None:
-    line.chars = []
+    replace_line_ocr_chars(line, [])
 
 
 def line_ocr_char_at(line: Line, index: int) -> Char:

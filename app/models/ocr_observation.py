@@ -1,8 +1,8 @@
-"""Access boundary for OCR lines currently attached to layout blocks.
+"""Access boundary for OCR line observations.
 
-Block.lines is a transitional storage detail.  Application code should use
-these helpers so OCR observations can move out of the layout block model
-without another broad rewrite.
+``Block.lines`` is a compatibility projection. Application code should use
+these helpers so OCR observations live behind one boundary instead of being
+owned by the layout block model.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .layout_projection import (
     iter_project_layout_block_occurrences,
     page_layout_blocks,
 )
+from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
 from .project import BBox, Block, Line, OcrProject, Page
 
 
@@ -29,7 +30,7 @@ class OcrLineOccurrence:
 
 
 def block_ocr_lines(block: Block) -> list[Line]:
-    return block.lines
+    return ocr_lines_for_block(block, block.lines)
 
 
 def block_ocr_line_count(block: Block) -> int:
@@ -48,7 +49,9 @@ def block_avg_confidence(block: Block) -> float:
 
 
 def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:
-    block.lines = list(lines)
+    projected = list(lines)
+    block.lines = projected
+    set_ocr_lines_for_block(block, projected)
 
 
 def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
@@ -56,7 +59,7 @@ def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
 
 
 def clear_block_ocr_lines(block: Block) -> None:
-    block.lines = []
+    replace_block_ocr_lines(block, [])
 
 
 def append_block_ocr_line(block: Block, line: Line) -> None:

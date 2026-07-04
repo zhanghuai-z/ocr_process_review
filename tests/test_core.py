@@ -98,6 +98,7 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
         line_ocr_char_at,
         line_ocr_char_count,
         line_ocr_chars,
+        replace_line_ocr_char_span,
         replace_line_ocr_chars,
     )
 
@@ -117,6 +118,60 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
 
     clear_line_ocr_chars(line)
     assert line_ocr_chars(line) == []
+    assert line.chars == []
+
+    replace_line_ocr_chars(line, [first, second])
+    third = Char(char="丙", confidence=0.97, bbox=BBox(10, 0, 10, 10))
+    replace_line_ocr_char_span(line, 1, 2, [third])
+    assert line_ocr_chars(line) == [first, third]
+    assert line.chars is line_ocr_chars(line)
+
+
+def test_ocr_observation_runtime_store_keeps_block_projection_in_sync():
+    from app.models import BBox, Block, BlockType, Line
+    from app.models.ocr_observation import (
+        append_block_ocr_line,
+        block_ocr_lines,
+        clear_block_ocr_lines,
+        replace_block_ocr_lines,
+    )
+
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
+    first = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+    second = Line(text="乙", confidence=0.8, bbox=BBox(0, 12, 10, 10))
+
+    replace_block_ocr_lines(block, [first])
+    assert block_ocr_lines(block) == [first]
+    assert block.lines is block_ocr_lines(block)
+
+    append_block_ocr_line(block, second)
+    assert block_ocr_lines(block) == [first, second]
+    assert block.lines == [first, second]
+
+    clear_block_ocr_lines(block)
+    assert block_ocr_lines(block) == []
+    assert block.lines == []
+
+
+def test_ocr_observation_store_adopts_replaced_legacy_projections():
+    from app.models import BBox, Block, BlockType, Char, Line
+    from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+    from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
+
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
+    line1 = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+    line2 = Line(text="乙", confidence=0.8, bbox=BBox(0, 12, 10, 10))
+    replace_block_ocr_lines(block, [line1])
+
+    block.lines = [line2]
+    assert block_ocr_lines(block) == [line2]
+
+    char1 = Char(char="甲", confidence=0.9)
+    char2 = Char(char="乙", confidence=0.8)
+    replace_line_ocr_chars(line2, [char1])
+
+    line2.chars = [char2]
+    assert line_ocr_chars(line2) == [char2]
 
 
 def test_raw_block_payload_prefers_page_artifact_origin_record():
