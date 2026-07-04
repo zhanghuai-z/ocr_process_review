@@ -239,9 +239,6 @@ def test_block_active_model_has_no_app_payload_field():
 def test_block_ocr_lines_access_goes_through_observation_boundary():
     allowed = {
         Path("app/core/project_store.py"),
-        Path("app/export/docx_exporter.py"),
-        Path("app/export/html.py"),
-        Path("app/export/rtf.py"),
         Path("app/models/ocr_observation.py"),
         Path("app/models/project.py"),
     }

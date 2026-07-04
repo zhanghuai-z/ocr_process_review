@@ -1467,6 +1467,31 @@ def test_model_validation_rejects_legacy_page_and_runtime_payloads():
     print("test_model_validation_rejects_legacy_page_and_runtime_payloads PASSED")
 
 
+def test_project_store_rejects_legacy_page_model_on_save():
+    import os
+    import tempfile
+
+    import pytest
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        page = Page(image_path="/tmp/legacy-page-model.png", width=20, height=20)
+        page.ppvl_parsing_res_list = []
+        project = OcrProject(name="legacy page", pages=[page])
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="ppvl_parsing_res_list"):
+                store.save_project(project)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_legacy_page_model_on_save PASSED")
+
+
 def test_project_store_save_project_preserves_child_rowids():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
@@ -19502,6 +19527,7 @@ if __name__ == "__main__":
     test_project_store_rejects_retired_app_payload_on_load()
     test_project_store_rejects_invalid_payload_json_on_load()
     test_model_validation_rejects_legacy_page_and_runtime_payloads()
+    test_project_store_rejects_legacy_page_model_on_save()
     test_line_final_text_contract_and_project_store_roundtrip()
     test_project_store_preserves_empty_final_text_roundtrip()
     test_project_store_clean_on_resave()

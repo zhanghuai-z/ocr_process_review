@@ -35,9 +35,9 @@ class RtfExporter(ExporterBase):
         ]
         for page, blocks in rich_reflow_pages(document):
             parts.append(r"\pard\sb200\b " + _rtf_escape(f"第 {page.page_number} 页") + r"\b0\par")
-            for block in blocks:
-                prefix, suffix = _rtf_style(block)
-                for text in block.lines:
+            for reflow in blocks:
+                prefix, suffix = _rtf_style(reflow)
+                for text in reflow.lines:
                     parts.append(prefix + _rtf_escape(text) + suffix)
                 parts.append(r"\pard\par")
         parts.append("}")

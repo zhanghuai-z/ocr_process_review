@@ -20,29 +20,29 @@ class DocxExporter(ExporterBase):
         for page, blocks in rich_reflow_pages(document):
             doc.add_heading(f"第 {page.page_number} 页", level=1)
 
-            for block in blocks:
-                self._add_block(doc, block)
+            for reflow in blocks:
+                self._add_block(doc, reflow)
 
             doc.add_page_break()
 
         doc.save(out_path)
 
-    def _add_block(self, doc: Document, block: RichReflowBlock) -> None:
-        if block.role == "heading":
-            for text in block.lines:
+    def _add_block(self, doc: Document, reflow: RichReflowBlock) -> None:
+        if reflow.role == "heading":
+            for text in reflow.lines:
                 doc.add_heading(text, level=2)
             return
 
-        for text in block.lines:
-            para = _safe_add_paragraph(doc, _docx_style(block))
-            if block.role == "equation":
+        for text in reflow.lines:
+            para = _safe_add_paragraph(doc, _docx_style(reflow))
+            if reflow.role == "equation":
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = para.add_run(text)
-            run.font.size = Pt(_font_size(block))
-            run.italic = block.role == "caption"
-            if block.proof_status == "auto_flagged":
+            run.font.size = Pt(_font_size(reflow))
+            run.italic = reflow.role == "caption"
+            if reflow.proof_status == "auto_flagged":
                 run.font.color.rgb = RGBColor(0xF4, 0x43, 0x36)
-            elif block.proof_status == "modified":
+            elif reflow.proof_status == "modified":
                 run.font.color.rgb = RGBColor(0xFF, 0xA7, 0x26)
 
 

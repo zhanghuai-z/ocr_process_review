@@ -39,16 +39,16 @@ _TEMPLATE = """\
 {% for page, blocks in rich_pages %}
 <div class="page-header">第 {{ page.page_number }} 页
   <span class="meta">{{ page.source_image }}</span></div>
-{% for block in blocks %}
-{% if block.role == "heading" %}
-{% for text in block.lines %}
-<h2 class="block {{ block.html_class }}" data-type="{{ block.kind }}">{{ text }}</h2>
+{% for reflow in blocks %}
+{% if reflow.role == "heading" %}
+{% for text in reflow.lines %}
+<h2 class="block {{ reflow.html_class }}" data-type="{{ reflow.kind }}">{{ text }}</h2>
 {% endfor %}
 {% else %}
-<div class="block {{ block.html_class }}" data-type="{{ block.kind }}" data-role="{{ block.role }}">
-  <div class="block-label">{{ block.label }} #{{ block.order }}</div>
-  {% for text in block.lines %}
-  <p class="line {{ block.proof_status }}">{{ text }}</p>
+<div class="block {{ reflow.html_class }}" data-type="{{ reflow.kind }}" data-role="{{ reflow.role }}">
+  <div class="block-label">{{ reflow.label }} #{{ reflow.order }}</div>
+  {% for text in reflow.lines %}
+  <p class="line {{ reflow.proof_status }}">{{ text }}</p>
   {% endfor %}
 </div>
 {% endif %}

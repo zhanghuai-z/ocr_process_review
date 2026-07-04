@@ -26,6 +26,7 @@ from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
 from app.core.model_validation import (
     ModelValidationError,
     validate_block_model,
+    validate_page_model,
     validate_persistent_block_payloads,
 )
 from app.core.line_text_contract import line_text_contract
@@ -842,6 +843,10 @@ class ProjectStore:
         *,
         save_seen_uids: dict[str, set[str]],
     ) -> None:
+        try:
+            validate_page_model(page)
+        except ModelValidationError as exc:
+            _raise_project_data_error(exc)
         self._prepare_entity_identity(
             cur,
             page,
