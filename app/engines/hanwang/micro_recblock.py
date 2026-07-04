@@ -6,7 +6,7 @@ import json
 import re
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -59,13 +59,16 @@ from app.core.paddle_line_routing import (
     is_formula_label,
     is_formula_style_position_block,
     is_table_label,
-    line_routes_for_block,
     route_authority_label,
     route_subblocks_for_block,
     union_xyxy,
     vertical_overlap_ratio,
 )
-from app.services.layout_routing_plan import RoutingLine, routing_plan_for_block_record
+from app.services.layout_routing_plan import (
+    RoutingLine,
+    routing_line_to_record,
+    routing_plan_for_block_record,
+)
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -394,58 +397,42 @@ def _refine_layout_text_route_bands_from_image(
     if image_bgr.size == 0:
         return
     for block in ppvl_blocks:
-        routes = line_routes_for_block(block, width, height)
+        routes = routing_plan_for_block_record(block, width, height).lines
         if not routes:
             continue
         changed = False
-        refined_routes: list[dict[str, Any]] = []
+        refined_routes: list[RoutingLine] = []
         for route in routes:
-            segments = route.get("segments")
-            if not isinstance(segments, list):
+            if not route.has_formula:
                 refined_routes.append(route)
                 continue
-            has_formula = any(
-                isinstance(segment, dict) and segment.get("kind") == "formula"
-                for segment in segments
-            )
-            if not has_formula:
-                refined_routes.append(route)
-                continue
-            refined_segments: list[dict[str, Any]] = []
+            refined_segments = []
             route_changed = False
-            for segment in segments:
-                if not isinstance(segment, dict):
-                    continue
-                next_segment = dict(segment)
-                if segment.get("kind") == "text":
-                    raw_bbox = segment.get("bbox")
-                    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
-                        refined_segments.append(next_segment)
-                        continue
-                    try:
-                        bbox = _clamp_xyxy(
-                            (int(raw_bbox[0]), int(raw_bbox[1]), int(raw_bbox[2]), int(raw_bbox[3])),
-                            width,
-                            height,
-                        )
-                    except (TypeError, ValueError):
-                        refined_segments.append(next_segment)
-                        continue
+            for segment in route.segments:
+                next_segment = segment
+                if segment.kind == "text":
+                    bbox = _clamp_xyxy(segment.bbox, width, height)
                     refined_bbox = _refined_text_segment_bbox_from_ink(image_bgr, bbox)
-                    if refined_bbox is not None and refined_bbox != bbox:
-                        next_segment["bbox"] = list(refined_bbox)
+                    if refined_bbox is not None and refined_bbox != segment.bbox:
+                        next_segment = replace(segment, bbox=refined_bbox)
                         route_changed = True
                 refined_segments.append(next_segment)
             if route_changed and refined_segments:
-                next_route = dict(route)
-                next_route["segments"] = refined_segments
-                next_route["bbox"] = list(union_xyxy([tuple(segment["bbox"]) for segment in refined_segments]))
-                refined_routes.append(next_route)
+                refined_routes.append(
+                    replace(
+                        route,
+                        segments=tuple(refined_segments),
+                        bbox=union_xyxy([segment.bbox for segment in refined_segments]),
+                    )
+                )
                 changed = True
             else:
                 refined_routes.append(route)
         if changed:
-            block[LAYOUT_LINE_ROUTES_FIELD] = refined_routes
+            block[LAYOUT_LINE_ROUTES_FIELD] = [
+                routing_line_to_record(route)
+                for route in refined_routes
+            ]
 
 
 def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:

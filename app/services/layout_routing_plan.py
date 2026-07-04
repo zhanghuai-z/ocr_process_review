@@ -98,6 +98,24 @@ def _routing_segment_from_dict(segment: dict[str, Any]) -> RoutingSegment:
     )
 
 
+def routing_line_to_record(line: RoutingLine) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "bbox": list(line.bbox),
+        "segments": [
+            {
+                "kind": segment.kind,
+                "label": segment.label,
+                "bbox": list(segment.bbox),
+                "text": segment.text,
+            }
+            for segment in line.segments
+        ],
+    }
+    if line.source:
+        record[LAYOUT_ROUTE_SOURCE_FIELD] = line.source
+    return record
+
+
 def _text_slice_from_dict(route: dict[str, Any]) -> TextSliceRoute:
     return TextSliceRoute(
         line_index=_int_or_default(route.get("line_idx"), -1),
@@ -129,5 +147,6 @@ __all__ = [
     "RoutingPlan",
     "RoutingSegment",
     "TextSliceRoute",
+    "routing_line_to_record",
     "routing_plan_for_block_record",
 ]

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.services.layout_routing_plan import routing_plan_for_block_record
+from app.services.layout_routing_plan import (
+    RoutingLine,
+    RoutingSegment,
+    routing_line_to_record,
+    routing_plan_for_block_record,
+)
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     LAYOUT_ROUTE_SOURCE_FIELD,
@@ -55,3 +60,28 @@ def test_routing_plan_preserves_ppocr_runtime_route_source():
     assert plan.lines[0].source == LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS
     assert plan.lines[0].bbox == (0, 0, 120, 30)
     assert plan.text_slices[0].bbox == (0, 0, 120, 30)
+
+
+def test_routing_line_to_record_serializes_runtime_cache_shape():
+    line = RoutingLine(
+        index=2,
+        bbox=(10, 20, 90, 60),
+        source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+        segments=(
+            RoutingSegment(kind="text", bbox=(10, 20, 40, 60)),
+            RoutingSegment(kind="formula", label="inline_formula", bbox=(40, 20, 70, 60), text="$ A $"),
+            RoutingSegment(kind="text", bbox=(70, 20, 90, 60)),
+        ),
+    )
+
+    record = routing_line_to_record(line)
+
+    assert record == {
+        "bbox": [10, 20, 90, 60],
+        "segments": [
+            {"kind": "text", "label": "", "bbox": [10, 20, 40, 60], "text": ""},
+            {"kind": "formula", "label": "inline_formula", "bbox": [40, 20, 70, 60], "text": "$ A $"},
+            {"kind": "text", "label": "", "bbox": [70, 20, 90, 60], "text": ""},
+        ],
+        LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+    }
