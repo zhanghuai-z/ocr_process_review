@@ -172,6 +172,17 @@ def test_page_scoped_ocr_pipeline_selection_uses_dispatch_plan():
         assert "build_text_ocr_dispatch_plan(page)" in function_source
 
 
+def test_ocr_run_result_contract_is_not_defined_inside_pipeline():
+    pipeline_source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
+    assert "class OcrProgress" not in pipeline_source
+    assert "class OcrResult" not in pipeline_source
+    assert "class PageOcrRunResult" not in pipeline_source
+    contract_source = Path("app/services/ocr_run_result.py").read_text(encoding="utf-8")
+    assert "class OcrProgress" in contract_source
+    assert "class OcrRunResult" in contract_source
+    assert "class PageOcrRunResult" in contract_source
+
+
 def test_block_attributes_do_not_derive_semantics_from_payloads():
     source = Path("app/core/block_attributes.py").read_text(encoding="utf-8")
     assert "authoritative_paddle_label" not in source

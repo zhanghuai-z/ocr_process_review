@@ -50,7 +50,8 @@ from app.models.page_state import (
     mark_page_ocr_failed,
     reconcile_page_ocr_done_from_result,
 )
-from app.services.ocr_pipeline import OcrPipeline, OcrProgress
+from app.services.ocr_pipeline import OcrPipeline
+from app.services.ocr_run_result import OcrProgress
 from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService
 from app.services.proof_persistence_service import ProofPersistenceService

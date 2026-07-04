@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
 from threading import Lock
 from typing import Callable, List, Optional
 
@@ -46,35 +45,14 @@ from app.services.table_text_layer_service import TableTextLayerService
 from app.services.ocr_dispatch_plan import (
     build_text_ocr_dispatch_plan,
 )
+from app.services.ocr_run_result import (
+    OcrProgress,
+    OcrRunResult,
+    PageOcrRunResult,
+)
 
 logger = get_logger(__name__)
 OCR_PAGE_CONCURRENCY_CAP = 20
-
-@dataclass
-class OcrProgress:
-    """OCR 进度信息。"""
-    current_page: int = 0
-    total_pages: int = 0
-    current_block: int = 0
-    total_blocks: int = 0
-    completed_pages: int = 0
-    message: str = ""
-
-
-@dataclass
-class OcrResult:
-    """OCR 处理结果。"""
-    pages: List[Page] = field(default_factory=list)
-    failed_blocks: List[tuple[int, int, str]] = field(default_factory=list)  # (page_idx, block_idx, error)
-
-
-@dataclass
-class _PageOcrWorkResult:
-    page_idx: int
-    page: Page
-    total_blocks: int = 0
-    failed_blocks: List[tuple[int, int, str]] = field(default_factory=list)
-    completion_message: str = ""
 
 
 class OcrPipeline:
@@ -111,9 +89,9 @@ class OcrPipeline:
         self,
         project: OcrProject,
         progress_callback: Optional[Callable[[OcrProgress], None]] = None,
-    ) -> OcrResult:
+    ) -> OcrRunResult:
         """处理项目所有页的所有可识别块。"""
-        result = OcrResult()
+        result = OcrRunResult()
         total_pages = len(project.pages)
 
         try:
@@ -297,9 +275,9 @@ class OcrPipeline:
         self,
         project: OcrProject,
         progress_callback: Optional[Callable[[OcrProgress], None]],
-    ) -> OcrResult:
+    ) -> OcrRunResult:
         total_pages = len(project.pages)
-        result = OcrResult(pages=[None] * total_pages)  # type: ignore[list-item]
+        result = OcrRunResult(pages=[None] * total_pages)  # type: ignore[list-item]
         completed_pages = 0
         completed_lock = Lock()
         emit_lock = Lock()
@@ -336,7 +314,7 @@ class OcrPipeline:
                     page = project.pages[page_idx]
                     logger.error("Page hybrid OCR worker crashed: page=%d: %s", page_idx, exc)
                     page.error_message = f"OCR 失败：{exc}"
-                    work = _PageOcrWorkResult(
+                    work = PageOcrRunResult(
                         page_idx=page_idx,
                         page=page,
                         failed_blocks=[(page_idx, -1, str(exc))],
@@ -368,7 +346,7 @@ class OcrPipeline:
         total_pages: int,
         completed_pages_getter: Callable[[], int],
         emit: Callable[[OcrProgress], None],
-    ) -> _PageOcrWorkResult:
+    ) -> PageOcrRunResult:
         self._clear_ocr_error(page)
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         emit(OcrProgress(
@@ -388,7 +366,7 @@ class OcrPipeline:
                 (page_idx, target.block.order, f"Cannot read image: {page.display_image_path}")
                 for target in dispatch_plan.text_blocks
             ]
-            return _PageOcrWorkResult(
+            return PageOcrRunResult(
                 page_idx=page_idx,
                 page=page,
                 failed_blocks=failed,
@@ -443,7 +421,7 @@ class OcrPipeline:
             completion = f"OCR 失败：第 {page_idx + 1}/{total_pages} 页，CharOCR 处理失败"
         else:
             completion = f"OCR 识别中… 第 {page_idx + 1}/{total_pages} 页，CharOCR 已写回版面块"
-        return _PageOcrWorkResult(
+        return PageOcrRunResult(
             page_idx=page_idx,
             page=page,
             total_blocks=total_blocks,

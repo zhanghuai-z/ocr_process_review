@@ -6068,7 +6068,7 @@ def test_workflow_controller_layout_progress_signal():
 
 def test_workflow_controller_abstracts_internal_ocr_progress_messages():
     from app.controllers.workflow_controller import WorkflowController
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
 
     controller = WorkflowController()
     statuses = []
@@ -6097,7 +6097,7 @@ def test_workflow_controller_abstracts_internal_ocr_progress_messages():
 def test_ocr_worker_emits_fine_grained_hanwang_progress_without_waiting():
     from app.controllers.workflow_controller import OcrPipelineWorker
     from app.models import Page
-    from app.services.ocr_pipeline import OcrProgress, OcrResult
+    from app.services.ocr_run_result import OcrProgress, OcrRunResult
 
     _get_qapp()
     page = Page(image_path="/tmp/progress.png", width=10, height=10)
@@ -6114,7 +6114,7 @@ def test_ocr_worker_emits_fine_grained_hanwang_progress_without_waiting():
                     completed_pages=0,
                     message=f"Hanwang OCR 识别中 {current}/10",
                 ))
-            return OcrResult(pages=[page])
+            return OcrRunResult(pages=[page])
 
     worker = OcrPipelineWorker(FastPipeline(), [page])
     worker.progress_state.connect(emitted.append)
@@ -6175,7 +6175,7 @@ def test_main_window_worker_error_finishes_background_ocr_progress_on_proof_step
     from PySide6.QtWidgets import QMessageBox
 
     from app.controllers.workflow_controller import STEP_HPROOF
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
     from app.ui.main_window import MainWindow
 
     _get_qapp()
@@ -13087,7 +13087,7 @@ def test_workflow_controller_falls_back_to_block_ocr_when_parallel_proof_failed(
 def test_workflow_controller_emits_ocr_progress_and_navigation():
     import app.controllers.workflow_controller as workflow_module
     from app.models import BBox, Block, BlockType, OcrProject, Page
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
 
     class DummySignal:
         def __init__(self):
@@ -13222,7 +13222,7 @@ def test_workflow_controller_ocr_done_keeps_error_status_even_with_prepass_lines
 
 def test_main_window_ocr_finished_preserves_current_step():
     from app.controllers.workflow_controller import STEP_HPROOF, STEP_LAYOUT, STEP_OCR
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
     from app.models import Page
     from app.ui.main_window import MainWindow
 
@@ -13261,7 +13261,7 @@ def test_main_window_ocr_finished_preserves_current_step():
 
 
 def test_main_window_bottom_progress_shows_ocr_stage_and_page_count():
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
     from app.ui.main_window import MainWindow
 
     _get_qapp()
@@ -17099,7 +17099,7 @@ def test_workflow_controller_marks_partial_layout_failures_without_blocking_succ
 def test_workflow_controller_enables_proof_steps_after_first_ocr_page():
     from app.controllers.workflow_controller import STEP_OCR, STEP_VPROOF, WorkflowController
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, PageStatus
-    from app.services.ocr_pipeline import OcrProgress
+    from app.services.ocr_run_result import OcrProgress
 
     page1 = Page(image_path="/tmp/ocr-page-1.png", width=100, height=100, page_number=1)
     page1.blocks = [

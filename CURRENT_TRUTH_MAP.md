@@ -54,6 +54,9 @@
      - 作用是让正文块进入 Hanwang/CharOCR 前扣除或插入公式等结构段
 
 OCR Hanwang/CharOCR
+  -> OcrRunResult / OcrProgress
+     - 本轮 OCR 的页结果、失败块和进度事件
+     - OcrPipeline 只产出该 typed contract，不再在 pipeline 文件内定义结果模型
   -> ocr_observation 边界（当前落点仍是 Block.lines）
      - Line 是可校对文本行
      - Line.bbox 是行几何
@@ -176,7 +179,7 @@ OCR Hanwang/CharOCR
 
 - `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute` 已作为生产和读取侧 typed contract；overlay 和 Hanwang 文本切片不应直接消费 route dict。
 - `_route_subblocks` 仍是 Paddle 子结构绑定的运行时 dict 输入；`_layout_line_routes` 只允许作为 legacy/cache serialization，不应成为业务读取入口。
-- `DispatchPlan` 已收口页级文字 OCR 调度；后续还需要继续抽 `OcrRunResult`，并加入列模型/阅读顺序模型承接双栏。
+- `DispatchPlan` 已收口页级文字 OCR 调度；`OcrRunResult` 已收口 OCR 运行结果和进度 contract；后续还需要加入列模型/阅读顺序模型承接双栏。
 
 ### 4. Line 文本：空终稿与 fake probe
 
@@ -328,7 +331,7 @@ OCR Hanwang/CharOCR
 - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
 - `NormalizedLayoutArtifact` 已作为读取侧归一化 contract；`LayoutOverlayService` 和 `PaddleArtifactIndex.from_page()` 不再直接遍历 `raw_layout_records`。
 - `RoutingPlan` 已作为 overlay 与 Hanwang route 消费端的读取边界；`paddle_line_routing.build_layout_routing_plan()` 是 typed 生产入口，旧 route dict API 只做序列化兼容。
-- `DispatchPlan` 已作为页级文字 OCR 调度边界；`LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界。后续应把人工编辑也迁到 snapshot，并继续抽 `OcrRunResult`。
+- `DispatchPlan` 已作为页级文字 OCR 调度边界；`OcrRunResult` 已作为 OCR 运行结果 contract；`LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界。后续应把人工编辑也迁到 snapshot。
 
 3. HProof/VProof 状态机重复。
    - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
@@ -356,7 +359,7 @@ OCR Hanwang/CharOCR
 
 1. 保留当前补丁成果，不继续扩大局部补丁。
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
-3. `DispatchPlan` 已落地；继续抽 `OcrRunResult`，把 OCR 输出、失败、审计和 route dict 从子结构输入/cache 层继续压缩。
+3. `DispatchPlan` / `OcrRunResult` 已落地；继续把 OCR observation 物理存储、失败审计和 route dict 从 `Page/Block/Line` 子结构/cache 层压缩出去。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
 5. 扩大 `proof_rebuild_gate` 到 HProof/VProof external refresh 的完整共享采集层。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
