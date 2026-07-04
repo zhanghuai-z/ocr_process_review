@@ -71,6 +71,14 @@ def _flatten_attr_targets(node: ast.AST) -> list[ast.Attribute]:
     return []
 
 
+def _function_source(source: str, function_name: str) -> str:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            return ast.get_source_segment(source, node) or ""
+    return ""
+
+
 def test_proof_ui_does_not_directly_mutate_line_facts():
     offenders: list[str] = []
     for path in _proof_ui_sources():
@@ -737,6 +745,19 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     assert "routing_line_to_record(route)" in refine_routes_source
 
     assert "line_routes_for_block" not in source
+
+
+def test_layout_routing_service_uses_typed_producer_not_route_dict_apis():
+    service_source = Path("app/services/layout_routing_plan.py").read_text(encoding="utf-8")
+    producer_source = Path("app/core/paddle_line_routing.py").read_text(encoding="utf-8")
+
+    assert "layout_routing_plan_for_block" in service_source
+    assert "line_routes_for_block" not in service_source
+    assert "text_slice_routes_for_block" not in service_source
+    assert "has_layout_line_routes" not in service_source
+    assert "def build_layout_routing_plan" in producer_source
+    build_legacy_source = _function_source(producer_source, "build_layout_line_routes")
+    assert "build_layout_routing_plan(block, width, height).lines" in build_legacy_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

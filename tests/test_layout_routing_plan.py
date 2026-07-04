@@ -11,6 +11,8 @@ from app.core.paddle_line_routing import (
     LAYOUT_ROUTE_SOURCE_FIELD,
     LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
     ROUTE_SUBBLOCKS_FIELD,
+    build_layout_line_routes,
+    build_layout_routing_plan,
 )
 
 
@@ -85,3 +87,21 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
         ],
         LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
     }
+
+
+def test_paddle_routing_producer_builds_typed_plan_before_legacy_records():
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 80],
+        "block_content": "甲 $ A $ 乙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [60, 10, 100, 45]},
+        ],
+    }
+
+    plan = build_layout_routing_plan(block, 240, 120)
+    records = build_layout_line_routes(block, 240, 120)
+
+    assert plan.has_layout_routes is True
+    assert [routing_line_to_record(line) for line in plan.lines] == records
+    assert any(segment.kind == "formula" for line in plan.lines for segment in line.segments)

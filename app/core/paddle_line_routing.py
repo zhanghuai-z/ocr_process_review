@@ -8,6 +8,14 @@ from typing import Any
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.ocr_ir import is_formula_marker_token, is_formula_token
+from app.core.layout_routing_contract import (
+    RoutingLine,
+    RoutingPlan,
+    TextSliceRoute,
+    routing_line_from_record,
+    routing_line_to_record,
+    text_slice_to_record,
+)
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_layout_schema import paddle_record_label, paddle_record_text
 from app.models import BlockType
@@ -964,7 +972,7 @@ def _filter_thin_text_artifact_routes(routes: list[dict[str, Any]]) -> list[dict
     return filtered
 
 
-def build_layout_line_routes(
+def _build_layout_line_route_records(
     block: dict[str, Any],
     width: int,
     height: int,
@@ -1088,6 +1096,34 @@ def build_layout_line_routes(
     return _filter_thin_text_artifact_routes(routes)
 
 
+def build_layout_routing_plan(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+) -> RoutingPlan:
+    """Build a typed routing plan from current block/subblock facts."""
+    routes = _build_layout_line_route_records(block, width, height)
+    return _routing_plan_from_line_records(
+        block,
+        width,
+        height,
+        routes,
+        has_layout_routes=bool(route_subblocks_for_block(block, width, height)),
+    )
+
+
+def build_layout_line_routes(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+) -> list[dict[str, Any]]:
+    """Serialize the typed layout routing plan for legacy route caches."""
+    return [
+        routing_line_to_record(line, source_field=LAYOUT_ROUTE_SOURCE_FIELD)
+        for line in build_layout_routing_plan(block, width, height).lines
+    ]
+
+
 def _normalize_cached_line_routes(
     routes: object,
     width: int,
@@ -1142,11 +1178,66 @@ def _routes_are_runtime_ppocr_line_routes(routes: list[dict[str, Any]]) -> bool:
     )
 
 
-def line_routes_for_block(
+def _text_slice_routes_from_lines(
     block: dict[str, Any],
     width: int,
     height: int,
-) -> list[dict[str, Any]]:
+    lines: tuple[RoutingLine, ...],
+) -> tuple[TextSliceRoute, ...]:
+    if not lines:
+        return (
+            TextSliceRoute(
+                line_index=-1,
+                segment_index=0,
+                bbox=block_bbox_xyxy(block, width, height),
+                carved=False,
+            ),
+        )
+    slices: list[TextSliceRoute] = []
+    for line in lines:
+        for segment_idx, segment in enumerate(line.segments):
+            if segment.kind != "text":
+                continue
+            slices.append(
+                TextSliceRoute(
+                    line_index=line.index,
+                    segment_index=segment_idx,
+                    bbox=block_bbox_xyxy({"block_bbox": segment.bbox}, width, height),
+                    carved=True,
+                )
+            )
+    slices.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
+    return tuple(slices)
+
+
+def _routing_plan_from_line_records(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+    routes: list[dict[str, Any]],
+    *,
+    has_layout_routes: bool,
+) -> RoutingPlan:
+    lines = tuple(
+        routing_line_from_record(
+            index,
+            route,
+            source_field=LAYOUT_ROUTE_SOURCE_FIELD,
+        )
+        for index, route in enumerate(routes)
+    )
+    return RoutingPlan(
+        lines=lines,
+        text_slices=_text_slice_routes_from_lines(block, width, height, lines),
+        has_layout_routes=has_layout_routes,
+    )
+
+
+def layout_routing_plan_for_block(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+) -> RoutingPlan:
     cached = _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height)
     if cached:
         if not _routes_are_runtime_ppocr_line_routes(cached):
@@ -1155,9 +1246,32 @@ def line_routes_for_block(
             block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
         else:
             block[LAYOUT_LINE_ROUTES_FIELD] = cached
-            return cached
-    routes = build_layout_line_routes(block, width, height)
-    return routes
+            return _routing_plan_from_line_records(
+                block,
+                width,
+                height,
+                cached,
+                has_layout_routes=True,
+            )
+    routes = _build_layout_line_route_records(block, width, height)
+    return _routing_plan_from_line_records(
+        block,
+        width,
+        height,
+        routes,
+        has_layout_routes=bool(route_subblocks_for_block(block, width, height)),
+    )
+
+
+def line_routes_for_block(
+    block: dict[str, Any],
+    width: int,
+    height: int,
+) -> list[dict[str, Any]]:
+    return [
+        routing_line_to_record(line, source_field=LAYOUT_ROUTE_SOURCE_FIELD)
+        for line in layout_routing_plan_for_block(block, width, height).lines
+    ]
 
 
 def text_slice_routes_for_block(
@@ -1165,31 +1279,10 @@ def text_slice_routes_for_block(
     width: int,
     height: int,
 ) -> list[dict[str, Any]]:
-    routes = line_routes_for_block(block, width, height)
-    if not routes:
-        return [
-            {
-                "line_idx": -1,
-                "segment_idx": 0,
-                "bbox": list(block_bbox_xyxy(block, width, height)),
-                "carved": False,
-            }
-        ]
-    slices = []
-    for line_idx, route in enumerate(routes):
-        for segment_idx, segment in enumerate(route.get("segments", [])):
-            if segment.get("kind") != "text":
-                continue
-            slices.append(
-                {
-                    "line_idx": line_idx,
-                    "segment_idx": segment_idx,
-                    "bbox": list(block_bbox_xyxy({"block_bbox": segment.get("bbox")}, width, height)),
-                    "carved": True,
-                }
-            )
-    slices.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
-    return slices
+    return [
+        text_slice_to_record(route)
+        for route in layout_routing_plan_for_block(block, width, height).text_slices
+    ]
 
 
 def has_layout_line_routes(
@@ -1218,6 +1311,7 @@ __all__ = [
     "block_bbox_xyxy",
     "block_text",
     "build_layout_line_routes",
+    "build_layout_routing_plan",
     "formula_texts_by_subblock_bbox",
     "clamp_xyxy",
     "has_layout_line_routes",
@@ -1226,6 +1320,7 @@ __all__ = [
     "is_formula_style_position_block",
     "is_formula_style_text",
     "is_table_label",
+    "layout_routing_plan_for_block",
     "line_routes_for_block",
     "recover_inline_formula_segments",
     "route_authority_label",
