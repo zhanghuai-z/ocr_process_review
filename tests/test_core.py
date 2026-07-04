@@ -14324,7 +14324,6 @@ def test_proof_state_bus():
 
 
 def test_proof_state_bus_typed_contracts():
-    from app.core import quality_probe as qp
     from app.core.proof_state import (
         TOPIC_LINE_PROOF_CHANGED,
         TOPIC_PROBE_OBSERVED,
@@ -14340,7 +14339,6 @@ def test_proof_state_bus_typed_contracts():
 
     bus = get_proof_state_bus()
     bus.clear()
-    assert qp.TOPIC_PROBE_OBSERVED == TOPIC_PROBE_OBSERVED
     line_events = []
     probe_events = []
 

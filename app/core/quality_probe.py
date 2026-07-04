@@ -48,7 +48,6 @@ from typing import Iterable, Optional
 
 from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
 from app.core.proof_line_facts import proof_display_text
-from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
 from app.models.layout_projection import page_layout_blocks
@@ -523,10 +522,6 @@ def extras_for_gallery_char(store: Optional[ProbeStore], char: str) -> list[Prob
 # ──────────────────────────────────────────────────────────────────
 # 观测接口（供 VProof 槽位编辑流程调用）
 # ──────────────────────────────────────────────────────────────────
-
-# TOPIC_PROBE_OBSERVED is imported from app.core.proof_state and re-exported
-# here as a compatibility alias; do not redefine the literal in this module.
-
 
 def observe_slot_edit(
     store: Optional[ProbeStore],

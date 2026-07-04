@@ -481,7 +481,7 @@ class QualityStatsDialog(QDialog):
         sand_count = getattr(store, "sand_count", None)
         density_text = (
             f"掺沙 {sand_count} 个/{density_label}"
-            if sand_count is not None else "掺沙密度沿用旧比例"
+            if sand_count is not None else "掺沙密度未记录"
         )
         self._btn_toggle.setChecked(True)
         self._btn_toggle.setText("停止统计")

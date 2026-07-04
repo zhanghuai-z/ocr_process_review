@@ -1391,7 +1391,10 @@ def test_proof_state_store_does_not_consume_retired_line_attr():
 def test_quality_probe_app_config_does_not_restore_retired_ratio_key():
     config_source = Path("app/core/app_config.py").read_text(encoding="utf-8")
     probe_source = Path("app/core/quality_probe.py").read_text(encoding="utf-8")
+    quality_dialog_source = Path("app/ui/widgets/quality_stats_dialog.py").read_text(encoding="utf-8")
     assert "quality_probe_target_ratio" not in config_source
+    assert "TOPIC_PROBE_OBSERVED" not in probe_source
+    assert "沿用旧比例" not in quality_dialog_source
     config_keys_source = _function_source(probe_source, "sampler_config_from_app_config")
     assert "quality_probe_target_ratio" not in config_keys_source
     mapping_source = probe_source.split("def sampler_config_from_app_config", 1)[0]

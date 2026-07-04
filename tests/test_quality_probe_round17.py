@@ -90,9 +90,9 @@ def test_round17_observe_slot_edit_publishes_event():
     qp.set_active_store(store)
 
     received: list = []
-    ProofStateBus.instance().subscribe(
-        qp.TOPIC_PROBE_OBSERVED, received.append,
-    )
+    from app.core.proof_state import TOPIC_PROBE_OBSERVED
+
+    ProofStateBus.instance().subscribe(TOPIC_PROBE_OBSERVED, received.append)
     ok = qp.observe_slot_edit(store, 1, 0, 0, 1)
     assert ok is True
     assert len(received) == 1

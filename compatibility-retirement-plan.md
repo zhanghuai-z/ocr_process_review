@@ -82,6 +82,7 @@
 - `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
 - `proof_line_state_store` 不再兼容读取旧 `line.proof_state` attr；proof runtime state 只存在于 external store。
 - quality probe 设置不再读取旧 `quality_probe_target_ratio`；AppConfig 只接受 `quality_probe_sand_count` 和 `quality_probe_sand_unit_chars` 作为用户密度真值。
+- quality probe bus topic 不再从 `app.core.quality_probe` 兼容导出；订阅方统一从 `app.core.proof_state` 读取。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `app.models.layout_snapshot.LayoutSnapshot` contract；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
 - 当前版面投影新增 `app.models.layout_projection` 边界；非 UI 业务层不再直接读写 `Page.blocks`，而是通过 `page_layout_blocks`、`replace_page_layout_blocks` 等 helper 消费或替换当前运行投影。
