@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BlockType, OcrPolicy, Page
+from app.models.layout_snapshot import LayoutSnapshot
 from app.services.layout_snapshot import (
     layout_snapshot_from_normalized_artifact,
     project_layout_snapshot_to_blocks,
@@ -35,6 +36,7 @@ def test_layout_snapshot_projects_normalized_artifact_to_legacy_blocks():
     )
     blocks = project_layout_snapshot_to_blocks(snapshot)
 
+    assert isinstance(snapshot, LayoutSnapshot)
     assert snapshot.page_uid == page.uid
     assert snapshot.artifact_uid == artifact.uid
     assert [block.source_label for block in blocks] == ["text", "page_number"]

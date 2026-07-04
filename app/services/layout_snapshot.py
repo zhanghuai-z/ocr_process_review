@@ -1,19 +1,17 @@
-"""Current layout truth model and legacy block projection.
+"""Compile layout snapshots and project them to the legacy block tree.
 
 ``LayoutSnapshot`` is the application-level layout adopted for a page. External
-artifacts such as PaddleOCR-VL or vector PDF extraction are normalized first,
-then compiled into this snapshot. ``Page.blocks`` remains a compatibility
-projection for existing UI/OCR code.
+artifacts such as PaddleOCR-VL or vector PDF extraction are normalized first.
+``Page.blocks`` remains a compatibility projection for existing UI/OCR code.
 """
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.normalized_layout_artifact import NormalizedLayoutArtifact
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.paddle_labels import normalize_paddle_label
-from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, OcrPolicy
+from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType
+from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 
 
 _POSITION_SOURCE_LABELS = {
@@ -25,26 +23,6 @@ _POSITION_SOURCE_LABELS = {
     "footnote",
     "sidebar_text",
 }
-
-
-@dataclass(frozen=True)
-class LayoutBlockSnapshot:
-    block_type: BlockType
-    bbox: BBox
-    order: int
-    source_label: str
-    origin: BlockOrigin
-    ocr_policy: OcrPolicy
-    note: str = ""
-
-
-@dataclass(frozen=True)
-class LayoutSnapshot:
-    page_uid: str
-    artifact_uid: str
-    source_engine: str
-    source_run_id: str
-    blocks: tuple[LayoutBlockSnapshot, ...]
 
 
 def layout_snapshot_from_normalized_artifact(
