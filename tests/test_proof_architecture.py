@@ -977,6 +977,16 @@ def test_proof_state_store_does_not_consume_retired_line_attr():
     assert "ProofLineState(line_uid=_line_uid(line))" in source
 
 
+def test_quality_probe_app_config_does_not_restore_retired_ratio_key():
+    config_source = Path("app/core/app_config.py").read_text(encoding="utf-8")
+    probe_source = Path("app/core/quality_probe.py").read_text(encoding="utf-8")
+    assert "quality_probe_target_ratio" not in config_source
+    config_keys_source = _function_source(probe_source, "sampler_config_from_app_config")
+    assert "quality_probe_target_ratio" not in config_keys_source
+    mapping_source = probe_source.split("def sampler_config_from_app_config", 1)[0]
+    assert "quality_probe_target_ratio" not in mapping_source
+
+
 def test_block_model_does_not_reconstruct_origin_from_payloads():
     source = Path("app/models/project.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="app/models/project.py")

@@ -623,7 +623,6 @@ def score(store: ProbeStore, *, min_observed_for_grade: int = 4) -> QualityRepor
 _SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
     "quality_probe_sand_count": ("sand_count", int),
     "quality_probe_sand_unit_chars": ("sand_unit_chars", int),
-    "quality_probe_target_ratio": ("target_ratio", float),
     "quality_probe_min_total": ("min_total", int),
     "quality_probe_max_total": ("max_total", int),
     "quality_probe_max_per_page": ("max_per_page", int),
@@ -633,7 +632,7 @@ _SAMPLER_CONFIG_KEYS: dict[str, tuple[str, type]] = {
 
 
 def sampler_config_from_app_config() -> SamplerConfig:
-    cfg = SamplerConfig()
+    cfg = SamplerConfig(sand_count=25)
     try:
         from app.core.app_config import AppConfig
     except Exception:

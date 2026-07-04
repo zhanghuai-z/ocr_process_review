@@ -395,6 +395,26 @@ def test_sampler_config_from_app_config_reads_max_per_true_char(monkeypatch):
     assert cfg.max_per_page == 3
 
 
+def test_sampler_config_from_app_config_ignores_retired_target_ratio(monkeypatch):
+    class _FakeAppConfig:
+        _data = {
+            "quality_probe_target_ratio": 0.5,
+        }
+        @classmethod
+        def instance(cls):
+            return cls()
+        def get(self, key, default=None):
+            return self._data.get(key, default)
+
+    import app.core.app_config as mod
+    monkeypatch.setattr(mod, "AppConfig", _FakeAppConfig, raising=False)
+
+    cfg = sampler_config_from_app_config()
+
+    assert cfg.sand_count == 25
+    assert cfg.target_ratio == SamplerConfig().target_ratio
+
+
 # ──────────────────────────────────────────────────────────────────
 # register_confusion_group
 # ──────────────────────────────────────────────────────────────────

@@ -118,6 +118,7 @@ OCR Hanwang/CharOCR
 | Proof 渲染单元 | `ProofAtom` | 原始 `Line.chars` 直接渲染 | ProofAtom 会标记 reliable/unreliable，是 UI 渲染输入，不是源事实。 |
 | 字符索引 | `CharIndexService` 查询结果 | CharIndex 当作数据源 | 它是派生索引；错配行会被跳过，不能修复坏数据。 |
 | 质量探针 | active probe sidecar | UI 显示假字 | pending fake_char 只在锚点仍匹配 true_char 时注入。 |
+| 质量探针密度设置 | `quality_probe_sand_count` + `quality_probe_sand_unit_chars` | 旧 `quality_probe_target_ratio` | UI/AppConfig 只保留“每 N 字投放几个沙子”一个口径。 |
 | proof 持久化 | `proof_changed(ProofChangeSet)` + `ProofChangeSet.line_refs` + `ProofPersistenceService` | 裸 bool 保存信号、无 scope 自动保存 | proof 信号语义是“校对事实已变更，需要持久化”，具体持久化范围由 `ProofChangeSet` 描述。 |
 | proof 写入口 | `ProofEditService` / `proof_line_mutation` | `Line.set_proof_text()` / `Line.set_proof_status()` | `Line` 模型不再持有 proof 写方法，后续写状态必须走显式 helper/service。 |
 | proof 重建门禁 | `proof_rebuild_gate` | HProof/VProof 各自解释保存状态 | 视图销毁/重建前是否允许继续，由共享 gate 根据 editor state 与 `ProofEditStatus` 判断。 |
