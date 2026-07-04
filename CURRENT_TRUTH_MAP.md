@@ -30,6 +30,7 @@
      - 当前程序采用的版面真值
      - 从 NormalizedLayoutArtifact 编译而来
      - LayoutEditService 的人工编辑会同步到外部 layout_snapshot_store
+     - ProjectStore 加载项目后会从持久化 block 投影重建 layout_snapshot_store
   -> page.blocks
      - 当前仍供旧 UI/OCR/导出读取的兼容投影
      - block_type 是程序大类
@@ -39,7 +40,7 @@
   -> layout_projection 边界
      - Page.blocks 仍是当前物理存储，但业务层不再直接把它当领域模型入口
      - 非 UI 的 OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块通过 page_layout_blocks/replace_page_layout_blocks 等 helper 访问当前投影
-     - LayoutSnapshot 已由 API 编译和 LayoutEditService 编辑同步维护；后续替换点集中在 projection 边界和持久化
+     - LayoutSnapshot 已由 API 编译、LayoutEditService 编辑和 ProjectStore 加载同步维护；后续替换点集中在 projection 边界和持久化
 
 人工版面编辑
   -> LayoutEditCommand / LayoutEditService
@@ -121,7 +122,7 @@ OCR Hanwang/CharOCR
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
 | 外部版面证据 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；artifact 里的 bbox 已归一到工作图坐标；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
-| 当前版面真值 | `app.models.layout_snapshot.LayoutSnapshot` + `layout_snapshot_store` | `Page.blocks` 直接当导入真值、service 内部临时 DTO | API 版面分析从归一化 artifact 编译 snapshot；人工编辑由 `LayoutEditService` 同步 snapshot store；`Page.blocks` 仍是旧链路投影。 |
+| 当前版面真值 | `app.models.layout_snapshot.LayoutSnapshot` + `layout_snapshot_store` | `Page.blocks` 直接当导入真值、service 内部临时 DTO | API 版面分析从归一化 artifact 编译 snapshot；人工编辑由 `LayoutEditService` 同步 snapshot store；项目加载从持久化 block 投影重建 snapshot store；`Page.blocks` 仍是旧链路投影。 |
 | 当前版面投影访问 | `app.models.layout_projection` | 非 UI 业务层直接 `page.blocks` | `Page.blocks` 暂时还是物理运行对象；非 UI 读取/替换当前投影必须走 projection helper，避免把物理对象树继续扩散成领域模型。 |
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 块几何/顺序 | `Block.bbox` / `Block.order` / `set_layout_block_bbox()` / `set_layout_block_order()` | 各模块直接写 `block.bbox/order`、把 bbox/order 当身份 | bbox/order 是当前投影状态，可随编辑、缩放和 OCR clamp 改变；运行时写入必须经 layout_block_state helper。 |
@@ -324,7 +325,7 @@ OCR Hanwang/CharOCR
 - `Page.display_image_path`：几何坐标对应的工作图。
 - `Page.raw_layout_artifact`：Paddle VL1.6 版面证据包，bbox 已归一到当前工作图坐标。
 - `NormalizedLayoutArtifact`：外部版面事实的统一读模型。
-- `LayoutSnapshot`：当前采用的版面真值 contract，定义在 `app.models.layout_snapshot`；API 版面分析和 LayoutEditService 人工编辑已同步到 `layout_snapshot_store`，再投影到旧 `Page.blocks`。
+- `LayoutSnapshot`：当前采用的版面真值 contract，定义在 `app.models.layout_snapshot`；API 版面分析、LayoutEditService 人工编辑和 ProjectStore 加载已同步到 `layout_snapshot_store`，再投影到旧 `Page.blocks`。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.bbox/order`：当前版面投影状态，不是身份；运行时写入必须经 `app.models.layout_block_state`。
 - `Block.block_type`：程序大类。

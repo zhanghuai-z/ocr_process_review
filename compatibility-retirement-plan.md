@@ -85,7 +85,7 @@
 - quality probe bus topic 不再从 `app.core.quality_probe` 兼容导出；订阅方统一从 `app.core.proof_state` 读取。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `app.models.layout_snapshot.LayoutSnapshot` contract；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供旧 UI/OCR/导出链路读取。新输入源不得直接适配旧 `Page.blocks`。
-- 当前版面 snapshot 新增外部 `layout_snapshot_store`；`LayoutEditService` 人工编辑后同步 snapshot，再保留 `Page.blocks` 作为旧 UI/OCR/导出投影。
+- 当前版面 snapshot 新增外部 `layout_snapshot_store`；`LayoutEditService` 人工编辑后同步 snapshot，`ProjectStore` 加载后也从持久化 block 投影重建 snapshot，再保留 `Page.blocks` 作为旧 UI/OCR/导出投影。
 - 当前版面投影新增 `app.models.layout_projection` 边界；非 UI 业务层不再直接读写 `Page.blocks`，而是通过 `page_layout_blocks`、`replace_page_layout_blocks` 等 helper 消费或替换当前运行投影。
 - layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。
 - OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。

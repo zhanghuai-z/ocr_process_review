@@ -1211,12 +1211,22 @@ def test_api_layout_blocks_are_projected_from_layout_snapshot():
 def test_layout_snapshot_contract_lives_in_model_layer():
     service_source = Path("app/services/layout_snapshot.py").read_text(encoding="utf-8")
     model_source = Path("app/models/layout_snapshot.py").read_text(encoding="utf-8")
+    projection_source = Path("app/models/layout_snapshot_projection.py").read_text(encoding="utf-8")
 
     assert "class LayoutSnapshot" not in service_source
     assert "class LayoutBlockSnapshot" not in service_source
     assert "class LayoutSnapshot" in model_source
     assert "class LayoutBlockSnapshot" in model_source
     assert "from app.models.layout_snapshot import" in service_source
+    assert "def sync_page_layout_snapshot_from_projection" in projection_source
+    assert "def adopt_page_layout_snapshot" in projection_source
+
+
+def test_project_store_rebuilds_layout_snapshot_without_service_dependency():
+    source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+    assert "from app.models.layout_snapshot_projection import" in source
+    assert "sync_page_layout_snapshot_from_projection(" in source
+    assert "from app.services.layout_snapshot" not in source
 
 
 def test_layout_edit_service_updates_layout_snapshot_store():

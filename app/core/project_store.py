@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_lines,
@@ -1545,6 +1546,11 @@ class ProjectStore:
                 layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
             replace_page_layout_blocks(page, self._load_blocks(page.id, project.id))
+            sync_page_layout_snapshot_from_projection(
+                page,
+                source_engine="project_store",
+                source_run_id=str(project.id or ""),
+            )
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
