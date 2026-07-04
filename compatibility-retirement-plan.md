@@ -19,7 +19,8 @@
 | --- | --- | --- |
 | `OcrProject.ocr_completed` | `has_any_ocr_result` / `all_pages_ocr_done` | 删除兼容 property；controller/UI/tests 改用显式语义。 |
 | `WorkflowController.ocr_completed` | `WorkflowController.has_any_ocr_result` | 删除旧 accessor，避免打开项目时继续传播模糊命名。 |
-| `Page.recognizable_blocks` | `Page.text_ocr_blocks` | 删除兼容 property；OCR 入口统计改用统一 dispatch 结果。 |
+| `Page.recognizable_blocks` | `DispatchPlan` / `count_text_ocr_blocks()` | 删除兼容 property；OCR 入口统计改用统一 dispatch 结果。 |
+| `Page.text_blocks` / `Page.text_ocr_blocks` / `OcrProject.has_unrecognized_blocks` | `DispatchPlan` / `iter_text_ocr_blocks()` / export summary service | 删除模型层策略 property；Page/Project 不再解释 OCR 调度策略或未识别块。 |
 | `LayoutAnalyzer._extract_*_from_record()` | `paddle_layout_schema.py` | 删除旧私有 shim；字段解析直接走 schema adapter。 |
 | `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |
@@ -45,7 +46,7 @@
 
 ### Phase 2: 调用方迁移
 
-- `recognizable_blocks` 调用点迁移到 `text_ocr_blocks`。已完成。
+- `recognizable_blocks` / `text_blocks` / `text_ocr_blocks` 调用点迁移到 `DispatchPlan`。已完成。
 - `ocr_completed` 调用点迁移到 `has_any_ocr_result` 或 `all_pages_ocr_done`。已完成。
 - `Line.text` 写入点收口到 OCR 源字段；proof 改动通过 `ProofEditService` / `proof_line_mutation` 写入外部 `ProofLineState` store；OCR 文本读取统一经 `line_text_contract()` / `proof_ocr_text()`。已完成。
 - controller 中业务 gate 直接调用 `workflow_state.page_gate_info()`。已完成。

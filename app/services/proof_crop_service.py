@@ -14,6 +14,7 @@ from app.core.char_bbox_utils import (
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_observation import block_ocr_lines
+from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
 
@@ -85,7 +86,8 @@ class ProofCropService:
         page_line_updates = 0
         page_char_updates = 0
 
-        for block in page.text_blocks:
+        dispatch_plan = build_text_ocr_dispatch_plan(page)
+        for block in dispatch_plan.text_block_models:
             for line in block_ocr_lines(block):
                 stats.lines += 1
                 old_line_bbox = line.bbox

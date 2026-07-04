@@ -373,17 +373,6 @@ class Page:
         return self.cache_image_path or self.image_path
 
     @property
-    def text_blocks(self) -> List[Block]:
-        return [b for b in self.blocks if b.block_type in (
-            BlockType.TEXT, BlockType.TITLE, BlockType.REFERENCE
-        )]
-
-    @property
-    def text_ocr_blocks(self) -> List[Block]:
-        """返回当前策略明确应送文字 OCR 的块。"""
-        return [b for b in self.blocks if b.ocr_policy == OcrPolicy.TEXT_OCR]
-
-    @property
     def total_lines(self) -> int:
         return sum(len(b.lines) for b in self.blocks)
 
@@ -438,11 +427,4 @@ class OcrProject:
         return any(
             p.is_analyzed and (not p.is_ocr_done or p.needs_ocr_rerun)
             for p in self.pages
-        )
-
-    @property
-    def has_unrecognized_blocks(self) -> bool:
-        return any(
-            not b.lines
-            for p in self.pages for b in p.text_ocr_blocks
         )

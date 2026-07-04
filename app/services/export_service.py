@@ -16,6 +16,7 @@ from app.core.block_attributes import block_attributes, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, BlockType, Line, OcrProject, Page
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
+from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
 from app.services.proof_stats_service import ProofStatsService
 
 
@@ -154,7 +155,7 @@ def build_export_summary(project: OcrProject) -> dict:
         "unproofed_lines": unproofed,
         "flagged_lines": proof_stats.flagged_lines,
         "unrecognized_blocks": sum(
-            1 for page in project.pages for block in page.text_ocr_blocks
+            1 for block in iter_text_ocr_blocks(project.pages)
             if not block_has_ocr_lines(block)
         ),
     }

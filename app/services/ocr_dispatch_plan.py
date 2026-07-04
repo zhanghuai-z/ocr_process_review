@@ -1,6 +1,7 @@
 """Typed OCR dispatch plan for page text-recognition work."""
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
@@ -69,8 +70,21 @@ def build_text_ocr_dispatch_plan(page: Page) -> DispatchPlan:
     )
 
 
+def iter_text_ocr_blocks(pages: Iterable[Page]) -> Iterator[Block]:
+    """Yield text OCR blocks for pages using the dispatch plan boundary."""
+    for page in pages:
+        yield from build_text_ocr_dispatch_plan(page).text_block_models
+
+
+def count_text_ocr_blocks(pages: Iterable[Page]) -> int:
+    """Count text OCR blocks for pages using the dispatch plan boundary."""
+    return sum(1 for _ in iter_text_ocr_blocks(pages))
+
+
 __all__ = [
     "DispatchBlock",
     "DispatchPlan",
     "build_text_ocr_dispatch_plan",
+    "count_text_ocr_blocks",
+    "iter_text_ocr_blocks",
 ]

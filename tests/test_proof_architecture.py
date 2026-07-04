@@ -271,6 +271,26 @@ def test_block_active_model_has_no_app_payload_field():
         raise AssertionError("Block class not found")
 
 
+def test_page_dispatch_policy_properties_are_not_restored():
+    source = Path("app/models/project.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="app/models/project.py")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Page":
+            page_source = ast.get_source_segment(source, node) or ""
+            assert "def text_blocks" not in page_source
+            assert "def text_ocr_blocks" not in page_source
+            break
+    else:
+        raise AssertionError("Page class not found")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "OcrProject":
+            project_source = ast.get_source_segment(source, node) or ""
+            assert "def has_unrecognized_blocks" not in project_source
+            break
+    else:
+        raise AssertionError("OcrProject class not found")
+
+
 def test_block_ocr_lines_access_goes_through_observation_boundary():
     allowed = {
         Path("app/core/project_store.py"),

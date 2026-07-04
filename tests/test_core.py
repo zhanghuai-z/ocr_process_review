@@ -192,7 +192,9 @@ def test_models():
     assert page.is_analyzed
     assert page.status == PageStatus.IMPORTED
     assert page.source_type == "image"
-    assert page.text_ocr_blocks == [block]
+    from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
+
+    assert list(build_text_ocr_dispatch_plan(page).text_block_models) == [block]
 
     # Page new fields
     page2 = Page(
@@ -230,7 +232,6 @@ def test_models():
     assert summary["total_pages"] == 1
     assert summary["total_lines"] >= 0
     assert summary["unrecognized_blocks"] == 0
-    assert project.has_unrecognized_blocks is False
 
     print("test_models PASSED")
 

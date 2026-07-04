@@ -565,7 +565,7 @@ class OcrPipeline:
                 mark_page_line_hints=True,
             )
             if progress_callback:
-                line_count = sum(block_ocr_line_count(block) for block in page.blocks)
+                line_count = sum(block_ocr_line_count(block) for block in dispatch_plan.text_block_models)
                 progress_callback(0, total_text_blocks, f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")

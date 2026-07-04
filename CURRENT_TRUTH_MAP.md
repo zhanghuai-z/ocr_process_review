@@ -160,6 +160,7 @@ OCR Hanwang/CharOCR
 - `recognizable` 已退役，OCR 入口不得恢复裸 bool 判断。
 - `Block` 构造不得恢复隐式 OCR policy 推导。
 - 页级 OCR 统计、图像读取失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用都应读取同一个 `DispatchPlan`。
+- Page/Project 模型不得恢复 `text_blocks`、`text_ocr_blocks`、`has_unrecognized_blocks` 这类策略 property；统计和导出状态由服务读取 `DispatchPlan`。
 - `Block.source` 的人工编辑/导出来源语义不得在 Hanwang、Export、BlockAttributes 内分散解释，必须经 `app.models.layout_block_state` helper。
 
 ### 3. Paddle 路由：父文本块 + 子结构块
