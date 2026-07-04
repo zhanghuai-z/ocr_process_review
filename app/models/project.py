@@ -268,12 +268,6 @@ class Block:
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
 
-    @property
-    def avg_confidence(self) -> float:
-        if not self.lines:
-            return 0.0
-        return sum(l.confidence for l in self.lines) / len(self.lines)
-
 
 @dataclass
 class RawOcrArtifact:

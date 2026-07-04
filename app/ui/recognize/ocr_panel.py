@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_display_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
-from app.models.ocr_observation import block_ocr_line_count, block_ocr_lines
+from app.models.ocr_observation import block_avg_confidence, block_ocr_line_count, block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -129,7 +129,7 @@ class OcrPanel(QWidget):
             for block in page.blocks:
                 block_item = QTreeWidgetItem(
                     page_item,
-                    [f"[{block_display_label(block)}]", f"{block.avg_confidence:.2f}", ""],
+                    [f"[{block_display_label(block)}]", f"{block_avg_confidence(block):.2f}", ""],
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
                 for line in block_ocr_lines(block):

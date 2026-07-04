@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_attributes
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
+from app.models.ocr_observation import block_avg_confidence
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
@@ -384,7 +385,7 @@ class ImageViewer(QGraphicsView):
             color = BLOCK_COLORS.get(attrs.semantic_block_type, BLOCK_COLORS[BlockType.UNKNOWN])
             bb = block.bbox
             rect = QRectF(0, 0, bb.w, bb.h)
-            label = f"[{attrs.display_label}] 置信度: {block.avg_confidence:.2f}"
+            label = f"[{attrs.display_label}] 置信度: {block_avg_confidence(block):.2f}"
             item = BBoxItem(rect, color, label)
             item.setPos(bb.x, bb.y)
             item.set_block(block)

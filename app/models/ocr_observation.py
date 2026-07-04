@@ -23,6 +23,13 @@ def block_has_ocr_lines(block: Block) -> bool:
     return bool(block_ocr_lines(block))
 
 
+def block_avg_confidence(block: Block) -> float:
+    lines = block_ocr_lines(block)
+    if not lines:
+        return 0.0
+    return sum(line.confidence for line in lines) / len(lines)
+
+
 def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:
     block.lines = list(lines)
 

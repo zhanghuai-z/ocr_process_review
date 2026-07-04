@@ -20,7 +20,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
-from app.models.ocr_observation import block_ocr_lines, page_ocr_line_count
+from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
@@ -1304,7 +1304,7 @@ class LayoutPanel(QWidget):
         self._selected_block = block
         bb = block.bbox
         self._sync_selected_type_buttons(block)
-        self._prop_conf.set_score(block.avg_confidence)
+        self._prop_conf.set_score(block_avg_confidence(block))
 
     @staticmethod
     def _layout_block_state(block: Block) -> dict:

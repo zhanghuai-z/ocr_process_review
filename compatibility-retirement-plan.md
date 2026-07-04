@@ -21,7 +21,7 @@
 | `WorkflowController.ocr_completed` | `WorkflowController.has_any_ocr_result` | 删除旧 accessor，避免打开项目时继续传播模糊命名。 |
 | `Page.recognizable_blocks` | `DispatchPlan` / `count_text_ocr_blocks()` | 删除兼容 property；OCR 入口统计改用统一 dispatch 结果。 |
 | `Page.text_blocks` / `Page.text_ocr_blocks` / `OcrProject.has_unrecognized_blocks` | `DispatchPlan` / `iter_text_ocr_blocks()` / export summary service | 删除模型层策略 property；Page/Project 不再解释 OCR 调度策略或未识别块。 |
-| `Page.total_lines` / `Page.has_ocr_result` / `OcrProject.total_lines` / `OcrProject.has_any_ocr_result` / `OcrProject.all_pages_ocr_done` | `app.models.ocr_observation` summary helpers | 删除模型层 OCR observation summary property；行数和是否已有 OCR 结果由 observation 边界解释。 |
+| `Block.avg_confidence` / `Page.total_lines` / `Page.has_ocr_result` / `OcrProject.total_lines` / `OcrProject.has_any_ocr_result` / `OcrProject.all_pages_ocr_done` | `app.models.ocr_observation` summary helpers | 删除模型层 OCR observation summary property；置信度、行数和是否已有 OCR 结果由 observation 边界解释。 |
 | `LayoutAnalyzer._extract_*_from_record()` | `paddle_layout_schema.py` | 删除旧私有 shim；字段解析直接走 schema adapter。 |
 | `WorkflowController._page_gate_info()` | `workflow_state.page_gate_info()` | 删除 controller 转发，调用点直接依赖 typed gate helper。 |
 | `app.core.ocr_config` | `app.core.app_config.get_config/update_config` | 删除旧配置桥模块，生产和测试导入统一到 AppConfig 入口。 |

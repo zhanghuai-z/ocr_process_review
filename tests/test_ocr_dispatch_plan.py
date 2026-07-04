@@ -8,7 +8,7 @@ import numpy as np
 
 from app.models import BBox, Block, BlockType, Line, Page
 from app.models.enums import OcrPolicy
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_avg_confidence, block_ocr_lines
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 from app.services.ocr_pipeline import OcrPipeline
 from app.services.proof_crop_service import ProofCropService
@@ -101,3 +101,13 @@ def test_proof_crop_service_uses_dispatch_plan_not_block_type_text_blocks():
             os.unlink(img_path)
         except FileNotFoundError:
             pass
+
+
+def test_block_average_confidence_lives_in_observation_boundary():
+    block = _block(BlockType.TEXT, BBox(0, 0, 60, 30), policy=OcrPolicy.TEXT_OCR, order=1)
+    block.lines = [
+        Line(text="甲", confidence=0.8, bbox=BBox(0, 0, 10, 10)),
+        Line(text="乙", confidence=0.6, bbox=BBox(0, 10, 10, 10)),
+    ]
+
+    assert block_avg_confidence(block) == 0.7
