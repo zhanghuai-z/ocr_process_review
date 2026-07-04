@@ -29,6 +29,7 @@
   -> LayoutSnapshot
      - 当前程序采用的版面真值
      - 从 NormalizedLayoutArtifact 编译而来
+     - LayoutEditService 的人工编辑会同步到外部 layout_snapshot_store
   -> page.blocks
      - 当前仍供旧 UI/OCR/导出读取的兼容投影
      - block_type 是程序大类
@@ -38,7 +39,7 @@
   -> layout_projection 边界
      - Page.blocks 仍是当前物理存储，但业务层不再直接把它当领域模型入口
      - 非 UI 的 OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块通过 page_layout_blocks/replace_page_layout_blocks 等 helper 访问当前投影
-     - 后续把 LayoutSnapshot/AnnotationLayer 升为真实版面模型时，替换点集中在该边界和 LayoutEditService
+     - LayoutSnapshot 已由 API 编译和 LayoutEditService 编辑同步维护；后续替换点集中在 projection 边界和持久化
 
 人工版面编辑
   -> LayoutEditCommand / LayoutEditService
@@ -119,7 +120,7 @@ OCR Hanwang/CharOCR
 | 字符身份 | `Char.uid` | `Char.id` | 全量保存允许跨父级 move；proof 增量保存不允许跨行认领。 |
 | 外部版面证据 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；artifact 里的 bbox 已归一到工作图坐标；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
-| 当前版面真值 | `app.models.layout_snapshot.LayoutSnapshot` | `Page.blocks` 直接当导入真值、service 内部临时 DTO | API 版面分析现在从归一化 artifact 编译 snapshot，再投影到 `Page.blocks` 供旧链路消费；snapshot contract 属于 model 层。 |
+| 当前版面真值 | `app.models.layout_snapshot.LayoutSnapshot` + `layout_snapshot_store` | `Page.blocks` 直接当导入真值、service 内部临时 DTO | API 版面分析从归一化 artifact 编译 snapshot；人工编辑由 `LayoutEditService` 同步 snapshot store；`Page.blocks` 仍是旧链路投影。 |
 | 当前版面投影访问 | `app.models.layout_projection` | 非 UI 业务层直接 `page.blocks` | `Page.blocks` 暂时还是物理运行对象；非 UI 读取/替换当前投影必须走 projection helper，避免把物理对象树继续扩散成领域模型。 |
 | 旧版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 块几何/顺序 | `Block.bbox` / `Block.order` / `set_layout_block_bbox()` / `set_layout_block_order()` | 各模块直接写 `block.bbox/order`、把 bbox/order 当身份 | bbox/order 是当前投影状态，可随编辑、缩放和 OCR clamp 改变；运行时写入必须经 layout_block_state helper。 |
@@ -322,7 +323,7 @@ OCR Hanwang/CharOCR
 - `Page.display_image_path`：几何坐标对应的工作图。
 - `Page.raw_layout_artifact`：Paddle VL1.6 版面证据包，bbox 已归一到当前工作图坐标。
 - `NormalizedLayoutArtifact`：外部版面事实的统一读模型。
-- `LayoutSnapshot`：当前采用的版面真值 contract，定义在 `app.models.layout_snapshot`；API 版面分析已从它投影到旧 `Page.blocks`。
+- `LayoutSnapshot`：当前采用的版面真值 contract，定义在 `app.models.layout_snapshot`；API 版面分析和 LayoutEditService 人工编辑已同步到 `layout_snapshot_store`，再投影到旧 `Page.blocks`。
 - `Block.uid` / `Line.uid` / `Char.uid`：业务身份。
 - `Block.bbox/order`：当前版面投影状态，不是身份；运行时写入必须经 `app.models.layout_block_state`。
 - `Block.block_type`：程序大类。
@@ -362,7 +363,7 @@ OCR Hanwang/CharOCR
 - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
 - `NormalizedLayoutArtifact` 已作为读取侧归一化 contract；`LayoutOverlayService` 和 `PaddleArtifactIndex.from_page()` 不再直接遍历 `raw_layout_records`。
 - `RoutingPlan` 已作为 overlay 与 Hanwang route 消费端的读取边界；`paddle_line_routing.build_layout_routing_plan()` 是 typed 生产入口，旧 route dict API 只做序列化兼容。
-- `DispatchPlan` 已作为页级文字 OCR 调度边界；`OcrRunResult` 已作为 OCR 运行结果 contract；`LayoutSnapshot` model contract 已作为 API 版面分析的当前版面真值边界。后续应把人工编辑也迁到 snapshot。
+- `DispatchPlan` 已作为页级文字 OCR 调度边界；`OcrRunResult` 已作为 OCR 运行结果 contract；`LayoutSnapshot` model contract 已作为 API 版面分析和人工编辑的当前版面真值边界，`Page.blocks` 仍是旧链路投影。
 
 3. HProof/VProof 状态机重复。
    - proof 写入和保存状态已经统一到 `ProofEditService` / `ProofEditStatus`、scoped `ProofChangeSet` 和 `ProofPersistenceService`。
@@ -391,7 +392,7 @@ OCR Hanwang/CharOCR
 1. 保留当前补丁成果，不继续扩大局部补丁。
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
 3. `DispatchPlan` / `OcrRunResult` 已落地；继续把 OCR observation 物理存储、失败审计和 route dict 从 `Page/Block/Line` 子结构/cache 层压缩出去。
-4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
+4. `LayoutEditCommand/LayoutEditResult` 已落地；命令执行后已同步 `LayoutSnapshot` store。下一步是让持久化和新输入源读取 snapshot，而不是把 `Page.blocks` 当最终事实。
 5. 扩大 `proof_rebuild_gate` 到 HProof/VProof external refresh 的完整共享采集层。
 6. `project_diagnostics` 已能只读报告持久化错配数据；后续若要自动修复，应新增独立 repair 工具，不应塞回 CharIndex/HProof/VProof。
 

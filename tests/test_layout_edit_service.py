@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
 from app.models import BBox, Block, BlockSource, BlockType, Line, Page
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_observation import block_ocr_lines
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
@@ -29,6 +30,12 @@ def test_layout_edit_service_create_block_records_event_and_binding():
     assert block.paddle_binding.manual_bbox == [10, 20, 60, 40]
     assert page.layout_edit_events[-1].op == "create_block"
     assert page.layout_edit_events[-1].target_uid == block.uid
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.source_engine == "layout_edit"
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+    assert snapshot.blocks[0].bbox == block.bbox
+    assert snapshot.blocks[0].source_label == "inline_formula"
 
 
 def test_layout_edit_service_delete_block_records_event_and_removes_block():
@@ -42,6 +49,9 @@ def test_layout_edit_service_delete_block_records_event_and_removes_block():
     assert page.blocks == []
     assert page.layout_edit_events[-1].op == "delete_block"
     assert page.layout_edit_events[-1].before["block"]["uid"] == block.uid
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.blocks == ()
 
 
 def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
@@ -89,6 +99,10 @@ def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     assert page.layout_edit_events[-1].op == "change_kind"
     assert page.layout_edit_events[-1].before["block"]["block_type"] == "text"
     assert page.layout_edit_events[-1].after["block"]["block_type"] == "table"
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.blocks[0].block_type == BlockType.TABLE
+    assert snapshot.blocks[0].source_label == "table"
 
 
 def test_layout_edit_service_preserves_explicit_structural_subtype_label():

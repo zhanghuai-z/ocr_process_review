@@ -31,6 +31,7 @@ from app.models.layout_projection import (
     replace_page_layout_blocks,
 )
 from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines, set_ocr_line_bbox
+from app.services.layout_snapshot import sync_page_layout_snapshot_from_projection
 
 
 STRUCTURAL_BINDING_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
@@ -229,15 +230,19 @@ class LayoutEditService:
         before: dict,
         after: dict,
     ) -> None:
-        page.layout_edit_events.append(
-            LayoutEditEvent(
-                page_uid=page.uid,
-                target_uid=block.uid if block is not None else "",
-                op=op,
-                before=before,
-                after=after,
-                actor="user",
-            )
+        event = LayoutEditEvent(
+            page_uid=page.uid,
+            target_uid=block.uid if block is not None else "",
+            op=op,
+            before=before,
+            after=after,
+            actor="user",
+        )
+        page.layout_edit_events.append(event)
+        sync_page_layout_snapshot_from_projection(
+            page,
+            source_engine="layout_edit",
+            source_run_id=event.uid,
         )
 
     def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:

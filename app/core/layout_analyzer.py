@@ -71,8 +71,8 @@ from app.models.layout_projection import (
 from app.models.page_state import clear_page_error_message, mark_page_layout_failed
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.services.layout_snapshot import (
+    adopt_page_layout_snapshot,
     layout_snapshot_from_normalized_artifact,
-    project_layout_snapshot_to_blocks,
 )
 
 logger = get_logger(__name__)
@@ -533,7 +533,7 @@ class LayoutAnalyzer:
             normalized_layout_artifact_from_page(page),
             source_run_id=self._layout_batch_id,
         )
-        page_blocks = project_layout_snapshot_to_blocks(snapshot)
+        page_blocks = adopt_page_layout_snapshot(page, snapshot)
         return page_blocks, raw_overlay_items
 
     def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:

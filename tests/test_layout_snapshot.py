@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
-from app.models import BlockType, OcrPolicy, Page
+from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot import LayoutSnapshot
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.services.layout_snapshot import (
+    adopt_page_layout_snapshot,
     layout_snapshot_from_normalized_artifact,
     project_layout_snapshot_to_blocks,
+    sync_page_layout_snapshot_from_projection,
 )
 
 
@@ -65,3 +68,30 @@ def test_layout_snapshot_deduplicates_regions_by_label_and_bbox():
 
     assert len(snapshot.blocks) == 1
     assert snapshot.blocks[0].order == 0
+
+
+def test_adopt_layout_snapshot_stores_truth_and_projects_blocks():
+    page = Page(image_path="", width=300, height=220)
+    set_paddle_raw_layout_records(page, [
+        {"block_label": "text", "block_bbox": [20, 30, 180, 70], "block_content": "A"},
+    ])
+    snapshot = layout_snapshot_from_normalized_artifact(normalized_layout_artifact_from_page(page))
+
+    blocks = adopt_page_layout_snapshot(page, snapshot)
+
+    assert page.blocks == blocks
+    assert layout_snapshot_for_page(page) is snapshot
+    assert page.blocks[0].source_label == "text"
+
+
+def test_sync_layout_snapshot_from_projection_tracks_current_blocks():
+    block = Block(block_type=BlockType.TABLE, bbox=BBox.from_xyxy(10, 20, 80, 60), source_label="table")
+    page = Page(image_path="", width=300, height=220, blocks=[block])
+
+    snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="layout_edit")
+
+    assert layout_snapshot_for_page(page) is snapshot
+    assert snapshot.source_engine == "layout_edit"
+    assert snapshot.blocks[0].bbox == block.bbox
+    assert snapshot.blocks[0].source_label == "table"
+    assert snapshot.blocks[0].origin.original_bbox == block.bbox

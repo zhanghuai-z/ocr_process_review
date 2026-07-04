@@ -1198,7 +1198,7 @@ def test_api_layout_blocks_are_projected_from_layout_snapshot():
     api_source = functions["_extract_api_blocks"]
     assert "def _append_api_block" not in source
     assert "layout_snapshot_from_normalized_artifact(" in api_source
-    assert "project_layout_snapshot_to_blocks(" in api_source
+    assert "adopt_page_layout_snapshot(" in api_source
     assert "Block(" not in api_source
 
 
@@ -1213,11 +1213,19 @@ def test_layout_snapshot_contract_lives_in_model_layer():
     assert "from app.models.layout_snapshot import" in service_source
 
 
+def test_layout_edit_service_updates_layout_snapshot_store():
+    source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+    assert "sync_page_layout_snapshot_from_projection" in source
+    record_edit_source = _function_source(source, "record_edit")
+    assert "sync_page_layout_snapshot_from_projection(" in record_edit_source
+    assert "source_engine=\"layout_edit\"" in record_edit_source
+
+
 def test_truth_map_records_layout_snapshot_as_current_boundary():
     source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
 
     assert "LayoutSnapshot`：当前采用的版面真值 contract" in source
-    assert "LayoutSnapshot` model contract 已作为 API 版面分析的当前版面真值边界" in source
+    assert "LayoutSnapshot` model contract 已作为 API 版面分析和人工编辑的当前版面真值边界" in source
     assert "后续应抽 `PaddleArtifact`、`LayoutSnapshot`" not in source
 
 
