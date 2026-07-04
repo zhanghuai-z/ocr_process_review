@@ -48,6 +48,43 @@ class ProjectDataError(RuntimeError):
     """Current schema project data violates model boundaries."""
 
 
+def _enum_from_db(enum_cls: Any, raw_value: object, *, field: str) -> Any:
+    value = str(raw_value or "").strip()
+    if not value:
+        raise ProjectDataError(f"{field} is empty")
+    try:
+        return enum_cls(value)
+    except ValueError as exc:
+        raise ProjectDataError(f"{field} invalid value: {value!r}") from exc
+
+
+def _int_from_db(raw_value: object, *, field: str) -> int:
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+        raise ProjectDataError(f"{field} must be int")
+    return raw_value
+
+
+def _bbox_from_db(
+    row: sqlite3.Row,
+    *,
+    fields: tuple[str, str, str, str],
+    field: str,
+    optional: bool = False,
+) -> BBox | None:
+    values = [row[name] for name in fields]
+    if optional and all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ProjectDataError(f"{field} bbox is partial")
+    x_name, y_name, w_name, h_name = fields
+    return BBox(
+        _int_from_db(row[x_name], field=f"{field}.{x_name}"),
+        _int_from_db(row[y_name], field=f"{field}.{y_name}"),
+        _int_from_db(row[w_name], field=f"{field}.{w_name}"),
+        _int_from_db(row[h_name], field=f"{field}.{h_name}"),
+    )
+
+
 # --------------------------------------------------------------------- schema v3
 DDL_V3 = """
 PRAGMA journal_mode=WAL;
@@ -1625,7 +1662,7 @@ class ProjectStore:
                 source_page_index=pr["source_page_index"],
                 cache_image_path=pr["cache_image_path"],
                 thumbnail_path=pr["thumbnail_path"],
-                status=PageStatus(pr["status"]),
+                status=_enum_from_db(PageStatus, pr["status"], field="page.status"),
                 error_message=pr["error_message"],
                 ocr_invalidated_reason=pr["ocr_invalidated_reason"],
                 raw_layout_artifact=raw_layout_artifact,
@@ -1722,13 +1759,11 @@ class ProjectStore:
             row = states.get(line.uid)
             if row is None:
                 continue
-            try:
-                proof_status = ProofStatus(row["proof_status"])
-            except ValueError as exc:
-                raise ProjectDataError(
-                    f"proof_line_state.proof_status invalid value for line_uid={line.uid!r}: "
-                    f"{row['proof_status']!r}"
-                ) from exc
+            proof_status = _enum_from_db(
+                ProofStatus,
+                row["proof_status"],
+                field="proof_line_state.proof_status",
+            )
             apply_line_proof_state(
                 line,
                 ProofLineState(
@@ -1777,13 +1812,13 @@ class ProjectStore:
                 raise ProjectDataError(f"block.paddle_binding_json {exc}") from exc
             origin = self._load_block_origin(project_id, str(r["uid"] or ""))
             block = Block(
-                block_type=BlockType(r["block_type"]),
-                bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
+                block_type=_enum_from_db(BlockType, r["block_type"], field="block.block_type"),
+                bbox=_bbox_from_db(r, fields=("x", "y", "w", "h"), field="block"),
                 order=r["block_order"],
                 id=r["id"],
                 uid=r["uid"],
-                source=BlockSource(r["source"]),
-                ocr_policy=OcrPolicy(str(r["ocr_policy"] or OcrPolicy.TEXT_OCR.value)),
+                source=_enum_from_db(BlockSource, r["source"], field="block.source"),
+                ocr_policy=_enum_from_db(OcrPolicy, r["ocr_policy"], field="block.ocr_policy"),
                 note=r["note"],
                 source_label=r["source_label"],
                 origin=origin,
@@ -1805,19 +1840,20 @@ class ProjectStore:
         ).fetchone()
         if row is None:
             return None
-        bbox = None
-        if row["original_x"] is not None:
-            bbox = BBox(row["original_x"], row["original_y"], row["original_w"], row["original_h"])
+        bbox = _bbox_from_db(
+            row,
+            fields=("original_x", "original_y", "original_w", "original_h"),
+            field="block_origin.original_bbox",
+            optional=True,
+        )
         kind = None
         raw_kind = str(row["original_kind"] or "")
         if raw_kind:
-            try:
-                kind = BlockType(raw_kind)
-            except ValueError as exc:
-                raise ProjectDataError(
-                    f"block_origin.original_kind invalid value for block_uid={block_uid!r}: "
-                    f"{raw_kind!r}"
-                ) from exc
+            kind = _enum_from_db(
+                BlockType,
+                raw_kind,
+                field="block_origin.original_kind",
+            )
         return BlockOrigin(
             created_by=row["created_by"],
             source_engine=row["source_engine"],
@@ -1840,7 +1876,7 @@ class ProjectStore:
             line = Line(
                 text=r["text"],
                 confidence=r["confidence"],
-                bbox=BBox(r["x"], r["y"], r["w"], r["h"]),
+                bbox=_bbox_from_db(r, fields=("x", "y", "w", "h"), field="line"),
                 id=r["id"],
                 uid=r["uid"],
                 ocr_text=r["ocr_text"] or r["text"],
@@ -1859,7 +1895,7 @@ class ProjectStore:
         ).fetchall()
         chars = []
         for r in rows:
-            bbox = BBox(r["x"], r["y"], r["w"], r["h"]) if r["x"] is not None else None
+            bbox = _bbox_from_db(r, fields=("x", "y", "w", "h"), field="char", optional=True)
             chars.append(Char(
                 char=r["char"],
                 confidence=r["confidence"],

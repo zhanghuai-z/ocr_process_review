@@ -1907,6 +1907,120 @@ def test_project_store_rejects_invalid_review_flags_json_on_load():
     print("test_project_store_rejects_invalid_review_flags_json_on_load PASSED")
 
 
+def test_project_store_rejects_invalid_current_schema_enums_on_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        line = Line(text="正文", confidence=0.9, bbox=BBox.from_xyxy(1, 2, 30, 20))
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            lines=[line],
+        )
+        project = OcrProject(
+            name="invalid current schema enum",
+            pages=[Page(image_path="/tmp/invalid-current-schema-enum.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+
+        cases = [
+            ("UPDATE page SET status=? WHERE id=?", ("not-a-status", project.pages[0].id), "page.status invalid value"),
+            ("UPDATE page SET status=? WHERE id=?", ("", project.pages[0].id), "page.status is empty"),
+            ("UPDATE block SET block_type=? WHERE id=?", ("not-a-block", block.id), "block.block_type invalid value"),
+            ("UPDATE block SET source=? WHERE id=?", ("not-a-source", block.id), "block.source invalid value"),
+            ("UPDATE block SET ocr_policy=? WHERE id=?", ("", block.id), "block.ocr_policy is empty"),
+            ("UPDATE block SET ocr_policy=? WHERE id=?", ("legacy-wordbox", block.id), "block.ocr_policy invalid value"),
+        ]
+
+        for sql, params, match in cases:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE page SET status='imported' WHERE id=?", (project.pages[0].id,))
+                conn.execute("UPDATE block SET block_type='text', source='auto_layout', ocr_policy='text_ocr' WHERE id=?", (block.id,))
+                conn.execute(sql, params)
+                conn.commit()
+            with ProjectStore(db_path) as store:
+                with pytest.raises(ProjectDataError, match=match):
+                    store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_invalid_current_schema_enums_on_load PASSED")
+
+
+def test_project_store_rejects_malformed_persisted_geometry_on_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Char, Line, OcrProject, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        char = Char(char="字", confidence=0.9, bbox=BBox.from_xyxy(2, 3, 8, 12))
+        line = Line(text="字", confidence=0.9, bbox=BBox.from_xyxy(1, 2, 20, 12), chars=[char])
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox.from_xyxy(0, 0, 40, 20),
+            lines=[line],
+            origin=BlockOrigin(
+                created_by=BlockSource.AUTO_LAYOUT.value,
+                original_bbox=BBox.from_xyxy(0, 0, 40, 20),
+                original_kind=BlockType.TEXT,
+            ),
+        )
+        project = OcrProject(
+            name="malformed persisted geometry",
+            pages=[Page(image_path="/tmp/malformed-geometry.png", width=80, height=40, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+
+        cases = [
+            ("UPDATE block SET x=? WHERE id=?", ("bad-x", block.id), "block.x must be int"),
+            ("UPDATE line SET h=? WHERE id=?", ("bad-h", line.id), "line.h must be int"),
+            ("UPDATE char_ SET y=? WHERE id=?", (None, char.id), "char bbox is partial"),
+            (
+                "UPDATE block_origin SET original_w=? WHERE block_uid=?",
+                ("bad-w", block.uid),
+                r"block_origin\.original_bbox\.original_w must be int",
+            ),
+            (
+                "UPDATE block_origin SET original_y=? WHERE block_uid=?",
+                (None, block.uid),
+                "block_origin.original_bbox bbox is partial",
+            ),
+        ]
+
+        for sql, params, match in cases:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE block SET x=0, y=0, w=40, h=20 WHERE id=?", (block.id,))
+                conn.execute("UPDATE line SET x=1, y=2, w=19, h=10 WHERE id=?", (line.id,))
+                conn.execute("UPDATE char_ SET x=2, y=3, w=6, h=9 WHERE id=?", (char.id,))
+                conn.execute(
+                    "UPDATE block_origin SET original_x=0, original_y=0, original_w=40, original_h=20 WHERE block_uid=?",
+                    (block.uid,),
+                )
+                conn.execute(sql, params)
+                conn.commit()
+            with ProjectStore(db_path) as store:
+                with pytest.raises(ProjectDataError, match=match):
+                    store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_malformed_persisted_geometry_on_load PASSED")
+
+
 def test_model_validation_rejects_legacy_page_and_block_payload_attr():
     import pytest
 
