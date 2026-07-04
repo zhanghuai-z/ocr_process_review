@@ -21,12 +21,12 @@ class LineTextContract:
 def line_text_contract(line: object) -> LineTextContract:
     """Return normalized OCR/proof line facts without mutating ``line``."""
     uid = str(getattr(line, "uid", "") or "")
+    state = proof_state_for_line(line)
     observation = line_ocr_text_observation(line)
     text = observation.text
     ocr_text = observation.ocr_text or text
     normalized_text = text or ocr_text
 
-    state = proof_state_for_line(line)
     proof_state = state if state.line_uid == uid else replace(state, line_uid=uid)
     return LineTextContract(
         text=normalized_text,

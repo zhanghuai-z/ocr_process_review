@@ -1286,6 +1286,8 @@ def test_project_store_persists_layout_edit_events():
 
 def test_line_final_text_contract_and_project_store_roundtrip():
     from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
+    from app.models.ocr_text_observation import set_line_ocr_text_observation
+    from app.models.ocr_text_observation_store import OcrTextObservation
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -1298,14 +1300,21 @@ def test_line_final_text_contract_and_project_store_roundtrip():
         assert line.text == "OCR text"
         assert proof_final_text(line) == "人工终稿"
         assert proof_display_text(line) == "人工终稿"
-        line.text = "直接兼容写入"
+        set_line_ocr_text_observation(
+            line,
+            OcrTextObservation(
+                text="观察边界写入",
+                ocr_text="OCR text",
+                confidence=0.9,
+            ),
+        )
         assert proof_final_text(line) == "人工终稿"
         ensure_line_text_contract(line)
-        assert line.text == "直接兼容写入"
+        assert line.text == "观察边界写入"
         assert proof_final_text(line) == "人工终稿"
         assert line.ocr_text == "OCR text"
         assert not hasattr(line, "final_text")
-        assert line.text == "直接兼容写入"
+        assert line.text == "观察边界写入"
         assert proof_display_text(line) == "人工终稿"
         assert not hasattr(line, "final_text_set")
         assert proof_display_text(line) == "人工终稿"
@@ -1346,7 +1355,8 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             loaded_line = loaded.pages[0].blocks[0].lines[0]
             assert proof_final_text(loaded_line) == "最终真值"
             assert proof_final_text_set(loaded_line) is True
-            assert loaded_line.text == "直接兼容写入"
+            assert loaded_line.text == "观察边界写入"
+            assert loaded_line.ocr_text == "OCR text"
 
         print("test_line_final_text_contract_and_project_store_roundtrip PASSED")
     finally:

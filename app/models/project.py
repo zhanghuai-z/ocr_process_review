@@ -121,8 +121,6 @@ class Line:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "line")
-        if not self.ocr_text:
-            self.ocr_text = self.text
 
 @dataclass
 class BlockOrigin:

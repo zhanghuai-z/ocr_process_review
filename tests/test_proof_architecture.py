@@ -632,6 +632,7 @@ def test_proof_ui_does_not_reach_legacy_layout_or_char_storage_directly():
 def test_line_text_facts_access_goes_through_text_contract_boundary():
     allowed = {
         Path("app/core/line_text_contract.py"),
+        Path("app/models/ocr_text_observation.py"),
         Path("app/models/project.py"),
     }
     forbidden_attrs = {"text", "ocr_text", "final_text", "original_text"}
@@ -1460,6 +1461,8 @@ def test_line_model_has_no_retired_final_text_mutation_wrapper():
             line_source = ast.get_source_segment(source, node) or ""
             assert "proof_state:" not in line_source
             assert "ProofLineState" not in line_source
+            assert "if not self.ocr_text" not in line_source
+            assert "self.ocr_text = self.text" not in line_source
             line_methods = {
                 child.name for child in node.body
                 if isinstance(child, ast.FunctionDef)
