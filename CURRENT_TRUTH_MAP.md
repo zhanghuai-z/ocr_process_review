@@ -62,6 +62,7 @@ OCR Hanwang/CharOCR
      - Line.bbox 是行几何
      - Line.chars 是字符/词/公式 carrier 的几何与文本观察
      - 业务代码必须通过 app.models.ocr_observation 读写，不能继续裸读写 block.lines
+     - 行的 page/block/line index 查找通过 OcrLineOccurrence helper 表达，不再由 proof 服务私有推导
      - ProjectStore 也通过该边界读写，`Block.lines` 只剩模型物理字段和 observation helper 内部实现
 
 校对 HProof/VProof
@@ -302,7 +303,7 @@ OCR Hanwang/CharOCR
 - `Block.block_type`：程序大类。
 - `Block.source_label`：Paddle 或人工绑定的细标签。
 - `Page.status/error_message/ocr_invalidated_reason`：当前页面流程状态字段；写入必须经 `app.models.page_state`。
-- `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储，ProjectStore 和业务代码都从这里读写。
+- `ocr_observation`：OCR 行观察访问边界；当前内部仍使用 `Block.lines` 存储，ProjectStore、业务代码和 proof 行 occurrence 查找都从这里读写。
 - `line_text_contract(line).ocr_text` / `proof_ocr_text(line)`：OCR 原始文本读取口径。
 - `proof_display_text(line)`：当前校对文本事实。
 - `Line.chars`：字符/词/公式 carrier 几何事实，前提是与 display_text 可对齐。
@@ -320,7 +321,7 @@ OCR Hanwang/CharOCR
 ### 兼容/过渡层
 
 - `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
-- `Block.lines`：仍是模型内部过渡存储；业务代码和 ProjectStore 已改为通过 `app.models.ocr_observation` 访问。
+- `Block.lines`：仍是模型内部过渡存储；业务代码、ProjectStore 和 proof 行定位已改为通过 `app.models.ocr_observation` 访问。
 - 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 
 ## 五、当前仍不健康的职责边界

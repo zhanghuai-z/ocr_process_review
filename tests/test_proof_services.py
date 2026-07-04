@@ -5,7 +5,7 @@
 1. probe text service：
    - 未启用评测时退化（displayed_text == line.text、save_displayed_edit_result 仅在差异时落盘）
    - 启用评测时显示叠加 fake_char，但 line.text 永不被污染
-   - 解析 block/line 索引：成功路径 + line/block 不在 page 中时返回 None
+   - OCR observation 解析 block/line 索引：成功路径 + line/block 不在 page 中时返回 None
 
 2. image service：
    - clamp_bbox_to_image：完全 in-bounds / 越右下边界 / 完全负坐标
@@ -23,13 +23,14 @@ import pytest
 
 from app.models import BBox, Block, Line, Page
 from app.models.enums import BlockType
+from app.models.ocr_observation import find_block_ocr_line_index
 from app.core import quality_probe as qp
 from app.core.quality_probe import (
     Probe, ProbeKey, ProbeStore,
     set_active_store, reset_active_store,
 )
 from app.services.proof_probe_text_service import (
-    displayed_text, save_displayed_edit_result, resolve_block_line_index,
+    displayed_text, save_displayed_edit_result,
 )
 from app.services.proof_image_service import (
     clamp_bbox_to_image, adaptive_pad_for_bbox,
@@ -65,27 +66,27 @@ def _isolate_store():
 # probe text service
 # ════════════════════════════════════════════════════════════════
 
-def test_resolve_block_line_index_success():
+def test_find_block_ocr_line_index_success():
     line = _line("abc")
     block = _block([line])
     page = _page(1, [block])
-    assert resolve_block_line_index(page, block, line) == (0, 0)
+    assert find_block_ocr_line_index(page, block, line) == (0, 0)
 
 
-def test_resolve_block_line_index_block_not_in_page():
+def test_find_block_ocr_line_index_block_not_in_page():
     line = _line("abc")
     block = _block([line])
     other_block = _block([_line("xyz")])
     page = _page(1, [block])
-    assert resolve_block_line_index(page, other_block, line) is None
+    assert find_block_ocr_line_index(page, other_block, line) is None
 
 
-def test_resolve_block_line_index_line_not_in_block():
+def test_find_block_ocr_line_index_line_not_in_block():
     line = _line("abc")
     other_line = _line("xyz")
     block = _block([line])
     page = _page(1, [block])
-    assert resolve_block_line_index(page, block, other_line) is None
+    assert find_block_ocr_line_index(page, block, other_line) is None
 
 
 def test_displayed_text_no_active_store_returns_line_text():

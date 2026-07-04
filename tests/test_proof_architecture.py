@@ -355,6 +355,16 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
     assert offenders == []
 
 
+def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
+    probe_source = Path("app/services/proof_probe_text_service.py").read_text(encoding="utf-8")
+    persist_source = Path("app/services/proof_persistence_service.py").read_text(encoding="utf-8")
+
+    assert "def resolve_block_line_index" not in probe_source
+    assert "find_block_ocr_line_index" in probe_source
+    assert "def _iter_project_lines" not in persist_source
+    assert "iter_project_ocr_line_occurrences" in persist_source
+
+
 def test_ui_char_display_uses_text_contract_helper():
     ui_sources = {
         Path("app/ui/widgets/image_viewer.py"),

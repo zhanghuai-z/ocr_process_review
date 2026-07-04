@@ -21,27 +21,14 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
-from typing import Optional, Tuple
 
 from app.models import Block, Line, Page
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import find_block_ocr_line_index
 from app.core import quality_probe as qp
 from app.core.proof_char_text import chars_display_spans, is_display_carrier
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_mutation import set_line_proof_text
-
-
-def resolve_block_line_index(
-    page: Page, block: Block, line: Line
-) -> Optional[Tuple[int, int]]:
-    """返回 (block_index, line_index) 或 None（line/block 已不在 page 中）。"""
-    try:
-        bi = page.blocks.index(block)
-        li = block_ocr_lines(block).index(line)
-    except ValueError:
-        return None
-    return bi, li
 
 
 def displayed_text(line: Line, page: Page, block: Block) -> str:
@@ -55,7 +42,7 @@ def displayed_text(line: Line, page: Page, block: Block) -> str:
     store = qp.get_active_store()
     if store is None or not base:
         return base
-    idx = resolve_block_line_index(page, block, line)
+    idx = find_block_ocr_line_index(page, block, line)
     if idx is None:
         return base
     bi, li = idx
@@ -82,7 +69,7 @@ def save_displayed_edit_result(
     用户动过的位置直接写回真实文本，并把命中的 pending probe 标 corrected。
     """
     store = qp.get_active_store()
-    idx = resolve_block_line_index(page, block, line)
+    idx = find_block_ocr_line_index(page, block, line)
 
     if idx is None:
         return ProofChangeSet(cancelled=True)
