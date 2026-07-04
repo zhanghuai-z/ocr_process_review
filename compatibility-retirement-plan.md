@@ -88,6 +88,7 @@
 - layout route 新增 `RoutingPlan` 生产/读取 contract；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费 `_layout_line_routes`/`_route_subblocks` dict，旧 dict API 仅作为运行时 cache 序列化边界。
 - OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。
 - OCR 运行结果新增 `OcrRunResult` / `OcrProgress` contract；Pipeline 文件不再定义结果模型，worker/controller/tests 改为依赖服务边界。
+- HProof/VProof 外部刷新新增共享 `ProofExternalRefreshPlan`；pending 队列和 plan contract 不再按横校/纵校各自定义。
 
 完成状态：第一阶段完成；`LayoutSnapshot` model contract 已成为 API 版面分析到旧 `Page.blocks` 的投影边界。人工编辑服务和物理 OCR observation store 仍是后续增强，不再作为当前兼容入口。
 

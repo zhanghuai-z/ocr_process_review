@@ -49,6 +49,30 @@ class ProofExternalRefreshBatch:
         return bool(self.line_refs or self.page_keys)
 
 
+@dataclass(frozen=True)
+class ProofExternalRefreshPlan:
+    """Shared UI-free external refresh plan for proof views.
+
+    Horizontal proof consumes projection indexes. Vertical proof consumes page
+    keys and a current-page reload flag. Keeping one plan type prevents H/V
+    refresh semantics from drifting while still allowing each view to execute
+    its own UI update.
+    """
+
+    line_refs: tuple[ProofExternalLineRef, ...] = tuple()
+    affected_page_keys: tuple[tuple[object, ...], ...] = tuple()
+    touched_projection_indexes: tuple[int, ...] = tuple()
+    reload_current_page: bool = False
+
+    @property
+    def has_work(self) -> bool:
+        return bool(
+            self.affected_page_keys
+            or self.touched_projection_indexes
+            or self.reload_current_page
+        )
+
+
 @dataclass
 class ProofExternalRefreshQueue:
     _line_refs: list[ProofExternalLineRef] = field(default_factory=list)

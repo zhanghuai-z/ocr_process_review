@@ -7,6 +7,7 @@ from app.services.proof_hproof_session import (
     HProofLineEditSession,
     HProofRuntimeSession,
 )
+from app.services.proof_external_refresh import ProofExternalRefreshPlan
 
 
 def test_hproof_session_keeps_valid_page_selection_and_clears_invalid_one():
@@ -54,6 +55,7 @@ def test_hproof_session_debug_flags_and_pending_external_queue_are_explicit():
     assert session.has_pending_external_refresh is True
     assert session.has_projection_for_request(request) is True
     plan = session.consume_external_refresh_plan()
+    assert isinstance(plan, ProofExternalRefreshPlan)
     assert plan.touched_projection_indexes == (0,)
     assert session.has_pending_external_refresh is False
 

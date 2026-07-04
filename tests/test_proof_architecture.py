@@ -1558,6 +1558,8 @@ def test_hproof_uses_projection_as_single_line_runtime_fact():
     assert "consume_external_refresh_plan" in source
     session_source = Path("app/services/proof_hproof_session.py").read_text(encoding="utf-8")
     assert "ProofExternalRefreshQueue" in session_source
+    assert "ProofExternalRefreshPlan" in session_source
+    assert "HProofExternalRefreshPlan" not in session_source
     assert "self._session.projections" in source
     assert "self._edit_session" in source
 
@@ -1597,6 +1599,8 @@ def test_vproof_uses_named_slots_and_shared_identity_helpers():
     assert "consume_external_refresh_plan" in source
     occurrence_source = Path("app/services/proof_occurrence_session.py").read_text(encoding="utf-8")
     assert "ProofExternalRefreshQueue" in occurrence_source
+    assert "ProofExternalRefreshPlan" in occurrence_source
+    assert "VProofExternalRefreshPlan" not in occurrence_source
 
     reference_source = Path("app/services/proof_reference_context.py").read_text(encoding="utf-8")
     assert "ProofTextSlot" in reference_source

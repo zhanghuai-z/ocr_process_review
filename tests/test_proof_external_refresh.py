@@ -4,6 +4,7 @@ from app.core.proof_state import ProofUpdateRequest
 from app.models import BBox, Line
 from app.services.proof_external_refresh import (
     ProofExternalLineRef,
+    ProofExternalRefreshPlan,
     ProofExternalRefreshQueue,
 )
 
@@ -37,3 +38,16 @@ def test_proof_external_refresh_queue_batches_line_refs_and_page_keys():
     assert [ref.line_id for ref in batch.line_refs] == [None, 42]
     assert set(batch.page_keys) == {("page", 1), ("page", 2)}
     assert queue.has_pending is False
+
+
+def test_proof_external_refresh_plan_shares_hv_refresh_shape():
+    plan = ProofExternalRefreshPlan(
+        affected_page_keys=(("page", 1),),
+        touched_projection_indexes=(2,),
+        reload_current_page=True,
+    )
+
+    assert plan.has_work is True
+    assert plan.affected_page_keys == (("page", 1),)
+    assert plan.touched_projection_indexes == (2,)
+    assert plan.reload_current_page is True

@@ -10,21 +10,11 @@ from app.core.proof_occurrence import (
     proof_page_identity_key,
 )
 from app.models import Page
-from app.services.proof_external_refresh import ProofExternalRefreshQueue
+from app.services.proof_external_refresh import ProofExternalRefreshPlan, ProofExternalRefreshQueue
 from app.services.proof_reference_context import (
     ProofReferenceContext,
     build_proof_reference_context,
 )
-
-
-@dataclass(frozen=True)
-class VProofExternalRefreshPlan:
-    affected_page_keys: tuple[tuple[object, ...], ...] = tuple()
-    reload_current_page: bool = False
-
-    @property
-    def has_work(self) -> bool:
-        return bool(self.affected_page_keys)
 
 
 @dataclass
@@ -140,18 +130,19 @@ class VProofOccurrenceSession:
     ) -> None:
         self._external_refresh_queue.queue_line_key(line_key, page_keys=page_keys)
 
-    def consume_external_refresh_plan(self) -> VProofExternalRefreshPlan:
+    def consume_external_refresh_plan(self) -> ProofExternalRefreshPlan:
         if not self.pages:
             self.clear_pending_external_refresh()
-            return VProofExternalRefreshPlan()
+            return ProofExternalRefreshPlan()
         batch = self._external_refresh_queue.consume()
         if not batch.line_refs:
-            return VProofExternalRefreshPlan()
+            return ProofExternalRefreshPlan()
         pending_page_keys = tuple(batch.page_keys)
         current_key = self.current_page_key
         if not pending_page_keys and current_key is not None:
             pending_page_keys = (current_key,)
-        return VProofExternalRefreshPlan(
+        return ProofExternalRefreshPlan(
+            line_refs=batch.line_refs,
             affected_page_keys=pending_page_keys,
             reload_current_page=bool(
                 pending_page_keys

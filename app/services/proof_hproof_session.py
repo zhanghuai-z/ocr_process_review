@@ -16,21 +16,11 @@ from app.models import Page
 from app.services.proof_external_refresh import (
     ProofExternalRefreshQueue,
     ProofExternalLineRef,
+    ProofExternalRefreshPlan,
 )
 
 
 PagePredicate = Callable[[Page], bool]
-
-
-@dataclass(frozen=True)
-class HProofExternalRefreshPlan:
-    """External line updates collapsed into HProof projection indexes."""
-
-    touched_projection_indexes: tuple[int, ...] = tuple()
-
-    @property
-    def has_work(self) -> bool:
-        return bool(self.touched_projection_indexes)
 
 
 @dataclass
@@ -124,10 +114,10 @@ class HProofRuntimeSession:
     def queue_external_refresh(self, request: ProofUpdateRequest) -> None:
         self._external_refresh_queue.queue_request(request)
 
-    def consume_external_refresh_plan(self) -> HProofExternalRefreshPlan:
+    def consume_external_refresh_plan(self) -> ProofExternalRefreshPlan:
         batch = self._external_refresh_queue.consume()
         if not batch.line_refs:
-            return HProofExternalRefreshPlan()
+            return ProofExternalRefreshPlan()
         touched_indexes = {
             index
             for index, projection in enumerate(self.projections)
@@ -136,7 +126,8 @@ class HProofRuntimeSession:
                 for line_ref in batch.line_refs
             )
         }
-        return HProofExternalRefreshPlan(
+        return ProofExternalRefreshPlan(
+            line_refs=batch.line_refs,
             touched_projection_indexes=tuple(sorted(touched_indexes)),
         )
 

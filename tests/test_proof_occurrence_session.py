@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.proof_occurrence import proof_page_identity_key
 from app.models import Page
+from app.services.proof_external_refresh import ProofExternalRefreshPlan
 from app.services.proof_occurrence_session import VProofOccurrenceSession
 
 
@@ -26,6 +27,7 @@ def test_vproof_occurrence_session_consumes_external_refresh_for_current_page():
     )
     plan = session.consume_external_refresh_plan()
 
+    assert isinstance(plan, ProofExternalRefreshPlan)
     assert plan.has_work is True
     assert plan.affected_page_keys == (proof_page_identity_key(page1),)
     assert plan.reload_current_page is True
