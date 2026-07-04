@@ -62,7 +62,7 @@
 - `ocr_text_invalidated` 已升为 `Block.ocr_invalidated_reason`。
 - active `Block` 不再携带 `raw_payload`；新导入和 Hanwang OCR 后重建的 block 通过 `Page.raw_layout_artifact` + `Block.origin.raw_index` 读取原始事实。
 - `Block.app_payload` 已从 active model 删除。
-- `Block.lines` 的业务访问已迁移到 `app.models.ocr_observation`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
+- `Block.lines` 的业务访问和 ProjectStore 读写已迁移到 `app.models.ocr_observation`；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
 - UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。

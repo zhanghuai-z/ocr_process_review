@@ -20,6 +20,7 @@ from app.models import (
     RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
+from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
 from app.models.page_state import reconcile_page_ocr_done_from_result
 
 from app.core.logging import get_logger, APP_VERSION, SCHEMA_VERSION
@@ -1095,7 +1096,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_line_ids: set[int] = set()
-        for line in block.lines:
+        for line in block_ocr_lines(block):
             self._ensure_unique_child_uid(
                 cur,
                 line,
@@ -1170,7 +1171,7 @@ class ProjectStore:
         current_line_uids: set[str] = set()
         for page in project.pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     if not str(line.uid or "").strip():
                         continue
                     current_line_uids.add(line.uid)
@@ -1613,7 +1614,7 @@ class ProjectStore:
             return
         for page in project.pages:
             for block in page.blocks:
-                for line in block.lines:
+                for line in block_ocr_lines(block):
                     row = states.get(line.uid)
                     if row is None:
                         continue
@@ -1692,7 +1693,7 @@ class ProjectStore:
                 ocr_audit=ocr_audit_payload,
                 table_text_layer_cells=table_text_layer_cells,
             )
-            block.lines = self._load_lines(block.id)
+            replace_block_ocr_lines(block, self._load_lines(block.id))
             blocks.append(block)
         return blocks
 

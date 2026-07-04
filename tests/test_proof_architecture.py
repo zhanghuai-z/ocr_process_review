@@ -328,7 +328,6 @@ def test_block_ocr_observation_summary_properties_are_not_restored():
 
 def test_block_ocr_lines_access_goes_through_observation_boundary():
     allowed = {
-        Path("app/core/project_store.py"),
         Path("app/models/ocr_observation.py"),
         Path("app/models/project.py"),
     }
