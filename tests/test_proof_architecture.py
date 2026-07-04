@@ -476,6 +476,21 @@ def test_carrier_detection_uses_proof_char_text_contract():
         assert 'bbox_granularity == "word" or len(char.char or "") > 1' not in source
 
 
+def test_proof_geometry_quality_is_shared_by_proof_services():
+    helper_source = Path("app/core/proof_geometry_quality.py").read_text(encoding="utf-8")
+    assert "def is_estimated_or_unavailable_geometry" in helper_source
+    assert "def is_char_index_hidden_geometry" in helper_source
+    assert "source.startswith(\"hanwang:\")" in helper_source
+
+    char_index_source = Path("app/services/char_index_service.py").read_text(encoding="utf-8")
+    crop_source = Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
+    assert "is_char_index_hidden_geometry" in char_index_source
+    assert "is_estimated_or_unavailable_geometry" in crop_source
+    assert "source.startswith(\"hanwang:\")" not in char_index_source
+    assert "source in {\"fallback\", \"unavailable\"}" not in crop_source
+    assert "granularity in {\"fallback\", \"unavailable\", \"line\"}" not in crop_source
+
+
 def test_ocr_observation_geometry_writes_stay_at_observation_boundaries():
     allowed_by_pattern = {
         r"\bline\.bbox\s*=(?!=)": {Path("app/models/ocr_observation.py")},

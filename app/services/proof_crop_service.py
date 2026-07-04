@@ -12,6 +12,7 @@ from app.core.char_bbox_utils import (
     split_line_bbox_into_char_bboxes,
 )
 from app.core.proof_char_text import is_display_carrier
+from app.core.proof_geometry_quality import is_estimated_or_unavailable_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
@@ -76,9 +77,7 @@ def proof_fallback_warning(stats: ProofCropStats, pages: Iterable[Page] | None =
             for _block, line, _line_idx in iter_unique_page_text_lines(page):
                 line_fallback_chars = 0
                 for char in line_ocr_chars(line):
-                    source = (char.bbox_source or "").strip().lower()
-                    granularity = (char.bbox_granularity or "").strip().lower()
-                    if source in {"fallback", "unavailable"} or granularity in {"fallback", "unavailable", "line"}:
+                    if is_estimated_or_unavailable_geometry(char.bbox_source, char.bbox_granularity):
                         line_fallback_chars += 1
                 if line_fallback_chars:
                     fallback_total += line_fallback_chars

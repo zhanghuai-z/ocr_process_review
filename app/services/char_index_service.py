@@ -16,6 +16,7 @@ from app.core.char_bbox_utils import (
 )
 from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
 from app.core.proof_char_text import chars_display_text, is_display_carrier
+from app.core.proof_geometry_quality import is_char_index_hidden_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.core.proof_occurrence import (
@@ -734,20 +735,7 @@ class CharIndexService:
         self._freq[glyph] += 1
 
     def _is_fallback_unit(self, bbox_source: str, bbox_granularity: str) -> bool:
-        source = (bbox_source or "fallback").strip().lower()
-        granularity = (bbox_granularity or "fallback").strip().lower()
-        # Accept both Paddle ("ocr") and Hanwang ("hanwang:*") as genuine OCR
-        # bbox sources.  Without this, all Hanwang char bboxes —including
-        # char_fallback recoveries— are misclassified as fallback and filtered
-        # out of the char index, leaving VProof with an empty character list
-        # when ocr_mode="hanwang".
-        if (
-            source != "ocr"
-            and source != "paddle_inline_formula"
-            and not source.startswith("hanwang:")
-        ):
-            return True
-        return granularity in {"fallback", "unavailable", "line"}
+        return is_char_index_hidden_geometry(bbox_source, bbox_granularity)
 
     def _is_cjk_index_key(self, glyph: str) -> bool:
         compact = "".join(ch for ch in str(glyph) if not ch.isspace())
