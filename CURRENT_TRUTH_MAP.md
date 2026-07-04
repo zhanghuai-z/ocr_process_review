@@ -302,7 +302,8 @@ OCR Hanwang/CharOCR
 
 - `ProofAtom`：proof UI 渲染单元。
 - `CharIndexService`：相同字/字符 gallery 索引。
-- `_route_subblocks` / `_layout_line_routes`：当前路线计划的运行时 dict 形式。
+- `RoutingPlan` / `RoutingLine` / `RoutingSegment` / `TextSliceRoute`：当前路线计划的 typed 读取口径。
+- `_route_subblocks` / `_layout_line_routes`：当前路线计划的底层运行时 dict cache；只能由 route adapter/生产侧解释。
 - `ProofLineViewModel` / UI 状态标签：展示投影。
 - `block.note`：提示/调试说明，不应参与关键判断。
 
@@ -320,9 +321,10 @@ OCR Hanwang/CharOCR
    - `Block.lines` 尚未物理外置，但直接访问已经被架构测试约束到持久化/模型边界。
 
 2. `raw_payload` 已从 active `Block` 模型退出，仅保留旧 SQLite 列拒绝边界。
-- Paddle vendor evidence 和 app state 已分开；route plan 仍有运行时 dict 生产形态。
+- Paddle vendor evidence 和 app state 已分开；route plan 仍有运行时 dict 生产/cache 形态。
 - `ProjectStore._save_block()` 固定写空 payload，并有架构守卫防止恢复保存时清 route、清 lines、写 invalidation 的旧副作用。
 - `NormalizedLayoutArtifact` 已作为读取侧归一化 contract；`LayoutOverlayService` 和 `PaddleArtifactIndex.from_page()` 不再直接遍历 `raw_layout_records`。
+- `RoutingPlan` 已作为 overlay 与 Hanwang route 消费端的读取边界；`layout_routing_plan.py` 是旧 route dict 到 typed route 的 adapter。
 - `LayoutSnapshot` 已作为 API 版面分析的当前版面真值边界；后续应把人工编辑也迁到 snapshot，并继续抽 `DispatchPlan/OcrRunResult`。
 
 3. HProof/VProof 状态机重复。
@@ -346,7 +348,7 @@ OCR Hanwang/CharOCR
 
 1. 保留当前补丁成果，不继续扩大局部补丁。
 2. architecture ratchet 已落地：`architecture_baseline.json` + `tests/test_architecture_import_ratchet.py` 只阻止新增包级违规依赖，不要求一次清空历史债。
-3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从核心调度接口中移出。
+3. 扩大 `RoutingPlan` 到生产侧，并继续抽 `DispatchPlan/OcrRunResult`，把 route dict 从生产/cache 层继续压缩。
 4. `LayoutEditCommand/LayoutEditResult` 已落地；下一步是让命令直接更新 `LayoutSnapshot`，再投影到 `Page.blocks`。
 5. 抽统一 `ProofEditSession/ProofSaveResult`，让 HProof/VProof 共用保存、冲突、重建 gate。
 6. 做项目诊断工具，专门检查并报告已持久化错配数据。
