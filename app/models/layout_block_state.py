@@ -25,6 +25,14 @@ def is_user_authored_layout_source(value: object) -> bool:
     return text in {source.value for source in USER_AUTHORED_LAYOUT_SOURCES}
 
 
+def mark_layout_block_manual_draw(block: Block) -> None:
+    block.source = BlockSource.MANUAL_DRAW
+
+
+def mark_layout_block_user_edited(block: Block) -> None:
+    block.source = BlockSource.USER_EDITED
+
+
 def is_auto_tightened_layout_block(block: Block) -> bool:
     return getattr(block, "source", None) == BlockSource.AUTO_TIGHTENED
 

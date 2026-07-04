@@ -33,7 +33,7 @@
 | UI/test hidden compatibility fields/signals | explicit state/table accessors | 删除 `QualityStatsDialog._rate_lbl`、兼容 `_table` property、`NavRail.account_clicked` 空信号；测试改读 typed state / `detail_table()`。 |
 | `LayoutPanel` 版面编辑私有业务 helper / 散参 mutation 调用 / 撤销直写 `page.blocks` | `LayoutEditCommand` + `LayoutEditService.apply()` | 删除 `_apply_subtype_to_block`、`_merge_blocks_into_bbox`、`_bind_manual_block_to_paddle`、`_update_existing_manual_binding_bbox` 等 UI 内业务写入口；新增、删除、改类型、合并、调框、撤销恢复统一经命令入口写 typed state 和 layout edit event。 |
 | `LayoutPanel` 直接解析 Paddle raw overlay | `LayoutOverlayService` | 删除 UI 内 `raw_layout_records`、`ROUTE_SUBBLOCKS_FIELD`、`bbox_from_variant` 等 raw artifact 解析；只读 overlay 和 inline formula 提升由服务统一产出。 |
-| Hanwang/Export/BlockAttributes 分散解释 `Block.source` | `app.models.layout_block_state` | 人工编辑来源、导出 origin、路由手工结构判断集中到 helper；`Block.source` 字段仍保留为后续迁移入口。 |
+| Hanwang/Export/BlockAttributes/LayoutEditService 分散解释或写入 `Block.source` | `app.models.layout_block_state` | 人工编辑来源、导出 origin、路由手工结构判断、用户编辑来源标记集中到 helper；`Block.source` 字段仍保留为后续迁移入口。 |
 | 非 UI 业务层直接读写 `Page.blocks` | `app.models.layout_projection` | 当前 `Page.blocks` 仍是物理运行投影；OCR observation、dispatch、ProjectStore、Hanwang、导出、诊断等模块经 projection helper 访问，避免对象树继续扩散为领域模型。 |
 | 非 UI/非 OCR producer 业务层直接读写 `Line.chars` | `app.models.ocr_character_observation` | 当前 `Line.chars` 仍是物理字符观察投影；ProofAtom、CharIndex、ProjectStore、Export IR、ProofCrop、QualityProbe 等经 character observation helper 访问。 |
 
@@ -73,7 +73,7 @@
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
-- `Block.source` 的判断已收口到 `app.models.layout_block_state`；生产模块不得各自比较 `BlockSource.USER_EDITED/MANUAL_DRAW`。
+- `Block.source` 的判断和用户编辑写入已收口到 `app.models.layout_block_state`；生产模块不得各自比较或直接写 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `ProjectStore` 保存路径已收口为纯持久化写入；旧 `raw_payload_json/app_payload_json` 固定写空对象，运行时 route/旧 payload 只在加载校验处拒绝，不再通过清 `Block.lines` 或写 OCR invalidation 修复业务状态。
 - `proof_line_state_store` 不再兼容读取旧 `line.proof_state` attr；proof runtime state 只存在于 external store。
 - quality probe 设置不再读取旧 `quality_probe_target_ratio`；AppConfig 只接受 `quality_probe_sand_count` 和 `quality_probe_sand_unit_chars` 作为用户密度真值。

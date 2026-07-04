@@ -13,8 +13,9 @@ from app.core.paddle_artifact_index import (
     PaddleArtifactIndex,
     apply_paddle_binding_to_block,
 )
-from app.models import BBox, Block, BlockSource, BlockType, LayoutEditEvent, OcrPolicy, Page
+from app.models import BBox, Block, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dict, set_paddle_binding
+from app.models.layout_block_state import mark_layout_block_manual_draw, mark_layout_block_user_edited
 from app.models.layout_projection import (
     append_page_layout_block,
     page_layout_blocks,
@@ -233,7 +234,7 @@ class LayoutEditService:
     def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:
         if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
             return {}
-        block.source = BlockSource.USER_EDITED
+        mark_layout_block_user_edited(block)
         mark_ocr_text_invalidated(block, "block_geometry_changed")
         if not self._update_existing_manual_binding_bbox(block):
             clear_block_ocr_lines(block)
@@ -274,9 +275,9 @@ class LayoutEditService:
         new_block = Block(
             block_type=block_type,
             bbox=bbox,
-            source=BlockSource.MANUAL_DRAW,
             source_label=source_label,
         )
+        mark_layout_block_manual_draw(new_block)
         new_block.ocr_policy = default_ocr_policy_for_block(new_block)
         binding = self.bind_manual_block_to_paddle(page, new_block)
         append_page_layout_block(page, new_block)
@@ -328,7 +329,7 @@ class LayoutEditService:
         before = {"block": self.block_state(block)}
         block.block_type = block_type
         block.source_label = source_label
-        block.source = BlockSource.USER_EDITED
+        mark_layout_block_user_edited(block)
         block.ocr_policy = default_ocr_policy_for_block(block)
         binding = self.bind_manual_block_to_paddle(page, block)
         after = {"block": self.block_state(block)}
@@ -364,7 +365,7 @@ class LayoutEditService:
         primary.block_type = block_type
         primary.source_label = source_label
         clear_block_ocr_lines(primary)
-        primary.source = BlockSource.USER_EDITED
+        mark_layout_block_user_edited(primary)
         primary.ocr_policy = default_ocr_policy_for_block(primary)
         primary.note = "manual_draw_merge_requires_ocr_rerun"
         mark_ocr_text_invalidated(primary, "manual_draw_merge")

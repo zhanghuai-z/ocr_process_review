@@ -768,6 +768,8 @@ def test_block_source_semantics_are_centralized():
     helper_source = Path("app/models/layout_block_state.py").read_text(encoding="utf-8")
     assert "def is_user_authored_layout_block" in helper_source
     assert "def export_origin_for_block" in helper_source
+    assert "def mark_layout_block_manual_draw" in helper_source
+    assert "def mark_layout_block_user_edited" in helper_source
 
     for path in (
         Path("app/core/block_attributes.py"),
@@ -788,6 +790,56 @@ def test_block_source_semantics_are_centralized():
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     assert "is_user_authored_layout_block(block)" in hanwang_source
     assert "block_source_value(block)" in hanwang_source
+
+    layout_edit_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+    assert "mark_layout_block_manual_draw(new_block)" in layout_edit_source
+    assert "mark_layout_block_user_edited(block)" in layout_edit_source
+    assert "mark_layout_block_user_edited(primary)" in layout_edit_source
+    assert "BlockSource.MANUAL_DRAW" not in layout_edit_source
+    assert "BlockSource.USER_EDITED" not in layout_edit_source
+
+
+def test_user_layout_source_writes_go_through_layout_block_state_helper():
+    allowed = {Path("app/models/layout_block_state.py")}
+    forbidden_sources = {
+        "BlockSource.MANUAL_DRAW",
+        "BlockSource.USER_EDITED",
+        "BlockSource.AUTO_TIGHTENED",
+    }
+    offenders: list[str] = []
+
+    def contains_forbidden_source(node: ast.AST) -> bool:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Attribute) and ast.unparse(child) in forbidden_sources:
+                return True
+        return False
+
+    for path in APP_DIR.rglob("*.py"):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+                value = node.value
+            else:
+                targets = []
+                value = None
+            if value is not None and contains_forbidden_source(value):
+                for target in targets:
+                    for attr in _flatten_attr_targets(target):
+                        if attr.attr == "source":
+                            offenders.append(f"{path}:{node.lineno}: direct layout source assignment")
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "source" and contains_forbidden_source(keyword.value):
+                        offenders.append(f"{path}:{node.lineno}: direct layout source constructor keyword")
+
+    assert offenders == []
 
 
 def test_project_store_exposes_only_scoped_proof_line_write_port():

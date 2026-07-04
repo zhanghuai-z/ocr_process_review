@@ -45,6 +45,7 @@
      - UI 提交 create/delete/change_kind/merge/geometry_update 命令
      - create/delete/change_kind/merge/geometry_update/restore_blocks 是当前用户编辑写入口
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
+     - Block.source 的人工来源标记通过 layout_block_state helper 写入
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
   -> LayoutOverlayService
@@ -118,7 +119,7 @@ OCR Hanwang/CharOCR
 | 程序派生状态 | typed 字段：`origin`、`paddle_binding`、`ocr_invalidated_reason`、`ocr_audit`、`table_text_layer_cells`、`layout_edit_events` | 旧 `block.raw_payload`、旧 `block.app_payload` | `raw_payload/app_payload` 已从 active model 删除；旧 SQLite 列非空会被存储校验拒绝。 |
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
-| 块来源/编辑态解释 | `app.models.layout_block_state` helper | 各模块直接比较 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑、导出 origin 等语义集中解释。 |
+| 块来源/编辑态 | `app.models.layout_block_state` helper | 各模块直接比较或写入 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑来源、导出 origin 等语义的解释和用户编辑写入都集中到 helper。 |
 | 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line。 |
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
@@ -179,7 +180,7 @@ OCR Hanwang/CharOCR
 - 页级 OCR 统计、图像读取失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用都应读取同一个 `DispatchPlan`。
 - Page/Project 模型不得恢复 `text_blocks`、`text_ocr_blocks`、`has_unrecognized_blocks` 这类策略 property；统计和导出状态由服务读取 `DispatchPlan`。
 - Block/Page/Project 模型不得恢复 `avg_confidence`、`total_lines`、`has_ocr_result`、`has_any_ocr_result`、`all_pages_ocr_done` 这类 OCR observation summary property；这些读取统一走 `ocr_observation` helper。
-- `Block.source` 的人工编辑/导出来源语义不得在 Hanwang、Export、BlockAttributes 内分散解释，必须经 `app.models.layout_block_state` helper。
+- `Block.source` 的人工编辑/导出来源语义不得在 Hanwang、Export、BlockAttributes 内分散解释；LayoutEditService 也不得直接写 `BlockSource.USER_EDITED/MANUAL_DRAW`，必须经 `app.models.layout_block_state` helper。
 
 ### 3. Paddle 路由：父文本块 + 子结构块
 
