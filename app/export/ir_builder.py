@@ -26,6 +26,7 @@ from app.models.layout_block_state import export_origin_for_block
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
+from app.models.page_state import page_error_message, page_status_value
 from app.services.export_service import (
     build_export_summary,
     iter_export_blocks,
@@ -51,11 +52,12 @@ def build_export_ir(
 
     for page in iter_export_pages(project):
         elements: list[ExportElement] = []
-        if page.error_message:
+        error_message = page_error_message(page)
+        if error_message:
             diagnostics.append(ExportDiagnostic(
                 level="error",
                 code="page_error",
-                message=page.error_message,
+                message=error_message,
                 details={"page_number": page.page_number},
             ))
 
@@ -81,7 +83,7 @@ def build_export_ir(
                 "source_type": page.source_type,
                 "source_page_index": page.source_page_index,
             },
-            status=page.status.value if hasattr(page.status, "value") else str(page.status),
+            status=page_status_value(page),
             elements=elements,
         ))
 

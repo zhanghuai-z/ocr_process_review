@@ -24,6 +24,7 @@ from app.models.layout_block_state import set_layout_block_order
 from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
+from app.models.page_state import page_error_message, page_has_error
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
@@ -695,7 +696,7 @@ class LayoutPanel(QWidget):
         self._update_viewer(current_idx)
         self._update_page_nav()
         total_blocks = sum(len(page_layout_blocks(page)) for page in pages)
-        failed = sum(1 for page in pages if page.error_message)
+        failed = sum(1 for page in pages if page_has_error(page))
         if failed:
             self._set_status_text(
                 f"共 {len(pages)} 页，{total_blocks} 个版面块，{failed} 页分析失败"
@@ -797,7 +798,7 @@ class LayoutPanel(QWidget):
             return
         total_pages = len(self._pages)
         analyzed_pages = sum(1 for page in self._pages if page.is_analyzed)
-        failed_pages = sum(1 for page in self._pages if page.error_message)
+        failed_pages = sum(1 for page in self._pages if page_has_error(page))
         total_blocks = sum(len(page_layout_blocks(page)) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
         total_lines = sum(page_ocr_line_count(page) for page in self._pages)
@@ -1283,8 +1284,8 @@ class LayoutPanel(QWidget):
         self._viewer.set_image(page.display_image_path)
         if page.is_analyzed:
             self._show_page_layers(page)
-        elif page.error_message:
-            self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error_message}")
+        elif page_error_message(page):
+            self._set_status_text(f"第 {page.page_number} 页分析失败：{page_error_message(page)}")
         self._selected_block = None
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()

@@ -522,6 +522,44 @@ def test_workflow_page_state_reads_go_through_page_state_boundary():
     assert offenders == []
 
 
+def test_page_workflow_status_and_error_reads_go_through_page_state_boundary():
+    allowed = {
+        Path("app/models/page_state.py"),
+        Path("app/models/project.py"),
+        Path("app/models/ocr_observation.py"),
+        Path("app/core/project_store.py"),
+        # This reads ExportPage.status, not app.models.Page.status.
+        Path("app/export/xml.py"),
+    }
+    checked_roots = [
+        Path("app/core"),
+        Path("app/services"),
+        Path("app/controllers"),
+        Path("app/export"),
+        Path("app/ui"),
+    ]
+    forbidden_attrs = {"error_message", "ocr_invalidated_reason", "status"}
+    page_like_names = {"page", "p"}
+    offenders: list[str] = []
+    for root in checked_roots:
+        for path in sorted(root.rglob("*.py")):
+            if path in allowed:
+                continue
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.attr in forbidden_attrs
+                ):
+                    continue
+                owner = node.value
+                if isinstance(owner, ast.Name) and owner.id in page_like_names:
+                    offenders.append(f"{path}:{node.lineno}: {owner.id}.{node.attr}")
+    assert offenders == []
+
+
 def test_production_code_does_not_construct_line_with_chars_storage():
     allowed = {
         Path("app/models/project.py"),

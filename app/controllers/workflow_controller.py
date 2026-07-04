@@ -59,6 +59,7 @@ from app.models.page_state import (
     mark_page_layout_failed,
     mark_page_ocr_done,
     mark_page_ocr_failed,
+    page_has_error,
     page_is_layout_analyzed,
     page_is_ocr_done,
     reconcile_page_ocr_done_from_result,
@@ -856,14 +857,14 @@ class WorkflowController(QObject):
         self._project.pages = pages
 
         for page in pages:
-            if page.error_message:
+            if page_has_error(page):
                 mark_page_layout_failed(page)
             else:
                 mark_page_layout_done(page)
 
         self._update_max_step()
         self.layout_finished.emit(pages)
-        failed_pages = [page for page in pages if page.error_message]
+        failed_pages = [page for page in pages if page_has_error(page)]
         success_count = len(pages) - len(failed_pages)
         if self._auto_start_ocr_after_layout:
             self.status_message.emit(
@@ -945,7 +946,7 @@ class WorkflowController(QObject):
             else [page for page in pages if page.page_number in target_page_numbers]
         )
         for page in processed_pages:
-            if page.error_message:
+            if page_has_error(page):
                 mark_page_ocr_failed(page)
             else:
                 mark_page_ocr_done(page)
@@ -959,7 +960,7 @@ class WorkflowController(QObject):
         self.ocr_finished.emit(pages)
         failed_pages = [
             page for page in pages
-            if page.error_message
+            if page_has_error(page)
         ]
         fallback_warning = self._proof_fallback_warning(proof_stats, processed_pages)
         self.status_message.emit(

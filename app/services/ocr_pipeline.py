@@ -45,7 +45,7 @@ from app.models.ocr_observation import (
     replace_block_ocr_lines,
     set_ocr_line_bbox,
 )
-from app.models.page_state import clear_page_error_message, mark_page_ocr_failed
+from app.models.page_state import clear_page_error_message, mark_page_ocr_failed, page_error_message
 from app.core.logging import get_logger
 from app.services.proof_crop_service import ProofCropService
 from app.services.table_text_layer_service import TableTextLayerService
@@ -251,7 +251,7 @@ class OcrPipeline:
                         completed_pages=page_idx + 1,
                             message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
                     ))
-                elif page_ocr_line_count(page) == 0 and page_failures and not page.error_message:
+                elif page_ocr_line_count(page) == 0 and page_failures and not page_error_message(page):
                     summary = "；".join(page_failures[:3])
                     if len(page_failures) > 3:
                         summary += "；…"
@@ -448,7 +448,7 @@ class OcrPipeline:
     @staticmethod
     def _clear_ocr_error(page: Page) -> None:
         """Clear stale OCR-owned errors before retrying OCR on a page."""
-        if is_ocr_error_message(page.error_message):
+        if is_ocr_error_message(page_error_message(page)):
             clear_page_error_message(page)
 
     def _normalize_proof_crops(

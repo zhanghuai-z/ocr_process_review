@@ -24,6 +24,7 @@ from app.controllers.workflow_controller import (
 from app.core.workflow_state import WorkflowViewState
 from app.core.logging import get_logger
 from app.models import OcrProject, Page
+from app.models.page_state import page_has_error
 from app.services import ImportService
 from app.ui.recognize.import_panel import ImportPanel
 from app.ui.recognize.layout_panel import LayoutPanel
@@ -677,7 +678,7 @@ class MainWindow(QMainWindow):
         self._layout_panel.show_analysis_result(pages)
         self._layout_panel.run_button.setEnabled(True)
         self._controller.set_layout_run_enabled(True)
-        failed = sum(1 for page in pages if page.error_message)
+        failed = sum(1 for page in pages if page_has_error(page))
         if failed:
             self._ocr_placeholder.finish()
             self._set_status_message(

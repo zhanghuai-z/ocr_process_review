@@ -7,6 +7,7 @@ from app.core.page_errors import is_ocr_error_message
 from app.models import OcrProject, Page
 from app.models.ocr_observation import project_has_any_ocr_done_page
 from app.models.page_state import (
+    page_error_message,
     page_is_layout_analyzed,
     page_is_ocr_done,
     page_needs_ocr_rerun,
@@ -73,13 +74,14 @@ def compute_max_step(project: OcrProject | None) -> int:
 
 def page_gate_info(page: Page) -> PageGateInfo:
     """Return the OCR entry gate for one page."""
-    if page.error_message:
-        if is_ocr_error_message(page.error_message):
+    error_message = page_error_message(page)
+    if error_message:
+        if is_ocr_error_message(error_message):
             return PageGateInfo(
                 page_state="ocr_error",
                 is_pending=True,
                 reason_code="ocr_failed",
-                reason_text=f"当前页 OCR 失败，可重新进入 OCR：{page.error_message}",
+                reason_text=f"当前页 OCR 失败，可重新进入 OCR：{error_message}",
                 action_key="rerun_ocr",
                 action_label="重新进入 OCR",
                 action_enabled=True,
@@ -88,7 +90,7 @@ def page_gate_info(page: Page) -> PageGateInfo:
             page_state="error",
             is_pending=False,
             reason_code="page_error",
-            reason_text=f"当前页处理失败：{page.error_message}",
+            reason_text=f"当前页处理失败：{error_message}",
             action_key="enter_ocr",
             action_label="提交并进入 OCR",
             action_enabled=False,

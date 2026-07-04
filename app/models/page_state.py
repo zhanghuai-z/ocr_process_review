@@ -25,6 +25,19 @@ def page_needs_ocr_rerun(page: Page) -> bool:
     return bool(page.ocr_invalidated_reason)
 
 
+def page_error_message(page: Page) -> str:
+    return str(page.error_message or "")
+
+
+def page_has_error(page: Page) -> bool:
+    return bool(page_error_message(page))
+
+
+def page_status_value(page: Page) -> str:
+    status = page.status
+    return status.value if hasattr(status, "value") else str(status)
+
+
 def mark_page_imported(page: Page) -> None:
     page.status = PageStatus.IMPORTED
     page.error_message = ""
@@ -72,6 +85,6 @@ def reconcile_page_ocr_done_from_result(page: Page) -> None:
         page_has_ocr_result(page)
         and not page_is_ocr_done(page)
         and not page_needs_ocr_rerun(page)
-        and not page.error_message
+        and not page_has_error(page)
     ):
         mark_page_ocr_done(page)
