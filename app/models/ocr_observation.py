@@ -59,6 +59,10 @@ def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
     line.bbox = bbox
 
 
+def line_ocr_bbox(line: Line) -> BBox:
+    return line.bbox
+
+
 def clear_block_ocr_lines(block: Block) -> None:
     replace_block_ocr_lines(block, [])
 

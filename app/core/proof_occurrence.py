@@ -14,7 +14,7 @@ from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
 from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
-from app.models.ocr_observation import block_ocr_lines, line_belongs_to_block
+from app.models.ocr_observation import block_ocr_lines, line_belongs_to_block, line_ocr_bbox
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ def proof_line_identity_key(
     line_uid = str(getattr(line, "uid", "") or "")
     if line_idx >= 0 and page_uid and block_uid and line_uid:
         return ("uid", page_uid, block_uid, line_uid)
-    bbox = line.bbox.normalize()
+    bbox = line_ocr_bbox(line).normalize()
     return (
         "geometry",
         str(getattr(page, "display_image_path", "") or ""),

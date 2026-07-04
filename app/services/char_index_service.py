@@ -25,6 +25,7 @@ from app.core.proof_occurrence import (
 )
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars
+from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 
 try:
@@ -149,7 +150,7 @@ def _estimate_char_bbox(line: Line, idx: int, total: int) -> Optional[BBox]:
     """Fallback character bbox estimate when OCR did not provide char boxes."""
     if total <= 0:
         return None
-    bbox = line.bbox
+    bbox = line_ocr_bbox(line)
     if _is_vertical_line(bbox):
         char_h = max(bbox.h / total, 1)
         return BBox(bbox.x, int(bbox.y + idx * char_h), bbox.w, int(char_h))
@@ -185,8 +186,8 @@ class CharEntry:
     def _entry_sort_key(self) -> Tuple[int, int, int, int]:
         return (
             self.page_number,
-            self.line.bbox.y,
-            self.line.bbox.x,
+            line_ocr_bbox(self.line).y,
+            line_ocr_bbox(self.line).x,
             self.char_idx,
         )
 
@@ -432,7 +433,7 @@ class CharIndexService:
     ) -> None:
         for char_idx, glyph in enumerate(text):
             char_obj = line_ocr_char_at(line, char_idx)
-            explicit_bbox = char_obj.bbox or _estimate_char_bbox(line, char_idx, len(text)) or line.bbox
+            explicit_bbox = char_obj.bbox or _estimate_char_bbox(line, char_idx, len(text)) or line_ocr_bbox(line)
             self._maybe_add(
                 glyph,
                 line=line,
@@ -466,9 +467,9 @@ class CharIndexService:
         page_image,
     ) -> None:
         boxes = (
-            refine_line_char_bboxes(line.bbox, text, page_image)
+            refine_line_char_bboxes(line_ocr_bbox(line), text, page_image)
             if page_image is not None
-            else split_line_bbox_into_char_bboxes(line.bbox, text)
+            else split_line_bbox_into_char_bboxes(line_ocr_bbox(line), text)
         )
         for char_idx, glyph in enumerate(text):
             self._maybe_add(
@@ -480,7 +481,7 @@ class CharIndexService:
                 block_order=block_order,
                 block_uid=block_uid,
                 line_idx=line_idx,
-                explicit_bbox=boxes[char_idx] if char_idx < len(boxes) else (_estimate_char_bbox(line, char_idx, len(text)) or line.bbox),
+                explicit_bbox=boxes[char_idx] if char_idx < len(boxes) else (_estimate_char_bbox(line, char_idx, len(text)) or line_ocr_bbox(line)),
                 confidence=line_ocr_confidence(line),
                 seen=seen,
                 bbox_source="fallback",
@@ -527,7 +528,7 @@ class CharIndexService:
                 idx = end
                 continue
 
-            bbox = char_obj.bbox or _estimate_char_bbox(line, idx, len(chars)) or line.bbox
+            bbox = char_obj.bbox or _estimate_char_bbox(line, idx, len(chars)) or line_ocr_bbox(line)
             units.append({
                 "key": glyph,
                 "char_idx": display_idx,
@@ -570,7 +571,7 @@ class CharIndexService:
 
     def _build_digit_unit(self, chars: List[Char], start_idx: int, line: Line) -> dict:
         token = "".join(char.char for char in chars if char.char and not char.char.isspace())
-        bbox = self._merge_bboxes(chars, line.bbox)
+        bbox = self._merge_bboxes(chars, line_ocr_bbox(line))
         confidence = sum(float(char.confidence) for char in chars) / max(1, len(chars))
         return {
             "key": token,
@@ -585,7 +586,7 @@ class CharIndexService:
 
     def _build_formula_unit(self, chars: List[Char], start_idx: int, line: Line) -> dict:
         token = "".join(char.char for char in chars if char.char and not char.char.isspace())
-        bbox = self._merge_bboxes(chars, line.bbox)
+        bbox = self._merge_bboxes(chars, line_ocr_bbox(line))
         confidence = sum(float(char.confidence) for char in chars) / max(1, len(chars))
         return {
             "key": token,
@@ -599,7 +600,7 @@ class CharIndexService:
         }
 
     def _build_word_units(self, chars: List[Char], start_idx: int, line: Line) -> List[dict]:
-        bbox = self._merge_bboxes(chars, line.bbox)
+        bbox = self._merge_bboxes(chars, line_ocr_bbox(line))
         raw_content = [
             (offset, char)
             for offset, char in enumerate(chars)
@@ -624,7 +625,7 @@ class CharIndexService:
                 units.append({
                     "key": glyph,
                     "char_idx": start_idx + offset,
-                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line_ocr_chars(line))) or line.bbox,
+                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line_ocr_chars(line))) or line_ocr_bbox(line),
                     "confidence": float(char.confidence),
                     "bbox_source": char.bbox_source or "fallback",
                     "bbox_granularity": _bbox_granularity_for_index(char),
@@ -693,7 +694,7 @@ class CharIndexService:
         key = (id(line), char_idx, glyph)
         if key in seen:
             return
-        bbox = explicit_bbox or line.bbox
+        bbox = explicit_bbox or line_ocr_bbox(line)
         if bbox is None:
             return
         validation_image = (

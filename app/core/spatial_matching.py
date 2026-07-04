@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Optional, Protocol, TypeVar
 
 from app.models import BBox, Block, Line
+from app.models.ocr_observation import line_ocr_bbox
 
 
 class HasOptionalBBox(Protocol):
@@ -71,9 +72,10 @@ def select_container_block_for_line(
     center_score: float = 0.10,
 ) -> Optional[Block]:
     scored: list[tuple[float, int, int, int, Block]] = []
-    center_x, center_y = bbox_center(line.bbox)
+    line_bbox = line_ocr_bbox(line)
+    center_x, center_y = bbox_center(line_bbox)
     for idx, block in enumerate(blocks):
-        overlap = source_area_overlap_ratio(line.bbox, block.bbox)
+        overlap = source_area_overlap_ratio(line_bbox, block.bbox)
         contains_center = bbox_contains_point(block.bbox, center_x, center_y)
         if overlap < min_overlap and not contains_center:
             continue

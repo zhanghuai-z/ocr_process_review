@@ -24,6 +24,7 @@ from app.export.rules import ExportRules, load_export_rules, normalize_export_fo
 from app.models import BBox, Block, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_block_state import export_origin_for_block
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
+from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 from app.services.export_service import (
     build_export_summary,
@@ -256,7 +257,7 @@ def _line_payload(line: Line, line_index: int) -> dict[str, Any]:
         "line_id": _entity_source_id(line, line_index),
         "text": facts.text,
         "ocr_text": facts.ocr_text,
-        "bbox": _bbox_to_dict(line.bbox),
+        "bbox": _bbox_to_dict(line_ocr_bbox(line)),
         "chars": [
             _char_payload(occurrence.char, f"line-{line_index}-char-{occurrence.char_index}")
             for occurrence in iter_line_ocr_char_occurrences(line)

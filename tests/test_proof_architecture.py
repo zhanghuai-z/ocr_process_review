@@ -475,6 +475,32 @@ def test_ocr_observation_geometry_writes_stay_at_observation_boundaries():
     assert "def replace_line_ocr_char_span" in char_boundary_source
 
 
+def test_ocr_line_bbox_reads_go_through_observation_boundary():
+    allowed = {
+        Path("app/models/ocr_observation.py"),
+        # These use the typed RoutingLine/PaddleRouteLineHint DTOs, not app.models.Line.
+        Path("app/core/layout_routing_contract.py"),
+        Path("app/core/paddle_line_routing.py"),
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if (
+            path in allowed
+            or path.parts[:2] == ("app", "ui")
+            or path.parts[:2] == ("app", "engines")
+        ):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "bbox":
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id == "line":
+                offenders.append(f"{path}:{node.lineno}: line.bbox")
+    assert offenders == []
+
+
 def test_production_code_does_not_construct_line_with_chars_storage():
     allowed = {
         Path("app/models/project.py"),

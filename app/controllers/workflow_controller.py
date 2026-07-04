@@ -45,6 +45,7 @@ from app.models.ocr_character_observation import iter_line_ocr_char_occurrences,
 from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
+    line_ocr_bbox,
     page_has_ocr_result,
     project_all_pages_ocr_done,
     project_has_any_ocr_done_page,
@@ -296,7 +297,7 @@ class WorkflowController(QObject):
                     line.id,
                     line_idx,
                     proof_display_text(line),
-                    self._bbox_signature(line.bbox),
+                    self._bbox_signature(line_ocr_bbox(line)),
                     line_ocr_review_flags(line),
                 ))
                 for char_occurrence in iter_line_ocr_char_occurrences(line):

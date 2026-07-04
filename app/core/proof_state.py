@@ -6,6 +6,7 @@ from typing import Any, Iterable, Optional
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
+from app.models.ocr_observation import line_ocr_bbox
 
 
 TOPIC_LINE_PROOF_CHANGED = "line.proof_changed"
@@ -101,7 +102,7 @@ class ProofLineViewModel:
             ocr_text=facts.ocr_text,
             proof_status=facts.status_value,
             confidence=facts.confidence,
-            bbox=line.bbox,
+            bbox=line_ocr_bbox(line),
             review_flags=facts.review_flags,
             char_count=len(text),
         )

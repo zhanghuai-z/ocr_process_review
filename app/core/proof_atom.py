@@ -17,6 +17,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.models import BBox, Block, BlockType, Char, Line
 from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_confidence
 
 
@@ -189,7 +190,7 @@ def _region_atom(
         kind=kind,
         text=text,
         edit_text=text,
-        bbox=line.bbox,
+        bbox=line_ocr_bbox(line),
         source="layout_region",
         confidence=line_ocr_confidence(line),
         reliable=reliable,

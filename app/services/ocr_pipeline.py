@@ -40,6 +40,7 @@ from app.models.ocr_observation import (
     block_ocr_line_count,
     block_ocr_lines,
     clear_block_ocr_lines,
+    line_ocr_bbox,
     page_ocr_line_count,
     replace_block_ocr_lines,
     set_ocr_line_bbox,
@@ -600,8 +601,8 @@ class OcrPipeline:
     @staticmethod
     def _has_marked_page_line_hints(block: Block) -> bool:
         return any(
-            line.bbox is not None
-            and line.bbox.area > 0
+            line_ocr_bbox(line) is not None
+            and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)
             for line in block_ocr_lines(block)
         )
@@ -613,8 +614,8 @@ class OcrPipeline:
             for target in dispatch_plan.text_blocks
             for block in (target.block,)
             for line in block_ocr_lines(block)
-            if line.bbox is not None
-            and line.bbox.area > 0
+            if line_ocr_bbox(line) is not None
+            and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)
         )
         parts: list[str] = []
@@ -629,7 +630,7 @@ class OcrPipeline:
         bbox_space: str,
     ) -> None:
         for line in lines:
-            set_ocr_line_bbox(line, seam.to_page_bbox(line.bbox, source_space=bbox_space))
+            set_ocr_line_bbox(line, seam.to_page_bbox(line_ocr_bbox(line), source_space=bbox_space))
             for char in line_ocr_chars(line):
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
@@ -643,7 +644,7 @@ class OcrPipeline:
         for block in containers:
             clear_block_ocr_lines(block)
         unmatched: list[Line] = []
-        for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
+        for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
             blocker = select_container_block_for_line(line, blockers)
             if blocker is not None:
                 continue
@@ -680,7 +681,7 @@ class OcrPipeline:
         for block in containers:
             clear_block_ocr_lines(block)
 
-        for line in sorted(lines, key=lambda item: (item.bbox.y, item.bbox.x)):
+        for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
             block = select_container_block_for_line(line, containers)
             if block is not None:
                 append_block_ocr_line(block, line)
@@ -690,7 +691,7 @@ class OcrPipeline:
         self._assign_page_ocr_lines_to_blocks(page, lines)
 
     def _merge_line_bboxes(self, lines: list[Line]) -> BBox | None:
-        return merge_bboxes([line.bbox for line in lines])
+        return merge_bboxes([line_ocr_bbox(line) for line in lines])
 
     def process_block(
         self,

@@ -6,7 +6,7 @@ from app.core.block_attributes import is_position_only_block, semantic_block_typ
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
 from app.models.layout_projection import page_layout_blocks
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_lines, line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 
 
@@ -25,7 +25,7 @@ PROOF_SKIP_LINE_FLAGS = {
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
     text = proof_display_text(line)
-    bbox = line.bbox.normalize()
+    bbox = line_ocr_bbox(line).normalize()
     for seen_text, seen_bbox in seen:
         if text == seen_text and bbox.iou(seen_bbox) >= 0.85:
             return True

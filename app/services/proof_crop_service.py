@@ -14,7 +14,7 @@ from app.core.char_bbox_utils import (
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_lines, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
@@ -92,7 +92,7 @@ class ProofCropService:
         for block in dispatch_plan.text_block_models:
             for line in block_ocr_lines(block):
                 stats.lines += 1
-                old_line_bbox = line.bbox
+                old_line_bbox = line_ocr_bbox(line)
                 old_char_boxes = [
                     char.bbox.to_dict() if char.bbox is not None else None
                     for char in line_ocr_chars(line)
@@ -123,12 +123,12 @@ class ProofCropService:
                             for glyph in text
                         ])
                     elif text:
-                        boxes = split_line_bbox_into_char_bboxes(line.bbox, text)
+                        boxes = split_line_bbox_into_char_bboxes(line_ocr_bbox(line), text)
                         stats.fallback_lines += 1
                         stats.fallback_chars += len(text)
                         replace_line_ocr_chars(line, _complete_positional_chars(line, text, boxes))
 
-                if line.bbox != old_line_bbox:
+                if line_ocr_bbox(line) != old_line_bbox:
                     page_line_updates += 1
                     page_changed = True
 

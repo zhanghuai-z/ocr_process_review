@@ -26,6 +26,7 @@ from app.models.ocr_character_observation import line_ocr_chars, replace_line_oc
 from app.models.ocr_observation import (
     block_ocr_lines,
     iter_project_ocr_line_occurrences,
+    line_ocr_bbox,
     replace_block_ocr_lines,
 )
 from app.models.ocr_text_observation import line_ocr_review_flags
@@ -1246,7 +1247,7 @@ class ProjectStore:
             parent_id=block_id,
             project_id=project_id,
         )
-        bb = line.bbox
+        bb = line_ocr_bbox(line)
         contract = line_text_contract(line)
         values = (
             block_id, contract.text, contract.confidence,
