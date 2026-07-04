@@ -11,7 +11,21 @@
 
 ## 当前兼容点
 
-当前没有登记中的兼容入口。新兼容入口必须先补充到本节，再进入实现。
+当前没有登记中的旧 API / 旧字段读取兼容入口。新兼容入口必须先补充到本节，再进入实现。
+
+注意：这不等于数据模型已经完全物理拆分。当前仍有几组受控的物理投影字段存在，
+它们不是允许新增业务逻辑依赖的兼容入口，而是旧 UI、存储表和当前运行对象之间的
+过渡投影。新代码必须经过对应 boundary/helper 访问，不能直接解释这些字段。
+
+## 当前受控过渡投影
+
+| 投影字段 | 当前真值入口 | 允许存在的原因 | 删除条件 |
+| --- | --- | --- | --- |
+| `Page.blocks` | `LayoutSnapshot` / `layout_snapshot_store` / `app.models.layout_projection` | 旧版面 UI、OCR、导出链路仍消费 block tree；API 版面分析和人工编辑已经先进入 snapshot，再投影回 block tree。 | LayoutPanel、OCR、导出都改为直接消费 `LayoutSnapshot` 或其视图模型；ProjectStore 能持久化 snapshot 而不依赖 block tree 作为主结构。 |
+| `Block.lines` | `app.models.ocr_observation` / `ocr_observation_store` | 旧 UI 和 SQLite `line` 表仍需要行对象投影；业务读写已经收口到 OCR observation boundary。 | HProof/VProof、导出、ProjectStore 和 Hanwang 回写都只读写 OCR observation store；`Block` 不再持有 lines。 |
+| `Line.chars` | `app.models.ocr_character_observation` / `ocr_character_observation_store` | 字符/词/公式 carrier 仍要投影给 proof UI、导出和存储；直接访问已经由架构测试限制。 | CharIndex、ProofAtom、PDF text layer、ProjectStore 都只消费 character observation store；`Line` 不再持有 chars。 |
+| `Line.text` / `Line.ocr_text` / `Line.confidence` / `Line.review_flags` | `app.models.ocr_text_observation` / `line_text_contract()` | 当前 SQLite 行表和部分 OCR producer 仍以 Line 为投影目标；读取口径已收口。 | OCR 原文、置信度、review flags 进入独立 OCR text observation table/store；Line 仅保留 uid/bbox/order 或被视图模型替代。 |
+| `block.raw_payload_json` / `block.app_payload_json` SQLite 列 | `validate_persistent_block_payloads()` 拒绝非空旧 payload | 旧 schema 列仍在数据库中，当前保存固定写 `{}`，加载非空旧 payload 会报错，不再迁移。 | 新项目 schema 不再创建这两列，迁移测试改为验证旧库被拒绝或显式升级工具处理。 |
 
 ## 已清理
 

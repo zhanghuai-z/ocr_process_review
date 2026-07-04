@@ -358,10 +358,11 @@ OCR Hanwang/CharOCR
 
 ### 兼容/过渡层
 
+- `Page.blocks`：当前采用版面投影，不是新输入源的事实入口；API 版面分析、人工编辑和加载路径先同步 `LayoutSnapshot`，再通过 `layout_projection` 投影到旧 block tree。
+- `block.raw_payload_json` / `block.app_payload_json` SQLite 列：保留为旧 schema 空列；当前保存固定写 `{}`，加载非空旧 payload 会被 `validate_persistent_block_payloads()` 拒绝，不再迁移旧项目数据。
 - `Line.text`：仍作为底层 OCR 行文本字段；读取口径已收口到 `line_text_contract()`，新逻辑不应直接解释它。
 - 旧 `line.proof_state`：已退出兼容路径；runtime store 不再消费该 attr，active Line 出现它会被视为模型污染。
 - `Block.lines`：仍是旧 UI/存储投影；业务代码、ProjectStore 和 proof 行定位已改为通过 `app.models.ocr_observation` 访问，运行时事实在 `ocr_observation_store`。
-- 旧 `block.app_payload_json`：不再进入 active `Block` 模型，仅保留 schema 读取边界；非空会被拒绝，不再迁移旧项目。
 
 ## 五、当前仍不健康的职责边界
 

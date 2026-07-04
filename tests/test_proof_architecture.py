@@ -143,6 +143,22 @@ def test_retired_legacy_raw_payload_splitter_is_not_restored():
     assert offenders == []
 
 
+def test_retirement_plan_names_active_physical_projections():
+    source = Path("compatibility-retirement-plan.md").read_text(encoding="utf-8")
+
+    assert "当前没有登记中的兼容入口。" not in source
+    assert "当前受控过渡投影" in source
+    for projection in (
+        "`Page.blocks`",
+        "`Block.lines`",
+        "`Line.chars`",
+        "`Line.text` / `Line.ocr_text`",
+        "`block.raw_payload_json` / `block.app_payload_json`",
+    ):
+        assert projection in source
+    assert "新代码必须经过对应 boundary/helper 访问" in source
+
+
 def test_retired_block_payload_helper_is_not_restored():
     assert not Path("app/core/block_payload.py").exists()
 
