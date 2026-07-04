@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from app.core.proof_projection import build_proof_line_projection
 from app.core.proof_state import ProofUpdateRequest
-from app.models import Page
+from app.models import BBox, Block, BlockType, Line, Page
 from app.services.proof_hproof_session import (
     HProofLineEditSession,
     HProofRuntimeSession,
@@ -27,16 +28,34 @@ def test_hproof_session_keeps_valid_page_selection_and_clears_invalid_one():
 
 def test_hproof_session_debug_flags_and_pending_external_queue_are_explicit():
     session = HProofRuntimeSession()
-    request = ProofUpdateRequest(page_id=None, line_id=None, page_uid="p1", line_uid="l1", status="MODIFIED")
+    line = Line(text="甲", confidence=0.9, bbox=BBox(1, 2, 10, 12))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 30, 30), lines=[line])
+    page = Page(
+        image_path="/tmp/hproof-session-pending.png",
+        width=30,
+        height=30,
+        blocks=[block],
+        page_number=1,
+    )
+    session.projections = [build_proof_line_projection(page, block, line, 0)]
+    request = ProofUpdateRequest(
+        page_id=None,
+        line_id=None,
+        page_uid=page.uid,
+        line_uid=line.uid,
+        status="MODIFIED",
+    )
 
     session.set_debug_flags(formula=True, table=False)
-    session.add_pending_external(request)
+    session.queue_external_refresh(request)
 
     assert session.debug_enabled is True
     assert session.debug_label == "公式"
-    assert session.pending_external_requests == [request]
-    assert session.pop_pending_external() == [request]
-    assert session.pending_external_requests == []
+    assert session.has_pending_external_refresh is True
+    assert session.has_projection_for_request(request) is True
+    plan = session.consume_external_refresh_plan()
+    assert plan.touched_projection_indexes == (0,)
+    assert session.has_pending_external_refresh is False
 
     session.set_debug_flags(formula=False, table=True)
     assert session.debug_label == "表格"
@@ -44,7 +63,7 @@ def test_hproof_session_debug_flags_and_pending_external_queue_are_explicit():
     session.reset()
     assert session.debug_enabled is False
     assert session.debug_label == ""
-    assert session.pending_external_requests == []
+    assert session.has_pending_external_refresh is False
 
 
 def test_hproof_line_edit_session_detects_dirty_conflict_and_rebinds():

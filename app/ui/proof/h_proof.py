@@ -63,7 +63,6 @@ from app.core.proof_state import (
     TOPIC_LINE_PROOF_CHANGED,
     ProofSelection,
     ProofUpdateRequest,
-    proof_request_matches_line,
 )
 from app.core.proof_state_bus import ProofStateBus
 from app.services.proof_probe_text_service import (
@@ -3735,7 +3734,7 @@ class HProofPanel(QWidget):
 
     def _clear_pending_external_refresh(self) -> None:
         self._external_refresh_timer.stop()
-        self._session.clear_pending_external()
+        self._session.clear_pending_external_refresh()
 
     def _render_pages(self, pages: List[Page]) -> None:
         self._clear_pending_external_refresh()
@@ -4201,27 +4200,19 @@ class HProofPanel(QWidget):
             return
         if (request.line_uid or None) is None and request.line_id is None:
             return
-        if not any(
-            proof_request_matches_line(request, projection.line)
-            for projection in self._session.projections
-        ):
+        if not self._session.has_projection_for_request(request):
             return
-        self._session.add_pending_external(request)
+        self._session.queue_external_refresh(request)
         self._external_refresh_timer.start()
 
     def _do_external_refresh(self) -> None:
-        if not self._session.pending_external_requests:
+        plan = self._session.consume_external_refresh_plan()
+        if not plan.has_work:
             return
-        requests = self._session.pop_pending_external()
-        touched_indexes: set[int] = set()
-        for i, projection in enumerate(self._session.projections):
-            if any(proof_request_matches_line(request, projection.line) for request in requests):
-                touched_indexes.add(i)
-        for i in sorted(touched_indexes):
+        for i in plan.touched_projection_indexes:
             if i < len(self._pairs):
                 self._pairs[i].refresh_text()
-        if touched_indexes:
-            self._update_stats()
+        self._update_stats()
 
     def _update_stats(self) -> None:
         projections = self._session.projections

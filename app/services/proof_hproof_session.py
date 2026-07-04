@@ -11,11 +11,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.core.proof_projection import ProofLineProjection
-from app.core.proof_state import ProofUpdateRequest
+from app.core.proof_state import ProofUpdateRequest, proof_request_matches_line
 from app.models import Page
 
 
 PagePredicate = Callable[[Page], bool]
+
+
+@dataclass(frozen=True)
+class HProofExternalRefreshPlan:
+    """External line updates collapsed into HProof projection indexes."""
+
+    touched_projection_indexes: tuple[int, ...] = tuple()
+
+    @property
+    def has_work(self) -> bool:
+        return bool(self.touched_projection_indexes)
 
 
 @dataclass
@@ -27,7 +38,10 @@ class HProofRuntimeSession:
     selected_page_number: int | None = None
     show_formula_debug: bool = False
     show_table_debug: bool = False
-    pending_external_requests: list[ProofUpdateRequest] = field(default_factory=list)
+    _pending_external_requests: list[ProofUpdateRequest] = field(
+        default_factory=list,
+        repr=False,
+    )
 
     def reset(self) -> None:
         self.pages = []
@@ -37,7 +51,7 @@ class HProofRuntimeSession:
         self.selected_page_number = None
         self.show_formula_debug = False
         self.show_table_debug = False
-        self.pending_external_requests.clear()
+        self.clear_pending_external_refresh()
 
     def set_pages(
         self,
@@ -90,16 +104,38 @@ class HProofRuntimeSession:
             labels.append("表格")
         return " / ".join(labels)
 
-    def clear_pending_external(self) -> None:
-        self.pending_external_requests.clear()
+    def clear_pending_external_refresh(self) -> None:
+        self._pending_external_requests.clear()
 
-    def add_pending_external(self, request: ProofUpdateRequest) -> None:
-        self.pending_external_requests.append(request)
+    @property
+    def has_pending_external_refresh(self) -> bool:
+        return bool(self._pending_external_requests)
 
-    def pop_pending_external(self) -> list[ProofUpdateRequest]:
-        requests = self.pending_external_requests
-        self.pending_external_requests = []
-        return requests
+    def has_projection_for_request(self, request: ProofUpdateRequest) -> bool:
+        return any(
+            proof_request_matches_line(request, projection.line)
+            for projection in self.projections
+        )
+
+    def queue_external_refresh(self, request: ProofUpdateRequest) -> None:
+        self._pending_external_requests.append(request)
+
+    def consume_external_refresh_plan(self) -> HProofExternalRefreshPlan:
+        if not self._pending_external_requests:
+            return HProofExternalRefreshPlan()
+        requests = self._pending_external_requests
+        self._pending_external_requests = []
+        touched_indexes = {
+            index
+            for index, projection in enumerate(self.projections)
+            if any(
+                proof_request_matches_line(request, projection.line)
+                for request in requests
+            )
+        }
+        return HProofExternalRefreshPlan(
+            touched_projection_indexes=tuple(sorted(touched_indexes)),
+        )
 
 
 @dataclass

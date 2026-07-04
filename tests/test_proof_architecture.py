@@ -1013,6 +1013,8 @@ def test_hproof_uses_projection_as_single_line_runtime_fact():
     assert "proof_rebuild_gate_for_editor_state" in source
     assert "HProofRuntimeSession" in source
     assert "HProofLineEditSession" in source
+    assert "proof_request_matches_line" not in source
+    assert "consume_external_refresh_plan" in source
     assert "self._session.projections" in source
     assert "self._edit_session" in source
 

@@ -311,14 +311,14 @@ def test_h_proof_render_clears_pending_external_refresh_before_rebuild():
             origin=999,
         )
     )
-    assert h._session.pending_external_requests
+    assert h._session.has_pending_external_refresh is True
 
     # Simulate a full view rebuild before the debounce timer flushes. The new
     # page deliberately reuses the same rowid-only identity so a stale request
     # would refresh the wrong row if the queue survived the rebuild.
     next_proj = _make_project("ab")
     h.load_pages(next_proj.pages)
-    assert h._session.pending_external_requests == []
+    assert h._session.has_pending_external_refresh is False
 
     flags = {"refresh": 0}
     pair = h._pairs[0]
