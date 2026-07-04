@@ -1296,6 +1296,9 @@ def test_layout_routing_service_uses_typed_producer_not_route_dict_apis():
     assert "def build_layout_routing_plan" in producer_source
     build_legacy_source = _function_source(producer_source, "build_layout_line_routes")
     assert "build_layout_routing_plan(block, width, height).lines" in build_legacy_source
+    read_source = _function_source(producer_source, "layout_routing_plan_for_block")
+    assert "block.pop(" not in read_source
+    assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in read_source
 
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():

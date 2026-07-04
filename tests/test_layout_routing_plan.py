@@ -13,6 +13,7 @@ from app.core.paddle_line_routing import (
     ROUTE_SUBBLOCKS_FIELD,
     build_layout_line_routes,
     build_layout_routing_plan,
+    layout_routing_plan_for_block,
 )
 
 
@@ -105,3 +106,37 @@ def test_paddle_routing_producer_builds_typed_plan_before_legacy_records():
     assert plan.has_layout_routes is True
     assert [routing_line_to_record(line) for line in plan.lines] == records
     assert any(segment.kind == "formula" for line in plan.lines for segment in line.segments)
+
+
+def test_layout_routing_plan_ignores_stale_cache_without_mutating_block():
+    stale_cache = [
+        {
+            "bbox": [0, 0, 300, 40],
+            LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+            "segments": [
+                {"kind": "text", "bbox": [0, 0, 70, 40]},
+                {"kind": "formula", "bbox": [70, 0, 100, 40], "text": "$ ^{②} $"},
+                {"kind": "text", "bbox": [100, 0, 300, 40]},
+            ],
+        }
+    ]
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 300, 40],
+        "block_content": "甲 $ ^{②} $ 乙 $ B $ 丙",
+        ROUTE_SUBBLOCKS_FIELD: [
+            {"block_label": "inline_formula", "block_bbox": [70, 0, 100, 30]},
+            {"block_label": "inline_formula", "block_bbox": [170, 0, 200, 30]},
+        ],
+        LAYOUT_LINE_ROUTES_FIELD: stale_cache,
+    }
+
+    plan = layout_routing_plan_for_block(block, 320, 60)
+
+    assert block[LAYOUT_LINE_ROUTES_FIELD] is stale_cache
+    assert [
+        segment.text
+        for line in plan.lines
+        for segment in line.segments
+        if segment.kind == "formula"
+    ] == ["$ B $"]

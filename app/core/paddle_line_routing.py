@@ -1240,12 +1240,13 @@ def layout_routing_plan_for_block(
 ) -> RoutingPlan:
     cached = _normalize_cached_line_routes(block.get(LAYOUT_LINE_ROUTES_FIELD), width, height)
     if cached:
-        if not _routes_are_runtime_ppocr_line_routes(cached):
-            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-        elif _routes_have_marker_formula(cached) and route_subblocks_for_block(block, width, height):
-            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-        else:
-            block[LAYOUT_LINE_ROUTES_FIELD] = cached
+        if (
+            _routes_are_runtime_ppocr_line_routes(cached)
+            and not (
+                _routes_have_marker_formula(cached)
+                and route_subblocks_for_block(block, width, height)
+            )
+        ):
             return _routing_plan_from_line_records(
                 block,
                 width,

@@ -11053,15 +11053,16 @@ def test_paddle_line_routing_has_layout_routes_is_pure():
     assert routes
     assert LAYOUT_LINE_ROUTES_FIELD not in block
 
-    block[LAYOUT_LINE_ROUTES_FIELD] = [
+    stale_routes = [
         {
             "bbox": [90, 0, 120, 30],
             "segments": [{"kind": "text", "bbox": [90, 0, 120, 30], "text": ""}],
         }
     ]
+    block[LAYOUT_LINE_ROUTES_FIELD] = stale_routes
     routes = line_routes_for_block(block, 140, 50)
     assert [route["bbox"] for route in routes] != [[90, 0, 120, 30]]
-    assert block.get(LAYOUT_LINE_ROUTES_FIELD) is None
+    assert block.get(LAYOUT_LINE_ROUTES_FIELD) is stale_routes
 
     print("test_paddle_line_routing_has_layout_routes_is_pure PASSED")
 
