@@ -8,7 +8,7 @@ import numpy as np
 from app.models import BBox, Char, Line
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import set_ocr_line_bbox
-from app.models.ocr_text_observation import line_has_ocr_review_flag
+from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.core.proof_line_facts import proof_display_text
 
 
@@ -490,7 +490,7 @@ def ensure_line_char_bboxes(
         chars = [
             Char(
                 char=glyph,
-                confidence=float(line.confidence),
+                confidence=line_ocr_confidence(line),
                 bbox=None,
                 bbox_source=BBOX_SOURCE_UNAVAILABLE,
                 bbox_granularity=BBOX_GRANULARITY_UNAVAILABLE,
@@ -537,7 +537,7 @@ def ensure_line_char_bboxes(
         confidence = (
             float(existing.confidence)
             if existing is not None
-            else float(line.confidence)
+            else line_ocr_confidence(line)
         )
         char_id = existing.id if existing is not None else None
         bbox_source = (

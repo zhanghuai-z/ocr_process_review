@@ -1249,7 +1249,7 @@ class ProjectStore:
         bb = line.bbox
         contract = line_text_contract(line)
         values = (
-            block_id, contract.text, line.confidence,
+            block_id, contract.text, contract.confidence,
             bb.x, bb.y, bb.w, bb.h,
             contract.ocr_text,
             _review_flags_to_json(list(line_ocr_review_flags(line))),

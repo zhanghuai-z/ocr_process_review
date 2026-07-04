@@ -15,6 +15,7 @@ from app.models.ocr_text_observation import (
 class LineTextContract:
     text: str
     ocr_text: str
+    confidence: float
     proof_state: ProofLineState
 
 
@@ -31,6 +32,7 @@ def line_text_contract(line: object) -> LineTextContract:
     return LineTextContract(
         text=normalized_text,
         ocr_text=ocr_text,
+        confidence=float(observation.confidence or 0.0),
         proof_state=proof_state,
     )
 

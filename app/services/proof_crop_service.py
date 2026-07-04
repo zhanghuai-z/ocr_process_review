@@ -15,7 +15,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines
-from app.models.ocr_text_observation import line_has_ocr_review_flag
+from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
@@ -28,7 +28,7 @@ def _is_tokenized_char(char: Char) -> bool:
 def _fallback_char(glyph: str, line: Line, bbox: BBox | None, source: str, granularity: str) -> Char:
     return Char(
         char=glyph,
-        confidence=float(line.confidence),
+        confidence=line_ocr_confidence(line),
         bbox=bbox,
         bbox_source=source,
         bbox_granularity=granularity,

@@ -18,6 +18,7 @@ from .layout_projection import (
 )
 from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
 from .project import BBox, Block, Line, OcrProject, Page
+from .ocr_text_observation import line_ocr_confidence
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ def block_avg_confidence(block: Block) -> float:
     lines = block_ocr_lines(block)
     if not lines:
         return 0.0
-    return sum(line.confidence for line in lines) / len(lines)
+    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
 
 
 def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:

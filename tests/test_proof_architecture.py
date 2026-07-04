@@ -635,7 +635,7 @@ def test_line_text_facts_access_goes_through_text_contract_boundary():
         Path("app/models/ocr_text_observation.py"),
         Path("app/models/project.py"),
     }
-    forbidden_attrs = {"text", "ocr_text", "final_text", "original_text"}
+    forbidden_attrs = {"text", "ocr_text", "confidence", "final_text", "original_text"}
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
         if (

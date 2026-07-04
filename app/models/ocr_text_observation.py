@@ -51,6 +51,11 @@ def line_ocr_text(line: object) -> str:
     return observation.ocr_text or observation.text
 
 
+def line_ocr_confidence(line: object) -> float:
+    """Return OCR confidence without exposing the physical line projection."""
+    return float(line_ocr_text_observation(line).confidence or 0.0)
+
+
 def line_ocr_review_flags(line: object) -> tuple[str, ...]:
     """Return OCR/route review flags without exposing the physical field."""
     return line_ocr_text_observation(line).review_flags
@@ -122,6 +127,7 @@ __all__ = [
     "append_line_ocr_review_flag_once",
     "create_ocr_text_line",
     "line_has_ocr_review_flag",
+    "line_ocr_confidence",
     "line_ocr_review_flags",
     "line_ocr_text",
     "line_ocr_text_observation",

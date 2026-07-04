@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.core.proof_line_facts import proof_status
 from app.models import Page, ProofStatus
 from app.models.ocr_observation import iter_page_ocr_line_occurrences
+from app.models.ocr_text_observation import line_ocr_confidence
 from app.services.proof_edit_service import ProofEditService
 
 LOW_CONFIDENCE = 0.80
@@ -23,7 +24,7 @@ class ProofAutoFlagService:
                 line = occurrence.line
                 if proof_status(line) in (ProofStatus.MODIFIED, ProofStatus.OK):
                     continue
-                if line.confidence >= self.threshold:
+                if line_ocr_confidence(line) >= self.threshold:
                     continue
                 result = ProofEditService.set_line_status(
                     page,

@@ -25,7 +25,7 @@ from app.core.proof_occurrence import (
 )
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars
-from app.models.ocr_text_observation import line_has_ocr_review_flag
+from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 
 try:
     from pypinyin import Style, lazy_pinyin  # type: ignore
@@ -481,7 +481,7 @@ class CharIndexService:
                 block_uid=block_uid,
                 line_idx=line_idx,
                 explicit_bbox=boxes[char_idx] if char_idx < len(boxes) else (_estimate_char_bbox(line, char_idx, len(text)) or line.bbox),
-                confidence=float(line.confidence),
+                confidence=line_ocr_confidence(line),
                 seen=seen,
                 bbox_source="fallback",
                 bbox_granularity="fallback",

@@ -48,7 +48,7 @@ def proof_line_facts(line: object) -> ProofLineFacts:
         text=text,
         ocr_text=contract.ocr_text,
         status=state.proof_status,
-        confidence=float(getattr(line, "confidence", 0.0) or 0.0),
+        confidence=contract.confidence,
         review_flags=line_ocr_review_flags(line),
         char_count=len(text),
     )
