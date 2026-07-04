@@ -293,6 +293,12 @@ class _TextRoute:
         return self.block_idx, self.line_idx, self.segment_idx
 
 
+@dataclass(frozen=True)
+class _LayoutOcrInputPlan:
+    rows: tuple[dict[str, Any], ...]
+    preserved_manual_blocks: tuple[Block, ...]
+
+
 def _label_from_block(block: dict[str, Any], default: str = "unknown") -> str:
     return route_authority_label(block, default)
 
@@ -3366,7 +3372,7 @@ def _apply_manual_unbound_parent_route(
     _append_manual_route_subblock(parent_row, route_subblock, page.width, page.height)
 
 
-def _page_blocks_from_layout(page: Page) -> list[dict]:
+def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
     entries: list[tuple[Block, dict[str, Any]]] = [
         (block, _layout_row_from_block(page, block))
         for block in page_layout_blocks(page)
@@ -3382,6 +3388,7 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
             parent_rows[parent_index] = row
 
     skip_block_ids: set[int] = set()
+    preserved_manual_blocks: list[Block] = []
     for block, row in entries:
         if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             continue
@@ -3405,6 +3412,8 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
                 block=block,
             )
         skip_block_ids.add(id(block))
+        if is_user_authored_layout_block(block):
+            preserved_manual_blocks.append(block)
 
     blocks: list[dict] = []
     for block in page_layout_blocks(page):
@@ -3412,7 +3421,14 @@ def _page_blocks_from_layout(page: Page) -> list[dict]:
             continue
         row = next(entry_row for entry_block, entry_row in entries if entry_block is block)
         blocks.append(row)
-    return blocks
+    return _LayoutOcrInputPlan(
+        rows=tuple(blocks),
+        preserved_manual_blocks=tuple(preserved_manual_blocks),
+    )
+
+
+def _page_blocks_from_layout(page: Page) -> list[dict]:
+    return [dict(row) for row in _compile_layout_ocr_input_plan(page).rows]
 
 
 def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
@@ -3438,34 +3454,7 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
 
 def _routed_manual_structure_blocks(page: Page) -> list[Block]:
     """Manual structural boxes consumed by parent routing must survive OCR writeback."""
-    entries: list[tuple[Block, dict[str, Any]]] = [
-        (block, _layout_row_from_block(page, block))
-        for block in page_layout_blocks(page)
-    ]
-    parent_rows: dict[int, dict[str, Any]] = {}
-    for _block, row in entries:
-        parent_index = _int_value(row.get("_layout_paddle_parent_index"))
-        if (
-            parent_index >= 0
-            and parent_index not in parent_rows
-            and _row_matches_paddle_parent_record(page, row, parent_index)
-        ):
-            parent_rows[parent_index] = row
-
-    preserved: list[Block] = []
-    for block, row in entries:
-        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
-            continue
-        if not is_user_authored_layout_block(block):
-            continue
-        binding = _binding_payload_from_block(block)
-        parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
-        if parent_row is None:
-            parent_row = _manual_structure_parent_row(entries, block, row, page)
-        if parent_row is None or parent_row is row:
-            continue
-        preserved.append(block)
-    return preserved
+    return list(_compile_layout_ocr_input_plan(page).preserved_manual_blocks)
 
 
 def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
@@ -3637,9 +3626,9 @@ class HanwangMicroRecBlockEngine:
             page,
             progress_callback=progress_callback,
         )
-        preserved_manual_blocks = _routed_manual_structure_blocks(page)
-        layout_blocks = _current_layout_blocks_for_ocr(page)
-        ppvl_blocks = deepcopy(layout_blocks)
+        input_plan = _compile_layout_ocr_input_plan(page)
+        preserved_manual_blocks = list(input_plan.preserved_manual_blocks)
+        ppvl_blocks = deepcopy(list(input_plan.rows))
         if not ppvl_blocks:
             raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
 

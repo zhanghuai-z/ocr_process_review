@@ -1273,6 +1273,15 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     assert "line_routes_for_block" not in source
 
 
+def test_hanwang_recognize_uses_single_layout_ocr_input_plan():
+    source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    assert "class _LayoutOcrInputPlan" in source
+    recognize_source = _function_source(source, "recognize_page_blocks")
+    assert "_compile_layout_ocr_input_plan(page)" in recognize_source
+    assert "_current_layout_blocks_for_ocr(page)" not in recognize_source
+    assert "_routed_manual_structure_blocks(page)" not in recognize_source
+
+
 def test_layout_routing_service_uses_typed_producer_not_route_dict_apis():
     service_source = Path("app/services/layout_routing_plan.py").read_text(encoding="utf-8")
     producer_source = Path("app/core/paddle_line_routing.py").read_text(encoding="utf-8")
