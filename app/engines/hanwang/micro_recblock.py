@@ -106,6 +106,7 @@ from app.models.layout_block_state import (
     block_source_value,
     is_user_authored_layout_block,
     is_user_authored_layout_source,
+    set_layout_block_ocr_policy,
 )
 from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_text_observation import create_ocr_text_line
@@ -3500,7 +3501,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
     }
     block.source_label = "inline_formula"
-    block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
+    set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
     replace_block_ocr_lines(block, [
@@ -3521,7 +3522,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
     if reason:
         flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
     block.source_label = "inline_formula"
-    block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
+    set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, {
             "status": BINDING_EMPTY_REVIEW,
             "source": "paddle_formula_crop_ocr_empty",
@@ -3696,9 +3697,9 @@ class HanwangMicroRecBlockEngine:
                 ocr_audit=ocr_audit,
             )
             replace_block_ocr_lines(new_block, lines)
-            new_block.ocr_policy = default_ocr_policy_for_block(new_block)
+            set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
             if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:
-                new_block.ocr_policy = OcrPolicy.MANUAL_ONLY
+                set_layout_block_ocr_policy(new_block, OcrPolicy.MANUAL_ONLY)
             new_blocks.append(new_block)
 
         if preserved_manual_blocks:

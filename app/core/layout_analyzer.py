@@ -62,6 +62,7 @@ from app.core.paddle_v16_client import (
     is_paddle_v16_endpoint,
 )
 from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
+from app.models.layout_block_state import set_layout_block_ocr_policy
 from app.models.layout_projection import (
     append_page_layout_block,
     page_layout_blocks,
@@ -831,7 +832,7 @@ class LayoutAnalyzer:
                     raw_index=i,
                 ),
             )
-            block.ocr_policy = default_ocr_policy_for_block(block)
+            set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
             append_page_layout_block(page, block)
         self._rescale_blocks_if_suspicious(page)
         return page

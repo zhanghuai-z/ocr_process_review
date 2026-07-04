@@ -1,7 +1,7 @@
 """Helpers for interpreting layout block lifecycle state."""
 from __future__ import annotations
 
-from .enums import BlockSource
+from .enums import BlockSource, OcrPolicy
 from .project import Block
 
 
@@ -31,6 +31,10 @@ def mark_layout_block_manual_draw(block: Block) -> None:
 
 def mark_layout_block_user_edited(block: Block) -> None:
     block.source = BlockSource.USER_EDITED
+
+
+def set_layout_block_ocr_policy(block: Block, policy: OcrPolicy) -> None:
+    block.ocr_policy = policy
 
 
 def is_auto_tightened_layout_block(block: Block) -> bool:

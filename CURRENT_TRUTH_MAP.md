@@ -46,6 +46,7 @@
      - create/delete/change_kind/merge/geometry_update/restore_blocks 是当前用户编辑写入口
      - 负责写 Block 当前 bbox/type/source_label/ocr_policy
      - Block.source 的人工来源标记通过 layout_block_state helper 写入
+     - Block.ocr_policy 的策略落点通过 layout_block_state helper 写入
      - 负责写 PaddleBinding、OCR invalidation、layout_edit_events
      - LayoutPanel 只保留用户意图采集、选区、撤销快照和 overlay 展示
   -> LayoutOverlayService
@@ -120,7 +121,7 @@ OCR Hanwang/CharOCR
 | 块大类 | `Block.block_type` | Paddle 原始 label 直接判断 | UI 和导出看大类。 |
 | Paddle 细标签 | `Block.source_label` / raw label | `Block.block_type` 反推 | 页眉、脚注、公式序号等细分来自 source_label。 |
 | 块来源/编辑态 | `app.models.layout_block_state` helper | 各模块直接比较或写入 `Block.source` | `Block.source` 仍是过渡字段，但人工编辑来源、导出 origin 等语义的解释和用户编辑写入都集中到 helper。 |
-| 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line。 |
+| 是否进文本 OCR | `DispatchPlan` / `should_dispatch_to_text_ocr(block)` / `Block.ocr_policy` / `set_layout_block_ocr_policy()` | `block_type/source_label/raw_payload` 的组合猜测、`Block` 构造副作用、页级流程自己遍历 `page.blocks`、各模块直接写 `block.ocr_policy` | 单块策略由 policy 决定；页级 OCR 入口统一先构建 `DispatchPlan`，公式、表格、图片作为 blocker 不进入正文 proof line；策略计算仍在规则层，写回 Block 必须走 layout_block_state helper。 |
 | 版面编辑写入口 | `LayoutEditCommand` + `LayoutEditService.apply()` | `LayoutPanel` 内部私有 helper、撤销直接替换 `page.blocks`、或直调散参 mutation 方法 | 用户新增、删除、改类型、合并、调框、撤销恢复统一表达为命令，服务内写当前 Block 和审计事件。 |
 | raw overlay 展示/提升 | `LayoutOverlayService` + `NormalizedLayoutArtifact` | `LayoutPanel` 直接读 `raw_layout_records`、`_route_subblocks` | UI 只消费服务输出的 overlay 或新建的 inline formula Block；overlay 服务读取归一化 region，不直接解析 Paddle route dict。 |
 | 页面流程状态 | `app.models.page_state` helper 写入 `Page.status/error_message/ocr_invalidated_reason` | Controller/UI 直接 `page.status = PageStatus...` | 当前仍是单字段 `Page.status`，但状态流转入口已收口，后续拆状态机从该 helper 切入。 |
@@ -177,6 +178,7 @@ OCR Hanwang/CharOCR
 
 - `recognizable` 已退役，OCR 入口不得恢复裸 bool 判断。
 - `Block` 构造不得恢复隐式 OCR policy 推导。
+- `Block.ocr_policy` 的生产流程写入不得恢复散落赋值，必须经 `app.models.layout_block_state.set_layout_block_ocr_policy()`。
 - 页级 OCR 统计、图像读取失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用都应读取同一个 `DispatchPlan`。
 - Page/Project 模型不得恢复 `text_blocks`、`text_ocr_blocks`、`has_unrecognized_blocks` 这类策略 property；统计和导出状态由服务读取 `DispatchPlan`。
 - Block/Page/Project 模型不得恢复 `avg_confidence`、`total_lines`、`has_ocr_result`、`has_any_ocr_result`、`all_pages_ocr_done` 这类 OCR observation summary property；这些读取统一走 `ocr_observation` helper。

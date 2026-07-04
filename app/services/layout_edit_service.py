@@ -15,7 +15,11 @@ from app.core.paddle_artifact_index import (
 )
 from app.models import BBox, Block, BlockType, LayoutEditEvent, OcrPolicy, Page
 from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dict, set_paddle_binding
-from app.models.layout_block_state import mark_layout_block_manual_draw, mark_layout_block_user_edited
+from app.models.layout_block_state import (
+    mark_layout_block_manual_draw,
+    mark_layout_block_user_edited,
+    set_layout_block_ocr_policy,
+)
 from app.models.layout_projection import (
     append_page_layout_block,
     page_layout_blocks,
@@ -278,7 +282,7 @@ class LayoutEditService:
             source_label=source_label,
         )
         mark_layout_block_manual_draw(new_block)
-        new_block.ocr_policy = default_ocr_policy_for_block(new_block)
+        set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
         binding = self.bind_manual_block_to_paddle(page, new_block)
         append_page_layout_block(page, new_block)
         after = {"block": self.block_state(new_block)}
@@ -330,7 +334,7 @@ class LayoutEditService:
         block.block_type = block_type
         block.source_label = source_label
         mark_layout_block_user_edited(block)
-        block.ocr_policy = default_ocr_policy_for_block(block)
+        set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
         binding = self.bind_manual_block_to_paddle(page, block)
         after = {"block": self.block_state(block)}
         self.record_edit(page, "change_kind", block, before=before, after=after)
@@ -366,7 +370,7 @@ class LayoutEditService:
         primary.source_label = source_label
         clear_block_ocr_lines(primary)
         mark_layout_block_user_edited(primary)
-        primary.ocr_policy = default_ocr_policy_for_block(primary)
+        set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
         primary.note = "manual_draw_merge_requires_ocr_rerun"
         mark_ocr_text_invalidated(primary, "manual_draw_merge")
         binding = self.bind_manual_block_to_paddle(page, primary)
@@ -439,7 +443,7 @@ class LayoutEditService:
             next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         block.source_label = source_label
-        block.ocr_policy = OcrPolicy.PRESERVE_AS_FORMULA
+        set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
         for line in block_ocr_lines(block):
             line.bbox = block.bbox
         set_paddle_binding(block, next_binding)
