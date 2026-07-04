@@ -461,6 +461,43 @@ def test_production_code_does_not_construct_line_with_chars_storage():
     assert offenders == []
 
 
+def test_ocr_text_observation_boundary_is_used_by_producers():
+    required_sources = {
+        Path("app/core/ocr_proof_projection.py"),
+        Path("app/engines/hanwang/micro_recblock.py"),
+        Path("app/engines/fake_ocr_engine.py"),
+        Path("app/engines/real_ocr_adapter.py"),
+        Path("app/core/paddle_artifact_index.py"),
+    }
+    for path in required_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "app.models.ocr_text_observation" in source
+
+
+def test_production_code_uses_ocr_text_observation_creator_for_line_text_fields():
+    allowed = {
+        Path("app/models/project.py"),
+        Path("app/models/ocr_text_observation.py"),
+        Path("app/core/project_store.py"),
+    }
+    text_fields = {"text", "ocr_text", "final_text", "original_text"}
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed or path.parts[:2] == ("app", "ui"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Name) or node.func.id != "Line":
+                continue
+            used = sorted(keyword.arg for keyword in node.keywords if keyword.arg in text_fields)
+            if used:
+                offenders.append(f"{path}:{node.lineno}: {','.join(used)}")
+    assert offenders == []
+
+
 def test_production_code_does_not_construct_block_with_lines_storage():
     allowed = {
         Path("app/models/project.py"),

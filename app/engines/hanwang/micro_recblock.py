@@ -108,6 +108,7 @@ from app.models.layout_block_state import (
     is_user_authored_layout_source,
 )
 from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
@@ -2946,11 +2947,11 @@ def _char_to_model(char: CharResult) -> Char:
 def _line_to_model(line: LineResult, width: int, height: int, review_flags: list[str]) -> Line:
     chars = [_char_to_model(char) for char in line.chars]
     merged_review_flags = [*review_flags, *line.review_flags]
-    model = Line(
+    model = create_ocr_text_line(
         text=line.text,
         confidence=line.confidence,
         bbox=_bbox_from_xyxy_tuple(line.bbox, width, height),
-        ocr_text=line.text,
+        source_text=line.text,
         review_flags=merged_review_flags,
     )
     replace_line_ocr_chars(model, chars)
@@ -3503,11 +3504,11 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
     replace_block_ocr_lines(block, [
-        Line(
+        create_ocr_text_line(
             text=text,
             confidence=1.0,
             bbox=block.bbox,
-            ocr_text=text,
+            source_text=text,
             review_flags=[FORMULA_CROP_OCR_REVIEW_FLAG],
         )
     ])
@@ -3534,11 +3535,11 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             "review_flags": flags,
     })
     replace_block_ocr_lines(block, [
-        Line(
+        create_ocr_text_line(
             text="",
             confidence=0.0,
             bbox=block.bbox,
-            ocr_text="",
+            source_text="",
             review_flags=flags,
         )
     ])

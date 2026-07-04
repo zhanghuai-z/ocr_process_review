@@ -9,6 +9,7 @@ import numpy as np
 
 from app.engines import OcrContext
 from app.models import BBox, Line, ProofLineState, ProofStatus
+from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 
 
@@ -39,9 +40,9 @@ class FakeOcrEngine:
                 else ProofStatus.UNCHECKED
             )
 
-            line = Line(
+            line = create_ocr_text_line(
                 text=text,
-                ocr_text=text,
+                source_text=text,
                 confidence=confidence,
                 bbox=BBox(
                     x=10,

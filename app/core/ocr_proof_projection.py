@@ -20,6 +20,7 @@ from app.core.ocr_ir_builder import (
 from app.core.proof_line_mutation import set_line_proof_status
 from app.models import Char, Line
 from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_text_observation import create_ocr_text_line
 
 
 ProofStatusFactory = Callable[[OcrIrLine], object | None]
@@ -115,11 +116,11 @@ def project_ocr_line_to_proof_line(
     proof_status: object | None = None,
 ) -> Line:
     """Project one OCR observation line into the current proof line model."""
-    line = Line(
+    line = create_ocr_text_line(
         text=ir_line.text,
         confidence=float(ir_line.confidence),
         bbox=ir_line.bbox,
-        ocr_text=ir_line.source_text or ir_line.text,
+        source_text=ir_line.source_text or ir_line.text,
         review_flags=list(ir_line.review_flags),
     )
     replace_line_ocr_chars(

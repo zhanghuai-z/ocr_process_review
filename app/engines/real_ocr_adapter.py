@@ -20,6 +20,7 @@ from app.core.proof_status import normalize_confidence, proof_status_for
 from app.engines import OcrContext
 from app.core.logging import get_logger
 from app.models import BBox, Line, ProofLineState
+from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 from app.core.app_config import get_config
 
@@ -91,7 +92,7 @@ class LocalOcrEngine:
             )
             if bbox.area <= 0:
                 continue
-            line = Line(
+            line = create_ocr_text_line(
                 text=text,
                 confidence=float(score),
                 bbox=bbox,

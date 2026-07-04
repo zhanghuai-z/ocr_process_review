@@ -68,6 +68,7 @@
 - `Block.app_payload` 已从 active model 删除。
 - `Block.lines` 的业务访问、ProjectStore 读写、proof 行定位和 OCR 生产投影已迁移到 `app.models.ocr_observation`；生产代码不再用 `Block(lines=...)` 构造 OCR 行观察；当前字段仍作为内部过渡存储，后续可替换为独立 OCR observation store。
 - `Line.chars` 的业务访问、ProjectStore 读写、ProofAtom 构建、CharIndex 构建、Export IR、ProofCrop 补框、OCR IR 投影和 Hanwang 投影已迁移到 `app.models.ocr_character_observation`；生产代码不再用 `Line(chars=...)` 构造 OCR 字符观察；当前字段仍作为内部字符观察投影，后续可替换为独立 char observation store。
+- `Line.text/ocr_text` 的 OCR 生产写入口已收口到 `app.models.ocr_text_observation.create_ocr_text_line()`；OCR IR、Hanwang、fake/local OCR、Paddle manual binding 不再手写 `Line(text=..., ocr_text=...)`。
 - UI 字符显示已收口到 `proof_char_text.char_display_text()`，避免直接把 `Char.token_text` 当单字符显示文本。
 - `Page.status/error_message/ocr_invalidated_reason` 的写入口已收口到 `app.models.page_state`。
 - `LayoutPanel` 用户版面编辑入口已收口到 `LayoutEditCommand` + `LayoutEditService.apply()`；UI 只负责采集用户动作、维护撤销/选择态和刷新画布。

@@ -7,6 +7,7 @@ from typing import Any
 from app.core.bbox_extraction import bbox_from_variant
 from app.models.block_state import set_paddle_binding
 from app.models.ocr_observation import clear_block_ocr_lines, replace_block_ocr_lines
+from app.models.ocr_text_observation import create_ocr_text_line
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,
@@ -19,7 +20,7 @@ from app.core.paddle_line_routing import (
     vertical_overlap_ratio,
 )
 from app.core.normalized_layout_artifact import LayoutRegion, normalized_layout_regions
-from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrPolicy
+from app.models import BBox, Block, BlockOrigin, BlockType, OcrPolicy
 
 
 XYXY = tuple[int, int, int, int]
@@ -577,11 +578,11 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
     block.ocr_policy = binding.ocr_policy
     if binding.text:
         replace_block_ocr_lines(block, [
-            Line(
+            create_ocr_text_line(
                 text=binding.text,
                 confidence=0.0,
                 bbox=block.bbox,
-                ocr_text=binding.text,
+                source_text=binding.text,
                 review_flags=list(binding.review_flags),
             )
         ])
