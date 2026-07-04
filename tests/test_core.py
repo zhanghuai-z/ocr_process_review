@@ -10775,6 +10775,7 @@ def test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt():
 def test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.core.paddle_line_routing import line_routes_for_block, text_slice_routes_for_block
+    from app.core.raw_ocr_artifact import layout_records_with_route_attachments
     from app.models import Page
 
     project_root = Path(__file__).resolve().parents[1]
@@ -10788,7 +10789,7 @@ def test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero():
     )
     LayoutAnalyzer()._extract_api_blocks(page, raw["response"])
 
-    parent = _raw_layout_records(page)[12]
+    parent = layout_records_with_route_attachments(page)[12]
     routes = line_routes_for_block(parent, page.width, page.height)
     formula_segments = [
         segment
@@ -11151,6 +11152,7 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
         ROUTE_SUBBLOCKS_FIELD,
         line_routes_for_block,
     )
+    from app.core.raw_ocr_artifact import layout_records_with_route_attachments
     from app.models import Page
 
     project_root = Path(__file__).resolve().parents[1]
@@ -11181,8 +11183,9 @@ def test_layout_fixture_routes_skip_parents_and_collapse_formula_row_bands():
     assert all(ROUTE_SUBBLOCKS_FIELD not in record for record in skip_records)
     assert all(LAYOUT_LINE_ROUTES_FIELD not in record for record in skip_records)
 
+    routed_records = layout_records_with_route_attachments(page)
     text_record = next(
-        record for record in _raw_layout_records(page)
+        record for record in routed_records
         if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
     )
     assert len(text_record[ROUTE_SUBBLOCKS_FIELD]) == 7
@@ -11216,6 +11219,7 @@ def test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
         LAYOUT_LINE_ROUTES_FIELD,
         attach_page_ocr_line_routes,
     )
+    from app.core.raw_ocr_artifact import layout_records_with_route_attachments
     from app.models import BBox, Line, Page
 
     project_root = Path(__file__).resolve().parents[1]
@@ -11255,14 +11259,15 @@ def test_layout_fixture_page_ocr_routes_do_not_shift_after_missing_formula_box()
             )
         )
 
+    routed_records = layout_records_with_route_attachments(page)
     attach_page_ocr_line_routes(
-        _raw_layout_records(page),
+        routed_records,
         page_ocr_lines,
         page.width,
         page.height,
     )
     text_record = next(
-        record for record in _raw_layout_records(page)
+        record for record in routed_records
         if record.get("block_label") == "text" and "$ Y_{ct} $" in str(record.get("block_content") or "")
     )
     formula_texts = [
