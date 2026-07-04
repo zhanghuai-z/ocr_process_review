@@ -2,8 +2,8 @@
 
 ``LayoutSnapshot`` is the adopted layout state for a page. It is separate from
 the current ``Page.blocks`` projection so importers, editors, OCR, and export
-can converge on a stable model before the legacy block tree is physically
-removed.
+can converge on snapshot-aware view models before the runtime block projection
+is physically removed.
 """
 from __future__ import annotations
 

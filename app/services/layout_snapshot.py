@@ -1,8 +1,9 @@
-"""Compile layout snapshots and project them to the legacy block tree.
+"""Compile layout snapshots and project them to the current block projection.
 
 ``LayoutSnapshot`` is the application-level layout adopted for a page. External
 artifacts such as PaddleOCR-VL or vector PDF extraction are normalized first.
-``Page.blocks`` remains a compatibility projection for existing UI/OCR code.
+``Page.blocks`` remains the runtime projection consumed by existing UI/OCR/export
+code; new layout inputs should still enter through ``LayoutSnapshot`` first.
 """
 from __future__ import annotations
 

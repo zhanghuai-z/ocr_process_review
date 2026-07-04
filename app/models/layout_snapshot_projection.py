@@ -1,4 +1,4 @@
-"""Projection helpers between ``LayoutSnapshot`` and legacy ``Page.blocks``."""
+"""Projection helpers between ``LayoutSnapshot`` and current ``Page.blocks``."""
 from __future__ import annotations
 
 from .layout_projection import page_layout_blocks, replace_page_layout_blocks

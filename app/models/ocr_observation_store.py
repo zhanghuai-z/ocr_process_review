@@ -1,8 +1,8 @@
 """Runtime store for OCR line observations.
 
-``Block.lines`` still exists as a compatibility projection for legacy UI and
-storage code. This store keeps the active OCR line observation list outside the
-layout block object so OCR facts can move without adding another field to
+``Block.lines`` still exists as the runtime projection consumed by current UI
+and storage code. This store keeps the active OCR line observation list outside
+the layout block object so OCR facts can move without adding another field to
 ``Block``.
 """
 from __future__ import annotations

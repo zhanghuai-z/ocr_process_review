@@ -417,6 +417,22 @@ def test_layout_projection_boundary_is_used_by_core_consumers():
         assert "app.models.layout_projection" in source or "from .layout_projection" in source
 
 
+def test_layout_snapshot_docs_do_not_name_current_projection_legacy():
+    checked = {
+        Path("app/services/layout_snapshot.py"),
+        Path("app/models/layout_snapshot.py"),
+        Path("app/models/layout_snapshot_projection.py"),
+        Path("app/models/layout_snapshot_store.py"),
+        Path("app/models/ocr_observation_store.py"),
+    }
+    offenders = [
+        str(path)
+        for path in checked
+        if "legacy" in path.read_text(encoding="utf-8").lower()
+    ]
+    assert offenders == []
+
+
 def test_line_ocr_chars_access_goes_through_character_observation_boundary():
     allowed = {
         Path("app/models/ocr_character_observation.py"),
