@@ -41,6 +41,7 @@ from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     page_has_ocr_result,
@@ -297,11 +298,12 @@ class WorkflowController(QObject):
                     self._bbox_signature(line.bbox),
                     tuple(line.review_flags),
                 ))
-                for char_idx, char in enumerate(line.chars):
+                for char_occurrence in iter_line_ocr_char_occurrences(line):
+                    char = char_occurrence.char
                     parts.append((
                         "char",
                         char.uid,
-                        char_idx,
+                        char_occurrence.char_index,
                         char.char,
                         self._bbox_signature(char.bbox),
                         char.bbox_source,
@@ -1211,7 +1213,7 @@ class WorkflowController(QObject):
             for page in pages:
                 for _block, line, _line_idx in iter_unique_page_text_lines(page):
                     line_fallback_chars = 0
-                    for char in line.chars:
+                    for char in line_ocr_chars(line):
                         source = (char.bbox_source or "").strip().lower()
                         granularity = (char.bbox_granularity or "").strip().lower()
                         if source in {"fallback", "unavailable"} or granularity in {"fallback", "unavailable", "line"}:

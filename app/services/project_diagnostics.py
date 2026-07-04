@@ -13,6 +13,7 @@ from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
 from app.models.layout_projection import page_layout_blocks
+from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines
 
 
@@ -138,18 +139,18 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
                     line,
                     line_idx,
                 )
-                for char_idx, char in enumerate(line.chars or []):
+                for occurrence in iter_line_ocr_char_occurrences(line):
                     _record_uid(
                         buckets["char"],
-                        char.uid,
+                        occurrence.char.uid,
                         page,
                         page_idx,
                         block,
                         block_idx,
                         line,
                         line_idx,
-                        char,
-                        char_idx,
+                        occurrence.char,
+                        occurrence.char_index,
                     )
     for kind, values in buckets.items():
         for uid, locations in values.items():
@@ -202,7 +203,7 @@ def _diagnose_line_char_contract(project: OcrProject) -> list[ProjectDiagnosticI
     issues: list[ProjectDiagnosticIssue] = []
     for page, block, line, _block_idx, _line_idx in _iter_lines(project):
         display_text = proof_display_text(line)
-        chars = list(line.chars or [])
+        chars = list(line_ocr_chars(line))
         if display_text and not chars:
             issues.append(_line_issue(
                 "warning",

@@ -24,6 +24,7 @@ from app.core.proof_occurrence import (
     proof_page_identity_key,
 )
 from app.models import BBox, Char, Line, OcrProject, Page
+from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars
 
 try:
     from pypinyin import Style, lazy_pinyin  # type: ignore
@@ -242,10 +243,11 @@ class CharIndexService:
         text = proof_display_text(line)
         if not text:
             return False
-        has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
-        if not line.chars or (len(line.chars) != len(text) and not has_tokenized_chars):
+        chars = line_ocr_chars(line)
+        has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
+        if not chars or (len(chars) != len(text) and not has_tokenized_chars):
             return True
-        return any(self._explicit_bbox_needs_validation(char.bbox) for char in line.chars)
+        return any(self._explicit_bbox_needs_validation(char.bbox) for char in chars)
 
     def _page_needs_image(self, page: Page) -> bool:
         return any(
@@ -327,8 +329,9 @@ class CharIndexService:
         if not text:
             return
 
-        has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
-        if not line.chars:
+        chars = line_ocr_chars(line)
+        has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
+        if not chars:
             self._index_fallback_line(
                 text=text,
                 line=line,
@@ -341,12 +344,12 @@ class CharIndexService:
                 page_image=page_image,
             )
             return
-        if has_tokenized_chars and chars_display_text(line.chars) != text:
+        if has_tokenized_chars and chars_display_text(chars) != text:
             return
-        if len(line.chars) != len(text) and not has_tokenized_chars:
+        if len(chars) != len(text) and not has_tokenized_chars:
             return
 
-        if not has_tokenized_chars and any((char.char or "") != text[idx] for idx, char in enumerate(line.chars)):
+        if not has_tokenized_chars and any((char.char or "") != text[idx] for idx, char in enumerate(chars)):
             if self._mismatched_line_geometry_is_untrusted(line, text):
                 return
             self._index_positional_line(
@@ -392,10 +395,11 @@ class CharIndexService:
         physical rows.  VProof should skip that line instead of showing
         thumbnails from unrelated positions.
         """
-        if not line.chars or len(line.chars) != len(text):
+        chars = line_ocr_chars(line)
+        if not chars or len(chars) != len(text):
             return True
         mismatches = [
-            char for idx, char in enumerate(line.chars)
+            char for idx, char in enumerate(chars)
             if (char.char or "") != text[idx]
         ]
         if not mismatches:
@@ -426,7 +430,7 @@ class CharIndexService:
         page_image,
     ) -> None:
         for char_idx, glyph in enumerate(text):
-            char_obj = line.chars[char_idx]
+            char_obj = line_ocr_char_at(line, char_idx)
             explicit_bbox = char_obj.bbox or _estimate_char_bbox(line, char_idx, len(text)) or line.bbox
             self._maybe_add(
                 glyph,
@@ -487,7 +491,7 @@ class CharIndexService:
 
     def _iter_index_units(self, line: Line) -> List[dict]:
         units: List[dict] = []
-        chars = line.chars
+        chars = line_ocr_chars(line)
         text = proof_display_text(line)
         idx = 0
         display_idx = 0
@@ -619,7 +623,7 @@ class CharIndexService:
                 units.append({
                     "key": glyph,
                     "char_idx": start_idx + offset,
-                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line.chars)) or line.bbox,
+                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line_ocr_chars(line))) or line.bbox,
                     "confidence": float(char.confidence),
                     "bbox_source": char.bbox_source or "fallback",
                     "bbox_granularity": _bbox_granularity_for_index(char),

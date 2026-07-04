@@ -13,6 +13,7 @@ from app.core.char_bbox_utils import (
 )
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Char, Line, OcrProject, Page
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
@@ -36,7 +37,7 @@ def _fallback_char(glyph: str, line: Line, bbox: BBox | None, source: str, granu
 
 def _complete_positional_chars(line: Line, text: str, boxes: list[BBox] | None) -> list[Char]:
     completed: list[Char] = []
-    existing = list(line.chars)
+    existing = list(line_ocr_chars(line))
     for idx, glyph in enumerate(text):
         current = existing[idx] if idx < len(existing) else None
         if current is not None and current.char == glyph and current.bbox is not None:
@@ -93,15 +94,16 @@ class ProofCropService:
                 old_line_bbox = line.bbox
                 old_char_boxes = [
                     char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line.chars
+                    for char in line_ocr_chars(line)
                 ]
 
-                has_tokenized_chars = any(_is_tokenized_char(char) for char in line.chars)
+                chars = line_ocr_chars(line)
+                has_tokenized_chars = any(_is_tokenized_char(char) for char in chars)
                 needs_fallback_chars = (
-                    not line.chars
+                    not chars
                     or (
                         not has_tokenized_chars
-                        and len(line.chars) != len(proof_display_text(line))
+                        and len(chars) != len(proof_display_text(line))
                     )
                 )
                 if needs_fallback_chars and INLINE_FORMULA_REVIEW_FLAG not in line.review_flags:
@@ -109,7 +111,7 @@ class ProofCropService:
                     if text and MISSING_LINE_BBOX_FLAG in line.review_flags:
                         stats.fallback_lines += 1
                         stats.unavailable_chars += len(text)
-                        line.chars = [
+                        replace_line_ocr_chars(line, [
                             _fallback_char(
                                 glyph,
                                 line,
@@ -118,12 +120,12 @@ class ProofCropService:
                                 BBOX_GRANULARITY_UNAVAILABLE,
                             )
                             for glyph in text
-                        ]
+                        ])
                     elif text:
                         boxes = split_line_bbox_into_char_bboxes(line.bbox, text)
                         stats.fallback_lines += 1
                         stats.fallback_chars += len(text)
-                        line.chars = _complete_positional_chars(line, text, boxes)
+                        replace_line_ocr_chars(line, _complete_positional_chars(line, text, boxes))
 
                 if line.bbox != old_line_bbox:
                     page_line_updates += 1
@@ -131,7 +133,7 @@ class ProofCropService:
 
                 new_char_boxes = [
                     char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line.chars
+                    for char in line_ocr_chars(line)
                 ]
                 if new_char_boxes != old_char_boxes:
                     page_char_updates += 1

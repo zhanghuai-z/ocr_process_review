@@ -52,6 +52,7 @@ from app.core.proof_state import TOPIC_PROBE_OBSERVED
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
 from app.models.layout_projection import page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_char_count
 from app.models.ocr_observation import (
     block_has_ocr_lines,
     block_ocr_line_at,
@@ -351,9 +352,9 @@ class ProbeStore:
 
 def _has_existing_cut_char(line: Line, idx: int) -> bool:
     text = proof_display_text(line)
-    if not (0 <= idx < len(text) and 0 <= idx < len(line.chars)):
+    if not (0 <= idx < len(text) and 0 <= idx < line_ocr_char_count(line)):
         return False
-    ch = line.chars[idx]
+    ch = line_ocr_char_at(line, idx)
     if ch.char != text[idx]:
         return False
     bbox = ch.bbox

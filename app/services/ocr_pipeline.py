@@ -33,6 +33,7 @@ from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
 from app.models.layout_projection import append_page_layout_block, page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     append_block_ocr_line,
     block_ocr_line_count,
@@ -633,7 +634,7 @@ class OcrPipeline:
                 line.bbox,
                 source_space=bbox_space,
             )
-            for char in line.chars:
+            for char in line_ocr_chars(line):
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
                 char.bbox = seam.to_page_bbox(

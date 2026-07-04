@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from app.models import BBox, Char, Line
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.core.proof_line_facts import proof_display_text
 
 
@@ -480,11 +481,11 @@ def ensure_line_char_bboxes(
     """确保 line.chars 至少拥有与文本长度一致的 page-space bbox。"""
     text = proof_display_text(line)
     if not text:
-        line.chars = []
+        replace_line_ocr_chars(line, [])
         return []
 
     if MISSING_LINE_BBOX_FLAG in line.review_flags:
-        line.chars = [
+        chars = [
             Char(
                 char=glyph,
                 confidence=float(line.confidence),
@@ -495,7 +496,8 @@ def ensure_line_char_bboxes(
             )
             for glyph in text
         ]
-        return line.chars
+        replace_line_ocr_chars(line, chars)
+        return chars
 
     refined_line_bbox = (
         refine_line_bbox(line.bbox, page_image)
@@ -509,8 +511,9 @@ def ensure_line_char_bboxes(
         else split_line_bbox_into_char_bboxes(refined_line_bbox, text)
     )
     chars: List[Char] = []
+    existing_chars = line_ocr_chars(line)
     for idx, glyph in enumerate(text):
-        existing = line.chars[idx] if idx < len(line.chars) else None
+        existing = existing_chars[idx] if idx < len(existing_chars) else None
         has_explicit_bbox = (
             existing is not None
             and existing.bbox is not None
@@ -559,5 +562,5 @@ def ensure_line_char_bboxes(
             bbox_granularity=bbox_granularity,
             token_text=token_text,
         ))
-    line.chars = chars
+    replace_line_ocr_chars(line, chars)
     return chars

@@ -89,6 +89,36 @@ def test_layout_projection_boundary_tracks_current_page_blocks():
     ] == [(formula, 0), (text, 1)]
 
 
+def test_ocr_character_observation_boundary_tracks_current_line_chars():
+    from app.models import BBox, Char, Line
+    from app.models.ocr_character_observation import (
+        clear_line_ocr_chars,
+        iter_line_ocr_char_occurrences,
+        line_has_ocr_chars,
+        line_ocr_char_at,
+        line_ocr_char_count,
+        line_ocr_chars,
+        replace_line_ocr_chars,
+    )
+
+    line = Line(text="甲乙", confidence=0.95, bbox=BBox(0, 0, 20, 10))
+    first = Char(char="甲", confidence=0.95, bbox=BBox(0, 0, 10, 10))
+    second = Char(char="乙", confidence=0.96, bbox=BBox(10, 0, 10, 10))
+
+    assert not line_has_ocr_chars(line)
+    replace_line_ocr_chars(line, [first, second])
+    assert line_ocr_chars(line) == [first, second]
+    assert line_ocr_char_count(line) == 2
+    assert line_ocr_char_at(line, 1) is second
+    assert [
+        (occurrence.char, occurrence.char_index)
+        for occurrence in iter_line_ocr_char_occurrences(line)
+    ] == [(first, 0), (second, 1)]
+
+    clear_line_ocr_chars(line)
+    assert line_ocr_chars(line) == []
+
+
 def test_raw_block_payload_prefers_page_artifact_origin_record():
     from app.core.raw_ocr_artifact import raw_block_payload, raw_block_text_values
     from app.models import BBox, Block, BlockOrigin, BlockType, Page

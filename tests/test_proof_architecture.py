@@ -398,6 +398,49 @@ def test_layout_projection_boundary_is_used_by_core_consumers():
         assert "app.models.layout_projection" in source or "from .layout_projection" in source
 
 
+def test_line_ocr_chars_access_goes_through_character_observation_boundary():
+    allowed = {
+        Path("app/models/ocr_character_observation.py"),
+        Path("app/models/project.py"),
+    }
+    line_like_names = {
+        "line",
+        "candidate",
+    }
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if (
+            path in allowed
+            or path.parts[:2] == ("app", "ui")
+            or path.parts[:2] == ("app", "engines")
+        ):
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr != "chars":
+                continue
+            owner = node.value
+            if isinstance(owner, ast.Name) and owner.id in line_like_names:
+                offenders.append(f"{path}:{node.lineno}")
+    assert offenders == []
+
+
+def test_character_observation_boundary_is_used_by_core_consumers():
+    required_sources = {
+        Path("app/core/char_bbox_utils.py"),
+        Path("app/core/project_store.py"),
+        Path("app/core/proof_atom.py"),
+        Path("app/services/char_index_service.py"),
+        Path("app/services/proof_crop_service.py"),
+        Path("app/services/proof_probe_text_service.py"),
+        Path("app/export/ir_builder.py"),
+    }
+    for path in required_sources:
+        source = path.read_text(encoding="utf-8")
+        assert "app.models.ocr_character_observation" in source
+
+
 def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
     probe_source = Path("app/services/proof_probe_text_service.py").read_text(encoding="utf-8")
     persist_source = Path("app/services/proof_persistence_service.py").read_text(encoding="utf-8")

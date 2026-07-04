@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_lines,
     iter_project_ocr_line_occurrences,
@@ -423,12 +424,13 @@ def _origin_from_current_block(block: Block) -> BlockOrigin:
 
 
 def _proof_alignment_state(line: Line, display_text: str | None = None) -> str:
-    if not line.chars:
+    chars = line_ocr_chars(line)
+    if not chars:
         return "line_only"
     try:
         from app.core.proof_char_text import chars_display_text
         text = display_text if display_text is not None else line_text_contract(line).text
-        return "aligned" if chars_display_text(line.chars) == text else "degraded"
+        return "aligned" if chars_display_text(chars) == text else "degraded"
     except Exception:
         return "degraded"
 
@@ -1276,7 +1278,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_char_ids: set[int] = set()
-        for char in line.chars:
+        for char in line_ocr_chars(line):
             self._ensure_unique_child_uid(
                 cur,
                 char,
@@ -1477,7 +1479,7 @@ class ProjectStore:
         }
         saved_char_ids: set[int] = set()
         seen_uids: set[str] = set()
-        for char in line.chars:
+        for char in line_ocr_chars(line):
             self._ensure_unique_child_uid(
                 cur,
                 char,
@@ -1750,7 +1752,7 @@ class ProjectStore:
                     field="line.review_flags_json",
                 ),
             )
-            line.chars = self._load_chars(line.id)
+            replace_line_ocr_chars(line, self._load_chars(line.id))
             lines.append(line)
         return lines
 

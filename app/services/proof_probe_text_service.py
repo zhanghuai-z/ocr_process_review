@@ -23,6 +23,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 
 from app.models import Block, Line, Page
+from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import find_block_ocr_line_index
 from app.core import quality_probe as qp
 from app.core.proof_char_text import chars_display_spans, is_display_carrier
@@ -267,7 +268,7 @@ def _sync_chars_glyphs(line: Line, new_text: str) -> None:
     显示 span 回写。若无法无损对齐，就不改 chars；下游 ProofAtom/CharIndex
     会根据 mismatch 降级，避免旧 carrier 被当成可靠事实继续传播。
     """
-    chars = getattr(line, "chars", None) or []
+    chars = line_ocr_chars(line)
     if not chars:
         return
     actions = _char_sync_actions(chars, new_text)

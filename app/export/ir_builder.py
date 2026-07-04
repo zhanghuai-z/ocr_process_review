@@ -23,6 +23,7 @@ from app.export.ir import (
 from app.export.rules import ExportRules, load_export_rules, normalize_export_format
 from app.models import BBox, Block, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_block_state import export_origin_for_block
+from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
 from app.services.export_service import (
     build_export_summary,
     iter_export_blocks,
@@ -256,8 +257,8 @@ def _line_payload(line: Line, line_index: int) -> dict[str, Any]:
         "ocr_text": facts.ocr_text,
         "bbox": _bbox_to_dict(line.bbox),
         "chars": [
-            _char_payload(char, f"line-{line_index}-char-{char_index}")
-            for char_index, char in enumerate(line.chars)
+            _char_payload(occurrence.char, f"line-{line_index}-char-{occurrence.char_index}")
+            for occurrence in iter_line_ocr_char_occurrences(line)
         ],
         "confidence": facts.confidence,
         "status": facts.status_value,
@@ -319,9 +320,9 @@ def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
         block_ids=[_entity_source_id(block, f"p{page.page_number}-block-{block.order}")],
         line_ids=[_entity_source_id(line, idx) for idx, line in enumerate(lines)],
         char_ids=[
-            _entity_source_id(char, f"line-{line_idx}-char-{char_idx}")
+            _entity_source_id(occurrence.char, f"line-{line_idx}-char-{occurrence.char_index}")
             for line_idx, line in enumerate(lines)
-            for char_idx, char in enumerate(line.chars)
+            for occurrence in iter_line_ocr_char_occurrences(line)
         ],
         block_type=block.block_type.value,
         source_label=attrs.source_label,
