@@ -713,6 +713,10 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     assert "routing_plan_for_block_record(block, width, height).has_layout_routes" in has_routes_source
     assert "has_layout_line_routes(" not in has_routes_source
 
+    assemble_routes_source = functions["_assemble_layout_route_lines"]
+    assert "routing_plan_for_block_record(block, width, height).lines" in assemble_routes_source
+    assert "line_routes_for_block(block" not in assemble_routes_source
+
 
 def test_deleted_inline_formula_state_is_layout_event_not_raw_mutation():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")

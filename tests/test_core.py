@@ -9424,15 +9424,17 @@ def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
         LineResult,
         _assemble_layout_route_line,
     )
+    from app.services.layout_routing_plan import RoutingLine, RoutingSegment
 
-    route = {
-        "bbox": [0, 0, 130, 50],
-        "segments": [
-            {"kind": "text", "bbox": [0, 0, 40, 50]},
-            {"kind": "formula", "bbox": [40, 0, 80, 50], "text": "$ A $"},
-            {"kind": "text", "bbox": [80, 0, 130, 50]},
-        ],
-    }
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 130, 50),
+        segments=(
+            RoutingSegment(kind="text", bbox=(0, 0, 40, 50)),
+            RoutingSegment(kind="formula", bbox=(40, 0, 80, 50), text="$ A $"),
+            RoutingSegment(kind="text", bbox=(80, 0, 130, 50)),
+        ),
+    )
     grouped_lines = {
         (0, 0, 0): [
             LineResult(
@@ -9476,16 +9478,18 @@ def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
         LineResult,
         _assemble_layout_route_line,
     )
+    from app.services.layout_routing_plan import RoutingLine, RoutingSegment
 
-    route = {
-        "bbox": [199, 556, 1453, 620],
-        "segments": [
-            {"kind": "text", "bbox": [199, 556, 445, 620]},
-            {"kind": "formula", "bbox": [445, 556, 884, 620], "text": ""},
-            {"kind": "text", "bbox": [884, 556, 1242, 620]},
-            {"kind": "formula", "bbox": [1242, 562, 1453, 620], "text": ""},
-        ],
-    }
+    route = RoutingLine(
+        index=0,
+        bbox=(199, 556, 1453, 620),
+        segments=(
+            RoutingSegment(kind="text", bbox=(199, 556, 445, 620)),
+            RoutingSegment(kind="formula", bbox=(445, 556, 884, 620), text=""),
+            RoutingSegment(kind="text", bbox=(884, 556, 1242, 620)),
+            RoutingSegment(kind="formula", bbox=(1242, 562, 1453, 620), text=""),
+        ),
+    )
     grouped_lines = {
         (0, 0, 0): [
             LineResult(

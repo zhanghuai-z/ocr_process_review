@@ -65,7 +65,7 @@ from app.core.paddle_line_routing import (
     union_xyxy,
     vertical_overlap_ratio,
 )
-from app.services.layout_routing_plan import routing_plan_for_block_record
+from app.services.layout_routing_plan import RoutingLine, routing_plan_for_block_record
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -658,26 +658,26 @@ def _assemble_layout_route_line(
     *,
     block_idx: int,
     line_idx: int,
-    route: dict[str, Any],
+    route: RoutingLine,
     grouped_lines: dict[tuple[int, int, int], list[LineResult]],
 ) -> list[LineResult]:
-    segments = route.get("segments") or []
+    segments = route.segments
     if not segments:
         return []
 
-    if all(segment.get("kind") == "skip" for segment in segments):
+    if all(segment.kind == "skip" for segment in segments):
         segment = segments[0]
-        text = str(segment.get("text") or "")
+        text = segment.text
         if not text:
             return []
-        flags = [ROUTE_TABLE_FLAG] if is_table_label(str(segment.get("label") or "")) else []
+        flags = [ROUTE_TABLE_FLAG] if is_table_label(segment.label) else []
         return [
             LineResult(
                 text=text,
-                bbox=tuple(segment["bbox"]),
+                bbox=segment.bbox,
                 confidence=0.0,
                 chars=[],
-                source=f"ppvl_route:{segment.get('label') or 'skip'}",
+                source=f"ppvl_route:{segment.label or 'skip'}",
                 bbox_source="ppvl_route_skip_segment",
                 review_flags=flags,
             )
@@ -685,9 +685,9 @@ def _assemble_layout_route_line(
 
     slice_lines_by_segment: dict[int, list[LineResult]] = {}
     all_text_lines: list[LineResult] = []
-    has_formula = any(segment.get("kind") == "formula" for segment in segments)
+    has_formula = any(segment.kind == "formula" for segment in segments)
     for segment_idx, segment in enumerate(segments):
-        if segment.get("kind") != "text":
+        if segment.kind != "text":
             continue
         key = (block_idx, line_idx, segment_idx)
         current_lines = [
@@ -719,8 +719,8 @@ def _assemble_layout_route_line(
         confidence_values: list[float] = []
         flags: set[str] = set()
         for segment_idx, segment in enumerate(segments):
-            segment_bbox = tuple(segment["bbox"])
-            kind = segment.get("kind")
+            segment_bbox = segment.bbox
+            kind = segment.kind
             if kind == "text":
                 segment_lines = [
                     line
@@ -742,7 +742,7 @@ def _assemble_layout_route_line(
             elif kind == "formula":
                 if len(clusters) > 1 and vertical_overlap_ratio(segment_bbox, cluster_bbox) < 0.5:
                     continue
-                formula_text = str(segment.get("text") or "")
+                formula_text = segment.text
                 if not formula_text:
                     continue
                 text_parts.append(formula_text)
@@ -767,7 +767,7 @@ def _assemble_layout_route_line(
             _recover_degenerate_punctuation_bboxes(
                 LineResult(
                     text=merged_text,
-                    bbox=union_xyxy(component_boxes) if component_boxes else tuple(route["bbox"]),
+                    bbox=union_xyxy(component_boxes) if component_boxes else route.bbox,
                     confidence=(
                         sum(confidence_values) / len(confidence_values)
                         if confidence_values
@@ -792,7 +792,7 @@ def _assemble_layout_route_lines(
     width: int,
     height: int,
 ) -> list[LineResult]:
-    line_routes = line_routes_for_block(block, width, height)
+    line_routes = routing_plan_for_block_record(block, width, height).lines
     if not line_routes:
         return []
     assembled: list[LineResult] = []
