@@ -180,20 +180,18 @@ class PaddleBinding:
         if not isinstance(payload, dict) or not payload:
             return None
         return cls(
-            status=str(payload.get("status") or ""),
-            source=str(payload.get("source") or ""),
-            block_type=str(payload.get("block_type") or ""),
-            source_label=str(payload.get("source_label") or ""),
-            text=str(payload.get("text") or ""),
-            parent_index=_int_or_default(payload.get("parent_index"), -1),
-            candidate_index=_int_or_default(payload.get("candidate_index"), -1),
-            score=_float_or_default(payload.get("score"), 0.0),
-            candidate_bbox=_int_list(payload.get("candidate_bbox")),
-            manual_bbox=_int_list(payload.get("manual_bbox")),
-            review_flags=[str(value) for value in payload.get("review_flags", [])]
-            if isinstance(payload.get("review_flags"), list) else [],
-            candidates=[str(value) for value in payload.get("candidates", [])]
-            if isinstance(payload.get("candidates"), list) else [],
+            status=_string_or_default(payload, "status"),
+            source=_string_or_default(payload, "source"),
+            block_type=_string_or_default(payload, "block_type"),
+            source_label=_string_or_default(payload, "source_label"),
+            text=_string_or_default(payload, "text"),
+            parent_index=_int_or_default(payload.get("parent_index"), -1, field="parent_index"),
+            candidate_index=_int_or_default(payload.get("candidate_index"), -1, field="candidate_index"),
+            score=_float_or_default(payload.get("score"), 0.0, field="score"),
+            candidate_bbox=_int_list(payload.get("candidate_bbox"), field="candidate_bbox"),
+            manual_bbox=_int_list(payload.get("manual_bbox"), field="manual_bbox"),
+            review_flags=_string_list(payload.get("review_flags"), field="review_flags"),
+            candidates=_string_list(payload.get("candidates"), field="candidates"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -217,29 +215,54 @@ class PaddleBinding:
         return payload
 
 
-def _int_or_default(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+def _string_or_default(payload: dict[str, Any], key: str, default: str = "") -> str:
+    value = payload.get(key, None)
+    if value is None:
         return default
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be str")
+    return value
 
 
-def _float_or_default(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+def _int_or_default(value: Any, default: int, *, field: str) -> int:
+    if value is None:
         return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be int")
+    return value
 
 
-def _int_list(value: Any) -> List[int]:
-    if not isinstance(value, (list, tuple)):
+def _float_or_default(value: Any, default: float, *, field: str) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be number")
+    return float(value)
+
+
+def _int_list(value: Any, *, field: str) -> List[int]:
+    if value is None:
         return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be list")
     result: list[int] = []
-    for item in value:
-        try:
-            result.append(int(item))
-        except (TypeError, ValueError):
-            return []
+    for item_index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"{field}[{item_index}] must be int")
+        result.append(item)
+    return result
+
+
+def _string_list(value: Any, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be list")
+    result: list[str] = []
+    for item_index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{field}[{item_index}] must be str")
+        result.append(item)
     return result
 
 

@@ -1771,6 +1771,10 @@ class ProjectStore:
                 if "ocr_invalidated_reason" in r.keys()
                 else ""
             )
+            try:
+                paddle_binding = PaddleBinding.from_dict(paddle_binding_payload)
+            except ValueError as exc:
+                raise ProjectDataError(f"block.paddle_binding_json {exc}") from exc
             origin = self._load_block_origin(project_id, str(r["uid"] or ""))
             block = Block(
                 block_type=BlockType(r["block_type"]),
@@ -1783,7 +1787,7 @@ class ProjectStore:
                 note=r["note"],
                 source_label=r["source_label"],
                 origin=origin,
-                paddle_binding=PaddleBinding.from_dict(paddle_binding_payload),
+                paddle_binding=paddle_binding,
                 ocr_invalidated_reason=ocr_invalidated_reason,
                 ocr_audit=ocr_audit_payload,
                 table_text_layer_cells=table_text_layer_cells,
@@ -1809,8 +1813,11 @@ class ProjectStore:
         if raw_kind:
             try:
                 kind = BlockType(raw_kind)
-            except ValueError:
-                kind = None
+            except ValueError as exc:
+                raise ProjectDataError(
+                    f"block_origin.original_kind invalid value for block_uid={block_uid!r}: "
+                    f"{raw_kind!r}"
+                ) from exc
         return BlockOrigin(
             created_by=row["created_by"],
             source_engine=row["source_engine"],

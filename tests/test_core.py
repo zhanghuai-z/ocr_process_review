@@ -1251,6 +1251,79 @@ def test_project_store_persists_typed_paddle_binding():
         os.unlink(db_path)
 
 
+def test_paddle_binding_rejects_malformed_typed_fields():
+    import pytest
+
+    from app.models import PaddleBinding
+
+    with pytest.raises(ValueError, match="parent_index must be int"):
+        PaddleBinding.from_dict({"status": "hit", "parent_index": "3"})
+
+    with pytest.raises(ValueError, match=r"candidate_bbox\[1\] must be int"):
+        PaddleBinding.from_dict({"status": "hit", "candidate_bbox": [1, "x", 3, 4]})
+
+    with pytest.raises(ValueError, match=r"review_flags\[0\] must be str"):
+        PaddleBinding.from_dict({"status": "hit", "review_flags": [1]})
+
+    print("test_paddle_binding_rejects_malformed_typed_fields PASSED")
+
+
+def test_project_store_rejects_invalid_typed_block_state_on_load():
+    import pytest
+    import sqlite3
+
+    from app.core.project_store import ProjectDataError, ProjectStore
+    from app.models import BBox, Block, BlockType, OcrProject, PaddleBinding, Page
+
+    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
+        db_path = f.name
+
+    try:
+        binding = PaddleBinding.from_dict({
+            "status": "paddle_geometry_hit",
+            "manual_bbox": [10, 20, 30, 40],
+        })
+        block = Block(
+            block_type=BlockType.EQUATION,
+            bbox=BBox.from_xyxy(10, 20, 30, 40),
+            paddle_binding=binding,
+        )
+        project = OcrProject(
+            name="invalid-typed-block-state",
+            pages=[Page(image_path="/tmp/invalid-typed-state.png", width=100, height=100, blocks=[block])],
+        )
+        with ProjectStore(db_path) as store:
+            saved = store.save_project(project)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET paddle_binding_json=? WHERE uid=?",
+                (json.dumps({"status": "hit", "manual_bbox": [10, "bad", 30, 40]}), block.uid),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match=r"block\.paddle_binding_json manual_bbox\[1\] must be int"):
+                store.load_project(saved.id)
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE block SET paddle_binding_json=? WHERE uid=?",
+                (json.dumps(binding.to_dict(), ensure_ascii=False), block.uid),
+            )
+            conn.execute(
+                "UPDATE block_origin SET original_kind=? WHERE block_uid=?",
+                ("not-a-kind", block.uid),
+            )
+            conn.commit()
+        with ProjectStore(db_path) as store:
+            with pytest.raises(ProjectDataError, match="block_origin.original_kind invalid value"):
+                store.load_project(saved.id)
+    finally:
+        os.unlink(db_path)
+
+    print("test_project_store_rejects_invalid_typed_block_state_on_load PASSED")
+
+
 def test_project_store_persists_block_ocr_invalidation():
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockOrigin, BlockType, OcrProject, Page
