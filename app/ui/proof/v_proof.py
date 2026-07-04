@@ -73,7 +73,7 @@ from app.core.proof_state import (
 )
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp
-from app.services.char_index_service import CharEntry, CharIndexService
+from app.services.char_index_service import CharEntry, CharIndexService, char_entry_display_text
 from app.services.proof_edit_service import (
     ProofEditService,
     ProofSpanReplacement,
@@ -328,10 +328,10 @@ class _GalleryModel(QAbstractListModel):
                 pad=_gallery_crop_pad_for_entry(entry),
             )
         if role == Qt.ItemDataRole.DisplayRole:
-            display_key = entry.token_text or entry.char
+            display_key = char_entry_display_text(entry)
             return f"{index.row() + 1:03d}\nP{entry.page_number}-{display_key}"
         if role == Qt.ItemDataRole.ToolTipRole:
-            display_key = entry.token_text or entry.char
+            display_key = char_entry_display_text(entry)
             kind = entry.collection_kind
             kind_label = "token" if kind == "token" else "char"
             return (
@@ -372,7 +372,7 @@ class _GalleryDelegate(QStyledItemDelegate):
             painter.fillRect(img_r, QColor("#FFFDF8"))
             # 裁图失败时显示 token 内容作为占位，避免白块无信息
             entry = index.data(Qt.ItemDataRole.UserRole)
-            fallback = (entry.token_text or entry.char) if entry else "?"
+            fallback = char_entry_display_text(entry) if entry else "?"
             painter.setPen(QColor("#5C6B58"))
             font = painter.font()
             font.setPointSize(10)
@@ -876,7 +876,7 @@ class VProofPanel(QWidget):
             return
         sel = self._gallery_view.selectionModel()
         selected_count = len(sel.selectedIndexes()) if sel else 0
-        token = entry.token_text or entry.char or ""
+        token = char_entry_display_text(entry)
         self._edit_bubble_input.blockSignals(True)
         self._edit_bubble_input.setText(token)
         self._edit_bubble_input.selectAll()
@@ -1847,7 +1847,7 @@ class VProofPanel(QWidget):
         本函数 **只读** 不写状态；返回一段短文本拼接到 hint label。
         """
         reasons: List[str] = []
-        token = entry.token_text or entry.char
+        token = char_entry_display_text(entry)
         ocr_ch = self._line_char_at(proof_ocr_text(entry.line), entry.char_idx)
         if not ocr_ch:
             reasons.append("OCR 无对应字")
@@ -1873,10 +1873,10 @@ class VProofPanel(QWidget):
             if value and value not in ranked:
                 ranked.append(value)
 
-        _push(entry.token_text or entry.char)
+        _push(char_entry_display_text(entry))
         _push(self._line_char_at(proof_ocr_text(entry.line), entry.char_idx))
 
-        token = entry.token_text or entry.char
+        token = char_entry_display_text(entry)
         # 一阶易混淆
         first_level = DEFAULT_CONFUSABLE_CANDIDATES.get(token, [])
         for value in first_level:
@@ -2032,7 +2032,7 @@ class VProofPanel(QWidget):
         entry = self._current_candidate_entry
         if entry is None:
             return False
-        tok = entry.token_text or entry.char
+        tok = char_entry_display_text(entry)
         applied = self._apply_replacement_to_selected(
             " " * max(1, len(tok)),
             fallback_entry=entry,
@@ -2264,7 +2264,7 @@ class VProofPanel(QWidget):
             sel_count = len(self._gallery_view.selectionModel().selectedIndexes())
             self._refresh_gallery_header(index, sel_count)
             # 传入 entry 以精准定位到该出现，而非首次出现
-            self._highlight_char_in_text(entry.token_text or entry.char, focus_entry=entry)
+            self._highlight_char_in_text(char_entry_display_text(entry), focus_entry=entry)
             side_inputs = (
                 getattr(self, "_edit_bubble_input", None),
                 self._text_edit,

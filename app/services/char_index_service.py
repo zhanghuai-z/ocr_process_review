@@ -195,6 +195,11 @@ class CharEntry:
 CharIndexEntry = CharEntry
 
 
+def char_entry_display_text(entry: CharEntry) -> str:
+    """Return the proof-visible text represented by a char index entry."""
+    return str(entry.token_text or entry.char or "")
+
+
 class CharIndexService:
     """全文字符索引。"""
 

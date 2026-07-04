@@ -812,6 +812,16 @@ def test_proof_refresh_signatures_use_line_signature_contract():
         assert forbidden not in char_index_signature_source
 
 
+def test_vproof_uses_char_entry_display_contract():
+    vproof_source = Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
+    service_source = Path("app/services/char_index_service.py").read_text(encoding="utf-8")
+
+    assert "def char_entry_display_text" in service_source
+    assert "char_entry_display_text" in vproof_source
+    assert "entry.token_text or entry.char" not in vproof_source
+    assert "(entry.token_text or entry.char)" not in vproof_source
+
+
 def test_proof_fallback_warning_is_owned_by_proof_crop_service():
     controller_source = Path("app/controllers/workflow_controller.py").read_text(encoding="utf-8")
     service_source = Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
