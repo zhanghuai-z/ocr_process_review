@@ -1316,6 +1316,25 @@ def test_proof_signal_contract_does_not_restore_proof_saved():
     assert offenders == []
 
 
+def test_proof_ui_does_not_create_unscoped_text_or_status_changes():
+    offenders: list[str] = []
+    pattern = re.compile(r"ProofChangeSet\([^)]*(text_changed|status_changed)\s*=")
+    for path in sorted(PROOF_UI_DIR.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for match in pattern.finditer(source):
+            line_no = source.count("\n", 0, match.start()) + 1
+            offenders.append(f"{path}:{line_no}: {match.group(0)}")
+    assert offenders == []
+
+
+def test_proof_change_contract_names_scope_requirement():
+    source = Path("app/core/proof_change.py").read_text(encoding="utf-8")
+    assert "def requires_line_scope" in source
+    assert "def has_required_scope" in source
+    persist_source = Path("app/services/proof_persistence_service.py").read_text(encoding="utf-8")
+    assert "change.has_required_scope" in persist_source
+
+
 def test_layout_panel_user_edits_go_through_layout_edit_service():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")

@@ -68,7 +68,7 @@ class ProofPersistenceService:
         return True
 
     def _persist_scoped_lines(self, change: ProofChangeSet) -> bool:
-        if not change.line_refs:
+        if not change.has_required_scope:
             logger.warning(
                 "Ignoring unscoped proof line change: text=%s status=%s",
                 change.text_changed,

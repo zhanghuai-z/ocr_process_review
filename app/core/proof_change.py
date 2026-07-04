@@ -66,6 +66,14 @@ class ProofChangeSet:
         return self.text_changed or self.status_changed or self.probe_changed
 
     @property
+    def requires_line_scope(self) -> bool:
+        return self.text_changed or self.status_changed
+
+    @property
+    def has_required_scope(self) -> bool:
+        return not self.requires_line_scope or bool(self.line_refs)
+
+    @property
     def changed(self) -> bool:
         return self.needs_persist or self.index_changed
 
