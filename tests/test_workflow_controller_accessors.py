@@ -27,12 +27,14 @@ def _block(lines, btype=BlockType.TEXT):
     return Block(block_type=btype, bbox=BBox(0, 0, 100, 200), lines=list(lines))
 
 
-def _page(page_no, blocks, *, is_analyzed=False):
-    p = Page(image_path=f"/tmp/p{page_no}.png", width=100, height=200,
-             blocks=list(blocks), page_number=page_no)
-    if is_analyzed:
-        p.status = p.status  # placeholder; is_analyzed is a property
-    return p
+def _page(page_no, blocks):
+    return Page(
+        image_path=f"/tmp/p{page_no}.png",
+        width=100,
+        height=200,
+        blocks=list(blocks),
+        page_number=page_no,
+    )
 
 
 @pytest.fixture

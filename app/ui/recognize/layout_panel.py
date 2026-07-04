@@ -21,7 +21,7 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.models.layout_block_state import set_layout_block_order
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
 from app.models.page_state import page_error_message, page_has_error
@@ -797,7 +797,7 @@ class LayoutPanel(QWidget):
             self._project_stats_lbl.setText("暂无项目")
             return
         total_pages = len(self._pages)
-        analyzed_pages = sum(1 for page in self._pages if page.is_analyzed)
+        analyzed_pages = sum(1 for page in self._pages if page_has_layout_blocks(page))
         failed_pages = sum(1 for page in self._pages if page_has_error(page))
         total_blocks = sum(len(page_layout_blocks(page)) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
@@ -1282,7 +1282,7 @@ class LayoutPanel(QWidget):
             return
         page = self._pages[idx]
         self._viewer.set_image(page.display_image_path)
-        if page.is_analyzed:
+        if page_has_layout_blocks(page):
             self._show_page_layers(page)
         elif page_error_message(page):
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page_error_message(page)}")

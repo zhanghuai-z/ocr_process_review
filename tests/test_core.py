@@ -362,7 +362,9 @@ def test_models():
     page.blocks.append(block)
     formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     page.blocks.append(formula_block)
-    assert page.is_analyzed
+    from app.models.layout_projection import page_has_layout_blocks
+
+    assert page_has_layout_blocks(page)
     assert page.status == PageStatus.IMPORTED
     assert page.source_type == "image"
     from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan

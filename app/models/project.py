@@ -415,10 +415,6 @@ class Page:
             event.page_uid = self.uid
 
     @property
-    def is_analyzed(self) -> bool:
-        return len(self.blocks) > 0
-
-    @property
     def display_image_path(self) -> str:
         """当前全流程使用的页面图路径。
 
