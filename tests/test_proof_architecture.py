@@ -2067,6 +2067,16 @@ def test_ocr_observation_store_has_no_object_read_adapter():
     assert "ocr_lines_for_block_uid" in store_source
 
 
+def test_ocr_character_observation_store_has_no_object_read_adapter():
+    observation_source = Path("app/models/ocr_character_observation.py").read_text(encoding="utf-8")
+    store_source = Path("app/models/ocr_character_observation_store.py").read_text(encoding="utf-8")
+
+    assert "def ocr_chars_for_line(" not in store_source
+    assert "ocr_chars_for_line_uid" in store_source
+    assert "ocr_chars_for_line(" not in observation_source
+    assert "ocr_chars_for_line_uid(line.uid)" in observation_source
+
+
 def test_export_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/export_service.py").read_text(encoding="utf-8")
 

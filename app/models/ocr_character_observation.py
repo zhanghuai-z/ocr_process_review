@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from .project import BBox, Char, Line
 from .ocr_character_observation_store import (
-    ocr_chars_for_line,
     ocr_chars_for_line_uid,
     set_ocr_chars_for_line_uid,
 )
@@ -24,7 +23,7 @@ class OcrCharOccurrence:
 
 
 def line_ocr_chars(line: Line) -> list[Char]:
-    return ocr_chars_for_line(line)
+    return ocr_chars_for_line_uid(line.uid)
 
 
 def line_ocr_chars_by_uid(line_uid: str) -> list[Char]:
