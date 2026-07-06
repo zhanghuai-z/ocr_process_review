@@ -50,13 +50,11 @@ from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
 from app.core.proof_line_facts import proof_display_text
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
-from app.models.layout_projection import page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_char_count
 from app.models.ocr_observation import (
     block_has_ocr_lines,
-    block_ocr_line_at,
-    block_ocr_line_count,
-    block_ocr_lines,
+    iter_page_ocr_line_occurrences,
+    iter_project_ocr_line_occurrences,
 )
 
 
@@ -433,18 +431,22 @@ class ProbeSampler:
         # 1. 扫整文档收集候选（每个位置即是未来 probe 的 true_char 位置）
         pool: list[_Candidate] = []
         total_cut_cjk = 0
-        for page in project.pages:
-            for bi, block in enumerate(page_layout_blocks(page)):
-                if not is_block_eligible(block):
-                    continue
-                for li, line in enumerate(block_ocr_lines(block)):
-                    total_cut_cjk += count_existing_cjk_crop_chars(line)
-                    text = proof_display_text(line)
-                    for idx in candidate_indices_with_existing_crops(line):
-                        pool.append(_Candidate(
-                            key=ProbeKey(page.page_number, bi, li, idx),
-                            char=text[idx],
-                        ))
+        for occurrence in iter_project_ocr_line_occurrences(project):
+            if not is_block_eligible(occurrence.block):
+                continue
+            line = occurrence.line
+            total_cut_cjk += count_existing_cjk_crop_chars(line)
+            text = proof_display_text(line)
+            for idx in candidate_indices_with_existing_crops(line):
+                pool.append(_Candidate(
+                    key=ProbeKey(
+                        occurrence.page.page_number,
+                        occurrence.block_index,
+                        occurrence.line_index,
+                        idx,
+                    ),
+                    char=text[idx],
+                ))
 
         store.sampled_from_chars = total_cut_cjk
         store.sand_count = self.cfg.sand_count
@@ -801,6 +803,13 @@ def reset_active_store() -> None:
 # Round 18：基于文本锚点的批量校验
 # ──────────────────────────────────────────────────────────────────
 
+def _probe_line_occurrence(page: Page, key: ProbeKey):
+    for occurrence in iter_page_ocr_line_occurrences(page):
+        if occurrence.block_index == key.block_index and occurrence.line_index == key.line_index:
+            return occurrence
+    return None
+
+
 def detect_corrections(
     store: Optional[ProbeStore],
     project_or_pages,
@@ -830,13 +839,10 @@ def detect_corrections(
         page = pages_by_no.get(probe.key.page_number)
         if page is None:
             continue
-        blocks = page_layout_blocks(page)
-        if not (0 <= probe.key.block_index < len(blocks)):
+        occurrence = _probe_line_occurrence(page, probe.key)
+        if occurrence is None:
             continue
-        block = blocks[probe.key.block_index]
-        if not (0 <= probe.key.line_index < block_ocr_line_count(block)):
-            continue
-        line = block_ocr_line_at(block, probe.key.line_index)
+        line = occurrence.line
         text = proof_display_text(line)
         ci = probe.key.char_index
         if ci < 0 or ci >= len(text):
