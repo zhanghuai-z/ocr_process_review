@@ -294,6 +294,96 @@ def test_layout_edit_service_merge_blocks_invalidates_primary_and_clears_ocr_lin
     ]
 
 
+def test_layout_edit_service_merge_blocks_uses_snapshot_order_and_geometry_when_projection_drifts():
+    primary = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(120, 80, 180, 95),
+        lines=[Line(text="old", confidence=0.9, bbox=BBox.from_xyxy(120, 80, 180, 95))],
+        order=9,
+        source_label="inline_formula",
+    )
+    secondary = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(0, 0, 180, 90),
+        order=0,
+        source_label="inline_formula",
+    )
+    kept = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(130, 80, 190, 98),
+        order=5,
+        source_label="text",
+    )
+    kept_snapshot_bbox = BBox.from_xyxy(100, 50, 160, 70)
+    page = Page(image_path="", width=200, height=100, blocks=[secondary, primary, kept])
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.EQUATION,
+                    bbox=BBox.from_xyxy(20, 20, 40, 30),
+                    order=0,
+                    source_label="inline_formula",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="inline_formula"),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                    uid=primary.uid,
+                ),
+                LayoutBlockSnapshot(
+                    block_type=BlockType.EQUATION,
+                    bbox=BBox.from_xyxy(60, 20, 80, 30),
+                    order=1,
+                    source_label="inline_formula",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="inline_formula"),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                    uid=secondary.uid,
+                ),
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=kept_snapshot_bbox,
+                    order=2,
+                    source_label="text",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    uid=kept.uid,
+                ),
+            ),
+        ),
+    )
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.merge_blocks(
+        page,
+        [secondary, primary],
+        BBox.from_xyxy(10, 10, 90, 40),
+        block_type=BlockType.EQUATION,
+        source_label="display_formula",
+    ))
+
+    assert result.op == "merge_blocks"
+    assert result.block is primary
+    assert page.blocks == [primary, kept]
+    assert primary.bbox == BBox.from_xyxy(10, 10, 90, 40)
+    assert block_ocr_lines(primary) == []
+    assert kept.bbox == kept_snapshot_bbox
+    assert [block.order for block in page.blocks] == [0, 1]
+    assert [item["uid"] for item in page.layout_edit_events[-1].before["blocks"]] == [
+        primary.uid,
+        secondary.uid,
+    ]
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert [block.uid for block in snapshot.blocks] == [primary.uid, kept.uid]
+    assert snapshot.blocks[0].bbox == BBox.from_xyxy(10, 10, 90, 40)
+    assert snapshot.blocks[1].bbox == kept_snapshot_bbox
+    assert [block.order for block in snapshot.blocks] == [0, 1]
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+
+
 def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_row():
     block = Block(
         block_type=BlockType.EQUATION,

@@ -459,6 +459,8 @@ class LayoutEditService:
         index: int,
         *,
         block_type: BlockType | None = None,
+        bbox: BBox | None = None,
+        order: int | None = None,
         source_label: str | None = None,
         origin: BlockOrigin | None = None,
         ocr_policy: OcrPolicy | None = None,
@@ -467,8 +469,8 @@ class LayoutEditService:
         current = snapshot.blocks[index]
         return LayoutBlockSnapshot(
             block_type=block_type if block_type is not None else current.block_type,
-            bbox=current.bbox,
-            order=current.order,
+            bbox=bbox if bbox is not None else current.bbox,
+            order=order if order is not None else current.order,
             source_label=source_label if source_label is not None else current.source_label,
             origin=origin if origin is not None else current.origin,
             ocr_policy=ocr_policy if ocr_policy is not None else current.ocr_policy,
@@ -575,6 +577,22 @@ class LayoutEditService:
             uid=block.uid,
         )
 
+    @staticmethod
+    def _snapshot_block_with_order(
+        block: LayoutBlockSnapshot,
+        order: int,
+    ) -> LayoutBlockSnapshot:
+        return LayoutBlockSnapshot(
+            block_type=block.block_type,
+            bbox=block.bbox,
+            order=order,
+            source_label=block.source_label,
+            origin=block.origin,
+            ocr_policy=block.ocr_policy,
+            note=block.note,
+            uid=block.uid,
+        )
+
     def _merge_blocks_into_bbox(
         self,
         page: Page,
@@ -584,35 +602,91 @@ class LayoutEditService:
         block_type: BlockType,
         source_label: str,
     ) -> LayoutEditResult:
-        ordered = sorted(blocks, key=lambda block: (block.order, block.bbox.y, block.bbox.x))
+        snapshot = current_layout_snapshot(page)
+        snapshot_by_uid = {
+            snapshot_block.uid: (index, snapshot_block)
+            for index, snapshot_block in enumerate(snapshot.blocks)
+        }
+        ordered = sorted(
+            (
+                (snapshot_by_uid[block.uid][0], snapshot_by_uid[block.uid][1], block)
+                for block in blocks
+            ),
+            key=lambda item: (item[1].order, item[1].bbox.y, item[1].bbox.x),
+        )
         if not ordered:
             raise ValueError("merge_blocks_into_bbox requires at least one block")
-        before = {"blocks": [self.block_state(block) for block in ordered]}
-        primary = ordered[0]
-        x1 = min([bbox.x1, *(block.bbox.x1 for block in ordered)])
-        y1 = min([bbox.y1, *(block.bbox.y1 for block in ordered)])
-        x2 = max([bbox.x2, *(block.bbox.x2 for block in ordered)])
-        y2 = max([bbox.y2, *(block.bbox.y2 for block in ordered)])
-        set_layout_block_bbox(primary, BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height))
-        set_layout_block_type(primary, block_type)
-        set_layout_block_source_label(primary, source_label)
+        before = {"blocks": [self.snapshot_block_state(snapshot_block) for _index, snapshot_block, _block in ordered]}
+        primary_index, primary_snapshot, primary = ordered[0]
+        x1 = min([bbox.x1, *(snapshot_block.bbox.x1 for _index, snapshot_block, _block in ordered)])
+        y1 = min([bbox.y1, *(snapshot_block.bbox.y1 for _index, snapshot_block, _block in ordered)])
+        x2 = max([bbox.x2, *(snapshot_block.bbox.x2 for _index, snapshot_block, _block in ordered)])
+        y2 = max([bbox.y2, *(snapshot_block.bbox.y2 for _index, snapshot_block, _block in ordered)])
+        merged_bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
+        provisional = self._replace_snapshot_block(
+            snapshot,
+            primary_index,
+            block_type=block_type,
+            bbox=merged_bbox,
+            source_label=source_label,
+        )
+        self._apply_snapshot_block_to_runtime_block(primary, provisional)
         clear_block_ocr_lines(primary)
         mark_layout_block_user_edited(primary)
         set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
         set_layout_block_note(primary, "manual_draw_merge_requires_ocr_rerun")
         mark_ocr_text_invalidated(primary, "manual_draw_merge")
         binding = self.bind_manual_block_to_paddle(page, primary)
-        for block in ordered[1:]:
+        for _index, _snapshot_block, block in ordered[1:]:
             self.mark_generated_inline_formula_handled(page, block, op="merge_inline_formula")
-        remove_ids = {id(block) for block in ordered[1:]}
-        replace_page_layout_blocks(
-            page,
-            [block for block in page_layout_blocks(page) if id(block) not in remove_ids],
+        final_primary_snapshot = self._replace_snapshot_block(
+            snapshot,
+            primary_index,
+            block_type=primary.block_type,
+            bbox=primary.bbox,
+            source_label=primary.source_label,
+            origin=primary.origin or primary_snapshot.origin,
+            ocr_policy=primary.ocr_policy,
+            note=primary.note,
         )
-        for order, block in enumerate(page_layout_blocks(page)):
-            set_layout_block_order(block, order)
-        after = {"block": self.block_state(primary)}
-        self.record_edit(page, "merge_blocks", primary, before=before, after=after)
+        remove_uids = {snapshot_block.uid for _index, snapshot_block, _block in ordered[1:]}
+        next_snapshot_blocks: list[LayoutBlockSnapshot] = []
+        for snapshot_block in snapshot.blocks:
+            if snapshot_block.uid in remove_uids:
+                continue
+            if snapshot_block.uid == final_primary_snapshot.uid:
+                next_snapshot_blocks.append(final_primary_snapshot)
+            else:
+                next_snapshot_blocks.append(snapshot_block)
+        next_snapshot_blocks = [
+            self._snapshot_block_with_order(snapshot_block, order)
+            for order, snapshot_block in enumerate(next_snapshot_blocks)
+        ]
+        after_block = next(
+            snapshot_block
+            for snapshot_block in next_snapshot_blocks
+            if snapshot_block.uid == final_primary_snapshot.uid
+        )
+        after = {"block": self.snapshot_block_state(after_block)}
+        event = self.record_edit(
+            page,
+            "merge_blocks",
+            primary,
+            before=before,
+            after=after,
+            sync_snapshot=False,
+        )
+        next_snapshot = self._snapshot_with_blocks(
+            snapshot,
+            tuple(next_snapshot_blocks),
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        self._replace_runtime_projection_from_snapshot(
+            page,
+            next_snapshot,
+            candidate_blocks=[primary],
+        )
         return LayoutEditResult(
             op="merge_blocks",
             block=primary,
