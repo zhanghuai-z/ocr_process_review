@@ -20,11 +20,18 @@ from app.models import (
     RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
-from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
+from app.models.layout_block_state import (
+    set_layout_block_bbox,
+    set_layout_block_note,
+    set_layout_block_ocr_policy,
+    set_layout_block_order,
+    set_layout_block_source_label,
+    set_layout_block_type,
+)
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_lines,
@@ -633,8 +640,25 @@ def _layout_snapshot_matches_projection(snapshot: LayoutSnapshot, page: Page) ->
     if len(snapshot.blocks) != len(blocks):
         return False
     return all(
-        bool(block.uid) and block_snapshot.uid == block.uid
+        _layout_block_snapshot_matches_projection(block_snapshot, block)
         for block_snapshot, block in zip(snapshot.blocks, blocks)
+    )
+
+
+def _layout_block_snapshot_matches_projection(
+    block_snapshot: LayoutBlockSnapshot,
+    block: Block,
+) -> bool:
+    return (
+        bool(block.uid)
+        and block_snapshot.uid == block.uid
+        and block_snapshot.block_type == block.block_type
+        and block_snapshot.bbox == block.bbox
+        and block_snapshot.order == block.order
+        and block_snapshot.source_label == block.source_label
+        and block_snapshot.ocr_policy == block.ocr_policy
+        and block_snapshot.note == block.note
+        and block_snapshot.origin == block.origin
     )
 
 
@@ -1212,7 +1236,11 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        for block in self._sync_layout_projection_from_snapshot(page):
+        for block in self._sync_layout_projection_from_snapshot(
+            page,
+            snapshot_authoritative=False,
+            source_run_id=str(project_id),
+        ):
             self._ensure_unique_child_uid(
                 cur,
                 block,
@@ -1235,28 +1263,63 @@ class ProjectStore:
         self._save_layout_snapshot(cur, page, project_id)
 
     @staticmethod
-    def _sync_layout_projection_from_snapshot(page: Page) -> list[Block]:
+    def _sync_layout_projection_from_snapshot(
+        page: Page,
+        *,
+        snapshot_authoritative: bool = True,
+        source_run_id: str = "",
+    ) -> list[Block]:
+        if not snapshot_authoritative:
+            snapshot = layout_snapshot_for_page(page)
+            if snapshot is None or not _layout_snapshot_matches_projection(snapshot, page):
+                sync_page_layout_snapshot_from_projection(
+                    page,
+                    source_engine="project_store_save",
+                    source_run_id=source_run_id,
+                )
+
+        snapshot = layout_snapshot_for_page(page)
+        if snapshot is None:
+            snapshot = sync_page_layout_snapshot_from_projection(
+                page,
+                source_engine="project_store_save",
+                source_run_id=source_run_id,
+            )
+        runtime_blocks = page_layout_blocks(page)
+        runtime_uid_counts: dict[str, int] = {}
+        runtime_by_uid: dict[str, Block] = {}
+        for block in runtime_blocks:
+            uid = str(block.uid or "")
+            if not uid:
+                continue
+            runtime_uid_counts[uid] = runtime_uid_counts.get(uid, 0) + 1
+            runtime_by_uid.setdefault(uid, block)
+
         blocks: list[Block] = []
-        for view in iter_page_layout_block_views(page):
-            block = view.runtime_block
+        for index, snapshot_block in enumerate(snapshot.blocks):
+            block: Block | None = None
+            if index < len(runtime_blocks) and runtime_blocks[index].uid == snapshot_block.uid:
+                block = runtime_blocks[index]
+            elif runtime_uid_counts.get(snapshot_block.uid) == 1:
+                block = runtime_by_uid[snapshot_block.uid]
             if block is None:
                 block = Block(
-                    block_type=view.block_type,
-                    bbox=view.bbox,
-                    order=view.order,
-                    note=view.note,
-                    source_label=view.source_label,
-                    origin=view.origin,
-                    ocr_policy=view.ocr_policy,
-                    uid=view.uid,
+                    block_type=snapshot_block.block_type,
+                    bbox=snapshot_block.bbox,
+                    order=snapshot_block.order,
+                    note=snapshot_block.note,
+                    source_label=snapshot_block.source_label,
+                    origin=snapshot_block.origin,
+                    ocr_policy=snapshot_block.ocr_policy,
+                    uid=snapshot_block.uid,
                 )
-            block.block_type = view.block_type
-            block.bbox = view.bbox
-            block.order = view.order
-            block.source_label = view.source_label
-            block.origin = view.origin
-            block.ocr_policy = view.ocr_policy
-            block.note = view.note
+            set_layout_block_type(block, snapshot_block.block_type)
+            set_layout_block_bbox(block, snapshot_block.bbox)
+            set_layout_block_order(block, snapshot_block.order)
+            set_layout_block_source_label(block, snapshot_block.source_label)
+            block.origin = snapshot_block.origin
+            set_layout_block_ocr_policy(block, snapshot_block.ocr_policy)
+            set_layout_block_note(block, snapshot_block.note)
             blocks.append(block)
         replace_page_layout_blocks(page, blocks)
         return blocks

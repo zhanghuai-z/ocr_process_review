@@ -190,7 +190,7 @@ def test_project_store_persists_layout_snapshot_independently_from_block_project
     assert loaded_page.blocks[0].uid == projected_uid
 
 
-def test_project_store_saves_block_projection_from_layout_snapshot_when_runtime_drifts(tmp_path):
+def test_project_store_refreshes_layout_snapshot_from_projection_when_saving_drift(tmp_path):
     page = Page(image_path="/tmp/layout-snapshot-save-projection.png", width=300, height=220)
     set_paddle_raw_layout_records(
         page,
@@ -225,12 +225,12 @@ def test_project_store_saves_block_projection_from_layout_snapshot_when_runtime_
     loaded_snapshot = layout_snapshot_for_page(loaded_page)
     assert loaded_snapshot is not None
     assert loaded_snapshot.blocks[0].uid == projected_uid
-    assert loaded_snapshot.blocks[0].block_type == BlockType.TEXT
-    assert loaded_snapshot.blocks[0].bbox == BBox.from_xyxy(20, 30, 180, 70)
+    assert loaded_snapshot.blocks[0].block_type == BlockType.FIGURE
+    assert loaded_snapshot.blocks[0].bbox == BBox(200, 180, 40, 20)
     assert loaded_page.blocks[0].uid == projected_uid
-    assert loaded_page.blocks[0].block_type == BlockType.TEXT
-    assert loaded_page.blocks[0].bbox == BBox.from_xyxy(20, 30, 180, 70)
-    assert loaded_page.blocks[0].source_label == "text"
+    assert loaded_page.blocks[0].block_type == BlockType.FIGURE
+    assert loaded_page.blocks[0].bbox == BBox(200, 180, 40, 20)
+    assert loaded_page.blocks[0].source_label == "figure"
 
 
 def test_project_store_load_projects_block_projection_from_layout_snapshot(tmp_path):
