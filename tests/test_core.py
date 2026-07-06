@@ -90,9 +90,9 @@ def _seed_project_layout_snapshots(project, *, source_engine: str = "test_seed")
 
 
 def _block_ocr_observations(block):
-    from app.models.ocr_observation import block_ocr_line_observations
+    from app.models.ocr_observation import block_ocr_line_observations_by_uid
 
-    return block_ocr_line_observations(block)
+    return block_ocr_line_observations_by_uid(block.uid)
 
 
 def test_layout_projection_boundary_tracks_current_page_blocks():
@@ -283,7 +283,7 @@ def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
 def test_ocr_observation_runtime_store_is_uid_scoped_without_projection_sync():
     from app.models import BBox, Block, BlockType, Line
     from app.models.ocr_observation import (
-        block_ocr_line_observations,
+        block_ocr_line_observations_by_uid,
         clear_block_ocr_line_observations,
         replace_block_ocr_line_observations,
     )
@@ -293,22 +293,22 @@ def test_ocr_observation_runtime_store_is_uid_scoped_without_projection_sync():
     second = Line(text="乙", confidence=0.8, bbox=BBox(0, 12, 10, 10))
 
     replace_block_ocr_line_observations(block.uid, [first])
-    assert block_ocr_line_observations(block) == [first]
+    assert block_ocr_line_observations_by_uid(block.uid) == [first]
     assert block.lines == []
 
     replace_block_ocr_line_observations(block.uid, [first, second])
-    assert block_ocr_line_observations(block) == [first, second]
+    assert block_ocr_line_observations_by_uid(block.uid) == [first, second]
     assert block.lines == []
 
     clear_block_ocr_line_observations(block.uid)
-    assert block_ocr_line_observations(block) == []
+    assert block_ocr_line_observations_by_uid(block.uid) == []
     assert block.lines == []
 
 
 def test_ocr_observation_uid_store_overrides_stale_block_projection():
     from app.models import BBox, Block, BlockType, Line
     from app.models.ocr_observation import (
-        block_ocr_line_observations,
+        block_ocr_line_observations_by_uid,
         clear_block_ocr_line_observations,
         replace_block_ocr_line_observations,
     )
@@ -322,15 +322,18 @@ def test_ocr_observation_uid_store_overrides_stale_block_projection():
     replace_block_ocr_line_observations(block.uid, [fresh])
 
     assert block.lines == [stale]
-    assert block_ocr_line_observations(block) == [fresh]
+    assert block_ocr_line_observations_by_uid(block.uid) == [fresh]
 
     clear_block_ocr_line_observations(block.uid)
-    assert block_ocr_line_observations(block) == []
+    assert block_ocr_line_observations_by_uid(block.uid) == []
 
 
 def test_ocr_observation_store_ignores_replaced_legacy_line_projection():
     from app.models import BBox, Block, BlockType, Line
-    from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
+    from app.models.ocr_observation import (
+        block_ocr_line_observations_by_uid,
+        replace_block_ocr_line_observations,
+    )
 
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
     line1 = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
@@ -338,10 +341,10 @@ def test_ocr_observation_store_ignores_replaced_legacy_line_projection():
     replace_block_ocr_line_observations(block.uid, [line1])
 
     block.lines = [line2]
-    assert block_ocr_line_observations(block) == [line1]
+    assert block_ocr_line_observations_by_uid(block.uid) == [line1]
 
     replace_block_ocr_line_observations(block.uid, [line2])
-    assert block_ocr_line_observations(block) == [line2]
+    assert block_ocr_line_observations_by_uid(block.uid) == [line2]
 
 
 def test_raw_block_payload_prefers_page_artifact_origin_record():

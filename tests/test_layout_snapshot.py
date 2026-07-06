@@ -16,7 +16,10 @@ from app.models.layout_snapshot_projection import (
 )
 from app.models.layout_snapshot_store import clear_layout_snapshot_for_page, layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars
-from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
+from app.models.ocr_observation import (
+    block_ocr_line_observations_by_uid,
+    replace_block_ocr_line_observations,
+)
 from app.services.layout_snapshot import (
     adopt_page_layout_snapshot,
     layout_snapshot_from_normalized_artifact,
@@ -158,7 +161,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     assert snapshot.blocks[0].source_label == "text"
 
     loaded_block = page.blocks[0]
-    loaded_line = block_ocr_line_observations(loaded_block)[0]
+    loaded_line = block_ocr_line_observations_by_uid(loaded_block.uid)[0]
     assert loaded_block.lines == []
     assert loaded_line.chars == []
     assert line_ocr_chars(loaded_line)[0].char == "甲"

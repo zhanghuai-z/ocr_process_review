@@ -2057,6 +2057,16 @@ def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
     assert "block_ocr_lines" not in source
 
 
+def test_ocr_observation_store_has_no_object_read_adapter():
+    observation_source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
+    store_source = Path("app/models/ocr_observation_store.py").read_text(encoding="utf-8")
+
+    assert "def block_ocr_line_observations(" not in observation_source
+    assert "def block_has_ocr_line_observations(" not in observation_source
+    assert "def ocr_lines_for_block(" not in store_source
+    assert "ocr_lines_for_block_uid" in store_source
+
+
 def test_export_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/export_service.py").read_text(encoding="utf-8")
 

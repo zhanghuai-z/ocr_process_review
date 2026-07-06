@@ -11,7 +11,6 @@ from collections.abc import Iterator
 
 from .layout_block_view import iter_page_layout_block_views
 from .ocr_observation_store import (
-    ocr_lines_for_block,
     ocr_lines_for_block_uid,
     set_ocr_lines_for_block_uid,
 )
@@ -29,19 +28,9 @@ class OcrLineOccurrence:
     line_index: int
 
 
-def block_ocr_line_observations(block: Block) -> list[Line]:
-    """Return OCR line observations for ``block``."""
-    return ocr_lines_for_block(block)
-
-
 def block_ocr_line_observations_by_uid(block_uid: str) -> list[Line]:
     """Return OCR line observations keyed by stable layout block uid."""
     return ocr_lines_for_block_uid(block_uid)
-
-
-def block_has_ocr_line_observations(block: Block) -> bool:
-    """Return whether OCR observations exist without reading ``Block.lines``."""
-    return bool(block_ocr_line_observations(block))
 
 
 def replace_block_ocr_line_observations(block_uid: str, lines: Iterable[Line]) -> None:
@@ -69,7 +58,7 @@ def clear_block_ocr_line_observations(block_uid: str) -> None:
 
 
 def line_belongs_to_block(block: Block, line: Line) -> bool:
-    return any(candidate is line for candidate in block_ocr_line_observations(block))
+    return any(candidate is line for candidate in block_ocr_line_observations_by_uid(block.uid))
 
 
 def find_block_ocr_line_index(
@@ -85,7 +74,7 @@ def find_block_ocr_line_index(
     if block_index is None:
         return None
     try:
-        line_index = block_ocr_line_observations(block).index(line)
+        line_index = block_ocr_line_observations_by_uid(block.uid).index(line)
     except ValueError:
         return None
     return block_index, line_index
@@ -115,7 +104,7 @@ def iter_page_ocr_line_observation_occurrences(page: Page) -> Iterator[OcrLineOc
         block = view.runtime_block
         if block is None:
             continue
-        for line_index, line in enumerate(block_ocr_line_observations(block)):
+        for line_index, line in enumerate(block_ocr_line_observations_by_uid(view.uid)):
             yield OcrLineOccurrence(
                 page=page,
                 block=block,
