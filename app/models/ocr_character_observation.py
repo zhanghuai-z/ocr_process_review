@@ -10,7 +10,12 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from .project import BBox, Char, Line
-from .ocr_character_observation_store import ocr_chars_for_line, set_ocr_chars_for_line
+from .ocr_character_observation_store import (
+    ocr_chars_for_line,
+    ocr_chars_for_line_uid,
+    set_ocr_chars_for_line,
+    set_ocr_chars_for_line_uid,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,10 @@ class OcrCharOccurrence:
 
 def line_ocr_chars(line: Line) -> list[Char]:
     return ocr_chars_for_line(line, line.chars)
+
+
+def line_ocr_chars_by_uid(line_uid: str) -> list[Char]:
+    return ocr_chars_for_line_uid(line_uid)
 
 
 def line_ocr_char_count(line: Line) -> int:
@@ -36,6 +45,10 @@ def replace_line_ocr_chars(line: Line, chars: Iterable[Char]) -> None:
     projected = list(chars)
     line.chars = projected
     set_ocr_chars_for_line(line, projected)
+
+
+def replace_line_ocr_char_observations(line_uid: str, chars: Iterable[Char]) -> None:
+    set_ocr_chars_for_line_uid(line_uid, list(chars))
 
 
 def replace_line_ocr_char_span(line: Line, start: int, end: int, chars: Iterable[Char]) -> None:

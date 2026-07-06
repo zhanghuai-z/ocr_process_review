@@ -148,6 +148,28 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
     assert line.chars is line_ocr_chars(line)
 
 
+def test_ocr_character_observation_uid_store_overrides_stale_line_projection():
+    from app.models import BBox, Char, Line
+    from app.models.ocr_character_observation import (
+        line_ocr_chars,
+        line_ocr_chars_by_uid,
+        replace_line_ocr_char_observations,
+        replace_line_ocr_chars,
+    )
+
+    line = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 100, 20))
+    stale = Char(char="旧", confidence=0.1, bbox=BBox(0, 0, 10, 10))
+    fresh = Char(char="新", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+    replace_line_ocr_chars(line, [stale])
+    line.chars = [stale]
+
+    replace_line_ocr_char_observations(line.uid, [fresh])
+
+    assert line.chars == [stale]
+    assert line_ocr_chars(line) == [fresh]
+    assert line_ocr_chars_by_uid(line.uid) == [fresh]
+
+
 def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
     from app.models import BBox, Line
     from app.models.ocr_text_observation import (
