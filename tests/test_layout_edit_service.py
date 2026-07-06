@@ -49,6 +49,57 @@ def test_layout_edit_service_create_block_records_event_and_binding():
     assert snapshot.blocks[0].source_label == "inline_formula"
 
 
+def test_layout_edit_service_create_block_appends_to_snapshot_without_projection_drift():
+    existing = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(90, 80, 140, 95),
+        order=7,
+        source_label="text",
+    )
+    existing_snapshot_bbox = BBox.from_xyxy(10, 10, 60, 30)
+    page = Page(image_path="", width=200, height=100, blocks=[existing])
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=existing_snapshot_bbox,
+                    order=0,
+                    source_label="text",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    uid=existing.uid,
+                ),
+            ),
+        ),
+    )
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.create_block(
+        page,
+        BBox.from_xyxy(70, 20, 110, 40),
+        BlockType.EQUATION,
+        "inline_formula",
+    ))
+
+    assert result.block is not None
+    assert page.blocks == [existing, result.block]
+    assert existing.bbox == existing_snapshot_bbox
+    assert result.block.order == 1
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert [block.uid for block in snapshot.blocks] == [existing.uid, result.block.uid]
+    assert snapshot.blocks[0].bbox == existing_snapshot_bbox
+    assert snapshot.blocks[1].bbox == BBox.from_xyxy(70, 20, 110, 40)
+    assert snapshot.blocks[1].order == 1
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+
+
 def test_layout_edit_service_delete_block_records_event_and_removes_block():
     block = Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 30, 20))
     page = Page(image_path="", width=200, height=100, blocks=[block])

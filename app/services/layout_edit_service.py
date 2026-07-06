@@ -27,7 +27,6 @@ from app.models.layout_block_state import (
     set_layout_block_type,
 )
 from app.models.layout_projection import (
-    append_page_layout_block,
     page_layout_blocks,
     replace_page_layout_blocks,
 )
@@ -334,11 +333,31 @@ class LayoutEditService:
             source_label=source_label,
         )
         mark_layout_block_manual_draw(new_block)
+        set_layout_block_order(new_block, len(current_layout_snapshot(page).blocks))
         set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
         binding = self.bind_manual_block_to_paddle(page, new_block)
-        append_page_layout_block(page, new_block)
-        after = {"block": self.block_state(new_block)}
-        self.record_edit(page, "create_block", new_block, before={}, after=after)
+        snapshot = current_layout_snapshot(page)
+        new_snapshot_block = self._snapshot_block_from_edit_block(new_block, order=len(snapshot.blocks))
+        after = {"block": self.snapshot_block_state(new_snapshot_block)}
+        event = self.record_edit(
+            page,
+            "create_block",
+            new_block,
+            before={},
+            after=after,
+            sync_snapshot=False,
+        )
+        next_snapshot = self._snapshot_with_blocks(
+            snapshot,
+            (*snapshot.blocks, new_snapshot_block),
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        self._replace_runtime_projection_from_snapshot(
+            page,
+            next_snapshot,
+            candidate_blocks=[new_block],
+        )
         return LayoutEditResult(
             op="create_block",
             block=new_block,
