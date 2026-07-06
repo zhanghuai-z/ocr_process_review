@@ -40,7 +40,8 @@ from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
     BBox, Block, BlockType, OcrProject, Page,
 )
-from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.layout_block_view import iter_page_layout_block_views
+from app.models.layout_projection import replace_page_layout_blocks
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     line_ocr_bbox,
@@ -717,8 +718,9 @@ class WorkflowController(QObject):
         if page is None:
             return
         had_ocr = page_has_ocr_result(page) or page_is_ocr_done(page)
-        for block in page_layout_blocks(page):
-            mark_ocr_text_invalidated(block, change_kind)
+        for view in iter_page_layout_block_views(page):
+            if view.runtime_block is not None:
+                mark_ocr_text_invalidated(view.runtime_block, change_kind)
         if had_ocr:
             invalidate_page_ocr(page, change_kind)
         mark_page_layout_done(page)
