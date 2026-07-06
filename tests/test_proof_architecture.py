@@ -999,7 +999,10 @@ def test_proof_ui_reads_ocr_lines_from_observation_store():
         assert "block_ocr_line_count" not in source
         assert "line_belongs_to_block" not in source
 
-    assert "block_ocr_line_observations" in Path("app/ui/proof/h_proof.py").read_text(encoding="utf-8")
+    hproof_source = Path("app/ui/proof/h_proof.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations_by_uid" in hproof_source
+    assert "block_ocr_line_observations(" not in hproof_source
+    assert "block_has_ocr_line_observations" not in hproof_source
     assert "block_ocr_line_observations" in Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
 
 

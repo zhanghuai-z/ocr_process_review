@@ -48,8 +48,7 @@ from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
-    block_has_ocr_line_observations,
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
 )
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
 from app.core.ocr_ir import is_formula_marker_token
@@ -629,13 +628,14 @@ def iter_unique_page_hproof_debug_lines(
             continue
         formula_block = _is_debug_formula_view(view, block)
         table_block = _is_debug_table_view(view, block)
-        if formulas and formula_block and not block_has_ocr_line_observations(block):
+        lines = block_ocr_line_observations_by_uid(view.uid)
+        if formulas and formula_block and not lines:
             synthetic = _synthetic_block_debug_line(page, block)
             if synthetic is not None and not _line_is_formula_marker_only(synthetic):
                 if not _is_duplicate_debug_line(synthetic, seen):
                     yield block, synthetic, -1
             continue
-        for line_idx, line in enumerate(block_ocr_line_observations(block)):
+        for line_idx, line in enumerate(lines):
             include_formula = formulas and (
                 (formula_block and not _line_is_formula_marker_only(line))
                 or _line_has_formula_source(line)
