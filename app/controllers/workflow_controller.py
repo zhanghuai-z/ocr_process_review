@@ -38,10 +38,12 @@ from app.core import quality_probe as qp
 from app.engines.hanwang import native_cache
 from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
-    BBox, Block, BlockType, OcrProject, Page,
+    BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+    OcrPolicy, OcrProject, Page,
 )
 from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_projection import replace_page_layout_blocks
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
     iter_page_ocr_line_occurrences,
     line_ocr_bbox,
@@ -1094,14 +1096,40 @@ class WorkflowController(QObject):
             setattr(source_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
             setattr(proof_page, PARALLEL_PROOF_PAGE_KEY_ATTR, page_key)
         for page in proof_pages:
-            replace_page_layout_blocks(page, [
-                Block(
-                    block_type=BlockType.TEXT,
-                    bbox=BBox(0, 0, max(1, int(page.width)), max(1, int(page.height))),
-                    order=0,
-                    note=f"Parallel {self._proof_ocr_status_label()} container",
-                )
-            ])
+            block = Block(
+                block_type=BlockType.TEXT,
+                bbox=BBox(0, 0, max(1, int(page.width)), max(1, int(page.height))),
+                order=0,
+                note=f"Parallel {self._proof_ocr_status_label()} container",
+                source_label="text",
+                origin=BlockOrigin(
+                    created_by="parallel_proof",
+                    source_engine="workflow_controller",
+                    source_label="text",
+                    original_bbox=BBox(0, 0, max(1, int(page.width)), max(1, int(page.height))),
+                    original_kind=BlockType.TEXT,
+                ),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            )
+            replace_page_layout_blocks(page, [block])
+            set_layout_snapshot_for_page(page, LayoutSnapshot(
+                page_uid=page.uid,
+                artifact_uid="",
+                source_engine="parallel_proof",
+                source_run_id=str(getattr(page, PARALLEL_PROOF_PAGE_KEY_ATTR, "")),
+                blocks=(
+                    LayoutBlockSnapshot(
+                        uid=block.uid,
+                        block_type=block.block_type,
+                        bbox=block.bbox,
+                        order=block.order,
+                        source_label=block.source_label,
+                        origin=block.origin,
+                        ocr_policy=block.ocr_policy,
+                        note=block.note,
+                    ),
+                ),
+            ))
         return proof_pages
 
     def _on_parallel_proof_done(self, pages: List[Page]) -> None:

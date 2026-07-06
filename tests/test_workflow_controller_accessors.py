@@ -128,6 +128,25 @@ def test_proof_pages_signature_uses_layout_snapshot_view(ctrl):
     assert line_part[4] == BlockType.TITLE.value
 
 
+def test_parallel_proof_clone_creates_layout_snapshot(ctrl):
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
+
+    source = _page(1, [_block([_line("甲")])])
+
+    clones = ctrl._clone_pages_for_parallel_proof([source])
+
+    assert len(clones) == 1
+    clone = clones[0]
+    snapshot = layout_snapshot_for_page(clone)
+    assert snapshot is not None
+    assert snapshot.source_engine == "parallel_proof"
+    assert len(snapshot.blocks) == 1
+    assert snapshot.blocks[0].uid == clone.blocks[0].uid
+    assert snapshot.blocks[0].block_type == BlockType.TEXT
+    assert snapshot.blocks[0].bbox == BBox(0, 0, clone.width, clone.height)
+    assert snapshot.blocks[0].source_label == "text"
+
+
 def test_page_number_at_returns_correct_value(ctrl):
     p1 = _page(7, [_block([_line()])])
     p2 = _page(11, [_block([_line()])])
