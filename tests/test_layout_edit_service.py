@@ -105,7 +105,7 @@ def test_layout_edit_service_delete_block_records_event_and_removes_block():
     page = Page(image_path="", width=200, height=100, blocks=[block])
     service = LayoutEditService()
 
-    result = service.apply(LayoutEditCommand.delete_block(page, block))
+    result = service.apply(LayoutEditCommand.delete_block(page, block.uid))
 
     assert result.op == "delete_block"
     assert page.blocks == []
@@ -152,7 +152,7 @@ def test_layout_edit_service_delete_block_keeps_remaining_snapshot_projection():
     )
     service = LayoutEditService()
 
-    result = service.apply(LayoutEditCommand.delete_block(page, deleted))
+    result = service.apply(LayoutEditCommand.delete_block(page, deleted.uid))
 
     assert result.op == "delete_block"
     assert page.blocks == [kept]
@@ -209,7 +209,7 @@ def test_layout_edit_service_change_block_kind_updates_policy_and_event():
 
     result = service.apply(LayoutEditCommand.change_kind(
         page,
-        block,
+        block.uid,
         block_type=BlockType.TABLE,
         source_label="table",
     ))
@@ -262,7 +262,7 @@ def test_layout_edit_service_change_block_kind_uses_snapshot_geometry_when_proje
 
     result = service.apply(LayoutEditCommand.change_kind(
         page,
-        block,
+        block.uid,
         block_type=BlockType.TITLE,
         source_label="heading_1",
     ))
@@ -291,7 +291,7 @@ def test_layout_edit_service_preserves_explicit_structural_subtype_label():
 
     service.apply(LayoutEditCommand.change_kind(
         page,
-        block,
+        block.uid,
         block_type=BlockType.FIGURE,
         source_label="chart",
     ))

@@ -94,19 +94,19 @@ class LayoutEditCommand:
         return cls("create_block", page, bbox=bbox, block_type=block_type, source_label=source_label)
 
     @classmethod
-    def delete_block(cls, page: Page, block: Block) -> "LayoutEditCommand":
-        return cls("delete_block", page, block=block)
+    def delete_block(cls, page: Page, block_uid: str) -> "LayoutEditCommand":
+        return cls("delete_block", page, block_uid=block_uid)
 
     @classmethod
     def change_kind(
         cls,
         page: Page,
-        block: Block,
+        block_uid: str,
         *,
         block_type: BlockType,
         source_label: str,
     ) -> "LayoutEditCommand":
-        return cls("change_kind", page, block=block, block_type=block_type, source_label=source_label)
+        return cls("change_kind", page, block_uid=block_uid, block_type=block_type, source_label=source_label)
 
     @classmethod
     def merge_blocks(
@@ -179,11 +179,14 @@ class LayoutEditService:
                 command.source_label,
             )
         if command.op == "delete_block":
-            return self._delete_block(command.page, self._require_block(command))
+            return self._delete_block(
+                command.page,
+                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
+            )
         if command.op == "change_kind":
             return self._change_block_kind(
                 command.page,
-                self._require_block(command),
+                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
                 block_type=self._require_block_type(command),
                 source_label=command.source_label,
             )

@@ -1119,7 +1119,7 @@ class LayoutPanel(QWidget):
                     continue
                 self._layout_edit_service.apply(LayoutEditCommand.change_kind(
                     page,
-                    block,
+                    block.uid,
                     block_type=subtype.block_type,
                     source_label=source_label,
                 ))
@@ -1521,7 +1521,7 @@ class LayoutPanel(QWidget):
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block))
+        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block.uid))
         if self._selected_block_uid == block.uid:
             self._selected_block_uid = None
             self._selected_char_box_index = -1
@@ -1556,7 +1556,7 @@ class LayoutPanel(QWidget):
         source_label = self._source_label_for_subtype(page, selected_block, new_subtype)
         result = self._layout_edit_service.apply(LayoutEditCommand.change_kind(
             page,
-            selected_block,
+            selected_block.uid,
             block_type=new_subtype.block_type,
             source_label=source_label,
         ))
