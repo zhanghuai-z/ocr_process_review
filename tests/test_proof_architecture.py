@@ -1688,6 +1688,13 @@ def test_layout_edit_service_updates_layout_snapshot_store():
     assert "source_engine=\"layout_edit\"" in record_edit_source
 
 
+def test_layout_edit_service_reads_ocr_lines_from_observation_store():
+    source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+
+    assert "block_ocr_line_observations" in source
+    assert re.search(r"(?<!clear_)block_ocr_lines\(", source) is None
+
+
 def test_truth_map_records_layout_snapshot_as_current_boundary():
     source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
 

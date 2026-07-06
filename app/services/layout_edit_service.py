@@ -32,7 +32,11 @@ from app.models.layout_projection import (
 )
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.models.ocr_observation import block_ocr_lines, clear_block_ocr_lines, set_ocr_line_bbox
+from app.models.ocr_observation import (
+    block_ocr_line_observations,
+    clear_block_ocr_lines,
+    set_ocr_line_bbox,
+)
 from app.services.layout_snapshot import sync_page_layout_snapshot_from_projection
 
 
@@ -801,7 +805,7 @@ class LayoutEditService:
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         set_layout_block_source_label(block, source_label)
         set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
-        for line in block_ocr_lines(block):
+        for line in block_ocr_line_observations(block):
             set_ocr_line_bbox(line, block.bbox)
         set_paddle_binding(block, next_binding)
         return True
