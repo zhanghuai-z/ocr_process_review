@@ -21,7 +21,14 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_block_state import set_layout_block_order
+from app.models.layout_block_state import (
+    set_layout_block_bbox,
+    set_layout_block_note,
+    set_layout_block_ocr_policy,
+    set_layout_block_order,
+    set_layout_block_source_label,
+    set_layout_block_type,
+)
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
@@ -1592,7 +1599,7 @@ class LayoutPanel(QWidget):
                 continue
             seen.add(page_idx)
             page = self._pages[page_idx]
-            snapshots.append((page_idx, copy.deepcopy(page_layout_blocks(page))))
+            snapshots.append((page_idx, self._layout_blocks_for_undo(page)))
         if not snapshots:
             return
         self._undo_stack.append(snapshots)
@@ -1613,7 +1620,12 @@ class LayoutPanel(QWidget):
             self._layout_edit_service.apply(LayoutEditCommand.restore_blocks(
                 page,
                 copy.deepcopy(blocks),
-                before={"blocks": [self._layout_block_state(block) for block in page_layout_blocks(page)]},
+                before={
+                    "blocks": [
+                        LayoutEditService.snapshot_block_state(view.snapshot_block)
+                        for view in iter_page_layout_block_views(page)
+                    ]
+                },
             ))
             restored_page_indices.append(page_idx)
         if not restored_page_indices:
@@ -1640,6 +1652,30 @@ class LayoutPanel(QWidget):
         self.geometry_changed.emit()
         for page_idx in restored_page_indices:
             self.block_contract_changed.emit(self._pages[page_idx].page_number, "layout_undo")
+
+    @staticmethod
+    def _layout_blocks_for_undo(page: Page) -> list[Block]:
+        blocks: list[Block] = []
+        for view in iter_page_layout_block_views(page):
+            block = copy.deepcopy(view.runtime_block) if view.runtime_block is not None else Block(
+                block_type=view.block_type,
+                bbox=view.bbox,
+                order=view.order,
+                note=view.note,
+                source_label=view.source_label,
+                origin=view.origin,
+                ocr_policy=view.ocr_policy,
+                uid=view.uid,
+            )
+            set_layout_block_type(block, view.block_type)
+            set_layout_block_bbox(block, view.bbox)
+            set_layout_block_order(block, view.order)
+            set_layout_block_source_label(block, view.source_label)
+            set_layout_block_ocr_policy(block, view.ocr_policy)
+            set_layout_block_note(block, view.note)
+            block.origin = view.origin
+            blocks.append(block)
+        return blocks
 
     @staticmethod
     def _bbox_hits_frame(a: BBox, b: BBox, tolerance: int = 6) -> bool:

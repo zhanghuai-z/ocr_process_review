@@ -6660,6 +6660,73 @@ def test_layout_panel_undo_restores_block_edits():
     print("test_layout_panel_undo_restores_block_edits PASSED")
 
 
+def test_layout_panel_undo_snapshot_uses_layout_snapshot_view_geometry():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
+    from app.services.layout_edit_service import LayoutEditCommand
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(80, 60, 110, 75), source_label="text")
+        snapshot_bbox = BBox.from_xyxy(10, 10, 40, 25)
+        changed_bbox = BBox.from_xyxy(45, 20, 75, 35)
+        page = Page(image_path=str(image_path), width=120, height=80, blocks=[block])
+        set_layout_snapshot_for_page(
+            page,
+            LayoutSnapshot(
+                page_uid=page.uid,
+                artifact_uid="artifact-1",
+                source_engine="paddleocr-vl",
+                source_run_id="layout-run-1",
+                blocks=(
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.TEXT,
+                        bbox=snapshot_bbox,
+                        order=0,
+                        source_label="text",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                        ocr_policy=OcrPolicy.TEXT_OCR,
+                        uid=block.uid,
+                    ),
+                ),
+            ),
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._push_undo_snapshot_for_page(0)
+            panel._layout_edit_service.apply(LayoutEditCommand.update_geometry(page, block, bbox=changed_bbox))
+            assert layout_snapshot_for_page(page).blocks[0].bbox == changed_bbox
+
+            panel._undo_last_edit()
+
+            assert page.blocks[0].bbox == snapshot_bbox
+            assert layout_snapshot_for_page(page).blocks[0].bbox == snapshot_bbox
+        finally:
+            panel.close()
+
+    print("test_layout_panel_undo_snapshot_uses_layout_snapshot_view_geometry PASSED")
+
+
 def test_layout_panel_undo_preserves_view_transform():
     from pathlib import Path
     import tempfile
