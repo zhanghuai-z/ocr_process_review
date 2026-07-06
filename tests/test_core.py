@@ -13246,6 +13246,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
     )
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.models import BlockOrigin
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
     from app.services.ocr_pipeline import OcrPipeline
 
     calls = []
@@ -13393,6 +13394,15 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert not hasattr(out_page.blocks[2], "raw_payload")
         assert out_page.blocks[2].origin is not None
         assert out_page.blocks[2].origin.raw_index == 2
+        snapshot = layout_snapshot_for_page(out_page)
+        assert snapshot is not None
+        assert snapshot.source_engine == "hanwang.micro_recblock"
+        assert [block.uid for block in out_page.blocks] == [block.uid for block in snapshot.blocks]
+        assert [block.block_type for block in snapshot.blocks] == [
+            BlockType.TEXT,
+            BlockType.EQUATION,
+            BlockType.REFERENCE,
+        ]
     finally:
         os.unlink(img_path)
 

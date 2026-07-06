@@ -21,7 +21,12 @@ from app.models.block_state import (
     set_paddle_binding,
 )
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_projection import replace_page_layout_blocks
+from app.models.layout_snapshot import LayoutSnapshot
+from app.models.layout_snapshot_projection import (
+    layout_block_snapshot_from_projection_block,
+    replace_page_layout_projection_from_snapshot,
+)
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
@@ -3773,7 +3778,15 @@ class HanwangMicroRecBlockEngine:
             new_blocks.extend(preserved_manual_blocks)
         for order, block in enumerate(new_blocks):
             set_layout_block_order(block, order)
-        replace_page_layout_blocks(page, new_blocks)
+        snapshot = LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+            source_engine=self.engine_id,
+            source_run_id=page.raw_layout_artifact.run_id if page.raw_layout_artifact else "",
+            blocks=tuple(layout_block_snapshot_from_projection_block(block) for block in new_blocks),
+        )
+        set_layout_snapshot_for_page(page, snapshot)
+        replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=new_blocks)
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "

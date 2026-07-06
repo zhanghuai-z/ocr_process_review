@@ -509,6 +509,10 @@ def test_layout_block_view_boundary_is_used_by_migrated_consumers():
     assert "replace_page_layout_projection_from_snapshot" in controller_source
     assert "app.models.layout_projection" not in controller_source
 
+    hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
+    assert "replace_page_layout_projection_from_snapshot" in hanwang_source
+    assert "app.models.layout_projection" not in hanwang_source
+
 
 def test_layout_snapshot_docs_do_not_name_current_projection_legacy():
     checked = {
