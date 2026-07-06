@@ -62,7 +62,8 @@ def _seed_page_ocr_observations(page):
     from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.models.layout_snapshot_store import layout_snapshot_for_page
 
-    if page.blocks and layout_snapshot_for_page(page) is None:
+    snapshot = layout_snapshot_for_page(page)
+    if page.blocks and (snapshot is None or snapshot.source_engine == "test_seed"):
         _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     for block in page.blocks:
         if block.lines:
