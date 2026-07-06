@@ -60,13 +60,22 @@ from app.core.paddle_v16_client import (
     build_paddle_v16_optional_payload,
     is_paddle_v16_endpoint,
 )
-from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
-from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
-from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.layout_projection import (
-    append_page_layout_block,
-    replace_page_layout_blocks,
+from app.models import (
+    Block,
+    BlockOrigin,
+    BlockSource,
+    BlockType,
+    LayoutBlockSnapshot,
+    LayoutSnapshot,
+    Page,
 )
+from app.models.layout_block_state import set_layout_block_ocr_policy
+from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
+from app.models.layout_snapshot_projection import (
+    layout_block_snapshot_from_projection_block,
+    replace_page_layout_projection_from_snapshot,
+)
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.page_state import clear_page_error_message, mark_page_layout_failed
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.services.layout_snapshot import (
@@ -94,6 +103,23 @@ def _display_image_path(page: Page) -> Path:
         return image_path
     normalized = Path(str(page.display_image_path).replace("\\", "/"))
     return normalized
+
+
+def _clear_layout_analysis_result(
+    page: Page,
+    *,
+    source_engine: str,
+    source_run_id: str = "",
+) -> None:
+    snapshot = LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+        source_engine=source_engine,
+        source_run_id=source_run_id,
+        blocks=(),
+    )
+    set_layout_snapshot_for_page(page, snapshot)
+    replace_page_layout_projection_from_snapshot(page, snapshot)
 
 
 def _layout_block_origin(
@@ -182,7 +208,11 @@ class LayoutWorker(QThread):
             if self._is_cancelled():
                 return index, None
             logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
-            replace_page_layout_blocks(page, [])
+            _clear_layout_analysis_result(
+                page,
+                source_engine="layout_analysis_failed",
+                source_run_id=self._batch_id,
+            )
             mark_page_layout_failed(page, f"版面分析失败：{e}")
             return index, f"第 {page.page_number} 页：{e}"
 
@@ -235,7 +265,11 @@ class LayoutWorker(QThread):
                             else:
                                 page = self._pages[page_idx]
                                 logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
-                                replace_page_layout_blocks(page, [])
+                                _clear_layout_analysis_result(
+                                    page,
+                                    source_engine="layout_analysis_failed",
+                                    source_run_id=self._batch_id,
+                                )
                                 mark_page_layout_failed(page, f"版面分析失败：{exc}")
                                 error_message = f"第 {page.page_number} 页：{exc}"
                         if self._is_cancelled():
@@ -754,15 +788,13 @@ class LayoutAnalyzer:
 
     def _rescale_blocks_if_suspicious(self, page: Page) -> None:
         """当所有框都像落在较小坐标系上时，做一次统一比例修正。"""
-        valid_views = [
-            view for view in iter_page_layout_block_views(page)
-            if view.runtime_block is not None and view.bbox.area > 0
-        ]
-        if len(valid_views) < 2 or page.width <= 0 or page.height <= 0:
+        snapshot = current_layout_snapshot(page)
+        valid_blocks = [block for block in snapshot.blocks if block.bbox.area > 0]
+        if len(valid_blocks) < 2 or page.width <= 0 or page.height <= 0:
             return
 
-        max_x2 = max(view.bbox.x2 for view in valid_views)
-        max_y2 = max(view.bbox.y2 for view in valid_views)
+        max_x2 = max(block.bbox.x2 for block in valid_blocks)
+        max_y2 = max(block.bbox.y2 for block in valid_blocks)
         if max_x2 <= 0 or max_y2 <= 0:
             return
 
@@ -784,11 +816,7 @@ class LayoutAnalyzer:
                 scale_x,
                 scale_y,
             )
-            for view in valid_views:
-                set_layout_block_bbox(
-                    view.runtime_block,
-                    scale_bbox(view.bbox, scale_x, scale_y).clamp(page.width, page.height),
-                )
+            self._replace_layout_snapshot_with_scaled_bboxes(page, snapshot, scale_x, scale_y)
             return
 
         scale_x = page.width / max_x2
@@ -810,11 +838,36 @@ class LayoutAnalyzer:
             "for %s: scale_x=%.3f scale_y=%.3f page=%dx%d max_bbox=(%d,%d)",
             page.display_image_path, scale_x, scale_y, page.width, page.height, max_x2, max_y2,
         )
-        for view in valid_views:
-            set_layout_block_bbox(
-                view.runtime_block,
-                scale_bbox(view.bbox, scale_x, scale_y).clamp(page.width, page.height),
-            )
+        self._replace_layout_snapshot_with_scaled_bboxes(page, snapshot, scale_x, scale_y)
+
+    @staticmethod
+    def _replace_layout_snapshot_with_scaled_bboxes(
+        page: Page,
+        snapshot: LayoutSnapshot,
+        scale_x: float,
+        scale_y: float,
+    ) -> None:
+        next_snapshot = LayoutSnapshot(
+            page_uid=snapshot.page_uid,
+            artifact_uid=snapshot.artifact_uid,
+            source_engine=snapshot.source_engine,
+            source_run_id=snapshot.source_run_id,
+            blocks=tuple(
+                LayoutBlockSnapshot(
+                    block_type=block.block_type,
+                    bbox=scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height),
+                    order=block.order,
+                    source_label=block.source_label,
+                    origin=block.origin,
+                    ocr_policy=block.ocr_policy,
+                    note=block.note,
+                    uid=block.uid,
+                )
+                for block in snapshot.blocks
+            ),
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        replace_page_layout_projection_from_snapshot(page, next_snapshot)
 
     def _local_analyze(self, page: Page) -> Page:
         import cv2
@@ -826,7 +879,7 @@ class LayoutAnalyzer:
         page.height, page.width = img.shape[:2]
         result = engine.predict(page.display_image_path)
         items = self._unwrap_layout_items(result)
-        replace_page_layout_blocks(page, [])
+        blocks: list[Block] = []
         for i, item in enumerate(items):
             raw_type = item.get("type", "unknown")
             bbox_raw = item.get("bbox", [0, 0, 0, 0])
@@ -852,7 +905,19 @@ class LayoutAnalyzer:
                 ),
             )
             set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
-            append_page_layout_block(page, block)
+            blocks.append(block)
+        snapshot = LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+            source_engine="paddleocr-local",
+            source_run_id=self._layout_batch_id,
+            blocks=tuple(
+                layout_block_snapshot_from_projection_block(block)
+                for block in blocks
+            ),
+        )
+        set_layout_snapshot_for_page(page, snapshot)
+        replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=blocks)
         self._rescale_blocks_if_suspicious(page)
         return page
 
@@ -926,8 +991,7 @@ class LayoutAnalyzer:
                 telemetry.get("submit_network_mode") or telemetry.get("network_mode") or "",
                 telemetry.get("batch_id") or "",
             )
-        blocks, raw_overlay_items = self._extract_api_blocks(page, data)
-        replace_page_layout_blocks(page, blocks)
+        _blocks, raw_overlay_items = self._extract_api_blocks(page, data)
         self._write_paddle_raw_artifact(page, data)
         # 注意：不再调用 _rescale_blocks_if_suspicious()——
         # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，

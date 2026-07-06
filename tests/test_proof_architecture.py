@@ -1717,6 +1717,9 @@ def test_api_layout_blocks_are_projected_from_layout_snapshot():
     assert "layout_snapshot_from_normalized_artifact(" in api_source
     assert "adopt_page_layout_snapshot(" in api_source
     assert "Block(" not in api_source
+    assert "app.models.layout_projection" not in source
+    assert "replace_page_layout_blocks(" not in source
+    assert "append_page_layout_block(" not in source
 
 
 def test_layout_snapshot_contract_lives_in_model_layer():

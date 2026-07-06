@@ -17173,6 +17173,7 @@ def test_fixed_api_chain_resolves_official_roots_to_vl16_and_ppocrv5():
 def test_layout_analyzer_rescales_suspicious_blocks():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Block, BlockType, Page
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
 
     analyzer = LayoutAnalyzer()
     page = Page(image_path="/tmp/test.png", width=2400, height=3200)
@@ -17187,6 +17188,10 @@ def test_layout_analyzer_rescales_suspicious_blocks():
     assert page.blocks[0].bbox.x > 100
     assert page.blocks[-1].bbox.y > 1500
     assert page.blocks[-1].bbox.y2 <= page.height
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.blocks[0].bbox == page.blocks[0].bbox
+    assert snapshot.blocks[-1].bbox == page.blocks[-1].bbox
 
     print("test_layout_analyzer_rescales_suspicious_blocks PASSED")
 
@@ -17197,7 +17202,7 @@ def test_layout_analyzer_rescales_snapshot_view_bboxes_into_runtime_projection()
         BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
         OcrPolicy, Page,
     )
-    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
 
     analyzer = LayoutAnalyzer()
     page = Page(image_path="/tmp/test-snapshot-rescale.png", width=2400, height=3200)
@@ -17249,6 +17254,10 @@ def test_layout_analyzer_rescales_snapshot_view_bboxes_into_runtime_projection()
     assert blocks[0].bbox.y > 200
     assert blocks[0].bbox.w > 800
     assert blocks[2].bbox.y > 2000
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.blocks[0].bbox == blocks[0].bbox
+    assert snapshot.blocks[2].bbox == blocks[2].bbox
 
     print("test_layout_analyzer_rescales_snapshot_view_bboxes_into_runtime_projection PASSED")
 
