@@ -1276,6 +1276,18 @@ class LayoutPanel(QWidget):
         } or bool(re.fullmatch(r"heading_[1-6]", label))
 
     @staticmethod
+    def _heading_level_for_layout_view(view: LayoutBlockView) -> int:
+        label = normalize_paddle_label(view.source_label)
+        match = re.fullmatch(r"heading_([1-6])", label)
+        if match:
+            return int(match.group(1))
+        if label == "doc_title":
+            return 1
+        if label in {"paragraph_title", "section_title", "chapter_title", "title"}:
+            return 0
+        return 0
+
+    @staticmethod
     def _is_title_like_layout_view(view: LayoutBlockView) -> bool:
         label = normalize_paddle_label(view.source_label)
         return view.block_type == BlockType.TITLE or label in {
@@ -1293,18 +1305,19 @@ class LayoutPanel(QWidget):
         stack: list[tuple[int, QTreeWidgetItem]] = []
         for page_idx, page in enumerate(self._pages):
             heading_blocks = [
-                block for block in page_layout_blocks(page)
-                if self._is_title_like_block(block)
+                (view, view.runtime_block)
+                for view in iter_page_layout_block_views(page)
+                if view.runtime_block is not None and self._is_title_like_layout_view(view)
             ]
             if not heading_blocks:
                 continue
-            for block in sorted(heading_blocks, key=lambda item: (item.bbox.y, item.bbox.x, item.order)):
-                level = self._heading_level_for_block(block)
+            for view, block in sorted(heading_blocks, key=lambda item: (item[0].bbox.y, item[0].bbox.x, item[0].order)):
+                level = self._heading_level_for_layout_view(view)
                 outline_level = level if 1 <= level <= 6 else 1
                 level_text = f"H{level}" if level else "标题候选"
-                text = self._block_preview_text(block)
+                text = self._layout_view_preview_text(view, block)
                 item = QTreeWidgetItem([text])
-                item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, id(block)))
+                item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, view.uid))
                 item.setToolTip(0, f"级别：{level_text}\n第 {page.page_number} 页")
                 while stack and stack[-1][0] >= outline_level:
                     stack.pop()
@@ -1319,13 +1332,14 @@ class LayoutPanel(QWidget):
         payload = item.data(0, Qt.ItemDataRole.UserRole)
         if not isinstance(payload, tuple) or len(payload) != 2:
             return
-        page_idx, block_identity = payload
+        page_idx, block_uid = payload
         if not isinstance(page_idx, int) or not (0 <= page_idx < len(self._pages)):
             return
-        block = next(
-            (candidate for candidate in page_layout_blocks(self._pages[page_idx]) if id(candidate) == block_identity),
-            None,
-        )
+        block = None
+        for view in iter_page_layout_block_views(self._pages[page_idx]):
+            if view.uid == block_uid:
+                block = view.runtime_block
+                break
         if block is not None:
             self._focus_block(page_idx, block)
 

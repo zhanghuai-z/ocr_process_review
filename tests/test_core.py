@@ -5230,6 +5230,8 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
     from pathlib import Path
     import tempfile
 
+    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QImage
 
     from app.models import (
@@ -6449,6 +6451,76 @@ def test_layout_panel_heading_outline_uses_nested_heading_levels():
             panel.close()
 
     print("test_layout_panel_heading_outline_uses_nested_heading_levels PASSED")
+
+
+def test_layout_panel_heading_outline_uses_layout_snapshot_view():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        Line,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 100, QImage.Format.Format_RGB888).save(str(image_path))
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 120, 20),
+            source_label="text",
+            lines=[Line(text="第一章", confidence=0.9, bbox=BBox(10, 10, 120, 20))],
+        )
+        page = Page(image_path=str(image_path), width=160, height=100, blocks=[block])
+        set_layout_snapshot_for_page(
+            page,
+            LayoutSnapshot(
+                page_uid=page.uid,
+                artifact_uid="artifact-1",
+                source_engine="paddleocr-vl",
+                source_run_id="layout-run-1",
+                blocks=(
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.TITLE,
+                        bbox=block.bbox,
+                        order=0,
+                        source_label="heading_1",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="heading_1"),
+                        ocr_policy=OcrPolicy.TEXT_OCR,
+                        uid=block.uid,
+                    ),
+                ),
+            ),
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            assert panel._outline_tree.topLevelItemCount() == 1
+            item = panel._outline_tree.topLevelItem(0)
+            assert item.text(0) == "第一章"
+            assert item.data(0, Qt.ItemDataRole.UserRole) == (0, block.uid)
+            panel._on_outline_item_clicked(item)
+            assert panel._selected_block is block
+        finally:
+            panel.close()
+
+    print("test_layout_panel_heading_outline_uses_layout_snapshot_view PASSED")
 
 
 def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
