@@ -12,7 +12,8 @@ from typing import Any, Iterable
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
-from app.models.layout_projection import iter_page_layout_block_occurrences, page_layout_blocks
+from app.models.layout_block_view import iter_page_layout_block_views
+from app.models.layout_projection import iter_page_layout_block_occurrences
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
 from app.models.ocr_observation import (
@@ -190,16 +191,12 @@ def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagno
         snapshot = layout_snapshot_for_page(page)
         if snapshot is None:
             continue
-        runtime_blocks = page_layout_blocks(page)
-        runtime_by_uid = {
-            block.uid: (block_idx, block)
-            for block_idx, block in enumerate(runtime_blocks)
-            if block.uid
-        }
-        snapshot_uids = {block.uid for block in snapshot.blocks if block.uid}
-        for snapshot_idx, snapshot_block in enumerate(snapshot.blocks):
-            pair = runtime_by_uid.get(snapshot_block.uid)
-            if pair is None:
+        views = list(iter_page_layout_block_views(page))
+        snapshot_uids = {view.uid for view in views if view.uid}
+        for view in views:
+            snapshot_block = view.snapshot_block
+            runtime_block = view.runtime_block
+            if runtime_block is None:
                 issues.append(ProjectDiagnosticIssue(
                     severity="error",
                     code="layout_snapshot_missing_runtime_block",
@@ -207,29 +204,28 @@ def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagno
                     page_number=page.page_number,
                     page_uid=page.uid,
                     block_uid=snapshot_block.uid,
-                    details={"snapshot_index": snapshot_idx},
+                    details={"snapshot_index": view.snapshot_index},
                 ))
                 continue
-            runtime_idx, runtime_block = pair
             drift: dict[str, Any] = {}
-            if runtime_block.block_type != snapshot_block.block_type:
+            if runtime_block.block_type != view.block_type:
                 drift["block_type"] = {
-                    "snapshot": snapshot_block.block_type.value,
+                    "snapshot": view.block_type.value,
                     "runtime": runtime_block.block_type.value,
                 }
-            if runtime_block.bbox != snapshot_block.bbox:
+            if runtime_block.bbox != view.bbox:
                 drift["bbox"] = {
-                    "snapshot": snapshot_block.bbox.to_dict(),
+                    "snapshot": view.bbox.to_dict(),
                     "runtime": runtime_block.bbox.to_dict(),
                 }
-            if runtime_block.order != snapshot_block.order:
+            if runtime_block.order != view.order:
                 drift["order"] = {
-                    "snapshot": snapshot_block.order,
+                    "snapshot": view.order,
                     "runtime": runtime_block.order,
                 }
-            if runtime_block.source_label != snapshot_block.source_label:
+            if runtime_block.source_label != view.source_label:
                 drift["source_label"] = {
-                    "snapshot": snapshot_block.source_label,
+                    "snapshot": view.source_label,
                     "runtime": runtime_block.source_label,
                 }
             if drift:
@@ -241,12 +237,14 @@ def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagno
                     page_uid=page.uid,
                     block_uid=snapshot_block.uid,
                     details={
-                        "snapshot_index": snapshot_idx,
-                        "runtime_block_index": runtime_idx,
+                        "snapshot_index": view.snapshot_index,
+                        "runtime_block_index": view.runtime_block_index,
                         "drift": drift,
                     },
                 ))
-        for runtime_idx, runtime_block in enumerate(runtime_blocks):
+        for occurrence in iter_page_layout_block_occurrences(page):
+            runtime_idx = occurrence.block_index
+            runtime_block = occurrence.block
             if runtime_block.uid and runtime_block.uid not in snapshot_uids:
                 issues.append(ProjectDiagnosticIssue(
                     severity="warning",

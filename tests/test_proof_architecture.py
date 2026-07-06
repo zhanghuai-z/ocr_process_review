@@ -1924,6 +1924,14 @@ def test_table_text_layer_service_reads_layout_from_snapshot_view():
     assert "view.block_type != BlockType.TABLE" in source
 
 
+def test_project_diagnostics_layout_drift_reads_snapshot_views():
+    source = Path("app/services/project_diagnostics.py").read_text(encoding="utf-8")
+
+    assert "iter_page_layout_block_views" in source
+    assert "from app.models.layout_projection import iter_page_layout_block_occurrences, page_layout_blocks" not in source
+    assert "page_layout_blocks(" not in source
+
+
 def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
 
