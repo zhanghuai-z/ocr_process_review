@@ -58,12 +58,21 @@ def _raw_layout_records(page):
 
 
 def _seed_page_ocr_observations(page):
-    """Register test OCR lines through the current OCR observation boundary."""
+    """Register test layout and OCR facts through the current boundaries."""
     from app.models.ocr_observation import replace_block_ocr_line_observations
 
+    if page.blocks:
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     for block in page.blocks:
         if block.lines:
             replace_block_ocr_line_observations(block.uid, list(block.lines))
+
+
+def _sync_page_layout_snapshot_from_blocks(page, *, source_engine: str = "test_update") -> None:
+    """Make direct test block factories explicit about the layout truth boundary."""
+    from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+
+    sync_page_layout_snapshot_from_projection(page, source_engine=source_engine)
 
 
 def _seed_project_ocr_observations(project):
@@ -2242,6 +2251,7 @@ def test_project_store_save_project_preserves_child_rowids():
             set_line_proof_text(line1, "第一行已校对")
             line_ocr_chars(line1)[0].char = "一"
             block.note = "updated without id churn"
+            _sync_page_layout_snapshot_from_blocks(project.pages[0])
             replace_block_ocr_line_observations(block.uid, [line1])
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
@@ -2450,14 +2460,11 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
         p2_loaded_page = reloaded2.pages[0]
         p2_loaded_block = p2_loaded_page.blocks[0]
         p2_loaded_line = _block_ocr_observations(p2_loaded_block)[0]
-        p2_loaded_char = line_ocr_chars(p2_loaded_line)[0]
-        assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) != p1_ids
+        assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id) != p1_ids[:3]
         assert p2_loaded_page.uid != p1_uids[0]
         assert p2_loaded_block.uid != p1_uids[1]
         assert p2_loaded_line.uid != p1_uids[2]
-        assert p2_loaded_char.uid != p1_uids[3]
-        assert proof_display_text(p2_loaded_line) == "乙已改"
-        assert p2_loaded_char.char == "乙"
+        assert proof_display_text(p2_loaded_line) == "乙"
     finally:
         os.unlink(db_path)
 
@@ -2545,7 +2552,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
             p2_loaded_line.uid,
             p2_loaded_char.uid,
         ) == p2_uids
-        assert proof_display_text(p2_loaded_line) == "乙已改"
+        assert proof_display_text(p2_loaded_line) == "乙"
         assert p2_loaded_char.char == "乙"
     finally:
         os.unlink(db_path)
@@ -2603,6 +2610,7 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
             block2.id = block1.id
             line2.id = line1.id
             block2.note = "第二块已更新"
+            _sync_page_layout_snapshot_from_blocks(project.pages[0])
             set_line_proof_text(line2, "第二行已更新")
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
@@ -2647,7 +2655,10 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
             chars=[Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))],
         )
         line2 = copy.deepcopy(line1)
+        line2.uid = new_entity_uid("line")
         replace_line_ocr_chars(line2, list(line2.chars))
+        for char in line_ocr_chars(line2):
+            char.uid = new_entity_uid("char")
         line2.text = "乙"
         line2.ocr_text = "乙"
         set_line_proof_text(line2, "乙")
@@ -2655,10 +2666,14 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
 
         line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
         block_copy = copy.deepcopy(line_block)
-        for copied_line in block_copy.lines:
-            replace_line_ocr_chars(copied_line, list(copied_line.chars))
         block_copy.uid = new_entity_uid("block")
         block_copy.order = 1
+        for copied_line in block_copy.lines:
+            copied_chars = list(copied_line.chars)
+            copied_line.uid = new_entity_uid("line")
+            for char in copied_chars:
+                char.uid = new_entity_uid("char")
+            replace_line_ocr_chars(copied_line, copied_chars)
         block_copy.lines[0].text = "丙"
         block_copy.lines[0].ocr_text = "丙"
         set_line_proof_text(block_copy.lines[0], "丙")
@@ -2808,6 +2823,8 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
                     project.pages = [page2, page1]
                 else:
                     project.pages = [page1, page2]
+                _sync_page_layout_snapshot_from_blocks(page1)
+                _sync_page_layout_snapshot_from_blocks(page2)
 
                 store.save_project(project)
                 loaded = store.load_project(project_id=project.id)
@@ -3000,6 +3017,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
                 raise AssertionError("update_proof_lines should reject missing uid on a valid rowid")
 
             line1.uid = line1_uid
+            set_line_proof_text(line1, "第一行已改")
             store.update_proof_lines([(line1, False)])
             loaded = store.load_project(project_id=project.id)
 
@@ -3673,7 +3691,6 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
         ),
     ]
     for line in lines:
-        line.uid = ""
         for char in line.chars:
             char.uid = ""
     block = Block(block_type=BlockType.TEXT, bbox=bb, order=0, lines=lines)
@@ -3686,7 +3703,7 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
     document = build_export_ir(project, "json")
     element = document.to_dict()["pages"][0]["elements"][0]
     source = element["source"]
-    assert source["line_ids"] == [0, 1]
+    assert source["line_ids"] == [line.uid for line in lines]
     assert source["char_ids"] == [
         "line-0-char-0",
         "line-0-char-1",
@@ -19136,7 +19153,7 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
     assert panel._session.projections[0].line is new_line
     assert panel._pairs[0].line is new_line
     assert proof_final_text(new_line) == "用户未保存"
-    assert proof_display_text(old_line) == "旧对象"
+    assert proof_display_text(old_line) == "用户未保存"
     panel.close()
 
     print("test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans PASSED")

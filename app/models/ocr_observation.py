@@ -15,6 +15,7 @@ from .ocr_observation_store import (
     ocr_lines_for_block_uid,
     set_ocr_lines_for_block_uid,
 )
+from .ocr_text_observation import refresh_line_ocr_text_observation_from_projection
 from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
 from .project import BBox, Block, Line, OcrProject, Page
 
@@ -44,7 +45,10 @@ def block_has_ocr_line_observations(block: Block) -> bool:
 
 
 def replace_block_ocr_line_observations(block_uid: str, lines: Iterable[Line]) -> None:
-    set_ocr_lines_for_block_uid(block_uid, list(lines))
+    line_list = list(lines)
+    for line in line_list:
+        refresh_line_ocr_text_observation_from_projection(line)
+    set_ocr_lines_for_block_uid(block_uid, line_list)
 
 
 def discard_block_ocr_line_projection(block: Block) -> None:

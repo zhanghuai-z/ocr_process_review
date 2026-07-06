@@ -5,7 +5,7 @@ import pytest
 
 from app.models import Block, Line
 from app.models.ocr_character_observation import replace_line_ocr_chars
-from app.models.ocr_observation import replace_block_ocr_line_observations
+from app.models.ocr_observation_store import set_ocr_lines_for_block_uid
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +23,7 @@ def _seed_block_constructor_lines_into_ocr_observations(monkeypatch: pytest.Monk
     def patched_post_init(self: Block) -> None:
         original_post_init(self)
         if self.lines:
-            replace_block_ocr_line_observations(self.uid, list(self.lines))
+            set_ocr_lines_for_block_uid(self.uid, list(self.lines))
 
     monkeypatch.setattr(Block, "__post_init__", patched_post_init)
 
