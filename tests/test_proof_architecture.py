@@ -559,6 +559,8 @@ def test_line_ocr_chars_access_goes_through_character_observation_boundary():
     assert offenders == []
     source = Path("app/models/ocr_character_observation.py").read_text(encoding="utf-8")
     assert "def replace_line_ocr_chars" not in source
+    assert "def replace_line_ocr_char_span" not in source
+    assert "def clear_line_ocr_chars" not in source
     assert "ocr_chars_for_line(line, line.chars)" not in source
     assert "set_ocr_chars_for_line(line, projected)" not in source
     store_source = Path("app/models/ocr_character_observation_store.py").read_text(encoding="utf-8")
@@ -677,7 +679,7 @@ def test_ocr_observation_geometry_writes_stay_at_observation_boundaries():
         encoding="utf-8"
     )
     assert "def set_ocr_char_bbox" in char_boundary_source
-    assert "def replace_line_ocr_char_span" in char_boundary_source
+    assert "def replace_line_ocr_char_span" not in char_boundary_source
 
 
 def test_ocr_line_bbox_reads_go_through_observation_boundary():

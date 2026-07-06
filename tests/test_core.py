@@ -178,13 +178,11 @@ def test_page_layout_state_reads_snapshot_not_runtime_projection():
 def test_ocr_character_observation_boundary_tracks_current_line_chars():
     from app.models import BBox, Char, Line
     from app.models.ocr_character_observation import (
-        clear_line_ocr_chars,
         iter_line_ocr_char_occurrences,
         line_has_ocr_chars,
         line_ocr_char_at,
         line_ocr_char_count,
         line_ocr_chars,
-        replace_line_ocr_char_span,
         replace_line_ocr_char_observations,
     )
 
@@ -202,13 +200,13 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
         for occurrence in iter_line_ocr_char_occurrences(line)
     ] == [(first, 0), (second, 1)]
 
-    clear_line_ocr_chars(line)
+    replace_line_ocr_char_observations(line.uid, [])
     assert line_ocr_chars(line) == []
     assert line.chars == []
 
     replace_line_ocr_char_observations(line.uid, [first, second])
     third = Char(char="丙", confidence=0.97, bbox=BBox(10, 0, 10, 10))
-    replace_line_ocr_char_span(line, 1, 2, [third])
+    replace_line_ocr_char_observations(line.uid, [first, third])
     assert line_ocr_chars(line) == [first, third]
     assert line.chars == []
 

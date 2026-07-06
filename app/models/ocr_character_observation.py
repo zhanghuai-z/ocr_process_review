@@ -43,16 +43,8 @@ def replace_line_ocr_char_observations(line_uid: str, chars: Iterable[Char]) -> 
     set_ocr_chars_for_line_uid(line_uid, list(chars))
 
 
-def replace_line_ocr_char_span(line: Line, start: int, end: int, chars: Iterable[Char]) -> None:
-    line_ocr_chars(line)[start:end] = list(chars)
-
-
 def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
     char.bbox = bbox
-
-
-def clear_line_ocr_chars(line: Line) -> None:
-    replace_line_ocr_char_observations(line.uid, [])
 
 
 def line_ocr_char_at(line: Line, index: int) -> Char:
