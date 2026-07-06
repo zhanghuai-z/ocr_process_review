@@ -4,6 +4,7 @@ from app.core.inline_formula_edit_state import mark_inline_formula_origin_handle
 from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockType, Page
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.services.layout_overlay_service import LayoutOverlayService
 
 
@@ -37,6 +38,10 @@ def test_layout_overlay_service_promotes_inline_formula_overlays():
     assert inline.origin.raw_index == 0
     assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
     assert inline.origin.raw_artifact_uid == page.raw_layout_artifact.uid
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.blocks[-1].uid == inline.uid
+    assert snapshot.blocks[-1].source_label == "inline_formula"
 
 
 def test_layout_overlay_service_skips_handled_inline_formula_origin():

@@ -27,6 +27,7 @@ from app.models.layout_projection import (
     page_layout_block_count,
     page_layout_blocks,
 )
+from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.services.layout_routing_plan import routing_plan_for_block_record
 
 
@@ -75,6 +76,8 @@ class LayoutOverlayService:
                 ),
             ))
             created += 1
+        if created:
+            sync_page_layout_snapshot_from_projection(page, source_engine="layout_overlay_service")
         return created
 
     def iter_inline_formula_overlays(self, page: Page) -> Iterable[InlineFormulaOverlay]:
