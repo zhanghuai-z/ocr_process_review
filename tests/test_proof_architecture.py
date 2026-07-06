@@ -479,16 +479,22 @@ def test_page_layout_blocks_access_goes_through_projection_boundary():
     assert offenders == []
 
 
-def test_layout_projection_boundary_is_used_by_core_consumers():
-    required_sources = {
+def test_layout_block_view_boundary_is_used_by_migrated_consumers():
+    view_consumers = {
         Path("app/models/ocr_observation.py"),
         Path("app/services/ocr_dispatch_plan.py"),
+        Path("app/engines/hanwang/micro_recblock.py"),
+    }
+    for path in view_consumers:
+        source = path.read_text(encoding="utf-8")
+        assert "layout_block_view" in source
+
+    projection_bridges = {
         Path("app/core/project_store.py"),
         Path("app/services/layout_edit_service.py"),
         Path("app/services/ocr_pipeline.py"),
-        Path("app/engines/hanwang/micro_recblock.py"),
     }
-    for path in required_sources:
+    for path in projection_bridges:
         source = path.read_text(encoding="utf-8")
         assert "app.models.layout_projection" in source or "from .layout_projection" in source
 
@@ -1096,10 +1102,16 @@ def test_hanwang_formula_crop_targets_do_not_read_payload_labels():
 def test_hanwang_block_row_does_not_recover_parent_from_block_payloads():
     source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     tree = ast.parse(source, filename="app/engines/hanwang/micro_recblock.py")
+    helper_source = ""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_route_source_label_from_view":
+            helper_source = ast.get_source_segment(source, node) or ""
+            break
+    assert "route_source_label(block)" in helper_source
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_layout_row_from_block":
             fn_source = ast.get_source_segment(source, node) or ""
-            assert "route_source_label(block)" in fn_source
+            assert "_route_source_label_from_view(block, view)" in fn_source
             assert "authoritative_paddle_label(raw_payload)" not in fn_source
             assert 'app_payload.get("_layout_paddle_parent_index"' not in fn_source
             assert 'raw_payload.get("_layout_paddle_parent_index"' not in fn_source

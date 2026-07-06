@@ -3067,6 +3067,12 @@ def _origin_raw_index(block: Block) -> int:
     return _int_value(getattr(origin, "raw_index", None))
 
 
+def _route_source_label_from_view(block: Block, view: LayoutBlockView | None) -> str:
+    if view is None:
+        return route_source_label(block)
+    return str(view.source_label or "") or route_source_label(block) or view.block_type.value
+
+
 def _layout_row_from_block(
     page: Page,
     block: Block,
@@ -3082,7 +3088,7 @@ def _layout_row_from_block(
     if parent_index < 0 and isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
     layout_bbox = view.bbox if view is not None else block.bbox
-    source_label = view.source_label if view is not None else route_source_label(block)
+    source_label = _route_source_label_from_view(block, view)
     ocr_policy = view.ocr_policy if view is not None else block.ocr_policy
     note = view.note if view is not None else block.note
     row = {
@@ -3226,7 +3232,7 @@ def _route_subblock_overlaps_bbox(
 def _manual_binding_route_subblock(entry: _LayoutOcrEntry, binding: dict[str, Any]) -> dict[str, Any]:
     block = entry.block
     manual_bbox = _manual_bbox_from_entry(entry)
-    label = str(binding.get("source_label") or entry.view.source_label)
+    label = str(binding.get("source_label") or _route_source_label_from_view(block, entry.view))
     text_is_stale = _manual_binding_text_is_stale(manual_bbox, binding)
     text = "" if text_is_stale else str(binding.get("text") or proof_block_text(block) or "")
     payload = {
@@ -3256,7 +3262,7 @@ def _manual_binding_text_is_stale(
 def _manual_unbound_route_subblock(entry: _LayoutOcrEntry) -> dict[str, Any]:
     block = entry.block
     manual_bbox = _manual_bbox_from_entry(entry)
-    label = entry.view.source_label
+    label = _route_source_label_from_view(block, entry.view)
     if entry.view.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
         label = "inline_formula"
     return {
@@ -3523,7 +3529,7 @@ def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
             continue
         if view.block_type != BlockType.EQUATION:
             continue
-        label = view.source_label
+        label = _route_source_label_from_view(block, view)
         if label not in {"inline_formula", "formula"}:
             continue
         if view.bbox is None or view.bbox.area <= 0:

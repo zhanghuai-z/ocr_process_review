@@ -29,7 +29,7 @@ def test_hanwang_layout_rows_use_snapshot_when_runtime_projection_drifts():
     set_layout_block_type(block, BlockType.FIGURE)
     set_layout_block_bbox(block, BBox(180, 120, 20, 20))
     set_layout_block_source_label(block, "figure")
-    set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FIGURE)
+    set_layout_block_ocr_policy(block, OcrPolicy.SKIP)
 
     rows = _page_blocks_from_layout(page)
 
