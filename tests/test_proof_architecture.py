@@ -1960,6 +1960,17 @@ def test_project_diagnostics_layout_drift_reads_snapshot_views():
     assert "page_layout_blocks(" not in source
 
 
+def test_layout_status_and_panel_do_not_read_projection_truth():
+    page_state_source = Path("app/models/page_state.py").read_text(encoding="utf-8")
+    layout_panel_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
+
+    assert "layout_snapshot_for_page" in page_state_source
+    assert "app.models.layout_projection" not in page_state_source
+    assert "app.models.layout_projection" not in layout_panel_source
+    assert "page_has_layout_blocks" not in layout_panel_source
+    assert "page_is_layout_analyzed" in layout_panel_source
+
+
 def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from app.models import Page, PageStatus
 from app.models.page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
-from app.models.layout_projection import page_has_layout_blocks
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_observation import page_has_ocr_result
 
 
 def page_is_layout_analyzed(page: Page) -> bool:
-    return page_has_layout_blocks(page)
+    snapshot = layout_snapshot_for_page(page)
+    return snapshot is not None and bool(snapshot.blocks)
 
 
 def page_is_ocr_done(page: Page) -> bool:

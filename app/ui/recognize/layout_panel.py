@@ -20,14 +20,18 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_line_observations,
     iter_page_ocr_line_observation_occurrences,
 )
 from app.models.ocr_text_observation import line_ocr_confidence
-from app.models.page_state import page_error_message, page_has_error, page_needs_ocr_rerun
+from app.models.page_state import (
+    page_error_message,
+    page_has_error,
+    page_is_layout_analyzed,
+    page_needs_ocr_rerun,
+)
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
@@ -817,7 +821,7 @@ class LayoutPanel(QWidget):
             self._project_stats_lbl.setText("暂无项目")
             return
         total_pages = len(self._pages)
-        analyzed_pages = sum(1 for page in self._pages if page_has_layout_blocks(page))
+        analyzed_pages = sum(1 for page in self._pages if page_is_layout_analyzed(page))
         failed_pages = sum(1 for page in self._pages if page_has_error(page))
         total_blocks = sum(self._layout_block_count(page) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
@@ -1385,7 +1389,7 @@ class LayoutPanel(QWidget):
             return
         page = self._pages[idx]
         self._viewer.set_image(page.display_image_path)
-        if page_has_layout_blocks(page):
+        if page_is_layout_analyzed(page):
             self._show_page_layers(page)
         elif page_error_message(page):
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page_error_message(page)}")

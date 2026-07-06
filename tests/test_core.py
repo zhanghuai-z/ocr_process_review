@@ -128,6 +128,51 @@ def test_layout_projection_boundary_tracks_current_page_blocks():
     ] == [(formula, 0), (text, 1)]
 
 
+def test_page_layout_state_reads_snapshot_not_runtime_projection():
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.models.page_state import page_is_layout_analyzed
+
+    page = Page(
+        image_path="/tmp/page-layout-state.png",
+        width=100,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 10), order=0)],
+    )
+
+    assert not page_is_layout_analyzed(page)
+
+    runtime_block = page.blocks[0]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="",
+        source_engine="test",
+        source_run_id="",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=runtime_block.uid,
+                block_type=runtime_block.block_type,
+                bbox=runtime_block.bbox,
+                order=runtime_block.order,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+
+    assert page_is_layout_analyzed(page)
+
+
 def test_ocr_character_observation_boundary_tracks_current_line_chars():
     from app.models import BBox, Char, Line
     from app.models.ocr_character_observation import (
@@ -5589,6 +5634,7 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
                 ),
             ),
         )
+        _sync_page_layout_snapshot_from_blocks(pages[1], source_engine="test_seed")
         panel = LayoutPanel()
         try:
             panel.set_pages(pages)
@@ -5738,6 +5784,7 @@ def test_layout_panel_auto_text_blocks_are_editable_frames():
             source=BlockSource.AUTO_LAYOUT,
         )
         page = Page(image_path=str(image_path), width=120, height=80, blocks=[text_block, formula_block])
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -6237,6 +6284,7 @@ def test_layout_panel_delete_selected_removes_unlocked_box():
         QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_path))
         formula_block = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 10, 20, 20))
         page = Page(image_path=str(image_path), width=120, height=80, blocks=[formula_block])
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -6292,6 +6340,7 @@ def test_layout_panel_readonly_char_boxes_do_not_block_formula_delete():
             order=1,
         )
         page = Page(image_path=str(image_path), width=160, height=100, blocks=[text_block, formula_block])
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -6343,6 +6392,7 @@ def test_layout_panel_hides_empty_and_invalidated_char_boxes():
             lines=[line],
         )
         page = Page(image_path=str(image_path), width=160, height=100, blocks=[block])
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -7263,6 +7313,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
                 )
             ],
         )
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -7408,6 +7459,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
                 )
             ],
         )
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
         panel = LayoutPanel()
         try:
@@ -14007,6 +14059,7 @@ def test_workflow_controller_hanwang_ocr_entry_redirects_to_first_pending_page()
         page_done.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
             Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
         ])]
+        _sync_page_layout_snapshot_from_blocks(page_done, source_engine="test_seed")
         page_pending = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page_done, page_pending])
@@ -14047,10 +14100,13 @@ def test_workflow_controller_hanwang_main_entry_starts_all_actionable_pages():
         page_done.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
             Line(text="已完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
         ])]
+        _sync_page_layout_snapshot_from_blocks(page_done, source_engine="test_seed")
         page_ready_2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
         page_ready_2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page_ready_2, source_engine="test_seed")
         page_ready_3 = Page(image_path="/tmp/p3.png", width=100, height=100, page_number=3)
         page_ready_3.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 60, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page_ready_3, source_engine="test_seed")
         page_layout_pending = Page(image_path="/tmp/p4.png", width=100, height=100, page_number=4)
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(
@@ -14082,6 +14138,7 @@ def test_workflow_controller_hanwang_layout_submit_starts_ocr_when_ready():
     try:
         page = Page(image_path="/tmp/ready.png", width=100, height=100, page_number=1)
         page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page])
         started = []
@@ -14202,9 +14259,11 @@ def test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_
         page1 = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
         page1.status = PageStatus.LAYOUT_DONE
         page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page1, source_engine="test_seed")
         page2 = Page(image_path="/tmp/p2.png", width=100, height=100, page_number=2)
         page2.status = PageStatus.LAYOUT_DONE
         page2.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page2, source_engine="test_seed")
         processed_page1 = Page(image_path="/tmp/p1.png", width=100, height=100, page_number=1)
         processed_page1.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
             Line(text="第一页完成", bbox=BBox(0, 0, 50, 20), confidence=0.98)
@@ -14322,6 +14381,7 @@ def test_workflow_controller_hanwang_no_pending_reports_all_done_without_redirec
         page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20), lines=[
             Line(text="完成", bbox=BBox(0, 0, 50, 20), confidence=0.9)
         ])]
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
         controller = workflow_module.WorkflowController()
         controller._project = OcrProject(name="Gate", pages=[page])
         messages = []
