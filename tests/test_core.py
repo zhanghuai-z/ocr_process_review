@@ -17319,6 +17319,7 @@ def test_char_index_dedup_on_rebuild():
         Line(text="永字八法", confidence=0.9, bbox=BBox(100, 50, 40, 160)),
     ]
     page.blocks = [blk]
+    _seed_page_ocr_observations(page)
     svc = CharIndexService(include_fallback=True)
     svc.build([page])
     n1 = len(svc.query("永"))
@@ -17521,6 +17522,8 @@ def test_char_index_query_stable_order():
     b0 = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
     b0.lines = [Line(text="永远", confidence=0.9, bbox=BBox(50, 100, 40, 80))]
     p0.blocks = [b0]
+    _seed_page_ocr_observations(p1)
+    _seed_page_ocr_observations(p0)
     svc = CharIndexService(include_fallback=True)
     svc.build([p1, p0])
     entries = svc.query("永")
@@ -17541,6 +17544,7 @@ def test_char_index_skips_whitespace():
     blk = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 400, 400), order=0)
     blk.lines = [Line(text="永 和\t九", confidence=0.9, bbox=BBox(50, 50, 40, 200))]
     page.blocks = [blk]
+    _seed_page_ocr_observations(page)
     svc = CharIndexService(include_fallback=True)
     svc.build([page])
     assert " " not in svc._index and "\t" not in svc._index
