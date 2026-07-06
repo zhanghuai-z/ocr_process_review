@@ -1736,6 +1736,26 @@ def test_ocr_pipeline_writes_ocr_lines_to_uid_observations():
     assert "block_ocr_lines(" not in source
 
 
+def test_legacy_block_ocr_line_projection_api_stays_inside_observation_boundary():
+    allowed = {Path("app/models/ocr_observation.py")}
+    forbidden = (
+        "replace_block_ocr_lines(",
+        "append_block_ocr_line(",
+        "clear_block_ocr_lines(",
+        "block_ocr_lines(",
+    )
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path in allowed:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in source:
+                offenders.append(f"{path}: {token}")
+
+    assert offenders == []
+
+
 def test_truth_map_records_layout_snapshot_as_current_boundary():
     source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
 

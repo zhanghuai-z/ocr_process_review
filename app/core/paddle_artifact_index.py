@@ -6,7 +6,7 @@ from typing import Any
 
 from app.core.bbox_extraction import bbox_from_variant
 from app.models.block_state import set_paddle_binding
-from app.models.ocr_observation import clear_block_ocr_lines, replace_block_ocr_lines
+from app.models.ocr_observation import clear_block_ocr_line_observations, replace_block_ocr_line_observations
 from app.models.ocr_text_observation import create_ocr_text_line
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
@@ -582,7 +582,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
     set_layout_block_source_label(block, binding.source_label or block.source_label or block.block_type.value)
     set_layout_block_ocr_policy(block, binding.ocr_policy)
     if binding.text:
-        replace_block_ocr_lines(block, [
+        replace_block_ocr_line_observations(block.uid, [
             create_ocr_text_line(
                 text=binding.text,
                 confidence=0.0,
@@ -592,7 +592,7 @@ def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) ->
             )
         ])
     else:
-        clear_block_ocr_lines(block)
+        clear_block_ocr_line_observations(block.uid)
     if binding.status == BINDING_EMPTY_REVIEW:
         set_layout_block_note(block, binding.source)
     elif binding.status == BINDING_AMBIGUOUS:

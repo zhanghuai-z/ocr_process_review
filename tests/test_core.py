@@ -58,11 +58,11 @@ def _raw_layout_records(page):
 
 def _seed_page_ocr_observations(page):
     """Register test OCR lines through the current OCR observation boundary."""
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
 
     for block in page.blocks:
         if block.lines:
-            replace_block_ocr_lines(block, list(block.lines))
+            replace_block_ocr_line_observations(block.uid, list(block.lines))
 
 
 def _seed_project_ocr_observations(project):
@@ -963,6 +963,7 @@ def test_project_store():
         page = Page(image_path="/tmp/img.jpg", width=800, height=600)
         page.blocks.append(block)
         project = OcrProject(name="存储测试", pages=[page])
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -970,8 +971,9 @@ def test_project_store():
             assert saved.pages[0].id is not None
             loaded = store.load_project(project_id=1)
             assert loaded.name == "存储测试"
-            assert loaded.pages[0].blocks[0].lines[0].text == "Hello OCR"
-            loaded_chars = loaded.pages[0].blocks[0].lines[0].chars
+            loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
+            assert loaded_line.text == "Hello OCR"
+            loaded_chars = loaded_line.chars
             assert loaded_chars[0].bbox_source == "ocr"
             assert loaded_chars[0].bbox_granularity == "char"
             assert loaded_chars[1].token_text == "ello"
@@ -1703,10 +1705,11 @@ def test_line_final_text_contract_and_project_store_roundtrip():
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
                         blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
         )
+        _seed_project_ocr_observations(project)
         with ProjectStore(db_path) as store:
             store.save_project(project)
             loaded = store.load_project(project_id=1)
-            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
             assert proof_final_text(loaded_line) == "最终真值"
             assert proof_final_text_set(loaded_line) is True
             assert loaded_line.text == "观察边界写入"
@@ -1737,10 +1740,11 @@ def test_project_store_preserves_empty_final_text_roundtrip():
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
                         blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
         )
+        _seed_project_ocr_observations(project)
         with ProjectStore(db_path) as store:
             store.save_project(project)
             loaded = store.load_project(project_id=1)
-            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
             assert loaded_line.text == "OCR原文"
             assert proof_final_text(loaded_line) == ""
             assert proof_final_text_set(loaded_line) is True
@@ -1765,6 +1769,7 @@ def test_project_store_serializes_line_contract_without_mutating_line():
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600,
                         blocks=[Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])])],
         )
+        _seed_project_ocr_observations(project)
         with ProjectStore(db_path) as store:
             store.save_project(project)
             assert line.text == ""
@@ -1772,7 +1777,7 @@ def test_project_store_serializes_line_contract_without_mutating_line():
             assert not hasattr(line, "proof_state")
 
             loaded = store.load_project(project_id=1)
-            loaded_line = loaded.pages[0].blocks[0].lines[0]
+            loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
             assert loaded_line.text == "OCR补全文本"
             assert loaded_line.ocr_text == "OCR补全文本"
             assert proof_display_text(loaded_line) == "OCR补全文本"
@@ -1797,6 +1802,7 @@ def test_project_store_clean_on_resave():
         page = Page(image_path="/tmp/img.jpg", width=800, height=600)
         page.blocks = [block_a]
         project = OcrProject(name="清理测试", pages=[page])
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -1806,13 +1812,14 @@ def test_project_store_clean_on_resave():
             line_b = Line(text="BlockB", confidence=0.95, bbox=bb)
             block_b = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line_b])
             project.pages[0].blocks = [block_b]
+            _seed_project_ocr_observations(project)
             store.save_project(project)
 
         # 重新打开，断言只有 BlockB
         with ProjectStore(db_path) as store:
             loaded = store.load_project(project_id=1)
             assert len(loaded.pages[0].blocks) == 1
-            assert loaded.pages[0].blocks[0].lines[0].text == "BlockB"
+            assert _block_ocr_observations(loaded.pages[0].blocks[0])[0].text == "BlockB"
 
         print("test_project_store_clean_on_resave PASSED")
     finally:
@@ -2192,6 +2199,7 @@ def test_project_store_save_project_preserves_child_rowids():
             name="stable ids",
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])],
         )
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -2219,7 +2227,7 @@ def test_project_store_save_project_preserves_child_rowids():
 
         loaded_page = loaded.pages[0]
         loaded_block = loaded_page.blocks[0]
-        loaded_line = loaded_block.lines[0]
+        loaded_line = _block_ocr_observations(loaded_block)[0]
         loaded_char = loaded_line.chars[0]
 
         assert loaded_page.id == ids["page"]
@@ -2233,7 +2241,7 @@ def test_project_store_save_project_preserves_child_rowids():
         assert proof_final_text(loaded_line) == "第一行已校对"
         assert loaded_char.char == "一"
         assert loaded_block.note == "updated without id churn"
-        assert len(loaded_block.lines) == 1
+        assert len(_block_ocr_observations(loaded_block)) == 1
 
         with ProjectStore(db_path) as store:
             assert store.conn.execute(
@@ -2280,6 +2288,8 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
     try:
         project1 = make_project("p1", "甲")
         project2 = make_project("p2", "乙")
+        _seed_project_ocr_observations(project1)
+        _seed_project_ocr_observations(project2)
 
         with ProjectStore(db_path) as store:
             store.save_project(project1)
@@ -2311,26 +2321,28 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
 
         assert reloaded1.pages[0].id == p1_page.id
         assert reloaded1.pages[0].blocks[0].id == p1_block.id
-        assert reloaded1.pages[0].blocks[0].lines[0].id == p1_line.id
-        assert reloaded1.pages[0].blocks[0].lines[0].chars[0].id == p1_char.id
-        assert reloaded1.pages[0].blocks[0].lines[0].text == "甲"
-        assert reloaded1.pages[0].blocks[0].lines[0].chars[0].char == "甲"
+        reloaded1_line = _block_ocr_observations(reloaded1.pages[0].blocks[0])[0]
+        assert reloaded1_line.id == p1_line.id
+        assert reloaded1_line.chars[0].id == p1_char.id
+        assert reloaded1_line.text == "甲"
+        assert reloaded1_line.chars[0].char == "甲"
 
         assert reloaded2.pages[0].id != p1_page.id
         assert reloaded2.pages[0].blocks[0].id != p1_block.id
-        assert reloaded2.pages[0].blocks[0].lines[0].id != p1_line.id
-        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id != p1_char.id
+        reloaded2_line = _block_ocr_observations(reloaded2.pages[0].blocks[0])[0]
+        assert reloaded2_line.id != p1_line.id
+        assert reloaded2_line.chars[0].id != p1_char.id
         assert reloaded2.pages[0].id == original_p2_ids[0]
         assert reloaded2.pages[0].blocks[0].id == original_p2_ids[1]
-        assert reloaded2.pages[0].blocks[0].lines[0].id == original_p2_ids[2]
-        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].id == original_p2_ids[3]
+        assert reloaded2_line.id == original_p2_ids[2]
+        assert reloaded2_line.chars[0].id == original_p2_ids[3]
         assert reloaded2.pages[0].uid == original_p2_uids[0]
         assert reloaded2.pages[0].blocks[0].uid == original_p2_uids[1]
-        assert reloaded2.pages[0].blocks[0].lines[0].uid == original_p2_uids[2]
-        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].uid == original_p2_uids[3]
-        assert proof_final_text(reloaded2.pages[0].blocks[0].lines[0]) == "乙已改"
-        assert proof_display_text(reloaded2.pages[0].blocks[0].lines[0]) == "乙已改"
-        assert reloaded2.pages[0].blocks[0].lines[0].chars[0].char == "乙"
+        assert reloaded2_line.uid == original_p2_uids[2]
+        assert reloaded2_line.chars[0].uid == original_p2_uids[3]
+        assert proof_final_text(reloaded2_line) == "乙已改"
+        assert proof_display_text(reloaded2_line) == "乙已改"
+        assert reloaded2_line.chars[0].char == "乙"
     finally:
         os.unlink(db_path)
 
@@ -2367,6 +2379,8 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
     try:
         project1 = make_project("p1", "甲")
         project2 = make_project("p2", "乙")
+        _seed_project_ocr_observations(project1)
+        _seed_project_ocr_observations(project2)
 
         with ProjectStore(db_path) as store:
             store.save_project(project1)
@@ -2398,7 +2412,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
 
         p1_loaded_page = reloaded1.pages[0]
         p1_loaded_block = p1_loaded_page.blocks[0]
-        p1_loaded_line = p1_loaded_block.lines[0]
+        p1_loaded_line = _block_ocr_observations(p1_loaded_block)[0]
         p1_loaded_char = p1_loaded_line.chars[0]
         assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
         assert (
@@ -2412,7 +2426,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
 
         p2_loaded_page = reloaded2.pages[0]
         p2_loaded_block = p2_loaded_page.blocks[0]
-        p2_loaded_line = p2_loaded_block.lines[0]
+        p2_loaded_line = _block_ocr_observations(p2_loaded_block)[0]
         p2_loaded_char = p2_loaded_line.chars[0]
         assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) != p1_ids
         assert p2_loaded_page.uid != p1_uids[0]
@@ -2457,6 +2471,8 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
     try:
         project1 = make_project("p1", "甲")
         project2 = make_project("p2", "乙")
+        _seed_project_ocr_observations(project1)
+        _seed_project_ocr_observations(project2)
 
         with ProjectStore(db_path) as store:
             store.save_project(project1)
@@ -2489,7 +2505,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
 
         p1_loaded_page = reloaded1.pages[0]
         p1_loaded_block = p1_loaded_page.blocks[0]
-        p1_loaded_line = p1_loaded_block.lines[0]
+        p1_loaded_line = _block_ocr_observations(p1_loaded_block)[0]
         p1_loaded_char = p1_loaded_line.chars[0]
         assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
         assert proof_display_text(p1_loaded_line) == "甲"
@@ -2497,7 +2513,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
 
         p2_loaded_page = reloaded2.pages[0]
         p2_loaded_block = p2_loaded_page.blocks[0]
-        p2_loaded_line = p2_loaded_block.lines[0]
+        p2_loaded_line = _block_ocr_observations(p2_loaded_block)[0]
         p2_loaded_char = p2_loaded_line.chars[0]
         assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) == p2_ids
         assert (
@@ -2546,6 +2562,7 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
             name="same parent stale rowid",
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block1, block2])],
         )
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -2570,8 +2587,8 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
         loaded_blocks = {block.uid: block for block in loaded.pages[0].blocks}
         loaded_block1 = loaded_blocks[original["block1_uid"]]
         loaded_block2 = loaded_blocks[original["block2_uid"]]
-        loaded_line1 = loaded_block1.lines[0]
-        loaded_line2 = loaded_block2.lines[0]
+        loaded_line1 = _block_ocr_observations(loaded_block1)[0]
+        loaded_line2 = _block_ocr_observations(loaded_block2)[0]
 
         assert loaded_block1.id == original["block1_id"]
         assert loaded_block2.id == original["block2_id"]
@@ -2592,6 +2609,7 @@ def test_project_store_uid_recovers_same_parent_stale_rowid():
 def test_project_store_duplicate_sibling_uids_are_reminted():
     import copy
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.models.entity_id import new_entity_uid
     from app.core.project_store import ProjectStore
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
@@ -2613,6 +2631,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
 
         line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
         block_copy = copy.deepcopy(line_block)
+        block_copy.uid = new_entity_uid("block")
         block_copy.order = 1
         block_copy.lines[0].text = "丙"
         block_copy.lines[0].ocr_text = "丙"
@@ -2623,6 +2642,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
             name="duplicate sibling uids",
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[line_block, block_copy])],
         )
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -2631,14 +2651,16 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         assert len(loaded.pages[0].blocks) == 2
         assert len({block.uid for block in loaded.pages[0].blocks}) == 2
         first_block, second_block = loaded.pages[0].blocks
-        assert [proof_display_text(line) for line in first_block.lines] == ["甲", "乙"]
-        assert len({line.uid for line in first_block.lines}) == 2
-        assert [proof_display_text(line) for line in second_block.lines] == ["丙", "乙"]
-        assert len({line.uid for block in loaded.pages[0].blocks for line in block.lines}) == 4
+        first_lines = _block_ocr_observations(first_block)
+        second_lines = _block_ocr_observations(second_block)
+        assert [proof_display_text(line) for line in first_lines] == ["甲", "乙"]
+        assert len({line.uid for line in first_lines}) == 2
+        assert [proof_display_text(line) for line in second_lines] == ["丙", "乙"]
+        assert len({line.uid for block in loaded.pages[0].blocks for line in _block_ocr_observations(block)}) == 4
         assert len({
             char.uid
             for block in loaded.pages[0].blocks
-            for line in block.lines
+            for line in _block_ocr_observations(block)
             for char in line.chars
         }) == 4
     finally:
@@ -2725,6 +2747,7 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
             db_path = f.name
         try:
             project, uids = make_project()
+            _seed_project_ocr_observations(project)
             with ProjectStore(db_path) as store:
                 store.save_project(project)
                 page1, page2 = project.pages
@@ -2748,6 +2771,11 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
                     char_block.lines = [char_target_line, char_source_line]
                 else:
                     char_block.lines = [char_source_line, char_target_line]
+                from app.models.ocr_observation import replace_block_ocr_line_observations
+
+                replace_block_ocr_line_observations(line_source_block.uid, [])
+                replace_block_ocr_line_observations(line_target_block.uid, [source_line])
+                replace_block_ocr_line_observations(char_block.uid, list(char_block.lines))
                 if page_order == "new_parent_first":
                     project.pages = [page2, page1]
                 else:
@@ -2762,9 +2790,9 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
 
             loaded_blocks = [block for page in loaded.pages for block in page.blocks]
             loaded_line_target = next(block for block in loaded_blocks if block.uid == uids["line_target_block"])
-            assert [line.uid for line in loaded_line_target.lines] == [uids["line"]]
+            assert [line.uid for line in _block_ocr_observations(loaded_line_target)] == [uids["line"]]
 
-            loaded_lines = [line for block in loaded_blocks for line in block.lines]
+            loaded_lines = [line for block in loaded_blocks for line in _block_ocr_observations(block)]
             loaded_char_target = next(line for line in loaded_lines if line.uid == uids["char_target_line"])
             assert [char.uid for char in loaded_char_target.chars] == [uids["char"]]
         finally:
@@ -2837,6 +2865,7 @@ def test_project_store_update_proof_lines_rolls_back_as_single_transaction():
                 )
             ],
         )
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -2852,7 +2881,7 @@ def test_project_store_update_proof_lines_rolls_back_as_single_transaction():
 
             loaded = store.load_project(project_id=1)
 
-        loaded_lines = loaded.pages[0].blocks[0].lines
+        loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert [proof_display_text(line) for line in loaded_lines] == ["第一行", "第二行"]
         assert [proof_status(line) for line in loaded_lines] == [
             ProofStatus.UNCHECKED,
@@ -2886,6 +2915,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
                 )
             ],
         )
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -2904,7 +2934,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
                 raise AssertionError("update_proof_lines should reject stale rowid with mismatched uid")
 
             loaded = store.load_project(project_id=project.id)
-            loaded_lines = loaded.pages[0].blocks[0].lines
+            loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
             assert loaded_lines[0].id == line1_id
             assert loaded_lines[0].uid == line1_uid
             assert proof_display_text(loaded_lines[0]) == "第一行"
@@ -2923,7 +2953,7 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
                 raise AssertionError("update_proof_lines should reject missing uid even when rowid exists")
 
             loaded = store.load_project(project_id=project.id)
-            loaded_lines = loaded.pages[0].blocks[0].lines
+            loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
             assert loaded_lines[0].id == line1_id
             assert loaded_lines[0].uid == line1_uid
             assert proof_display_text(loaded_lines[0]) == "第一行"
@@ -2945,9 +2975,10 @@ def test_project_store_update_proof_lines_requires_stable_uid_match():
             store.update_proof_lines([(line1, False)])
             loaded = store.load_project(project_id=project.id)
 
-        assert loaded.pages[0].blocks[0].lines[0].id == line1_id
-        assert loaded.pages[0].blocks[0].lines[0].uid == line1_uid
-        assert proof_display_text(loaded.pages[0].blocks[0].lines[0]) == "第一行已改"
+        loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
+        assert loaded_line.id == line1_id
+        assert loaded_line.uid == line1_uid
+        assert proof_display_text(loaded_line) == "第一行已改"
     finally:
         os.unlink(db_path)
 
@@ -8628,16 +8659,17 @@ def test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks():
             height=220,
             blocks=[equation, figure_caption, table_caption],
         )
+        _seed_page_ocr_observations(page)
 
         result = OcrPipeline(engine=PageOcrEngine()).process_project(
             OcrProject(name="CaptionEquationRefill", pages=[page])
         )
         blocks = result.pages[0].blocks
 
-        assert [line.text for line in blocks[0].lines] == ["旧公式"]
-        assert [line.text for line in blocks[1].lines] == ["图"]
-        assert [line.text for line in blocks[2].lines] == ["表"]
-        all_texts = [line.text for block in blocks for line in block.lines]
+        assert [line.text for line in _block_ocr_observations(blocks[0])] == ["旧公式"]
+        assert [line.text for line in _block_ocr_observations(blocks[1])] == ["图"]
+        assert [line.text for line in _block_ocr_observations(blocks[2])] == ["表"]
+        all_texts = [line.text for block in blocks for line in _block_ocr_observations(block)]
         assert "式" not in all_texts
         assert "旧" not in all_texts
     finally:
@@ -8750,11 +8782,12 @@ def test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula():
             ocr_policy=OcrPolicy.TEXT_OCR,
         )
         page = Page(image_path=img_path, width=160, height=80, blocks=[equation])
+        _seed_page_ocr_observations(page)
         result = OcrPipeline(engine=RaisingTextEngine()).process_project(
             OcrProject(name="EquationSkip", pages=[page])
         )
 
-        assert [line.text for line in result.pages[0].blocks[0].lines] == ["E=mc^2"]
+        assert [line.text for line in _block_ocr_observations(result.pages[0].blocks[0])] == ["E=mc^2"]
     finally:
         os.unlink(img_path)
 
@@ -11701,10 +11734,11 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         ).process_project(OcrProject(name="hybrid-prepass", pages=[page]))
 
         assert seen_recblocks == [(0, 10, 60, 30), (90, 10, 180, 30)]
-        assert result.pages[0].blocks[0].lines[0].text == "甲$ A $乙"
-        assert [char.char for char in result.pages[0].blocks[0].lines[0].chars] == ["甲", "$ A $", "乙"]
-        assert result.pages[0].blocks[0].lines[0].chars[1].bbox_source == "paddle_inline_formula"
-        assert result.pages[0].blocks[0].lines[0].chars[1].bbox_granularity == "word"
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
+        assert line.text == "甲$ A $乙"
+        assert [char.char for char in line.chars] == ["甲", "$ A $", "乙"]
+        assert line.chars[1].bbox_source == "paddle_inline_formula"
+        assert line.chars[1].bbox_granularity == "word"
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -13367,7 +13401,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
         assert len(calls) == 1
         assert len(calls[0]["page_ocr_lines"]) == 1
         assert calls[0]["page_ocr_lines"][0].text == "PP行"
-        assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
+        assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "重跑结果"
         assert any(
             "PP-OCRv5 page-line prepass complete: 1 lines" in event.message
             for event in progress_events
@@ -13446,7 +13480,7 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
         )
 
         assert len(calls) == 1
-        assert result.pages[0].blocks[0].lines[0].text == "重跑结果"
+        assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "重跑结果"
         assert any("PP-OCRv5 page-line prepass complete: 1 lines" in event.message for event in progress_events)
     finally:
         os.unlink(img_path)
@@ -13562,8 +13596,8 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
         assert sorted(seen_pages) == ["p1", "p2"]
         assert [page.page_number for page in result.pages] == [1, 2]
         assert result.failed_blocks == []
-        assert result.pages[0].blocks[0].lines[0].text == "完成p1"
-        assert result.pages[1].blocks[0].lines[0].text == "完成p2"
+        assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "完成p1"
+        assert _block_ocr_observations(result.pages[1].blocks[0])[0].text == "完成p2"
         assert any("第 1/2 页：CharOCR SegImg done p1" == event.message for event in progress_events)
         assert any(event.completed_pages == 2 for event in progress_events)
     finally:
@@ -14856,11 +14890,12 @@ def test_workflow_controller_auto_save_persists_flag_status_change():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="flag-auto-save", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
 
-        saved_line = project.pages[0].blocks[0].lines[0]
+        saved_line = _block_ocr_observations(project.pages[0].blocks[0])[0]
         set_line_proof_status(saved_line, ProofStatus.AUTO_FLAGGED)
         controller = WorkflowController()
         controller._project = project
@@ -14876,7 +14911,7 @@ def test_workflow_controller_auto_save_persists_flag_status_change():
         )
 
         loaded = store.load_project(project.id)
-        assert proof_status(loaded.pages[0].blocks[0].lines[0]) == ProofStatus.AUTO_FLAGGED
+        assert proof_status(_block_ocr_observations(loaded.pages[0].blocks[0])[0]) == ProofStatus.AUTO_FLAGGED
     finally:
         if store is not None:
             store.close()
@@ -14927,12 +14962,13 @@ def test_workflow_controller_auto_save_persists_line_chars_for_text_change():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="line-char-auto-save", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
         page = project.pages[0]
         block = page.blocks[0]
-        line = block.lines[0]
+        line = _block_ocr_observations(block)[0]
 
         change = save_displayed_edit_result(line, page, block, "乙").scoped_to_line(
             page,
@@ -14947,7 +14983,7 @@ def test_workflow_controller_auto_save_persists_line_chars_for_text_change():
         controller.auto_save(change)
 
         loaded = store.load_project(project.id)
-        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == "乙"
         assert loaded_line.chars[0].char == "乙"
         assert loaded_line.chars[0].token_text == "乙"
@@ -15006,12 +15042,13 @@ def test_workflow_controller_auto_save_persists_inline_formula_carrier_text_chan
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 24), lines=[line])],
         )
         project = OcrProject(name="inline-formula-auto-save", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
         page = project.pages[0]
         block = page.blocks[0]
-        line = block.lines[0]
+        line = _block_ocr_observations(block)[0]
 
         change = save_displayed_edit_result(line, page, block, "丙$ B $乙").scoped_to_line(
             page,
@@ -15026,7 +15063,7 @@ def test_workflow_controller_auto_save_persists_inline_formula_carrier_text_chan
         controller.auto_save(change)
 
         loaded = store.load_project(project.id)
-        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == "丙$ B $乙"
         assert [(char.char, char.token_text) for char in loaded_line.chars] == [
             ("丙", "丙"),
@@ -15082,10 +15119,11 @@ def test_project_store_update_proof_lines_does_not_move_foreign_char_uid():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
         )
         project = OcrProject(name="proof-char-uid-collision", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
-        saved_line1, saved_line2 = project.pages[0].blocks[0].lines
+        saved_line1, saved_line2 = _block_ocr_observations(project.pages[0].blocks[0])
         line1_original_uid = saved_line1.chars[0].uid
         line2_uid = saved_line2.chars[0].uid
 
@@ -15097,7 +15135,7 @@ def test_project_store_update_proof_lines_does_not_move_foreign_char_uid():
         store.update_proof_lines([(saved_line1, True)])
 
         loaded = store.load_project(project.id)
-        loaded_line1, loaded_line2 = loaded.pages[0].blocks[0].lines
+        loaded_line1, loaded_line2 = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert proof_display_text(loaded_line1) == "丙"
         assert [char.char for char in loaded_line1.chars] == ["丙"]
         assert loaded_line1.chars[0].uid == line1_original_uid
@@ -15137,10 +15175,11 @@ def test_project_store_creates_and_loads_proof_line_state():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="proof-line-state", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
-        saved_line = project.pages[0].blocks[0].lines[0]
+        saved_line = _block_ocr_observations(project.pages[0].blocks[0])[0]
 
         row = store.conn.execute(
             "SELECT final_text, final_text_set, proof_status FROM proof_line_state WHERE line_uid=?",
@@ -15155,7 +15194,7 @@ def test_project_store_creates_and_loads_proof_line_state():
         assert {"final_text", "final_text_set", "proof_status"}.isdisjoint(line_cols)
 
         loaded = store.load_project(project.id)
-        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == "人工文本"
         assert proof_status(loaded_line) == ProofStatus.OK
     finally:
@@ -15189,10 +15228,11 @@ def test_project_store_update_proof_lines_writes_proof_line_state():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="proof-line-state-update", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
-        saved_line = project.pages[0].blocks[0].lines[0]
+        saved_line = _block_ocr_observations(project.pages[0].blocks[0])[0]
 
         set_line_proof_text(saved_line, "")
         set_line_proof_status(saved_line, ProofStatus.MODIFIED)
@@ -15211,7 +15251,7 @@ def test_project_store_update_proof_lines_writes_proof_line_state():
         assert {"final_text", "final_text_set", "proof_status"}.isdisjoint(line_cols)
 
         loaded = store.load_project(project.id)
-        loaded_line = loaded.pages[0].blocks[0].lines[0]
+        loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == ""
         assert proof_final_text_set(loaded_line) is True
         assert proof_status(loaded_line) == ProofStatus.MODIFIED
@@ -15277,7 +15317,7 @@ def test_project_store_save_project_prunes_stale_proof_line_state():
 
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
         db_path = db_file.name
@@ -15293,18 +15333,20 @@ def test_project_store_save_project_prunes_stale_proof_line_state():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
         )
         project = OcrProject(name="proof-line-state-prune", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
         block = project.pages[0].blocks[0]
-        stale_uid = block.lines[1].uid
+        lines = _block_ocr_observations(block)
+        stale_uid = lines[1].uid
 
         assert store.conn.execute("SELECT COUNT(*) FROM proof_line_state").fetchone()[0] == 2
-        replace_block_ocr_lines(block, [block.lines[0]])
+        replace_block_ocr_line_observations(block.uid, [lines[0]])
         store.save_project(project)
 
         rows = store.conn.execute("SELECT line_uid FROM proof_line_state").fetchall()
-        assert [row["line_uid"] for row in rows] == [block.lines[0].uid]
+        assert [row["line_uid"] for row in rows] == [lines[0].uid]
         assert not store.conn.execute(
             "SELECT 1 FROM proof_line_state WHERE line_uid=?",
             (stale_uid,),
@@ -15343,12 +15385,13 @@ def test_proof_persistence_scoped_status_does_not_overwrite_other_db_lines():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
         )
         project = OcrProject(name="scoped-proof-save", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
         page = project.pages[0]
         block = page.blocks[0]
-        saved_line1, stale_line2 = block.lines
+        saved_line1, stale_line2 = _block_ocr_observations(block)
 
         store.conn.execute(
             "UPDATE proof_line_state SET final_text=?, final_text_set=1, proof_status=? WHERE line_uid=?",
@@ -15370,7 +15413,7 @@ def test_proof_persistence_scoped_status_does_not_overwrite_other_db_lines():
         )
 
         loaded = store.load_project(project.id)
-        loaded_lines = loaded.pages[0].blocks[0].lines
+        loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert proof_status(loaded_lines[0]) == ProofStatus.AUTO_FLAGGED
         assert proof_display_text(loaded_lines[1]) == "数据库新值"
     finally:
@@ -15426,12 +15469,13 @@ def test_proof_persistence_scoped_lines_commit_atomically():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 40), lines=[line1, line2])],
         )
         project = OcrProject(name="scoped-proof-atomic", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
         page = project.pages[0]
         block = page.blocks[0]
-        line1, line2 = block.lines
+        line1, line2 = _block_ocr_observations(block)
 
         change1 = save_displayed_edit_result(line1, page, block, "CCCC").scoped_to_line(
             page,
@@ -15452,7 +15496,7 @@ def test_proof_persistence_scoped_lines_commit_atomically():
             ProofPersistenceService(store, project).persist(change)
 
         loaded = store.load_project(project.id)
-        loaded_lines = loaded.pages[0].blocks[0].lines
+        loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert [proof_display_text(line) for line in loaded_lines] == ["AAAA", "BBBB"]
         assert [[char.char for char in line.chars] for line in loaded_lines] == [
             list("AAAA"),

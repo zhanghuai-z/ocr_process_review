@@ -34,10 +34,10 @@ from app.models.layout_block_state import (
 )
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
-    block_ocr_lines,
+    block_ocr_line_observations,
     iter_project_ocr_line_occurrences,
     line_ocr_bbox,
-    replace_block_ocr_lines,
+    replace_block_ocr_line_observations,
 )
 from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.page_state import reconcile_page_ocr_done_from_result
@@ -1530,7 +1530,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_line_ids: set[int] = set()
-        for line in block_ocr_lines(block):
+        for line in block_ocr_line_observations(block):
             self._ensure_unique_child_uid(
                 cur,
                 line,
@@ -2161,7 +2161,7 @@ class ProjectStore:
                 ocr_audit=ocr_audit_payload,
                 table_text_layer_cells=table_text_layer_cells,
             )
-            replace_block_ocr_lines(block, self._load_lines(block.id))
+            replace_block_ocr_line_observations(block.uid, self._load_lines(block.id))
             blocks.append(block)
         return blocks
 
