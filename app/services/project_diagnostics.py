@@ -12,10 +12,10 @@ from typing import Any, Iterable
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_projection import iter_page_layout_block_occurrences, page_layout_blocks
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import iter_page_ocr_line_occurrences, iter_project_ocr_line_occurrences
 
 
 @dataclass(frozen=True)
@@ -128,32 +128,39 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
     }
     for page_idx, page in enumerate(project.pages):
         _record_uid(buckets["page"], page.uid, page, page_idx)
-        for block_idx, block in enumerate(page_layout_blocks(page)):
-            _record_uid(buckets["block"], block.uid, page, page_idx, block, block_idx)
-            for line_idx, line in enumerate(block_ocr_lines(block)):
+        for block_occurrence in iter_page_layout_block_occurrences(page):
+            _record_uid(
+                buckets["block"],
+                block_occurrence.block.uid,
+                page,
+                page_idx,
+                block_occurrence.block,
+                block_occurrence.block_index,
+            )
+        for line_occurrence in iter_page_ocr_line_occurrences(page):
+            _record_uid(
+                buckets["line"],
+                line_occurrence.line.uid,
+                page,
+                page_idx,
+                line_occurrence.block,
+                line_occurrence.block_index,
+                line_occurrence.line,
+                line_occurrence.line_index,
+            )
+            for char_occurrence in iter_line_ocr_char_occurrences(line_occurrence.line):
                 _record_uid(
-                    buckets["line"],
-                    line.uid,
+                    buckets["char"],
+                    char_occurrence.char.uid,
                     page,
                     page_idx,
-                    block,
-                    block_idx,
-                    line,
-                    line_idx,
+                    line_occurrence.block,
+                    line_occurrence.block_index,
+                    line_occurrence.line,
+                    line_occurrence.line_index,
+                    char_occurrence.char,
+                    char_occurrence.char_index,
                 )
-                for occurrence in iter_line_ocr_char_occurrences(line):
-                    _record_uid(
-                        buckets["char"],
-                        occurrence.char.uid,
-                        page,
-                        page_idx,
-                        block,
-                        block_idx,
-                        line,
-                        line_idx,
-                        occurrence.char,
-                        occurrence.char_index,
-                    )
     for kind, values in buckets.items():
         for uid, locations in values.items():
             if uid and len(locations) > 1:
@@ -337,6 +344,20 @@ def _diagnose_line_char_contract(project: OcrProject) -> list[ProjectDiagnosticI
     return issues
 
 
+def _probe_block_occurrence(page: Page, block_index: int):
+    for occurrence in iter_page_layout_block_occurrences(page):
+        if occurrence.block_index == block_index:
+            return occurrence
+    return None
+
+
+def _probe_line_occurrence(page: Page, block_index: int, line_index: int):
+    for occurrence in iter_page_ocr_line_occurrences(page):
+        if occurrence.block_index == block_index and occurrence.line_index == line_index:
+            return occurrence
+    return None
+
+
 def _diagnose_probe_anchors(
     project: OcrProject,
     probe_store: Any,
@@ -354,8 +375,8 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        blocks = page_layout_blocks(page)
-        if key.block_index < 0 or key.block_index >= len(blocks):
+        block_occurrence = _probe_block_occurrence(page, key.block_index)
+        if block_occurrence is None:
             issues.append(_probe_issue(
                 "warning",
                 "probe_anchor_missing_block",
@@ -364,9 +385,9 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        block = blocks[key.block_index]
-        lines = block_ocr_lines(block)
-        if key.line_index < 0 or key.line_index >= len(lines):
+        block = block_occurrence.block
+        line_occurrence = _probe_line_occurrence(page, key.block_index, key.line_index)
+        if line_occurrence is None:
             issues.append(_probe_issue(
                 "warning",
                 "probe_anchor_missing_line",
@@ -376,7 +397,7 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        line = lines[key.line_index]
+        line = line_occurrence.line
         text = proof_display_text(line)
         if key.char_index < 0 or key.char_index >= len(text):
             issues.append(_probe_issue(
@@ -406,10 +427,14 @@ def _diagnose_probe_anchors(
 
 
 def _iter_lines(project: OcrProject) -> Iterable[tuple[Page, Block, Line, int, int]]:
-    for page in project.pages:
-        for block_idx, block in enumerate(page_layout_blocks(page)):
-            for line_idx, line in enumerate(block_ocr_lines(block)):
-                yield page, block, line, block_idx, line_idx
+    for occurrence in iter_project_ocr_line_occurrences(project):
+        yield (
+            occurrence.page,
+            occurrence.block,
+            occurrence.line,
+            occurrence.block_index,
+            occurrence.line_index,
+        )
 
 
 def _line_issue(
