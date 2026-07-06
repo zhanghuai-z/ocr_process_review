@@ -1781,6 +1781,7 @@ def test_layout_snapshot_contract_lives_in_model_layer():
     service_source = Path("app/services/layout_snapshot.py").read_text(encoding="utf-8")
     model_source = Path("app/models/layout_snapshot.py").read_text(encoding="utf-8")
     projection_source = Path("app/models/layout_snapshot_projection.py").read_text(encoding="utf-8")
+    view_source = Path("app/models/layout_block_view.py").read_text(encoding="utf-8")
 
     assert "class LayoutSnapshot" not in service_source
     assert "class LayoutBlockSnapshot" not in service_source
@@ -1791,6 +1792,9 @@ def test_layout_snapshot_contract_lives_in_model_layer():
     assert "layout_snapshot_from_blocks" not in service_source
     assert "def sync_page_layout_snapshot_from_projection" in projection_source
     assert "def adopt_page_layout_snapshot" in projection_source
+    assert "layout_snapshot_from_blocks" not in view_source
+    assert "layout_projection_view" not in view_source
+    assert "LayoutSnapshotRequiredError" in view_source
 
 
 def test_project_store_persists_layout_snapshot_without_service_dependency():

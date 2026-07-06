@@ -6,10 +6,13 @@ from typing import Iterator
 
 from .layout_projection import page_layout_blocks
 from .layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
-from .layout_snapshot_projection import layout_snapshot_from_blocks
 from .layout_snapshot_store import layout_snapshot_for_page
 from .project import BBox, Block, BlockOrigin, Page
 from .enums import BlockType, OcrPolicy
+
+
+class LayoutSnapshotRequiredError(RuntimeError):
+    """Raised when code attempts to read layout truth before a snapshot exists."""
 
 
 @dataclass(frozen=True)
@@ -73,7 +76,9 @@ def current_layout_snapshot(page: Page) -> LayoutSnapshot:
     snapshot = layout_snapshot_for_page(page)
     if snapshot is not None:
         return snapshot
-    return layout_snapshot_from_blocks(page, source_engine="layout_projection_view")
+    raise LayoutSnapshotRequiredError(
+        f"page {page.uid or page.page_number!r} has no layout snapshot"
+    )
 
 
 def iter_page_layout_block_views(page: Page) -> Iterator[LayoutBlockView]:
@@ -89,9 +94,6 @@ def iter_page_layout_block_views(page: Page) -> Iterator[LayoutBlockView]:
         runtime_block: Block | None = None
         if runtime_pair is not None:
             runtime_block_index, runtime_block = runtime_pair
-        elif snapshot.source_engine == "layout_projection_view" and snapshot_index < len(runtime_blocks):
-            runtime_block_index = snapshot_index
-            runtime_block = runtime_blocks[snapshot_index]
         yield LayoutBlockView(
             page=page,
             snapshot_block=snapshot_block,
@@ -122,6 +124,7 @@ def iter_page_layout_runtime_orphans(page: Page) -> Iterator[LayoutRuntimeBlockO
 __all__ = [
     "LayoutBlockView",
     "LayoutRuntimeBlockOrphan",
+    "LayoutSnapshotRequiredError",
     "current_layout_snapshot",
     "iter_page_layout_block_views",
     "iter_page_layout_runtime_orphans",

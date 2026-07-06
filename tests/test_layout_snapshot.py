@@ -8,6 +8,7 @@ from app.core.normalized_layout_artifact import normalized_layout_artifact_from_
 from app.core.project_store import ProjectDataError, ProjectStore
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockType, Char, Line, OcrPolicy, OcrProject, Page
+from app.models.layout_block_view import LayoutSnapshotRequiredError, current_layout_snapshot
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.layout_snapshot_projection import (
     project_layout_snapshot_to_blocks,
@@ -109,6 +110,18 @@ def test_sync_layout_snapshot_from_projection_tracks_current_blocks():
     assert snapshot.blocks[0].bbox == block.bbox
     assert snapshot.blocks[0].source_label == "table"
     assert snapshot.blocks[0].origin.original_bbox == block.bbox
+
+
+def test_current_layout_snapshot_requires_adopted_snapshot():
+    page = Page(
+        image_path="/tmp/no-snapshot.png",
+        width=100,
+        height=80,
+        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(1, 2, 30, 20))],
+    )
+
+    with pytest.raises(LayoutSnapshotRequiredError, match="has no layout snapshot"):
+        current_layout_snapshot(page)
 
 
 def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):

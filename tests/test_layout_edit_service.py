@@ -18,8 +18,38 @@ from app.models.ocr_observation import block_ocr_line_observations
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
 
+def _seed_layout_snapshot(page: Page) -> None:
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="test-artifact",
+            source_engine="test_seed",
+            source_run_id="test-seed",
+            blocks=tuple(
+                LayoutBlockSnapshot(
+                    block_type=block.block_type,
+                    bbox=block.bbox,
+                    order=block.order,
+                    source_label=block.source_label,
+                    origin=block.origin or BlockOrigin(
+                        source_engine="test",
+                        source_label=block.source_label or block.block_type.value,
+                        original_bbox=block.bbox,
+                        original_kind=block.block_type,
+                    ),
+                    ocr_policy=block.ocr_policy,
+                    uid=block.uid,
+                )
+                for block in page.blocks
+            ),
+        ),
+    )
+
+
 def test_layout_edit_service_create_block_records_event_and_binding():
     page = Page(image_path="", width=200, height=100)
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     result = service.apply(LayoutEditCommand.create_block(
@@ -103,6 +133,7 @@ def test_layout_edit_service_create_block_appends_to_snapshot_without_projection
 def test_layout_edit_service_delete_block_records_event_and_removes_block():
     block = Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 30, 20))
     page = Page(image_path="", width=200, height=100, blocks=[block])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     result = service.apply(LayoutEditCommand.delete_block(page, block.uid))
@@ -185,6 +216,7 @@ def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
         ocr_policy=OcrPolicy.SKIP,
     )
     page = Page(image_path="", width=200, height=100, blocks=[old_block])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     result = service.apply(LayoutEditCommand.restore_blocks(
@@ -215,6 +247,7 @@ def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
 def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 30, 20), source_label="text")
     page = Page(image_path="", width=200, height=100, blocks=[block])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     result = service.apply(LayoutEditCommand.change_kind(
@@ -297,6 +330,7 @@ def test_layout_edit_service_change_block_kind_uses_snapshot_geometry_when_proje
 def test_layout_edit_service_preserves_explicit_structural_subtype_label():
     block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 30, 20), source_label="text")
     page = Page(image_path="", width=200, height=100, blocks=[block])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     service.apply(LayoutEditCommand.change_kind(
@@ -327,6 +361,7 @@ def test_layout_edit_service_merge_blocks_invalidates_primary_and_clears_ocr_lin
         order=1,
     )
     page = Page(image_path="", width=200, height=100, blocks=[primary, secondary])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
 
     result = service.apply(LayoutEditCommand.merge_blocks(
@@ -452,6 +487,7 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
         source_label="inline_formula",
     )
     page = Page(image_path="", width=200, height=100, blocks=[block])
+    _seed_layout_snapshot(page)
     service = LayoutEditService()
     service.apply(LayoutEditCommand.create_block(page, block.bbox, block.block_type, block.source_label))
     bound = page.blocks[-1]
