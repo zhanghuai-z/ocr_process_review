@@ -1494,6 +1494,10 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     assert "self._viewer.block_geometry_change_requested.connect(" in layout_source
     assert "self._viewer.block_moved.connect(" not in layout_source
     assert re.search(r"self\._selected_block\s*[=:]", layout_source) is None
+    update_geometry_source = _function_source(edit_service_source, "update_geometry")
+    assert "block_uid: str" in update_geometry_source
+    assert "block: Block" not in update_geometry_source
+    assert "block=block" not in update_geometry_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",

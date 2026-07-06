@@ -449,7 +449,7 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
 
     result = service.apply(LayoutEditCommand.update_geometry(
         page,
-        bound,
+        bound.uid,
         bbox=bound.bbox,
         before=LayoutEditService.block_state(bound),
     ))
@@ -493,7 +493,7 @@ def test_layout_edit_service_geometry_update_uses_command_bbox_when_projection_d
     )
     service = LayoutEditService()
 
-    result = service.apply(LayoutEditCommand.update_geometry(page, block, bbox=next_bbox))
+    result = service.apply(LayoutEditCommand.update_geometry(page, block.uid, bbox=next_bbox))
 
     assert result.op == "resize_block"
     assert block.bbox == next_bbox

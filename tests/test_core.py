@@ -1547,7 +1547,7 @@ def test_project_store_persists_block_origin_separately_from_current_layout():
 
             LayoutEditService().apply(LayoutEditCommand.update_geometry(
                 loaded.pages[0],
-                loaded_block,
+                loaded_block.uid,
                 bbox=BBox(30, 40, 130, 50),
             ))
             store.save_project(loaded)
@@ -6956,7 +6956,7 @@ def test_layout_panel_undo_snapshot_uses_layout_snapshot_view_geometry():
             panel.set_pages([page])
             app.processEvents()
             panel._push_undo_snapshot_for_page(0)
-            panel._layout_edit_service.apply(LayoutEditCommand.update_geometry(page, block, bbox=changed_bbox))
+            panel._layout_edit_service.apply(LayoutEditCommand.update_geometry(page, block.uid, bbox=changed_bbox))
             assert layout_snapshot_for_page(page).blocks[0].bbox == changed_bbox
 
             panel._undo_last_edit()

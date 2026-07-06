@@ -1450,7 +1450,7 @@ class LayoutPanel(QWidget):
         before = self._layout_edit_start_state.pop(block_uid, self._layout_block_state(block))
         self._layout_edit_service.apply(LayoutEditCommand.update_geometry(
             page,
-            block,
+            block.uid,
             bbox=bbox,
             before=before,
         ))

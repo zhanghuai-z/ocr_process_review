@@ -14,7 +14,7 @@ from app.core.paddle_artifact_index import (
     apply_paddle_binding_to_block,
 )
 from app.models import BBox, Block, BlockOrigin, BlockType, LayoutEditEvent, OcrPolicy, Page
-from app.models.layout_block_view import current_layout_snapshot
+from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
 from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dict, set_paddle_binding
 from app.models.layout_block_state import (
     mark_layout_block_manual_draw,
@@ -76,6 +76,7 @@ class LayoutEditCommand:
     op: str
     page: Page
     block: Block | None = None
+    block_uid: str = ""
     blocks: tuple[Block, ...] = ()
     bbox: BBox | None = None
     block_type: BlockType | None = None
@@ -130,12 +131,12 @@ class LayoutEditCommand:
     def update_geometry(
         cls,
         page: Page,
-        block: Block,
+        block_uid: str,
         *,
         bbox: BBox,
         before: dict | None = None,
     ) -> "LayoutEditCommand":
-        return cls("resize_block", page, block=block, bbox=bbox, before=before)
+        return cls("resize_block", page, block_uid=block_uid, bbox=bbox, before=before)
 
     @classmethod
     def restore_blocks(
@@ -197,7 +198,7 @@ class LayoutEditService:
         if command.op == "resize_block":
             return self._update_block_geometry(
                 command.page,
-                self._require_block(command),
+                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
                 bbox=self._require_bbox(command),
                 before=command.before,
             )
@@ -212,6 +213,12 @@ class LayoutEditService:
         return command.block
 
     @staticmethod
+    def _require_block_uid(command: LayoutEditCommand) -> str:
+        if not command.block_uid:
+            raise ValueError(f"{command.op} requires a block uid")
+        return command.block_uid
+
+    @staticmethod
     def _require_bbox(command: LayoutEditCommand) -> BBox:
         if command.bbox is None:
             raise ValueError(f"{command.op} requires a bbox")
@@ -222,6 +229,13 @@ class LayoutEditService:
         if command.block_type is None:
             raise ValueError(f"{command.op} requires a block type")
         return command.block_type
+
+    @staticmethod
+    def _runtime_block_by_uid(page: Page, block_uid: str) -> Block:
+        for view in iter_page_layout_block_views(page):
+            if view.uid == block_uid and view.runtime_block is not None:
+                return view.runtime_block
+        raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
 
     @staticmethod
     def block_state(block: Block) -> dict:
