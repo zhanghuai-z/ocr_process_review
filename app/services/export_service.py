@@ -7,31 +7,17 @@
 - XML / HTML 保留空块结构，TXT / Markdown 默认只输出有文本的块。
 """
 from __future__ import annotations
-from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Iterable, List
 
-from app.core.block_attributes import block_attributes, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
-from app.models import Block, BlockType, Line, OcrProject, Page
+from app.models import Block, Line, OcrProject, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
 from app.services.proof_stats_service import ProofStatsService
 
-
-BLOCK_LABELS: dict[BlockType, str] = {
-    BlockType.TEXT: "正文",
-    BlockType.TITLE: "标题",
-    BlockType.FIGURE: "图片",
-    BlockType.FIGURE_CAPTION: "图注",
-    BlockType.TABLE: "表格",
-    BlockType.TABLE_CAPTION: "表注",
-    BlockType.REFERENCE: "参考文献",
-    BlockType.EQUATION: "公式",
-    BlockType.UNKNOWN: "未知块",
-}
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_RESERVED_NAMES = {
@@ -39,36 +25,6 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
-
-
-@dataclass(frozen=True)
-class ExportBlockStyle:
-    """默认导出样式预设中的块样式。"""
-    name: str
-    html_class: str
-    docx_style: str
-    font_size_pt: int
-    line_height_mm: int
-    italic: bool = False
-
-
-DEFAULT_STYLE_PRESET: dict[BlockType, ExportBlockStyle] = {
-    BlockType.TITLE: ExportBlockStyle("标题", "block-title", "Heading 2", 16, 10),
-    BlockType.TEXT: ExportBlockStyle("正文", "block-body", "Normal", 12, 8),
-    BlockType.REFERENCE: ExportBlockStyle("参考文献", "block-reference", "Normal", 11, 7),
-    BlockType.FIGURE_CAPTION: ExportBlockStyle("图注", "block-caption", "Caption", 10, 6, italic=True),
-    BlockType.TABLE_CAPTION: ExportBlockStyle("表注", "block-caption", "Caption", 10, 6, italic=True),
-    BlockType.EQUATION: ExportBlockStyle("公式", "block-equation", "Normal", 12, 8),
-    BlockType.TABLE: ExportBlockStyle("表格", "block-table", "Normal", 11, 7),
-    BlockType.FIGURE: ExportBlockStyle("图片", "block-figure", "Normal", 11, 7),
-    BlockType.UNKNOWN: ExportBlockStyle("未知块", "block-unknown", "Normal", 12, 8),
-}
-
-
-def get_block_style(block: Block) -> ExportBlockStyle:
-    """返回当前块在 HTML/DOCX/PDF/RTF 中共享的默认样式。"""
-    block_type = semantic_block_type(block)
-    return DEFAULT_STYLE_PRESET.get(block_type, DEFAULT_STYLE_PRESET[BlockType.UNKNOWN])
 
 
 def get_export_text(line: Line) -> str:
@@ -79,21 +35,6 @@ def get_export_text(line: Line) -> str:
     - 不读取 ocr_text（除非人工未修改且没有原始文本）
     """
     return proof_display_text(line)
-
-
-def get_block_label(block: Block) -> str:
-    """返回导出时使用的人类可读块类型。"""
-    attrs = block_attributes(block)
-    base = BLOCK_LABELS.get(attrs.semantic_block_type, attrs.semantic_block_type.value)
-    semantic = attrs.normalized_semantic_label
-    if semantic and semantic != attrs.semantic_block_type.value:
-        return f"{base}（{semantic}）"
-    return base
-
-
-def format_bbox(bbox) -> str:
-    """将 bbox 格式化为稳定的 x,y,w,h 字符串。"""
-    return f"{bbox.x},{bbox.y},{bbox.w},{bbox.h}"
 
 
 def sanitize_export_filename(name: str, fallback: str = "ocr_export") -> str:
