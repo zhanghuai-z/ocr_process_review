@@ -34,7 +34,7 @@ from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
     block_ocr_line_observations,
-    clear_block_ocr_lines,
+    clear_block_ocr_line_observations,
     set_ocr_line_bbox,
 )
 
@@ -288,7 +288,7 @@ class LayoutEditService:
         mark_layout_block_user_edited(block)
         mark_ocr_text_invalidated(block, "block_geometry_changed")
         if not self._update_existing_manual_binding_bbox(block):
-            clear_block_ocr_lines(block)
+            clear_block_ocr_line_observations(block.uid)
             binding = self.bind_manual_block_to_paddle(page, block)
         else:
             binding = paddle_binding_dict(block)
@@ -701,7 +701,7 @@ class LayoutEditService:
             source_label=source_label,
         )
         self._apply_snapshot_block_to_runtime_block(primary, provisional)
-        clear_block_ocr_lines(primary)
+        clear_block_ocr_line_observations(primary.uid)
         mark_layout_block_user_edited(primary)
         set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
         set_layout_block_note(primary, "manual_draw_merge_requires_ocr_rerun")

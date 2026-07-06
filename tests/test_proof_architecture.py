@@ -1716,8 +1716,12 @@ def test_layout_edit_service_records_snapshot_edits_without_projection_backflow(
 
 def test_layout_edit_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+    observation_source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
 
     assert "block_ocr_line_observations" in source
+    assert "clear_block_ocr_line_observations" in source
+    assert "def replace_block_ocr_line_observations" in observation_source
+    assert "def block_ocr_line_observations_by_uid" in observation_source
     assert re.search(r"(?<!clear_)block_ocr_lines\(", source) is None
 
 

@@ -11,7 +11,12 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 
 from .layout_block_view import iter_page_layout_block_views
-from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
+from .ocr_observation_store import (
+    ocr_lines_for_block,
+    ocr_lines_for_block_uid,
+    set_ocr_lines_for_block,
+    set_ocr_lines_for_block_uid,
+)
 from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
 from .project import BBox, Block, Line, OcrProject, Page
 from .ocr_text_observation import line_ocr_confidence
@@ -33,6 +38,11 @@ def block_ocr_lines(block: Block) -> list[Line]:
 def block_ocr_line_observations(block: Block) -> list[Line]:
     """Return OCR line observations without adopting ``Block.lines`` projection."""
     return ocr_lines_for_block(block)
+
+
+def block_ocr_line_observations_by_uid(block_uid: str) -> list[Line]:
+    """Return OCR line observations keyed by stable layout block uid."""
+    return ocr_lines_for_block_uid(block_uid)
 
 
 def block_has_ocr_line_observations(block: Block) -> bool:
@@ -61,6 +71,10 @@ def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:
     set_ocr_lines_for_block(block, projected)
 
 
+def replace_block_ocr_line_observations(block_uid: str, lines: Iterable[Line]) -> None:
+    set_ocr_lines_for_block_uid(block_uid, list(lines))
+
+
 def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
     line.bbox = bbox
 
@@ -71,6 +85,10 @@ def line_ocr_bbox(line: Line) -> BBox:
 
 def clear_block_ocr_lines(block: Block) -> None:
     replace_block_ocr_lines(block, [])
+
+
+def clear_block_ocr_line_observations(block_uid: str) -> None:
+    replace_block_ocr_line_observations(block_uid, [])
 
 
 def append_block_ocr_line(block: Block, line: Line) -> None:

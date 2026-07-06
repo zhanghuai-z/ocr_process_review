@@ -216,10 +216,36 @@ def test_ocr_observation_runtime_store_keeps_block_projection_in_sync():
     assert block.lines == []
 
 
-def test_ocr_observation_store_adopts_replaced_legacy_projections():
-    from app.models import BBox, Block, BlockType, Char, Line
-    from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
-    from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
+def test_ocr_observation_uid_store_overrides_stale_block_projection():
+    from app.models import BBox, Block, BlockType, Line
+    from app.models.ocr_observation import (
+        block_ocr_line_observations,
+        block_ocr_lines,
+        clear_block_ocr_line_observations,
+        replace_block_ocr_line_observations,
+        replace_block_ocr_lines,
+    )
+
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
+    stale = Line(text="旧", confidence=0.1, bbox=BBox(0, 0, 10, 10))
+    fresh = Line(text="新", confidence=0.9, bbox=BBox(0, 0, 10, 10))
+
+    replace_block_ocr_lines(block, [stale])
+    block.lines = [stale]
+    replace_block_ocr_line_observations(block.uid, [fresh])
+
+    assert block.lines == [stale]
+    assert block_ocr_line_observations(block) == [fresh]
+    assert block_ocr_lines(block) == [fresh]
+
+    clear_block_ocr_line_observations(block.uid)
+    assert block_ocr_line_observations(block) == []
+    assert block_ocr_lines(block) == []
+
+
+def test_ocr_observation_store_ignores_replaced_legacy_line_projection():
+    from app.models import BBox, Block, BlockType, Line
+    from app.models.ocr_observation import block_ocr_line_observations, block_ocr_lines, replace_block_ocr_lines
 
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
     line1 = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
@@ -227,14 +253,12 @@ def test_ocr_observation_store_adopts_replaced_legacy_projections():
     replace_block_ocr_lines(block, [line1])
 
     block.lines = [line2]
+    assert block_ocr_line_observations(block) == [line1]
+    assert block_ocr_lines(block) == [line1]
+
+    replace_block_ocr_lines(block, [line2])
+    assert block_ocr_line_observations(block) == [line2]
     assert block_ocr_lines(block) == [line2]
-
-    char1 = Char(char="甲", confidence=0.9)
-    char2 = Char(char="乙", confidence=0.8)
-    replace_line_ocr_chars(line2, [char1])
-
-    line2.chars = [char2]
-    assert line_ocr_chars(line2) == [char2]
 
 
 def test_raw_block_payload_prefers_page_artifact_origin_record():
@@ -2138,6 +2162,7 @@ def test_project_store_rejects_legacy_page_model_on_save():
 def test_project_store_save_project_preserves_child_rowids():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
+    from app.models.ocr_observation import replace_block_ocr_lines
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -2182,7 +2207,7 @@ def test_project_store_save_project_preserves_child_rowids():
             set_line_proof_text(line1, "第一行已校对")
             line1.chars[0].char = "一"
             block.note = "updated without id churn"
-            block.lines = [line1]
+            replace_block_ocr_lines(block, [line1])
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
 
@@ -15245,6 +15270,7 @@ def test_project_store_save_project_prunes_stale_proof_line_state():
 
     from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
         db_path = db_file.name
@@ -15267,7 +15293,7 @@ def test_project_store_save_project_prunes_stale_proof_line_state():
         stale_uid = block.lines[1].uid
 
         assert store.conn.execute("SELECT COUNT(*) FROM proof_line_state").fetchone()[0] == 2
-        block.lines = [block.lines[0]]
+        replace_block_ocr_lines(block, [block.lines[0]])
         store.save_project(project)
 
         rows = store.conn.execute("SELECT line_uid FROM proof_line_state").fetchall()
