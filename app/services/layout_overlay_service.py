@@ -25,8 +25,8 @@ from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
 from app.models.layout_projection import (
     append_page_layout_block,
     page_layout_block_count,
-    page_layout_blocks,
 )
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.services.layout_routing_plan import routing_plan_for_block_record
 
@@ -156,12 +156,13 @@ class LayoutOverlayService:
     @staticmethod
     def has_inline_formula_origin_block(page: Page, origin_bbox: list[int]) -> bool:
         origin_tuple = tuple(origin_bbox)
-        for block in page_layout_blocks(page):
-            if inline_formula_origin_bbox(block) == origin_tuple:
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is not None and inline_formula_origin_bbox(block) == origin_tuple:
                 return True
-            if normalize_paddle_label(getattr(block, "source_label", "")) != "inline_formula":
+            if normalize_paddle_label(view.source_label) != "inline_formula":
                 continue
-            if block.bbox.to_xyxy() == origin_tuple:
+            if view.bbox.to_xyxy() == origin_tuple:
                 return True
         return False
 
