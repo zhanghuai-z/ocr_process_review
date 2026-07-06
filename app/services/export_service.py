@@ -130,13 +130,6 @@ def iter_export_pages(project: OcrProject) -> Iterable[Page]:
     return sorted(project.pages, key=lambda page: page.page_number)
 
 
-def iter_export_blocks(page: Page, *, include_empty: bool = False) -> Iterable[Block]:
-    """按统一阅读顺序输出块。"""
-    for view in iter_export_block_views(page, include_empty=include_empty):
-        if view.runtime_block is not None:
-            yield view.runtime_block
-
-
 def iter_export_block_views(page: Page, *, include_empty: bool = False) -> Iterable[LayoutBlockView]:
     """Yield export blocks ordered by adopted layout snapshot facts."""
     views = sorted(
