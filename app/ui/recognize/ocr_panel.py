@@ -44,6 +44,10 @@ def _observation_avg_confidence(block: Block) -> float:
     return sum(line_ocr_confidence(line) for line in lines) / len(lines)
 
 
+def _tree_payload(kind: str, *uids: str) -> tuple[str, ...]:
+    return (kind, *uids)
+
+
 class OcrPanel(QWidget):
     """
     步骤3: OCR 识别结果展示。
@@ -157,7 +161,7 @@ class OcrPanel(QWidget):
         self._tree.clear()
         for page in pages:
             page_item = QTreeWidgetItem(self._tree, [f"第 {page.page_number} 页", "", ""])
-            page_item.setData(0, Qt.ItemDataRole.UserRole, page)
+            page_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("page", page.uid))
             for view in _runtime_layout_views(page):
                 block = view.runtime_block
                 if block is None:
@@ -166,7 +170,7 @@ class OcrPanel(QWidget):
                     page_item,
                     [f"[{_view_display_label(view)}]", f"{_observation_avg_confidence(block):.2f}", ""],
                 )
-                block_item.setData(0, Qt.ItemDataRole.UserRole, block)
+                block_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("block", page.uid, view.uid))
                 for line in _observation_lines(block):
                     facts = proof_line_facts(line)
                     line_text = facts.text
@@ -181,7 +185,7 @@ class OcrPanel(QWidget):
                         block_item,
                         [preview, f"{facts.confidence:.2f}", status_str],
                     )
-                    line_item.setData(0, Qt.ItemDataRole.UserRole, line)
+                    line_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("line", page.uid, view.uid, line.uid))
                     if facts.status == ProofStatus.AUTO_FLAGGED:
                         line_item.setForeground(1, Qt.GlobalColor.red)
             page_item.setExpanded(True)
@@ -189,19 +193,36 @@ class OcrPanel(QWidget):
     def _on_item_selected(self, current: QTreeWidgetItem, _) -> None:
         if current is None:
             return
-        obj = current.data(0, Qt.ItemDataRole.UserRole)
-        from app.models import Line, Page as PageModel
-        if isinstance(obj, PageModel):
-            self._viewer.set_image(obj.display_image_path)
-            self._viewer.show_blocks([
-                view.runtime_block
-                for view in _runtime_layout_views(obj)
-                if view.runtime_block is not None
-            ])
-        elif isinstance(obj, Block):
-            # 找到对应页面
-            for page in self._pages:
-                if any(view.runtime_block is obj for view in _runtime_layout_views(page)):
-                    self._viewer.set_image(page.display_image_path)
-                    self._viewer.show_blocks([obj])
-                    break
+        payload = current.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(payload, tuple) or not payload:
+            return
+        kind = payload[0]
+        if kind == "page" and len(payload) == 2:
+            page = self._page_by_uid(payload[1])
+            if page is None:
+                return
+            self._viewer.set_image(page.display_image_path)
+            self._viewer.show_layout_block_views(_runtime_layout_views(page))
+            return
+        if kind == "block" and len(payload) == 3:
+            page = self._page_by_uid(payload[1])
+            if page is None:
+                return
+            view = self._layout_view_by_uid(page, payload[2])
+            if view is None:
+                return
+            self._viewer.set_image(page.display_image_path)
+            self._viewer.show_layout_block_views([view])
+
+    def _page_by_uid(self, page_uid: str) -> Page | None:
+        for page in self._pages:
+            if page.uid == page_uid:
+                return page
+        return None
+
+    @staticmethod
+    def _layout_view_by_uid(page: Page, block_uid: str) -> LayoutBlockView | None:
+        for view in _runtime_layout_views(page):
+            if view.uid == block_uid:
+                return view
+        return None

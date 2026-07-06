@@ -899,13 +899,26 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
     assert "block_ocr_line_count" not in ocr_source
     assert "block_avg_confidence" not in ocr_source
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
-    assert "app.models.layout_projection" in layout_source
+    assert "app.models.layout_projection" not in layout_source
     assert "app.models.ocr_character_observation" in layout_source
     assert "block_ocr_line_observations" in layout_source
     assert "iter_page_ocr_line_observation_occurrences" in layout_source
     assert "block_ocr_lines" not in layout_source
     assert "page_ocr_line_count" not in layout_source
     assert "block_avg_confidence" not in layout_source
+
+
+def test_ocr_panel_tree_state_uses_uid_payloads_not_model_objects():
+    source = Path("app/ui/recognize/ocr_panel.py").read_text(encoding="utf-8")
+
+    assert "_tree_payload(\"page\"" in source
+    assert "_tree_payload(\"block\"" in source
+    assert "_tree_payload(\"line\"" in source
+    assert "setData(0, Qt.ItemDataRole.UserRole, page)" not in source
+    assert "setData(0, Qt.ItemDataRole.UserRole, block)" not in source
+    assert "setData(0, Qt.ItemDataRole.UserRole, line)" not in source
+    assert "isinstance(obj, Block)" not in source
+    assert "isinstance(obj, Page" not in source
 
 
 def test_image_viewer_reads_block_confidence_from_ocr_observation_store():

@@ -21261,7 +21261,9 @@ def test_ui_block_labels_use_structured_semantic_label():
     viewer.close()
 
     panel = OcrPanel()
-    panel.on_recognition_complete([Page(image_path="/tmp/ui-label.png", width=80, height=60, blocks=[block])])
+    page = Page(image_path="/tmp/ui-label.png", width=80, height=60, blocks=[block])
+    _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
+    panel.on_recognition_complete([page])
     page_item = panel._tree.topLevelItem(0)
     assert page_item.child(0).text(0) == "[text · paragraph_title]"
     panel.close()
@@ -21350,9 +21352,9 @@ def test_ocr_panel_reads_block_order_from_layout_snapshot_view():
     panel.on_recognition_complete([page])
     page_item = panel._tree.topLevelItem(0)
 
-    assert page_item.child(0).data(0, Qt.ItemDataRole.UserRole) is title
+    assert page_item.child(0).data(0, Qt.ItemDataRole.UserRole) == ("block", page.uid, title.uid)
     assert page_item.child(0).text(0) == "[title · paragraph_title]"
-    assert page_item.child(1).data(0, Qt.ItemDataRole.UserRole) is body
+    assert page_item.child(1).data(0, Qt.ItemDataRole.UserRole) == ("block", page.uid, body.uid)
     panel.close()
 
     print("test_ocr_panel_reads_block_order_from_layout_snapshot_view PASSED")
@@ -21371,6 +21373,7 @@ def test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_emp
     replace_block_ocr_line_observations(block.uid, [line])
     block.lines = []
     page = Page(image_path="/tmp/ocr-panel-observation-lines.png", width=80, height=60, blocks=[block])
+    _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
 
     panel = OcrPanel()
     panel.on_recognition_complete([page])
@@ -21381,7 +21384,7 @@ def test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_emp
     assert "识别完成：1 行" in panel._status_lbl.text()
     assert block_item.text(1) == "0.80"
     assert line_item.text(0) == "观察行"
-    assert line_item.data(0, Qt.ItemDataRole.UserRole) is line
+    assert line_item.data(0, Qt.ItemDataRole.UserRole) == ("line", page.uid, block.uid, line.uid)
     panel.close()
 
     print("test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_empty PASSED")
