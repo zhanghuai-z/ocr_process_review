@@ -1787,6 +1787,8 @@ def test_layout_snapshot_contract_lives_in_model_layer():
     assert "class LayoutSnapshot" in model_source
     assert "class LayoutBlockSnapshot" in model_source
     assert "from app.models.layout_snapshot import" in service_source
+    assert "sync_page_layout_snapshot_from_projection" not in service_source
+    assert "layout_snapshot_from_blocks" not in service_source
     assert "def sync_page_layout_snapshot_from_projection" in projection_source
     assert "def adopt_page_layout_snapshot" in projection_source
 

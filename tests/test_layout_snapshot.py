@@ -9,14 +9,16 @@ from app.core.project_store import ProjectDataError, ProjectStore
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockType, Char, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_snapshot import LayoutSnapshot
+from app.models.layout_snapshot_projection import (
+    project_layout_snapshot_to_blocks,
+    sync_page_layout_snapshot_from_projection,
+)
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 from app.services.layout_snapshot import (
     adopt_page_layout_snapshot,
     layout_snapshot_from_normalized_artifact,
-    project_layout_snapshot_to_blocks,
-    sync_page_layout_snapshot_from_projection,
 )
 
 

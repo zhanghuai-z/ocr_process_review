@@ -15,9 +15,6 @@ from app.models import BBox, Block, BlockOrigin, BlockSource
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_projection import (
     adopt_page_layout_snapshot,
-    layout_snapshot_from_blocks,
-    project_layout_snapshot_to_blocks,
-    sync_page_layout_snapshot_from_projection,
 )
 
 
@@ -104,8 +101,5 @@ __all__ = [
     "LayoutBlockSnapshot",
     "LayoutSnapshot",
     "adopt_page_layout_snapshot",
-    "layout_snapshot_from_blocks",
     "layout_snapshot_from_normalized_artifact",
-    "project_layout_snapshot_to_blocks",
-    "sync_page_layout_snapshot_from_projection",
 ]
