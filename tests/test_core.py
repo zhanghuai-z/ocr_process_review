@@ -6836,6 +6836,7 @@ def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
     from PySide6.QtGui import QImage
 
     from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -6856,9 +6857,9 @@ def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
             app.processEvents()
             assert panel._outline_tree.topLevelItem(0).text(0) == "Paddle 标题预览"
 
-            heading.lines = [
+            replace_block_ocr_lines(heading, [
                 Line(text="Hanwang 标题文本", confidence=0.95, bbox=BBox(10, 10, 120, 20))
-            ]
+            ])
             panel.refresh_text_indexes()
 
             assert panel._outline_tree.topLevelItem(0).text(0) == "Hanwang 标题文本"
