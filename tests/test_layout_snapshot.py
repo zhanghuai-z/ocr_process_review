@@ -190,6 +190,49 @@ def test_project_store_persists_layout_snapshot_independently_from_block_project
     assert loaded_page.blocks[0].uid == projected_uid
 
 
+def test_project_store_saves_block_projection_from_layout_snapshot_when_runtime_drifts(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot-save-projection.png", width=300, height=220)
+    set_paddle_raw_layout_records(
+        page,
+        [
+            {
+                "block_label": "text",
+                "block_bbox": [20, 30, 180, 70],
+                "block_content": "正文内容",
+                "score": 0.9,
+            },
+        ],
+        run_id="job-layout",
+    )
+    snapshot = layout_snapshot_from_normalized_artifact(
+        normalized_layout_artifact_from_page(page),
+        source_run_id="job-layout",
+    )
+    adopt_page_layout_snapshot(page, snapshot)
+    projected_uid = page.blocks[0].uid
+    page.blocks[0].block_type = BlockType.FIGURE
+    page.blocks[0].bbox = BBox(200, 180, 40, 20)
+    page.blocks[0].source_label = "figure"
+    project = OcrProject(name="snapshot save projection", pages=[page])
+    db_path = str(tmp_path / "snapshot-save-projection.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+    with ProjectStore(db_path) as store:
+        loaded = store.load_project(saved.id)
+
+    loaded_page = loaded.pages[0]
+    loaded_snapshot = layout_snapshot_for_page(loaded_page)
+    assert loaded_snapshot is not None
+    assert loaded_snapshot.blocks[0].uid == projected_uid
+    assert loaded_snapshot.blocks[0].block_type == BlockType.TEXT
+    assert loaded_snapshot.blocks[0].bbox == BBox.from_xyxy(20, 30, 180, 70)
+    assert loaded_page.blocks[0].uid == projected_uid
+    assert loaded_page.blocks[0].block_type == BlockType.TEXT
+    assert loaded_page.blocks[0].bbox == BBox.from_xyxy(20, 30, 180, 70)
+    assert loaded_page.blocks[0].source_label == "text"
+
+
 def test_project_store_rejects_malformed_persisted_layout_snapshot(tmp_path):
     page = Page(image_path="/tmp/layout-snapshot-bad.png", width=100, height=80)
     snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="layout_edit")

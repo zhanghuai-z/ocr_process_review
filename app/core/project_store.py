@@ -20,6 +20,7 @@ from app.models import (
     RawOcrArtifact,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
@@ -1211,7 +1212,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        for block in page_layout_blocks(page):
+        for block in self._layout_blocks_for_save(page):
             self._ensure_unique_child_uid(
                 cur,
                 block,
@@ -1232,6 +1233,33 @@ class ProjectStore:
                 )
             cur.execute("DELETE FROM block WHERE id=?", (old_id,))
         self._save_layout_snapshot(cur, page, project_id)
+
+    @staticmethod
+    def _layout_blocks_for_save(page: Page) -> list[Block]:
+        blocks: list[Block] = []
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is None:
+                block = Block(
+                    block_type=view.block_type,
+                    bbox=view.bbox,
+                    order=view.order,
+                    note=view.note,
+                    source_label=view.source_label,
+                    origin=view.origin,
+                    ocr_policy=view.ocr_policy,
+                    uid=view.uid,
+                )
+            block.block_type = view.block_type
+            block.bbox = view.bbox
+            block.order = view.order
+            block.source_label = view.source_label
+            block.origin = view.origin
+            block.ocr_policy = view.ocr_policy
+            block.note = view.note
+            blocks.append(block)
+        replace_page_layout_blocks(page, blocks)
+        return blocks
 
     def _save_layout_edit_events(
         self,

@@ -1487,6 +1487,7 @@ def test_project_store_persists_block_origin_separately_from_current_layout():
     from app.models import (
         BBox, Block, BlockOrigin, BlockSource, BlockType, OcrProject, Page,
     )
+    from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -1529,7 +1530,11 @@ def test_project_store_persists_block_origin_separately_from_current_layout():
             assert loaded_block.origin.source_confidence == 0.88
             assert loaded_block.origin.raw_index == 3
 
-            loaded_block.bbox = BBox(30, 40, 130, 50)
+            LayoutEditService().apply(LayoutEditCommand.update_geometry(
+                loaded.pages[0],
+                loaded_block,
+                bbox=BBox(30, 40, 130, 50),
+            ))
             store.save_project(loaded)
             reloaded = store.load_project(project_id=1)
             reloaded_block = reloaded.pages[0].blocks[0]
