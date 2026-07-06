@@ -10,7 +10,7 @@ from app.core.proof_line_facts import proof_display_text, proof_status
 from app.core.proof_line_mutation import set_line_proof_status
 from app.core.proof_occurrence import ProofOccurrence, line_signature
 from app.models import Block, Line, Page, ProofStatus
-from app.models.layout_projection import block_belongs_to_page
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_observation import line_belongs_to_block
 from app.services.proof_probe_text_service import save_displayed_edit_result
 
@@ -183,7 +183,7 @@ class ProofEditService:
         *,
         expected_signature: str = "",
     ) -> ProofEditResult | None:
-        if not block_belongs_to_page(page, block) or not line_belongs_to_block(block, line):
+        if not ProofEditService._block_belongs_to_page_view(page, block) or not line_belongs_to_block(block, line):
             return ProofEditResult(
                 ProofEditStatus.INVALID_TARGET,
                 ProofChangeSet(cancelled=True),
@@ -196,3 +196,7 @@ class ProofEditService:
                 "line changed after the proof occurrence was built",
             )
         return None
+
+    @staticmethod
+    def _block_belongs_to_page_view(page: Page, block: Block) -> bool:
+        return any(view.runtime_block is block for view in iter_page_layout_block_views(page))

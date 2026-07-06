@@ -483,6 +483,7 @@ def test_layout_block_view_boundary_is_used_by_migrated_consumers():
     view_consumers = {
         Path("app/models/ocr_observation.py"),
         Path("app/services/ocr_dispatch_plan.py"),
+        Path("app/services/proof_edit_service.py"),
         Path("app/engines/hanwang/micro_recblock.py"),
     }
     for path in view_consumers:
