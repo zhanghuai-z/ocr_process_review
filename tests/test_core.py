@@ -20909,6 +20909,35 @@ def test_ocr_panel_reads_block_order_from_layout_snapshot_view():
     print("test_ocr_panel_reads_block_order_from_layout_snapshot_view PASSED")
 
 
+def test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_empty():
+    from PySide6.QtCore import Qt
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.ui.recognize.ocr_panel import OcrPanel
+
+    _get_qapp()
+    line = Line(text="观察行", confidence=0.8, bbox=BBox(5, 6, 30, 10))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(5, 6, 30, 20), order=0)
+    replace_block_ocr_lines(block, [line])
+    block.lines = []
+    page = Page(image_path="/tmp/ocr-panel-observation-lines.png", width=80, height=60, blocks=[block])
+
+    panel = OcrPanel()
+    panel.on_recognition_complete([page])
+    page_item = panel._tree.topLevelItem(0)
+    block_item = page_item.child(0)
+    line_item = block_item.child(0)
+
+    assert "识别完成：1 行" in panel._status_lbl.text()
+    assert block_item.text(1) == "0.80"
+    assert line_item.text(0) == "观察行"
+    assert line_item.data(0, Qt.ItemDataRole.UserRole) is line
+    panel.close()
+
+    print("test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_empty PASSED")
+
+
 def test_hanwang_concurrency_evaluation_script_help():
     import subprocess
 

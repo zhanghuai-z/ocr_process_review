@@ -12,7 +12,8 @@ from app.core.block_attributes import normalize_source_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import block_avg_confidence, block_ocr_line_count, block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations
+from app.models.ocr_text_observation import line_ocr_confidence
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 
@@ -26,6 +27,21 @@ def _view_display_label(view: LayoutBlockView) -> str:
     if source_label and source_label != view.block_type.value:
         return f"{view.block_type.value} · {source_label}"
     return view.block_type.value
+
+
+def _observation_lines(block: Block):
+    return block_ocr_line_observations(block)
+
+
+def _observation_line_count(block: Block) -> int:
+    return len(_observation_lines(block))
+
+
+def _observation_avg_confidence(block: Block) -> float:
+    lines = _observation_lines(block)
+    if not lines:
+        return 0.0
+    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
 
 
 class OcrPanel(QWidget):
@@ -123,11 +139,11 @@ class OcrPanel(QWidget):
         self._populate_tree(pages)
         flagged = sum(
             1 for p in pages for view in _runtime_layout_views(p)
-            for l in block_ocr_lines(view.runtime_block)
+            for l in _observation_lines(view.runtime_block)
             if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
         )
         total_lines = sum(
-            block_ocr_line_count(view.runtime_block)
+            _observation_line_count(view.runtime_block)
             for p in pages for view in _runtime_layout_views(p)
         )
         self._status_lbl.setText(
@@ -148,10 +164,10 @@ class OcrPanel(QWidget):
                     continue
                 block_item = QTreeWidgetItem(
                     page_item,
-                    [f"[{_view_display_label(view)}]", f"{block_avg_confidence(block):.2f}", ""],
+                    [f"[{_view_display_label(view)}]", f"{_observation_avg_confidence(block):.2f}", ""],
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
-                for line in block_ocr_lines(block):
+                for line in _observation_lines(block):
                     facts = proof_line_facts(line)
                     line_text = facts.text
                     preview = line_text[:40] + ("…" if len(line_text) > 40 else "")

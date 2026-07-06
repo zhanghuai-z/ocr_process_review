@@ -874,6 +874,10 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
     ocr_source = Path("app/ui/recognize/ocr_panel.py").read_text(encoding="utf-8")
     assert "app.models.layout_block_view" in ocr_source
     assert "app.models.layout_projection" not in ocr_source
+    assert "block_ocr_line_observations" in ocr_source
+    assert "block_ocr_lines" not in ocr_source
+    assert "block_ocr_line_count" not in ocr_source
+    assert "block_avg_confidence" not in ocr_source
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     assert "app.models.layout_projection" in layout_source
     assert "app.models.ocr_character_observation" in layout_source
