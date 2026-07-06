@@ -56,14 +56,19 @@ def _raw_layout_records(page):
     return raw_layout_records(page)
 
 
-def _seed_project_ocr_observations(project):
+def _seed_page_ocr_observations(page):
     """Register test OCR lines through the current OCR observation boundary."""
     from app.models.ocr_observation import replace_block_ocr_lines
 
+    for block in page.blocks:
+        if block.lines:
+            replace_block_ocr_lines(block, list(block.lines))
+
+
+def _seed_project_ocr_observations(project):
+    """Register test OCR lines through the current OCR observation boundary."""
     for page in project.pages:
-        for block in page.blocks:
-            if block.lines:
-                replace_block_ocr_lines(block, list(block.lines))
+        _seed_page_ocr_observations(page)
 
 
 def test_layout_projection_boundary_tracks_current_page_blocks():
@@ -18513,12 +18518,30 @@ def test_proof_line_iterator_excludes_equation_lines():
             Line(text="图片不校", confidence=0.9, bbox=BBox(1, 61, 30, 10)),
         ]),
     ]
+    _seed_page_ocr_observations(page)
 
     texts = [line.text for _block, line, _idx in iter_unique_page_text_lines(page)]
 
     assert texts == ["正文", "图注"]
 
     print("test_proof_line_iterator_excludes_equation_lines PASSED")
+
+
+def test_proof_line_iterator_reads_ocr_observation_store_when_projection_is_empty():
+    from app.core.proof_line_utils import iter_unique_page_hproof_lines, iter_unique_page_text_lines
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
+
+    line = Line(text="来自 observation", confidence=0.9, bbox=BBox(1, 1, 90, 12))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 20), order=0)
+    replace_block_ocr_lines(block, [line])
+    block.lines = []
+    page = Page(image_path="/tmp/proof-lines-observation.png", width=120, height=80, blocks=[block])
+
+    assert [candidate.text for _block, candidate, _idx in iter_unique_page_text_lines(page)] == ["来自 observation"]
+    assert [candidate.text for _block, candidate, _idx in iter_unique_page_hproof_lines(page)] == ["来自 observation"]
+
+    print("test_proof_line_iterator_reads_ocr_observation_store_when_projection_is_empty PASSED")
 
 
 def test_proof_line_iterator_trusts_layout_snapshot_type_over_runtime_projection():
@@ -18538,6 +18561,7 @@ def test_proof_line_iterator_trusts_layout_snapshot_type_over_runtime_projection
     )
     page = Page(image_path="/tmp/proof-lines-snapshot.png", width=100, height=100)
     page.blocks = [runtime_block]
+    _seed_page_ocr_observations(page)
     set_layout_snapshot_for_page(page, LayoutSnapshot(
         page_uid=page.uid,
         artifact_uid="artifact-proof-lines",
@@ -18583,6 +18607,7 @@ def test_char_index_service_does_not_repopulate_equation_chars():
             order=1,
         ),
     ]
+    _seed_page_ocr_observations(page)
 
     svc = CharIndexService(include_non_cjk=True).build_index(OcrProject(name="equation-skip", pages=[page]))
 
@@ -18611,6 +18636,7 @@ def test_hproof_line_iterator_uses_shared_proof_text_elements():
             Line(text="E=mc2", confidence=0.9, bbox=BBox(1, 61, 30, 10)),
         ]),
     ]
+    _seed_page_ocr_observations(page)
 
     texts = [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)]
 
@@ -18635,6 +18661,7 @@ def test_proof_line_iterators_exclude_route_table_lines():
             ),
         ]),
     ]
+    _seed_page_ocr_observations(page)
 
     assert [line.text for _block, line, _idx in iter_unique_page_text_lines(page)] == ["正文"]
     assert [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)] == ["正文"]
@@ -18669,6 +18696,7 @@ def test_hproof_line_iterator_excludes_position_source_labels():
             source_label="footnote",
         ),
     ]
+    _seed_page_ocr_observations(page)
 
     texts = [line.text for _block, line, _idx in iter_unique_page_hproof_lines(page)]
 

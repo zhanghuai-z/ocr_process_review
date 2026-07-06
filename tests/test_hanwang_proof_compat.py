@@ -20,6 +20,7 @@ import pytest
 
 from app.models import BBox, Block, Char, Line, Page
 from app.models.enums import BlockType, ProofStatus
+from app.models.ocr_observation import replace_block_ocr_lines
 from app.core.char_bbox_utils import (
     ensure_line_char_bboxes,
     _is_trusted_char_bbox_source,
@@ -60,7 +61,8 @@ def _hw_line(text: str, chars: List[Char], x: int = 0, y: int = 0,
 
 
 def _page_with_lines(lines: List[Line], img_shape=(400, 300, 3)) -> Page:
-    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 300, 400), lines=lines)
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 300, 400))
+    replace_block_ocr_lines(block, lines)
     page = Page(
         image_path="",
         width=img_shape[1],
@@ -601,9 +603,9 @@ def test_char_index_indexes_old_hanwang_chars_with_empty_granularity():
         ],
     )
     page = Page(image_path="/tmp/old-hanwang-granularity.png", width=100, height=50)
-    page.blocks = [
-        Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 90, 32), order=0, lines=[line])
-    ]
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 90, 32), order=0)
+    replace_block_ocr_lines(block, [line])
+    page.blocks = [block]
 
     svc = CharIndexService(include_non_cjk=True).build([page])
 

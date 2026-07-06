@@ -7,7 +7,7 @@ from app.core.block_attributes import normalize_source_label
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_lines, line_ocr_bbox
+from app.models.ocr_observation import block_ocr_line_observations, line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 
 
@@ -70,7 +70,7 @@ def iter_unique_page_text_line_views(page: Page) -> Iterator[tuple[LayoutBlockVi
             continue
         if _semantic_block_type_from_view(view) not in PROOF_LINE_BLOCK_TYPES:
             continue
-        for line_idx, line in enumerate(block_ocr_lines(block)):
+        for line_idx, line in enumerate(block_ocr_line_observations(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line_ocr_review_flags(line)):
                 continue
             if _is_duplicate_line(line, seen):
@@ -102,7 +102,7 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
             continue
         if _is_position_only_view(view):
             continue
-        for line_idx, line in enumerate(block_ocr_lines(block)):
+        for line_idx, line in enumerate(block_ocr_line_observations(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line_ocr_review_flags(line)):
                 continue
             if _is_duplicate_line(line, seen):
