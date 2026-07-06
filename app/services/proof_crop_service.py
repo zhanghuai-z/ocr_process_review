@@ -16,7 +16,7 @@ from app.core.proof_geometry_quality import is_estimated_or_unavailable_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
 from app.models.ocr_observation import block_ocr_line_observations, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
@@ -137,7 +137,7 @@ class ProofCropService:
                     if text and line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
                         stats.fallback_lines += 1
                         stats.unavailable_chars += len(text)
-                        replace_line_ocr_chars(line, [
+                        replace_line_ocr_char_observations(line.uid, [
                             _fallback_char(
                                 glyph,
                                 line,
@@ -151,7 +151,10 @@ class ProofCropService:
                         boxes = split_line_bbox_into_char_bboxes(line_ocr_bbox(line), text)
                         stats.fallback_lines += 1
                         stats.fallback_chars += len(text)
-                        replace_line_ocr_chars(line, _complete_positional_chars(line, text, boxes))
+                        replace_line_ocr_char_observations(
+                            line.uid,
+                            _complete_positional_chars(line, text, boxes),
+                        )
 
                 if line_ocr_bbox(line) != old_line_bbox:
                     page_line_updates += 1
