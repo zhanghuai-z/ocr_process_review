@@ -1752,6 +1752,16 @@ def test_layout_edit_service_records_snapshot_edits_without_projection_backflow(
     assert "source_engine=" not in record_source
 
 
+def test_layout_overlay_service_promotes_inline_formula_snapshot_first():
+    source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+
+    assert "LayoutBlockSnapshot(" in source
+    assert "replace_page_layout_projection_from_snapshot(" in source
+    assert "sync_page_layout_snapshot_from_projection" not in source
+    assert "append_page_layout_block" not in source
+    assert "page_layout_block_count" not in source
+
+
 def test_layout_edit_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     observation_source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")

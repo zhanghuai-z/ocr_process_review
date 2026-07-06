@@ -21,13 +21,19 @@ from app.core.paddle_line_routing import (
     block_text,
     formula_texts_by_subblock_bbox,
 )
-from app.models import BBox, Block, BlockOrigin, BlockSource, BlockType, Page
-from app.models.layout_projection import (
-    append_page_layout_block,
-    page_layout_block_count,
+from app.models import (
+    BBox,
+    BlockOrigin,
+    BlockSource,
+    BlockType,
+    LayoutBlockSnapshot,
+    LayoutSnapshot,
+    OcrPolicy,
+    Page,
 )
-from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
+from app.models.layout_snapshot_projection import replace_page_layout_projection_from_snapshot
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.services.layout_routing_plan import routing_plan_for_block_record
 
 
@@ -52,33 +58,56 @@ class LayoutOverlayService:
         """Promote raw inline-formula overlays to editable equation blocks."""
         created = 0
         handled_origins = handled_inline_formula_origin_bboxes(page)
+        created_origins: set[tuple[int, int, int, int]] = set()
+        snapshot = current_layout_snapshot(page)
+        next_blocks = list(snapshot.blocks)
         for overlay in self.iter_inline_formula_overlays(page):
             origin_tuple = overlay.bbox.to_xyxy()
             if origin_tuple in handled_origins:
                 continue
+            if origin_tuple in created_origins:
+                continue
             origin = list(origin_tuple)
             if self.has_inline_formula_origin_block(page, origin):
                 continue
-            append_page_layout_block(page, Block(
-                block_type=BlockType.EQUATION,
-                bbox=overlay.bbox,
-                order=page_layout_block_count(page),
-                source=BlockSource.AUTO_LAYOUT,
-                source_label="inline_formula",
-                origin=BlockOrigin(
-                    created_by=BlockSource.AUTO_LAYOUT.value,
-                    source_engine="paddleocr-vl",
-                    source_label="inline_formula",
-                    original_bbox=overlay.bbox,
-                    original_kind=BlockType.EQUATION,
-                    raw_artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
-                    raw_index=overlay.parent_index,
-                ),
-            ))
+            next_blocks.append(self._inline_formula_snapshot_block(page, overlay, order=len(next_blocks)))
+            created_origins.add(origin_tuple)
             created += 1
         if created:
-            sync_page_layout_snapshot_from_projection(page, source_engine="layout_overlay_service")
+            next_snapshot = LayoutSnapshot(
+                page_uid=snapshot.page_uid,
+                artifact_uid=snapshot.artifact_uid,
+                source_engine="layout_overlay_service",
+                source_run_id="",
+                blocks=tuple(next_blocks),
+            )
+            set_layout_snapshot_for_page(page, next_snapshot)
+            replace_page_layout_projection_from_snapshot(page, next_snapshot)
         return created
+
+    @staticmethod
+    def _inline_formula_snapshot_block(
+        page: Page,
+        overlay: InlineFormulaOverlay,
+        *,
+        order: int,
+    ) -> LayoutBlockSnapshot:
+        return LayoutBlockSnapshot(
+            block_type=BlockType.EQUATION,
+            bbox=overlay.bbox,
+            order=order,
+            source_label="inline_formula",
+            origin=BlockOrigin(
+                created_by=BlockSource.AUTO_LAYOUT.value,
+                source_engine="paddleocr-vl",
+                source_label="inline_formula",
+                original_bbox=overlay.bbox,
+                original_kind=BlockType.EQUATION,
+                raw_artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
+                raw_index=overlay.parent_index,
+            ),
+            ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        )
 
     def iter_inline_formula_overlays(self, page: Page) -> Iterable[InlineFormulaOverlay]:
         for parent in normalized_layout_regions(page):

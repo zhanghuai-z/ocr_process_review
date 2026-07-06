@@ -19,18 +19,17 @@ from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dic
 from app.models.layout_block_state import (
     mark_layout_block_manual_draw,
     mark_layout_block_user_edited,
-    set_layout_block_bbox,
     set_layout_block_note,
     set_layout_block_ocr_policy,
     set_layout_block_order,
     set_layout_block_source_label,
     set_layout_block_type,
 )
-from app.models.layout_projection import (
-    page_layout_blocks,
-    replace_page_layout_blocks,
-)
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
+from app.models.layout_snapshot_projection import (
+    apply_layout_snapshot_block_to_projection,
+    replace_page_layout_projection_from_snapshot,
+)
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
     block_ocr_line_observations,
@@ -301,7 +300,7 @@ class LayoutEditService:
         before = before or self.snapshot_block_state(snapshot_block)
         block = self._runtime_block_by_uid(page, block_uid)
         provisional = self._replace_snapshot_block(snapshot, snapshot_index, bbox=bbox)
-        self._apply_snapshot_block_to_runtime_block(block, provisional)
+        apply_layout_snapshot_block_to_projection(block, provisional)
         binding = self._persist_user_block_geometry(page, block)
         final_snapshot_block = self._replace_snapshot_block(
             snapshot,
@@ -326,7 +325,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._apply_snapshot_block_to_runtime_block(block, final_snapshot_block)
+        apply_layout_snapshot_block_to_projection(block, final_snapshot_block)
         return LayoutEditResult(
             op="resize_block",
             block=block,
@@ -368,7 +367,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._replace_runtime_projection_from_snapshot(
+        replace_page_layout_projection_from_snapshot(
             page,
             next_snapshot,
             candidate_blocks=[new_block],
@@ -405,7 +404,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._replace_runtime_projection_from_snapshot(page, next_snapshot)
+        replace_page_layout_projection_from_snapshot(page, next_snapshot)
         return LayoutEditResult(op="delete_block", block=block, before=before, after={})
 
     def _restore_blocks(
@@ -436,7 +435,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._replace_runtime_projection_from_snapshot(page, next_snapshot)
+        replace_page_layout_projection_from_snapshot(page, next_snapshot)
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
 
     def _change_block_kind(
@@ -457,7 +456,7 @@ class LayoutEditService:
             block_type=block_type,
             source_label=source_label,
         )
-        self._apply_snapshot_block_to_runtime_block(block, provisional)
+        apply_layout_snapshot_block_to_projection(block, provisional)
         set_layout_block_type(block, block_type)
         set_layout_block_source_label(block, source_label)
         mark_layout_block_user_edited(block)
@@ -487,7 +486,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._apply_snapshot_block_to_runtime_block(block, final_snapshot_block)
+        apply_layout_snapshot_block_to_projection(block, final_snapshot_block)
         return LayoutEditResult(
             op="change_kind",
             block=block,
@@ -575,52 +574,6 @@ class LayoutEditService:
         )
 
     @staticmethod
-    def _apply_snapshot_block_to_runtime_block(
-        block: Block,
-        snapshot_block: LayoutBlockSnapshot,
-    ) -> None:
-        set_layout_block_type(block, snapshot_block.block_type)
-        set_layout_block_bbox(block, snapshot_block.bbox)
-        set_layout_block_order(block, snapshot_block.order)
-        set_layout_block_source_label(block, snapshot_block.source_label)
-        set_layout_block_ocr_policy(block, snapshot_block.ocr_policy)
-        set_layout_block_note(block, snapshot_block.note)
-        block.origin = snapshot_block.origin
-
-    def _replace_runtime_projection_from_snapshot(
-        self,
-        page: Page,
-        snapshot: LayoutSnapshot,
-        *,
-        candidate_blocks: Iterable[Block] = (),
-    ) -> None:
-        runtime_by_uid = {
-            block.uid: block
-            for block in page_layout_blocks(page)
-            if block.uid
-        }
-        for block in candidate_blocks:
-            if block.uid:
-                runtime_by_uid[block.uid] = block
-        next_blocks: list[Block] = []
-        for snapshot_block in snapshot.blocks:
-            block = runtime_by_uid.get(snapshot_block.uid)
-            if block is None:
-                block = Block(
-                    block_type=snapshot_block.block_type,
-                    bbox=snapshot_block.bbox,
-                    order=snapshot_block.order,
-                    note=snapshot_block.note,
-                    source_label=snapshot_block.source_label,
-                    origin=snapshot_block.origin,
-                    ocr_policy=snapshot_block.ocr_policy,
-                    uid=snapshot_block.uid,
-                )
-            self._apply_snapshot_block_to_runtime_block(block, snapshot_block)
-            next_blocks.append(block)
-        replace_page_layout_blocks(page, next_blocks)
-
-    @staticmethod
     def _snapshot_block_from_edit_block(
         block: Block,
         *,
@@ -702,7 +655,7 @@ class LayoutEditService:
             bbox=merged_bbox,
             source_label=source_label,
         )
-        self._apply_snapshot_block_to_runtime_block(primary, provisional)
+        apply_layout_snapshot_block_to_projection(primary, provisional)
         clear_block_ocr_line_observations(primary.uid)
         discard_block_ocr_line_projection(primary)
         mark_layout_block_user_edited(primary)
@@ -754,7 +707,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._replace_runtime_projection_from_snapshot(
+        replace_page_layout_projection_from_snapshot(
             page,
             next_snapshot,
             candidate_blocks=[primary],
