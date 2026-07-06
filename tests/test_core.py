@@ -14924,6 +14924,7 @@ def test_workflow_controller_auto_save_persists_quality_probe_sidecar():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="qprobe-auto-save", pages=[page], db_path=db_path)
+        _seed_project_layout_snapshots(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
@@ -15642,6 +15643,7 @@ def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         controller._project = OcrProject(name="qprobe-save-as", pages=[page])
+        _seed_project_layout_snapshots(controller._project)
 
         probe_store = qp.ProbeStore()
         probe_store.add(qp.Probe(

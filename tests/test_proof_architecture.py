@@ -491,12 +491,16 @@ def test_layout_block_view_boundary_is_used_by_migrated_consumers():
 
     projection_bridges = {
         Path("app/core/project_store.py"),
-        Path("app/services/layout_edit_service.py"),
         Path("app/services/ocr_pipeline.py"),
+        Path("app/models/layout_snapshot_projection.py"),
     }
     for path in projection_bridges:
         source = path.read_text(encoding="utf-8")
         assert "app.models.layout_projection" in source or "from .layout_projection" in source
+
+    edit_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+    assert "replace_page_layout_projection_from_snapshot" in edit_source
+    assert "app.models.layout_projection" not in edit_source
 
 
 def test_layout_snapshot_docs_do_not_name_current_projection_legacy():
