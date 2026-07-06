@@ -56,6 +56,16 @@ def _raw_layout_records(page):
     return raw_layout_records(page)
 
 
+def _seed_project_ocr_observations(project):
+    """Register test OCR lines through the current OCR observation boundary."""
+    from app.models.ocr_observation import replace_block_ocr_lines
+
+    for page in project.pages:
+        for block in page.blocks:
+            if block.lines:
+                replace_block_ocr_lines(block, list(block.lines))
+
+
 def test_layout_projection_boundary_tracks_current_page_blocks():
     from app.models import BBox, Block, BlockType, Page
     from app.models.layout_projection import (
@@ -2996,6 +3006,7 @@ def test_export_txt():
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
     page = Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])
     project = OcrProject(name="TxtTest", pages=[page])
+    _seed_project_ocr_observations(project)
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
         out_path = f.name
     try:
@@ -3039,6 +3050,7 @@ def test_txt_dual_encoding_outputs_and_layout_contract():
         ]),
     ])
     project = OcrProject(name="TxtDual", pages=[page])
+    _seed_project_ocr_observations(project)
     with tempfile.TemporaryDirectory() as tmpdir:
         out_path = os.path.join(tmpdir, "TxtDual.txt")
         utf8_path, gbk_path = txt_output_paths(out_path)
@@ -3076,6 +3088,7 @@ def test_export_xml():
     page = Page(image_path="/tmp/img.jpg", width=800, height=600,
                 blocks=[block], page_number=1)
     project = OcrProject(name="XmlTest", pages=[page])
+    _seed_project_ocr_observations(project)
     with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as f:
         out_path = f.name
     try:
@@ -3101,6 +3114,7 @@ def test_export_html():
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line])
     page = Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])
     project = OcrProject(name="HtmlTest", pages=[page])
+    _seed_project_ocr_observations(project)
     with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
         out_path = f.name
     try:
@@ -3159,6 +3173,7 @@ def test_export_markdown_structure():
             ],
         )
         project = OcrProject(name="MdTest", pages=[page])
+        _seed_project_ocr_observations(project)
         MarkdownExporter().export(project, out_path)
         raw = open(out_path, "rb").read()
         assert not raw.startswith(b"\xef\xbb\xbf")
@@ -3262,6 +3277,7 @@ def test_markdown_export_settings_filter_and_merge_layout_fragments():
             ],
         )
         project = OcrProject(name="MdPolicy", pages=[page])
+        _seed_project_ocr_observations(project)
 
         MarkdownExporter().export(project, out_path)
 
@@ -3307,7 +3323,9 @@ def test_markdown_filter_ignores_raw_payload_labels():
                 ),
             ],
         )
-        MarkdownExporter().export(OcrProject(name="MdRawLabelIgnored", pages=[page]), out_path)
+        project = OcrProject(name="MdRawLabelIgnored", pages=[page])
+        _seed_project_ocr_observations(project)
+        MarkdownExporter().export(project, out_path)
         content = open(out_path, encoding="utf-8").read()
 
     assert "正文不能被 raw header 过滤" in content
@@ -3340,6 +3358,7 @@ def test_export_formats_share_structured_blocks():
         blocks=[text_block, caption_block],
     )
     project = OcrProject(name="StructuredExport", pages=[page])
+    _seed_project_ocr_observations(project)
 
     assert isinstance(get_exporter("markdown"), MarkdownExporter)
     for fmt in ("txt", "html", "xml", "md"):
@@ -3361,6 +3380,32 @@ def test_export_formats_share_structured_blocks():
                     os.unlink(path)
 
     print("test_export_formats_share_structured_blocks PASSED")
+
+
+def test_export_ir_reads_lines_from_ocr_observation_store_when_projection_is_empty():
+    from app.export.ir_builder import build_export_ir
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.services.export_service import build_export_summary, iter_export_lines
+
+    bb = BBox(0, 0, 120, 24)
+    line = Line(text="OCR observation truth", confidence=0.9, bbox=bb)
+    block = Block(block_type=BlockType.TEXT, bbox=bb, order=0)
+    replace_block_ocr_lines(block, [line])
+    block.lines = []
+    project = OcrProject(
+        name="ExportObservationTruth",
+        pages=[Page(image_path="/tmp/export-observation.png", width=200, height=120, blocks=[block])],
+    )
+
+    assert list(iter_export_lines(block)) == [line]
+    document = build_export_ir(project, "json")
+    element = document.to_dict()["pages"][0]["elements"][0]
+    assert element["payload"]["text"] == "OCR observation truth"
+    assert element["source"]["line_ids"] == [line.uid]
+    assert build_export_summary(project)["unrecognized_blocks"] == 0
+
+    print("test_export_ir_reads_lines_from_ocr_observation_store_when_projection_is_empty PASSED")
 
 
 def test_export_ir_rules_load_and_validate():
@@ -3429,6 +3474,7 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
         ],
     )
     project = OcrProject(name="IRProject", pages=[page])
+    _seed_project_ocr_observations(project)
     rules = load_export_rules()
     rules.kind_rules["table"]["asset_kind"] = "json_controlled_table_crop"
     rules.fallback_strategies["image_fallback"]["reason"] = "json_controlled_missing_structure"
@@ -3541,6 +3587,7 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
         name="fallback source ids",
         pages=[Page(image_path="/tmp/page.png", width=100, height=100, blocks=[block])],
     )
+    _seed_project_ocr_observations(project)
 
     document = build_export_ir(project, "json")
     element = document.to_dict()["pages"][0]["elements"][0]
@@ -3575,7 +3622,9 @@ def test_export_ir_preserves_structured_block_attributes():
         origin=BlockOrigin(source_label="paragraph_title"),
     )
     page = Page(image_path="/tmp/attrs-page.png", width=100, height=100, blocks=[block])
-    document = build_export_ir(OcrProject(name="AttrIR", pages=[page]), "json")
+    project = OcrProject(name="AttrIR", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "json")
     element = document.to_dict()["pages"][0]["elements"][0]
 
     assert element["kind"] == "title"
@@ -3624,7 +3673,9 @@ def test_export_ir_reads_layout_facts_from_snapshot_view():
         ),
     ))
 
-    document = build_export_ir(OcrProject(name="SnapshotExport", pages=[page]), "json")
+    project = OcrProject(name="SnapshotExport", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "json")
     element = document.to_dict()["pages"][0]["elements"][0]
 
     assert element["kind"] == "table"
@@ -3664,6 +3715,7 @@ def test_pdf_page_faithful_plans_use_image_and_char_layer():
             Block(block_type=BlockType.FIGURE, bbox=BBox(5, 5, 50, 50), order=0),
         ]),
     ])
+    _seed_project_ocr_observations(project)
 
     document = build_export_ir(project, "pdf-dual")
     assert document.profile.options["dpi"] == 300
@@ -3741,6 +3793,7 @@ def test_pdf_dual_generated_pdf_searches_continuous_text_and_uses_region_fonts()
                 ]),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -3827,6 +3880,7 @@ def test_pdf_dual_positions_mixed_chars_without_copy_spaces():
                 ]),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -3933,7 +3987,9 @@ def test_pdf_dual_text_bbox_ratio_can_be_profile_tuned():
             ]),
         ]),
     ])
-    document = build_export_ir(OcrProject(name="PdfRatio", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfRatio", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     document.profile.options["pdf_text_font_size_to_bbox_ratio"] = 0.72
 
     tuned = build_pdf_page_plans(
@@ -3972,7 +4028,9 @@ def test_pdf_dual_text_layer_splits_inline_formula_as_atomic_span():
         Block(block_type=BlockType.TEXT, bbox=BBox(10, 20, 160, 40), lines=[line]),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfFormulaSplit", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfFormulaSplit", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["甲", formula, "乙"]
@@ -4017,7 +4075,9 @@ def test_pdf_dual_skips_duplicate_inline_formula_equation_element():
         ),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfFormulaDedupe", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfFormulaDedupe", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["甲", formula, "乙"]
@@ -4062,7 +4122,9 @@ def test_pdf_dual_dedup_ignores_raw_payload_inline_formula_label():
         ),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfRawInlineIgnored", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfRawInlineIgnored", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["甲", formula, "乙", "$$ A $$"]
@@ -4087,7 +4149,9 @@ def test_pdf_dual_equation_text_collapses_identical_formula_repeat():
         ),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfEquationCollapse", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfEquationCollapse", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["$$ A $$"]
@@ -4127,7 +4191,9 @@ def test_pdf_dual_keeps_display_equation_even_if_it_overlaps_inline_formula_bbox
         ),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfDisplayFormulaOverlap", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfDisplayFormulaOverlap", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["甲", formula, "乙", display_formula]
@@ -4153,7 +4219,9 @@ def test_pdf_dual_table_text_layer_uses_atomic_rows():
         ]),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfTableRows", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfTableRows", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == ["A1 B1", "A2 B2"]
@@ -4181,7 +4249,9 @@ def test_pdf_dual_html_table_text_layer_splits_cells_without_tags():
         ]),
     ])
 
-    document = build_export_ir(OcrProject(name="PdfHtmlTableRows", pages=[page]), "pdf-dual")
+    project = OcrProject(name="PdfHtmlTableRows", pages=[page])
+    _seed_project_ocr_observations(project)
+    document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
     assert [span.text for span in plan.text_spans] == [
@@ -4230,6 +4300,7 @@ def test_pdf_dual_generated_table_rows_stay_inside_table_lines():
                 ]),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -4274,6 +4345,7 @@ def test_pdf_dual_generated_html_table_cells_stay_inside_cells():
                 ]),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -4325,7 +4397,9 @@ def test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid():
             ]),
         ])
 
-        document = build_export_ir(OcrProject(name="PdfClusterTable", pages=[page]), "pdf-dual")
+        project = OcrProject(name="PdfClusterTable", pages=[page])
+        _seed_project_ocr_observations(project)
+        document = build_export_ir(project, "pdf-dual")
         plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
         spans_by_text = {span.text: span for span in plan.text_spans}
@@ -4561,7 +4635,9 @@ def test_pdf_dual_table_cells_use_ocr_stage_payload_before_image_inference():
             },
         ]
         page = Page(image_path=image_path, width=400, height=220, blocks=[block])
-        document = build_export_ir(OcrProject(name="PdfPayloadTable", pages=[page]), "pdf-dual")
+        project = OcrProject(name="PdfPayloadTable", pages=[page])
+        _seed_project_ocr_observations(project)
+        document = build_export_ir(project, "pdf-dual")
         payload = document.pages[0].elements[0].payload
         assert payload[TABLE_TEXT_LAYER_CELLS_KEY][1]["bbox"]["x"] == 260
 
@@ -4593,6 +4669,7 @@ def test_pdf_dual_generated_formula_text_bbox_stays_inside_formula_block():
                 ]),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -4654,6 +4731,7 @@ def test_pdf_dual_generated_pdf_deduplicates_inline_formula_equation_text():
                 ),
             ]),
         ])
+        _seed_project_ocr_observations(project)
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -4750,6 +4828,7 @@ def test_xml_authority_and_json_mirror_archive_parity():
         ],
     )
     project = OcrProject(name="ArchiveProject", pages=[page])
+    _seed_project_ocr_observations(project)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         xml_path = f"{tmpdir}/archive.xml"
@@ -4806,6 +4885,7 @@ def test_ir_based_exporters_and_pdf_profiles():
             ]),
         ])
     ])
+    _seed_project_ocr_observations(project)
     with tempfile.TemporaryDirectory() as tmpdir:
         json_path = build_export_path(tmpdir, project.name, "json")
         txt_path = build_export_path(tmpdir, project.name, "txt")
@@ -4888,6 +4968,7 @@ def test_export_default_styles_map_to_html_docx_and_pdf():
             ]),
         ]),
     ])
+    _seed_project_ocr_observations(project)
 
     paths = []
     try:
@@ -15331,6 +15412,7 @@ def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
 
 def test_export_service():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.models.ocr_observation import replace_block_ocr_lines
     from app.services.export_service import (
         check_export_readiness, get_export_text,
     )
@@ -15353,6 +15435,7 @@ def test_export_service():
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[
         Line(text="未校对", confidence=0.6, bbox=bb),
     ])
+    replace_block_ocr_lines(block, list(block.lines))
     page.blocks = [block]
     project = OcrProject(name="test", pages=[page])
     warnings = check_export_readiness(project)
@@ -16311,6 +16394,7 @@ def test_page_image_cache():
 
 def test_proof_stats_service():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
+    from app.models.ocr_observation import replace_block_ocr_lines
     from app.services.proof_stats_service import ProofStatsService
 
     bb = BBox(0, 0, 100, 20)
@@ -16321,13 +16405,10 @@ def test_proof_stats_service():
     set_line_proof_status(modified, ProofStatus.MODIFIED)
     flagged = Line(text="疑点", confidence=0.6, bbox=bb, review_flags=["low_confidence"])
     pending = Line(text="待处理", confidence=0.9, bbox=bb)
-    page.blocks = [
-        Block(
-            block_type=BlockType.TEXT,
-            bbox=bb,
-            lines=[confirmed, modified, flagged, pending],
-        )
-    ]
+    block = Block(block_type=BlockType.TEXT, bbox=bb)
+    replace_block_ocr_lines(block, [confirmed, modified, flagged, pending])
+    block.lines = []
+    page.blocks = [block]
 
     stats = ProofStatsService().summarize(OcrProject(name="proof-stats", pages=[page]))
 

@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import OcrProject, ProofStatus
-from app.models.ocr_observation import iter_project_ocr_line_occurrences
+from app.models.ocr_observation import iter_project_ocr_line_observation_occurrences
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class ProofStatsService:
     def summarize(self, project: OcrProject) -> ProofStats:
         total = confirmed = modified = flagged = pending = 0
 
-        for occurrence in iter_project_ocr_line_occurrences(project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(project):
             facts = proof_line_facts(occurrence.line)
             total += 1
             if facts.status == ProofStatus.OK:

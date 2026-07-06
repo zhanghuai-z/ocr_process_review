@@ -35,6 +35,11 @@ def block_ocr_line_observations(block: Block) -> list[Line]:
     return ocr_lines_for_block(block)
 
 
+def block_has_ocr_line_observations(block: Block) -> bool:
+    """Return whether OCR observations exist without reading ``Block.lines``."""
+    return bool(block_ocr_line_observations(block))
+
+
 def block_ocr_line_count(block: Block) -> int:
     return len(block_ocr_lines(block))
 
@@ -132,11 +137,35 @@ def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
             )
 
 
+def iter_page_ocr_line_observation_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
+    """Yield OCR line observations without adopting ``Block.lines`` projection."""
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
+        for line_index, line in enumerate(block_ocr_line_observations(block)):
+            yield OcrLineOccurrence(
+                page=page,
+                block=block,
+                line=line,
+                block_index=view.snapshot_index,
+                line_index=line_index,
+            )
+
+
 def iter_project_ocr_line_occurrences(
     project: OcrProject,
 ) -> Iterator[OcrLineOccurrence]:
     for page in project.pages:
         yield from iter_page_ocr_line_occurrences(page)
+
+
+def iter_project_ocr_line_observation_occurrences(
+    project: OcrProject,
+) -> Iterator[OcrLineOccurrence]:
+    """Yield project OCR line observations without adopting runtime projections."""
+    for page in project.pages:
+        yield from iter_page_ocr_line_observation_occurrences(page)
 
 
 def page_ocr_line_count(page: Page) -> int:

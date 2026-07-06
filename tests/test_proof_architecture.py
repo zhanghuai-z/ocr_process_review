@@ -1790,6 +1790,22 @@ def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
     assert "block_ocr_lines" not in source
 
 
+def test_export_service_reads_ocr_lines_from_observation_store():
+    source = Path("app/services/export_service.py").read_text(encoding="utf-8")
+
+    assert "block_ocr_line_observations" in source
+    assert "block_has_ocr_line_observations" in source
+    assert "block_ocr_lines" not in source
+    assert "block_has_ocr_lines" not in source
+
+
+def test_proof_stats_service_reads_ocr_lines_from_observation_store():
+    source = Path("app/services/proof_stats_service.py").read_text(encoding="utf-8")
+
+    assert "iter_project_ocr_line_observation_occurrences" in source
+    assert "iter_project_ocr_line_occurrences" not in source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(
