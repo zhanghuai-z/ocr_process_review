@@ -1503,9 +1503,18 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
         assert "block_uid: str" in command_source
         assert "block: Block" not in command_source
         assert "block=block" not in command_source
+    assert "def _snapshot_block_for_edit" not in edit_service_source
+    snapshot_lookup_source = _function_source(edit_service_source, "_snapshot_block_for_uid")
+    assert "block_uid: str" in snapshot_lookup_source
+    for internal_command in ("_update_block_geometry", "_delete_block", "_change_block_kind"):
+        internal_source = _function_source(edit_service_source, internal_command)
+        assert "block_uid: str" in internal_source
     merge_source = _function_source(edit_service_source, "merge_blocks")
     assert "block_uids: Iterable[str]" in merge_source
     assert "blocks: Iterable[Block]" not in merge_source
+    internal_merge_source = _function_source(edit_service_source, "_merge_blocks_into_bbox")
+    assert "block_uids: Iterable[str]" in internal_merge_source
+    assert "blocks: Iterable[Block]" not in internal_merge_source
     restore_source = _function_source(edit_service_source, "restore_blocks")
     assert "blocks: Iterable[LayoutBlockSnapshot]" in restore_source
     assert "snapshot_blocks=tuple(blocks)" in restore_source

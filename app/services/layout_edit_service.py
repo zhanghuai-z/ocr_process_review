@@ -182,19 +182,19 @@ class LayoutEditService:
         if command.op == "delete_block":
             return self._delete_block(
                 command.page,
-                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
+                self._require_block_uid(command),
             )
         if command.op == "change_kind":
             return self._change_block_kind(
                 command.page,
-                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
+                self._require_block_uid(command),
                 block_type=self._require_block_type(command),
                 source_label=command.source_label,
             )
         if command.op == "merge_blocks":
             return self._merge_blocks_into_bbox(
                 command.page,
-                self._runtime_blocks_by_uid(command.page, command.block_uids),
+                command.block_uids,
                 self._require_bbox(command),
                 block_type=self._require_block_type(command),
                 source_label=command.source_label,
@@ -202,7 +202,7 @@ class LayoutEditService:
         if command.op == "resize_block":
             return self._update_block_geometry(
                 command.page,
-                self._runtime_block_by_uid(command.page, self._require_block_uid(command)),
+                self._require_block_uid(command),
                 bbox=self._require_bbox(command),
                 before=command.before,
             )
@@ -236,21 +236,12 @@ class LayoutEditService:
         raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
 
     @staticmethod
-    def _runtime_blocks_by_uid(page: Page, block_uids: tuple[str, ...]) -> tuple[Block, ...]:
-        if not block_uids:
-            return ()
-        runtime_by_uid = {
+    def _runtime_block_map(page: Page) -> dict[str, Block]:
+        return {
             view.uid: view.runtime_block
             for view in iter_page_layout_block_views(page)
             if view.runtime_block is not None
         }
-        blocks: list[Block] = []
-        for block_uid in block_uids:
-            block = runtime_by_uid.get(block_uid)
-            if block is None:
-                raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
-            blocks.append(block)
-        return tuple(blocks)
 
     @staticmethod
     def block_state(block: Block) -> dict:
@@ -300,14 +291,15 @@ class LayoutEditService:
     def _update_block_geometry(
         self,
         page: Page,
-        block: Block,
+        block_uid: str,
         *,
         bbox: BBox,
         before: dict | None,
     ) -> LayoutEditResult:
         snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
+        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
         before = before or self.snapshot_block_state(snapshot_block)
+        block = self._runtime_block_by_uid(page, block_uid)
         provisional = self._replace_snapshot_block(snapshot, snapshot_index, bbox=bbox)
         self._apply_snapshot_block_to_runtime_block(block, provisional)
         binding = self._persist_user_block_geometry(page, block)
@@ -323,7 +315,7 @@ class LayoutEditService:
         event = self.record_snapshot_edit(
             page,
             "resize_block",
-            block.uid,
+            block_uid,
             before=before,
             after=after,
         )
@@ -390,15 +382,16 @@ class LayoutEditService:
             binding_text=str(binding.get("text") or ""),
         )
 
-    def _delete_block(self, page: Page, block: Block) -> LayoutEditResult:
+    def _delete_block(self, page: Page, block_uid: str) -> LayoutEditResult:
         snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
+        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
+        block = self._runtime_block_by_uid(page, block_uid)
         before = {"block": self.snapshot_block_state(snapshot_block)}
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
         event = self.record_snapshot_edit(
             page,
             "delete_block",
-            block.uid,
+            block_uid,
             before=before,
             after={},
         )
@@ -449,13 +442,14 @@ class LayoutEditService:
     def _change_block_kind(
         self,
         page: Page,
-        block: Block,
+        block_uid: str,
         *,
         block_type: BlockType,
         source_label: str,
     ) -> LayoutEditResult:
         snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
+        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
+        block = self._runtime_block_by_uid(page, block_uid)
         before = {"block": self.snapshot_block_state(snapshot_block)}
         provisional = self._replace_snapshot_block(
             snapshot,
@@ -482,7 +476,7 @@ class LayoutEditService:
         event = self.record_snapshot_edit(
             page,
             "change_kind",
-            block.uid,
+            block_uid,
             before=before,
             after=after,
         )
@@ -515,14 +509,14 @@ class LayoutEditService:
         }
 
     @staticmethod
-    def _snapshot_block_for_edit(
+    def _snapshot_block_for_uid(
         snapshot: LayoutSnapshot,
-        block: Block,
+        block_uid: str,
     ) -> tuple[int, LayoutBlockSnapshot]:
         for index, snapshot_block in enumerate(snapshot.blocks):
-            if snapshot_block.uid == block.uid:
+            if snapshot_block.uid == block_uid:
                 return index, snapshot_block
-        raise ValueError(f"layout block {block.uid!r} is not present in the active layout snapshot")
+        raise ValueError(f"layout block {block_uid!r} is not present in the active layout snapshot")
 
     @staticmethod
     def _replace_snapshot_block(
@@ -667,21 +661,28 @@ class LayoutEditService:
     def _merge_blocks_into_bbox(
         self,
         page: Page,
-        blocks: Iterable[Block],
+        block_uids: Iterable[str],
         bbox: BBox,
         *,
         block_type: BlockType,
         source_label: str,
     ) -> LayoutEditResult:
         snapshot = current_layout_snapshot(page)
+        runtime_by_uid = self._runtime_block_map(page)
         snapshot_by_uid = {
             snapshot_block.uid: (index, snapshot_block)
             for index, snapshot_block in enumerate(snapshot.blocks)
         }
+        ordered_uids = tuple(uid for uid in block_uids if uid)
+        for block_uid in ordered_uids:
+            if block_uid not in snapshot_by_uid:
+                raise ValueError(f"layout block {block_uid!r} is not present in the active layout snapshot")
+            if block_uid not in runtime_by_uid:
+                raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
         ordered = sorted(
             (
-                (snapshot_by_uid[block.uid][0], snapshot_by_uid[block.uid][1], block)
-                for block in blocks
+                (snapshot_by_uid[block_uid][0], snapshot_by_uid[block_uid][1], runtime_by_uid[block_uid])
+                for block_uid in ordered_uids
             ),
             key=lambda item: (item[1].order, item[1].bbox.y, item[1].bbox.x),
         )
