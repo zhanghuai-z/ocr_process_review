@@ -22,7 +22,7 @@ from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot,
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     iter_page_ocr_line_observation_occurrences,
 )
 from app.models.ocr_text_observation import line_ocr_confidence
@@ -44,7 +44,7 @@ STRUCTURAL_DRAW_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FI
 
 
 def _ocr_observation_lines(block: Block):
-    return block_ocr_line_observations(block)
+    return block_ocr_line_observations_by_uid(block.uid)
 
 
 def _ocr_observation_line_count(page: Page) -> int:

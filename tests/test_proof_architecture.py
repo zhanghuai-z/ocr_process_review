@@ -940,14 +940,16 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
     ocr_source = Path("app/ui/recognize/ocr_panel.py").read_text(encoding="utf-8")
     assert "app.models.layout_block_view" in ocr_source
     assert "app.models.layout_projection" not in ocr_source
-    assert "block_ocr_line_observations" in ocr_source
+    assert "block_ocr_line_observations_by_uid" in ocr_source
+    assert "block_ocr_line_observations(" not in ocr_source
     assert "block_ocr_lines" not in ocr_source
     assert "block_ocr_line_count" not in ocr_source
     assert "block_avg_confidence" not in ocr_source
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     assert "app.models.layout_projection" not in layout_source
     assert "app.models.ocr_character_observation" in layout_source
-    assert "block_ocr_line_observations" in layout_source
+    assert "block_ocr_line_observations_by_uid" in layout_source
+    assert "block_ocr_line_observations(" not in layout_source
     assert "iter_page_ocr_line_observation_occurrences" in layout_source
     assert "block_ocr_lines" not in layout_source
     assert "page_ocr_line_count" not in layout_source
@@ -970,7 +972,8 @@ def test_ocr_panel_tree_state_uses_uid_payloads_not_model_objects():
 def test_image_viewer_reads_block_confidence_from_ocr_observation_store():
     source = Path("app/ui/widgets/image_viewer.py").read_text(encoding="utf-8")
 
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert "block_ocr_line_observations(" not in source
     assert "line_ocr_confidence" in source
     assert "block_avg_confidence" not in source
 
@@ -1003,7 +1006,9 @@ def test_proof_ui_reads_ocr_lines_from_observation_store():
     assert "block_ocr_line_observations_by_uid" in hproof_source
     assert "block_ocr_line_observations(" not in hproof_source
     assert "block_has_ocr_line_observations" not in hproof_source
-    assert "block_ocr_line_observations" in Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
+    vproof_source = Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations_by_uid" in vproof_source
+    assert "block_ocr_line_observations(" not in vproof_source
 
 
 def test_line_text_facts_access_goes_through_text_contract_boundary():

@@ -23,7 +23,7 @@ from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
 from app.models.layout_block_view import LayoutBlockView
 from app.models.ocr_character_observation import set_ocr_char_bbox
-from app.models.ocr_observation import block_ocr_line_observations
+from app.models.ocr_observation import block_ocr_line_observations_by_uid
 from app.models.ocr_text_observation import line_ocr_confidence
 
 
@@ -59,7 +59,7 @@ _CHAR_BOX_Z = 16
 
 
 def _block_observation_avg_confidence(block: Block) -> float:
-    lines = block_ocr_line_observations(block)
+    lines = block_ocr_line_observations_by_uid(block.uid)
     if not lines:
         return 0.0
     return sum(line_ocr_confidence(line) for line in lines) / len(lines)

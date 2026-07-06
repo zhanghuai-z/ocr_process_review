@@ -43,7 +43,7 @@ from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_observation import (
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     line_ocr_bbox,
 )
 from app.core.page_image_cache import PageImageCache
@@ -87,7 +87,7 @@ logger = logging.getLogger(__name__)
 
 
 def _observation_lines_for_block(block: Block) -> list[Line]:
-    return block_ocr_line_observations(block)
+    return block_ocr_line_observations_by_uid(block.uid)
 
 
 def _line_belongs_to_observation_block(block: Block, line: Line | None) -> bool:

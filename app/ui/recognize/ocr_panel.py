@@ -12,7 +12,7 @@ from app.core.block_attributes import normalize_source_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_line_observations
+from app.models.ocr_observation import block_ocr_line_observations_by_uid
 from app.models.ocr_text_observation import line_ocr_confidence
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
@@ -30,7 +30,7 @@ def _view_display_label(view: LayoutBlockView) -> str:
 
 
 def _observation_lines(block: Block):
-    return block_ocr_line_observations(block)
+    return block_ocr_line_observations_by_uid(block.uid)
 
 
 def _observation_line_count(block: Block) -> int:
