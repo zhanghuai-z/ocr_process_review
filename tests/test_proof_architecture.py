@@ -597,6 +597,15 @@ def test_proof_crop_service_writes_chars_by_line_uid():
     assert "line.uid" in source
 
 
+def test_char_bbox_utils_writes_chars_by_line_uid():
+    source = Path("app/core/char_bbox_utils.py").read_text(encoding="utf-8")
+
+    assert "replace_line_ocr_char_observations" in source
+    assert "replace_line_ocr_chars" not in source
+    assert "line.uid" in source
+    assert "line.chars" not in source
+
+
 def test_carrier_detection_uses_proof_char_text_contract():
     service_paths = {
         Path("app/services/char_index_service.py"),
