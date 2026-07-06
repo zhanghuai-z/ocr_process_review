@@ -377,11 +377,11 @@ class LayoutPanel(QWidget):
         self._find_dialog = self._build_find_dialog()
 
         self._viewer = ImageViewer()
-        self._viewer.block_clicked.connect(self._on_block_clicked)
-        self._viewer.block_edit_started.connect(self._on_block_edit_started)
+        self._viewer.block_clicked_uid.connect(self._on_block_clicked_uid)
+        self._viewer.block_edit_started_uid.connect(self._on_block_edit_started_uid)
         self._viewer.block_geometry_change_requested.connect(self._on_block_geometry_change_requested)
         self._viewer.block_created.connect(self._on_block_created)
-        self._viewer.block_deleted.connect(self._on_block_deleted)
+        self._viewer.block_deleted_uid.connect(self._on_block_deleted_uid)
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
         self._viewer.set_bbox_snapper(self._snap_current_draw_bbox)
         vw_lay.addWidget(self._viewer, 1)
@@ -1079,8 +1079,8 @@ class LayoutPanel(QWidget):
         self._current_page_idx = page_idx
         self._page_list.set_current_index(page_idx)
         self._update_viewer(page_idx)
-        if block is not None and self._viewer.select_block(block):
-            self._on_block_clicked(block)
+        if block is not None and self._viewer.select_block_uid(block_uid):
+            self._on_block_clicked_uid(block_uid)
         else:
             self._viewer.highlight_bbox(view.bbox, zoom=True)
             self._selected_block_uid = block_uid
@@ -1413,8 +1413,14 @@ class LayoutPanel(QWidget):
         self._prop_conf.hide()
         self._update_project_stats()
 
-    def _on_block_clicked(self, block: Block) -> None:
-        self._selected_block_uid = block.uid
+    def _on_block_clicked_uid(self, block_uid: str) -> None:
+        if not block_uid or not self._pages:
+            return
+        page = self._pages[self._current_page_idx]
+        block = self._runtime_block_by_uid(page, block_uid)
+        if block is None:
+            return
+        self._selected_block_uid = block_uid
         self._sync_selected_type_buttons(block)
         self._prop_conf.set_score(_ocr_observation_avg_confidence(block))
 
@@ -1422,9 +1428,14 @@ class LayoutPanel(QWidget):
     def _layout_block_state(block: Block) -> dict:
         return LayoutEditService.block_state(block)
 
-    def _on_block_edit_started(self, block: Block) -> None:
+    def _on_block_edit_started_uid(self, block_uid: str) -> None:
+        if not block_uid or not self._pages:
+            return
+        block = self._runtime_block_by_uid(self._pages[self._current_page_idx], block_uid)
+        if block is None:
+            return
         self._push_undo_snapshot()
-        self._layout_edit_start_state[block.uid] = self._layout_block_state(block)
+        self._layout_edit_start_state[block_uid] = self._layout_block_state(block)
 
     def _runtime_block_by_uid(self, page: Page, block_uid: str) -> Block | None:
         for view in iter_page_layout_block_views(page):
@@ -1487,7 +1498,7 @@ class LayoutPanel(QWidget):
             if merged is None:
                 return
             self._show_page_layers(page)
-            self._select_block_for_edit(merged)
+            self._select_block_uid_for_edit(merged.uid)
             self._set_status_text("已合并框，需重新识别")
             self._rebuild_heading_outline()
             self._refresh_block_search()
@@ -1506,21 +1517,21 @@ class LayoutPanel(QWidget):
             return
         self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
-        self._select_block_for_edit(new_block)
+        self._select_block_uid_for_edit(new_block.uid)
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(page.page_number, "block_created")
 
-    def _on_block_deleted(self, block: Block) -> None:
+    def _on_block_deleted_uid(self, block_uid: str) -> None:
         """viewer 键盘 Delete 已删除框 → 从 page 数据中移除。"""
-        if not self._pages:
+        if not block_uid or not self._pages:
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block.uid))
-        if self._selected_block_uid == block.uid:
+        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block_uid))
+        if self._selected_block_uid == block_uid:
             self._selected_block_uid = None
             self._selected_char_box_index = -1
             self._prop_conf.hide()
@@ -1532,7 +1543,7 @@ class LayoutPanel(QWidget):
 
     def _delete_selected(self) -> None:
         """顶部栏删除框按钮。"""
-        if not self._viewer.selected_blocks():
+        if not self._viewer.selected_block_uids():
             self._set_status_text("请先用右键拉框选中要删除的框")
             return
         self._viewer.delete_selected()
@@ -1560,7 +1571,7 @@ class LayoutPanel(QWidget):
         ))
         self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
-        self._viewer.select_block(selected_block)
+        self._viewer.select_block_uid(selected_block.uid)
         self._sync_selected_type_buttons(selected_block)
         self._rebuild_heading_outline()
         self._refresh_block_search()
@@ -1602,9 +1613,9 @@ class LayoutPanel(QWidget):
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)
 
-    def _select_block_for_edit(self, block: Block) -> None:
-        self._viewer.select_block(block)
-        self._on_block_clicked(block)
+    def _select_block_uid_for_edit(self, block_uid: str) -> None:
+        self._viewer.select_block_uid(block_uid)
+        self._on_block_clicked_uid(block_uid)
 
     def _set_status_text_for_layout_edit_result(self, result: LayoutEditResult) -> None:
         if result.binding_empty_review:

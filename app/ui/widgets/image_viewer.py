@@ -173,7 +173,7 @@ class _ResizeHandle(QGraphicsRectItem):
 
 class _BBoxSignals(QObject):
     """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
-    edit_started = Signal(object)  # payload = block
+    edit_started = Signal(str)  # payload = block_uid
     moved = Signal(object)  # payload = block
     geometry_changed = Signal(str, object)  # payload = block_uid, BBox
 
@@ -281,8 +281,9 @@ class BBoxItem(QGraphicsRectItem):
     def _emit_edit_started_once(self) -> None:
         if not self._editable or not self._selectable or self._block is None or self._edit_started_for_drag:
             return
-        self._edit_started_for_drag = True
-        self.signals.edit_started.emit(self._block)
+        if isinstance(self._block, Block) and self._block.uid:
+            self._edit_started_for_drag = True
+            self.signals.edit_started.emit(self._block.uid)
 
     def _scene_bbox(self) -> BBox:
         pos = self.scenePos()
@@ -326,11 +327,11 @@ class BBoxItem(QGraphicsRectItem):
 class ImageViewer(QGraphicsView):
     """通用图像查看组件。"""
 
-    block_clicked  = Signal(object)  # Block
-    block_edit_started = Signal(object)  # Block — 用于上层在几何变化前记录撤销点
+    block_clicked_uid = Signal(str)
+    block_edit_started_uid = Signal(str)  # 用于上层在几何变化前记录撤销点
     block_geometry_change_requested = Signal(str, object)  # block_uid, BBox
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
-    block_deleted  = Signal(object)  # Block — Delete 键删除选中框
+    block_deleted_uid = Signal(str)
     char_bbox_moved = Signal(object)  # Char
 
     def __init__(self, parent=None):
@@ -437,8 +438,8 @@ class ImageViewer(QGraphicsView):
         item.set_selectable(True)
         item.set_editable(self._block_is_editable(block))
         item.setZValue(self._block_z_value(block))
-        item.setData(0, block)
-        item.signals.edit_started.connect(self.block_edit_started.emit)
+        item.setData(0, block.uid)
+        item.signals.edit_started.connect(self.block_edit_started_uid.emit)
         item.signals.geometry_changed.connect(self.block_geometry_change_requested.emit)
         self._scene.addItem(item)
         self._block_items.append((item, block))
@@ -494,7 +495,7 @@ class ImageViewer(QGraphicsView):
             self._char_items.append((item, char))
 
     def delete_selected(self) -> None:
-        """删除所有选中的 BBoxItem，并 emit block_deleted 信号。"""
+        """删除所有选中的 BBoxItem，并 emit block_deleted_uid 信号。"""
         to_remove = [
             (item, block) for item, block in self._block_items
             if item.isSelected()
@@ -502,23 +503,24 @@ class ImageViewer(QGraphicsView):
         for item, block in to_remove:
             self._scene.removeItem(item)
             self._block_items.remove((item, block))
-            self.block_deleted.emit(block)
+            if block.uid:
+                self.block_deleted_uid.emit(block.uid)
 
-    def selected_blocks(self) -> List[Block]:
+    def selected_block_uids(self) -> List[str]:
         return [
-            block for item, block in self._block_items
-            if item.isSelected()
+            block.uid for item, block in self._block_items
+            if item.isSelected() and block.uid
         ]
 
     def set_bbox_snapper(self, snapper: Optional[Callable[[BBox], BBox]]) -> None:
         """Install a layout-level snap callback used while drawing new boxes."""
         self._bbox_snapper = snapper
 
-    def select_block(self, target: Block) -> bool:
+    def select_block_uid(self, target_uid: str) -> bool:
         """Select one visible, editable layout block after overlays are rebuilt."""
         selected = False
         for item, block in self._block_items:
-            should_select = block is target
+            should_select = bool(target_uid) and block.uid == target_uid
             item.setSelected(should_select)
             selected = selected or should_select
         return selected
@@ -640,7 +642,8 @@ class ImageViewer(QGraphicsView):
             pos = self.mapToScene(event.pos())
             for item, block in self._block_items:
                 if item.contains(item.mapFromScene(pos)) and item.isSelected():
-                    self.block_clicked.emit(block)
+                    if block.uid:
+                        self.block_clicked_uid.emit(block.uid)
                     break
 
     def mouseMoveEvent(self, event):
@@ -723,14 +726,14 @@ class ImageViewer(QGraphicsView):
         self._selection_start = None
         if rect.width() < 4 or rect.height() < 4:
             return
-        selected_blocks: list[Block] = []
+        selected_uids: list[str] = []
         for item, block in self._block_items:
             selected = self._selection_rect_hits_frame(rect, item)
             item.setSelected(selected)
-            if selected:
-                selected_blocks.append(block)
-        if len(selected_blocks) == 1:
-            self.block_clicked.emit(selected_blocks[0])
+            if selected and block.uid:
+                selected_uids.append(block.uid)
+        if len(selected_uids) == 1:
+            self.block_clicked_uid.emit(selected_uids[0])
 
     @staticmethod
     def _selection_rect_hits_frame(selection: QRectF, item: BBoxItem) -> bool:

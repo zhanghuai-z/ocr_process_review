@@ -1499,8 +1499,19 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     assert "block: Block | None" not in command_class_source
     assert "def _require_block(" not in edit_service_source
     assert "block_geometry_change_requested" in viewer_source
+    assert "block_clicked_uid" in viewer_source
+    assert "block_edit_started_uid" in viewer_source
+    assert "block_deleted_uid" in viewer_source
+    assert "def selected_blocks" not in viewer_source
+    assert "def select_block(" not in viewer_source
     assert "set_layout_block_bbox" not in viewer_source
     assert "self._viewer.block_geometry_change_requested.connect(" in layout_source
+    assert "self._viewer.block_clicked_uid.connect(" in layout_source
+    assert "self._viewer.block_edit_started_uid.connect(" in layout_source
+    assert "self._viewer.block_deleted_uid.connect(" in layout_source
+    assert "self._viewer.block_clicked.connect(" not in layout_source
+    assert "self._viewer.block_edit_started.connect(" not in layout_source
+    assert "self._viewer.block_deleted.connect(" not in layout_source
     assert "self._viewer.block_moved.connect(" not in layout_source
     assert re.search(r"self\._selected_block\s*[=:]", layout_source) is None
     for command_name in ("update_geometry", "delete_block", "change_kind"):

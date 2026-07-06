@@ -5705,7 +5705,7 @@ def test_layout_panel_auto_text_blocks_are_editable_frames():
             assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
             assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
 
-            panel._on_block_clicked(text_block)
+            panel._on_block_clicked_uid(text_block.uid)
             assert panel._selected_block_uid == text_block.uid
         finally:
             panel.close()
@@ -6373,7 +6373,7 @@ def test_layout_panel_type_buttons_change_unlocked_block_type():
         try:
             panel.set_pages([page])
             app.processEvents()
-            panel._on_block_clicked(formula_block)
+            panel._on_block_clicked_uid(formula_block.uid)
             panel._selected_type_buttons[BlockType.TABLE].click()
 
             assert formula_block.block_type == BlockType.TABLE
@@ -20993,7 +20993,7 @@ def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
     ))
 
     assert created == []
-    assert viewer.selected_blocks() == [first, second, third]
+    assert viewer.selected_block_uids() == [first.uid, second.uid, third.uid]
     viewer.close()
 
     print("test_image_viewer_right_drag_selects_blocks_without_creating_bbox PASSED")
@@ -21055,7 +21055,7 @@ def test_image_viewer_frame_selection_ignores_box_interior():
         Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
     ))
-    assert viewer.selected_blocks() == []
+    assert viewer.selected_block_uids() == []
 
     start = QPointF(viewer.mapFromScene(QPointF(60, 45)))
     end = QPointF(viewer.mapFromScene(QPointF(80, 65)))
@@ -21080,7 +21080,7 @@ def test_image_viewer_frame_selection_ignores_box_interior():
         Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
     ))
-    assert viewer.selected_blocks() == []
+    assert viewer.selected_block_uids() == []
 
     edge_start = QPointF(viewer.mapFromScene(QPointF(18, 18)))
     edge_end = QPointF(viewer.mapFromScene(QPointF(42, 28)))
@@ -21105,7 +21105,7 @@ def test_image_viewer_frame_selection_ignores_box_interior():
         Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
     ))
-    assert viewer.selected_blocks() == [block]
+    assert viewer.selected_block_uids() == [block.uid]
     viewer.close()
 
     print("test_image_viewer_frame_selection_ignores_box_interior PASSED")
