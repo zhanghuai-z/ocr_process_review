@@ -1,6 +1,10 @@
 from app.core import quality_probe as qp
 from app.core.proof_line_mutation import set_line_proof_text
-from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models import (
+    BBox, Block, BlockOrigin, BlockType, Char, LayoutBlockSnapshot,
+    LayoutSnapshot, Line, OcrPolicy, OcrProject, Page,
+)
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.services.project_diagnostics import diagnose_project
 
 
@@ -73,6 +77,42 @@ def test_project_diagnostics_reports_stale_pending_probe_anchor():
     report = diagnose_project(project, probe_store=probe_store)
 
     assert report.counts_by_code()["stale_pending_probe_anchor"] == 1
+
+
+def test_project_diagnostics_reports_layout_snapshot_projection_drift():
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 20, 20),
+        source_label="text",
+    )
+    orphan = Block(block_type=BlockType.TEXT, bbox=BBox(30, 0, 20, 20), source_label="text")
+    page = Page(image_path="/tmp/layout-drift.png", width=100, height=100, blocks=[block, orphan])
+    snapshot = LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="",
+        source_engine="test",
+        source_run_id="",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.TABLE,
+                bbox=BBox(1, 2, 30, 40),
+                order=0,
+                source_label="table",
+                origin=BlockOrigin(original_bbox=BBox(1, 2, 30, 40), original_kind=BlockType.TABLE),
+                ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
+            ),
+        ),
+    )
+    set_layout_snapshot_for_page(page, snapshot)
+
+    report = diagnose_project(OcrProject(name="diag-layout", pages=[page]))
+
+    codes = report.counts_by_code()
+    assert codes["layout_projection_drift"] == 1
+    assert codes["layout_runtime_orphan_block"] == 1
+    drift_issue = next(issue for issue in report.issues if issue.code == "layout_projection_drift")
+    assert set(drift_issue.details["drift"]) >= {"block_type", "bbox", "source_label"}
 
 
 def test_project_diagnostics_script_help():

@@ -13,6 +13,7 @@ from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
 from app.models.layout_projection import page_layout_blocks
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines
 
@@ -110,6 +111,7 @@ def diagnose_project(
 ) -> ProjectDiagnosticReport:
     issues: list[ProjectDiagnosticIssue] = []
     issues.extend(_diagnose_duplicate_uids(project))
+    issues.extend(_diagnose_layout_projection_drift(project))
     issues.extend(_diagnose_line_char_contract(project))
     if probe_store is not None:
         issues.extend(_diagnose_probe_anchors(project, probe_store))
@@ -169,6 +171,82 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
                         details={"uid": uid, "locations": locations},
                     )
                 )
+    return issues
+
+
+def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagnosticIssue]:
+    issues: list[ProjectDiagnosticIssue] = []
+    for page in project.pages:
+        snapshot = layout_snapshot_for_page(page)
+        if snapshot is None:
+            continue
+        runtime_blocks = page_layout_blocks(page)
+        runtime_by_uid = {
+            block.uid: (block_idx, block)
+            for block_idx, block in enumerate(runtime_blocks)
+            if block.uid
+        }
+        snapshot_uids = {block.uid for block in snapshot.blocks if block.uid}
+        for snapshot_idx, snapshot_block in enumerate(snapshot.blocks):
+            pair = runtime_by_uid.get(snapshot_block.uid)
+            if pair is None:
+                issues.append(ProjectDiagnosticIssue(
+                    severity="error",
+                    code="layout_snapshot_missing_runtime_block",
+                    message="layout snapshot block has no runtime projection",
+                    page_number=page.page_number,
+                    page_uid=page.uid,
+                    block_uid=snapshot_block.uid,
+                    details={"snapshot_index": snapshot_idx},
+                ))
+                continue
+            runtime_idx, runtime_block = pair
+            drift: dict[str, Any] = {}
+            if runtime_block.block_type != snapshot_block.block_type:
+                drift["block_type"] = {
+                    "snapshot": snapshot_block.block_type.value,
+                    "runtime": runtime_block.block_type.value,
+                }
+            if runtime_block.bbox != snapshot_block.bbox:
+                drift["bbox"] = {
+                    "snapshot": snapshot_block.bbox.to_dict(),
+                    "runtime": runtime_block.bbox.to_dict(),
+                }
+            if runtime_block.order != snapshot_block.order:
+                drift["order"] = {
+                    "snapshot": snapshot_block.order,
+                    "runtime": runtime_block.order,
+                }
+            if runtime_block.source_label != snapshot_block.source_label:
+                drift["source_label"] = {
+                    "snapshot": snapshot_block.source_label,
+                    "runtime": runtime_block.source_label,
+                }
+            if drift:
+                issues.append(ProjectDiagnosticIssue(
+                    severity="error",
+                    code="layout_projection_drift",
+                    message="runtime block projection diverges from layout snapshot",
+                    page_number=page.page_number,
+                    page_uid=page.uid,
+                    block_uid=snapshot_block.uid,
+                    details={
+                        "snapshot_index": snapshot_idx,
+                        "runtime_block_index": runtime_idx,
+                        "drift": drift,
+                    },
+                ))
+        for runtime_idx, runtime_block in enumerate(runtime_blocks):
+            if runtime_block.uid and runtime_block.uid not in snapshot_uids:
+                issues.append(ProjectDiagnosticIssue(
+                    severity="warning",
+                    code="layout_runtime_orphan_block",
+                    message="runtime block projection is not present in layout snapshot",
+                    page_number=page.page_number,
+                    page_uid=page.uid,
+                    block_uid=runtime_block.uid,
+                    details={"runtime_block_index": runtime_idx},
+                ))
     return issues
 
 
