@@ -6,7 +6,7 @@ from app.core.raw_ocr_artifact import raw_block_text_values
 from app.core.table_text_layer import build_table_text_layer_cells
 from app.models import Block, BlockType, Page
 from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations
 
 
 class TableTextLayerService:
@@ -39,7 +39,7 @@ class TableTextLayerService:
     @staticmethod
     def _table_html(page: Page, block: Block) -> str:
         candidates: list[str] = []
-        lines = block_ocr_lines(block)
+        lines = block_ocr_line_observations(block)
         for line in lines:
             ocr_text = proof_ocr_text(line)
             if ocr_text:

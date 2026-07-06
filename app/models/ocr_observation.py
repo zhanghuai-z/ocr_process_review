@@ -30,6 +30,11 @@ def block_ocr_lines(block: Block) -> list[Line]:
     return ocr_lines_for_block(block, block.lines)
 
 
+def block_ocr_line_observations(block: Block) -> list[Line]:
+    """Return OCR line observations without adopting ``Block.lines`` projection."""
+    return ocr_lines_for_block(block)
+
+
 def block_ocr_line_count(block: Block) -> int:
     return len(block_ocr_lines(block))
 

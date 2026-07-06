@@ -4345,6 +4345,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4358,8 +4359,9 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
         image.save(image_path)
 
         html = "<table><tr><td>A</td><td>B</td><td>C</td></tr><tr><td>D</td><td>E</td><td>F</td></tr></table>"
-        block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 500, 160), order=0, lines=[
-            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160)),
+        block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 500, 160), order=0)
+        replace_block_ocr_lines(block, [
+            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160))
         ])
         page = Page(image_path=image_path, width=700, height=320, blocks=[block])
 
@@ -4384,6 +4386,7 @@ def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
         Line, OcrPolicy, Page,
     )
     from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.models.ocr_observation import replace_block_ocr_lines
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4395,8 +4398,9 @@ def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
         image.save(image_path)
 
         html = "<table><tr><td>A</td><td>B</td></tr></table>"
-        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=0, lines=[
-            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160)),
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=0)
+        replace_block_ocr_lines(block, [
+            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160))
         ])
         page = Page(image_path=image_path, width=700, height=320, blocks=[block])
         snapshot = LayoutSnapshot(
@@ -4425,6 +4429,36 @@ def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
         assert abs(block.table_text_layer_cells[1]["bbox"]["x"] - 300) < 3
 
     print("test_table_text_layer_service_reads_table_bbox_from_layout_snapshot PASSED")
+
+
+def test_table_text_layer_service_reads_table_html_from_ocr_observation_store():
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.services.table_text_layer_service import TableTextLayerService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        image = Image.new("RGB", (320, 180), "white")
+        draw = ImageDraw.Draw(image)
+        draw.text((80, 70), "A", fill="black", font=ImageFont.load_default())
+        image.save(image_path)
+
+        html = "<table><tr><td>A</td></tr></table>"
+        block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 180, 80), order=0)
+        replace_block_ocr_lines(block, [
+            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 180, 80))
+        ])
+        block.lines = []
+        page = Page(image_path=image_path, width=320, height=180, blocks=[block])
+
+        updated = TableTextLayerService().enrich_page(page)
+
+        assert updated == 1
+        assert block.table_text_layer_cells[0]["text"] == "A"
+
+    print("test_table_text_layer_service_reads_table_html_from_ocr_observation_store PASSED")
 
 
 def test_table_text_layer_service_clears_stale_cells_without_table_html_source():

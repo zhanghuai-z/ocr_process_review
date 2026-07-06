@@ -1783,6 +1783,13 @@ def test_table_text_layer_service_reads_layout_from_snapshot_view():
     assert "view.block_type != BlockType.TABLE" in source
 
 
+def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
+    source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
+
+    assert "block_ocr_line_observations" in source
+    assert "block_ocr_lines" not in source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(
