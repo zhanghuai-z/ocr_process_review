@@ -62,9 +62,9 @@ from app.core.paddle_v16_client import (
 )
 from app.models import Block, BlockOrigin, BlockSource, BlockType, Page
 from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_projection import (
     append_page_layout_block,
-    page_layout_blocks,
     replace_page_layout_blocks,
 )
 from app.models.page_state import clear_page_error_message, mark_page_layout_failed
@@ -754,12 +754,15 @@ class LayoutAnalyzer:
 
     def _rescale_blocks_if_suspicious(self, page: Page) -> None:
         """当所有框都像落在较小坐标系上时，做一次统一比例修正。"""
-        valid_blocks = [block for block in page_layout_blocks(page) if block.bbox.area > 0]
-        if len(valid_blocks) < 2 or page.width <= 0 or page.height <= 0:
+        valid_views = [
+            view for view in iter_page_layout_block_views(page)
+            if view.runtime_block is not None and view.bbox.area > 0
+        ]
+        if len(valid_views) < 2 or page.width <= 0 or page.height <= 0:
             return
 
-        max_x2 = max(block.bbox.x2 for block in valid_blocks)
-        max_y2 = max(block.bbox.y2 for block in valid_blocks)
+        max_x2 = max(view.bbox.x2 for view in valid_views)
+        max_y2 = max(view.bbox.y2 for view in valid_views)
         if max_x2 <= 0 or max_y2 <= 0:
             return
 
@@ -781,8 +784,11 @@ class LayoutAnalyzer:
                 scale_x,
                 scale_y,
             )
-            for block in page_layout_blocks(page):
-                set_layout_block_bbox(block, scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height))
+            for view in valid_views:
+                set_layout_block_bbox(
+                    view.runtime_block,
+                    scale_bbox(view.bbox, scale_x, scale_y).clamp(page.width, page.height),
+                )
             return
 
         scale_x = page.width / max_x2
@@ -804,8 +810,11 @@ class LayoutAnalyzer:
             "for %s: scale_x=%.3f scale_y=%.3f page=%dx%d max_bbox=(%d,%d)",
             page.display_image_path, scale_x, scale_y, page.width, page.height, max_x2, max_y2,
         )
-        for block in page_layout_blocks(page):
-            set_layout_block_bbox(block, scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height))
+        for view in valid_views:
+            set_layout_block_bbox(
+                view.runtime_block,
+                scale_bbox(view.bbox, scale_x, scale_y).clamp(page.width, page.height),
+            )
 
     def _local_analyze(self, page: Page) -> Page:
         import cv2
@@ -933,7 +942,7 @@ class LayoutAnalyzer:
             )
             self._write_bbox_overlay(
                 page,
-                items=[(block.block_type.value, block.bbox) for block in page_layout_blocks(page)],
+                items=[(view.block_type.value, view.bbox) for view in iter_page_layout_block_views(page)],
                 suffix=".layout-app-overlay.png",
                 color=(80, 220, 80),
             )

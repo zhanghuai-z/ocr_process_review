@@ -16398,6 +16398,68 @@ def test_layout_analyzer_rescales_suspicious_blocks():
     print("test_layout_analyzer_rescales_suspicious_blocks PASSED")
 
 
+def test_layout_analyzer_rescales_snapshot_view_bboxes_into_runtime_projection():
+    from app.core.layout_analyzer import LayoutAnalyzer
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+        OcrPolicy, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+
+    analyzer = LayoutAnalyzer()
+    page = Page(image_path="/tmp/test-snapshot-rescale.png", width=2400, height=3200)
+    blocks = [
+        Block(block_type=BlockType.TEXT, bbox=BBox(900, 900, 30, 20)),
+        Block(block_type=BlockType.TEXT, bbox=BBox(950, 950, 30, 20)),
+        Block(block_type=BlockType.TEXT, bbox=BBox(1000, 1000, 30, 20)),
+    ]
+    page.blocks = blocks
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-layout-rescale",
+        source_engine="test",
+        source_run_id="run-layout-rescale",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=blocks[0].uid,
+                block_type=BlockType.TEXT,
+                bbox=BBox(50, 40, 300, 80),
+                order=0,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+            LayoutBlockSnapshot(
+                uid=blocks[1].uid,
+                block_type=BlockType.TEXT,
+                bbox=BBox(60, 180, 320, 120),
+                order=1,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+            LayoutBlockSnapshot(
+                uid=blocks[2].uid,
+                block_type=BlockType.TEXT,
+                bbox=BBox(80, 420, 400, 120),
+                order=2,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+
+    analyzer._rescale_blocks_if_suspicious(page)
+
+    assert blocks[0].bbox.x == 150
+    assert blocks[0].bbox.y > 200
+    assert blocks[0].bbox.w > 800
+    assert blocks[2].bbox.y > 2000
+
+    print("test_layout_analyzer_rescales_snapshot_view_bboxes_into_runtime_projection PASSED")
+
+
 def test_layout_analyzer_extracts_api_polygon_bbox():
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BBox, Page
