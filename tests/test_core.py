@@ -2066,6 +2066,35 @@ def test_model_validation_rejects_legacy_page_and_block_payload_attr():
     print("test_model_validation_rejects_legacy_page_and_block_payload_attr PASSED")
 
 
+def test_model_validation_uses_layout_snapshot_view_for_page_blocks():
+    from app.core.model_validation import validate_page_model
+    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
+    from app.models import BBox, Block, BlockType, Page
+    from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+
+    current = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(0, 0, 20, 20),
+    )
+    page = Page(
+        image_path="/tmp/model-validation-view.png",
+        width=40,
+        height=40,
+        blocks=[current],
+    )
+    sync_page_layout_snapshot_from_projection(page, source_engine="test")
+    stale_projection_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(20, 20, 30, 30),
+    )
+    stale_projection_block.raw_payload = {LAYOUT_LINE_ROUTES_FIELD: []}
+    page.blocks.append(stale_projection_block)
+
+    validate_page_model(page)
+
+    print("test_model_validation_uses_layout_snapshot_view_for_page_blocks PASSED")
+
+
 def test_project_store_rejects_legacy_page_model_on_save():
     import os
     import tempfile
