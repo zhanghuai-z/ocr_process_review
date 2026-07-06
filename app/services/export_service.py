@@ -15,7 +15,7 @@ from typing import Iterable, List
 from app.core.block_attributes import block_attributes, semantic_block_type
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, BlockType, Line, OcrProject, Page
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
 from app.services.proof_stats_service import ProofStatsService
@@ -132,13 +132,23 @@ def iter_export_pages(project: OcrProject) -> Iterable[Page]:
 
 def iter_export_blocks(page: Page, *, include_empty: bool = False) -> Iterable[Block]:
     """按统一阅读顺序输出块。"""
-    blocks = sorted(
-        page_layout_blocks(page),
-        key=lambda block: (block.order, block.bbox.y, block.bbox.x),
+    for view in iter_export_block_views(page, include_empty=include_empty):
+        if view.runtime_block is not None:
+            yield view.runtime_block
+
+
+def iter_export_block_views(page: Page, *, include_empty: bool = False) -> Iterable[LayoutBlockView]:
+    """Yield export blocks ordered by adopted layout snapshot facts."""
+    views = sorted(
+        (view for view in iter_page_layout_block_views(page) if view.runtime_block is not None),
+        key=lambda view: (view.order, view.bbox.y, view.bbox.x),
     )
-    for block in blocks:
-        if include_empty or block_has_ocr_lines(block) or block.note:
-            yield block
+    for view in views:
+        block = view.runtime_block
+        if block is None:
+            continue
+        if include_empty or block_has_ocr_lines(block) or view.note:
+            yield view
 
 
 def iter_export_lines(block: Block) -> Iterable[Line]:

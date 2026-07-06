@@ -4,7 +4,8 @@ from __future__ import annotations
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from app.core.block_attributes import block_attributes
+from app.adapters.paddle import map_paddle_label_to_block_type
+from app.core.block_attributes import BlockAttributes, normalize_source_label
 from app.core.proof_line_facts import ProofLineFacts, proof_line_facts, proof_status_value
 from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
 from app.export.ir import (
@@ -21,15 +22,16 @@ from app.export.ir import (
     ExportSource,
 )
 from app.export.rules import ExportRules, load_export_rules, normalize_export_format
-from app.models import BBox, Block, Line, OcrPolicy, OcrProject, Page
+from app.models import BBox, Block, BlockType, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_block_state import export_origin_for_block
+from app.models.layout_block_view import LayoutBlockView
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.page_state import page_error_message, page_status_value
 from app.services.export_service import (
     build_export_summary,
-    iter_export_blocks,
+    iter_export_block_views,
     iter_export_lines,
     iter_export_pages,
 )
@@ -61,10 +63,10 @@ def build_export_ir(
                 details={"page_number": page.page_number},
             ))
 
-        for index, block in enumerate(iter_export_blocks(page, include_empty=True), start=1):
+        for index, view in enumerate(iter_export_block_views(page, include_empty=True), start=1):
             element = _build_element(
                 page=page,
-                block=block,
+                view=view,
                 index=index,
                 profile=profile,
                 rules=export_rules,
@@ -111,7 +113,7 @@ def build_export_ir(
 def _build_element(
     *,
     page: Page,
-    block: Block,
+    view: LayoutBlockView,
     index: int,
     profile: ExportProfile,
     rules: ExportRules,
@@ -119,7 +121,10 @@ def _build_element(
     diagnostics: list[ExportDiagnostic],
     private_paths: bool,
 ) -> ExportElement:
-    attrs = block_attributes(block)
+    block = view.runtime_block
+    if block is None:
+        raise RuntimeError("Export requires a runtime block projection")
+    attrs = _layout_attrs(view)
     kind = rules.kind_for_block_type(attrs.semantic_block_type.value)
     rule = rules.rule_for_kind(kind)
     payload_type = str(rule.get("payload") or "text")
@@ -141,7 +146,7 @@ def _build_element(
         }
     elif payload_type == "asset":
         asset_ref = _append_region_asset(
-            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+            profile, assets, page, view, element_id, asset_kind, private_paths=private_paths
         )
         if kind == "figure":
             payload = {"asset_ref": asset_ref, "alt_text": block.note}
@@ -163,7 +168,7 @@ def _build_element(
             fallback = _fallback_from_rule(fallback_rule, reason="missing_asset")
     elif payload_type == "table":
         asset_ref = _append_region_asset(
-            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+            profile, assets, page, view, element_id, asset_kind, private_paths=private_paths
         )
         payload = {
             "mode": str(fallback_rule.get("mode") or "image_fallback"),
@@ -191,7 +196,7 @@ def _build_element(
             }
         else:
             asset_ref = _append_region_asset(
-                profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+                profile, assets, page, view, element_id, asset_kind, private_paths=private_paths
             )
             payload = {"mode": str(fallback_rule.get("mode") or "image_fallback"), "asset_ref": asset_ref}
             fallback = _fallback_from_rule(fallback_rule, reason="missing_equation_text", asset_ref=asset_ref)
@@ -204,7 +209,7 @@ def _build_element(
             ))
     else:
         asset_ref = _append_region_asset(
-            profile, assets, page, block, element_id, asset_kind, private_paths=private_paths
+            profile, assets, page, view, element_id, asset_kind, private_paths=private_paths
         )
         payload = {
             "asset_ref": asset_ref,
@@ -230,22 +235,22 @@ def _build_element(
             {"block_attributes": attrs.to_export_dict()},
         ))
 
-    if block.ocr_policy != OcrPolicy.TEXT_OCR:
+    if view.ocr_policy != OcrPolicy.TEXT_OCR:
         diagnostics.append(_diagnostic(
             "info",
             "block_not_text_ocr_policy",
             "该块 OCR 策略不是 text_ocr，导出仅保留现有内容/兜底。",
             element_id,
-            {"block_attributes": attrs.to_export_dict(), "ocr_policy": block.ocr_policy.value},
+            {"block_attributes": attrs.to_export_dict(), "ocr_policy": view.ocr_policy.value},
         ))
 
     return ExportElement(
         id=element_id,
         kind=kind,
         page=page.page_number,
-        order=int(block.order),
-        bbox=_bbox_to_dict(block.bbox),
-        source=_source(page, block, lines),
+        order=int(view.order),
+        bbox=_bbox_to_dict(view.bbox),
+        source=_source(page, view, lines),
         proof=_proof(lines),
         payload=payload,
         layout_attributes=attrs.to_export_dict(),
@@ -317,22 +322,39 @@ def _table_text_layer_cells(block: Block) -> list[dict[str, Any]]:
     return cells
 
 
-def _source(page: Page, block: Block, lines: list[Line]) -> ExportSource:
-    attrs = block_attributes(block)
+def _source(page: Page, view: LayoutBlockView, lines: list[Line]) -> ExportSource:
+    attrs = _layout_attrs(view)
+    block = view.runtime_block
     return ExportSource(
         page_number=page.page_number,
-        block_ids=[_entity_source_id(block, f"p{page.page_number}-block-{block.order}")],
+        block_ids=[view.uid or _entity_source_id(block, f"p{page.page_number}-block-{view.order}")],
         line_ids=[_entity_source_id(line, idx) for idx, line in enumerate(lines)],
         char_ids=[
             _entity_source_id(occurrence.char, f"line-{line_idx}-char-{occurrence.char_index}")
             for line_idx, line in enumerate(lines)
             for occurrence in iter_line_ocr_char_occurrences(line)
         ],
-        block_type=block.block_type.value,
+        block_type=view.block_type.value,
         source_label=attrs.source_label,
         semantic_label=attrs.semantic_label,
         semantic_block_type=attrs.semantic_block_type.value,
-        origin=export_origin_for_block(block),
+        origin=export_origin_for_block(block) if block is not None else view.origin.created_by,
+    )
+
+
+def _layout_attrs(view: LayoutBlockView) -> BlockAttributes:
+    source_label = normalize_source_label(view.origin.source_label or view.source_label)
+    semantic_label = source_label or normalize_source_label(view.block_type.value)
+    semantic_block_type = map_paddle_label_to_block_type(semantic_label)
+    if semantic_block_type == BlockType.UNKNOWN:
+        semantic_block_type = view.block_type
+    return BlockAttributes(
+        block_type=view.block_type,
+        source_label=source_label,
+        current_label=normalize_source_label(view.source_label or view.block_type.value),
+        origin_label=normalize_source_label(view.origin.source_label),
+        semantic_label=semantic_label,
+        semantic_block_type=semantic_block_type,
     )
 
 
@@ -362,7 +384,7 @@ def _append_region_asset(
     profile: ExportProfile,
     assets: list[ExportAsset],
     page: Page,
-    block: Block,
+    view: LayoutBlockView,
     element_id: str,
     asset_kind: str,
     *,
@@ -375,7 +397,7 @@ def _append_region_asset(
         id=asset_id,
         kind=asset_kind,
         page_number=page.page_number,
-        bbox=_bbox_to_dict(block.bbox),
+        bbox=_bbox_to_dict(view.bbox),
         path=_export_path(page.display_image_path, private_paths=private_paths),
         mime=_mime_for_path(page.display_image_path),
     ))

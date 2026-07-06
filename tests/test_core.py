@@ -3556,6 +3556,53 @@ def test_export_ir_preserves_structured_block_attributes():
     print("test_export_ir_preserves_structured_block_attributes PASSED")
 
 
+def test_export_ir_reads_layout_facts_from_snapshot_view():
+    from app.export.ir_builder import build_export_ir
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+        Line, OcrPolicy, OcrProject, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+
+    runtime_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 10, 10),
+        order=0,
+        source_label="text",
+        lines=[Line(text="<table><tr><td>A</td></tr></table>", confidence=1.0, bbox=BBox(50, 50, 500, 160))],
+    )
+    page = Page(image_path="/tmp/snapshot-export.png", width=700, height=320, blocks=[runtime_block])
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="",
+        source_engine="test",
+        source_run_id="",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=runtime_block.uid,
+                block_type=BlockType.TABLE,
+                bbox=BBox(50, 50, 500, 160),
+                order=0,
+                source_label="table",
+                origin=BlockOrigin(source_label="table", original_bbox=BBox(50, 50, 500, 160), original_kind=BlockType.TABLE),
+                ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
+            ),
+        ),
+    ))
+
+    document = build_export_ir(OcrProject(name="SnapshotExport", pages=[page]), "json")
+    element = document.to_dict()["pages"][0]["elements"][0]
+
+    assert element["kind"] == "table"
+    assert element["bbox"] == {"x": 50, "y": 50, "w": 500, "h": 160}
+    assert element["source"]["block_ids"] == [runtime_block.uid]
+    assert element["source"]["block_type"] == "table"
+    assert element["layout_attributes"]["semantic_block_type"] == "table"
+    assert any(asset["bbox"] == {"x": 50, "y": 50, "w": 500, "h": 160} for asset in document.to_dict()["assets"])
+
+    print("test_export_ir_reads_layout_facts_from_snapshot_view PASSED")
+
+
 def test_pdf_page_faithful_plans_use_image_and_char_layer():
     from app.export.ir_builder import build_export_ir
     from app.export.pdf import build_pdf_page_plans, pixel_bbox_to_pdf_rect
