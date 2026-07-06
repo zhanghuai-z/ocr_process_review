@@ -2048,7 +2048,8 @@ def test_export_service_reads_ocr_lines_from_observation_store():
 
     assert "block_ocr_line_observations_by_uid" in source
     assert "block_ocr_line_observations(" not in source
-    assert "block_has_ocr_line_observations" in source
+    assert "block_has_ocr_line_observations" not in source
+    assert "build_text_ocr_dispatch_plan" in source
     assert "block_ocr_lines" not in source
     assert "block_has_ocr_lines" not in source
 

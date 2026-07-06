@@ -14,11 +14,8 @@ from typing import Iterable, List
 from app.core.proof_line_facts import proof_display_text
 from app.models import Line, OcrProject, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import (
-    block_has_ocr_line_observations,
-    block_ocr_line_observations_by_uid,
-)
-from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
+from app.models.ocr_observation import block_ocr_line_observations_by_uid
+from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 from app.services.proof_stats_service import ProofStatsService
 
 
@@ -84,7 +81,7 @@ def iter_export_block_views(page: Page, *, include_empty: bool = False) -> Itera
         block = view.runtime_block
         if block is None:
             continue
-        if include_empty or block_has_ocr_line_observations(block) or view.note:
+        if include_empty or block_ocr_line_observations_by_uid(view.uid) or view.note:
             yield view
 
 
@@ -103,8 +100,10 @@ def build_export_summary(project: OcrProject) -> dict:
         "unproofed_lines": unproofed,
         "flagged_lines": proof_stats.flagged_lines,
         "unrecognized_blocks": sum(
-            1 for block in iter_text_ocr_blocks(project.pages)
-            if not block_has_ocr_line_observations(block)
+            1
+            for page in project.pages
+            for target in build_text_ocr_dispatch_plan(page).text_blocks
+            if not block_ocr_line_observations_by_uid(target.view.uid)
         ),
     }
 
