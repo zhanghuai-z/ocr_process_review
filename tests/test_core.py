@@ -20843,6 +20843,29 @@ def test_ui_block_labels_use_structured_semantic_label():
     print("test_ui_block_labels_use_structured_semantic_label PASSED")
 
 
+def test_image_viewer_reads_block_confidence_from_ocr_observation_store():
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line
+    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    _get_qapp()
+    line = Line(text="置信度", confidence=0.73, bbox=BBox(5, 6, 30, 10))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(5, 6, 30, 20), order=0)
+    replace_block_ocr_lines(block, [line])
+    block.lines = []
+
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(80, 60, QImage.Format.Format_RGB888))
+    viewer.show_blocks([block])
+
+    assert "置信度: 0.73" in viewer._block_items[0][0].toolTip()
+    viewer.close()
+
+    print("test_image_viewer_reads_block_confidence_from_ocr_observation_store PASSED")
+
+
 def test_ocr_panel_reads_block_order_from_layout_snapshot_view():
     from PySide6.QtCore import Qt
 

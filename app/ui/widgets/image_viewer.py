@@ -23,7 +23,8 @@ from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
 from app.models.layout_block_view import LayoutBlockView
 from app.models.layout_block_state import set_layout_block_bbox
-from app.models.ocr_observation import block_avg_confidence
+from app.models.ocr_observation import block_ocr_line_observations
+from app.models.ocr_text_observation import line_ocr_confidence
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
@@ -55,6 +56,13 @@ _LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)
 _CHAR_BOX_COLOR = QColor("#ff8c00")
 _FORMULA_CHAR_BOX_COLOR = QColor("#2563eb")
 _CHAR_BOX_Z = 16
+
+
+def _block_observation_avg_confidence(block: Block) -> float:
+    lines = block_ocr_line_observations(block)
+    if not lines:
+        return 0.0
+    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
 
 # ── 缩放手柄 ──────────────────────────────────────────────────
 
@@ -388,7 +396,7 @@ class ImageViewer(QGraphicsView):
         for block in blocks:
             attrs = block_attributes(block)
             color = BLOCK_COLORS.get(attrs.semantic_block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-            label = f"[{attrs.display_label}] 置信度: {block_avg_confidence(block):.2f}"
+            label = f"[{attrs.display_label}] 置信度: {_block_observation_avg_confidence(block):.2f}"
             self._add_block_item(block, bbox=block.bbox, color=color, label=label)
 
     def show_layout_block_views(self, views: List[LayoutBlockView]) -> None:
@@ -399,7 +407,7 @@ class ImageViewer(QGraphicsView):
                 continue
             color = BLOCK_COLORS.get(view.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
             display_label = view.source_label or getattr(view.block_type, "value", str(view.block_type))
-            label = f"[{display_label}] 置信度: {block_avg_confidence(block):.2f}"
+            label = f"[{display_label}] 置信度: {_block_observation_avg_confidence(block):.2f}"
             self._add_block_item(block, bbox=view.bbox, color=color, label=label)
 
     def _add_block_item(

@@ -883,6 +883,14 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
     assert "app.models.ocr_character_observation" in layout_source
 
 
+def test_image_viewer_reads_block_confidence_from_ocr_observation_store():
+    source = Path("app/ui/widgets/image_viewer.py").read_text(encoding="utf-8")
+
+    assert "block_ocr_line_observations" in source
+    assert "line_ocr_confidence" in source
+    assert "block_avg_confidence" not in source
+
+
 def test_proof_ui_does_not_reach_legacy_layout_or_char_storage_directly():
     offenders: list[str] = []
     for path in sorted(PROOF_UI_DIR.glob("*.py")):
