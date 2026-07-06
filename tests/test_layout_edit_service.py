@@ -1,8 +1,19 @@
 from __future__ import annotations
 
 from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
-from app.models import BBox, Block, BlockSource, BlockType, Line, Page
-from app.models.layout_snapshot_store import layout_snapshot_for_page
+from app.models import (
+    BBox,
+    Block,
+    BlockOrigin,
+    BlockSource,
+    BlockType,
+    LayoutBlockSnapshot,
+    LayoutSnapshot,
+    Line,
+    OcrPolicy,
+    Page,
+)
+from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
 from app.models.ocr_observation import block_ocr_lines
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
@@ -103,6 +114,61 @@ def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     assert snapshot is not None
     assert snapshot.blocks[0].block_type == BlockType.TABLE
     assert snapshot.blocks[0].source_label == "table"
+
+
+def test_layout_edit_service_change_block_kind_uses_snapshot_geometry_when_projection_drifts():
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(90, 90, 130, 120),
+        order=9,
+        source_label="text",
+    )
+    page = Page(image_path="", width=200, height=100, blocks=[block])
+    snapshot_bbox = BBox.from_xyxy(10, 20, 60, 40)
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=snapshot_bbox,
+                    order=2,
+                    source_label="text",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    uid=block.uid,
+                ),
+            ),
+        ),
+    )
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.change_kind(
+        page,
+        block,
+        block_type=BlockType.TITLE,
+        source_label="heading_1",
+    ))
+
+    assert result.op == "change_kind"
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.source_engine == "layout_edit"
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+    assert snapshot.blocks[0].block_type == BlockType.TITLE
+    assert snapshot.blocks[0].source_label == "heading_1"
+    assert snapshot.blocks[0].bbox == snapshot_bbox
+    assert snapshot.blocks[0].order == 2
+    assert snapshot.blocks[0].ocr_policy == OcrPolicy.TEXT_OCR
+    assert block.block_type == BlockType.TITLE
+    assert block.source == BlockSource.USER_EDITED
+    assert block.source_label == "heading_1"
+    assert block.bbox == snapshot_bbox
+    assert block.order == 2
 
 
 def test_layout_edit_service_preserves_explicit_structural_subtype_label():
