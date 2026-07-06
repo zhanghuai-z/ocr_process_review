@@ -346,12 +346,32 @@ class LayoutEditService:
         before: dict | None,
     ) -> LayoutEditResult:
         next_blocks = list(blocks)
-        before = before or {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
-        replace_page_layout_blocks(page, next_blocks)
-        for order, block in enumerate(page_layout_blocks(page)):
-            set_layout_block_order(block, order)
-        after = {"blocks": [self.block_state(block) for block in page_layout_blocks(page)]}
-        self.record_edit(page, "restore_blocks", None, before=before, after=after)
+        snapshot = current_layout_snapshot(page)
+        before = before or {"blocks": [self.snapshot_block_state(block) for block in snapshot.blocks]}
+        next_snapshot_blocks = tuple(
+            self._snapshot_block_from_edit_block(block, order=order)
+            for order, block in enumerate(next_blocks)
+        )
+        after = {"blocks": [self.snapshot_block_state(block) for block in next_snapshot_blocks]}
+        event = self.record_edit(
+            page,
+            "restore_blocks",
+            None,
+            before=before,
+            after=after,
+            sync_snapshot=False,
+        )
+        next_snapshot = self._snapshot_with_blocks(
+            snapshot,
+            next_snapshot_blocks,
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        self._replace_runtime_projection_from_snapshot(
+            page,
+            next_snapshot,
+            candidate_blocks=next_blocks,
+        )
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
 
     def _change_block_kind(
@@ -504,12 +524,17 @@ class LayoutEditService:
         self,
         page: Page,
         snapshot: LayoutSnapshot,
+        *,
+        candidate_blocks: Iterable[Block] = (),
     ) -> None:
         runtime_by_uid = {
             block.uid: block
             for block in page_layout_blocks(page)
             if block.uid
         }
+        for block in candidate_blocks:
+            if block.uid:
+                runtime_by_uid[block.uid] = block
         next_blocks: list[Block] = []
         for snapshot_block in snapshot.blocks:
             block = runtime_by_uid.get(snapshot_block.uid)
@@ -527,6 +552,28 @@ class LayoutEditService:
             self._apply_snapshot_block_to_runtime_block(block, snapshot_block)
             next_blocks.append(block)
         replace_page_layout_blocks(page, next_blocks)
+
+    @staticmethod
+    def _snapshot_block_from_edit_block(
+        block: Block,
+        *,
+        order: int,
+    ) -> LayoutBlockSnapshot:
+        return LayoutBlockSnapshot(
+            block_type=block.block_type,
+            bbox=block.bbox,
+            order=order,
+            source_label=block.source_label,
+            origin=block.origin or BlockOrigin(
+                created_by=getattr(block.source, "value", str(block.source)),
+                source_label=block.source_label,
+                original_bbox=block.bbox,
+                original_kind=block.block_type,
+            ),
+            ocr_policy=block.ocr_policy,
+            note=block.note,
+            uid=block.uid,
+        )
 
     def _merge_blocks_into_bbox(
         self,
