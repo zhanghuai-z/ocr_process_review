@@ -128,6 +128,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     )
     db_path = str(tmp_path / "snapshot-load.ocrproj")
     replace_block_ocr_line_observations(block.uid, [line])
+    sync_page_layout_snapshot_from_projection(project.pages[0], source_engine="test_seed")
 
     with ProjectStore(db_path) as store:
         saved = store.save_project(project)
@@ -137,7 +138,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     page = loaded.pages[0]
     snapshot = layout_snapshot_for_page(page)
     assert snapshot is not None
-    assert snapshot.source_engine == "project_store_save"
+    assert snapshot.source_engine == "test_seed"
     assert snapshot.blocks[0].source_label == "text"
 
     loaded_block = page.blocks[0]

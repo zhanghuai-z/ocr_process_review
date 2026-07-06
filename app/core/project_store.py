@@ -1207,10 +1207,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        for block in self._sync_layout_projection_from_snapshot(
-            page,
-            source_run_id=str(project_id),
-        ):
+        for block in self._sync_layout_projection_from_snapshot(page):
             self._ensure_unique_child_uid(
                 cur,
                 block,
@@ -1235,15 +1232,11 @@ class ProjectStore:
     @staticmethod
     def _sync_layout_projection_from_snapshot(
         page: Page,
-        *,
-        source_run_id: str = "",
     ) -> list[Block]:
         snapshot = layout_snapshot_for_page(page)
         if snapshot is None:
-            snapshot = sync_page_layout_snapshot_from_projection(
-                page,
-                source_engine="project_store_save",
-                source_run_id=source_run_id,
+            raise ProjectDataError(
+                f"page {page.uid or page.page_number!r} has no layout snapshot in normal save path"
             )
         runtime_blocks = page_layout_blocks(page)
         runtime_uid_counts: dict[str, int] = {}
@@ -1283,6 +1276,14 @@ class ProjectStore:
             blocks.append(block)
         replace_page_layout_blocks(page, blocks)
         return blocks
+
+    @staticmethod
+    def _migrate_legacy_projection_to_snapshot(page: Page, *, source_run_id: str = "") -> None:
+        sync_page_layout_snapshot_from_projection(
+            page,
+            source_engine="project_store_legacy_projection",
+            source_run_id=source_run_id,
+        )
 
     def _save_layout_edit_events(
         self,
@@ -1328,10 +1329,8 @@ class ProjectStore:
     ) -> None:
         snapshot = layout_snapshot_for_page(page)
         if snapshot is None:
-            snapshot = sync_page_layout_snapshot_from_projection(
-                page,
-                source_engine="project_store_save",
-                source_run_id=str(project_id),
+            raise ProjectDataError(
+                f"page {page.uid or page.page_number!r} has no layout snapshot in normal save path"
             )
         cur.execute(
             "INSERT INTO layout_snapshot ("
@@ -1937,11 +1936,7 @@ class ProjectStore:
                 set_layout_snapshot_for_page(page, snapshot)
                 self._sync_layout_projection_from_snapshot(page)
             else:
-                sync_page_layout_snapshot_from_projection(
-                    page,
-                    source_engine="project_store",
-                    source_run_id=str(project.id or ""),
-                )
+                self._migrate_legacy_projection_to_snapshot(page, source_run_id=str(project.id or ""))
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 

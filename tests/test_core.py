@@ -63,7 +63,7 @@ def _seed_page_ocr_observations(page):
     from app.models.layout_snapshot_store import layout_snapshot_for_page
 
     snapshot = layout_snapshot_for_page(page)
-    if page.blocks and (snapshot is None or snapshot.source_engine == "test_seed"):
+    if snapshot is None or snapshot.source_engine == "test_seed":
         _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     for block in page.blocks:
         if block.lines:
@@ -81,6 +81,12 @@ def _seed_project_ocr_observations(project):
     """Register test OCR lines through the current OCR observation boundary."""
     for page in project.pages:
         _seed_page_ocr_observations(page)
+
+
+def _seed_project_layout_snapshots(project, *, source_engine: str = "test_seed") -> None:
+    """Register direct test block factories through the layout snapshot boundary."""
+    for page in project.pages:
+        _sync_page_layout_snapshot_from_blocks(page, source_engine=source_engine)
 
 
 def _block_ocr_observations(block):
@@ -1063,6 +1069,7 @@ def test_project_store_persists_raw_layout_artifact():
                 )
             ],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -1143,6 +1150,7 @@ def test_project_store_rejects_malformed_route_attachments_on_save_and_load():
                 )
             ],
         )
+        _seed_project_layout_snapshots(bad_project)
         with ProjectStore(db_path) as store:
             with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.route_attachments\[0\]\[0\] must be dict"):
                 store.save_project(bad_project)
@@ -1161,6 +1169,7 @@ def test_project_store_rejects_malformed_route_attachments_on_save_and_load():
                 )
             ],
         )
+        _seed_project_layout_snapshots(good_project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(good_project)
         with sqlite3.connect(db_path) as conn:
@@ -1205,6 +1214,7 @@ def test_project_store_rejects_non_dict_raw_layout_records_on_save_and_load():
                 )
             ],
         )
+        _seed_project_layout_snapshots(bad_project)
         with ProjectStore(db_path) as store:
             with pytest.raises(ProjectDataError, match=r"raw_ocr_artifact\.records\[0\] must be dict"):
                 store.save_project(bad_project)
@@ -1223,6 +1233,7 @@ def test_project_store_rejects_non_dict_raw_layout_records_on_save_and_load():
                 )
             ],
         )
+        _seed_project_layout_snapshots(good_project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(good_project)
         with sqlite3.connect(db_path) as conn:
@@ -1260,6 +1271,7 @@ def test_project_store_rejects_non_dict_table_text_layer_cells_on_save_and_load(
             name="bad-table-cells-save",
             pages=[Page(image_path="/tmp/bad-table-save.png", width=120, height=80, blocks=[bad_block])],
         )
+        _seed_project_layout_snapshots(bad_project)
         with ProjectStore(db_path) as store:
             with pytest.raises(ProjectDataError, match=r"block\.table_text_layer_cells\[0\] must be dict"):
                 store.save_project(bad_project)
@@ -1281,6 +1293,7 @@ def test_project_store_rejects_non_dict_table_text_layer_cells_on_save_and_load(
                 )
             ],
         )
+        _seed_project_layout_snapshots(good_project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(good_project)
         with sqlite3.connect(db_path) as conn:
@@ -1328,6 +1341,7 @@ def test_project_store_persists_typed_paddle_binding():
             name="paddle-binding",
             pages=[Page(image_path="/tmp/binding.png", width=100, height=100, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -1384,6 +1398,7 @@ def test_project_store_rejects_invalid_typed_block_state_on_load():
             name="invalid-typed-block-state",
             pages=[Page(image_path="/tmp/invalid-typed-state.png", width=100, height=100, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
 
@@ -1433,6 +1448,7 @@ def test_project_store_persists_block_ocr_invalidation():
             name="typed-ocr-invalidation",
             pages=[Page(image_path="/tmp/ocr-invalidated.png", width=100, height=100, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -1470,6 +1486,7 @@ def test_project_store_persists_inline_formula_origin():
             name="inline-formula-origin",
             pages=[Page(image_path="/tmp/inline-formula.png", width=100, height=80, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -1508,6 +1525,7 @@ def test_project_store_persists_ocr_audit():
             name="ocr-audit",
             pages=[Page(image_path="/tmp/ocr-audit.png", width=100, height=80, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -1548,6 +1566,7 @@ def test_project_store_persists_table_text_layer_cells():
             name="table-text-layer-cells",
             pages=[Page(image_path="/tmp/table-cells.png", width=100, height=80, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
@@ -1596,6 +1615,7 @@ def test_project_store_persists_block_origin_separately_from_current_layout():
             name="block-origin",
             pages=[Page(image_path="/tmp/img.jpg", width=800, height=600, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -1651,6 +1671,7 @@ def test_project_store_persists_layout_edit_events():
             ],
         )
         project = OcrProject(name="layout-events", pages=[page])
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -1896,6 +1917,7 @@ def test_project_store_migration_drops_empty_retired_block_payload_columns():
             name="retired payload empty migration",
             pages=[Page(image_path="/tmp/empty-retired-payload.png", width=80, height=40, blocks=[block])],
         )
+        _seed_project_layout_snapshots(clean_project)
         with ProjectStore(db_path) as store:
             store.save_project(clean_project)
         with sqlite3.connect(db_path) as conn:
@@ -1936,6 +1958,7 @@ def test_project_store_migration_rejects_nonempty_retired_block_payload_columns(
             name="retired payload nonempty migration",
             pages=[Page(image_path="/tmp/nonempty-retired-payload.png", width=80, height=40, blocks=[clean_block])],
         )
+        _seed_project_layout_snapshots(clean_project)
         with ProjectStore(db_path) as store:
             store.save_project(clean_project)
         with sqlite3.connect(db_path) as conn:
@@ -1981,6 +2004,7 @@ def test_project_store_rejects_invalid_review_flags_json_on_load():
             name="invalid payload json",
             pages=[Page(image_path="/tmp/invalid-payload-json.png", width=80, height=40, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
         with sqlite3.connect(db_path) as conn:
@@ -2030,6 +2054,7 @@ def test_project_store_rejects_invalid_current_schema_enums_on_load():
             name="invalid current schema enum",
             pages=[Page(image_path="/tmp/invalid-current-schema-enum.png", width=80, height=40, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
 
@@ -2084,6 +2109,7 @@ def test_project_store_rejects_malformed_persisted_geometry_on_load():
             name="malformed persisted geometry",
             pages=[Page(image_path="/tmp/malformed-geometry.png", width=80, height=40, blocks=[block])],
         )
+        _seed_project_layout_snapshots(project)
         with ProjectStore(db_path) as store:
             saved = store.save_project(project)
 
@@ -2876,6 +2902,7 @@ def test_project_store_persists_page_ocr_invalidation_reason():
         )
         invalidate_page_ocr(page, "block_type_changed")
         project = OcrProject(name="invalidate", pages=[page])
+        _seed_project_layout_snapshots(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -15366,6 +15393,7 @@ def test_project_store_rejects_invalid_proof_line_state_status_on_load():
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
         project = OcrProject(name="invalid-proof-status", pages=[page], db_path=db_path)
+        _seed_project_layout_snapshots(project)
         store = ProjectStore(db_path)
         store.open()
         project = store.save_project(project)
