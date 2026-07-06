@@ -1822,6 +1822,8 @@ def test_project_store_persists_layout_snapshot_without_service_dependency():
     assert "from app.services.layout_snapshot" not in source
     assert "snapshot_authoritative" not in source
     assert "_layout_snapshot_matches_projection" not in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
 
     normal_save_source = _function_source(source, "_sync_layout_projection_from_snapshot")
     assert "sync_page_layout_snapshot_from_projection" not in normal_save_source

@@ -33,7 +33,7 @@ from app.models.layout_block_state import (
 )
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
 from app.models.ocr_observation import (
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     iter_project_ocr_line_observation_occurrences,
     line_ocr_bbox,
     replace_block_ocr_line_observations,
@@ -1480,7 +1480,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_line_ids: set[int] = set()
-        for line in block_ocr_line_observations(block):
+        for line in block_ocr_line_observations_by_uid(block.uid):
             self._ensure_unique_child_uid(
                 cur,
                 line,
