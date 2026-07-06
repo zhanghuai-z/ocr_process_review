@@ -20,6 +20,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_block_state import set_layout_block_order
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
@@ -695,7 +696,7 @@ class LayoutPanel(QWidget):
         current_idx = min(self._current_page_idx, len(pages) - 1)
         self._update_viewer(current_idx)
         self._update_page_nav()
-        total_blocks = sum(len(page_layout_blocks(page)) for page in pages)
+        total_blocks = sum(self._layout_block_count(page) for page in pages)
         failed = sum(1 for page in pages if page_has_error(page))
         if failed:
             self._set_status_text(
@@ -799,13 +800,13 @@ class LayoutPanel(QWidget):
         total_pages = len(self._pages)
         analyzed_pages = sum(1 for page in self._pages if page_has_layout_blocks(page))
         failed_pages = sum(1 for page in self._pages if page_has_error(page))
-        total_blocks = sum(len(page_layout_blocks(page)) for page in self._pages)
+        total_blocks = sum(self._layout_block_count(page) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
         total_lines = sum(page_ocr_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
         for page in self._pages:
-            for block in page_layout_blocks(page):
-                label = _block_type_label(block.block_type)
+            for view in iter_page_layout_block_views(page):
+                label = _block_type_label(view.block_type)
                 counts[label] = counts.get(label, 0) + 1
         count_text = "，".join(
             f"{label} {count}"
@@ -821,6 +822,10 @@ class LayoutPanel(QWidget):
                 f"类型：{count_text}",
             ])
         )
+
+    @staticmethod
+    def _layout_block_count(page: Page) -> int:
+        return sum(1 for _view in iter_page_layout_block_views(page))
 
     @staticmethod
     def _block_search_fields(block: Block) -> list[str]:
@@ -1456,7 +1461,10 @@ class LayoutPanel(QWidget):
         if page_needs_ocr_rerun(page):
             return []
         chars = []
-        for block in page_layout_blocks(page):
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is None:
+                continue
             if is_ocr_text_invalidated(block):
                 continue
             for line in block_ocr_lines(block):

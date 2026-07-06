@@ -5232,7 +5232,17 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
 
     from PySide6.QtGui import QImage
 
-    from app.models import BBox, Block, BlockOrigin, BlockType, Page
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5241,6 +5251,7 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
         image_b = Path(tmpdir) / "page-b.png"
         QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_a))
         QImage(120, 80, QImage.Format.Format_RGB888).save(str(image_b))
+        drifted_formula = Block(block_type=BlockType.TEXT, bbox=BBox(40, 10, 20, 10))
         pages = [
             Page(
                 image_path=str(image_a),
@@ -5248,7 +5259,7 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
                 height=80,
                 blocks=[
                     Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 20, 10)),
-                    Block(block_type=BlockType.EQUATION, bbox=BBox(40, 10, 20, 10)),
+                    drifted_formula,
                 ],
             ),
             Page(
@@ -5258,6 +5269,35 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
                 blocks=[Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 20, 10))],
             ),
         ]
+        set_layout_snapshot_for_page(
+            pages[0],
+            LayoutSnapshot(
+                page_uid=pages[0].uid,
+                artifact_uid="artifact-1",
+                source_engine="paddleocr-vl",
+                source_run_id="layout-run-1",
+                blocks=(
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.TEXT,
+                        bbox=pages[0].blocks[0].bbox,
+                        order=0,
+                        source_label="text",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                        ocr_policy=OcrPolicy.TEXT_OCR,
+                        uid=pages[0].blocks[0].uid,
+                    ),
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.EQUATION,
+                        bbox=drifted_formula.bbox,
+                        order=1,
+                        source_label="inline_formula",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="inline_formula"),
+                        ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                        uid=drifted_formula.uid,
+                    ),
+                ),
+            ),
+        )
         panel = LayoutPanel()
         try:
             panel.set_pages(pages)
