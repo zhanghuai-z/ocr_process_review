@@ -52,9 +52,9 @@ from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_char_count
 from app.models.ocr_observation import (
-    block_has_ocr_lines,
-    iter_page_ocr_line_occurrences,
-    iter_project_ocr_line_occurrences,
+    block_has_ocr_line_observations,
+    iter_page_ocr_line_observation_occurrences,
+    iter_project_ocr_line_observation_occurrences,
 )
 
 
@@ -197,7 +197,7 @@ def is_block_eligible(block: Block) -> bool:
         return False
     if block.block_type in EXCLUDED_BLOCK_TYPES:
         return False
-    if not block_has_ocr_lines(block):
+    if not block_has_ocr_line_observations(block):
         return False
     return True
 
@@ -431,7 +431,7 @@ class ProbeSampler:
         # 1. 扫整文档收集候选（每个位置即是未来 probe 的 true_char 位置）
         pool: list[_Candidate] = []
         total_cut_cjk = 0
-        for occurrence in iter_project_ocr_line_occurrences(project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(project):
             if not is_block_eligible(occurrence.block):
                 continue
             line = occurrence.line
@@ -804,7 +804,7 @@ def reset_active_store() -> None:
 # ──────────────────────────────────────────────────────────────────
 
 def _probe_line_occurrence(page: Page, key: ProbeKey):
-    for occurrence in iter_page_ocr_line_occurrences(page):
+    for occurrence in iter_page_ocr_line_observation_occurrences(page):
         if occurrence.block_index == key.block_index and occurrence.line_index == key.line_index:
             return occurrence
     return None

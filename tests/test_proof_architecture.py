@@ -1813,6 +1813,25 @@ def test_proof_line_utils_reads_ocr_lines_from_observation_store():
     assert "block_ocr_lines" not in source
 
 
+def test_proof_readers_use_ocr_observation_store_not_block_lines_projection():
+    targets = [
+        Path("app/core/proof_line_facts.py"),
+        Path("app/core/proof_occurrence.py"),
+        Path("app/core/quality_probe.py"),
+        Path("app/services/proof_crop_service.py"),
+    ]
+
+    for path in targets:
+        source = path.read_text(encoding="utf-8")
+        assert "block_ocr_lines" not in source
+        assert "block_has_ocr_lines" not in source
+
+    assert "block_ocr_line_observations" in Path("app/core/proof_line_facts.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations" in Path("app/core/proof_occurrence.py").read_text(encoding="utf-8")
+    assert "block_has_ocr_line_observations" in Path("app/core/quality_probe.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations" in Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(

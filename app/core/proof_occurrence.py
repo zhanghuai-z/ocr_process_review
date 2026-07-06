@@ -14,7 +14,7 @@ from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars
-from app.models.ocr_observation import block_ocr_lines, line_belongs_to_block, line_ocr_bbox
+from app.models.ocr_observation import block_ocr_line_observations, line_ocr_bbox
 
 
 @dataclass(frozen=True)
@@ -278,7 +278,9 @@ def _entry_matches_block_order(entry: Any, view: LayoutBlockView) -> bool:
 
 def _entry_line_in_block(entry: Any, block: Block) -> bool:
     line = getattr(entry, "line", None)
-    return line is not None and line_belongs_to_block(block, line)
+    return line is not None and any(
+        candidate is line for candidate in block_ocr_line_observations(block)
+    )
 
 
 def _identity_key(uid: str, row_id: int | None, fallback: object) -> tuple[object, ...]:
@@ -363,7 +365,7 @@ def _resolve_line_in_matching_blocks(
             continue
         if not _matches_block_identity(view, block_identity):
             continue
-        for line_idx, line in enumerate(block_ocr_lines(block)):
+        for line_idx, line in enumerate(block_ocr_line_observations(block)):
             if _matches_line_identity(line, line_idx, line_identity):
                 return page, block, line, line_idx
     return None
@@ -380,7 +382,7 @@ def _resolve_line_any_block(
         block = view.runtime_block
         if block is None:
             continue
-        for line_idx, line in enumerate(block_ocr_lines(block)):
+        for line_idx, line in enumerate(block_ocr_line_observations(block)):
             if _matches_line_identity(line, line_idx, line_identity):
                 return page, block, line, line_idx
     return None

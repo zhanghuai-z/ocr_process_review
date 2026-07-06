@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from app.core.line_text_contract import line_text_contract
 from app.models import Line, ProofLineState, ProofStatus
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations
 from app.models.ocr_text_observation import line_ocr_review_flags
 
 
@@ -75,7 +75,7 @@ def proof_ocr_text(line: Line) -> str:
 
 
 def proof_block_text(block) -> str:
-    return "\n".join(proof_display_text(line) for line in block_ocr_lines(block))
+    return "\n".join(proof_display_text(line) for line in block_ocr_line_observations(block))
 
 
 def proof_status(line: Line) -> ProofStatus:
