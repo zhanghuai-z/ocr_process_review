@@ -7805,7 +7805,11 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
     import tempfile
     import cv2
     import numpy as np
-    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, Char, LayoutBlockSnapshot, LayoutSnapshot,
+        Line, OcrPolicy, OcrProject, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
     from app.services.ocr_pipeline import OcrPipeline
 
     class PageOcrEngine:
@@ -7847,6 +7851,32 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
         broad = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 220, 80), order=0)
         precise = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 60, 50), order=1)
         page = Page(image_path=img_path, width=320, height=200, blocks=[broad, precise])
+        set_layout_snapshot_for_page(page, LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-page-ocr-assign",
+            source_engine="test",
+            source_run_id="run-page-ocr-assign",
+            blocks=(
+                LayoutBlockSnapshot(
+                    uid=broad.uid,
+                    block_type=BlockType.TEXT,
+                    bbox=broad.bbox,
+                    order=4,
+                    source_label="text",
+                    origin=BlockOrigin(source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                ),
+                LayoutBlockSnapshot(
+                    uid=precise.uid,
+                    block_type=BlockType.TEXT,
+                    bbox=precise.bbox,
+                    order=8,
+                    source_label="text",
+                    origin=BlockOrigin(source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                ),
+            ),
+        ))
         result = OcrPipeline(engine=PageOcrEngine()).process_project(
             OcrProject(name="PageOcrAssign", pages=[page])
         )
@@ -7861,6 +7891,7 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
         assert blocks[-1].note == "PP-OCRv5 unmatched proof lines"
         assert [line.text for line in blocks[-1].lines] == ["丙"]
         assert blocks[-1].block_type == BlockType.TEXT
+        assert blocks[-1].order == 9
     finally:
         os.unlink(img_path)
 

@@ -35,9 +35,9 @@ from app.models import (
 from app.models.layout_block_state import append_layout_block_note_once, set_layout_block_bbox
 from app.models.layout_projection import (
     append_page_layout_block,
-    page_layout_blocks,
     replace_page_layout_blocks,
 )
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
 from app.models.ocr_observation import (
     append_block_ocr_line,
@@ -666,7 +666,7 @@ class OcrPipeline:
         synthetic = Block(
             block_type=BlockType.TEXT,
             bbox=merged,
-            order=(max((block.order for block in page_layout_blocks(page)), default=-1) + 1),
+            order=(max((view.order for view in iter_page_layout_block_views(page)), default=-1) + 1),
             note="PP-OCRv5 unmatched proof lines",
         )
         replace_block_ocr_lines(synthetic, unmatched)
