@@ -26,7 +26,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
-from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_character_observation import replace_line_ocr_char_observations
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
@@ -41,7 +41,7 @@ def _qapp():
 def _make_project(text: str) -> OcrProject:
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, len(text) * 10, 20))
     line.id = 8401
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(
             char=ch,
             confidence=0.9,
@@ -69,7 +69,7 @@ def _load_vproof(text: str):
 def _make_page(text: str, page_number: int, page_id: int, line_id: int) -> Page:
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, len(text) * 10, 20))
     line.id = line_id
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(
             char=ch,
             confidence=0.9,

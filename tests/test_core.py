@@ -26,7 +26,7 @@ from app.models.ocr_observation import (
     project_has_any_ocr_result,
     project_ocr_line_count,
 )
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
 
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import (
@@ -185,7 +185,7 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
         line_ocr_char_count,
         line_ocr_chars,
         replace_line_ocr_char_span,
-        replace_line_ocr_chars,
+        replace_line_ocr_char_observations,
     )
 
     line = Line(text="甲乙", confidence=0.95, bbox=BBox(0, 0, 20, 10))
@@ -193,7 +193,7 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
     second = Char(char="乙", confidence=0.96, bbox=BBox(10, 0, 10, 10))
 
     assert not line_has_ocr_chars(line)
-    replace_line_ocr_chars(line, [first, second])
+    replace_line_ocr_char_observations(line.uid, [first, second])
     assert line_ocr_chars(line) == [first, second]
     assert line_ocr_char_count(line) == 2
     assert line_ocr_char_at(line, 1) is second
@@ -206,7 +206,7 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
     assert line_ocr_chars(line) == []
     assert line.chars == []
 
-    replace_line_ocr_chars(line, [first, second])
+    replace_line_ocr_char_observations(line.uid, [first, second])
     third = Char(char="丙", confidence=0.97, bbox=BBox(10, 0, 10, 10))
     replace_line_ocr_char_span(line, 1, 2, [third])
     assert line_ocr_chars(line) == [first, third]
@@ -219,13 +219,12 @@ def test_ocr_character_observation_uid_store_overrides_stale_line_projection():
         line_ocr_chars,
         line_ocr_chars_by_uid,
         replace_line_ocr_char_observations,
-        replace_line_ocr_chars,
     )
 
     line = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 100, 20))
     stale = Char(char="旧", confidence=0.1, bbox=BBox(0, 0, 10, 10))
     fresh = Char(char="新", confidence=0.9, bbox=BBox(0, 0, 10, 10))
-    replace_line_ocr_chars(line, [stale])
+    replace_line_ocr_char_observations(line.uid, [stale])
     line.chars = [stale]
 
     replace_line_ocr_char_observations(line.uid, [fresh])
@@ -2735,7 +2734,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
         )
         line2 = copy.deepcopy(line1)
         line2.uid = new_entity_uid("line")
-        replace_line_ocr_chars(line2, list(line2.chars))
+        replace_line_ocr_char_observations(line2.uid, list(line2.chars))
         for char in line_ocr_chars(line2):
             char.uid = new_entity_uid("char")
         line2.text = "乙"
@@ -2752,7 +2751,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
             copied_line.uid = new_entity_uid("line")
             for char in copied_chars:
                 char.uid = new_entity_uid("char")
-            replace_line_ocr_chars(copied_line, copied_chars)
+            replace_line_ocr_char_observations(copied_line.uid, copied_chars)
         block_copy.lines[0].text = "丙"
         block_copy.lines[0].ocr_text = "丙"
         set_line_proof_text(block_copy.lines[0], "丙")
@@ -2880,12 +2879,12 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
                 char_target_line = next(line for line in char_block.lines if line.uid == uids["char_target_line"])
                 source_chars = line_ocr_chars(char_source_line)
                 moved_char = source_chars[0]
-                replace_line_ocr_chars(char_source_line, source_chars[1:])
+                replace_line_ocr_char_observations(char_source_line.uid, source_chars[1:])
 
                 page1.blocks.remove(moved_block)
                 page2.blocks.append(moved_block)
                 line_target_block.lines.append(source_line)
-                replace_line_ocr_chars(char_target_line, [*line_ocr_chars(char_target_line), moved_char])
+                replace_line_ocr_char_observations(char_target_line.uid, [*line_ocr_chars(char_target_line), moved_char])
 
                 if block_order == "new_parent_first":
                     page1.blocks.remove(line_target_block)
@@ -3643,7 +3642,7 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     edited = Line(text="OCR原文", confidence=0.9, bbox=bb)
     set_line_proof_status(edited, ProofStatus.MODIFIED)
     edited.ocr_text = "OCR原文"
-    replace_line_ocr_chars(edited, [Char(char="O", confidence=0.9, bbox=bb)])
+    replace_line_ocr_char_observations(edited.uid, [Char(char="O", confidence=0.9, bbox=bb)])
     set_line_proof_text(edited, "人工终审")
     table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
     page = Page(
@@ -20093,9 +20092,9 @@ def test_char_index_service_replace_pages_preserves_other_page_entries():
 
     service = CharIndexService(include_non_cjk=True, include_fallback=True).build([page1, page2])
     set_line_proof_text(line1, "丙")
-    from app.models.ocr_character_observation import replace_line_ocr_chars
+    from app.models.ocr_character_observation import replace_line_ocr_char_observations
 
-    replace_line_ocr_chars(line1, [
+    replace_line_ocr_char_observations(line1.uid, [
         Char(char="丙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
     ])
 

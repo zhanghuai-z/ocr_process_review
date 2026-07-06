@@ -16,7 +16,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockType, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
@@ -49,7 +49,7 @@ def _make_project_with_char_crops(text: str, *, n_pages: int = 1, lines_per_page
         lines = []
         for line_no in range(lines_per_page):
             line = Line(text=text, confidence=0.9, bbox=BBox(0, line_no * 24, len(text) * 10, 20))
-            replace_line_ocr_chars(line, [
+            replace_line_ocr_char_observations(line.uid, [
                 Char(
                     char=ch,
                     confidence=0.9,
@@ -476,7 +476,7 @@ def test_quality_stats_dialog_toggle_on_then_off(monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     # 文本中刻意包含已知互为近形的字（己/已/巳、体/休、拼/并）以保证 sampler 能投放
     line = Line(text="今天已学己事拼并体休巳过本身", confidence=0.9, bbox=BBox(0, 0, 240, 20))
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(
             char=ch,
             confidence=0.9,
@@ -695,7 +695,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
     proj = _make_project("AAAA")
     page = proj.pages[0]
     line0 = page.blocks[0].lines[0]
-    replace_line_ocr_chars(line0, [
+    replace_line_ocr_char_observations(line0.uid, [
         Char(char="A", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
         for i in range(4)
     ])
@@ -908,7 +908,7 @@ def test_v_proof_undo_action_failure_preserves_current_page_and_editor_state():
     assert v._vproof_undo_stack
     replacement = Line(text="CCCC", confidence=0.9, bbox=BBox(0, 0, 80, 20))
     replacement.id = 97003
-    replace_line_ocr_chars(replacement, [
+    replace_line_ocr_char_observations(replacement.uid, [
         Char(char="C", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
         for i in range(4)
     ])
@@ -2211,7 +2211,7 @@ def test_hproof_formula_slot_geometry_keeps_single_char_word_atom_visible():
     formula = "$ F $"
     text = f"取o；{formula}在"
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, 120, 24))
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(char="取", confidence=0.9, bbox=BBox(0, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="取"),
         Char(char="o", confidence=0.19, bbox=BBox(22, 0, 10, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="o"),
         Char(char="；", confidence=0.4, bbox=BBox(36, 0, 8, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="；"),

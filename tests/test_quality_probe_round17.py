@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from app.core import quality_probe as qp
 from app.core.proof_state_bus import ProofStateBus
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_character_observation import replace_line_ocr_char_observations
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +37,7 @@ def _make_long_project_with_pairs() -> OcrProject:
     for pi in range(10):
         chunk = text[pi * per_page:(pi + 1) * per_page]
         line = Line(text=chunk, confidence=0.9, bbox=BBox(0, 0, 800, 20))
-        replace_line_ocr_chars(line, [
+        replace_line_ocr_char_observations(line.uid, [
             Char(char=ch, confidence=0.9, bbox=BBox(i * 8, 0, 8, 20),
                  bbox_source="ocr", bbox_granularity="char", token_text=ch)
             for i, ch in enumerate(chunk)
@@ -75,7 +75,7 @@ def test_round17_default_max_per_true_char_is_relaxed():
 
 def test_round17_observe_slot_edit_publishes_event():
     line = Line(text="己已", confidence=0.9, bbox=BBox(0, 0, 40, 20))
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(char="己", confidence=0.9, bbox=BBox(0, 0, 20, 20),
              bbox_source="ocr", bbox_granularity="char", token_text="己"),
         Char(char="已", confidence=0.9, bbox=BBox(20, 0, 20, 20),
@@ -110,7 +110,7 @@ def test_round17_corrected_probe_uses_char_index_without_gallery_extras():
     from app.ui.proof.v_proof import VProofPanel
 
     line = Line(text="己已", confidence=0.9, bbox=BBox(0, 0, 40, 20))
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(char="己", confidence=0.9, bbox=BBox(0, 0, 20, 20),
              bbox_source="ocr", bbox_granularity="char", token_text="己"),
         Char(char="已", confidence=0.9, bbox=BBox(20, 0, 20, 20),
@@ -148,7 +148,7 @@ def test_round17_dialog_realtime_refresh_on_probe_observed(monkeypatch):
 
     # 构造 active store + 假项目
     line = Line(text="己已", confidence=0.9, bbox=BBox(0, 0, 40, 20))
-    replace_line_ocr_chars(line, [
+    replace_line_ocr_char_observations(line.uid, [
         Char(char="己", confidence=0.9, bbox=BBox(0, 0, 20, 20),
              bbox_source="ocr", bbox_granularity="char", token_text="己"),
         Char(char="已", confidence=0.9, bbox=BBox(20, 0, 20, 20),

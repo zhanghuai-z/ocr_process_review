@@ -12,7 +12,6 @@ from .project import BBox, Char, Line
 from .ocr_character_observation_store import (
     ocr_chars_for_line,
     ocr_chars_for_line_uid,
-    set_ocr_chars_for_line,
     set_ocr_chars_for_line_uid,
 )
 
@@ -40,10 +39,6 @@ def line_has_ocr_chars(line: Line) -> bool:
     return bool(line_ocr_chars(line))
 
 
-def replace_line_ocr_chars(line: Line, chars: Iterable[Char]) -> None:
-    set_ocr_chars_for_line(line, list(chars))
-
-
 def replace_line_ocr_char_observations(line_uid: str, chars: Iterable[Char]) -> None:
     set_ocr_chars_for_line_uid(line_uid, list(chars))
 
@@ -57,7 +52,7 @@ def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
 
 
 def clear_line_ocr_chars(line: Line) -> None:
-    replace_line_ocr_chars(line, [])
+    replace_line_ocr_char_observations(line.uid, [])
 
 
 def line_ocr_char_at(line: Line, index: int) -> Char:

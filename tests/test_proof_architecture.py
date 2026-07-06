@@ -558,11 +558,13 @@ def test_line_ocr_chars_access_goes_through_character_observation_boundary():
                 offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
     source = Path("app/models/ocr_character_observation.py").read_text(encoding="utf-8")
+    assert "def replace_line_ocr_chars" not in source
     assert "ocr_chars_for_line(line, line.chars)" not in source
     assert "set_ocr_chars_for_line(line, projected)" not in source
     store_source = Path("app/models/ocr_character_observation_store.py").read_text(encoding="utf-8")
     assert "_CHARS_BY_LINE_UID" in store_source
     assert "_CHARS_BY_LINE_OBJECT" not in store_source
+    assert "def set_ocr_chars_for_line(" not in store_source
     assert "weakref" not in store_source
 
 
