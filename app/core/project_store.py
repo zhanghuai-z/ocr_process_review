@@ -32,7 +32,7 @@ from app.models.layout_block_state import (
     set_layout_block_source_label,
     set_layout_block_type,
 )
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
 from app.models.ocr_observation import (
     block_ocr_line_observations,
     iter_project_ocr_line_observation_occurrences,
@@ -2174,7 +2174,7 @@ class ProjectStore:
                     field="line.review_flags_json",
                 ),
             )
-            replace_line_ocr_chars(line, self._load_chars(line.id))
+            replace_line_ocr_char_observations(line.uid, self._load_chars(line.id))
             lines.append(line)
         return lines
 

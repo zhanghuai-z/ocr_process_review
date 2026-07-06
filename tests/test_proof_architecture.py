@@ -606,6 +606,14 @@ def test_char_bbox_utils_writes_chars_by_line_uid():
     assert "line.chars" not in source
 
 
+def test_project_store_loads_chars_by_line_uid_observation():
+    source = Path("app/core/project_store.py").read_text(encoding="utf-8")
+
+    assert "replace_line_ocr_char_observations" in source
+    assert "replace_line_ocr_chars" not in source
+    assert "line.uid" in source
+
+
 def test_carrier_detection_uses_proof_char_text_contract():
     service_paths = {
         Path("app/services/char_index_service.py"),
