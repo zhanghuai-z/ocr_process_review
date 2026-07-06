@@ -25,6 +25,7 @@ from app.core.proof_state import ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
@@ -146,6 +147,7 @@ def test_vproof_undo_resolves_occurrence_after_line_moves_between_blocks():
     moved_block.lines = [line]
     replace_block_ocr_line_observations(original_block.uid, [])
     replace_block_ocr_line_observations(moved_block.uid, [line])
+    sync_page_layout_snapshot_from_projection(page, source_engine="test_move")
 
     assert v._undo_vproof_edit() is True
     assert moved_block.lines[0] is line
@@ -167,6 +169,7 @@ def test_merge_pages_restores_selected_occurrence_to_new_line_object():
     new_page.blocks[0].uid = page.blocks[0].uid
     new_page.blocks[0].lines[0].uid = page.blocks[0].lines[0].uid
     replace_block_ocr_line_observations(new_page.blocks[0].uid, list(new_page.blocks[0].lines))
+    sync_page_layout_snapshot_from_projection(new_page, source_engine="test_rebind")
 
     v.merge_pages([new_page])
 
