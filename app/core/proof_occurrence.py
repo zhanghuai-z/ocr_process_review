@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_ocr_lines, line_belongs_to_block, line_ocr_bbox
 
@@ -235,13 +235,19 @@ def resolve_entry_owner(
     for page in pages:
         if not _entry_matches_page(entry, page):
             continue
-        for block in page_layout_blocks(page):
-            if not _entry_matches_block(entry, block):
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is None:
+                continue
+            if not _entry_matches_block(entry, view):
                 continue
             if _entry_line_in_block(entry, block):
                 return page, block
-        for block in page_layout_blocks(page):
-            if _entry_matches_block_order(entry, block) and _entry_line_in_block(entry, block):
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is None:
+                continue
+            if _entry_matches_block_order(entry, view) and _entry_line_in_block(entry, block):
                 return page, block
     return None
 
@@ -259,15 +265,15 @@ def _entry_matches_page(entry: Any, page: Page) -> bool:
     )
 
 
-def _entry_matches_block(entry: Any, block: Block) -> bool:
+def _entry_matches_block(entry: Any, view: LayoutBlockView) -> bool:
     block_uid = str(getattr(entry, "block_uid", "") or "")
     if block_uid:
-        return block.uid == block_uid
-    return _entry_matches_block_order(entry, block)
+        return view.uid == block_uid
+    return _entry_matches_block_order(entry, view)
 
 
-def _entry_matches_block_order(entry: Any, block: Block) -> bool:
-    return block.order == int(getattr(entry, "block_order", 0) or 0)
+def _entry_matches_block_order(entry: Any, view: LayoutBlockView) -> bool:
+    return view.order == int(getattr(entry, "block_order", 0) or 0)
 
 
 def _entry_line_in_block(entry: Any, block: Block) -> bool:
@@ -323,14 +329,15 @@ def _matches_page_identity(page: Page, identity: tuple[object, ...]) -> bool:
     return False
 
 
-def _matches_block_identity(block: Block, identity: tuple[object, ...]) -> bool:
+def _matches_block_identity(view: LayoutBlockView, identity: tuple[object, ...]) -> bool:
     kind = identity[0] if identity else ""
     if kind == "uid":
-        return block.uid == identity[1]
+        return view.uid == identity[1]
     if kind == "id":
-        return block.id == identity[1]
+        block = view.runtime_block
+        return block is not None and block.id == identity[1]
     if kind == "fallback":
-        return block.order == identity[1]
+        return view.order == identity[1]
     return False
 
 
@@ -350,8 +357,11 @@ def _resolve_line_in_matching_blocks(
     block_identity: tuple[object, ...],
     line_identity: tuple[object, ...],
 ) -> tuple[Page, Block, Line, int] | None:
-    for block in page_layout_blocks(page):
-        if not _matches_block_identity(block, block_identity):
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
+        if not _matches_block_identity(view, block_identity):
             continue
         for line_idx, line in enumerate(block_ocr_lines(block)):
             if _matches_line_identity(line, line_idx, line_identity):
@@ -366,7 +376,10 @@ def _resolve_line_any_block(
     kind = line_identity[0] if line_identity else ""
     if kind not in {"uid", "id"}:
         return None
-    for block in page_layout_blocks(page):
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
         for line_idx, line in enumerate(block_ocr_lines(block)):
             if _matches_line_identity(line, line_idx, line_identity):
                 return page, block, line, line_idx

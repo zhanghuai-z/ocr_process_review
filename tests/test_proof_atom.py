@@ -3,7 +3,11 @@ from app.core.proof_atom import ProofAtomKind, build_line_proof_atoms, has_non_c
 from app.core.proof_char_text import chars_display_text
 from app.core.proof_occurrence import resolve_entry_owner
 from app.core.proof_projection import build_proof_line_projection
-from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models import (
+    BBox, Block, BlockOrigin, BlockType, Char, LayoutBlockSnapshot, LayoutSnapshot,
+    Line, OcrPolicy, OcrProject, Page,
+)
+from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.services.char_index_service import CharIndexService
 from app.services.proof_probe_text_service import save_displayed_edit_result
 
@@ -120,6 +124,44 @@ def test_resolve_entry_owner_prefers_stable_ids_and_keeps_runtime_fallback():
     entry.page_path = page.display_image_path
     entry.page_number = page.page_number
     entry.block_order = block.order
+    assert resolve_entry_owner([page], entry) == (page, block)
+
+
+def test_resolve_entry_owner_uses_layout_snapshot_order_for_runtime_fallback():
+    line = _line("甲", [Char("甲", 0.9, BBox(0, 0, 10, 20))])
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 20, 20), lines=[line], order=9)
+    page = Page(image_path="/tmp/proof-entry-owner-snapshot.png", width=40, height=40, page_number=3)
+    page.blocks = [block]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-entry-owner",
+        source_engine="test",
+        source_run_id="run-entry-owner",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.TEXT,
+                bbox=BBox(0, 0, 20, 20),
+                order=2,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+
+    class Entry:
+        pass
+
+    entry = Entry()
+    entry.page_uid = page.uid
+    entry.page_id = None
+    entry.page_path = ""
+    entry.page_number = 0
+    entry.block_uid = ""
+    entry.block_order = 2
+    entry.line = line
+
     assert resolve_entry_owner([page], entry) == (page, block)
 
 
