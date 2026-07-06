@@ -1825,6 +1825,85 @@ def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
     assert [line.text for _block, line, _idx in rows] == ["其中 $ \\beta_t $ 显著"]
 
 
+def test_hproof_formula_debug_uses_layout_snapshot_type_over_runtime_projection():
+    from app.models import LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.proof.h_proof import iter_unique_page_hproof_debug_lines
+
+    line = Line(
+        text="E=mc2",
+        confidence=0.9,
+        bbox=BBox(0, 0, 80, 12),
+    )
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 12),
+        lines=[line],
+        source_label="text",
+    )
+    page = Page(image_path="/tmp/hproof-debug-snapshot.png", width=100, height=50, page_number=1)
+    page.blocks = [block]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-hproof-debug",
+        source_engine="test",
+        source_run_id="run-hproof-debug",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.EQUATION,
+                bbox=block.bbox,
+                order=0,
+                source_label="display_formula",
+                origin=BlockOrigin(source_label="display_formula"),
+                ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            ),
+        ),
+    ))
+
+    rows = list(iter_unique_page_hproof_debug_lines(page, formulas=True))
+
+    assert [(line.text, idx) for _block, line, idx in rows] == [("E=mc2", 0)]
+
+
+def test_vproof_entry_lookup_uses_stable_block_uid_when_runtime_order_drifts():
+    from app.services.char_index_service import CharEntry
+    from app.ui.proof.v_proof import VProofPanel
+
+    line = Line(
+        text="甲乙",
+        confidence=0.9,
+        bbox=BBox(0, 0, 40, 12),
+        chars=[
+            Char("甲", 0.9, BBox(0, 0, 20, 12)),
+            Char("乙", 0.9, BBox(20, 0, 20, 12)),
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 12), lines=[line], order=9)
+    page = Page(image_path="/tmp/vproof-entry-owner.png", width=100, height=50, page_number=1)
+    page.blocks = [block]
+    entry = CharEntry(
+        char="乙",
+        page_path=page.display_image_path,
+        page_number=page.page_number,
+        line=line,
+        char_idx=1,
+        bbox=BBox(20, 0, 20, 12),
+        page_uid=page.uid,
+        block_uid=block.uid,
+        line_uid=line.uid,
+        block_order=2,
+        line_idx=0,
+    )
+
+    panel = VProofPanel()
+    panel.load_pages([page])
+
+    assert panel._block_for_entry(entry) is block
+    assert panel._lookup_token_at_entry_position(entry) == "乙"
+    panel.close()
+
+
 def test_phase25_only_active_editor_visible_and_weak_cursor():
     """横校只在当前行显示文本编辑层；上下文行只显示图像层。"""
     from app.ui.proof.h_proof import HProofPanel

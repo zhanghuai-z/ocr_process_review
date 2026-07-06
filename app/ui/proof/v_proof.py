@@ -41,7 +41,7 @@ from PySide6.QtWidgets import (
 
 from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_observation import (
     block_ocr_line_at,
     block_ocr_line_count,
@@ -935,7 +935,7 @@ class VProofPanel(QWidget):
             page_id=page.id,
             block_uid=block.uid,
             block_id=block.id,
-            block_index=page_layout_blocks(page).index(block) if block in page_layout_blocks(page) else -1,
+            block_index=self._layout_block_index(page, block),
             line_uid=line.uid,
             line_id=line.id,
             line_index=line_index,
@@ -981,11 +981,11 @@ class VProofPanel(QWidget):
                 return resolved_page, block, line, line_index
         block: Optional[Block] = None
         if edit.block_uid:
-            block = next((b for b in page_layout_blocks(page) if b.uid == edit.block_uid), None)
+            block = self._layout_block_by_uid(page, edit.block_uid)
         if block is None and edit.block_id is not None:
-            block = next((b for b in page_layout_blocks(page) if b.id == edit.block_id), None)
-        if block is None and 0 <= edit.block_index < len(page_layout_blocks(page)):
-            block = page_layout_blocks(page)[edit.block_index]
+            block = self._layout_block_by_id(page, edit.block_id)
+        if block is None:
+            block = self._layout_block_at_index(page, edit.block_index)
         if block is None:
             return None
 
@@ -2079,18 +2079,18 @@ class VProofPanel(QWidget):
         模型里查那个槽位现在是什么字。改字后原字消失时用它找到新字。"""
         if not self._session.pages:
             return None
-        for page in self._session.pages:
-            if page.page_number != entry.page_number:
-                continue
-            for block in page_layout_blocks(page):
-                if block.order != entry.block_order:
-                    continue
-                if not (0 <= entry.line_idx < block_ocr_line_count(block)):
-                    continue
-                line = block_ocr_line_at(block, entry.line_idx)
-                txt = proof_display_text(line)
-                if 0 <= entry.char_idx < len(txt):
-                    return txt[entry.char_idx]
+        owner = self._page_block_for_entry(entry)
+        if owner is None:
+            return None
+        _page, block = owner
+        line = entry.line if line_belongs_to_block(block, entry.line) else None
+        if line is None and 0 <= entry.line_idx < block_ocr_line_count(block):
+            line = block_ocr_line_at(block, entry.line_idx)
+        if line is None:
+            return None
+        txt = proof_display_text(line)
+        if 0 <= entry.char_idx < len(txt):
+            return txt[entry.char_idx]
         return None
 
     def _select_all_gallery(self) -> None:
@@ -2226,12 +2226,36 @@ class VProofPanel(QWidget):
         return "缺失" if score is None else f"{score:.2f}"
 
     def _block_for_entry(self, entry: CharEntry) -> Optional[Block]:
-        for page in self._session.pages:
-            if page.page_number != entry.page_number:
-                continue
-            for block in page_layout_blocks(page):
-                if block.order == entry.block_order:
-                    return block
+        owner = self._page_block_for_entry(entry)
+        if owner is None:
+            return None
+        return owner[1]
+
+    def _layout_block_index(self, page: Page, block: Block) -> int:
+        for view in iter_page_layout_block_views(page):
+            if view.runtime_block is block or view.uid == block.uid:
+                return view.snapshot_index
+        return -1
+
+    def _layout_block_by_uid(self, page: Page, block_uid: str) -> Optional[Block]:
+        for view in iter_page_layout_block_views(page):
+            if view.uid == block_uid and view.runtime_block is not None:
+                return view.runtime_block
+        return None
+
+    def _layout_block_by_id(self, page: Page, block_id: int) -> Optional[Block]:
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is not None and block.id == block_id:
+                return block
+        return None
+
+    def _layout_block_at_index(self, page: Page, block_index: int) -> Optional[Block]:
+        if block_index < 0:
+            return None
+        for view in iter_page_layout_block_views(page):
+            if view.snapshot_index == block_index:
+                return view.runtime_block
         return None
 
     # ─────────────────── Gallery 点击 ───────────────────────

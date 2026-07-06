@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models import Block, BlockType, Line, Page, ProofStatus
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_has_ocr_lines, block_ocr_lines
 from app.core.block_attributes import block_attributes, normalize_source_label, semantic_block_type
@@ -559,6 +559,39 @@ def _is_debug_table_block(block: Block) -> bool:
     )
 
 
+def _view_debug_labels(view: LayoutBlockView, block: Block) -> set[str]:
+    labels = set(_debug_block_labels(block))
+    labels.add(normalize_source_label(view.block_type.value))
+    labels.add(normalize_source_label(view.source_label))
+    labels.add(normalize_source_label(view.origin.source_label))
+    labels.discard("")
+    return labels
+
+
+def _is_debug_formula_view(view: LayoutBlockView, block: Block) -> bool:
+    labels = _view_debug_labels(view, block)
+    if labels & _DEBUG_FORMULA_EXCLUDED_LABELS:
+        return False
+    if view.block_type == BlockType.EQUATION or semantic_block_type(block) == BlockType.EQUATION:
+        return True
+    return any(
+        token in label
+        for label in labels
+        for token in _DEBUG_FORMULA_LABEL_TOKENS
+    )
+
+
+def _is_debug_table_view(view: LayoutBlockView, block: Block) -> bool:
+    if view.block_type == BlockType.TABLE or semantic_block_type(block) == BlockType.TABLE:
+        return True
+    labels = _view_debug_labels(view, block)
+    return any(
+        token in label
+        for label in labels
+        for token in _DEBUG_TABLE_LABEL_TOKENS
+    )
+
+
 def _debug_line_kind(block: Block, line: Line) -> str:
     if (_is_debug_formula_block(block) and not _line_is_formula_marker_only(line)) or _line_has_formula_source(line):
         return "公式"
@@ -587,9 +620,12 @@ def iter_unique_page_hproof_debug_lines(
     if not formulas and not tables:
         return
     seen: list[tuple[str, object]] = []
-    for block in page_layout_blocks(page):
-        formula_block = _is_debug_formula_block(block)
-        table_block = _is_debug_table_block(block)
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
+        formula_block = _is_debug_formula_view(view, block)
+        table_block = _is_debug_table_view(view, block)
         if formulas and formula_block and not block_has_ocr_lines(block):
             synthetic = _synthetic_block_debug_line(page, block)
             if synthetic is not None and not _line_is_formula_marker_only(synthetic):
