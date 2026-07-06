@@ -1104,8 +1104,6 @@ class LayoutPanel(QWidget):
                 ))
                 if is_changed:
                     changed += 1
-            for order, block in enumerate(page_layout_blocks(page)):
-                set_layout_block_order(block, order)
             self.block_contract_changed.emit(page.page_number, "block_type_changed")
         self._show_page_layers(self._pages[self._current_page_idx])
         self._rebuild_heading_outline()
@@ -1801,10 +1799,12 @@ class LayoutPanel(QWidget):
         return cached
 
     def _blocks_intersecting_bbox(self, page: Page, bbox: BBox) -> list[Block]:
-        return [
-            block for block in page_layout_blocks(page)
-            if self._bbox_hits_frame(bbox, block.bbox)
-        ]
+        blocks: list[Block] = []
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is not None and self._bbox_hits_frame(bbox, view.bbox):
+                blocks.append(block)
+        return blocks
 
     @staticmethod
     def _draw_merge_candidates(blocks: list[Block], block_type: BlockType) -> list[Block]:
@@ -1835,10 +1835,10 @@ class LayoutPanel(QWidget):
     def _infer_formula_source_label_for_bbox(self, page: Page, bbox: BBox, *, exclude: Block | None = None) -> str:
         cx = (bbox.x1 + bbox.x2) / 2.0
         cy = (bbox.y1 + bbox.y2) / 2.0
-        for block in page_layout_blocks(page):
-            if block is exclude or block.block_type != BlockType.TEXT:
+        for view in iter_page_layout_block_views(page):
+            if view.runtime_block is exclude or view.block_type != BlockType.TEXT:
                 continue
-            if not (block.bbox.x1 <= cx <= block.bbox.x2 and block.bbox.y1 <= cy <= block.bbox.y2):
+            if not (view.bbox.x1 <= cx <= view.bbox.x2 and view.bbox.y1 <= cy <= view.bbox.y2):
                 continue
             return "inline_formula"
         return "display_formula"

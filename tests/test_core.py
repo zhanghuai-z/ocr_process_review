@@ -5585,6 +5585,54 @@ def test_layout_panel_draw_merge_uses_large_box_and_removes_overlap():
     print("test_layout_panel_draw_merge_uses_large_box_and_removes_overlap PASSED")
 
 
+def test_layout_panel_bbox_hit_and_formula_label_use_layout_snapshot_view():
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    text = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(120, 60, 150, 80), source_label="text")
+    snapshot_bbox = BBox.from_xyxy(10, 10, 100, 40)
+    page = Page(image_path="", width=160, height=100, blocks=[text])
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=snapshot_bbox,
+                    order=0,
+                    source_label="text",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    uid=text.uid,
+                ),
+            ),
+        ),
+    )
+    panel = LayoutPanel()
+    try:
+        assert panel._blocks_intersecting_bbox(page, BBox.from_xyxy(95, 12, 105, 30)) == [text]
+        assert panel._infer_formula_source_label_for_bbox(page, BBox.from_xyxy(30, 12, 40, 24)) == "inline_formula"
+    finally:
+        panel.close()
+
+    print("test_layout_panel_bbox_hit_and_formula_label_use_layout_snapshot_view PASSED")
+
+
 def test_layout_panel_draw_inside_text_frame_does_not_merge_parent():
     from pathlib import Path
     import tempfile
