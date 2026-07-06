@@ -1490,6 +1490,9 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     assert "LayoutEditService" in layout_source
     assert "LayoutEditCommand" in layout_source
     assert "self._layout_edit_service.apply(" in layout_source
+    command_class_source = edit_service_source.split("class LayoutEditCommand:", 1)[1].split("class LayoutEditResult:", 1)[0]
+    assert "block: Block | None" not in command_class_source
+    assert "def _require_block(" not in edit_service_source
     assert "block_geometry_change_requested" in viewer_source
     assert "self._viewer.block_geometry_change_requested.connect(" in layout_source
     assert "self._viewer.block_moved.connect(" not in layout_source

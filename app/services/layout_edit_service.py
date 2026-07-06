@@ -75,7 +75,6 @@ _PRESERVE_EXPLICIT_SOURCE_LABELS = {
 class LayoutEditCommand:
     op: str
     page: Page
-    block: Block | None = None
     block_uid: str = ""
     block_uids: tuple[str, ...] = ()
     snapshot_blocks: tuple[LayoutBlockSnapshot, ...] = ()
@@ -209,12 +208,6 @@ class LayoutEditService:
         if command.op == "restore_blocks":
             return self._restore_blocks(command.page, command.snapshot_blocks, before=command.before)
         raise ValueError(f"Unsupported layout edit command: {command.op}")
-
-    @staticmethod
-    def _require_block(command: LayoutEditCommand) -> Block:
-        if command.block is None:
-            raise ValueError(f"{command.op} requires a block")
-        return command.block
 
     @staticmethod
     def _require_block_uid(command: LayoutEditCommand) -> str:
