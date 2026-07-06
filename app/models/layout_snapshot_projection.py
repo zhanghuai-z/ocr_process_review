@@ -17,6 +17,7 @@ def project_layout_snapshot_to_blocks(snapshot: LayoutSnapshot) -> list[Block]:
             source_label=block.source_label,
             origin=block.origin,
             ocr_policy=block.ocr_policy,
+            uid=block.uid,
         )
         for block in snapshot.blocks
     ]
@@ -60,7 +61,8 @@ def sync_page_layout_snapshot_from_projection(
 def adopt_page_layout_snapshot(page: Page, snapshot: LayoutSnapshot) -> list[Block]:
     blocks = project_layout_snapshot_to_blocks(snapshot)
     replace_page_layout_blocks(page, blocks)
-    set_layout_snapshot_for_page(page, snapshot)
+    adopted_snapshot = _snapshot_with_projected_block_uids(snapshot, blocks)
+    set_layout_snapshot_for_page(page, adopted_snapshot)
     return blocks
 
 
@@ -73,6 +75,37 @@ def _snapshot_from_block(block: Block, *, order: int) -> LayoutBlockSnapshot:
         origin=block.origin or _origin_from_block(block),
         ocr_policy=block.ocr_policy,
         note=block.note,
+        uid=block.uid,
+    )
+
+
+def _snapshot_with_projected_block_uids(
+    snapshot: LayoutSnapshot,
+    blocks: list[Block],
+) -> LayoutSnapshot:
+    if len(snapshot.blocks) != len(blocks):
+        return snapshot
+    projected_blocks = tuple(
+        LayoutBlockSnapshot(
+            block_type=block_snapshot.block_type,
+            bbox=block_snapshot.bbox,
+            order=block_snapshot.order,
+            source_label=block_snapshot.source_label,
+            origin=block_snapshot.origin,
+            ocr_policy=block_snapshot.ocr_policy,
+            note=block_snapshot.note,
+            uid=block.uid,
+        )
+        for block_snapshot, block in zip(snapshot.blocks, blocks)
+    )
+    if projected_blocks == snapshot.blocks:
+        return snapshot
+    return LayoutSnapshot(
+        page_uid=snapshot.page_uid,
+        artifact_uid=snapshot.artifact_uid,
+        source_engine=snapshot.source_engine,
+        source_run_id=snapshot.source_run_id,
+        blocks=projected_blocks,
     )
 
 

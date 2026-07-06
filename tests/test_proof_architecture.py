@@ -1622,9 +1622,14 @@ def test_layout_snapshot_contract_lives_in_model_layer():
     assert "def adopt_page_layout_snapshot" in projection_source
 
 
-def test_project_store_rebuilds_layout_snapshot_without_service_dependency():
+def test_project_store_persists_layout_snapshot_without_service_dependency():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     assert "from app.models.layout_snapshot_projection import" in source
+    assert "CREATE TABLE IF NOT EXISTS layout_snapshot" in source
+    assert "def _save_layout_snapshot" in source
+    assert "def _load_layout_snapshot" in source
+    assert "layout_snapshot_for_page(" in source
+    assert "set_layout_snapshot_for_page(" in source
     assert "sync_page_layout_snapshot_from_projection(" in source
     assert "from app.services.layout_snapshot" not in source
 
@@ -1641,7 +1646,7 @@ def test_truth_map_records_layout_snapshot_as_current_boundary():
     source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
 
     assert "LayoutSnapshot`：当前采用的版面真值 contract" in source
-    assert "LayoutSnapshot` model contract 已作为 API 版面分析和人工编辑的当前版面真值边界" in source
+    assert "SQLite `layout_snapshot` 表已作为 API 版面分析、人工编辑和项目保存/加载" in source
     assert "后续应抽 `PaddleArtifact`、`LayoutSnapshot`" not in source
 
 

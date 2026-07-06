@@ -22,6 +22,7 @@ class LayoutBlockSnapshot:
     origin: BlockOrigin
     ocr_policy: OcrPolicy
     note: str = ""
+    uid: str = ""
 
 
 @dataclass(frozen=True)

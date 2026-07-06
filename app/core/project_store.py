@@ -21,7 +21,9 @@ from app.models import (
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_lines,
@@ -192,6 +194,21 @@ CREATE TABLE IF NOT EXISTS layout_edit_event (
 
 CREATE INDEX IF NOT EXISTS idx_layout_edit_event_project_page
     ON layout_edit_event(project_id, page_uid);
+
+CREATE TABLE IF NOT EXISTS layout_snapshot (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    page_uid        TEXT    NOT NULL DEFAULT '',
+    artifact_uid    TEXT    NOT NULL DEFAULT '',
+    source_engine   TEXT    NOT NULL DEFAULT '',
+    source_run_id   TEXT    NOT NULL DEFAULT '',
+    blocks_json     TEXT    NOT NULL DEFAULT '[]',
+    updated_at      REAL    NOT NULL DEFAULT 0.0,
+    UNIQUE(project_id, page_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_layout_snapshot_project_page
+    ON layout_snapshot(project_id, page_uid);
 
 CREATE TABLE IF NOT EXISTS line (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,6 +419,20 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE raw_ocr_artifact ADD COLUMN route_attachments_json TEXT NOT NULL DEFAULT '{}';",
     ],
     23: [],
+    24: [
+        "CREATE TABLE IF NOT EXISTS layout_snapshot ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "page_uid TEXT NOT NULL DEFAULT '', "
+        "artifact_uid TEXT NOT NULL DEFAULT '', "
+        "source_engine TEXT NOT NULL DEFAULT '', "
+        "source_run_id TEXT NOT NULL DEFAULT '', "
+        "blocks_json TEXT NOT NULL DEFAULT '[]', "
+        "updated_at REAL NOT NULL DEFAULT 0.0, "
+        "UNIQUE(project_id, page_uid));",
+        "CREATE INDEX IF NOT EXISTS idx_layout_snapshot_project_page "
+        "ON layout_snapshot(project_id, page_uid);",
+    ],
 }
 
 
@@ -465,6 +496,138 @@ def _json_to_dict(s: str, *, field: str) -> dict:
     if not isinstance(value, dict):
         raise ProjectDataError(f"{field} must be dict")
     return value
+
+
+def _str_from_json(value: object, *, field: str) -> str:
+    if not isinstance(value, str):
+        raise ProjectDataError(f"{field} must be str")
+    return value
+
+
+def _int_from_json(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProjectDataError(f"{field} must be int")
+    return value
+
+
+def _optional_float_from_json(value: object, *, field: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProjectDataError(f"{field} must be number or null")
+    return float(value)
+
+
+def _optional_int_from_json(value: object, *, field: str) -> int | None:
+    if value is None:
+        return None
+    return _int_from_json(value, field=field)
+
+
+def _dict_from_json_value(value: object, *, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProjectDataError(f"{field} must be dict")
+    return dict(value)
+
+
+def _bbox_from_json(value: object, *, field: str, optional: bool = False) -> BBox | None:
+    if value is None and optional:
+        return None
+    payload = _dict_from_json_value(value, field=field)
+    return BBox(
+        _int_from_json(payload.get("x"), field=f"{field}.x"),
+        _int_from_json(payload.get("y"), field=f"{field}.y"),
+        _int_from_json(payload.get("w"), field=f"{field}.w"),
+        _int_from_json(payload.get("h"), field=f"{field}.h"),
+    )
+
+
+def _origin_to_json(origin: BlockOrigin) -> dict[str, Any]:
+    return origin.to_dict()
+
+
+def _origin_from_json(value: object, *, field: str) -> BlockOrigin:
+    payload = _dict_from_json_value(value, field=field)
+    raw_kind = _str_from_json(payload.get("original_kind", ""), field=f"{field}.original_kind")
+    original_kind = (
+        _enum_from_db(BlockType, raw_kind, field=f"{field}.original_kind")
+        if raw_kind
+        else None
+    )
+    return BlockOrigin(
+        created_by=_str_from_json(payload.get("created_by", ""), field=f"{field}.created_by"),
+        source_engine=_str_from_json(payload.get("source_engine", ""), field=f"{field}.source_engine"),
+        source_run_id=_str_from_json(payload.get("source_run_id", ""), field=f"{field}.source_run_id"),
+        source_label=_str_from_json(payload.get("source_label", ""), field=f"{field}.source_label"),
+        source_confidence=_optional_float_from_json(
+            payload.get("source_confidence"),
+            field=f"{field}.source_confidence",
+        ),
+        original_bbox=_bbox_from_json(
+            payload.get("original_bbox"),
+            field=f"{field}.original_bbox",
+            optional=True,
+        ),
+        original_kind=original_kind,
+        raw_artifact_uid=_str_from_json(
+            payload.get("raw_artifact_uid", ""),
+            field=f"{field}.raw_artifact_uid",
+        ),
+        raw_json_path=_str_from_json(payload.get("raw_json_path", ""), field=f"{field}.raw_json_path"),
+        raw_index=_optional_int_from_json(payload.get("raw_index"), field=f"{field}.raw_index"),
+    )
+
+
+def _layout_block_snapshot_to_json(block: LayoutBlockSnapshot) -> dict[str, Any]:
+    return {
+        "uid": block.uid,
+        "block_type": block.block_type.value,
+        "bbox": block.bbox.to_dict(),
+        "order": block.order,
+        "source_label": block.source_label,
+        "origin": _origin_to_json(block.origin),
+        "ocr_policy": block.ocr_policy.value,
+        "note": block.note,
+    }
+
+
+def _layout_block_snapshot_from_json(value: object, *, index: int) -> LayoutBlockSnapshot:
+    field = f"layout_snapshot.blocks_json[{index}]"
+    payload = _dict_from_json_value(value, field=field)
+    return LayoutBlockSnapshot(
+        uid=_str_from_json(payload.get("uid", ""), field=f"{field}.uid"),
+        block_type=_enum_from_db(
+            BlockType,
+            payload.get("block_type", ""),
+            field=f"{field}.block_type",
+        ),
+        bbox=_bbox_from_json(payload.get("bbox"), field=f"{field}.bbox"),
+        order=_int_from_json(payload.get("order"), field=f"{field}.order"),
+        source_label=_str_from_json(payload.get("source_label", ""), field=f"{field}.source_label"),
+        origin=_origin_from_json(payload.get("origin"), field=f"{field}.origin"),
+        ocr_policy=_enum_from_db(
+            OcrPolicy,
+            payload.get("ocr_policy", ""),
+            field=f"{field}.ocr_policy",
+        ),
+        note=_str_from_json(payload.get("note", ""), field=f"{field}.note"),
+    )
+
+
+def _layout_snapshot_blocks_to_json(snapshot: LayoutSnapshot) -> list[dict[str, Any]]:
+    return [_layout_block_snapshot_to_json(block) for block in snapshot.blocks]
+
+
+def _layout_snapshot_matches_projection(snapshot: LayoutSnapshot, page: Page) -> bool:
+    if snapshot.page_uid != page.uid:
+        return False
+    blocks = page_layout_blocks(page)
+    if len(snapshot.blocks) != len(blocks):
+        return False
+    return all(
+        bool(block.uid) and block_snapshot.uid == block.uid
+        for block_snapshot, block in zip(snapshot.blocks, blocks)
+    )
 
 
 def _route_attachments_to_json_dict(
@@ -922,12 +1085,12 @@ class ProjectStore:
                     (project.name, project.updated_at, project.id),
                 )
 
-            # 获取当前所有 page id，用于清理旧数据
-            old_page_ids = [
-                r["id"] for r in conn.execute(
-                    "SELECT id FROM page WHERE project_id=?", (project.id,)
-                ).fetchall()
-            ]
+            # 获取当前所有 page id/uid，用于清理旧数据
+            old_page_rows = conn.execute(
+                "SELECT id, uid FROM page WHERE project_id=?", (project.id,)
+            ).fetchall()
+            old_page_ids = [r["id"] for r in old_page_rows]
+            old_page_uid_by_id = {r["id"]: str(r["uid"] or "") for r in old_page_rows}
 
             save_seen_uids: dict[str, set[str]] = {
                 "page": set(),
@@ -949,6 +1112,12 @@ class ProjectStore:
             saved_page_ids = {p.id for p in project.pages if p.id is not None}
             for old_id in old_page_ids:
                 if old_id not in saved_page_ids:
+                    old_uid = old_page_uid_by_id.get(old_id, "")
+                    if old_uid:
+                        cur.execute(
+                            "DELETE FROM layout_snapshot WHERE project_id=? AND page_uid=?",
+                            (project.id, old_uid),
+                        )
                     cur.execute("DELETE FROM page WHERE id=?", (old_id,))
 
             self._sync_project_proof_line_states_no_commit(cur, project)
@@ -1055,6 +1224,7 @@ class ProjectStore:
                     (project_id, old_uid),
                 )
             cur.execute("DELETE FROM block WHERE id=?", (old_id,))
+        self._save_layout_snapshot(cur, page, project_id)
 
     def _save_layout_edit_events(
         self,
@@ -1091,6 +1261,41 @@ class ProjectStore:
                 ),
             )
             event.id = cur.lastrowid
+
+    def _save_layout_snapshot(
+        self,
+        cur: sqlite3.Cursor,
+        page: Page,
+        project_id: int,
+    ) -> None:
+        snapshot = layout_snapshot_for_page(page)
+        if snapshot is None or not _layout_snapshot_matches_projection(snapshot, page):
+            snapshot = sync_page_layout_snapshot_from_projection(
+                page,
+                source_engine="project_store_save",
+                source_run_id=str(project_id),
+            )
+        cur.execute(
+            "INSERT INTO layout_snapshot ("
+            "project_id, page_uid, artifact_uid, source_engine, source_run_id, "
+            "blocks_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(project_id, page_uid) DO UPDATE SET "
+            "artifact_uid=excluded.artifact_uid, "
+            "source_engine=excluded.source_engine, "
+            "source_run_id=excluded.source_run_id, "
+            "blocks_json=excluded.blocks_json, "
+            "updated_at=excluded.updated_at",
+            (
+                project_id,
+                page.uid,
+                snapshot.artifact_uid,
+                snapshot.source_engine,
+                snapshot.source_run_id,
+                json.dumps(_layout_snapshot_blocks_to_json(snapshot), ensure_ascii=False),
+                time.time(),
+            ),
+        )
 
     def _save_raw_layout_artifact(
         self,
@@ -1669,11 +1874,15 @@ class ProjectStore:
                 layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
             replace_page_layout_blocks(page, self._load_blocks(page.id, project.id))
-            sync_page_layout_snapshot_from_projection(
-                page,
-                source_engine="project_store",
-                source_run_id=str(project.id or ""),
-            )
+            snapshot = self._load_layout_snapshot(project.id, page.uid)
+            if snapshot is not None:
+                set_layout_snapshot_for_page(page, snapshot)
+            else:
+                sync_page_layout_snapshot_from_projection(
+                    page,
+                    source_engine="project_store",
+                    source_run_id=str(project.id or ""),
+                )
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
@@ -1711,6 +1920,32 @@ class ProjectStore:
                 field="raw_ocr_artifact.route_attachments_json",
             ),
             created_at=row["created_at"],
+        )
+
+    def _load_layout_snapshot(
+        self,
+        project_id: int,
+        page_uid: str,
+    ) -> LayoutSnapshot | None:
+        if not page_uid:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM layout_snapshot WHERE project_id=? AND page_uid=?",
+            (project_id, page_uid),
+        ).fetchone()
+        if row is None:
+            return None
+        raw_blocks = _json_to_list(row["blocks_json"], field="layout_snapshot.blocks_json")
+        blocks = tuple(
+            _layout_block_snapshot_from_json(block, index=index)
+            for index, block in enumerate(raw_blocks)
+        )
+        return LayoutSnapshot(
+            page_uid=page_uid,
+            artifact_uid=row["artifact_uid"],
+            source_engine=row["source_engine"],
+            source_run_id=row["source_run_id"],
+            blocks=blocks,
         )
 
     def _load_layout_edit_events(

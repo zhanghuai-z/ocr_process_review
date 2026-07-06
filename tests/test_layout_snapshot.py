@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
-from app.core.project_store import ProjectStore
+import pytest
+
+from app.core.project_store import ProjectDataError, ProjectStore
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockType, Char, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_snapshot import LayoutSnapshot
@@ -83,7 +85,10 @@ def test_adopt_layout_snapshot_stores_truth_and_projects_blocks():
     blocks = adopt_page_layout_snapshot(page, snapshot)
 
     assert page.blocks == blocks
-    assert layout_snapshot_for_page(page) is snapshot
+    stored_snapshot = layout_snapshot_for_page(page)
+    assert stored_snapshot is not None
+    assert stored_snapshot.page_uid == snapshot.page_uid
+    assert stored_snapshot.blocks[0].uid == page.blocks[0].uid
     assert page.blocks[0].source_label == "text"
 
 
@@ -127,7 +132,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     page = loaded.pages[0]
     snapshot = layout_snapshot_for_page(page)
     assert snapshot is not None
-    assert snapshot.source_engine == "project_store"
+    assert snapshot.source_engine == "project_store_save"
     assert snapshot.blocks[0].source_label == "text"
 
     loaded_block = page.blocks[0]
@@ -135,3 +140,66 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     assert block_ocr_lines(loaded_block) is loaded_block.lines
     assert line_ocr_chars(loaded_line) is loaded_line.chars
     assert line_ocr_chars(loaded_line)[0].char == "甲"
+
+
+def test_project_store_persists_layout_snapshot_independently_from_block_projection(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot.png", width=300, height=220)
+    artifact = set_paddle_raw_layout_records(
+        page,
+        [
+            {
+                "block_label": "text",
+                "block_bbox": [20, 30, 180, 70],
+                "block_content": "正文内容",
+                "score": 0.9,
+            },
+            {
+                "block_label": "formula",
+                "block_bbox": [40, 100, 160, 130],
+                "block_content": "$x$",
+            },
+        ],
+        run_id="job-layout",
+    )
+    snapshot = layout_snapshot_from_normalized_artifact(
+        normalized_layout_artifact_from_page(page),
+        source_run_id="job-layout",
+    )
+    adopt_page_layout_snapshot(page, snapshot)
+    projected_uid = page.blocks[0].uid
+    project = OcrProject(name="snapshot persist", pages=[page])
+    db_path = str(tmp_path / "snapshot-persist.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+    with ProjectStore(db_path) as store:
+        loaded = store.load_project(saved.id)
+
+    loaded_page = loaded.pages[0]
+    loaded_snapshot = layout_snapshot_for_page(loaded_page)
+    assert loaded_snapshot is not None
+    assert loaded_snapshot.source_engine == "paddleocr-vl"
+    assert loaded_snapshot.source_run_id == "job-layout"
+    assert loaded_snapshot.artifact_uid == artifact.uid
+    assert loaded_snapshot.blocks[0].source_label == "text"
+    assert loaded_snapshot.blocks[0].uid == projected_uid
+    assert loaded_page.blocks[0].uid == projected_uid
+
+
+def test_project_store_rejects_malformed_persisted_layout_snapshot(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot-bad.png", width=100, height=80)
+    snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="layout_edit")
+    project = OcrProject(name="snapshot malformed", pages=[page])
+    db_path = str(tmp_path / "snapshot-malformed.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+        store.conn.execute(
+            "UPDATE layout_snapshot SET blocks_json=? WHERE project_id=? AND page_uid=?",
+            ("{}", saved.id, snapshot.page_uid),
+        )
+        store.conn.commit()
+
+    with ProjectStore(db_path) as store:
+        with pytest.raises(ProjectDataError):
+            store.load_project(saved.id)

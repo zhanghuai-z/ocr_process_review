@@ -21,7 +21,7 @@
 
 | 投影字段 | 当前真值入口 | 允许存在的原因 | 删除条件 |
 | --- | --- | --- | --- |
-| `Page.blocks` | `LayoutSnapshot` / `layout_snapshot_store` / `app.models.layout_projection` | 当前 UI、OCR、导出链路仍消费 block tree；API 版面分析和人工编辑已经先进入 snapshot，再投影回 block tree。 | LayoutPanel、OCR、导出都改为直接消费 `LayoutSnapshot` 或其视图模型；ProjectStore 能持久化 snapshot 而不依赖 block tree 作为主结构。 |
+| `Page.blocks` | `LayoutSnapshot` / SQLite `layout_snapshot` / `layout_snapshot_store` / `app.models.layout_projection` | 当前 UI、OCR、导出链路仍消费 block tree；API 版面分析、人工编辑和 ProjectStore 已先进入/保存 snapshot，再投影回 block tree。 | LayoutPanel、OCR、导出都改为直接消费 `LayoutSnapshot` 或其视图模型；不再需要 block tree 作为运行投影。 |
 | `Block.lines` | `app.models.ocr_observation` / `ocr_observation_store` | 当前 UI 和 SQLite `line` 表仍需要行对象投影；业务读写已经收口到 OCR observation boundary。 | HProof/VProof、导出、ProjectStore 和 Hanwang 回写都只读写 OCR observation store；`Block` 不再持有 lines。 |
 | `Line.chars` | `app.models.ocr_character_observation` / `ocr_character_observation_store` | 字符/词/公式 carrier 仍要投影给 proof UI、导出和存储；直接访问已经由架构测试限制。 | CharIndex、ProofAtom、PDF text layer、ProjectStore 都只消费 character observation store；`Line` 不再持有 chars。 |
 | `Line.text` / `Line.ocr_text` / `Line.confidence` / `Line.review_flags` | `app.models.ocr_text_observation` / `line_text_contract()` | 当前 SQLite 行表和部分 OCR producer 仍以 Line 为投影目标；读取口径已收口。 | OCR 原文、置信度、review flags 进入独立 OCR text observation table/store；Line 仅保留 uid/bbox/order 或被视图模型替代。 |
@@ -101,14 +101,14 @@
 - quality probe bus topic 不再从 `app.core.quality_probe` 兼容导出；订阅方统一从 `app.core.proof_state` 读取。
 - 外部版面事实新增 `NormalizedLayoutArtifact` 读取视图；overlay 展示和人工 Paddle 绑定索引先消费归一化 `LayoutRegion/LayoutSubregion`，为矢量 PDF 输入复用同一入口。
 - 当前采用版面新增 `app.models.layout_snapshot.LayoutSnapshot` contract；Paddle API 主链从 `NormalizedLayoutArtifact` 编译 snapshot，再投影为 `Page.blocks` 供当前 UI/OCR/导出链路读取。新输入源不得直接适配 `Page.blocks`。
-- 当前版面 snapshot 新增外部 `layout_snapshot_store`；`LayoutEditService` 人工编辑后同步 snapshot，`ProjectStore` 加载后也从持久化 block 投影重建 snapshot，再保留 `Page.blocks` 作为当前 UI/OCR/导出运行投影。
+- 当前版面 snapshot 新增外部 `layout_snapshot_store` 和 SQLite `layout_snapshot` 表；`LayoutEditService` 人工编辑后同步 snapshot，`ProjectStore` 保存/加载独立持久化 snapshot，再保留 `Page.blocks` 作为当前 UI/OCR/导出运行投影。
 - 当前版面投影新增 `app.models.layout_projection` 边界；非 UI 业务层不再直接读写 `Page.blocks`，而是通过 `page_layout_blocks`、`replace_page_layout_blocks` 等 helper 消费或替换当前运行投影。
 - layout route 新增 `RoutingPlan` 生产/读取 contract；Paddle geometry 子结构绑定从 raw records 拆到 `route_attachments_json`；overlay 公式文本读取、Hanwang 文本切片入口和 Hanwang route band 修正入口不再直接消费持久化 raw dict，`_route_subblocks` dict 只由 `layout_records_with_route_attachments()` / `layout_region_route_record()` 临时合成给 route compiler。
 - OCR 页级调度新增 `DispatchPlan`；OCR 管线的页级统计、图像失败记录、PP-OCRv5 行归属和 Hanwang prepass hint 复用不再直接遍历 `page.blocks` 推导文字块。
 - OCR 运行结果新增 `OcrRunResult` / `OcrProgress` contract；Pipeline 文件不再定义结果模型，worker/controller/tests 改为依赖服务边界。
 - HProof/VProof 外部刷新新增共享 `ProofExternalRefreshPlan`；pending 队列和 plan contract 不再按横校/纵校各自定义。
 
-完成状态：第一阶段完成；`LayoutSnapshot` model contract 和 runtime store 已成为 API 版面分析、人工编辑到当前 `Page.blocks` 运行投影的边界。物理字段删除和独立持久化表仍是后续增强，不再作为当前兼容入口。
+完成状态：第一阶段完成；`LayoutSnapshot` model contract、runtime store 和 SQLite `layout_snapshot` 表已成为 API 版面分析、人工编辑到当前 `Page.blocks` 运行投影的边界。物理字段删除仍是后续增强，不再作为当前兼容入口。
 
 ### Phase 4: 删除兼容入口
 
