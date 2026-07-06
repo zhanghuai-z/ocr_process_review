@@ -313,13 +313,29 @@ class LayoutEditService:
         )
 
     def _delete_block(self, page: Page, block: Block) -> LayoutEditResult:
-        before = {"block": self.block_state(block)}
+        snapshot = current_layout_snapshot(page)
+        snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
+        before = {"block": self.snapshot_block_state(snapshot_block)}
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
-        replace_page_layout_blocks(
+        event = self.record_edit(
             page,
-            [candidate for candidate in page_layout_blocks(page) if candidate is not block],
+            "delete_block",
+            block,
+            before=before,
+            after={},
+            sync_snapshot=False,
         )
-        self.record_edit(page, "delete_block", block, before=before, after={})
+        next_snapshot = self._snapshot_with_blocks(
+            snapshot,
+            tuple(
+                candidate
+                for index, candidate in enumerate(snapshot.blocks)
+                if index != snapshot_index
+            ),
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        self._replace_runtime_projection_from_snapshot(page, next_snapshot)
         return LayoutEditResult(op="delete_block", block=block, before=before, after={})
 
     def _restore_blocks(
@@ -450,12 +466,25 @@ class LayoutEditService:
     ) -> LayoutSnapshot:
         blocks = list(snapshot.blocks)
         blocks[index] = block
+        return LayoutEditService._snapshot_with_blocks(
+            snapshot,
+            tuple(blocks),
+            source_run_id=source_run_id,
+        )
+
+    @staticmethod
+    def _snapshot_with_blocks(
+        snapshot: LayoutSnapshot,
+        blocks: tuple[LayoutBlockSnapshot, ...],
+        *,
+        source_run_id: str,
+    ) -> LayoutSnapshot:
         return LayoutSnapshot(
             page_uid=snapshot.page_uid,
             artifact_uid=snapshot.artifact_uid,
             source_engine="layout_edit",
             source_run_id=source_run_id,
-            blocks=tuple(blocks),
+            blocks=blocks,
         )
 
     @staticmethod
@@ -470,6 +499,34 @@ class LayoutEditService:
         set_layout_block_ocr_policy(block, snapshot_block.ocr_policy)
         set_layout_block_note(block, snapshot_block.note)
         block.origin = snapshot_block.origin
+
+    def _replace_runtime_projection_from_snapshot(
+        self,
+        page: Page,
+        snapshot: LayoutSnapshot,
+    ) -> None:
+        runtime_by_uid = {
+            block.uid: block
+            for block in page_layout_blocks(page)
+            if block.uid
+        }
+        next_blocks: list[Block] = []
+        for snapshot_block in snapshot.blocks:
+            block = runtime_by_uid.get(snapshot_block.uid)
+            if block is None:
+                block = Block(
+                    block_type=snapshot_block.block_type,
+                    bbox=snapshot_block.bbox,
+                    order=snapshot_block.order,
+                    note=snapshot_block.note,
+                    source_label=snapshot_block.source_label,
+                    origin=snapshot_block.origin,
+                    ocr_policy=snapshot_block.ocr_policy,
+                    uid=snapshot_block.uid,
+                )
+            self._apply_snapshot_block_to_runtime_block(block, snapshot_block)
+            next_blocks.append(block)
+        replace_page_layout_blocks(page, next_blocks)
 
     def _merge_blocks_into_bbox(
         self,

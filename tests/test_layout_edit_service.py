@@ -65,6 +65,56 @@ def test_layout_edit_service_delete_block_records_event_and_removes_block():
     assert snapshot.blocks == ()
 
 
+def test_layout_edit_service_delete_block_keeps_remaining_snapshot_projection():
+    deleted = Block(block_type=BlockType.TABLE, bbox=BBox.from_xyxy(10, 10, 40, 30), order=4)
+    kept = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(90, 90, 130, 120), order=9)
+    page = Page(image_path="", width=200, height=100, blocks=[deleted, kept])
+    kept_snapshot_bbox = BBox.from_xyxy(50, 20, 100, 40)
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TABLE,
+                    bbox=BBox.from_xyxy(10, 10, 40, 30),
+                    order=4,
+                    source_label="table",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="table"),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
+                    uid=deleted.uid,
+                ),
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=kept_snapshot_bbox,
+                    order=1,
+                    source_label="text",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="text"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    uid=kept.uid,
+                ),
+            ),
+        ),
+    )
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.delete_block(page, deleted))
+
+    assert result.op == "delete_block"
+    assert page.blocks == [kept]
+    assert kept.bbox == kept_snapshot_bbox
+    assert kept.order == 1
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert [block.uid for block in snapshot.blocks] == [kept.uid]
+    assert snapshot.blocks[0].bbox == kept_snapshot_bbox
+    assert snapshot.blocks[0].order == 1
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+
+
 def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
     old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=9)
     restored_a = Block(block_type=BlockType.TABLE, bbox=BBox(10, 10, 30, 20), order=4)
