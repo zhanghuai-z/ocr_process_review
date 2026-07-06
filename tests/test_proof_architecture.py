@@ -1163,6 +1163,17 @@ def test_block_type_enum_does_not_own_paddle_label_mapping():
     adapter_source = Path("app/adapters/paddle/layout_importer.py").read_text(encoding="utf-8")
     assert "map_paddle_label_to_block_type" in adapter_source
     assert "_PADDLE_LABEL_TO_BLOCK_TYPE" in adapter_source
+    for forbidden in (
+        '"title" in normalized',
+        '"caption" in normalized',
+        '"table" in normalized',
+        '"formula" in normalized',
+        '"reference" in normalized',
+        '"paragraph" in normalized',
+        "any(token in normalized",
+        "normalized.startswith",
+    ):
+        assert forbidden not in adapter_source
 
 
 def test_block_source_semantics_are_centralized():

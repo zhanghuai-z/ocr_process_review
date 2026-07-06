@@ -91,15 +91,4 @@ def is_hanwang_skip_label(label: object) -> bool:
     normalized = normalize_paddle_label(label)
     if normalized in PADDLE_HANWANG_TEXT_LABELS:
         return False
-    if normalized in PADDLE_HANWANG_SKIP_LABELS:
-        return True
-    return normalized.startswith((
-        "equation",
-        "formula",
-        "table",
-        "figure",
-        "image",
-        "chart",
-        "seal",
-        "stamp",
-    ))
+    return normalized in PADDLE_HANWANG_SKIP_LABELS

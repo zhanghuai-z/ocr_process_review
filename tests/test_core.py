@@ -719,10 +719,16 @@ def test_block_type_mapping():
     assert map_paddle_label_to_block_type("table_caption_text") == BlockType.TABLE_CAPTION
     assert map_paddle_label_to_block_type("table_body") == BlockType.TABLE
     assert map_paddle_label_to_block_type("graphic") == BlockType.FIGURE
+    assert map_paddle_label_to_block_type("display_formula") == BlockType.EQUATION
     assert map_paddle_label_to_block_type("isolated_formula") == BlockType.EQUATION
+    assert map_paddle_label_to_block_type("math_formula") == BlockType.EQUATION
     assert map_paddle_label_to_block_type("bibliography") == BlockType.REFERENCE
     assert map_paddle_label_to_block_type("vision_footnote") == BlockType.TEXT
     assert normalize_paddle_label("vision_footnote") == "footnote"
+    assert map_paddle_label_to_block_type("custom_formula_noise") == BlockType.UNKNOWN
+    assert map_paddle_label_to_block_type("not_table") == BlockType.UNKNOWN
+    assert map_paddle_label_to_block_type("untitled_region") == BlockType.UNKNOWN
+    assert map_paddle_label_to_block_type("reference_like") == BlockType.UNKNOWN
 
     print("test_block_type_mapping PASSED")
 
@@ -7775,18 +7781,29 @@ def test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels():
     formula_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="inline_formula")
     equation = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     table_label = Block(block_type=BlockType.TEXT, bbox=bb, source_label="table")
+    unknown_formula_like = Block(block_type=BlockType.TEXT, bbox=bb, source_label="custom_formula_noise")
+    unknown_table_like = Block(block_type=BlockType.TEXT, bbox=bb, source_label="not_table")
+    known_display_formula = Block(block_type=BlockType.TEXT, bbox=bb, source_label="display_formula")
     text_without_structured_label = Block(block_type=BlockType.TEXT, bbox=bb)
     disabled_text = Block(block_type=BlockType.TEXT, bbox=bb, ocr_policy=OcrPolicy.MANUAL_ONLY)
     from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 
     formula_label.ocr_policy = default_ocr_policy_for_block(formula_label)
     table_label.ocr_policy = default_ocr_policy_for_block(table_label)
+    unknown_formula_like.ocr_policy = default_ocr_policy_for_block(unknown_formula_like)
+    unknown_table_like.ocr_policy = default_ocr_policy_for_block(unknown_table_like)
+    known_display_formula.ocr_policy = default_ocr_policy_for_block(known_display_formula)
 
     assert is_text_ocr_candidate(footnote) is True
     assert should_dispatch_to_text_ocr(footnote) is True
     assert should_dispatch_to_text_ocr(formula_label) is False
     assert should_dispatch_to_text_ocr(equation) is False
     assert should_dispatch_to_text_ocr(table_label) is False
+    assert should_dispatch_to_text_ocr(known_display_formula) is False
+    assert is_text_ocr_candidate(unknown_formula_like) is True
+    assert should_dispatch_to_text_ocr(unknown_formula_like) is True
+    assert is_text_ocr_candidate(unknown_table_like) is True
+    assert should_dispatch_to_text_ocr(unknown_table_like) is True
     assert should_dispatch_to_text_ocr(text_without_structured_label) is True
     assert is_text_ocr_candidate(disabled_text) is True
     assert should_dispatch_to_text_ocr(disabled_text) is False

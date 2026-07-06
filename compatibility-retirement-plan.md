@@ -90,6 +90,7 @@
 - `LayoutPanel` raw overlay 解析已收口到 `LayoutOverlayService`；UI 不再直接读取 Paddle raw dict 或 route dict。
 - `Block.bbox/order` 的生产运行时写入已收口到 `app.models.layout_block_state`；bbox/order 不得作为业务身份。
 - `Block.block_type` 的生产运行时写入已收口到 `app.models.layout_block_state.set_layout_block_type()`；导入/投影构造可传初始值，运行时不得直接赋值。
+- Paddle label 到 `BlockType` 的映射只允许 adapter 显式表；substring fallback 已移除，未知 label 不得凭名称片段改变 OCR dispatch。
 - `Block.note` 的生产写入已收口到 `app.models.layout_block_state`；它只作为提示/调试说明，不得恢复为关键判断字段。
 - `Block.source` 的判断和用户编辑写入已收口到 `app.models.layout_block_state`；生产模块不得各自比较或直接写 `BlockSource.USER_EDITED/MANUAL_DRAW`。
 - `Block.source_label` 的生产写入已收口到 `app.models.layout_block_state.set_layout_block_source_label()`；导入/投影构造可传初始值，运行时不得直接赋值。

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.core.block_attributes import block_attributes
-from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
+from app.core.paddle_labels import is_hanwang_skip_label
 from app.models.enums import BlockType, OcrPolicy
 
 
@@ -44,10 +44,12 @@ def is_text_ocr_candidate(block: OcrDispatchBlock) -> bool:
     """
     if block.block_type in PRESERVE_BLOCK_TYPES:
         return False
-    label = authoritative_block_label(block)
-    if is_hanwang_skip_label(label):
+    attrs = block_attributes(block)  # type: ignore[arg-type]
+    if attrs.semantic_block_type in PRESERVE_BLOCK_TYPES:
         return False
-    return block.block_type in TEXT_OCR_BLOCK_TYPES
+    if is_hanwang_skip_label(attrs.normalized_semantic_label or attrs.source_label):
+        return False
+    return attrs.semantic_block_type in TEXT_OCR_BLOCK_TYPES
 
 
 def should_dispatch_to_text_ocr(block: OcrDispatchBlock) -> bool:
@@ -56,10 +58,10 @@ def should_dispatch_to_text_ocr(block: OcrDispatchBlock) -> bool:
 
 
 def default_ocr_policy_for_block(block: OcrDispatchBlock) -> OcrPolicy:
-    label = normalize_paddle_label(authoritative_block_label(block))
-    if block.block_type == BlockType.EQUATION or any(token in label for token in ("equation", "formula", "math")):
+    attrs = block_attributes(block)  # type: ignore[arg-type]
+    if attrs.semantic_block_type == BlockType.EQUATION:
         return OcrPolicy.PRESERVE_AS_FORMULA
-    if block.block_type == BlockType.TABLE or "table" in label:
+    if attrs.semantic_block_type == BlockType.TABLE:
         return OcrPolicy.PRESERVE_AS_TABLE
     if is_text_ocr_candidate(block):
         return OcrPolicy.TEXT_OCR

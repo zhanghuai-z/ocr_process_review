@@ -76,10 +76,15 @@ _PADDLE_LABEL_TO_BLOCK_TYPE: dict[str, BlockType] = {
     "bibliography": BlockType.REFERENCE,
     "equation": BlockType.EQUATION,
     "equation_block": BlockType.EQUATION,
+    "display_formula": BlockType.EQUATION,
     "isolated_formula": BlockType.EQUATION,
     "inline_formula": BlockType.EQUATION,
     "formula": BlockType.EQUATION,
+    "formula_block": BlockType.EQUATION,
     "formula_number": BlockType.EQUATION,
+    "math": BlockType.EQUATION,
+    "math_formula": BlockType.EQUATION,
+    "math_block": BlockType.EQUATION,
 }
 
 
@@ -88,28 +93,7 @@ def map_paddle_label_to_block_type(label: object) -> BlockType:
     normalized = normalize_paddle_label(label)
     if not normalized:
         return BlockType.UNKNOWN
-    if normalized in _PADDLE_LABEL_TO_BLOCK_TYPE:
-        return _PADDLE_LABEL_TO_BLOCK_TYPE[normalized]
-
-    if "title" in normalized or normalized.startswith("heading_"):
-        return BlockType.TITLE
-    if "caption" in normalized and "table" in normalized:
-        return BlockType.TABLE_CAPTION
-    if "note" in normalized and "table" in normalized:
-        return BlockType.TABLE_CAPTION
-    if "caption" in normalized:
-        return BlockType.FIGURE_CAPTION
-    if "table" in normalized:
-        return BlockType.TABLE
-    if any(token in normalized for token in ("reference", "bibliography")):
-        return BlockType.REFERENCE
-    if any(token in normalized for token in ("paragraph", "text", "body", "content")):
-        return BlockType.TEXT
-    if any(token in normalized for token in ("figure", "image", "picture", "illustration", "graphic", "logo", "photo")):
-        return BlockType.FIGURE
-    if any(token in normalized for token in ("equation", "formula", "math")):
-        return BlockType.EQUATION
-    return BlockType.UNKNOWN
+    return _PADDLE_LABEL_TO_BLOCK_TYPE.get(normalized, BlockType.UNKNOWN)
 
 
 __all__ = ["map_paddle_label_to_block_type"]
