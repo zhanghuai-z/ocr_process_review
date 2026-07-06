@@ -1,6 +1,5 @@
 """版面分析面板：图像 + BBox 叠加可视化，右侧提供框类型与项目统计。"""
 from __future__ import annotations
-import copy
 import re
 from dataclasses import dataclass
 from typing import List, Optional
@@ -19,16 +18,8 @@ from app.models.block_state import is_ocr_text_invalidated
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
-from app.models import BBox, Block, BlockSource, BlockType, Page
+from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_block_state import (
-    set_layout_block_bbox,
-    set_layout_block_note,
-    set_layout_block_ocr_policy,
-    set_layout_block_order,
-    set_layout_block_source_label,
-    set_layout_block_type,
-)
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import (
@@ -241,7 +232,7 @@ class LayoutPanel(QWidget):
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._layout_edit_service = LayoutEditService()
         self._layout_overlay_service = LayoutOverlayService()
-        self._undo_stack: list[list[tuple[int, list[Block]]]] = []
+        self._undo_stack: list[list[tuple[int, tuple[LayoutBlockSnapshot, ...]]]] = []
         self._layout_edit_start_state: dict[str, dict] = {}
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
@@ -1627,7 +1618,7 @@ class LayoutPanel(QWidget):
     def _push_undo_snapshot_for_pages(self, page_indices) -> None:
         if not self._pages:
             return
-        snapshots: list[tuple[int, list[Block]]] = []
+        snapshots: list[tuple[int, tuple[LayoutBlockSnapshot, ...]]] = []
         seen: set[int] = set()
         for page_idx in page_indices:
             if not isinstance(page_idx, int) or page_idx in seen:
@@ -1636,7 +1627,7 @@ class LayoutPanel(QWidget):
                 continue
             seen.add(page_idx)
             page = self._pages[page_idx]
-            snapshots.append((page_idx, self._layout_blocks_for_undo(page)))
+            snapshots.append((page_idx, self._layout_snapshot_blocks_for_undo(page)))
         if not snapshots:
             return
         self._undo_stack.append(snapshots)
@@ -1656,7 +1647,7 @@ class LayoutPanel(QWidget):
             page = self._pages[page_idx]
             self._layout_edit_service.apply(LayoutEditCommand.restore_blocks(
                 page,
-                copy.deepcopy(blocks),
+                blocks,
                 before={
                     "blocks": [
                         LayoutEditService.snapshot_block_state(view.snapshot_block)
@@ -1691,10 +1682,9 @@ class LayoutPanel(QWidget):
             self.block_contract_changed.emit(self._pages[page_idx].page_number, "layout_undo")
 
     @staticmethod
-    def _layout_blocks_for_undo(page: Page) -> list[Block]:
-        blocks: list[Block] = []
-        for view in iter_page_layout_block_views(page):
-            block = copy.deepcopy(view.runtime_block) if view.runtime_block is not None else Block(
+    def _layout_snapshot_blocks_for_undo(page: Page) -> tuple[LayoutBlockSnapshot, ...]:
+        return tuple(
+            LayoutBlockSnapshot(
                 block_type=view.block_type,
                 bbox=view.bbox,
                 order=view.order,
@@ -1704,15 +1694,8 @@ class LayoutPanel(QWidget):
                 ocr_policy=view.ocr_policy,
                 uid=view.uid,
             )
-            set_layout_block_type(block, view.block_type)
-            set_layout_block_bbox(block, view.bbox)
-            set_layout_block_order(block, view.order)
-            set_layout_block_source_label(block, view.source_label)
-            set_layout_block_ocr_policy(block, view.ocr_policy)
-            set_layout_block_note(block, view.note)
-            block.origin = view.origin
-            blocks.append(block)
-        return blocks
+            for view in iter_page_layout_block_views(page)
+        )
 
     @staticmethod
     def _bbox_hits_frame(a: BBox, b: BBox, tolerance: int = 6) -> bool:

@@ -1502,6 +1502,12 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     merge_source = _function_source(edit_service_source, "merge_blocks")
     assert "block_uids: Iterable[str]" in merge_source
     assert "blocks: Iterable[Block]" not in merge_source
+    restore_source = _function_source(edit_service_source, "restore_blocks")
+    assert "blocks: Iterable[LayoutBlockSnapshot]" in restore_source
+    assert "snapshot_blocks=tuple(blocks)" in restore_source
+    assert "import copy" not in layout_source
+    assert "_layout_snapshot_blocks_for_undo" in layout_source
+    assert "list[tuple[int, list[Block]]]" not in layout_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",

@@ -168,14 +168,22 @@ def test_layout_edit_service_delete_block_keeps_remaining_snapshot_projection():
 
 def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
     old_block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=9)
-    restored_line = Line(text="keep", confidence=0.9, bbox=BBox(12, 12, 8, 8))
-    restored_a = Block(
+    restored_a = LayoutBlockSnapshot(
         block_type=BlockType.TABLE,
         bbox=BBox(10, 10, 30, 20),
-        lines=[restored_line],
         order=4,
+        source_label="table",
+        origin=BlockOrigin(source_engine="test", source_label="table"),
+        ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
     )
-    restored_b = Block(block_type=BlockType.FIGURE, bbox=BBox(40, 10, 30, 20), order=2)
+    restored_b = LayoutBlockSnapshot(
+        block_type=BlockType.FIGURE,
+        bbox=BBox(40, 10, 30, 20),
+        order=2,
+        source_label="figure",
+        origin=BlockOrigin(source_engine="test", source_label="figure"),
+        ocr_policy=OcrPolicy.SKIP,
+    )
     page = Page(image_path="", width=200, height=100, blocks=[old_block])
     service = LayoutEditService()
 
@@ -186,8 +194,10 @@ def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
     ))
 
     assert result.op == "restore_blocks"
-    assert page.blocks == [restored_a, restored_b]
-    assert page.blocks[0].lines == [restored_line]
+    assert [block.uid for block in page.blocks] == [restored_a.uid, restored_b.uid]
+    assert page.blocks[0].lines == []
+    assert page.blocks[0].block_type == BlockType.TABLE
+    assert page.blocks[1].block_type == BlockType.FIGURE
     assert [block.order for block in page.blocks] == [0, 1]
     assert page.layout_edit_events[-1].op == "restore_blocks"
     assert page.layout_edit_events[-1].before["blocks"][0]["uid"] == old_block.uid

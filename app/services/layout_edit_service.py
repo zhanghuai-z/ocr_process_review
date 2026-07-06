@@ -78,7 +78,7 @@ class LayoutEditCommand:
     block: Block | None = None
     block_uid: str = ""
     block_uids: tuple[str, ...] = ()
-    blocks: tuple[Block, ...] = ()
+    snapshot_blocks: tuple[LayoutBlockSnapshot, ...] = ()
     bbox: BBox | None = None
     block_type: BlockType | None = None
     source_label: str = ""
@@ -143,11 +143,11 @@ class LayoutEditCommand:
     def restore_blocks(
         cls,
         page: Page,
-        blocks: Iterable[Block],
+        blocks: Iterable[LayoutBlockSnapshot],
         *,
         before: dict | None = None,
     ) -> "LayoutEditCommand":
-        return cls("restore_blocks", page, blocks=tuple(blocks), before=before)
+        return cls("restore_blocks", page, snapshot_blocks=tuple(blocks), before=before)
 
 
 @dataclass(frozen=True)
@@ -207,7 +207,7 @@ class LayoutEditService:
                 before=command.before,
             )
         if command.op == "restore_blocks":
-            return self._restore_blocks(command.page, command.blocks, before=command.before)
+            return self._restore_blocks(command.page, command.snapshot_blocks, before=command.before)
         raise ValueError(f"Unsupported layout edit command: {command.op}")
 
     @staticmethod
@@ -424,16 +424,16 @@ class LayoutEditService:
     def _restore_blocks(
         self,
         page: Page,
-        blocks: Iterable[Block],
+        blocks: Iterable[LayoutBlockSnapshot],
         *,
         before: dict | None,
     ) -> LayoutEditResult:
-        next_blocks = list(blocks)
+        restore_blocks = tuple(blocks)
         snapshot = current_layout_snapshot(page)
         before = before or {"blocks": [self.snapshot_block_state(block) for block in snapshot.blocks]}
         next_snapshot_blocks = tuple(
-            self._snapshot_block_from_edit_block(block, order=order)
-            for order, block in enumerate(next_blocks)
+            self._snapshot_block_with_order(block, order)
+            for order, block in enumerate(restore_blocks)
         )
         after = {"blocks": [self.snapshot_block_state(block) for block in next_snapshot_blocks]}
         event = self.record_snapshot_edit(
@@ -449,11 +449,7 @@ class LayoutEditService:
             source_run_id=event.uid,
         )
         set_layout_snapshot_for_page(page, next_snapshot)
-        self._replace_runtime_projection_from_snapshot(
-            page,
-            next_snapshot,
-            candidate_blocks=next_blocks,
-        )
+        self._replace_runtime_projection_from_snapshot(page, next_snapshot)
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
 
     def _change_block_kind(
