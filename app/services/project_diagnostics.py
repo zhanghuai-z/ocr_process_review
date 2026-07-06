@@ -12,8 +12,7 @@ from typing import Any, Iterable
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
-from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.layout_projection import iter_page_layout_block_occurrences
+from app.models.layout_block_view import iter_page_layout_block_views, iter_page_layout_runtime_orphans
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
 from app.models.ocr_observation import (
@@ -132,14 +131,27 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
     }
     for page_idx, page in enumerate(project.pages):
         _record_uid(buckets["page"], page.uid, page, page_idx)
-        for block_occurrence in iter_page_layout_block_occurrences(page):
+        for view in iter_page_layout_block_views(page):
+            block = view.runtime_block
+            if block is None:
+                continue
             _record_uid(
                 buckets["block"],
-                block_occurrence.block.uid,
+                block.uid,
                 page,
                 page_idx,
-                block_occurrence.block,
-                block_occurrence.block_index,
+                block,
+                view.runtime_block_index,
+            )
+        for orphan in iter_page_layout_runtime_orphans(page):
+            block = orphan.runtime_block
+            _record_uid(
+                buckets["block"],
+                block.uid,
+                page,
+                page_idx,
+                block,
+                orphan.runtime_block_index,
             )
         for line_occurrence in iter_page_ocr_line_observation_occurrences(page):
             _record_uid(
@@ -192,7 +204,6 @@ def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagno
         if snapshot is None:
             continue
         views = list(iter_page_layout_block_views(page))
-        snapshot_uids = {view.uid for view in views if view.uid}
         for view in views:
             snapshot_block = view.snapshot_block
             runtime_block = view.runtime_block
@@ -242,19 +253,17 @@ def _diagnose_layout_projection_drift(project: OcrProject) -> list[ProjectDiagno
                         "drift": drift,
                     },
                 ))
-        for occurrence in iter_page_layout_block_occurrences(page):
-            runtime_idx = occurrence.block_index
-            runtime_block = occurrence.block
-            if runtime_block.uid and runtime_block.uid not in snapshot_uids:
-                issues.append(ProjectDiagnosticIssue(
-                    severity="warning",
-                    code="layout_runtime_orphan_block",
-                    message="runtime block projection is not present in layout snapshot",
-                    page_number=page.page_number,
-                    page_uid=page.uid,
-                    block_uid=runtime_block.uid,
-                    details={"runtime_block_index": runtime_idx},
-                ))
+        for orphan in iter_page_layout_runtime_orphans(page):
+            runtime_block = orphan.runtime_block
+            issues.append(ProjectDiagnosticIssue(
+                severity="warning",
+                code="layout_runtime_orphan_block",
+                message="runtime block projection is not present in layout snapshot",
+                page_number=page.page_number,
+                page_uid=page.uid,
+                block_uid=runtime_block.uid,
+                details={"runtime_block_index": orphan.runtime_block_index},
+            ))
     return issues
 
 
@@ -345,10 +354,10 @@ def _diagnose_line_char_contract(project: OcrProject) -> list[ProjectDiagnosticI
     return issues
 
 
-def _probe_block_occurrence(page: Page, block_index: int):
-    for occurrence in iter_page_layout_block_occurrences(page):
-        if occurrence.block_index == block_index:
-            return occurrence
+def _probe_block_view(page: Page, block_index: int):
+    for view in iter_page_layout_block_views(page):
+        if view.snapshot_index == block_index:
+            return view
     return None
 
 
@@ -376,8 +385,8 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        block_occurrence = _probe_block_occurrence(page, key.block_index)
-        if block_occurrence is None:
+        block_view = _probe_block_view(page, key.block_index)
+        if block_view is None or block_view.runtime_block is None:
             issues.append(_probe_issue(
                 "warning",
                 "probe_anchor_missing_block",
@@ -386,7 +395,7 @@ def _diagnose_probe_anchors(
                 details={"probe": _probe_details(probe)},
             ))
             continue
-        block = block_occurrence.block
+        block = block_view.runtime_block
         line_occurrence = _probe_line_occurrence(page, key.block_index, key.line_index)
         if line_occurrence is None:
             issues.append(_probe_issue(

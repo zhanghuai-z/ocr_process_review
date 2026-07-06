@@ -1970,6 +1970,8 @@ def test_project_diagnostics_layout_drift_reads_snapshot_views():
     source = Path("app/services/project_diagnostics.py").read_text(encoding="utf-8")
 
     assert "iter_page_layout_block_views" in source
+    assert "iter_page_layout_runtime_orphans" in source
+    assert "app.models.layout_projection" not in source
     assert "from app.models.layout_projection import iter_page_layout_block_occurrences, page_layout_blocks" not in source
     assert "page_layout_blocks(" not in source
 

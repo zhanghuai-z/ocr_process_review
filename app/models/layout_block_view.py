@@ -60,6 +60,15 @@ class LayoutBlockView:
         return self.snapshot_block.note
 
 
+@dataclass(frozen=True)
+class LayoutRuntimeBlockOrphan:
+    """Runtime projection block that is not represented by layout truth."""
+
+    page: Page
+    runtime_block: Block
+    runtime_block_index: int
+
+
 def current_layout_snapshot(page: Page) -> LayoutSnapshot:
     snapshot = layout_snapshot_for_page(page)
     if snapshot is not None:
@@ -92,8 +101,28 @@ def iter_page_layout_block_views(page: Page) -> Iterator[LayoutBlockView]:
         )
 
 
+def iter_page_layout_runtime_orphans(page: Page) -> Iterator[LayoutRuntimeBlockOrphan]:
+    snapshot = layout_snapshot_for_page(page)
+    if snapshot is None:
+        return
+    paired_runtime_ids = {
+        id(view.runtime_block)
+        for view in iter_page_layout_block_views(page)
+        if view.runtime_block is not None
+    }
+    for block_index, block in enumerate(page_layout_blocks(page)):
+        if id(block) not in paired_runtime_ids:
+            yield LayoutRuntimeBlockOrphan(
+                page=page,
+                runtime_block=block,
+                runtime_block_index=block_index,
+            )
+
+
 __all__ = [
     "LayoutBlockView",
+    "LayoutRuntimeBlockOrphan",
     "current_layout_snapshot",
     "iter_page_layout_block_views",
+    "iter_page_layout_runtime_orphans",
 ]
