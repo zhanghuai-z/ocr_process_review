@@ -1717,6 +1717,8 @@ def test_project_store_persists_layout_snapshot_without_service_dependency():
     assert "set_layout_snapshot_for_page(" in source
     assert "sync_page_layout_snapshot_from_projection(" in source
     assert "from app.services.layout_snapshot" not in source
+    assert "snapshot_authoritative" not in source
+    assert "_layout_snapshot_matches_projection" not in source
 
 
 def test_layout_edit_service_records_snapshot_edits_without_projection_backflow():

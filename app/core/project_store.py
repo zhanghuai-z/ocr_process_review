@@ -633,35 +633,6 @@ def _layout_snapshot_blocks_to_json(snapshot: LayoutSnapshot) -> list[dict[str, 
     return [_layout_block_snapshot_to_json(block) for block in snapshot.blocks]
 
 
-def _layout_snapshot_matches_projection(snapshot: LayoutSnapshot, page: Page) -> bool:
-    if snapshot.page_uid != page.uid:
-        return False
-    blocks = page_layout_blocks(page)
-    if len(snapshot.blocks) != len(blocks):
-        return False
-    return all(
-        _layout_block_snapshot_matches_projection(block_snapshot, block)
-        for block_snapshot, block in zip(snapshot.blocks, blocks)
-    )
-
-
-def _layout_block_snapshot_matches_projection(
-    block_snapshot: LayoutBlockSnapshot,
-    block: Block,
-) -> bool:
-    return (
-        bool(block.uid)
-        and block_snapshot.uid == block.uid
-        and block_snapshot.block_type == block.block_type
-        and block_snapshot.bbox == block.bbox
-        and block_snapshot.order == block.order
-        and block_snapshot.source_label == block.source_label
-        and block_snapshot.ocr_policy == block.ocr_policy
-        and block_snapshot.note == block.note
-        and block_snapshot.origin == block.origin
-    )
-
-
 def _route_attachments_to_json_dict(
     attachments: dict[int, list[dict[str, Any]]] | None,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -1238,7 +1209,6 @@ class ProjectStore:
         saved_block_ids: set[int] = set()
         for block in self._sync_layout_projection_from_snapshot(
             page,
-            snapshot_authoritative=False,
             source_run_id=str(project_id),
         ):
             self._ensure_unique_child_uid(
@@ -1266,18 +1236,8 @@ class ProjectStore:
     def _sync_layout_projection_from_snapshot(
         page: Page,
         *,
-        snapshot_authoritative: bool = True,
         source_run_id: str = "",
     ) -> list[Block]:
-        if not snapshot_authoritative:
-            snapshot = layout_snapshot_for_page(page)
-            if snapshot is None or not _layout_snapshot_matches_projection(snapshot, page):
-                sync_page_layout_snapshot_from_projection(
-                    page,
-                    source_engine="project_store_save",
-                    source_run_id=source_run_id,
-                )
-
         snapshot = layout_snapshot_for_page(page)
         if snapshot is None:
             snapshot = sync_page_layout_snapshot_from_projection(
@@ -1367,7 +1327,7 @@ class ProjectStore:
         project_id: int,
     ) -> None:
         snapshot = layout_snapshot_for_page(page)
-        if snapshot is None or not _layout_snapshot_matches_projection(snapshot, page):
+        if snapshot is None:
             snapshot = sync_page_layout_snapshot_from_projection(
                 page,
                 source_engine="project_store_save",
