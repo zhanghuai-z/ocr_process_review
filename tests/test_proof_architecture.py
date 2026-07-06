@@ -1499,6 +1499,9 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
         assert "block_uid: str" in command_source
         assert "block: Block" not in command_source
         assert "block=block" not in command_source
+    merge_source = _function_source(edit_service_source, "merge_blocks")
+    assert "block_uids: Iterable[str]" in merge_source
+    assert "blocks: Iterable[Block]" not in merge_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",

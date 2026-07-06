@@ -321,7 +321,7 @@ def test_layout_edit_service_merge_blocks_invalidates_primary_and_clears_ocr_lin
 
     result = service.apply(LayoutEditCommand.merge_blocks(
         page,
-        [secondary, primary],
+        [secondary.uid, primary.uid],
         BBox.from_xyxy(10, 10, 90, 40),
         block_type=BlockType.EQUATION,
         source_label="display_formula",
@@ -409,7 +409,7 @@ def test_layout_edit_service_merge_blocks_uses_snapshot_order_and_geometry_when_
 
     result = service.apply(LayoutEditCommand.merge_blocks(
         page,
-        [secondary, primary],
+        [secondary.uid, primary.uid],
         BBox.from_xyxy(10, 10, 90, 40),
         block_type=BlockType.EQUATION,
         source_label="display_formula",

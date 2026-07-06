@@ -1480,7 +1480,7 @@ class LayoutPanel(QWidget):
         if intersecting:
             result = self._layout_edit_service.apply(LayoutEditCommand.merge_blocks(
                 page,
-                intersecting,
+                [block.uid for block in intersecting],
                 bbox,
                 block_type=bt,
                 source_label=source_label,

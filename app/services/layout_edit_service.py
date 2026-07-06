@@ -77,6 +77,7 @@ class LayoutEditCommand:
     page: Page
     block: Block | None = None
     block_uid: str = ""
+    block_uids: tuple[str, ...] = ()
     blocks: tuple[Block, ...] = ()
     bbox: BBox | None = None
     block_type: BlockType | None = None
@@ -112,7 +113,7 @@ class LayoutEditCommand:
     def merge_blocks(
         cls,
         page: Page,
-        blocks: Iterable[Block],
+        block_uids: Iterable[str],
         bbox: BBox,
         *,
         block_type: BlockType,
@@ -121,7 +122,7 @@ class LayoutEditCommand:
         return cls(
             "merge_blocks",
             page,
-            blocks=tuple(blocks),
+            block_uids=tuple(block_uids),
             bbox=bbox,
             block_type=block_type,
             source_label=source_label,
@@ -193,7 +194,7 @@ class LayoutEditService:
         if command.op == "merge_blocks":
             return self._merge_blocks_into_bbox(
                 command.page,
-                command.blocks,
+                self._runtime_blocks_by_uid(command.page, command.block_uids),
                 self._require_bbox(command),
                 block_type=self._require_block_type(command),
                 source_label=command.source_label,
@@ -239,6 +240,23 @@ class LayoutEditService:
             if view.uid == block_uid and view.runtime_block is not None:
                 return view.runtime_block
         raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
+
+    @staticmethod
+    def _runtime_blocks_by_uid(page: Page, block_uids: tuple[str, ...]) -> tuple[Block, ...]:
+        if not block_uids:
+            return ()
+        runtime_by_uid = {
+            view.uid: view.runtime_block
+            for view in iter_page_layout_block_views(page)
+            if view.runtime_block is not None
+        }
+        blocks: list[Block] = []
+        for block_uid in block_uids:
+            block = runtime_by_uid.get(block_uid)
+            if block is None:
+                raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
+            blocks.append(block)
+        return tuple(blocks)
 
     @staticmethod
     def block_state(block: Block) -> dict:
