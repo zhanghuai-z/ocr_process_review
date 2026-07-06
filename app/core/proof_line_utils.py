@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-from app.core.block_attributes import is_position_only_block, semantic_block_type
+from app.adapters.paddle import map_paddle_label_to_block_type
+from app.core.block_attributes import normalize_source_label
 from app.core.proof_line_facts import proof_display_text
 from app.models import BBox, Block, BlockType, Line, Page
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_observation import block_ocr_lines, line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 
@@ -21,6 +22,26 @@ PROOF_LINE_BLOCK_TYPES = {
 PROOF_SKIP_LINE_FLAGS = {
     "hanwang_route_table",
 }
+
+POSITION_ONLY_LABELS = {
+    "page_number",
+    "number",
+    "formula_number",
+    "header",
+    "footer",
+    "sidebar_text",
+}
+
+
+def _semantic_block_type_from_view(view: LayoutBlockView) -> BlockType:
+    label = normalize_source_label(view.origin.source_label or view.source_label or view.block_type.value)
+    semantic = map_paddle_label_to_block_type(label)
+    return view.block_type if semantic == BlockType.UNKNOWN else semantic
+
+
+def _is_position_only_view(view: LayoutBlockView) -> bool:
+    label = normalize_source_label(view.origin.source_label or view.source_label)
+    return label in POSITION_ONLY_LABELS
 
 
 def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
@@ -41,10 +62,13 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
     while preserving repeated text at different page positions.
     """
     seen: list[tuple[str, BBox]] = []
-    for block in page_layout_blocks(page):
-        if block.block_type == BlockType.EQUATION:
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
             continue
-        if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
+        if view.block_type == BlockType.EQUATION:
+            continue
+        if _semantic_block_type_from_view(view) not in PROOF_LINE_BLOCK_TYPES:
             continue
         for line_idx, line in enumerate(block_ocr_lines(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line_ocr_review_flags(line)):
@@ -62,12 +86,15 @@ def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int
     position-only blocks are not useful in row-by-row proofreading.
     """
     seen: list[tuple[str, BBox]] = []
-    for block in page_layout_blocks(page):
-        if block.block_type == BlockType.EQUATION:
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
             continue
-        if semantic_block_type(block) not in PROOF_LINE_BLOCK_TYPES:
+        if view.block_type == BlockType.EQUATION:
             continue
-        if is_position_only_block(block):
+        if _semantic_block_type_from_view(view) not in PROOF_LINE_BLOCK_TYPES:
+            continue
+        if _is_position_only_view(view):
             continue
         for line_idx, line in enumerate(block_ocr_lines(block)):
             if any(flag in PROOF_SKIP_LINE_FLAGS for flag in line_ocr_review_flags(line)):

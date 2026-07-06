@@ -17916,6 +17916,47 @@ def test_proof_line_iterator_excludes_equation_lines():
     print("test_proof_line_iterator_excludes_equation_lines PASSED")
 
 
+def test_proof_line_iterator_trusts_layout_snapshot_type_over_runtime_projection():
+    from app.core.proof_line_utils import iter_unique_page_hproof_lines, iter_unique_page_text_lines
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+        Line, OcrPolicy, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+
+    runtime_block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(0, 0, 80, 20),
+        lines=[Line(text="旧投影公式文本", confidence=0.9, bbox=BBox(1, 1, 30, 10))],
+        order=0,
+        source_label="text",
+    )
+    page = Page(image_path="/tmp/proof-lines-snapshot.png", width=100, height=100)
+    page.blocks = [runtime_block]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-proof-lines",
+        source_engine="test",
+        source_run_id="run-proof-lines",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=runtime_block.uid,
+                block_type=BlockType.EQUATION,
+                bbox=BBox(0, 0, 80, 20),
+                order=0,
+                source_label="formula",
+                origin=BlockOrigin(source_label="formula"),
+                ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            ),
+        ),
+    ))
+
+    assert list(iter_unique_page_text_lines(page)) == []
+    assert list(iter_unique_page_hproof_lines(page)) == []
+
+    print("test_proof_line_iterator_trusts_layout_snapshot_type_over_runtime_projection PASSED")
+
+
 def test_char_index_service_does_not_repopulate_equation_chars():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.services.char_index_service import CharIndexService
