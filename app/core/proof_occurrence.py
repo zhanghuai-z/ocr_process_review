@@ -13,7 +13,7 @@ from typing import Any, Iterable
 from app.core.proof_line_facts import proof_line_facts
 from app.models import BBox, Block, Line, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 
 
@@ -53,7 +53,7 @@ def line_signature(line: Line) -> str:
 
     facts = proof_line_facts(line)
     char_parts: list[tuple[Any, ...]] = []
-    for idx, char in enumerate(line_ocr_chars(line)):
+    for idx, char in enumerate(line_ocr_chars_by_uid(line.uid)):
         bbox = char.bbox.to_dict() if char.bbox is not None else None
         char_parts.append((
             idx,

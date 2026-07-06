@@ -14,7 +14,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.models import Block, Char, Line, OcrProject, Page
 from app.models.layout_block_view import iter_page_layout_block_views, iter_page_layout_runtime_orphans
 from app.models.layout_snapshot_store import layout_snapshot_for_page
-from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
+from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     iter_page_ocr_line_observation_occurrences,
     iter_project_ocr_line_observation_occurrences,
@@ -298,7 +298,7 @@ def _diagnose_line_char_contract(project: OcrProject) -> list[ProjectDiagnosticI
     issues: list[ProjectDiagnosticIssue] = []
     for page, block, line, _block_idx, _line_idx in _iter_lines(project):
         display_text = proof_display_text(line)
-        chars = list(line_ocr_chars(line))
+        chars = list(line_ocr_chars_by_uid(line.uid))
         if display_text and not chars:
             issues.append(_line_issue(
                 "warning",

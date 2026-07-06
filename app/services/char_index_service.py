@@ -25,7 +25,7 @@ from app.core.proof_occurrence import (
     proof_page_identity_key,
 )
 from app.models import BBox, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars_by_uid
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 
@@ -247,7 +247,7 @@ class CharIndexService:
         text = proof_display_text(line)
         if not text:
             return False
-        chars = line_ocr_chars(line)
+        chars = line_ocr_chars_by_uid(line.uid)
         has_tokenized_chars = any(is_display_carrier(char) for char in chars)
         if not chars or (len(chars) != len(text) and not has_tokenized_chars):
             return True
@@ -333,7 +333,7 @@ class CharIndexService:
         if not text:
             return
 
-        chars = line_ocr_chars(line)
+        chars = line_ocr_chars_by_uid(line.uid)
         has_tokenized_chars = any(is_display_carrier(char) for char in chars)
         if not chars:
             self._index_fallback_line(
@@ -399,7 +399,7 @@ class CharIndexService:
         physical rows.  VProof should skip that line instead of showing
         thumbnails from unrelated positions.
         """
-        chars = line_ocr_chars(line)
+        chars = line_ocr_chars_by_uid(line.uid)
         if not chars or len(chars) != len(text):
             return True
         mismatches = [
@@ -495,7 +495,7 @@ class CharIndexService:
 
     def _iter_index_units(self, line: Line) -> List[dict]:
         units: List[dict] = []
-        chars = line_ocr_chars(line)
+        chars = line_ocr_chars_by_uid(line.uid)
         text = proof_display_text(line)
         idx = 0
         display_idx = 0
@@ -627,7 +627,11 @@ class CharIndexService:
                 units.append({
                     "key": glyph,
                     "char_idx": start_idx + offset,
-                    "bbox": char.bbox or _estimate_char_bbox(line, start_idx + offset, len(line_ocr_chars(line))) or line_ocr_bbox(line),
+                    "bbox": (
+                        char.bbox
+                        or _estimate_char_bbox(line, start_idx + offset, len(line_ocr_chars_by_uid(line.uid)))
+                        or line_ocr_bbox(line)
+                    ),
                     "confidence": float(char.confidence),
                     "bbox_source": char.bbox_source or "fallback",
                     "bbox_granularity": _bbox_granularity_for_index(char),

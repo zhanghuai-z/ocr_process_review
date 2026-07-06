@@ -16,7 +16,7 @@ from app.core.block_attributes import normalize_source_label, semantic_block_typ
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_char_text import char_display_text, chars_display_text
 from app.models import BBox, Block, BlockType, Char, Line
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_confidence
 
@@ -76,7 +76,7 @@ def build_line_proof_atoms(block: Block | None, line: Line) -> list[ProofAtom]:
         if block_kind == BlockType.EQUATION:
             return [_region_atom(ProofAtomKind.FORMULA, line)]
 
-    chars = list(line_ocr_chars(line))
+    chars = list(line_ocr_chars_by_uid(line.uid))
     if not chars:
         return [_region_atom(ProofAtomKind.UNKNOWN, line, reliable=False, reason="line_without_chars")]
     reconstructed_text = chars_display_text(chars)

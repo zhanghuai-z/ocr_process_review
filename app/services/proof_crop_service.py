@@ -16,7 +16,7 @@ from app.core.proof_geometry_quality import is_estimated_or_unavailable_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
+from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
@@ -37,7 +37,7 @@ def _fallback_char(glyph: str, line: Line, bbox: BBox | None, source: str, granu
 
 def _complete_positional_chars(line: Line, text: str, boxes: list[BBox] | None) -> list[Char]:
     completed: list[Char] = []
-    existing = list(line_ocr_chars(line))
+    existing = list(line_ocr_chars_by_uid(line.uid))
     for idx, glyph in enumerate(text):
         current = existing[idx] if idx < len(existing) else None
         if current is not None and current.char == glyph and current.bbox is not None:
@@ -76,7 +76,7 @@ def proof_fallback_warning(stats: ProofCropStats, pages: Iterable[Page] | None =
         for page in pages:
             for _block, line, _line_idx in iter_unique_page_text_lines(page):
                 line_fallback_chars = 0
-                for char in line_ocr_chars(line):
+                for char in line_ocr_chars_by_uid(line.uid):
                     if is_estimated_or_unavailable_geometry(char.bbox_source, char.bbox_granularity):
                         line_fallback_chars += 1
                 if line_fallback_chars:
@@ -120,10 +120,10 @@ class ProofCropService:
                 old_line_bbox = line_ocr_bbox(line)
                 old_char_boxes = [
                     char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line_ocr_chars(line)
+                    for char in line_ocr_chars_by_uid(line.uid)
                 ]
 
-                chars = line_ocr_chars(line)
+                chars = line_ocr_chars_by_uid(line.uid)
                 has_tokenized_chars = any(is_display_carrier(char) for char in chars)
                 needs_fallback_chars = (
                     not chars
@@ -162,7 +162,7 @@ class ProofCropService:
 
                 new_char_boxes = [
                     char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line_ocr_chars(line)
+                    for char in line_ocr_chars_by_uid(line.uid)
                 ]
                 if new_char_boxes != old_char_boxes:
                     page_char_updates += 1

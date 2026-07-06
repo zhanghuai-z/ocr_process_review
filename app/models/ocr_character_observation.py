@@ -31,11 +31,11 @@ def line_ocr_chars_by_uid(line_uid: str) -> list[Char]:
 
 
 def line_ocr_char_count(line: Line) -> int:
-    return len(line_ocr_chars(line))
+    return len(line_ocr_chars_by_uid(line.uid))
 
 
 def line_has_ocr_chars(line: Line) -> bool:
-    return bool(line_ocr_chars(line))
+    return bool(line_ocr_chars_by_uid(line.uid))
 
 
 def replace_line_ocr_char_observations(line_uid: str, chars: Iterable[Char]) -> None:
@@ -47,11 +47,11 @@ def set_ocr_char_bbox(char: Char, bbox: BBox) -> None:
 
 
 def line_ocr_char_at(line: Line, index: int) -> Char:
-    return line_ocr_chars(line)[index]
+    return line_ocr_chars_by_uid(line.uid)[index]
 
 
 def iter_line_ocr_char_occurrences(line: Line) -> Iterator[OcrCharOccurrence]:
-    for char_index, char in enumerate(line_ocr_chars(line)):
+    for char_index, char in enumerate(line_ocr_chars_by_uid(line.uid)):
         yield OcrCharOccurrence(
             line=line,
             char=char,

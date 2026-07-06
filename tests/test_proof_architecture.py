@@ -2077,6 +2077,17 @@ def test_ocr_character_observation_store_has_no_object_read_adapter():
     assert "ocr_chars_for_line_uid(line.uid)" in observation_source
 
 
+def test_production_code_reads_ocr_chars_by_line_uid():
+    offenders: list[str] = []
+    for path in sorted(APP_DIR.rglob("*.py")):
+        if path == Path("app/models/ocr_character_observation.py"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        if re.search(r"(?<!replace_)line_ocr_chars\(", source):
+            offenders.append(str(path))
+    assert offenders == []
+
+
 def test_export_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/export_service.py").read_text(encoding="utf-8")
 

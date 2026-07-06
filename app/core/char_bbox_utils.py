@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from app.models import BBox, Char, Line
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
+from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import line_ocr_bbox, set_ocr_line_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.core.proof_line_facts import proof_display_text
@@ -513,7 +513,7 @@ def ensure_line_char_bboxes(
         else split_line_bbox_into_char_bboxes(refined_line_bbox, text)
     )
     chars: List[Char] = []
-    existing_chars = line_ocr_chars(line)
+    existing_chars = line_ocr_chars_by_uid(line.uid)
     for idx, glyph in enumerate(text):
         existing = existing_chars[idx] if idx < len(existing_chars) else None
         has_explicit_bbox = (

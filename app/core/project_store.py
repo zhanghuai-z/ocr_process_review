@@ -31,7 +31,7 @@ from app.models.layout_block_state import (
     set_layout_block_source_label,
     set_layout_block_type,
 )
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
+from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     iter_project_ocr_line_observation_occurrences,
@@ -679,7 +679,7 @@ def _origin_from_current_block(block: Block) -> BlockOrigin:
 
 
 def _proof_alignment_state(line: Line, display_text: str | None = None) -> str:
-    chars = line_ocr_chars(line)
+    chars = line_ocr_chars_by_uid(line.uid)
     if not chars:
         return "line_only"
     try:
@@ -1655,7 +1655,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_char_ids: set[int] = set()
-        for char in line_ocr_chars(line):
+        for char in line_ocr_chars_by_uid(line.uid):
             self._ensure_unique_child_uid(
                 cur,
                 char,
@@ -1856,7 +1856,7 @@ class ProjectStore:
         }
         saved_char_ids: set[int] = set()
         seen_uids: set[str] = set()
-        for char in line_ocr_chars(line):
+        for char in line_ocr_chars_by_uid(line.uid):
             self._ensure_unique_child_uid(
                 cur,
                 char,

@@ -20,7 +20,7 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     iter_page_ocr_line_observation_occurrences,
@@ -1601,7 +1601,7 @@ class LayoutPanel(QWidget):
             for line in _ocr_observation_lines(block):
                 chars.extend([
                     char
-                    for char in line_ocr_chars(line)
+                    for char in line_ocr_chars_by_uid(line.uid)
                     if (
                         char.bbox is not None
                         and char.bbox_source != "paddle_inline_formula"

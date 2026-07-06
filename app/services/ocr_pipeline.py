@@ -39,7 +39,7 @@ from app.models.layout_snapshot_projection import (
     replace_page_layout_projection_from_snapshot,
 )
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
+from app.models.ocr_character_observation import line_ocr_chars_by_uid, set_ocr_char_bbox
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     line_ocr_bbox,
@@ -635,7 +635,7 @@ class OcrPipeline:
     ) -> None:
         for line in lines:
             set_ocr_line_bbox(line, seam.to_page_bbox(line_ocr_bbox(line), source_space=bbox_space))
-            for char in line_ocr_chars(line):
+            for char in line_ocr_chars_by_uid(line.uid):
                 if char.bbox is None or char.bbox.area <= 0:
                     continue
                 set_ocr_char_bbox(char, seam.to_page_bbox(char.bbox, source_space=bbox_space))

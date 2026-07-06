@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from app.models import Line
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 
 
 def normalize_confidence(raw) -> Optional[float]:
@@ -26,7 +26,7 @@ def line_confidence(line: Line) -> Optional[float]:
     """Prefer real char confidence, then fall back to a non-zero line score."""
     char_scores = [
         score
-        for ch in line_ocr_chars(line)
+        for ch in line_ocr_chars_by_uid(line.uid)
         if (score := normalize_confidence(getattr(ch, "confidence", None))) is not None
     ]
     if char_scores:
@@ -35,7 +35,7 @@ def line_confidence(line: Line) -> Optional[float]:
 
 
 def char_confidence(line: Line, idx: int) -> Optional[float]:
-    chars = line_ocr_chars(line)
+    chars = line_ocr_chars_by_uid(line.uid)
     if 0 <= idx < len(chars):
         score = normalize_confidence(getattr(chars[idx], "confidence", None))
         if score is not None:

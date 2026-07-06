@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
 
 from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
 )
@@ -474,7 +474,7 @@ def _debug_block_labels(block: Block) -> set[str]:
 def _line_has_formula_source(line: Line) -> bool:
     has_formula_route = any(flag in _DEBUG_FORMULA_LINE_FLAGS for flag in line.review_flags)
     formula_texts: list[str] = []
-    for char in line_ocr_chars(line):
+    for char in line_ocr_chars_by_uid(line.uid):
         source = normalize_source_label(getattr(char, "bbox_source", ""))
         if source == "paddle_inline_formula":
             formula_texts.append(char_display_text(char))
@@ -491,7 +491,7 @@ def _line_is_formula_marker_only(line: Line) -> bool:
         return True
     formula_texts = [
         char_display_text(char)
-        for char in line_ocr_chars(line)
+        for char in line_ocr_chars_by_uid(line.uid)
         if normalize_source_label(getattr(char, "bbox_source", "")) == "paddle_inline_formula"
     ]
     return bool(formula_texts) and all(is_formula_marker_token(text) for text in formula_texts)
@@ -3153,7 +3153,7 @@ class _LinePair(QFrame):
     # ── 私有 ──────────────────────────────────────────────────
 
     def _line_chars(self):
-        return line_ocr_chars(self._line)
+        return line_ocr_chars_by_uid(self._line.uid)
 
     def _on_click(self, event) -> None:
         if hasattr(event, "button") and event.button() == Qt.MouseButton.RightButton:
