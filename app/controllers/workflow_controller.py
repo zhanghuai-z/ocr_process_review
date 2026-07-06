@@ -18,7 +18,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from app.models.block_state import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
-from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_line_utils import iter_unique_page_text_line_views
 from app.core.proof_occurrence import line_signature
 from app.core.project_store import ProjectStore
 from app.core.proof_change import ProofChangeSet
@@ -288,13 +288,13 @@ class WorkflowController(QObject):
                 page.width,
                 page.height,
             ))
-            for block, line, line_idx in iter_unique_page_text_lines(page):
+            for view, block, line, line_idx in iter_unique_page_text_line_views(page):
                 parts.append((
                     "line",
-                    block.uid,
+                    view.uid,
                     block.id,
-                    block.order,
-                    block.block_type.value,
+                    view.order,
+                    view.block_type.value,
                     line.uid,
                     line.id,
                     line_idx,

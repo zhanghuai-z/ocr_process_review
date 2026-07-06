@@ -94,6 +94,40 @@ def test_total_line_count_sums_pages(ctrl):
     assert ctrl.total_line_count == project_ocr_line_count(ctrl._project)
 
 
+def test_proof_pages_signature_uses_layout_snapshot_view(ctrl):
+    from app.models import BlockOrigin, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+
+    line = _line("甲")
+    block = _block([line])
+    block.order = 9
+    page = _page(1, [block])
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-controller-proof-signature",
+        source_engine="test",
+        source_run_id="run-controller-proof-signature",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.TITLE,
+                bbox=block.bbox,
+                order=2,
+                source_label="paragraph_title",
+                origin=BlockOrigin(source_label="paragraph_title"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+    ctrl._project = OcrProject(name="signature", pages=[page])
+
+    line_part = next(part for part in ctrl._proof_pages_signature() if part[0] == "line")
+
+    assert line_part[1] == block.uid
+    assert line_part[3] == 2
+    assert line_part[4] == BlockType.TITLE.value
+
+
 def test_page_number_at_returns_correct_value(ctrl):
     p1 = _page(7, [_block([_line()])])
     p2 = _page(11, [_block([_line()])])
