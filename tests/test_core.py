@@ -4295,6 +4295,57 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
     print("test_table_text_layer_service_writes_hidden_cells_for_table_block PASSED")
 
 
+def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
+    from PIL import Image, ImageDraw, ImageFont
+
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+        Line, OcrPolicy, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.services.table_text_layer_service import TableTextLayerService
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        image = Image.new("RGB", (700, 320), "white")
+        draw = ImageDraw.Draw(image)
+        font = ImageFont.load_default()
+        draw.text((300, 80), "BBB", fill="black", font=font)
+        image.save(image_path)
+
+        html = "<table><tr><td>A</td><td>B</td></tr></table>"
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=0, lines=[
+            Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160)),
+        ])
+        page = Page(image_path=image_path, width=700, height=320, blocks=[block])
+        snapshot = LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="",
+            source_engine="test",
+            source_run_id="",
+            blocks=(
+                LayoutBlockSnapshot(
+                    uid=block.uid,
+                    block_type=BlockType.TABLE,
+                    bbox=BBox(50, 50, 500, 160),
+                    order=0,
+                    source_label="table",
+                    origin=BlockOrigin(original_bbox=BBox(50, 50, 500, 160), original_kind=BlockType.TABLE),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_TABLE,
+                ),
+            ),
+        )
+        set_layout_snapshot_for_page(page, snapshot)
+
+        updated = TableTextLayerService().enrich_page(page)
+
+        assert updated == 1
+        assert block.table_text_layer_cells
+        assert abs(block.table_text_layer_cells[1]["bbox"]["x"] - 300) < 3
+
+    print("test_table_text_layer_service_reads_table_bbox_from_layout_snapshot PASSED")
+
+
 def test_table_text_layer_service_clears_stale_cells_without_table_html_source():
     from PIL import Image
 
