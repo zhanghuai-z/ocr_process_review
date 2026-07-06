@@ -25,6 +25,7 @@ from app.core.proof_state import ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_observation import replace_block_ocr_lines
 
 
 @pytest.fixture(autouse=True)
@@ -140,8 +141,8 @@ def test_vproof_undo_resolves_occurrence_after_line_moves_between_blocks():
     assert v._vproof_undo_stack
     assert v._vproof_undo_stack[-1].edits[0].occurrence_keys
 
-    original_block.lines.remove(line)
-    moved_block.lines.append(line)
+    replace_block_ocr_lines(original_block, [])
+    replace_block_ocr_lines(moved_block, [line])
 
     assert v._undo_vproof_edit() is True
     assert moved_block.lines[0] is line
