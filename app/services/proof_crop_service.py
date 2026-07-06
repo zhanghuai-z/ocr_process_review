@@ -17,7 +17,7 @@ from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
-from app.models.ocr_observation import block_ocr_line_observations, line_ocr_bbox
+from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 
@@ -114,8 +114,8 @@ class ProofCropService:
         page_char_updates = 0
 
         dispatch_plan = build_text_ocr_dispatch_plan(page)
-        for block in dispatch_plan.text_block_models:
-            for line in block_ocr_line_observations(block):
+        for target in dispatch_plan.text_blocks:
+            for line in block_ocr_line_observations_by_uid(target.view.uid):
                 stats.lines += 1
                 old_line_bbox = line_ocr_bbox(line)
                 old_char_boxes = [
