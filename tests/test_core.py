@@ -71,6 +71,12 @@ def _seed_project_ocr_observations(project):
         _seed_page_ocr_observations(page)
 
 
+def _block_ocr_observations(block):
+    from app.models.ocr_observation import block_ocr_line_observations
+
+    return block_ocr_line_observations(block)
+
+
 def test_layout_projection_boundary_tracks_current_page_blocks():
     from app.models import BBox, Block, BlockType, Page
     from app.models.layout_projection import (
@@ -8128,9 +8134,10 @@ def test_ocr_pipeline():
 
         assert len(result.pages) == 1
         assert len(result.pages[0].blocks) > 0
-        # fake OCR 应生成了 lines
-        assert len(result.pages[0].blocks[0].lines) > 0
-        assert result.pages[0].blocks[0].lines[0].text is not None
+        # fake OCR 应生成 observation lines；Block.lines 不再是生产者写入事实。
+        assert len(_block_ocr_observations(result.pages[0].blocks[0])) > 0
+        assert _block_ocr_observations(result.pages[0].blocks[0])[0].text is not None
+        assert result.pages[0].blocks[0].lines == []
         assert result.pages[0].error_message == ""
 
         print("test_ocr_pipeline PASSED")
@@ -8162,7 +8169,7 @@ def test_ocr_pipeline_keeps_page_relative_boxes():
         project = OcrProject(name="PageCoords", pages=[page])
 
         result = OcrPipeline(engine=PageCoordEngine()).process_project(project)
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
     finally:
@@ -8201,7 +8208,7 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         project = OcrProject(name="CropCoords", pages=[page])
 
         result = OcrPipeline(engine=CropCoordEngine()).process_project(project)
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
         assert len(line.chars) == len(line.text)
@@ -8259,7 +8266,7 @@ def test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_
         result = OcrPipeline(engine=PartialCharBoxEngine()).process_project(
             OcrProject(name="PartialCharBox", pages=[page])
         )
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.chars[0].bbox == BBox(112, 80, 14, 24)
         assert line.chars[0].bbox_source == "ocr"
@@ -8297,7 +8304,7 @@ def test_ocr_pipeline_normalizes_proof_geometry():
         result = OcrPipeline(engine=LooseLineEngine()).process_project(
             OcrProject(name="ProofNormalize", pages=[page])
         )
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(10, 44, 160, 40)
         assert len(line.chars) == 2
@@ -8326,7 +8333,7 @@ def test_ocr_pipeline_process_block_normalizes_proof_geometry():
     try:
         block = Block(block_type=BlockType.TEXT, bbox=BBox(20, 10, 100, 40))
         result = OcrPipeline(engine=LooseBlockEngine()).process_block(block, img_path)
-        line = result.lines[0]
+        line = _block_ocr_observations(result)[0]
 
         assert line.bbox == BBox(30, 22, 80, 24)
         assert len(line.chars) == 2
@@ -8366,7 +8373,7 @@ def test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers():
         )
 
         assert result.pages[0].error_message == ""
-        assert result.pages[0].blocks[0].lines[0].chars
+        assert _block_ocr_observations(result.pages[0].blocks[0])[0].chars
         warnings = [event.message for event in progress_events if "proof fallback" in event.message]
         assert warnings == ["警告：第 1/1 页触发 proof fallback，1 行/3 字使用估算或不可用字框"]
     finally:
@@ -8504,15 +8511,15 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
             OcrProject(name="PageOcrAssign", pages=[page])
         )
         blocks = result.pages[0].blocks
-        all_texts = [line.text for block in blocks for line in block.lines]
+        all_texts = [line.text for block in blocks for line in _block_ocr_observations(block)]
 
         assert all_texts.count("甲") == 1
         assert all_texts.count("乙") == 1
         assert all_texts.count("丙") == 1
-        assert [line.text for line in precise.lines] == ["甲"]
-        assert [line.text for line in broad.lines] == ["乙"]
+        assert [line.text for line in _block_ocr_observations(precise)] == ["甲"]
+        assert [line.text for line in _block_ocr_observations(broad)] == ["乙"]
         assert blocks[-1].note == "PP-OCRv5 unmatched proof lines"
-        assert [line.text for line in blocks[-1].lines] == ["丙"]
+        assert [line.text for line in _block_ocr_observations(blocks[-1])] == ["丙"]
         assert blocks[-1].block_type == BlockType.TEXT
         assert blocks[-1].order == 9
     finally:
@@ -8778,7 +8785,7 @@ def test_ocr_pipeline_avoids_double_shift_for_page_space_boxes():
         project = OcrProject(name="NoDoubleShift", pages=[page])
 
         result = OcrPipeline(engine=LargeCropPageCoordEngine()).process_project(project)
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
     finally:
@@ -8823,7 +8830,7 @@ def test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars():
             OcrProject(name="HanwangSharedPipeline", pages=[page])
         )
 
-        line = result.pages[0].blocks[0].lines[0]
+        line = _block_ocr_observations(result.pages[0].blocks[0])[0]
         assert line.text == "汉王"
         assert line.bbox == BBox(46, 58, 42, 16)
         assert [char.char for char in line.chars] == ["汉", "王"]

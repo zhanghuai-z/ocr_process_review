@@ -40,13 +40,10 @@ from app.models.layout_projection import (
 from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
 from app.models.ocr_observation import (
-    append_block_ocr_line,
-    block_ocr_line_count,
-    block_ocr_lines,
-    clear_block_ocr_lines,
+    block_ocr_line_observations,
     line_ocr_bbox,
-    page_ocr_line_count,
-    replace_block_ocr_lines,
+    iter_page_ocr_line_observation_occurrences,
+    replace_block_ocr_line_observations,
     set_ocr_line_bbox,
 )
 from app.models.page_state import clear_page_error_message, mark_page_ocr_failed, page_error_message
@@ -223,7 +220,7 @@ class OcrPipeline:
 
                     try:
                         lines = self._process_block(img, block, page, page_idx)
-                        replace_block_ocr_lines(block, lines)
+                        replace_block_ocr_line_observations(block.uid, lines)
                     except Exception as e:
                         logger.error(
                             "OCR failed: page=%d block=%d: %s",
@@ -255,7 +252,7 @@ class OcrPipeline:
                         completed_pages=page_idx + 1,
                             message=f"OCR 跳过：第 {page_idx + 1}/{total_pages} 页没有可识别块",
                     ))
-                elif page_ocr_line_count(page) == 0 and page_failures and not page_error_message(page):
+                elif self._page_ocr_observation_count(page) == 0 and page_failures and not page_error_message(page):
                     summary = "；".join(page_failures[:3])
                     if len(page_failures) > 3:
                         summary += "；…"
@@ -572,7 +569,10 @@ class OcrPipeline:
                 mark_page_line_hints=True,
             )
             if progress_callback:
-                line_count = sum(block_ocr_line_count(block) for block in dispatch_plan.text_block_models)
+                line_count = sum(
+                    len(block_ocr_line_observations(block))
+                    for block in dispatch_plan.text_block_models
+                )
                 progress_callback(0, total_text_blocks, f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")
@@ -608,7 +608,7 @@ class OcrPipeline:
             line_ocr_bbox(line) is not None
             and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)
-            for line in block_ocr_lines(block)
+            for line in block_ocr_line_observations(block)
         )
 
     def _reusable_page_line_hint_summary(self, page: Page) -> str:
@@ -617,7 +617,7 @@ class OcrPipeline:
             1
             for target in dispatch_plan.text_blocks
             for block in (target.block,)
-            for line in block_ocr_lines(block)
+            for line in block_ocr_line_observations(block)
             if line_ocr_bbox(line) is not None
             and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)
@@ -645,8 +645,7 @@ class OcrPipeline:
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         containers = list(dispatch_plan.text_blocks)
         blockers = list(dispatch_plan.blocked_blocks)
-        for target in containers:
-            clear_block_ocr_lines(target.block)
+        assigned: dict[str, list[Line]] = {target.block.uid: [] for target in containers}
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
             blocker = select_container_block_for_line(line, blockers)
@@ -656,7 +655,10 @@ class OcrPipeline:
             if target is None:
                 unmatched.append(line)
             else:
-                append_block_ocr_line(target.block, line)
+                assigned.setdefault(target.block.uid, []).append(line)
+
+        for target in containers:
+            replace_block_ocr_line_observations(target.block.uid, assigned.get(target.block.uid, []))
 
         if not unmatched:
             return
@@ -669,7 +671,7 @@ class OcrPipeline:
             order=(max((view.order for view in iter_page_layout_block_views(page)), default=-1) + 1),
             note="PP-OCRv5 unmatched proof lines",
         )
-        replace_block_ocr_lines(synthetic, unmatched)
+        replace_block_ocr_line_observations(synthetic.uid, unmatched)
         append_page_layout_block(page, synthetic)
 
     def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
@@ -682,13 +684,15 @@ class OcrPipeline:
         """
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         containers = list(dispatch_plan.text_blocks)
-        for target in containers:
-            clear_block_ocr_lines(target.block)
+        assigned: dict[str, list[Line]] = {target.block.uid: [] for target in containers}
 
         for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
             target = select_container_block_for_line(line, containers)
             if target is not None:
-                append_block_ocr_line(target.block, line)
+                assigned.setdefault(target.block.uid, []).append(line)
+
+        for target in containers:
+            replace_block_ocr_line_observations(target.block.uid, assigned.get(target.block.uid, []))
 
     def assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Public wrapper used when PP-OCRv5 proof lines finish before layout."""
@@ -718,7 +722,7 @@ class OcrPipeline:
         )
         replace_page_layout_blocks(page, [block])
         lines = self._process_block(img, block, page, 0)
-        replace_block_ocr_lines(block, lines)
+        replace_block_ocr_line_observations(block.uid, lines)
         self._normalize_proof_crops(
             page,
             page_idx=0,
@@ -726,6 +730,10 @@ class OcrPipeline:
             progress_callback=None,
         )
         return block
+
+    @staticmethod
+    def _page_ocr_observation_count(page: Page) -> int:
+        return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
 
     def _process_block(
         self,

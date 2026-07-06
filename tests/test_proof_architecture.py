@@ -1725,6 +1725,17 @@ def test_layout_edit_service_reads_ocr_lines_from_observation_store():
     assert re.search(r"(?<!clear_)block_ocr_lines\(", source) is None
 
 
+def test_ocr_pipeline_writes_ocr_lines_to_uid_observations():
+    source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
+
+    assert "replace_block_ocr_line_observations" in source
+    assert "block_ocr_line_observations" in source
+    assert "replace_block_ocr_lines" not in source
+    assert "append_block_ocr_line" not in source
+    assert "clear_block_ocr_lines" not in source
+    assert "block_ocr_lines(" not in source
+
+
 def test_truth_map_records_layout_snapshot_as_current_boundary():
     source = Path("CURRENT_TRUTH_MAP.md").read_text(encoding="utf-8")
 
