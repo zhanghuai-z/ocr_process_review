@@ -52,7 +52,7 @@ from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
 from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_char_count
 from app.models.ocr_observation import (
-    block_has_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     iter_page_ocr_line_observation_occurrences,
     iter_project_ocr_line_observation_occurrences,
 )
@@ -197,7 +197,7 @@ def is_block_eligible(block: Block) -> bool:
         return False
     if block.block_type in EXCLUDED_BLOCK_TYPES:
         return False
-    if not block_has_ocr_line_observations(block):
+    if not block_ocr_line_observations_by_uid(block.uid):
         return False
     return True
 

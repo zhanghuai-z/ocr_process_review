@@ -2086,7 +2086,9 @@ def test_proof_readers_use_ocr_observation_store_not_block_lines_projection():
     proof_occurrence_source = Path("app/core/proof_occurrence.py").read_text(encoding="utf-8")
     assert "block_ocr_line_observations_by_uid" in proof_occurrence_source
     assert "block_ocr_line_observations(" not in proof_occurrence_source
-    assert "block_has_ocr_line_observations" in Path("app/core/quality_probe.py").read_text(encoding="utf-8")
+    quality_probe_source = Path("app/core/quality_probe.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations_by_uid" in quality_probe_source
+    assert "block_has_ocr_line_observations" not in quality_probe_source
     assert "block_ocr_line_observations" in Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
 
 
