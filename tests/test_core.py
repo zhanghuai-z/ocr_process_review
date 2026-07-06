@@ -20721,6 +20721,53 @@ def test_image_viewer_char_boxes_update_char_bbox():
     print("test_image_viewer_char_boxes_update_char_bbox PASSED")
 
 
+def test_image_viewer_resize_handle_emits_geometry_without_mutating_block():
+    from PySide6.QtCore import QPointF, QRectF
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    class _FakeSceneMove:
+        def __init__(self, scene_pos: QPointF) -> None:
+            self._scene_pos = scene_pos
+            self.accepted = False
+
+        def scenePos(self) -> QPointF:
+            return self._scene_pos
+
+        def accept(self) -> None:
+            self.accepted = True
+
+    _get_qapp()
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(80, 60, QImage.Format.Format_RGB888))
+    block = Block(block_type=BlockType.EQUATION, bbox=BBox(10, 12, 20, 22))
+    viewer.show_blocks([block])
+    item, _ = viewer._block_items[0]
+    handle = item._handles[7]
+    emitted: list[tuple[str, BBox]] = []
+    viewer.block_geometry_change_requested.connect(lambda uid, bbox: emitted.append((uid, bbox)))
+
+    handle._drag_start = QPointF(30, 34)
+    handle._orig_scene_rect = QRectF(10, 12, 20, 22)
+    event = _FakeSceneMove(QPointF(36, 42))
+    handle.mouseMoveEvent(event)
+
+    assert event.accepted is True
+    assert block.bbox == BBox(10, 12, 20, 22)
+    assert emitted
+    uid, bbox = emitted[-1]
+    assert uid == block.uid
+    assert bbox.x == 10
+    assert bbox.y == 12
+    assert bbox.w > block.bbox.w
+    assert bbox.h > block.bbox.h
+    viewer.close()
+
+    print("test_image_viewer_resize_handle_emits_geometry_without_mutating_block PASSED")
+
+
 def test_image_viewer_space_pan_temporarily_disables_box_editing():
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtGui import QImage, QKeyEvent

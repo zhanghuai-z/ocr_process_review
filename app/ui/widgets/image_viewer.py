@@ -22,7 +22,7 @@ from app.core.block_attributes import block_attributes
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
 from app.models.layout_block_view import LayoutBlockView
-from app.models.layout_block_state import set_layout_block_bbox
+from app.models.ocr_character_observation import set_ocr_char_bbox
 from app.models.ocr_observation import block_ocr_line_observations
 from app.models.ocr_text_observation import line_ocr_confidence
 
@@ -150,15 +150,16 @@ class _ResizeHandle(QGraphicsRectItem):
             return
         # 更新父 item
         bi = self._bbox_item
-        bi.prepareGeometryChange()
-        bi.setPos(r.topLeft())
-        bi.setRect(QRectF(0, 0, r.width(), r.height()))
-        for h in bi._handles:
-            h.update_position()
-        # 同步 block
-        if bi._block is not None and hasattr(bi._block, "bbox"):
-            set_layout_block_bbox(bi._block, BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height())))
-            bi.signals.moved.emit(bi._block)
+        bi._suppress_geometry_emit = True
+        try:
+            bi.prepareGeometryChange()
+            bi.setPos(r.topLeft())
+            bi.setRect(QRectF(0, 0, r.width(), r.height()))
+            for h in bi._handles:
+                h.update_position()
+        finally:
+            bi._suppress_geometry_emit = False
+        bi._emit_geometry_changed(BBox(int(r.x()), int(r.y()), int(r.width()), int(r.height())))
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -205,6 +206,7 @@ class BBoxItem(QGraphicsRectItem):
         self._editable = True
         self._selectable = True
         self._edit_started_for_drag = False
+        self._suppress_geometry_emit = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
@@ -259,7 +261,8 @@ class BBoxItem(QGraphicsRectItem):
             self._emit_edit_started_once()
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._update_tooltip()
-            self._emit_geometry_changed(self._scene_bbox())
+            if not self._suppress_geometry_emit:
+                self._emit_geometry_changed(self._scene_bbox())
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # 选中时显示手柄，取消选中时隐藏
             editable = bool(self.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
@@ -298,8 +301,9 @@ class BBoxItem(QGraphicsRectItem):
             if self._block.uid:
                 self.signals.geometry_changed.emit(self._block.uid, bbox)
             return
-        set_layout_block_bbox(self._block, bbox)
-        self.signals.moved.emit(self._block)
+        if isinstance(self._block, Char):
+            set_ocr_char_bbox(self._block, bbox)
+            self.signals.moved.emit(self._block)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
