@@ -10,11 +10,7 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 from collections.abc import Iterator
 
-from .layout_projection import (
-    find_page_layout_block_index,
-    iter_page_layout_block_occurrences,
-    iter_project_layout_block_occurrences,
-)
+from .layout_block_view import iter_page_layout_block_views
 from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
 from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
 from .project import BBox, Block, Line, OcrProject, Page
@@ -84,7 +80,11 @@ def find_block_ocr_line_index(
     block: Block,
     line: Line,
 ) -> tuple[int, int] | None:
-    block_index = find_page_layout_block_index(page, block)
+    block_index: int | None = None
+    for view in iter_page_layout_block_views(page):
+        if view.runtime_block is block:
+            block_index = view.snapshot_index
+            break
     if block_index is None:
         return None
     try:
@@ -113,14 +113,16 @@ def find_block_ocr_line_occurrence(
 
 
 def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
-    for block_occurrence in iter_page_layout_block_occurrences(page):
-        block = block_occurrence.block
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
         for line_index, line in enumerate(block_ocr_lines(block)):
             yield OcrLineOccurrence(
                 page=page,
                 block=block,
                 line=line,
-                block_index=block_occurrence.block_index,
+                block_index=view.snapshot_index,
                 line_index=line_index,
             )
 
@@ -128,16 +130,8 @@ def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
 def iter_project_ocr_line_occurrences(
     project: OcrProject,
 ) -> Iterator[OcrLineOccurrence]:
-    for block_occurrence in iter_project_layout_block_occurrences(project):
-        block = block_occurrence.block
-        for line_index, line in enumerate(block_ocr_lines(block)):
-            yield OcrLineOccurrence(
-                page=block_occurrence.page,
-                block=block,
-                line=line,
-                block_index=block_occurrence.block_index,
-                line_index=line_index,
-            )
+    for page in project.pages:
+        yield from iter_page_ocr_line_occurrences(page)
 
 
 def page_ocr_line_count(page: Page) -> int:
