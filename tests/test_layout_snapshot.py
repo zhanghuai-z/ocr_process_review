@@ -279,6 +279,41 @@ def test_project_store_load_projects_block_projection_from_layout_snapshot(tmp_p
     assert loaded_page.blocks[0].source_label == "text"
 
 
+def test_project_store_rejects_project_without_layout_snapshot(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot-required.png", width=300, height=220)
+    set_paddle_raw_layout_records(
+        page,
+        [
+            {
+                "block_label": "text",
+                "block_bbox": [20, 30, 180, 70],
+                "block_content": "正文内容",
+                "score": 0.9,
+            },
+        ],
+        run_id="job-layout",
+    )
+    snapshot = layout_snapshot_from_normalized_artifact(
+        normalized_layout_artifact_from_page(page),
+        source_run_id="job-layout",
+    )
+    adopt_page_layout_snapshot(page, snapshot)
+    project = OcrProject(name="snapshot required", pages=[page])
+    db_path = str(tmp_path / "snapshot-required.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+        store.conn.execute(
+            "DELETE FROM layout_snapshot WHERE project_id=?",
+            (saved.id,),
+        )
+        store.conn.commit()
+
+    with ProjectStore(db_path) as store:
+        with pytest.raises(ProjectDataError, match="has no persisted layout snapshot"):
+            store.load_project(saved.id)
+
+
 def test_project_store_rejects_malformed_persisted_layout_snapshot(tmp_path):
     page = Page(image_path="/tmp/layout-snapshot-bad.png", width=100, height=80)
     snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="layout_edit")

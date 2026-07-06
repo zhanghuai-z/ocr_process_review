@@ -1793,24 +1793,21 @@ def test_layout_snapshot_contract_lives_in_model_layer():
 
 def test_project_store_persists_layout_snapshot_without_service_dependency():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
-    assert "from app.models.layout_snapshot_projection import" in source
     assert "CREATE TABLE IF NOT EXISTS layout_snapshot" in source
     assert "def _save_layout_snapshot" in source
     assert "def _load_layout_snapshot" in source
     assert "layout_snapshot_for_page(" in source
     assert "set_layout_snapshot_for_page(" in source
-    assert "sync_page_layout_snapshot_from_projection(" in source
-    assert "project_store_save" not in source
-    assert "project_store_legacy_projection" in source
+    assert "sync_page_layout_snapshot_from_projection(" not in source
+    assert "_migrate_legacy_projection_to_snapshot" not in source
+    assert "project_store_legacy_projection" not in source
     assert "from app.services.layout_snapshot" not in source
     assert "snapshot_authoritative" not in source
     assert "_layout_snapshot_matches_projection" not in source
 
     normal_save_source = _function_source(source, "_sync_layout_projection_from_snapshot")
-    legacy_source = _function_source(source, "_migrate_legacy_projection_to_snapshot")
     assert "sync_page_layout_snapshot_from_projection" not in normal_save_source
     assert "ProjectDataError(" in normal_save_source
-    assert "sync_page_layout_snapshot_from_projection" in legacy_source
 
 
 def test_layout_edit_service_records_snapshot_edits_without_projection_backflow():

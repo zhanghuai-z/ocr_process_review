@@ -22,7 +22,6 @@ from app.models import (
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
-from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
 from app.models.layout_block_state import (
     set_layout_block_bbox,
@@ -1277,14 +1276,6 @@ class ProjectStore:
         replace_page_layout_blocks(page, blocks)
         return blocks
 
-    @staticmethod
-    def _migrate_legacy_projection_to_snapshot(page: Page, *, source_run_id: str = "") -> None:
-        sync_page_layout_snapshot_from_projection(
-            page,
-            source_engine="project_store_legacy_projection",
-            source_run_id=source_run_id,
-        )
-
     def _save_layout_edit_events(
         self,
         cur: sqlite3.Cursor,
@@ -1936,7 +1927,9 @@ class ProjectStore:
                 set_layout_snapshot_for_page(page, snapshot)
                 self._sync_layout_projection_from_snapshot(page)
             else:
-                self._migrate_legacy_projection_to_snapshot(page, source_run_id=str(project.id or ""))
+                raise ProjectDataError(
+                    f"page {page.uid or page.page_number!r} has no persisted layout snapshot"
+                )
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
