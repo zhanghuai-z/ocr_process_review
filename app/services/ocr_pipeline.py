@@ -643,20 +643,20 @@ class OcrPipeline:
 
     def _assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         dispatch_plan = build_text_ocr_dispatch_plan(page)
-        containers = list(dispatch_plan.text_block_models)
-        blockers = list(dispatch_plan.blocker_block_models)
-        for block in containers:
-            clear_block_ocr_lines(block)
+        containers = list(dispatch_plan.text_blocks)
+        blockers = list(dispatch_plan.blocked_blocks)
+        for target in containers:
+            clear_block_ocr_lines(target.block)
         unmatched: list[Line] = []
         for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
             blocker = select_container_block_for_line(line, blockers)
             if blocker is not None:
                 continue
-            block = select_container_block_for_line(line, containers)
-            if block is None:
+            target = select_container_block_for_line(line, containers)
+            if target is None:
                 unmatched.append(line)
             else:
-                append_block_ocr_line(block, line)
+                append_block_ocr_line(target.block, line)
 
         if not unmatched:
             return
@@ -681,14 +681,14 @@ class OcrPipeline:
         the route builder.
         """
         dispatch_plan = build_text_ocr_dispatch_plan(page)
-        containers = list(dispatch_plan.text_block_models)
-        for block in containers:
-            clear_block_ocr_lines(block)
+        containers = list(dispatch_plan.text_blocks)
+        for target in containers:
+            clear_block_ocr_lines(target.block)
 
         for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
-            block = select_container_block_for_line(line, containers)
-            if block is not None:
-                append_block_ocr_line(block, line)
+            target = select_container_block_for_line(line, containers)
+            if target is not None:
+                append_block_ocr_line(target.block, line)
 
     def assign_page_ocr_lines_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Public wrapper used when PP-OCRv5 proof lines finish before layout."""

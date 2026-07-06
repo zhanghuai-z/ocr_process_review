@@ -8,6 +8,9 @@ import numpy as np
 
 from app.models import BBox, Block, BlockType, Line, Page
 from app.models.enums import OcrPolicy
+from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
+from app.models.layout_projection import replace_page_layout_blocks
+from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.ocr_observation import block_avg_confidence, block_ocr_lines
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 from app.services.ocr_pipeline import OcrPipeline
@@ -56,6 +59,36 @@ def test_dispatch_plan_selects_text_ocr_blocks_and_preserves_page_order():
     assert plan.has_text_work is True
 
 
+def test_dispatch_plan_uses_layout_snapshot_when_runtime_projection_drifts():
+    text = _block(BlockType.TEXT, BBox(0, 0, 100, 40), policy=OcrPolicy.TEXT_OCR, order=0)
+    formula = _block(
+        BlockType.EQUATION,
+        BBox(20, 5, 30, 20),
+        policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        order=1,
+    )
+    page = Page(
+        image_path="page.png",
+        width=200,
+        height=120,
+        blocks=[text, formula],
+    )
+    sync_page_layout_snapshot_from_projection(page, source_engine="test")
+
+    set_layout_block_ocr_policy(text, OcrPolicy.SKIP)
+    set_layout_block_ocr_policy(formula, OcrPolicy.TEXT_OCR)
+    replace_page_layout_blocks(page, [formula, text])
+
+    plan = build_text_ocr_dispatch_plan(page)
+
+    assert [target.index for target in plan.text_blocks] == [0]
+    assert [target.block for target in plan.text_blocks] == [text]
+    assert [target.view.ocr_policy for target in plan.text_blocks] == [OcrPolicy.TEXT_OCR]
+    assert [target.index for target in plan.blocked_blocks] == [1]
+    assert [target.block for target in plan.blocked_blocks] == [formula]
+    assert [target.reason for target in plan.blocked_blocks] == ["policy:preserve_as_formula"]
+
+
 def test_page_ocr_assignment_uses_dispatch_plan_blockers_before_text_container():
     text = _block(BlockType.TEXT, BBox(0, 0, 200, 200), policy=OcrPolicy.TEXT_OCR, order=1)
     formula = _block(
@@ -72,6 +105,28 @@ def test_page_ocr_assignment_uses_dispatch_plan_blockers_before_text_container()
 
     assert block_ocr_lines(text) == [normal_line]
     assert block_ocr_lines(formula) == []
+
+
+def test_page_ocr_assignment_uses_snapshot_geometry_when_runtime_projection_drifts():
+    text = _block(BlockType.TEXT, BBox(0, 0, 200, 80), policy=OcrPolicy.TEXT_OCR, order=0)
+    formula = _block(
+        BlockType.EQUATION,
+        BBox(50, 10, 60, 30),
+        policy=OcrPolicy.PRESERVE_AS_FORMULA,
+        order=1,
+    )
+    page = Page(image_path="page.png", width=240, height=160, blocks=[text, formula])
+    sync_page_layout_snapshot_from_projection(page, source_engine="test")
+
+    set_layout_block_bbox(text, BBox(180, 120, 30, 20))
+    normal_line = Line(text="正文", confidence=0.9, bbox=BBox(10, 45, 40, 12))
+    formula_line = Line(text="式", confidence=0.9, bbox=BBox(55, 18, 20, 12))
+
+    OcrPipeline().assign_page_ocr_lines_to_blocks(page, [formula_line, normal_line])
+
+    assert block_ocr_lines(text) == [normal_line]
+    assert block_ocr_lines(formula) == []
+    assert len(page.blocks) == 2
 
 
 def test_proof_crop_service_uses_dispatch_plan_not_block_type_text_blocks():

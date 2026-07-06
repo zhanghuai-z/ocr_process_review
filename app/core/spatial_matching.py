@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Optional, Protocol, TypeVar
 
-from app.models import BBox, Block, Line
+from app.models import BBox, Line
 from app.models.ocr_observation import line_ocr_bbox
 
 
@@ -13,6 +13,14 @@ class HasOptionalBBox(Protocol):
 
 
 T = TypeVar("T", bound=HasOptionalBBox)
+
+
+class HasContainerBBox(Protocol):
+    bbox: BBox
+    order: int
+
+
+C = TypeVar("C", bound=HasContainerBBox)
 
 
 def min_area_overlap_ratio(first: Optional[BBox], second: Optional[BBox]) -> float:
@@ -66,12 +74,12 @@ def select_token_row_for_line(token_rows: Sequence[T], line_bbox: BBox) -> Optio
 
 def select_container_block_for_line(
     line: Line,
-    blocks: Sequence[Block],
+    blocks: Sequence[C],
     *,
     min_overlap: float = 0.10,
     center_score: float = 0.10,
-) -> Optional[Block]:
-    scored: list[tuple[float, int, int, int, Block]] = []
+) -> Optional[C]:
+    scored: list[tuple[float, int, int, int, C]] = []
     line_bbox = line_ocr_bbox(line)
     center_x, center_y = bbox_center(line_bbox)
     for idx, block in enumerate(blocks):

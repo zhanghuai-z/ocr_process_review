@@ -5,8 +5,8 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
-from app.models import Block, Page
-from app.models.layout_projection import iter_page_layout_block_occurrences
+from app.models import BBox, Block, Page
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,16 @@ class DispatchBlock:
 
     index: int
     block: Block
+    view: LayoutBlockView
     reason: str
+
+    @property
+    def bbox(self) -> BBox:
+        return self.view.bbox
+
+    @property
+    def order(self) -> int:
+        return self.view.order
 
 
 @dataclass(frozen=True)
@@ -47,22 +56,26 @@ def build_text_ocr_dispatch_plan(page: Page) -> DispatchPlan:
     """Build the authoritative text OCR dispatch view for a page."""
     text_blocks: list[DispatchBlock] = []
     blocked_blocks: list[DispatchBlock] = []
-    for occurrence in iter_page_layout_block_occurrences(page):
-        block = occurrence.block
-        if should_dispatch_to_text_ocr(block):
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
+        if should_dispatch_to_text_ocr(view):
             text_blocks.append(
                 DispatchBlock(
-                    index=occurrence.block_index,
+                    index=view.snapshot_index,
                     block=block,
+                    view=view,
                     reason="policy:text_ocr",
                 )
             )
         else:
             blocked_blocks.append(
                 DispatchBlock(
-                    index=occurrence.block_index,
+                    index=view.snapshot_index,
                     block=block,
-                    reason=f"policy:{block.ocr_policy.value}",
+                    view=view,
+                    reason=f"policy:{view.ocr_policy.value}",
                 )
             )
     return DispatchPlan(
