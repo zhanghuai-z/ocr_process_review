@@ -399,6 +399,7 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
     result = service.apply(LayoutEditCommand.update_geometry(
         page,
         bound,
+        bbox=bound.bbox,
         before=LayoutEditService.block_state(bound),
     ))
 
@@ -407,3 +408,50 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
     assert bound.paddle_binding.manual_bbox == [12, 10, 42, 30]
     assert bound.source == BlockSource.USER_EDITED
     assert bound.ocr_invalidated_reason == "block_geometry_changed"
+
+
+def test_layout_edit_service_geometry_update_uses_command_bbox_when_projection_drifts():
+    block = Block(
+        block_type=BlockType.EQUATION,
+        bbox=BBox.from_xyxy(90, 80, 150, 95),
+        order=7,
+        source_label="inline_formula",
+    )
+    snapshot_bbox = BBox.from_xyxy(10, 10, 40, 30)
+    next_bbox = BBox.from_xyxy(12, 14, 42, 34)
+    page = Page(image_path="", width=200, height=100, blocks=[block])
+    set_layout_snapshot_for_page(
+        page,
+        LayoutSnapshot(
+            page_uid=page.uid,
+            artifact_uid="artifact-1",
+            source_engine="paddleocr-vl",
+            source_run_id="layout-run-1",
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.EQUATION,
+                    bbox=snapshot_bbox,
+                    order=1,
+                    source_label="inline_formula",
+                    origin=BlockOrigin(source_engine="paddleocr-vl", source_label="inline_formula"),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                    uid=block.uid,
+                ),
+            ),
+        ),
+    )
+    service = LayoutEditService()
+
+    result = service.apply(LayoutEditCommand.update_geometry(page, block, bbox=next_bbox))
+
+    assert result.op == "resize_block"
+    assert block.bbox == next_bbox
+    assert block.order == 1
+    assert block.source == BlockSource.USER_EDITED
+    assert block.paddle_binding is not None
+    assert block.paddle_binding.manual_bbox == [12, 14, 42, 34]
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+    assert snapshot.blocks[0].bbox == next_bbox
+    assert snapshot.blocks[0].order == 1

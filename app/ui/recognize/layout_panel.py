@@ -1328,7 +1328,12 @@ class LayoutPanel(QWidget):
         bb = block.bbox
         page = self._pages[self._current_page_idx]
         before = self._layout_edit_start_state.pop(block.uid, self._layout_block_state(block))
-        self._layout_edit_service.apply(LayoutEditCommand.update_geometry(page, block, before=before))
+        self._layout_edit_service.apply(LayoutEditCommand.update_geometry(
+            page,
+            block,
+            bbox=block.bbox,
+            before=before,
+        ))
         self._update_project_stats()
         self.geometry_changed.emit()
         self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")

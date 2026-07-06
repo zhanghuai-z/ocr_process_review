@@ -125,8 +125,15 @@ class LayoutEditCommand:
         )
 
     @classmethod
-    def update_geometry(cls, page: Page, block: Block, *, before: dict | None = None) -> "LayoutEditCommand":
-        return cls("resize_block", page, block=block, before=before)
+    def update_geometry(
+        cls,
+        page: Page,
+        block: Block,
+        *,
+        bbox: BBox,
+        before: dict | None = None,
+    ) -> "LayoutEditCommand":
+        return cls("resize_block", page, block=block, bbox=bbox, before=before)
 
     @classmethod
     def restore_blocks(
@@ -189,6 +196,7 @@ class LayoutEditService:
             return self._update_block_geometry(
                 command.page,
                 self._require_block(command),
+                bbox=self._require_bbox(command),
                 before=command.before,
             )
         if command.op == "restore_blocks":
@@ -270,12 +278,40 @@ class LayoutEditService:
         page: Page,
         block: Block,
         *,
+        bbox: BBox,
         before: dict | None,
     ) -> LayoutEditResult:
-        before = before or self.block_state(block)
+        snapshot = current_layout_snapshot(page)
+        snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
+        before = before or self.snapshot_block_state(snapshot_block)
+        provisional = self._replace_snapshot_block(snapshot, snapshot_index, bbox=bbox)
+        self._apply_snapshot_block_to_runtime_block(block, provisional)
         binding = self._persist_user_block_geometry(page, block)
-        after = self.block_state(block)
-        self.record_edit(page, "resize_block", block, before=before, after=after)
+        final_snapshot_block = self._replace_snapshot_block(
+            snapshot,
+            snapshot_index,
+            bbox=block.bbox,
+            origin=block.origin or provisional.origin,
+            ocr_policy=block.ocr_policy,
+            note=block.note,
+        )
+        after = self.snapshot_block_state(final_snapshot_block)
+        event = self.record_edit(
+            page,
+            "resize_block",
+            block,
+            before=before,
+            after=after,
+            sync_snapshot=False,
+        )
+        next_snapshot = self._snapshot_with_replaced_block(
+            snapshot,
+            snapshot_index,
+            final_snapshot_block,
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        self._apply_snapshot_block_to_runtime_block(block, final_snapshot_block)
         return LayoutEditResult(
             op="resize_block",
             block=block,
