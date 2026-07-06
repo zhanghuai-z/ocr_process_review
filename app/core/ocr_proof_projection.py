@@ -19,7 +19,7 @@ from app.core.ocr_ir_builder import (
 )
 from app.core.proof_line_mutation import set_line_proof_status
 from app.models import Char, Line
-from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_character_observation import replace_line_ocr_char_observations
 from app.models.ocr_text_observation import create_ocr_text_line
 
 
@@ -123,8 +123,8 @@ def project_ocr_line_to_proof_line(
         source_text=ir_line.source_text or ir_line.text,
         review_flags=list(ir_line.review_flags),
     )
-    replace_line_ocr_chars(
-        line,
+    replace_line_ocr_char_observations(
+        line.uid,
         project_ocr_tokens_to_proof_chars(
             page_image=page_image,
             line_text=ir_line.text,

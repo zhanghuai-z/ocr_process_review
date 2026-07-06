@@ -581,6 +581,14 @@ def test_character_observation_boundary_is_used_by_core_consumers():
         assert "app.models.ocr_character_observation" in source
 
 
+def test_ocr_proof_projection_writes_chars_by_line_uid():
+    source = Path("app/core/ocr_proof_projection.py").read_text(encoding="utf-8")
+
+    assert "replace_line_ocr_char_observations" in source
+    assert "replace_line_ocr_chars" not in source
+    assert "line.uid" in source
+
+
 def test_carrier_detection_uses_proof_char_text_contract():
     service_paths = {
         Path("app/services/char_index_service.py"),
