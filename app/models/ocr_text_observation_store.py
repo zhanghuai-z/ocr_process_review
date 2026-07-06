@@ -7,7 +7,6 @@ helpers so OCR source text and route review flags have one boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import weakref
 
 
 @dataclass(frozen=True)
@@ -18,24 +17,20 @@ class OcrTextObservation:
     review_flags: tuple[str, ...] = tuple()
 
 
-_TextEntry = tuple[weakref.ReferenceType[object], OcrTextObservation]
-_TEXT_BY_LINE_OBJECT: dict[int, _TextEntry] = {}
+_TEXT_BY_LINE_UID: dict[str, OcrTextObservation] = {}
+
+
+def _line_uid(line: object) -> str:
+    return str(getattr(line, "uid", "") or "")
 
 
 def ocr_text_observation_for_line(
     line: object,
     projection: OcrTextObservation | None = None,
 ) -> OcrTextObservation:
-    line_id = id(line)
-    entry = _TEXT_BY_LINE_OBJECT.get(line_id)
-    if entry is not None:
-        line_ref, observation = entry
-        if line_ref() is line:
-            if projection is not None and projection != observation:
-                set_ocr_text_observation_for_line(line, projection)
-                return projection
-            return observation
-        _TEXT_BY_LINE_OBJECT.pop(line_id, None)
+    line_uid = _line_uid(line)
+    if line_uid and line_uid in _TEXT_BY_LINE_UID:
+        return _TEXT_BY_LINE_UID[line_uid]
     observation = projection if projection is not None else OcrTextObservation("", "", 0.0)
     set_ocr_text_observation_for_line(line, observation)
     return observation
@@ -45,18 +40,15 @@ def set_ocr_text_observation_for_line(
     line: object,
     observation: OcrTextObservation,
 ) -> None:
-    line_id = id(line)
-
-    def _cleanup(_ref: weakref.ReferenceType[object]) -> None:
-        entry = _TEXT_BY_LINE_OBJECT.get(line_id)
-        if entry is not None and entry[0] is _ref:
-            _TEXT_BY_LINE_OBJECT.pop(line_id, None)
-
-    _TEXT_BY_LINE_OBJECT[line_id] = (weakref.ref(line, _cleanup), observation)
+    line_uid = _line_uid(line)
+    if line_uid:
+        _TEXT_BY_LINE_UID[line_uid] = observation
 
 
 def clear_ocr_text_observation_for_line(line: object) -> None:
-    _TEXT_BY_LINE_OBJECT.pop(id(line), None)
+    line_uid = _line_uid(line)
+    if line_uid:
+        _TEXT_BY_LINE_UID.pop(line_uid, None)
 
 
 __all__ = [

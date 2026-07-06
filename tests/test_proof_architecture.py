@@ -544,6 +544,10 @@ def test_line_ocr_chars_access_goes_through_character_observation_boundary():
     source = Path("app/models/ocr_character_observation.py").read_text(encoding="utf-8")
     assert "ocr_chars_for_line(line, line.chars)" not in source
     assert "set_ocr_chars_for_line(line, projected)" not in source
+    store_source = Path("app/models/ocr_character_observation_store.py").read_text(encoding="utf-8")
+    assert "_CHARS_BY_LINE_UID" in store_source
+    assert "_CHARS_BY_LINE_OBJECT" not in store_source
+    assert "weakref" not in store_source
 
 
 def test_character_observation_boundary_is_used_by_core_consumers():
@@ -752,7 +756,8 @@ def test_ocr_text_observation_boundary_is_used_by_producers():
     line_contract_source = Path("app/core/line_text_contract.py").read_text(encoding="utf-8")
     assert "ocr_text_observation_for_line(" in boundary_source
     assert "set_ocr_text_observation_for_line(" in boundary_source
-    assert "_TEXT_BY_LINE_OBJECT" in store_source
+    assert "_TEXT_BY_LINE_UID" in store_source
+    assert "_TEXT_BY_LINE_OBJECT" not in store_source
     assert "line_ocr_text_observation(line)" in line_contract_source
 
 
@@ -1729,11 +1734,15 @@ def test_layout_edit_service_records_snapshot_edits_without_projection_backflow(
 def test_layout_edit_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     observation_source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
+    store_source = Path("app/models/ocr_observation_store.py").read_text(encoding="utf-8")
 
     assert "block_ocr_line_observations" in source
     assert "clear_block_ocr_line_observations" in source
     assert "def replace_block_ocr_line_observations" in observation_source
     assert "def block_ocr_line_observations_by_uid" in observation_source
+    assert "_LINES_BY_BLOCK_UID" in store_source
+    assert "_LINES_BY_BLOCK_OBJECT" not in store_source
+    assert "weakref" not in store_source
     assert re.search(r"(?<!clear_)block_ocr_lines\(", source) is None
 
 
@@ -2030,6 +2039,9 @@ def test_proof_state_store_does_not_consume_retired_line_attr():
     assert "_remove_legacy_state_attr" not in source
     assert "values.pop(\"proof_state\"" not in source
     assert "ProofLineState(line_uid=_line_uid(line))" in source
+    assert "_STATE_BY_LINE_UID" in source
+    assert "_STATE_BY_OBJECT_ID" not in source
+    assert "weakref" not in source
 
 
 def test_quality_probe_app_config_does_not_restore_retired_ratio_key():

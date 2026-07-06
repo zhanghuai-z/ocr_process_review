@@ -2,7 +2,7 @@
 
 ``Line`` carries OCR observation fields only. Code outside proof editing/storage
 should read proof text/status through this module so the proof state remains an
-external runtime fact keyed by the line object.
+external runtime fact keyed by stable line uid.
 """
 from __future__ import annotations
 

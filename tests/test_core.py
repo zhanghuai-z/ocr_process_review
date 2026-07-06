@@ -208,15 +208,15 @@ def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
     line.text = "旧投影直改"
     line.ocr_text = "旧投影源"
     line.review_flags = ["legacy"]
-    adopted = line_ocr_text_observation(line)
-    assert adopted.text == "旧投影直改"
-    assert adopted.ocr_text == "旧投影源"
-    assert line_ocr_review_flags(line) == ("legacy",)
+    unchanged = line_ocr_text_observation(line)
+    assert unchanged.text == "新OCR"
+    assert unchanged.ocr_text == "新OCR源"
+    assert line_ocr_review_flags(line) == ("flag-a", "flag-b")
 
-    append_line_ocr_review_flag_once(line, "legacy")
+    append_line_ocr_review_flag_once(line, "flag-a")
     append_line_ocr_review_flag_once(line, "new-flag")
     assert line_has_ocr_review_flag(line, "new-flag")
-    assert line.review_flags == ["legacy", "new-flag"]
+    assert line.review_flags == ["flag-a", "flag-b", "new-flag"]
 
 
 def test_ocr_observation_runtime_store_is_uid_scoped_without_projection_sync():
