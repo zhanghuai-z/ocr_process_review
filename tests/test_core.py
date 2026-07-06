@@ -20206,6 +20206,72 @@ def test_ui_block_labels_use_structured_semantic_label():
     print("test_ui_block_labels_use_structured_semantic_label PASSED")
 
 
+def test_ocr_panel_reads_block_order_from_layout_snapshot_view():
+    from PySide6.QtCore import Qt
+
+    from app.models import (
+        BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+        Line, OcrPolicy, Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.recognize.ocr_panel import OcrPanel
+
+    _get_qapp()
+    body = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(5, 6, 30, 20),
+        lines=[Line(text="正文", confidence=0.9, bbox=BBox(5, 6, 30, 10))],
+        order=0,
+        source_label="text",
+    )
+    title = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox(5, 30, 40, 20),
+        lines=[Line(text="标题", confidence=0.9, bbox=BBox(5, 30, 40, 10))],
+        order=1,
+        source_label="text",
+    )
+    page = Page(image_path="/tmp/ocr-panel-snapshot-order.png", width=80, height=60)
+    page.blocks = [body, title]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-ocr-panel",
+        source_engine="test",
+        source_run_id="run-ocr-panel",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=title.uid,
+                block_type=BlockType.TITLE,
+                bbox=title.bbox,
+                order=0,
+                source_label="paragraph_title",
+                origin=BlockOrigin(source_label="paragraph_title"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+            LayoutBlockSnapshot(
+                uid=body.uid,
+                block_type=BlockType.TEXT,
+                bbox=body.bbox,
+                order=1,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+
+    panel = OcrPanel()
+    panel.on_recognition_complete([page])
+    page_item = panel._tree.topLevelItem(0)
+
+    assert page_item.child(0).data(0, Qt.ItemDataRole.UserRole) is title
+    assert page_item.child(0).text(0) == "[title · paragraph_title]"
+    assert page_item.child(1).data(0, Qt.ItemDataRole.UserRole) is body
+    panel.close()
+
+    print("test_ocr_panel_reads_block_order_from_layout_snapshot_view PASSED")
+
+
 def test_hanwang_concurrency_evaluation_script_help():
     import subprocess
 

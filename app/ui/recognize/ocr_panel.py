@@ -8,13 +8,24 @@ from PySide6.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from app.core.block_attributes import block_display_label
+from app.core.block_attributes import normalize_source_label
 from app.core.proof_line_facts import proof_line_facts
 from app.models import Block, Page, ProofStatus
-from app.models.layout_projection import page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_observation import block_avg_confidence, block_ocr_line_count, block_ocr_lines
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
+
+
+def _runtime_layout_views(page: Page) -> list[LayoutBlockView]:
+    return [view for view in iter_page_layout_block_views(page) if view.runtime_block is not None]
+
+
+def _view_display_label(view: LayoutBlockView) -> str:
+    source_label = normalize_source_label(view.origin.source_label or view.source_label)
+    if source_label and source_label != view.block_type.value:
+        return f"{view.block_type.value} · {source_label}"
+    return view.block_type.value
 
 
 class OcrPanel(QWidget):
@@ -111,10 +122,14 @@ class OcrPanel(QWidget):
         self._progress.setVisible(False)
         self._populate_tree(pages)
         flagged = sum(
-            1 for p in pages for b in page_layout_blocks(p)
-            for l in block_ocr_lines(b) if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
+            1 for p in pages for view in _runtime_layout_views(p)
+            for l in block_ocr_lines(view.runtime_block)
+            if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
         )
-        total_lines = sum(block_ocr_line_count(b) for p in pages for b in page_layout_blocks(p))
+        total_lines = sum(
+            block_ocr_line_count(view.runtime_block)
+            for p in pages for view in _runtime_layout_views(p)
+        )
         self._status_lbl.setText(
             f"识别完成：{total_lines} 行，其中 {flagged} 行置信度偏低（已自动标记）"
         )
@@ -127,10 +142,13 @@ class OcrPanel(QWidget):
         for page in pages:
             page_item = QTreeWidgetItem(self._tree, [f"第 {page.page_number} 页", "", ""])
             page_item.setData(0, Qt.ItemDataRole.UserRole, page)
-            for block in page_layout_blocks(page):
+            for view in _runtime_layout_views(page):
+                block = view.runtime_block
+                if block is None:
+                    continue
                 block_item = QTreeWidgetItem(
                     page_item,
-                    [f"[{block_display_label(block)}]", f"{block_avg_confidence(block):.2f}", ""],
+                    [f"[{_view_display_label(view)}]", f"{block_avg_confidence(block):.2f}", ""],
                 )
                 block_item.setData(0, Qt.ItemDataRole.UserRole, block)
                 for line in block_ocr_lines(block):
@@ -159,11 +177,15 @@ class OcrPanel(QWidget):
         from app.models import Line, Page as PageModel
         if isinstance(obj, PageModel):
             self._viewer.set_image(obj.display_image_path)
-            self._viewer.show_blocks(page_layout_blocks(obj))
+            self._viewer.show_blocks([
+                view.runtime_block
+                for view in _runtime_layout_views(obj)
+                if view.runtime_block is not None
+            ])
         elif isinstance(obj, Block):
             # 找到对应页面
             for page in self._pages:
-                if obj in page_layout_blocks(page):
+                if any(view.runtime_block is obj for view in _runtime_layout_views(page)):
                     self._viewer.set_image(page.display_image_path)
                     self._viewer.show_blocks([obj])
                     break

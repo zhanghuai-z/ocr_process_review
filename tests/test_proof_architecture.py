@@ -865,9 +865,9 @@ def test_recognize_ui_uses_layout_and_char_observation_boundaries():
                 offenders.append(f"{path}:{node.lineno}: .{node.attr}")
     assert offenders == []
 
-    assert "app.models.layout_projection" in Path("app/ui/recognize/ocr_panel.py").read_text(
-        encoding="utf-8"
-    )
+    ocr_source = Path("app/ui/recognize/ocr_panel.py").read_text(encoding="utf-8")
+    assert "app.models.layout_block_view" in ocr_source
+    assert "app.models.layout_projection" not in ocr_source
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     assert "app.models.layout_projection" in layout_source
     assert "app.models.ocr_character_observation" in layout_source
