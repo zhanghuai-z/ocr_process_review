@@ -5474,6 +5474,45 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
     print("test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspector PASSED")
 
 
+def test_layout_panel_reads_ocr_lines_from_observation_store_when_projection_is_empty():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.models.layout_block_view import iter_page_layout_block_views
+    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
+        line = Line(text="观察正文", confidence=0.84, bbox=BBox(10, 10, 120, 20))
+        block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 20), source_label="text")
+        replace_block_ocr_lines(block, [line])
+        block.lines = []
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[block])
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            stats = panel._project_stats_lbl.text()
+            assert "OCR 行：1 行" in stats
+            assert "观察正文" in LayoutPanel._block_search_fields(block)
+            assert LayoutPanel._block_preview_text(block) == "观察正文"
+            view = next(iter_page_layout_block_views(page))
+            assert "观察正文" in LayoutPanel._layout_view_search_fields(view, block)
+            assert LayoutPanel._layout_view_preview_text(view, block) == "观察正文"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_reads_ocr_lines_from_observation_store_when_projection_is_empty PASSED")
+
+
 def test_layout_panel_show_page_layers_uses_layout_snapshot_view_geometry():
     from pathlib import Path
     import tempfile

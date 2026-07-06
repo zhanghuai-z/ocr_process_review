@@ -31,7 +31,11 @@ from app.models.layout_block_state import (
 )
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
-from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, page_ocr_line_count
+from app.models.ocr_observation import (
+    block_ocr_line_observations,
+    iter_page_ocr_line_observation_occurrences,
+)
+from app.models.ocr_text_observation import line_ocr_confidence
 from app.models.page_state import page_error_message, page_has_error, page_needs_ocr_rerun
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
@@ -42,6 +46,23 @@ from app.ui.widgets.effects import apply_soft_shadow
 
 STATUS_LABEL_MAX_CHARS = 96
 STRUCTURAL_DRAW_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
+
+
+def _ocr_observation_lines(block: Block):
+    return block_ocr_line_observations(block)
+
+
+def _ocr_observation_line_count(page: Page) -> int:
+    return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
+
+
+def _ocr_observation_avg_confidence(block: Block) -> float:
+    lines = _ocr_observation_lines(block)
+    if not lines:
+        return 0.0
+    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
+
+
 @dataclass(frozen=True)
 class LayoutSubtypeSpec:
     """UI button spec for one Paddle layout label."""
@@ -809,7 +830,7 @@ class LayoutPanel(QWidget):
         failed_pages = sum(1 for page in self._pages if page_has_error(page))
         total_blocks = sum(self._layout_block_count(page) for page in self._pages)
         text_ocr_blocks = count_text_ocr_blocks(self._pages)
-        total_lines = sum(page_ocr_line_count(page) for page in self._pages)
+        total_lines = sum(_ocr_observation_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
         for page in self._pages:
             for view in iter_page_layout_block_views(page):
@@ -841,14 +862,14 @@ class LayoutPanel(QWidget):
             getattr(block.block_type, "value", str(block.block_type)),
             block.note,
         ]
-        for line in block_ocr_lines(block):
+        for line in _ocr_observation_lines(block):
             parts.extend(proof_search_texts(line))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod
     def _block_text_search_fields(block: Block) -> list[str]:
         parts: list[str] = []
-        for line in block_ocr_lines(block):
+        for line in _ocr_observation_lines(block):
             parts.extend(proof_search_texts(line))
         if block.note:
             parts.append(block.note.split("|", 1)[0])
@@ -860,7 +881,7 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _block_preview_text(block: Block) -> str:
-        for line in block_ocr_lines(block):
+        for line in _ocr_observation_lines(block):
             text = proof_display_text(line)
             if text:
                 return _compact_status_text(text)
@@ -900,13 +921,13 @@ class LayoutPanel(QWidget):
             getattr(view.block_type, "value", str(view.block_type)),
             view.note,
         ]
-        for line in block_ocr_lines(block):
+        for line in _ocr_observation_lines(block):
             parts.extend(proof_search_texts(line))
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod
     def _layout_view_preview_text(view: LayoutBlockView, block: Block) -> str:
-        for line in block_ocr_lines(block):
+        for line in _ocr_observation_lines(block):
             text = proof_display_text(line)
             if text:
                 return _compact_status_text(text)
@@ -1398,7 +1419,7 @@ class LayoutPanel(QWidget):
         self._selected_block = block
         bb = block.bbox
         self._sync_selected_type_buttons(block)
-        self._prop_conf.set_score(block_avg_confidence(block))
+        self._prop_conf.set_score(_ocr_observation_avg_confidence(block))
 
     @staticmethod
     def _layout_block_state(block: Block) -> dict:
@@ -1546,7 +1567,7 @@ class LayoutPanel(QWidget):
                 continue
             if is_ocr_text_invalidated(block):
                 continue
-            for line in block_ocr_lines(block):
+            for line in _ocr_observation_lines(block):
                 chars.extend([
                     char
                     for char in line_ocr_chars(line)
