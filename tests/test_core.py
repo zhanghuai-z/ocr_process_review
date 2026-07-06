@@ -3649,7 +3649,6 @@ def test_export_ir_char_source_fallbacks_are_unique_across_lines():
         for char in line.chars:
             char.uid = ""
     block = Block(block_type=BlockType.TEXT, bbox=bb, order=0, lines=lines)
-    block.uid = ""
     project = OcrProject(
         name="fallback source ids",
         pages=[Page(image_path="/tmp/page.png", width=100, height=100, blocks=[block])],
@@ -8700,8 +8699,8 @@ def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
 
     OcrPipeline().assign_page_ocr_lines_to_blocks(page, [normal_line, formula_line])
 
-    assert [line.text for line in text.lines] == ["文"]
-    assert equation.lines == []
+    assert [line.text for line in _block_ocr_observations(text)] == ["文"]
+    assert _block_ocr_observations(equation) == []
     assert len(page.blocks) == 2
 
     print("test_page_ocr_nested_equation_blocks_before_parent_text_assignment PASSED")
@@ -8749,10 +8748,11 @@ def test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block():
         mark_page_line_hints=True,
     )
 
-    assert len(text.lines) == 1
-    assert text.lines[0].bbox == BBox.from_xyxy(0, 10, 180, 40)
-    assert is_ppocr_page_line_hint(text.lines[0]) is True
-    assert equation.lines == []
+    text_lines = _block_ocr_observations(text)
+    assert len(text_lines) == 1
+    assert text_lines[0].bbox == BBox.from_xyxy(0, 10, 180, 40)
+    assert is_ppocr_page_line_hint(text_lines[0]) is True
+    assert _block_ocr_observations(equation) == []
     assert len(page.blocks) == 2
 
     print("test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block PASSED")
@@ -9027,9 +9027,10 @@ def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
     assert len(page.blocks) == 1
     assert page.blocks[0].block_type == BlockType.EQUATION
     assert page.blocks[0].ocr_policy != OcrPolicy.TEXT_OCR
-    assert len(page.blocks[0].lines) == 1
-    assert page.blocks[0].lines[0].text == ""
-    assert "manual_formula_needs_text" in page.blocks[0].lines[0].review_flags
+    formula_lines = _block_ocr_observations(page.blocks[0])
+    assert len(formula_lines) == 1
+    assert formula_lines[0].text == ""
+    assert "manual_formula_needs_text" in formula_lines[0].review_flags
 
     print("test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes PASSED")
 
@@ -9617,7 +9618,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     subblocks = captured["blocks"][0][ROUTE_SUBBLOCKS_FIELD]
     assert subblocks[0]["block_bbox"] == [110, 0, 140, 30]
     assert subblocks[0]["block_content"] == "$ B_{new} $"
-    assert formula.lines[0].text == "$ B_{new} $"
+    assert _block_ocr_observations(formula)[0].text == "$ B_{new} $"
     assert formula.paddle_binding is not None
     assert formula.paddle_binding.status == BINDING_FORMULA_CROP_OCR
     assert formula.paddle_binding.text == "$ B_{new} $"
@@ -13290,13 +13291,15 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
             BlockType.EQUATION,
             BlockType.REFERENCE,
         ]
-        assert out_page.blocks[0].lines[0].text == "汉王"
+        text_lines = _block_ocr_observations(out_page.blocks[0])
+        formula_lines = _block_ocr_observations(out_page.blocks[1])
+        assert text_lines[0].text == "汉王"
         assert out_page.blocks[0].source_label == "text"
         assert not hasattr(out_page.blocks[0], "raw_payload")
         assert out_page.blocks[0].origin is not None
         assert out_page.blocks[0].origin.raw_index == 0
-        assert out_page.blocks[0].lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
-        assert out_page.blocks[1].lines[0].text == "$$x+y$$"
+        assert text_lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
+        assert formula_lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].ocr_policy != OcrPolicy.TEXT_OCR
         assert not hasattr(out_page.blocks[1], "raw_payload")
         assert out_page.blocks[1].origin is not None
@@ -14293,9 +14296,13 @@ def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
 
         def start(self):
             self._running = True
-            self._pages[0].blocks[0].lines = [
-                Line(text="税", confidence=0.96, bbox=BBox(20, 20, 20, 20))
-            ]
+            from app.models.ocr_observation import replace_block_ocr_line_observations
+
+            block = self._pages[0].blocks[0]
+            replace_block_ocr_line_observations(
+                block.uid,
+                [Line(text="税", confidence=0.96, bbox=BBox(20, 20, 20, 20))],
+            )
             self.all_done.emit(self._pages)
             self._running = False
 
@@ -14320,7 +14327,7 @@ def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
 
         assert ok is True
         assert finished
-        assert finished[0][0].blocks[0].lines[0].text == "税"
+        assert _block_ocr_observations(finished[0][0].blocks[0])[0].text == "税"
         assert finished[0][0].status == PageStatus.OCR_DONE
     finally:
         layout_module.LayoutWorker = original_layout_worker
@@ -14378,12 +14385,18 @@ def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignm
 
         def start(self):
             self._running = True
-            self._pages[0].blocks[0].lines = [
-                Line(text="第一页", confidence=0.96, bbox=BBox(10, 10, 20, 20))
-            ]
-            self._pages[2].blocks[0].lines = [
-                Line(text="第三页", confidence=0.97, bbox=BBox(30, 30, 20, 20))
-            ]
+            from app.models.ocr_observation import replace_block_ocr_line_observations
+
+            first_block = self._pages[0].blocks[0]
+            third_block = self._pages[2].blocks[0]
+            replace_block_ocr_line_observations(
+                first_block.uid,
+                [Line(text="第一页", confidence=0.96, bbox=BBox(10, 10, 20, 20))],
+            )
+            replace_block_ocr_line_observations(
+                third_block.uid,
+                [Line(text="第三页", confidence=0.97, bbox=BBox(30, 30, 20, 20))],
+            )
             self.all_done.emit([self._pages[0], self._pages[2]])
             self._running = False
 
@@ -14413,9 +14426,9 @@ def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignm
         assert ok is True
         assert finished
         out_pages = finished[0]
-        assert out_pages[0].blocks[0].lines[0].text == "第一页"
-        assert out_pages[1].blocks[0].lines == []
-        assert out_pages[2].blocks[0].lines[0].text == "第三页"
+        assert _block_ocr_observations(out_pages[0].blocks[0])[0].text == "第一页"
+        assert _block_ocr_observations(out_pages[1].blocks[0]) == []
+        assert _block_ocr_observations(out_pages[2].blocks[0])[0].text == "第三页"
     finally:
         layout_module.LayoutWorker = original_layout_worker
         workflow_module.OcrPipelineWorker = original_ocr_worker
@@ -14786,6 +14799,7 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
             )],
         )
         project = OcrProject(name="LoadedProof", pages=[page], db_path=db_path)
+        _seed_project_ocr_observations(project)
 
         with ProjectStore(db_path) as store:
             store.save_project(project)
@@ -14793,7 +14807,7 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
         controller = WorkflowController()
         try:
             assert controller.open_project(db_path) is True
-            loaded_line = controller.project.pages[0].blocks[0].lines[0]
+            loaded_line = _block_ocr_observations(controller.project.pages[0].blocks[0])[0]
             assert loaded_line.bbox == BBox(10, 44, 160, 40)
             assert len(loaded_line.chars) == 2
         finally:
@@ -19069,6 +19083,7 @@ def test_hproof_merge_rebinds_replaced_lines_without_duplicates_or_orphans():
     panel.load_pages([old_page])
     panel._pairs[0]._editor.setPlainText("用户未保存")
 
+    _seed_page_ocr_observations(new_page)
     panel.merge_pages([new_page])
     panel._save_current(silent=True)
 
@@ -19115,6 +19130,7 @@ def test_hproof_merge_rebind_marks_conflict_when_dirty_editor_meets_new_model_te
     panel.load_pages([old_page])
     panel._pairs[0]._editor.setPlainText("CCCC")
 
+    _seed_page_ocr_observations(new_page)
     panel.merge_pages([new_page])
 
     assert len(panel._pairs) == 1
@@ -19170,6 +19186,7 @@ def test_hproof_merge_uses_stable_uid_when_geometry_changes():
     panel.load_pages([old_page])
     panel._pairs[0]._editor.setPlainText("CCCC")
 
+    _seed_page_ocr_observations(new_page)
     panel.merge_pages([new_page])
 
     assert len(panel._pairs) == 1
@@ -19229,6 +19246,7 @@ def test_hproof_merge_pages_removes_orphan_rows_absent_from_new_pages():
     panel.load_pages([old_page])
     assert len(panel._pairs) == 2
 
+    _seed_page_ocr_observations(new_page)
     panel.merge_pages([new_page])
 
     assert len(panel._pairs) == 1
@@ -19290,6 +19308,7 @@ def test_hproof_orphan_merge_restore_dirty_text_marks_conflict_when_model_change
     panel.load_pages([old_page])
     panel._pairs[0]._editor.setPlainText("CCCC")
 
+    _seed_page_ocr_observations(new_page)
     panel.merge_pages([new_page])
 
     assert len(panel._pairs) == 1

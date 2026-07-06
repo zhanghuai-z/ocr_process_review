@@ -22,7 +22,7 @@ from app.models.block_state import (
 )
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.layout_projection import replace_page_layout_blocks
-from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
@@ -3509,7 +3509,7 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
         for view in iter_page_layout_block_views(page)
         for block in (view.runtime_block,)
         if block is not None
-        for line in block_ocr_lines(block)
+        for line in block_ocr_line_observations(block)
         if line.bbox is not None
         and line.bbox.area > 0
         and is_ppocr_page_line_hint(line)
@@ -3570,7 +3570,7 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
     set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
-    replace_block_ocr_lines(block, [
+    replace_block_ocr_line_observations(block.uid, [
         create_ocr_text_line(
             text=text,
             confidence=1.0,
@@ -3601,7 +3601,7 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             "manual_bbox": bbox_xyxy,
             "review_flags": flags,
     })
-    replace_block_ocr_lines(block, [
+    replace_block_ocr_line_observations(block.uid, [
         create_ocr_text_line(
             text="",
             confidence=0.0,
@@ -3762,7 +3762,7 @@ class HanwangMicroRecBlockEngine:
                 paddle_binding=paddle_binding,
                 ocr_audit=ocr_audit,
             )
-            replace_block_ocr_lines(new_block, lines)
+            replace_block_ocr_line_observations(new_block.uid, lines)
             set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
             if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:
                 set_layout_block_ocr_policy(new_block, OcrPolicy.MANUAL_ONLY)

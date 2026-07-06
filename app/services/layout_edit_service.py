@@ -35,6 +35,7 @@ from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
     block_ocr_line_observations,
     clear_block_ocr_line_observations,
+    discard_block_ocr_line_projection,
     set_ocr_line_bbox,
 )
 
@@ -702,6 +703,7 @@ class LayoutEditService:
         )
         self._apply_snapshot_block_to_runtime_block(primary, provisional)
         clear_block_ocr_line_observations(primary.uid)
+        discard_block_ocr_line_projection(primary)
         mark_layout_block_user_edited(primary)
         set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
         set_layout_block_note(primary, "manual_draw_merge_requires_ocr_rerun")

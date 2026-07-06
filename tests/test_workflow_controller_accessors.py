@@ -14,7 +14,7 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_HPROOF, STEP_LAYOUT,
 )
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
-from app.models.ocr_observation import project_ocr_line_count
+from app.models.ocr_observation import project_ocr_line_count, replace_block_ocr_line_observations
 
 
 # ── 辅助 ───────────────────────────────────────────────────────
@@ -234,6 +234,7 @@ def test_sync_proof_panels_second_call_merges(ctrl):
     ctrl.sync_proof_panels()      # 首次 load
     # 增加一行
     p1.blocks[0].lines.append(_line())
+    replace_block_ocr_line_observations(p1.blocks[0].uid, list(p1.blocks[0].lines))
     ctrl.sync_proof_panels()      # 第二次：merge
     assert len(h.load_calls) == 1
     assert len(h.merge_calls) == 1

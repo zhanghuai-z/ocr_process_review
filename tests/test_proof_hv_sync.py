@@ -16,6 +16,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
 @pytest.fixture(autouse=True)
@@ -667,6 +668,7 @@ def test_v_proof_external_refresh_does_not_write_reference_text_to_model():
     line1 = Line(text="L1_orig", confidence=0.9, bbox=BBox(0, 30, 80, 20))
     line1.id = 2002
     page.blocks[0].lines.append(line1)
+    replace_block_ocr_line_observations(page.blocks[0].uid, list(page.blocks[0].lines))
     v = VProofPanel()
     v.load_pages(proj.pages)
     v._text_edit.setPlainText("STALE_PAGE_TEXT\n")
@@ -756,6 +758,7 @@ def test_v_proof_refresh_context_ignores_structural_reference_mutation():
     line1 = Line(text="BBBB", confidence=0.9, bbox=BBox(0, 30, 80, 20))
     line1.id = 93002
     page.blocks[0].lines.append(line1)
+    replace_block_ocr_line_observations(page.blocks[0].uid, list(page.blocks[0].lines))
 
     v = VProofPanel()
     v.load_pages(proj.pages)
@@ -827,6 +830,8 @@ def test_v_proof_refresh_context_does_not_partially_write_stale_slots():
     # 保持 line id 序列不变，但让最后一个 session slot 的 block owner 失效。
     block2.lines.remove(line2)
     block1.lines.append(line2)
+    replace_block_ocr_line_observations(block1.uid, [line1, line2])
+    replace_block_ocr_line_observations(block2.uid, [])
     v._text_edit.setPlainText("CCCC\n\nDDDD\n\nFFFF\n")
     changes: list = []
     v.proof_changed.connect(changes.append)
@@ -867,6 +872,7 @@ def test_v_proof_undo_action_cancels_atomically_when_line_owner_is_stale():
     assert v._apply_replacement_to_selected("C", fallback_entry=entry) == 1
     assert proof_display_text(line0) == "CAAA"
     block0.lines.remove(line0)
+    replace_block_ocr_line_observations(block0.uid, [])
     changes: list = []
     v.proof_changed.connect(changes.append)
 

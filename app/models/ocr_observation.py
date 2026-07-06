@@ -75,6 +75,11 @@ def replace_block_ocr_line_observations(block_uid: str, lines: Iterable[Line]) -
     set_ocr_lines_for_block_uid(block_uid, list(lines))
 
 
+def discard_block_ocr_line_projection(block: Block) -> None:
+    """Drop the legacy runtime projection without changing uid observations."""
+    block.lines = []
+
+
 def set_ocr_line_bbox(line: Line, bbox: BBox) -> None:
     line.bbox = bbox
 

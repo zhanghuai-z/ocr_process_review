@@ -25,7 +25,7 @@ from app.core.proof_state import ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
-from app.models.ocr_observation import replace_block_ocr_lines
+from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
 @pytest.fixture(autouse=True)
@@ -141,8 +141,10 @@ def test_vproof_undo_resolves_occurrence_after_line_moves_between_blocks():
     assert v._vproof_undo_stack
     assert v._vproof_undo_stack[-1].edits[0].occurrence_keys
 
-    replace_block_ocr_lines(original_block, [])
-    replace_block_ocr_lines(moved_block, [line])
+    original_block.lines = []
+    moved_block.lines = [line]
+    replace_block_ocr_line_observations(original_block.uid, [])
+    replace_block_ocr_line_observations(moved_block.uid, [line])
 
     assert v._undo_vproof_edit() is True
     assert moved_block.lines[0] is line
@@ -163,6 +165,7 @@ def test_merge_pages_restores_selected_occurrence_to_new_line_object():
     new_page.uid = page.uid
     new_page.blocks[0].uid = page.blocks[0].uid
     new_page.blocks[0].lines[0].uid = page.blocks[0].lines[0].uid
+    replace_block_ocr_line_observations(new_page.blocks[0].uid, list(new_page.blocks[0].lines))
 
     v.merge_pages([new_page])
 
