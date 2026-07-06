@@ -116,7 +116,8 @@ OCR Hanwang/CharOCR
 导出
   -> Export IR / Markdown / PDF
      - 应读取最终文本 proof_display_text(line)
-     - 几何来自 Block/Line/Char bbox
+     - 块级类型、顺序和 bbox 来自 LayoutBlockView / LayoutSnapshot
+     - 行级和字符级几何来自 OCR observation 的 Line/Char bbox
      - 不应泄露本机绝对路径
 ```
 
@@ -132,7 +133,7 @@ OCR Hanwang/CharOCR
 | 外部版面证据 | `Page.raw_layout_artifact` + `Block.origin.raw_index` | `block.note`、旧 `block.app_payload`、旧 `block.raw_payload` | active `Block` 不再携带 vendor JSON；artifact 里的 bbox 已归一到工作图坐标；page 级原始列表不再挂 `ppvl_parsing_res_list`。 |
 | 外部版面归一化视图 | `NormalizedLayoutArtifact` / `LayoutRegion` / `LayoutSubregion` | 业务服务直接读 Paddle raw dict | Paddle、未来矢量 PDF 等输入源应先归一化，再进入 overlay、manual binding、routing。 |
 | 当前版面真值 | `app.models.layout_snapshot.LayoutSnapshot` + SQLite `layout_snapshot` + runtime `layout_snapshot_store` | `Page.blocks` 直接当导入真值、service 内部临时 DTO | API 版面分析从归一化 artifact 编译 snapshot；人工编辑由 `LayoutEditService` 同步 snapshot store；项目保存/加载维护独立 `layout_snapshot` 表；`Page.blocks` 仍是当前运行投影。 |
-| 当前版面读取视图 | `app.models.layout_block_view.LayoutBlockView` | 消费者直接从 runtime `Block` 读取版面类型/几何 | View 以 snapshot block 为版面事实，按 uid 关联 runtime Block，服务可逐步迁移而不一次性拆掉运行投影。 |
+| 当前版面读取视图 | `app.models.layout_block_view.LayoutBlockView` | 消费者直接从 runtime `Block` 读取版面类型/几何 | View 以 snapshot block 为版面事实，按 uid 关联 runtime Block；Table text layer 与 Export IR 已读取该 view。 |
 | 当前版面投影访问 | `app.models.layout_projection` | 非 UI 业务层直接 `page.blocks` | `Page.blocks` 暂时还是物理运行对象；非 UI 读取/替换当前投影必须走 projection helper，避免把物理对象树继续扩散成领域模型。 |
 | 当前运行版面投影 | `Page.blocks` | 未来新输入源直接写 `Page.blocks` | `Page.blocks` 暂时还是 UI/OCR/导出运行对象，但不应作为矢量 PDF 等新入口的适配目标。 |
 | 块几何/顺序 | `Block.bbox` / `Block.order` / `set_layout_block_bbox()` / `set_layout_block_order()` | 各模块直接写 `block.bbox/order`、把 bbox/order 当身份 | bbox/order 是当前投影状态，可随编辑、缩放和 OCR clamp 改变；运行时写入必须经 layout_block_state helper。 |
