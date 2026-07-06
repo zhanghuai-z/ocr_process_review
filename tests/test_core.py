@@ -601,6 +601,8 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
         status=PageStatus.LAYOUT_DONE,
         blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 30, 80, 20))],
     )
+    _sync_page_layout_snapshot_from_blocks(done_page, source_engine="test_seed")
+    _sync_page_layout_snapshot_from_blocks(pending_page, source_engine="test_seed")
     project = OcrProject(name="mixed", pages=[done_page, pending_page])
 
     assert project_has_any_ocr_result(project) is True
@@ -623,6 +625,7 @@ def test_workflow_state_keeps_project_and_page_ocr_state_separate():
             )
         ],
     )
+    _sync_page_layout_snapshot_from_blocks(lines_without_done_status, source_engine="test_seed")
     assert page_has_ocr_result(lines_without_done_status) is True
     assert page_is_ocr_done(lines_without_done_status) is False
     assert compute_max_step(OcrProject(name="lines-only", pages=[lines_without_done_status])) == STEP_OCR
