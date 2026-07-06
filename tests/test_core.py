@@ -60,11 +60,8 @@ def _raw_layout_records(page):
 def _seed_page_ocr_observations(page):
     """Register test layout and OCR facts through the current boundaries."""
     from app.models.ocr_observation import replace_block_ocr_line_observations
-    from app.models.layout_snapshot_store import layout_snapshot_for_page
 
-    snapshot = layout_snapshot_for_page(page)
-    if snapshot is None or snapshot.source_engine == "test_seed":
-        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
+    _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     for block in page.blocks:
         if block.lines:
             replace_block_ocr_line_observations(block.uid, list(block.lines))
@@ -148,6 +145,8 @@ def test_page_layout_state_reads_snapshot_not_runtime_projection():
         height=80,
         blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(1, 2, 30, 10), order=0)],
     )
+    from app.models.layout_snapshot_store import clear_layout_snapshot_for_page
+    clear_layout_snapshot_for_page(page)
 
     assert not page_is_layout_analyzed(page)
 

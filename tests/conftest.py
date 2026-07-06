@@ -53,11 +53,29 @@ def _seed_page_constructor_blocks_into_layout_snapshots(monkeypatch: pytest.Monk
     """
 
     original_post_init = Page.__post_init__
+    original_setattr = Page.__setattr__
+
+    def sync_page_snapshot(page: Page) -> None:
+        from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+
+        sync_page_layout_snapshot_from_projection(page, source_engine="test_fixture")
 
     def patched_post_init(self: Page) -> None:
         original_post_init(self)
-        from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+        sync_page_snapshot(self)
 
-        sync_page_layout_snapshot_from_projection(self, source_engine="test_fixture")
+    def patched_setattr(self: Page, name: str, value: object) -> None:
+        original_setattr(self, name, value)
+        if name != "blocks":
+            return
+        if not getattr(self, "uid", ""):
+            return
+        from app.models.layout_snapshot_store import layout_snapshot_for_page
+
+        snapshot = layout_snapshot_for_page(self)
+        if snapshot is not None and snapshot.source_engine != "test_fixture":
+            return
+        sync_page_snapshot(self)
 
     monkeypatch.setattr(Page, "__post_init__", patched_post_init)
+    monkeypatch.setattr(Page, "__setattr__", patched_setattr)
