@@ -504,6 +504,13 @@ def _str_from_json(value: object, *, field: str) -> str:
     return value
 
 
+def _non_empty_str_from_json(value: object, *, field: str) -> str:
+    text = _str_from_json(value, field=field).strip()
+    if not text:
+        raise ProjectDataError(f"{field} is empty")
+    return text
+
+
 def _int_from_json(value: object, *, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ProjectDataError(f"{field} must be int")
@@ -595,7 +602,7 @@ def _layout_block_snapshot_from_json(value: object, *, index: int) -> LayoutBloc
     field = f"layout_snapshot.blocks_json[{index}]"
     payload = _dict_from_json_value(value, field=field)
     return LayoutBlockSnapshot(
-        uid=_str_from_json(payload.get("uid", ""), field=f"{field}.uid"),
+        uid=_non_empty_str_from_json(payload.get("uid", ""), field=f"{field}.uid"),
         block_type=_enum_from_db(
             BlockType,
             payload.get("block_type", ""),
@@ -760,7 +767,7 @@ class ProjectStore:
                 stmts = MIGRATIONS[ver]
                 logger.info("Running schema migration v%d -> v%d", ver - 1, ver)
                 try:
-                    if ver == 23:
+                    if ver in (23, 24):
                         self._migrate_v23_drop_retired_block_payload_columns()
                     for stmt in stmts:
                         try:

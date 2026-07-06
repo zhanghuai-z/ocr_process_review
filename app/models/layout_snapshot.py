@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .entity_id import ensure_entity_uid
 from .enums import BlockType, OcrPolicy
 from .project import BBox, BlockOrigin
 
@@ -23,6 +24,9 @@ class LayoutBlockSnapshot:
     ocr_policy: OcrPolicy
     note: str = ""
     uid: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "uid", ensure_entity_uid(self.uid, "block"))
 
 
 @dataclass(frozen=True)

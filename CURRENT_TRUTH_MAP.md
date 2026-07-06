@@ -31,6 +31,7 @@
   -> LayoutSnapshot
      - 当前程序采用的版面真值
      - 从 NormalizedLayoutArtifact 编译而来
+     - LayoutSnapshot.blocks[].uid 是当前版面块业务身份
      - LayoutEditService 的人工编辑会同步到外部 layout_snapshot_store
      - ProjectStore 保存到 SQLite `layout_snapshot` 表；加载时优先恢复该表，没有快照的旧库才从 block 投影补建
   -> page.blocks

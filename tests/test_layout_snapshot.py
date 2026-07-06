@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
+import json
+
 import pytest
 
+from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.core.project_store import ProjectDataError, ProjectStore
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockType, Char, Line, OcrPolicy, OcrProject, Page
@@ -49,6 +51,8 @@ def test_layout_snapshot_projects_normalized_artifact_to_legacy_blocks():
     assert snapshot.artifact_uid == artifact.uid
     assert [block.source_label for block in blocks] == ["text", "page_number"]
     assert [block.block_type for block in blocks] == [BlockType.TEXT, BlockType.TEXT]
+    assert snapshot.blocks[0].uid.startswith("block_")
+    assert blocks[0].uid == snapshot.blocks[0].uid
     assert blocks[0].note == "正文内容 | score=0.988"
     assert blocks[1].note == "12 | source_label=page_number"
     assert blocks[0].ocr_policy == OcrPolicy.TEXT_OCR
@@ -202,4 +206,51 @@ def test_project_store_rejects_malformed_persisted_layout_snapshot(tmp_path):
 
     with ProjectStore(db_path) as store:
         with pytest.raises(ProjectDataError):
+            store.load_project(saved.id)
+
+
+def test_project_store_rejects_empty_layout_snapshot_block_uid(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot-empty-uid.png", width=120, height=80)
+    set_paddle_raw_layout_records(
+        page,
+        [{"block_label": "text", "block_bbox": [1, 2, 30, 20], "block_content": "A"}],
+    )
+    snapshot = layout_snapshot_from_normalized_artifact(normalized_layout_artifact_from_page(page))
+    adopt_page_layout_snapshot(page, snapshot)
+    project = OcrProject(name="snapshot empty uid", pages=[page])
+    db_path = str(tmp_path / "snapshot-empty-uid.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+        payload = [
+            {
+                "uid": "",
+                "block_type": "text",
+                "bbox": {"x": 1, "y": 2, "w": 29, "h": 18},
+                "order": 0,
+                "source_label": "text",
+                "origin": {
+                    "created_by": "auto_layout",
+                    "source_engine": "paddleocr-vl",
+                    "source_run_id": "",
+                    "source_label": "text",
+                    "source_confidence": None,
+                    "original_bbox": {"x": 1, "y": 2, "w": 29, "h": 18},
+                    "original_kind": "text",
+                    "raw_artifact_uid": "",
+                    "raw_json_path": "",
+                    "raw_index": 0,
+                },
+                "ocr_policy": "text_ocr",
+                "note": "",
+            }
+        ]
+        store.conn.execute(
+            "UPDATE layout_snapshot SET blocks_json=? WHERE project_id=? AND page_uid=?",
+            (json.dumps(payload), saved.id, page.uid),
+        )
+        store.conn.commit()
+
+    with ProjectStore(db_path) as store:
+        with pytest.raises(ProjectDataError, match="uid is empty"):
             store.load_project(saved.id)
