@@ -1762,6 +1762,15 @@ def test_table_text_layer_cells_are_typed_state_not_app_payload_state():
     assert "payload_get(block, TABLE_TEXT_LAYER_CELLS_KEY)" not in ir_source
 
 
+def test_table_text_layer_service_reads_layout_from_snapshot_view():
+    source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
+
+    assert "iter_page_layout_block_views" in source
+    assert "from app.models.layout_projection import page_layout_blocks" not in source
+    assert "view.bbox.to_dict()" in source
+    assert "view.block_type != BlockType.TABLE" in source
+
+
 def test_project_store_line_table_does_not_restore_retired_proof_columns():
     source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     line_table = re.search(
