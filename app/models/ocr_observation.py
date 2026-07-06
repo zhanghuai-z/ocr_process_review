@@ -14,7 +14,6 @@ from .layout_projection import (
     find_page_layout_block_index,
     iter_page_layout_block_occurrences,
     iter_project_layout_block_occurrences,
-    page_layout_blocks,
 )
 from .ocr_observation_store import ocr_lines_for_block, set_ocr_lines_for_block
 from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
@@ -142,7 +141,7 @@ def iter_project_ocr_line_occurrences(
 
 
 def page_ocr_line_count(page: Page) -> int:
-    return sum(block_ocr_line_count(block) for block in page_layout_blocks(page))
+    return sum(1 for _occurrence in iter_page_ocr_line_occurrences(page))
 
 
 def page_has_ocr_result(page: Page) -> bool:
@@ -150,7 +149,7 @@ def page_has_ocr_result(page: Page) -> bool:
 
 
 def project_ocr_line_count(project: OcrProject) -> int:
-    return sum(page_ocr_line_count(page) for page in project.pages)
+    return sum(1 for _occurrence in iter_project_ocr_line_occurrences(project))
 
 
 def project_has_any_ocr_result(project: OcrProject) -> bool:
