@@ -103,7 +103,14 @@ def set_line_ocr_text_observation(line: Line, observation: OcrTextObservation) -
 def refresh_line_ocr_text_observation_from_projection(line: Line) -> None:
     """Refresh the OCR text observation at an explicit projection write boundary."""
 
-    set_line_ocr_text_observation(line, _projection_observation(line))
+    observation = _projection_observation(line)
+    normalized = OcrTextObservation(
+        text=str(observation.text or ""),
+        ocr_text=str(observation.ocr_text or observation.text or ""),
+        confidence=float(observation.confidence or 0.0),
+        review_flags=_normalized_review_flags(observation.review_flags),
+    )
+    set_ocr_text_observation_for_line(line, normalized)
 
 
 def _projection_observation(line: object) -> OcrTextObservation:

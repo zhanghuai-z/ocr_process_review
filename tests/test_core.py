@@ -60,8 +60,9 @@ def _raw_layout_records(page):
 def _seed_page_ocr_observations(page):
     """Register test layout and OCR facts through the current boundaries."""
     from app.models.ocr_observation import replace_block_ocr_line_observations
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
 
-    if page.blocks:
+    if page.blocks and layout_snapshot_for_page(page) is None:
         _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     for block in page.blocks:
         if block.lines:

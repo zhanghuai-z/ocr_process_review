@@ -1334,19 +1334,17 @@ class VProofPanel(QWidget):
     def _char_index_page_signature(self, page: Page) -> tuple:
         parts: list[tuple] = [(
             "page",
-            id(page),
             page.uid,
             page.id,
             page.page_number,
             page.display_image_path,
             page.width,
             page.height,
+            id(page),
         )]
         for view, block, line, line_idx in iter_unique_page_text_line_views(page):
             parts.append((
                 "line",
-                id(block),
-                id(line),
                 view.uid,
                 block.id,
                 view.order,
@@ -1356,6 +1354,8 @@ class VProofPanel(QWidget):
                 line_idx,
                 line_signature(line),
                 self._bbox_signature(line_ocr_bbox(line)),
+                id(block),
+                id(line),
                 ))
         return tuple(parts)
 
