@@ -1212,7 +1212,7 @@ class ProjectStore:
             ).fetchall()
         }
         saved_block_ids: set[int] = set()
-        for block in self._layout_blocks_for_save(page):
+        for block in self._sync_layout_projection_from_snapshot(page):
             self._ensure_unique_child_uid(
                 cur,
                 block,
@@ -1235,7 +1235,7 @@ class ProjectStore:
         self._save_layout_snapshot(cur, page, project_id)
 
     @staticmethod
-    def _layout_blocks_for_save(page: Page) -> list[Block]:
+    def _sync_layout_projection_from_snapshot(page: Page) -> list[Block]:
         blocks: list[Block] = []
         for view in iter_page_layout_block_views(page):
             block = view.runtime_block
@@ -1912,6 +1912,7 @@ class ProjectStore:
             snapshot = self._load_layout_snapshot(project.id, page.uid)
             if snapshot is not None:
                 set_layout_snapshot_for_page(page, snapshot)
+                self._sync_layout_projection_from_snapshot(page)
             else:
                 sync_page_layout_snapshot_from_projection(
                     page,

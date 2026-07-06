@@ -233,6 +233,50 @@ def test_project_store_saves_block_projection_from_layout_snapshot_when_runtime_
     assert loaded_page.blocks[0].source_label == "text"
 
 
+def test_project_store_load_projects_block_projection_from_layout_snapshot(tmp_path):
+    page = Page(image_path="/tmp/layout-snapshot-load-projection.png", width=300, height=220)
+    set_paddle_raw_layout_records(
+        page,
+        [
+            {
+                "block_label": "text",
+                "block_bbox": [20, 30, 180, 70],
+                "block_content": "正文内容",
+                "score": 0.9,
+            },
+        ],
+        run_id="job-layout",
+    )
+    snapshot = layout_snapshot_from_normalized_artifact(
+        normalized_layout_artifact_from_page(page),
+        source_run_id="job-layout",
+    )
+    adopt_page_layout_snapshot(page, snapshot)
+    projected_uid = page.blocks[0].uid
+    project = OcrProject(name="snapshot load projection", pages=[page])
+    db_path = str(tmp_path / "snapshot-load-projection.ocrproj")
+
+    with ProjectStore(db_path) as store:
+        saved = store.save_project(project)
+        store.conn.execute(
+            "UPDATE block SET block_type=?, x=?, y=?, w=?, h=?, source_label=? WHERE uid=?",
+            ("figure", 200, 180, 40, 20, "figure", projected_uid),
+        )
+        store.conn.commit()
+
+    with ProjectStore(db_path) as store:
+        loaded = store.load_project(saved.id)
+
+    loaded_page = loaded.pages[0]
+    loaded_snapshot = layout_snapshot_for_page(loaded_page)
+    assert loaded_snapshot is not None
+    assert loaded_snapshot.blocks[0].uid == projected_uid
+    assert loaded_page.blocks[0].uid == projected_uid
+    assert loaded_page.blocks[0].block_type == BlockType.TEXT
+    assert loaded_page.blocks[0].bbox == BBox.from_xyxy(20, 30, 180, 70)
+    assert loaded_page.blocks[0].source_label == "text"
+
+
 def test_project_store_rejects_malformed_persisted_layout_snapshot(tmp_path):
     page = Page(image_path="/tmp/layout-snapshot-bad.png", width=100, height=80)
     snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="layout_edit")
