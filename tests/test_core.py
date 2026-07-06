@@ -6644,7 +6644,7 @@ def test_layout_panel_search_source_filter_uses_layout_snapshot_view():
             panel._search_source_filter.setCurrentIndex(source_idx)
 
             assert len(panel._block_search_matches) == 1
-            assert panel._block_search_matches[0] == (0, block)
+            assert panel._block_search_matches[0] == (0, block.uid)
             assert panel._search_results.item(0).text() == "一、引言"
         finally:
             panel.close()
@@ -6769,7 +6769,7 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
 
             assert panel._search_regex.isChecked()
             assert len(panel._block_search_matches) == 1
-            assert [match[1] for match in panel._block_search_matches] == [blocks[0]]
+            assert [match[1] for match in panel._block_search_matches] == [blocks[0].uid]
             assert panel._search_results.item(0).text() == "一、研究背景"
 
             preset_index = next(
@@ -6778,7 +6778,7 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
             )
             panel._search_preset.setCurrentIndex(preset_index)
             assert len(panel._block_search_matches) == 1
-            assert [match[1] for match in panel._block_search_matches] == [blocks[1]]
+            assert [match[1] for match in panel._block_search_matches] == [blocks[1].uid]
 
             preset_index = next(
                 idx for idx in range(panel._search_preset.count())
@@ -6786,7 +6786,7 @@ def test_layout_panel_find_dialog_preset_matches_chinese_heading_forms():
             )
             panel._search_preset.setCurrentIndex(preset_index)
             assert len(panel._block_search_matches) == 1
-            assert [match[1] for match in panel._block_search_matches] == [blocks[3]]
+            assert [match[1] for match in panel._block_search_matches] == [blocks[3].uid]
         finally:
             panel.close()
 

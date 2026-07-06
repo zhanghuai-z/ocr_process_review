@@ -243,7 +243,7 @@ class LayoutPanel(QWidget):
         self._selected_type_buttons: dict[BlockType, QPushButton] = {}
         self._selected_subtype_buttons: dict[str, QPushButton] = {}
         self._type_group: QButtonGroup | None = None
-        self._block_search_matches: list[tuple[int, Block]] = []
+        self._block_search_matches: list[tuple[int, str]] = []
         self._search_text_fields_only = False
         self._build_ui()
 
@@ -1001,7 +1001,7 @@ class LayoutPanel(QWidget):
                 if not matched:
                     continue
                 match_idx = len(self._block_search_matches)
-                self._block_search_matches.append((page_idx, block))
+                self._block_search_matches.append((page_idx, view.uid))
                 item = QListWidgetItem(self._layout_view_preview_text(view, block))
                 item.setData(Qt.ItemDataRole.UserRole, match_idx)
                 self._search_results.addItem(item)
@@ -1016,8 +1016,8 @@ class LayoutPanel(QWidget):
         if not self._block_search_matches:
             self._set_status_text("没有匹配的版面块")
             return
-        page_idx, block = self._block_search_matches[0]
-        self._focus_block(page_idx, block)
+        page_idx, block_uid = self._block_search_matches[0]
+        self._focus_block_uid(page_idx, block_uid)
         self._set_status_text(f"已预览第 1 个匹配块，共 {len(self._block_search_matches)} 个")
 
     def _sync_search_target_combo(self) -> None:
@@ -1061,20 +1061,29 @@ class LayoutPanel(QWidget):
         match_idx = item.data(Qt.ItemDataRole.UserRole)
         if not isinstance(match_idx, int) or not (0 <= match_idx < len(self._block_search_matches)):
             return
-        page_idx, block = self._block_search_matches[match_idx]
-        self._focus_block(page_idx, block)
+        page_idx, block_uid = self._block_search_matches[match_idx]
+        self._focus_block_uid(page_idx, block_uid)
 
-    def _focus_block(self, page_idx: int, block: Block) -> None:
+    def _focus_block_uid(self, page_idx: int, block_uid: str) -> None:
         if not (0 <= page_idx < len(self._pages)):
+            return
+        view = None
+        block = None
+        for candidate in iter_page_layout_block_views(self._pages[page_idx]):
+            if candidate.uid == block_uid:
+                view = candidate
+                block = candidate.runtime_block
+                break
+        if view is None:
             return
         self._current_page_idx = page_idx
         self._page_list.set_current_index(page_idx)
         self._update_viewer(page_idx)
-        if self._viewer.select_block(block):
+        if block is not None and self._viewer.select_block(block):
             self._on_block_clicked(block)
         else:
-            self._viewer.highlight_bbox(block.bbox, zoom=True)
-            self._selected_block_uid = block.uid
+            self._viewer.highlight_bbox(view.bbox, zoom=True)
+            self._selected_block_uid = block_uid
             self._sync_selected_type_buttons(block)
 
     def _current_checked_subtype(self) -> LayoutSubtypeSpec:
@@ -1090,17 +1099,20 @@ class LayoutPanel(QWidget):
             self._set_status_text("没有可应用的查找结果")
             return
         subtype = subtype or self._current_checked_subtype()
-        affected: dict[int, list[Block]] = {}
-        for page_idx, block in self._block_search_matches:
-            if 0 <= page_idx < len(self._pages):
-                affected.setdefault(page_idx, []).append(block)
+        affected: dict[int, list[str]] = {}
+        for page_idx, block_uid in self._block_search_matches:
+            if 0 <= page_idx < len(self._pages) and block_uid:
+                affected.setdefault(page_idx, []).append(block_uid)
         if not affected:
             return
         self._push_undo_snapshot_for_pages(affected.keys())
         changed = 0
-        for page_idx, blocks in affected.items():
+        for page_idx, block_uids in affected.items():
             page = self._pages[page_idx]
-            for block in blocks:
+            for block_uid in block_uids:
+                block = self._runtime_block_by_uid(page, block_uid)
+                if block is None:
+                    continue
                 source_label = self._source_label_for_subtype(page, block, subtype)
                 is_changed = (
                     block.block_type != subtype.block_type
@@ -1352,13 +1364,8 @@ class LayoutPanel(QWidget):
         page_idx, block_uid = payload
         if not isinstance(page_idx, int) or not (0 <= page_idx < len(self._pages)):
             return
-        block = None
-        for view in iter_page_layout_block_views(self._pages[page_idx]):
-            if view.uid == block_uid:
-                block = view.runtime_block
-                break
-        if block is not None:
-            self._focus_block(page_idx, block)
+        if isinstance(block_uid, str) and block_uid:
+            self._focus_block_uid(page_idx, block_uid)
 
     # ------------------------------------------------------------------ private
 

@@ -1512,6 +1512,8 @@ def test_layout_panel_user_edits_go_through_layout_edit_service():
     assert "import copy" not in layout_source
     assert "_layout_snapshot_blocks_for_undo" in layout_source
     assert "list[tuple[int, list[Block]]]" not in layout_source
+    assert "list[tuple[int, Block]]" not in layout_source
+    assert "_block_search_matches.append((page_idx, block))" not in layout_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",
