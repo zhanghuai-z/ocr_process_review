@@ -26,6 +26,7 @@ from app.models.ocr_observation import (
     project_has_any_ocr_result,
     project_ocr_line_count,
 )
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.proof_line_facts import (
@@ -145,7 +146,7 @@ def test_ocr_character_observation_boundary_tracks_current_line_chars():
     third = Char(char="丙", confidence=0.97, bbox=BBox(10, 0, 10, 10))
     replace_line_ocr_char_span(line, 1, 2, [third])
     assert line_ocr_chars(line) == [first, third]
-    assert line.chars is line_ocr_chars(line)
+    assert line.chars == []
 
 
 def test_ocr_character_observation_uid_store_overrides_stale_line_projection():
@@ -677,8 +678,9 @@ def test_bbox_tools():
 
     line = Line(text="天地玄黄", confidence=0.9, bbox=BBox(10, 20, 24, 160))
     ensure_line_char_bboxes(line)
-    assert len(line.chars) == 4
-    assert line.chars[1].bbox == BBox(10, 60, 24, 40)
+    chars = line_ocr_chars(line)
+    assert len(chars) == 4
+    assert chars[1].bbox == BBox(10, 60, 24, 40)
 
     shifted = Line(
         text="甲乙丙",
@@ -700,10 +702,11 @@ def test_bbox_tools():
         ],
     )
     ensure_line_char_bboxes(shifted)
-    assert shifted.chars[0].bbox == BBox(40, 20, 30, 30)
-    assert shifted.chars[0].bbox_source == "ocr"
-    assert shifted.chars[1].bbox == BBox(40, 20, 30, 30)
-    assert shifted.chars[1].bbox_source == "ocr"
+    shifted_chars = line_ocr_chars(shifted)
+    assert shifted_chars[0].bbox == BBox(40, 20, 30, 30)
+    assert shifted_chars[0].bbox_source == "ocr"
+    assert shifted_chars[1].bbox == BBox(40, 20, 30, 30)
+    assert shifted_chars[1].bbox_source == "ocr"
 
     fallback_shifted = Line(
         text="甲乙丙",
@@ -725,8 +728,9 @@ def test_bbox_tools():
         ],
     )
     ensure_line_char_bboxes(fallback_shifted)
-    assert fallback_shifted.chars[0].bbox == BBox(10, 20, 30, 30)
-    assert fallback_shifted.chars[0].bbox_source == "fallback"
+    fallback_shifted_chars = line_ocr_chars(fallback_shifted)
+    assert fallback_shifted_chars[0].bbox == BBox(10, 20, 30, 30)
+    assert fallback_shifted_chars[0].bbox_source == "fallback"
 
     img = np.full((100, 180, 3), 255, dtype=np.uint8)
     glyph_boxes = [
@@ -747,7 +751,7 @@ def test_bbox_tools():
 
     line = Line(text="甲乙丙丁", confidence=0.95, bbox=BBox(10, 28, 132, 32))
     ensure_line_char_bboxes(line, page_image=img)
-    for got, expected in zip(line.chars, glyph_boxes):
+    for got, expected in zip(line_ocr_chars(line), glyph_boxes):
         assert abs(got.bbox.x - expected.x) <= 3
         assert abs(got.bbox.w - expected.w) <= 4
 
@@ -988,7 +992,9 @@ def test_project_store():
             assert loaded.name == "存储测试"
             loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
             assert loaded_line.text == "Hello OCR"
-            loaded_chars = loaded_line.chars
+            from app.models.ocr_character_observation import line_ocr_chars
+
+            loaded_chars = line_ocr_chars(loaded_line)
             assert loaded_chars[0].bbox_source == "ocr"
             assert loaded_chars[0].bbox_granularity == "char"
             assert loaded_chars[1].token_text == "ello"
@@ -2222,19 +2228,19 @@ def test_project_store_save_project_preserves_child_rowids():
                 "page": project.pages[0].id,
                 "block": block.id,
                 "line": line1.id,
-                "char": line1.chars[0].id,
+                "char": line_ocr_chars(line1)[0].id,
                 "removed_line": line2.id,
-                "removed_char": line2.chars[0].id,
+                "removed_char": line_ocr_chars(line2)[0].id,
             }
             uids = {
                 "page": project.pages[0].uid,
                 "block": block.uid,
                 "line": line1.uid,
-                "char": line1.chars[0].uid,
+                "char": line_ocr_chars(line1)[0].uid,
             }
 
             set_line_proof_text(line1, "第一行已校对")
-            line1.chars[0].char = "一"
+            line_ocr_chars(line1)[0].char = "一"
             block.note = "updated without id churn"
             replace_block_ocr_line_observations(block.uid, [line1])
             store.save_project(project)
@@ -2243,7 +2249,7 @@ def test_project_store_save_project_preserves_child_rowids():
         loaded_page = loaded.pages[0]
         loaded_block = loaded_page.blocks[0]
         loaded_line = _block_ocr_observations(loaded_block)[0]
-        loaded_char = loaded_line.chars[0]
+        loaded_char = line_ocr_chars(loaded_line)[0]
 
         assert loaded_page.id == ids["page"]
         assert loaded_block.id == ids["block"]
@@ -2313,12 +2319,12 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
             p1_page = project1.pages[0]
             p1_block = p1_page.blocks[0]
             p1_line = p1_block.lines[0]
-            p1_char = p1_line.chars[0]
+            p1_char = line_ocr_chars(p1_line)[0]
 
             p2_page = project2.pages[0]
             p2_block = p2_page.blocks[0]
             p2_line = p2_block.lines[0]
-            p2_char = p2_line.chars[0]
+            p2_char = line_ocr_chars(p2_line)[0]
             original_p2_ids = (p2_page.id, p2_block.id, p2_line.id, p2_char.id)
             original_p2_uids = (p2_page.uid, p2_block.uid, p2_line.uid, p2_char.uid)
 
@@ -2337,27 +2343,29 @@ def test_project_store_upsert_rejects_foreign_parent_rowids():
         assert reloaded1.pages[0].id == p1_page.id
         assert reloaded1.pages[0].blocks[0].id == p1_block.id
         reloaded1_line = _block_ocr_observations(reloaded1.pages[0].blocks[0])[0]
+        reloaded1_char = line_ocr_chars(reloaded1_line)[0]
         assert reloaded1_line.id == p1_line.id
-        assert reloaded1_line.chars[0].id == p1_char.id
+        assert reloaded1_char.id == p1_char.id
         assert reloaded1_line.text == "甲"
-        assert reloaded1_line.chars[0].char == "甲"
+        assert reloaded1_char.char == "甲"
 
         assert reloaded2.pages[0].id != p1_page.id
         assert reloaded2.pages[0].blocks[0].id != p1_block.id
         reloaded2_line = _block_ocr_observations(reloaded2.pages[0].blocks[0])[0]
+        reloaded2_char = line_ocr_chars(reloaded2_line)[0]
         assert reloaded2_line.id != p1_line.id
-        assert reloaded2_line.chars[0].id != p1_char.id
+        assert reloaded2_char.id != p1_char.id
         assert reloaded2.pages[0].id == original_p2_ids[0]
         assert reloaded2.pages[0].blocks[0].id == original_p2_ids[1]
         assert reloaded2_line.id == original_p2_ids[2]
-        assert reloaded2_line.chars[0].id == original_p2_ids[3]
+        assert reloaded2_char.id == original_p2_ids[3]
         assert reloaded2.pages[0].uid == original_p2_uids[0]
         assert reloaded2.pages[0].blocks[0].uid == original_p2_uids[1]
         assert reloaded2_line.uid == original_p2_uids[2]
-        assert reloaded2_line.chars[0].uid == original_p2_uids[3]
+        assert reloaded2_char.uid == original_p2_uids[3]
         assert proof_final_text(reloaded2_line) == "乙已改"
         assert proof_display_text(reloaded2_line) == "乙已改"
-        assert reloaded2_line.chars[0].char == "乙"
+        assert reloaded2_char.char == "乙"
     finally:
         os.unlink(db_path)
 
@@ -2404,14 +2412,14 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
             p1_page = project1.pages[0]
             p1_block = p1_page.blocks[0]
             p1_line = p1_block.lines[0]
-            p1_char = p1_line.chars[0]
+            p1_char = line_ocr_chars(p1_line)[0]
             p1_ids = (p1_page.id, p1_block.id, p1_line.id, p1_char.id)
             p1_uids = (p1_page.uid, p1_block.uid, p1_line.uid, p1_char.uid)
 
             p2_page = project2.pages[0]
             p2_block = p2_page.blocks[0]
             p2_line = p2_block.lines[0]
-            p2_char = p2_line.chars[0]
+            p2_char = line_ocr_chars(p2_line)[0]
 
             p2_page.id, p2_page.uid = p1_page.id, p1_page.uid
             p2_block.id, p2_block.uid = p1_block.id, p1_block.uid
@@ -2428,7 +2436,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
         p1_loaded_page = reloaded1.pages[0]
         p1_loaded_block = p1_loaded_page.blocks[0]
         p1_loaded_line = _block_ocr_observations(p1_loaded_block)[0]
-        p1_loaded_char = p1_loaded_line.chars[0]
+        p1_loaded_char = line_ocr_chars(p1_loaded_line)[0]
         assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
         assert (
             p1_loaded_page.uid,
@@ -2442,7 +2450,7 @@ def test_project_store_cross_project_uid_collision_remints_without_stealing():
         p2_loaded_page = reloaded2.pages[0]
         p2_loaded_block = p2_loaded_page.blocks[0]
         p2_loaded_line = _block_ocr_observations(p2_loaded_block)[0]
-        p2_loaded_char = p2_loaded_line.chars[0]
+        p2_loaded_char = line_ocr_chars(p2_loaded_line)[0]
         assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) != p1_ids
         assert p2_loaded_page.uid != p1_uids[0]
         assert p2_loaded_block.uid != p1_uids[1]
@@ -2496,13 +2504,13 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
             p1_page = project1.pages[0]
             p1_block = p1_page.blocks[0]
             p1_line = p1_block.lines[0]
-            p1_char = p1_line.chars[0]
+            p1_char = line_ocr_chars(p1_line)[0]
             p1_ids = (p1_page.id, p1_block.id, p1_line.id, p1_char.id)
 
             p2_page = project2.pages[0]
             p2_block = p2_page.blocks[0]
             p2_line = p2_block.lines[0]
-            p2_char = p2_line.chars[0]
+            p2_char = line_ocr_chars(p2_line)[0]
             p2_ids = (p2_page.id, p2_block.id, p2_line.id, p2_char.id)
             p2_uids = (p2_page.uid, p2_block.uid, p2_line.uid, p2_char.uid)
 
@@ -2521,7 +2529,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
         p1_loaded_page = reloaded1.pages[0]
         p1_loaded_block = p1_loaded_page.blocks[0]
         p1_loaded_line = _block_ocr_observations(p1_loaded_block)[0]
-        p1_loaded_char = p1_loaded_line.chars[0]
+        p1_loaded_char = line_ocr_chars(p1_loaded_line)[0]
         assert (p1_loaded_page.id, p1_loaded_block.id, p1_loaded_line.id, p1_loaded_char.id) == p1_ids
         assert proof_display_text(p1_loaded_line) == "甲"
         assert p1_loaded_char.char == "甲"
@@ -2529,7 +2537,7 @@ def test_project_store_cross_project_uid_pollution_preserves_valid_rowids():
         p2_loaded_page = reloaded2.pages[0]
         p2_loaded_block = p2_loaded_page.blocks[0]
         p2_loaded_line = _block_ocr_observations(p2_loaded_block)[0]
-        p2_loaded_char = p2_loaded_line.chars[0]
+        p2_loaded_char = line_ocr_chars(p2_loaded_line)[0]
         assert (p2_loaded_page.id, p2_loaded_block.id, p2_loaded_line.id, p2_loaded_char.id) == p2_ids
         assert (
             p2_loaded_page.uid,
@@ -2639,19 +2647,22 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
             chars=[Char(char="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))],
         )
         line2 = copy.deepcopy(line1)
+        replace_line_ocr_chars(line2, list(line2.chars))
         line2.text = "乙"
         line2.ocr_text = "乙"
         set_line_proof_text(line2, "乙")
-        line2.chars[0].char = "乙"
+        line_ocr_chars(line2)[0].char = "乙"
 
         line_block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[line1, line2])
         block_copy = copy.deepcopy(line_block)
+        for copied_line in block_copy.lines:
+            replace_line_ocr_chars(copied_line, list(copied_line.chars))
         block_copy.uid = new_entity_uid("block")
         block_copy.order = 1
         block_copy.lines[0].text = "丙"
         block_copy.lines[0].ocr_text = "丙"
         set_line_proof_text(block_copy.lines[0], "丙")
-        block_copy.lines[0].chars[0].char = "丙"
+        line_ocr_chars(block_copy.lines[0])[0].char = "丙"
 
         project = OcrProject(
             name="duplicate sibling uids",
@@ -2676,7 +2687,7 @@ def test_project_store_duplicate_sibling_uids_are_reminted():
             char.uid
             for block in loaded.pages[0].blocks
             for line in _block_ocr_observations(block)
-            for char in line.chars
+            for char in line_ocr_chars(line)
         }) == 4
     finally:
         os.unlink(db_path)
@@ -2751,7 +2762,7 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
         uids = {
             "block": moved_block.uid,
             "line": source_line.uid,
-            "char": char_source_line.chars[0].uid,
+            "char": line_ocr_chars(char_source_line)[0].uid,
             "line_target_block": line_target_block.uid,
             "char_target_line": char_target_line.uid,
         }
@@ -2773,12 +2784,14 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
                 source_line = line_source_block.lines.pop(0)
                 char_source_line = char_block.lines[0]
                 char_target_line = next(line for line in char_block.lines if line.uid == uids["char_target_line"])
-                moved_char = char_source_line.chars.pop(0)
+                source_chars = line_ocr_chars(char_source_line)
+                moved_char = source_chars[0]
+                replace_line_ocr_chars(char_source_line, source_chars[1:])
 
                 page1.blocks.remove(moved_block)
                 page2.blocks.append(moved_block)
                 line_target_block.lines.append(source_line)
-                char_target_line.chars.append(moved_char)
+                replace_line_ocr_chars(char_target_line, [*line_ocr_chars(char_target_line), moved_char])
 
                 if block_order == "new_parent_first":
                     page1.blocks.remove(line_target_block)
@@ -2809,7 +2822,7 @@ def test_project_store_cross_parent_moves_preserve_uids_regardless_of_save_order
 
             loaded_lines = [line for block in loaded_blocks for line in _block_ocr_observations(block)]
             loaded_char_target = next(line for line in loaded_lines if line.uid == uids["char_target_line"])
-            assert [char.uid for char in loaded_char_target.chars] == [uids["char"]]
+            assert [char.uid for char in line_ocr_chars(loaded_char_target)] == [uids["char"]]
         finally:
             os.unlink(db_path)
 
@@ -3532,7 +3545,7 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     edited = Line(text="OCR原文", confidence=0.9, bbox=bb)
     set_line_proof_status(edited, ProofStatus.MODIFIED)
     edited.ocr_text = "OCR原文"
-    edited.chars = [Char(char="O", confidence=0.9, bbox=bb)]
+    replace_line_ocr_chars(edited, [Char(char="O", confidence=0.9, bbox=bb)])
     set_line_proof_text(edited, "人工终审")
     table_line = Line(text="表格文字", confidence=0.8, bbox=bb)
     page = Page(
@@ -3570,10 +3583,10 @@ def test_project_to_export_ir_builder_maps_final_text_and_fallbacks():
     paragraph = data["pages"][0]["elements"][1]
     assert paragraph["source"]["block_ids"] == [page.blocks[1].uid]
     assert paragraph["source"]["line_ids"] == [edited.uid]
-    assert paragraph["source"]["char_ids"] == [edited.chars[0].uid]
+    assert paragraph["source"]["char_ids"] == [line_ocr_chars(edited)[0].uid]
     assert paragraph["payload"]["text"] == "人工终审"
     assert paragraph["payload"]["lines"][0]["line_id"] == edited.uid
-    assert paragraph["payload"]["lines"][0]["chars"][0]["char_id"] == edited.chars[0].uid
+    assert paragraph["payload"]["lines"][0]["chars"][0]["char_id"] == line_ocr_chars(edited)[0].uid
     assert paragraph["payload"]["lines"][0]["ocr_text"] == "OCR原文"
     assert paragraph["proof"]["corrected"] is True
     table = data["pages"][0]["elements"][5]
@@ -8256,11 +8269,12 @@ def test_ocr_pipeline_offsets_crop_relative_boxes():
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(120, 70, 80, 18)
-        assert len(line.chars) == len(line.text)
-        assert line.chars[0].bbox == BBox(120, 70, 20, 18)
-        assert line.chars[1].bbox == BBox(140, 70, 20, 18)
-        assert line.chars[2].bbox == BBox(160, 70, 20, 18)
-        assert line.chars[3].bbox == BBox(180, 70, 20, 18)
+        chars = line_ocr_chars(line)
+        assert len(chars) == len(line.text)
+        assert chars[0].bbox == BBox(120, 70, 20, 18)
+        assert chars[1].bbox == BBox(140, 70, 20, 18)
+        assert chars[2].bbox == BBox(160, 70, 20, 18)
+        assert chars[3].bbox == BBox(180, 70, 20, 18)
     finally:
         os.unlink(img_path)
 
@@ -8313,12 +8327,13 @@ def test_ocr_pipeline_prefers_engine_char_boxes_and_only_falls_back_for_missing_
         )
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
-        assert line.chars[0].bbox == BBox(112, 80, 14, 24)
-        assert line.chars[0].bbox_source == "ocr"
-        assert line.chars[1].bbox == BBox(134, 80, 18, 24)
-        assert line.chars[1].bbox_source == "ocr"
-        assert line.chars[2].bbox_source == "fallback"
-        assert line.chars[2].bbox_granularity == "fallback"
+        chars = line_ocr_chars(line)
+        assert chars[0].bbox == BBox(112, 80, 14, 24)
+        assert chars[0].bbox_source == "ocr"
+        assert chars[1].bbox == BBox(134, 80, 18, 24)
+        assert chars[1].bbox_source == "ocr"
+        assert chars[2].bbox_source == "fallback"
+        assert chars[2].bbox_granularity == "fallback"
     finally:
         os.unlink(img_path)
 
@@ -8352,7 +8367,7 @@ def test_ocr_pipeline_normalizes_proof_geometry():
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
 
         assert line.bbox == BBox(10, 44, 160, 40)
-        assert len(line.chars) == 2
+        assert len(line_ocr_chars(line)) == 2
     finally:
         os.unlink(img_path)
 
@@ -8381,10 +8396,11 @@ def test_ocr_pipeline_process_block_normalizes_proof_geometry():
         line = _block_ocr_observations(result)[0]
 
         assert line.bbox == BBox(30, 22, 80, 24)
-        assert len(line.chars) == 2
-        assert [char.char for char in line.chars] == ["甲", "乙"]
-        assert [char.bbox_source for char in line.chars] == ["fallback", "fallback"]
-        assert [char.bbox_granularity for char in line.chars] == ["fallback", "fallback"]
+        chars = line_ocr_chars(line)
+        assert len(chars) == 2
+        assert [char.char for char in chars] == ["甲", "乙"]
+        assert [char.bbox_source for char in chars] == ["fallback", "fallback"]
+        assert [char.bbox_granularity for char in chars] == ["fallback", "fallback"]
     finally:
         os.unlink(img_path)
 
@@ -8418,7 +8434,7 @@ def test_ocr_pipeline_emits_nonblocking_warning_when_proof_fallback_triggers():
         )
 
         assert result.pages[0].error_message == ""
-        assert _block_ocr_observations(result.pages[0].blocks[0])[0].chars
+        assert line_ocr_chars(_block_ocr_observations(result.pages[0].blocks[0])[0])
         warnings = [event.message for event in progress_events if "proof fallback" in event.message]
         assert warnings == ["警告：第 1/1 页触发 proof fallback，1 行/3 字使用估算或不可用字框"]
     finally:
@@ -8881,10 +8897,11 @@ def test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars():
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
         assert line.text == "汉王"
         assert line.bbox == BBox(46, 58, 42, 16)
-        assert [char.char for char in line.chars] == ["汉", "王"]
-        assert line.chars[0].bbox == BBox(46, 58, 18, 16)
-        assert line.chars[1].bbox == BBox(70, 58, 18, 16)
-        assert all(char.bbox_source.startswith("hanwang:") for char in line.chars)
+        chars = line_ocr_chars(line)
+        assert [char.char for char in chars] == ["汉", "王"]
+        assert chars[0].bbox == BBox(46, 58, 18, 16)
+        assert chars[1].bbox == BBox(70, 58, 18, 16)
+        assert all(char.bbox_source.startswith("hanwang:") for char in chars)
     finally:
         os.unlink(img_path)
 
@@ -10603,7 +10620,10 @@ def test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers():
             review_flags=[micro_module.ROUTE_INLINE_FORMULA_FLAG],
         )
         line = micro_module._line_to_model(line_result, 120, 40, [])
-        formula_char = line.chars[1]
+        from app.models.ocr_character_observation import line_ocr_chars
+
+        chars = line_ocr_chars(line)
+        formula_char = chars[1]
         assert formula_char.char == "$ A $"
         assert formula_char.token_text == "$ A $"
         assert formula_char.bbox == BBox(40, 0, 30, 30)
@@ -10700,7 +10720,9 @@ def test_proof_crop_service_reports_fallback_geometry(tmp_path):
     assert stats.fallback_lines == 1
     assert stats.fallback_chars == 3
     assert stats.unavailable_chars == 0
-    assert [char.bbox_granularity for char in line.chars] == ["fallback", "fallback", "fallback"]
+    from app.models.ocr_character_observation import line_ocr_chars
+
+    assert [char.bbox_granularity for char in line_ocr_chars(line)] == ["fallback", "fallback", "fallback"]
 
     print("test_proof_crop_service_reports_fallback_geometry PASSED")
 
@@ -11752,9 +11774,10 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         assert seen_recblocks == [(0, 10, 60, 30), (90, 10, 180, 30)]
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
         assert line.text == "甲$ A $乙"
-        assert [char.char for char in line.chars] == ["甲", "$ A $", "乙"]
-        assert line.chars[1].bbox_source == "paddle_inline_formula"
-        assert line.chars[1].bbox_granularity == "word"
+        chars = line_ocr_chars(line)
+        assert [char.char for char in chars] == ["甲", "$ A $", "乙"]
+        assert chars[1].bbox_source == "paddle_inline_formula"
+        assert chars[1].bbox_granularity == "word"
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
@@ -13313,7 +13336,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert not hasattr(out_page.blocks[0], "raw_payload")
         assert out_page.blocks[0].origin is not None
         assert out_page.blocks[0].origin.raw_index == 0
-        assert text_lines[0].chars[0].bbox_source == "hanwang:micro_recblock"
+        assert line_ocr_chars(text_lines[0])[0].bbox_source == "hanwang:micro_recblock"
         assert formula_lines[0].text == "$$x+y$$"
         assert out_page.blocks[1].ocr_policy != OcrPolicy.TEXT_OCR
         assert not hasattr(out_page.blocks[1], "raw_payload")
@@ -14824,7 +14847,7 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
             assert controller.open_project(db_path) is True
             loaded_line = _block_ocr_observations(controller.project.pages[0].blocks[0])[0]
             assert loaded_line.bbox == BBox(10, 44, 160, 40)
-            assert len(loaded_line.chars) == 2
+            assert len(line_ocr_chars(loaded_line)) == 2
         finally:
             controller.close()
     finally:
@@ -15014,8 +15037,11 @@ def test_workflow_controller_auto_save_persists_line_chars_for_text_change():
         loaded = store.load_project(project.id)
         loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == "乙"
-        assert loaded_line.chars[0].char == "乙"
-        assert loaded_line.chars[0].token_text == "乙"
+        from app.models.ocr_character_observation import line_ocr_chars
+
+        loaded_chars = line_ocr_chars(loaded_line)
+        assert loaded_chars[0].char == "乙"
+        assert loaded_chars[0].token_text == "乙"
         index = CharIndexService(include_non_cjk=True, include_fallback=True).build(loaded.pages)
         assert index.query("乙")
         assert index.query("甲") == []
@@ -15094,7 +15120,9 @@ def test_workflow_controller_auto_save_persists_inline_formula_carrier_text_chan
         loaded = store.load_project(project.id)
         loaded_line = _block_ocr_observations(loaded.pages[0].blocks[0])[0]
         assert proof_display_text(loaded_line) == "丙$ B $乙"
-        assert [(char.char, char.token_text) for char in loaded_line.chars] == [
+        from app.models.ocr_character_observation import line_ocr_chars
+
+        assert [(char.char, char.token_text) for char in line_ocr_chars(loaded_line)] == [
             ("丙", "丙"),
             ("$ B $", "$ B $"),
             ("乙", "乙"),
@@ -15153,24 +15181,26 @@ def test_project_store_update_proof_lines_does_not_move_foreign_char_uid():
         store.open()
         project = store.save_project(project)
         saved_line1, saved_line2 = _block_ocr_observations(project.pages[0].blocks[0])
-        line1_original_uid = saved_line1.chars[0].uid
-        line2_uid = saved_line2.chars[0].uid
+        line1_original_uid = line_ocr_chars(saved_line1)[0].uid
+        line2_uid = line_ocr_chars(saved_line2)[0].uid
 
         set_line_proof_text(saved_line1, "丙")
-        saved_line1.chars[0].char = "丙"
-        saved_line1.chars[0].token_text = "丙"
-        saved_line1.chars[0].uid = line2_uid
+        line_ocr_chars(saved_line1)[0].char = "丙"
+        line_ocr_chars(saved_line1)[0].token_text = "丙"
+        line_ocr_chars(saved_line1)[0].uid = line2_uid
 
         store.update_proof_lines([(saved_line1, True)])
 
         loaded = store.load_project(project.id)
         loaded_line1, loaded_line2 = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert proof_display_text(loaded_line1) == "丙"
-        assert [char.char for char in loaded_line1.chars] == ["丙"]
-        assert loaded_line1.chars[0].uid == line1_original_uid
+        loaded_line1_chars = line_ocr_chars(loaded_line1)
+        loaded_line2_chars = line_ocr_chars(loaded_line2)
+        assert [char.char for char in loaded_line1_chars] == ["丙"]
+        assert loaded_line1_chars[0].uid == line1_original_uid
         assert proof_display_text(loaded_line2) == "乙"
-        assert [char.char for char in loaded_line2.chars] == ["乙"]
-        assert loaded_line2.chars[0].uid == line2_uid
+        assert [char.char for char in loaded_line2_chars] == ["乙"]
+        assert loaded_line2_chars[0].uid == line2_uid
     finally:
         if store is not None:
             store.close()
@@ -15527,7 +15557,7 @@ def test_proof_persistence_scoped_lines_commit_atomically():
         loaded = store.load_project(project.id)
         loaded_lines = _block_ocr_observations(loaded.pages[0].blocks[0])
         assert [proof_display_text(line) for line in loaded_lines] == ["AAAA", "BBBB"]
-        assert [[char.char for char in line.chars] for line in loaded_lines] == [
+        assert [[char.char for char in line_ocr_chars(line)] for line in loaded_lines] == [
             list("AAAA"),
             list("BBBB"),
         ]
@@ -19929,9 +19959,11 @@ def test_char_index_service_replace_pages_preserves_other_page_entries():
 
     service = CharIndexService(include_non_cjk=True, include_fallback=True).build([page1, page2])
     set_line_proof_text(line1, "丙")
-    line1.chars = [
+    from app.models.ocr_character_observation import replace_line_ocr_chars
+
+    replace_line_ocr_chars(line1, [
         Char(char="丙", confidence=0.9, bbox=BBox(1, 1, 10, 10), bbox_source="ocr", bbox_granularity="char")
-    ]
+    ])
 
     service.replace_pages([page1])
 

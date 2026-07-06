@@ -14,6 +14,7 @@ from app.controllers.workflow_controller import (
     WorkflowController, STEP_IMPORT, STEP_HPROOF, STEP_LAYOUT,
 )
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import project_ocr_line_count, replace_block_ocr_line_observations
 
 
@@ -246,7 +247,7 @@ def test_sync_proof_panels_merges_when_char_geometry_changes_with_same_line_coun
     h = _StubPanel(); v = _StubPanel()
     ctrl.register_proof_panels(h, v)
     line = _line("业")
-    line.chars = [
+    replace_line_ocr_chars(line, [
         Char(
             char="业",
             confidence=0.96,
@@ -255,12 +256,12 @@ def test_sync_proof_panels_merges_when_char_geometry_changes_with_same_line_coun
             bbox_granularity="char",
             token_text="业",
         )
-    ]
+    ])
     ctrl._project = OcrProject(name="t", pages=[_page(1, [_block([line])])])
 
     ctrl.sync_proof_panels()
     h.load_calls.clear(); v.load_calls.clear()
-    line.chars[0].bbox = BBox(11, 20, 30, 40)
+    line_ocr_chars(line)[0].bbox = BBox(11, 20, 30, 40)
 
     ctrl.sync_proof_panels()
     assert ctrl.total_line_count == 1

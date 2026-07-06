@@ -1,8 +1,7 @@
 """Access boundary for OCR character observations.
 
-``Line.chars`` is a current runtime projection. Application code should use this
-module so character, word, and formula carriers live behind one boundary instead
-of being owned directly by the mutable line model.
+Application code reads character, word, and formula carriers through this
+boundary so mutable lines do not own OCR character state.
 """
 from __future__ import annotations
 
@@ -26,7 +25,7 @@ class OcrCharOccurrence:
 
 
 def line_ocr_chars(line: Line) -> list[Char]:
-    return ocr_chars_for_line(line, line.chars)
+    return ocr_chars_for_line(line)
 
 
 def line_ocr_chars_by_uid(line_uid: str) -> list[Char]:
@@ -42,9 +41,7 @@ def line_has_ocr_chars(line: Line) -> bool:
 
 
 def replace_line_ocr_chars(line: Line, chars: Iterable[Char]) -> None:
-    projected = list(chars)
-    line.chars = projected
-    set_ocr_chars_for_line(line, projected)
+    set_ocr_chars_for_line(line, list(chars))
 
 
 def replace_line_ocr_char_observations(line_uid: str, chars: Iterable[Char]) -> None:

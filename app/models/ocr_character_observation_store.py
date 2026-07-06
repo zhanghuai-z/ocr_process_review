@@ -31,29 +31,20 @@ def _drop_object_entries_for_uid(line_uid: str, *, keep: object | None = None) -
             _CHARS_BY_LINE_OBJECT.pop(line_id, None)
 
 
-def ocr_chars_for_line(line: object, projection: list[Char] | None = None) -> list[Char]:
+def ocr_chars_for_line(line: object) -> list[Char]:
     line_id = id(line)
     line_uid = _object_uid(line)
     entry = _CHARS_BY_LINE_OBJECT.get(line_id)
     if entry is not None:
         line_ref, chars = entry
         if line_ref() is line:
-            if projection is not None and projection is not chars:
-                if line_uid and line_uid in _CHARS_BY_LINE_UID:
-                    uid_chars = _CHARS_BY_LINE_UID[line_uid]
-                    _set_ocr_chars_for_line_object(line, uid_chars)
-                    return uid_chars
-                set_ocr_chars_for_line(line, projection)
-                return projection
             return chars
         _CHARS_BY_LINE_OBJECT.pop(line_id, None)
     if line_uid and line_uid in _CHARS_BY_LINE_UID:
         chars = _CHARS_BY_LINE_UID[line_uid]
         _set_ocr_chars_for_line_object(line, chars)
         return chars
-    chars = projection if projection is not None else []
-    set_ocr_chars_for_line(line, chars)
-    return chars
+    return []
 
 
 def _set_ocr_chars_for_line_object(line: object, chars: list[Char]) -> None:
@@ -71,7 +62,6 @@ def set_ocr_chars_for_line(line: object, chars: list[Char]) -> None:
     line_uid = _object_uid(line)
     if line_uid:
         _CHARS_BY_LINE_UID[line_uid] = chars
-        _drop_object_entries_for_uid(line_uid, keep=line)
     _set_ocr_chars_for_line_object(line, chars)
 
 

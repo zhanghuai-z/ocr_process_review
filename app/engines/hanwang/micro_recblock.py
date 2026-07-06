@@ -116,16 +116,17 @@ from app.models.layout_block_state import (
     set_layout_block_order,
     set_layout_block_source_label,
 )
-from app.models.ocr_character_observation import (
-    replace_line_ocr_char_span,
-    replace_line_ocr_chars,
-)
+from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
 
 logger = get_logger(__name__)
+
+
+def _replace_line_result_char_span(line: "LineResult", start: int, end: int, chars: list["CharResult"]) -> None:
+    line.chars[start:end] = chars
 
 ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
@@ -1445,7 +1446,7 @@ def _refine_overlap_fragments_with_recrop(
                 timeout=timeout,
             )
             if _cluster_replacement_accepted(old_chars, replacement):
-                replace_line_ocr_char_span(line, start, end, replacement)
+                _replace_line_result_char_span(line, start, end, replacement)
                 stats.overlap_merge_replacements += 1
             else:
                 continue
@@ -1989,7 +1990,7 @@ def _replace_line_span_with_binding(line: LineResult, binding: _TokenBinding) ->
         )
         for idx, char in enumerate(binding.chars)
     ]
-    replace_line_ocr_char_span(line, start, end, replacement)
+    _replace_line_result_char_span(line, start, end, replacement)
     line.text = "".join(char.text for char in line.chars)
     return True
 
@@ -2019,7 +2020,7 @@ def _replace_line_span_with_word_binding(line: LineResult, binding: _TokenBindin
     if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
         if not all(_low_confidence_latin_rewrite_candidate(char) for char in current_chars):
             return False
-    replace_line_ocr_char_span(
+    _replace_line_result_char_span(
         line,
         start,
         end,

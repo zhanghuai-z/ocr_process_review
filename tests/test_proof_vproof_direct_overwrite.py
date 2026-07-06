@@ -25,6 +25,7 @@ from app.core.proof_state import ProofUpdateRequest
 from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
@@ -39,7 +40,7 @@ def _qapp():
 def _make_project(text: str) -> OcrProject:
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, len(text) * 10, 20))
     line.id = 8401
-    line.chars = [
+    replace_line_ocr_chars(line, [
         Char(
             char=ch,
             confidence=0.9,
@@ -49,7 +50,7 @@ def _make_project(text: str) -> OcrProject:
             token_text=ch,
         )
         for i, ch in enumerate(text)
-    ]
+    ])
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, len(text) * 10, 200), lines=[line])
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=300, height=200)
     page.id = 9401
@@ -67,7 +68,7 @@ def _load_vproof(text: str):
 def _make_page(text: str, page_number: int, page_id: int, line_id: int) -> Page:
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, len(text) * 10, 20))
     line.id = line_id
-    line.chars = [
+    replace_line_ocr_chars(line, [
         Char(
             char=ch,
             confidence=0.9,
@@ -77,7 +78,7 @@ def _make_page(text: str, page_number: int, page_id: int, line_id: int) -> Page:
             token_text=ch,
         )
         for i, ch in enumerate(text)
-    ]
+    ])
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, len(text) * 10, 200), lines=[line])
     page = Page(
         page_number=page_number,

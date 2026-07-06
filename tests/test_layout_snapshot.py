@@ -143,7 +143,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     loaded_block = page.blocks[0]
     loaded_line = block_ocr_line_observations(loaded_block)[0]
     assert loaded_block.lines == []
-    assert line_ocr_chars(loaded_line) is loaded_line.chars
+    assert loaded_line.chars == []
     assert line_ocr_chars(loaded_line)[0].char == "甲"
 
 

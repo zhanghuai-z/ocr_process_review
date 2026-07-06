@@ -16,6 +16,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockType, Char, Line, OcrProject, Page
+from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
@@ -48,7 +49,7 @@ def _make_project_with_char_crops(text: str, *, n_pages: int = 1, lines_per_page
         lines = []
         for line_no in range(lines_per_page):
             line = Line(text=text, confidence=0.9, bbox=BBox(0, line_no * 24, len(text) * 10, 20))
-            line.chars = [
+            replace_line_ocr_chars(line, [
                 Char(
                     char=ch,
                     confidence=0.9,
@@ -58,7 +59,7 @@ def _make_project_with_char_crops(text: str, *, n_pages: int = 1, lines_per_page
                     token_text=ch,
                 )
                 for i, ch in enumerate(text)
-            ]
+            ])
             lines.append(line)
         block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, max(100, len(text) * 10), 200), lines=lines)
         pages.append(Page(page_number=page_no, blocks=[block], image_path="/tmp/none.png", width=300, height=200))
@@ -413,7 +414,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     page2.page_number = 2
     line2 = page2.blocks[0].lines[0]
     set_line_proof_text(line2, "BB")
-    for char in line2.chars:
+    for char in line_ocr_chars(line2):
         char.char = "B"
         char.token_text = "B"
 
@@ -427,7 +428,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     v._load_page = lambda i, _o=orig_load: (calls.__setitem__("load", calls["load"] + 1), _o(i))[1]  # type: ignore
 
     set_line_proof_text(line2, "CC")
-    for char in line2.chars:
+    for char in line_ocr_chars(line2):
         char.char = "C"
         char.token_text = "C"
 
@@ -475,7 +476,7 @@ def test_quality_stats_dialog_toggle_on_then_off(monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     # 文本中刻意包含已知互为近形的字（己/已/巳、体/休、拼/并）以保证 sampler 能投放
     line = Line(text="今天已学己事拼并体休巳过本身", confidence=0.9, bbox=BBox(0, 0, 240, 20))
-    line.chars = [
+    replace_line_ocr_chars(line, [
         Char(
             char=ch,
             confidence=0.9,
@@ -485,7 +486,7 @@ def test_quality_stats_dialog_toggle_on_then_off(monkeypatch):
             token_text=ch,
         )
         for i, ch in enumerate(line.text)
-    ]
+    ])
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 200), lines=[line])
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png",
                 width=100, height=200)
@@ -694,10 +695,10 @@ def test_v_proof_external_refresh_updates_reference_from_model():
     proj = _make_project("AAAA")
     page = proj.pages[0]
     line0 = page.blocks[0].lines[0]
-    line0.chars = [
+    replace_line_ocr_chars(line0, [
         Char(char="A", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
         for i in range(4)
-    ]
+    ])
 
     v = VProofPanel()
     v.load_pages(proj.pages)
@@ -705,7 +706,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
     v.proof_changed.connect(changes.append)
 
     set_line_proof_text(line0, "DDDD")
-    for char in line0.chars:
+    for char in line_ocr_chars(line0):
         char.char = "D"
     v._bus.publish_line_update(ProofUpdateRequest(
         page_id=page.id,
@@ -717,7 +718,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
 
     assert proof_final_text(line0) == "DDDD"
     assert proof_display_text(line0) == "DDDD"
-    assert [char.char for char in line0.chars] == ["D", "D", "D", "D"]
+    assert [char.char for char in line_ocr_chars(line0)] == ["D", "D", "D", "D"]
     assert v._text_edit.toPlainText().startswith("DDDD")
     assert v._session.loaded_text == v._text_edit.toPlainText()
     assert changes == []
@@ -907,10 +908,10 @@ def test_v_proof_undo_action_failure_preserves_current_page_and_editor_state():
     assert v._vproof_undo_stack
     replacement = Line(text="CCCC", confidence=0.9, bbox=BBox(0, 0, 80, 20))
     replacement.id = 97003
-    replacement.chars = [
+    replace_line_ocr_chars(replacement, [
         Char(char="C", confidence=0.9, bbox=BBox(i * 10, 0, 10, 20))
         for i in range(4)
-    ]
+    ])
     page1.blocks[0].lines[0] = replacement
 
     assert v._safe_load_page(1) is True
@@ -2043,7 +2044,7 @@ def test_vproof_page_badge_uses_char_confidence_when_line_score_is_zero():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 0.0
-    for ch in line.chars:
+    for ch in line_ocr_chars(line):
         ch.confidence = 87
 
     v = VProofPanel()
@@ -2058,7 +2059,7 @@ def test_vproof_page_badge_marks_missing_confidence_unavailable():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 0.0
-    for ch in line.chars:
+    for ch in line_ocr_chars(line):
         ch.confidence = 0.0
 
     v = VProofPanel()
@@ -2073,7 +2074,7 @@ def test_vproof_entry_diagnostics_do_not_report_fake_zero_confidence():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 91
-    for ch in line.chars:
+    for ch in line_ocr_chars(line):
         ch.confidence = 0.0
 
     v = VProofPanel()
@@ -2210,13 +2211,13 @@ def test_hproof_formula_slot_geometry_keeps_single_char_word_atom_visible():
     formula = "$ F $"
     text = f"取o；{formula}在"
     line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, 120, 24))
-    line.chars = [
+    replace_line_ocr_chars(line, [
         Char(char="取", confidence=0.9, bbox=BBox(0, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="取"),
         Char(char="o", confidence=0.19, bbox=BBox(22, 0, 10, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="o"),
         Char(char="；", confidence=0.4, bbox=BBox(36, 0, 8, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="；"),
         Char(char=formula, confidence=0.0, bbox=BBox(48, 0, 40, 22), bbox_source="paddle_inline_formula", bbox_granularity="word", token_text=formula),
         Char(char="在", confidence=0.9, bbox=BBox(92, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="在"),
-    ]
+    ])
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 140, 30), lines=[line])
     page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=160, height=40)
 
