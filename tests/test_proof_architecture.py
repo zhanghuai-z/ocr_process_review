@@ -1850,7 +1850,8 @@ def test_layout_edit_service_reads_ocr_lines_from_observation_store():
     observation_source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
     store_source = Path("app/models/ocr_observation_store.py").read_text(encoding="utf-8")
 
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
     assert "clear_block_ocr_line_observations" in source
     assert "def replace_block_ocr_line_observations" in observation_source
     assert "def block_ocr_line_observations_by_uid" in observation_source
@@ -1864,7 +1865,8 @@ def test_ocr_pipeline_writes_ocr_lines_to_uid_observations():
     source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
 
     assert "replace_block_ocr_line_observations" in source
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
     assert "replace_block_ocr_lines" not in source
     assert "append_block_ocr_line" not in source
     assert "clear_block_ocr_lines" not in source

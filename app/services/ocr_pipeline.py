@@ -41,7 +41,7 @@ from app.models.layout_snapshot_projection import (
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars, set_ocr_char_bbox
 from app.models.ocr_observation import (
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     line_ocr_bbox,
     iter_page_ocr_line_observation_occurrences,
     replace_block_ocr_line_observations,
@@ -571,8 +571,8 @@ class OcrPipeline:
             )
             if progress_callback:
                 line_count = sum(
-                    len(block_ocr_line_observations(block))
-                    for block in dispatch_plan.text_block_models
+                    len(block_ocr_line_observations_by_uid(target.view.uid))
+                    for target in dispatch_plan.text_blocks
                 )
                 progress_callback(0, total_text_blocks, f"PP-OCRv5 page-line prepass complete: {line_count} lines")
         if not supports_page_block_ocr(self._engine):
@@ -609,7 +609,7 @@ class OcrPipeline:
             line_ocr_bbox(line) is not None
             and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)
-            for line in block_ocr_line_observations(block)
+            for line in block_ocr_line_observations_by_uid(block.uid)
         )
 
     def _reusable_page_line_hint_summary(self, page: Page) -> str:
@@ -617,8 +617,7 @@ class OcrPipeline:
         marked_lines = sum(
             1
             for target in dispatch_plan.text_blocks
-            for block in (target.block,)
-            for line in block_ocr_line_observations(block)
+            for line in block_ocr_line_observations_by_uid(target.view.uid)
             if line_ocr_bbox(line) is not None
             and line_ocr_bbox(line).area > 0
             and is_ppocr_page_line_hint(line)

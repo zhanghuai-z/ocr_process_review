@@ -32,7 +32,7 @@ from app.models.layout_snapshot_projection import (
 )
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
     clear_block_ocr_line_observations,
     discard_block_ocr_line_projection,
     set_ocr_line_bbox,
@@ -771,7 +771,7 @@ class LayoutEditService:
         source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
         set_layout_block_source_label(block, source_label)
         set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
-        for line in block_ocr_line_observations(block):
+        for line in block_ocr_line_observations_by_uid(block.uid):
             set_ocr_line_bbox(line, block.bbox)
         set_paddle_binding(block, next_binding)
         return True
