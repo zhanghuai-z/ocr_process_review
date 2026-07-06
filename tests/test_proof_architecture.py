@@ -2079,11 +2079,17 @@ def test_ocr_character_observation_store_has_no_object_read_adapter():
 
 def test_production_code_reads_ocr_chars_by_line_uid():
     offenders: list[str] = []
+    forbidden = (
+        r"(?<!replace_)line_ocr_chars\(",
+        r"line_ocr_char_count\(",
+        r"line_ocr_char_at\(",
+        r"iter_line_ocr_char_occurrences\(",
+    )
     for path in sorted(APP_DIR.rglob("*.py")):
         if path == Path("app/models/ocr_character_observation.py"):
             continue
         source = path.read_text(encoding="utf-8")
-        if re.search(r"(?<!replace_)line_ocr_chars\(", source):
+        if any(re.search(pattern, source) for pattern in forbidden):
             offenders.append(str(path))
     assert offenders == []
 

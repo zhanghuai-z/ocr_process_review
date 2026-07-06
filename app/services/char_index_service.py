@@ -25,7 +25,7 @@ from app.core.proof_occurrence import (
     proof_page_identity_key,
 )
 from app.models import BBox, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_chars_by_uid
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 
@@ -433,8 +433,9 @@ class CharIndexService:
         seen: Set[Tuple[int, int, str]],
         page_image,
     ) -> None:
+        chars = line_ocr_chars_by_uid(line.uid)
         for char_idx, glyph in enumerate(text):
-            char_obj = line_ocr_char_at(line, char_idx)
+            char_obj = chars[char_idx]
             explicit_bbox = char_obj.bbox or _estimate_char_bbox(line, char_idx, len(text)) or line_ocr_bbox(line)
             self._maybe_add(
                 glyph,

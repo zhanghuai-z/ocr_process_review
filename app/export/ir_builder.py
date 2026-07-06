@@ -25,7 +25,7 @@ from app.export.rules import ExportRules, load_export_rules, normalize_export_fo
 from app.models import BBox, Block, BlockType, Line, OcrPolicy, OcrProject, Page
 from app.models.layout_block_state import export_origin_for_block
 from app.models.layout_block_view import LayoutBlockView
-from app.models.ocr_character_observation import iter_line_ocr_char_occurrences
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_ocr_review_flags
 from app.models.page_state import page_error_message, page_status_value
@@ -266,8 +266,8 @@ def _line_payload(line: Line, line_index: int) -> dict[str, Any]:
         "ocr_text": facts.ocr_text,
         "bbox": _bbox_to_dict(line_ocr_bbox(line)),
         "chars": [
-            _char_payload(occurrence.char, f"line-{line_index}-char-{occurrence.char_index}")
-            for occurrence in iter_line_ocr_char_occurrences(line)
+            _char_payload(char, f"line-{line_index}-char-{char_index}")
+            for char_index, char in enumerate(line_ocr_chars_by_uid(line.uid))
         ],
         "confidence": facts.confidence,
         "status": facts.status_value,
@@ -330,9 +330,9 @@ def _source(page: Page, view: LayoutBlockView, lines: list[Line]) -> ExportSourc
         block_ids=[view.uid or _entity_source_id(block, f"p{page.page_number}-block-{view.order}")],
         line_ids=[_entity_source_id(line, idx) for idx, line in enumerate(lines)],
         char_ids=[
-            _entity_source_id(occurrence.char, f"line-{line_idx}-char-{occurrence.char_index}")
+            _entity_source_id(char, f"line-{line_idx}-char-{char_index}")
             for line_idx, line in enumerate(lines)
-            for occurrence in iter_line_ocr_char_occurrences(line)
+            for char_index, char in enumerate(line_ocr_chars_by_uid(line.uid))
         ],
         block_type=view.block_type.value,
         source_label=attrs.source_label,

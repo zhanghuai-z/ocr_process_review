@@ -50,7 +50,7 @@ from app.core.ocr_dispatch_policy import should_dispatch_to_text_ocr
 from app.core.proof_line_facts import proof_display_text
 from app.models import OcrProject, Page, Block, Line
 from app.models.enums import BlockType
-from app.models.ocr_character_observation import line_ocr_char_at, line_ocr_char_count
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     iter_page_ocr_line_observation_occurrences,
@@ -349,9 +349,10 @@ class ProbeStore:
 
 def _has_existing_cut_char(line: Line, idx: int) -> bool:
     text = proof_display_text(line)
-    if not (0 <= idx < len(text) and 0 <= idx < line_ocr_char_count(line)):
+    chars = line_ocr_chars_by_uid(line.uid)
+    if not (0 <= idx < len(text) and 0 <= idx < len(chars)):
         return False
-    ch = line_ocr_char_at(line, idx)
+    ch = chars[idx]
     if ch.char != text[idx]:
         return False
     bbox = ch.bbox
