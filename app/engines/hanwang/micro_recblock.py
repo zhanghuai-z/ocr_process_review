@@ -27,7 +27,7 @@ from app.models.layout_snapshot_projection import (
     replace_page_layout_projection_from_snapshot,
 )
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
+from app.models.ocr_observation import block_ocr_line_observations_by_uid, replace_block_ocr_line_observations
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
@@ -3515,7 +3515,7 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
         for view in iter_page_layout_block_views(page)
         for block in (view.runtime_block,)
         if block is not None
-        for line in block_ocr_line_observations(block)
+        for line in block_ocr_line_observations_by_uid(view.uid)
         if line.bbox is not None
         and line.bbox.area > 0
         and is_ppocr_page_line_hint(line)

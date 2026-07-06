@@ -1938,6 +1938,8 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
     assert "apply_page_ocr_line_route_attachment(" in run_source
     assert "attach_page_ocr_line_routes(" not in run_source
     assert "line_routes_for_block" not in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
 
 
 def test_hanwang_recognize_uses_single_layout_ocr_input_plan():
