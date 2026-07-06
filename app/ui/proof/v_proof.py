@@ -43,10 +43,7 @@ from app.core.block_attributes import block_display_label
 from app.models import BBox, Block, Line, Page, ProofStatus
 from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.ocr_observation import (
-    block_ocr_line_at,
-    block_ocr_line_count,
-    block_ocr_lines,
-    line_belongs_to_block,
+    block_ocr_line_observations,
     line_ocr_bbox,
 )
 from app.core.page_image_cache import PageImageCache
@@ -87,6 +84,15 @@ from app.ui.widgets.effects import apply_soft_shadow
 from app.ui.widgets.image_viewer import ImageViewer
 
 logger = logging.getLogger(__name__)
+
+
+def _observation_lines_for_block(block: Block) -> list[Line]:
+    return block_ocr_line_observations(block)
+
+
+def _line_belongs_to_observation_block(block: Block, line: Line | None) -> bool:
+    return line is not None and any(candidate is line for candidate in _observation_lines_for_block(block))
+
 
 CHAR_LIST_THUMB = 18
 # 相同字索引用较大的缩略图，优先保证 CJK 字形和标点细节可读。
@@ -991,20 +997,21 @@ class VProofPanel(QWidget):
 
         line: Optional[Line] = None
         line_index = -1
+        observation_lines = _observation_lines_for_block(block)
         if edit.line_uid:
-            for idx, candidate in enumerate(block_ocr_lines(block)):
+            for idx, candidate in enumerate(observation_lines):
                 if candidate.uid == edit.line_uid:
                     line = candidate
                     line_index = idx
                     break
         if line is None and edit.line_id is not None:
-            for idx, candidate in enumerate(block_ocr_lines(block)):
+            for idx, candidate in enumerate(observation_lines):
                 if candidate.id == edit.line_id:
                     line = candidate
                     line_index = idx
                     break
-        if line is None and 0 <= edit.line_index < block_ocr_line_count(block):
-            line = block_ocr_line_at(block, edit.line_index)
+        if line is None and 0 <= edit.line_index < len(observation_lines):
+            line = observation_lines[edit.line_index]
             line_index = edit.line_index
         if line is None:
             return None
@@ -2083,9 +2090,10 @@ class VProofPanel(QWidget):
         if owner is None:
             return None
         _page, block = owner
-        line = entry.line if line_belongs_to_block(block, entry.line) else None
-        if line is None and 0 <= entry.line_idx < block_ocr_line_count(block):
-            line = block_ocr_line_at(block, entry.line_idx)
+        observation_lines = _observation_lines_for_block(block)
+        line = entry.line if _line_belongs_to_observation_block(block, entry.line) else None
+        if line is None and 0 <= entry.line_idx < len(observation_lines):
+            line = observation_lines[entry.line_idx]
         if line is None:
             return None
         txt = proof_display_text(line)
@@ -2303,7 +2311,7 @@ class VProofPanel(QWidget):
         if context is None:
             return
         for slot in context.slots:
-            if line_belongs_to_block(block, slot.line):
+            if _line_belongs_to_observation_block(block, slot.line):
                 cursor = self._text_edit.textCursor()
                 cursor.setPosition(slot.start)
                 self._text_edit.setTextCursor(cursor)

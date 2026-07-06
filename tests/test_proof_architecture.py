@@ -902,6 +902,23 @@ def test_proof_ui_does_not_reach_legacy_layout_or_char_storage_directly():
     assert offenders == []
 
 
+def test_proof_ui_reads_ocr_lines_from_observation_store():
+    targets = [
+        Path("app/ui/proof/h_proof.py"),
+        Path("app/ui/proof/v_proof.py"),
+    ]
+
+    for path in targets:
+        source = path.read_text(encoding="utf-8")
+        assert "block_ocr_lines" not in source
+        assert "block_has_ocr_lines" not in source
+        assert "block_ocr_line_count" not in source
+        assert "line_belongs_to_block" not in source
+
+    assert "block_ocr_line_observations" in Path("app/ui/proof/h_proof.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations" in Path("app/ui/proof/v_proof.py").read_text(encoding="utf-8")
+
+
 def test_line_text_facts_access_goes_through_text_contract_boundary():
     allowed = {
         Path("app/core/line_text_contract.py"),
