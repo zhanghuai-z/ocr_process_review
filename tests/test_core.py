@@ -490,6 +490,7 @@ def test_models():
     page.blocks.append(block)
     formula_block = Block(block_type=BlockType.EQUATION, bbox=bb, ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA)
     page.blocks.append(formula_block)
+    _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
     from app.models.layout_projection import page_has_layout_blocks
 
     assert page_has_layout_blocks(page)

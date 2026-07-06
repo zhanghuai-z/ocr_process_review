@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models import Block, Line
+from app.models import Block, Line, Page
 from app.models.ocr_character_observation import replace_line_ocr_chars
 from app.models.ocr_observation_store import set_ocr_lines_for_block_uid
 
@@ -40,3 +40,24 @@ def _seed_line_constructor_chars_into_ocr_observations(monkeypatch: pytest.Monke
             replace_line_ocr_chars(self, list(self.chars))
 
     monkeypatch.setattr(Line, "__post_init__", patched_post_init)
+
+
+@pytest.fixture(autouse=True)
+def _seed_page_constructor_blocks_into_layout_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat ``Page(blocks=[...])`` test factories as adopted layout snapshots.
+
+    Production code now requires an explicit ``LayoutSnapshot`` before layout
+    consumers run. Older tests still use direct Page/Block constructors to state
+    their fixture layout; this test-only bridge keeps those fixtures concise
+    without adding a product fallback from ``Page.blocks`` back to layout truth.
+    """
+
+    original_post_init = Page.__post_init__
+
+    def patched_post_init(self: Page) -> None:
+        original_post_init(self)
+        from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+
+        sync_page_layout_snapshot_from_projection(self, source_engine="test_fixture")
+
+    monkeypatch.setattr(Page, "__post_init__", patched_post_init)

@@ -14,7 +14,7 @@ from app.models.layout_snapshot_projection import (
     project_layout_snapshot_to_blocks,
     sync_page_layout_snapshot_from_projection,
 )
-from app.models.layout_snapshot_store import layout_snapshot_for_page
+from app.models.layout_snapshot_store import clear_layout_snapshot_for_page, layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars
 from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 from app.services.layout_snapshot import (
@@ -117,8 +117,9 @@ def test_current_layout_snapshot_requires_adopted_snapshot():
         image_path="/tmp/no-snapshot.png",
         width=100,
         height=80,
-        blocks=[Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(1, 2, 30, 20))],
     )
+    page.blocks.append(Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(1, 2, 30, 20)))
+    clear_layout_snapshot_for_page(page)
 
     with pytest.raises(LayoutSnapshotRequiredError, match="has no layout snapshot"):
         current_layout_snapshot(page)
