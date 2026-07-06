@@ -1680,12 +1680,16 @@ def test_project_store_persists_layout_snapshot_without_service_dependency():
     assert "from app.services.layout_snapshot" not in source
 
 
-def test_layout_edit_service_updates_layout_snapshot_store():
+def test_layout_edit_service_records_snapshot_edits_without_projection_backflow():
     source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
-    assert "sync_page_layout_snapshot_from_projection" in source
-    record_edit_source = _function_source(source, "record_edit")
-    assert "sync_page_layout_snapshot_from_projection(" in record_edit_source
-    assert "source_engine=\"layout_edit\"" in record_edit_source
+    assert "def record_edit" not in source
+    assert "sync_snapshot" not in source
+    assert "sync_page_layout_snapshot_from_projection" not in source
+
+    record_source = _function_source(source, "record_snapshot_edit")
+    assert "LayoutEditEvent(" in record_source
+    assert "page.layout_edit_events.append(event)" in record_source
+    assert "source_engine=" not in record_source
 
 
 def test_layout_edit_service_reads_ocr_lines_from_observation_store():

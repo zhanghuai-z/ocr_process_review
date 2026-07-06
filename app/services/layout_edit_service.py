@@ -37,7 +37,6 @@ from app.models.ocr_observation import (
     clear_block_ocr_lines,
     set_ocr_line_bbox,
 )
-from app.services.layout_snapshot import sync_page_layout_snapshot_from_projection
 
 
 STRUCTURAL_BINDING_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
@@ -235,31 +234,24 @@ class LayoutEditService:
             "ocr_policy": getattr(block.ocr_policy, "value", str(block.ocr_policy)),
         }
 
-    def record_edit(
+    def record_snapshot_edit(
         self,
         page: Page,
         op: str,
-        block: Block | None,
+        block_uid: str,
         *,
         before: dict,
         after: dict,
-        sync_snapshot: bool = True,
     ) -> LayoutEditEvent:
         event = LayoutEditEvent(
             page_uid=page.uid,
-            target_uid=block.uid if block is not None else "",
+            target_uid=block_uid,
             op=op,
             before=before,
             after=after,
             actor="user",
         )
         page.layout_edit_events.append(event)
-        if sync_snapshot:
-            sync_page_layout_snapshot_from_projection(
-                page,
-                source_engine="layout_edit",
-                source_run_id=event.uid,
-            )
         return event
 
     def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:
@@ -299,13 +291,12 @@ class LayoutEditService:
             note=block.note,
         )
         after = self.snapshot_block_state(final_snapshot_block)
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "resize_block",
-            block,
+            block.uid,
             before=before,
             after=after,
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_replaced_block(
             snapshot,
@@ -343,13 +334,12 @@ class LayoutEditService:
         snapshot = current_layout_snapshot(page)
         new_snapshot_block = self._snapshot_block_from_edit_block(new_block, order=len(snapshot.blocks))
         after = {"block": self.snapshot_block_state(new_snapshot_block)}
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "create_block",
-            new_block,
+            new_block.uid,
             before={},
             after=after,
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_blocks(
             snapshot,
@@ -376,13 +366,12 @@ class LayoutEditService:
         snapshot_index, snapshot_block = self._snapshot_block_for_edit(snapshot, block)
         before = {"block": self.snapshot_block_state(snapshot_block)}
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "delete_block",
-            block,
+            block.uid,
             before=before,
             after={},
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_blocks(
             snapshot,
@@ -412,13 +401,12 @@ class LayoutEditService:
             for order, block in enumerate(next_blocks)
         )
         after = {"blocks": [self.snapshot_block_state(block) for block in next_snapshot_blocks]}
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "restore_blocks",
-            None,
+            "",
             before=before,
             after=after,
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_blocks(
             snapshot,
@@ -466,13 +454,12 @@ class LayoutEditService:
             note=block.note,
         )
         after = {"block": self.snapshot_block_state(final_snapshot_block)}
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "change_kind",
-            block,
+            block.uid,
             before=before,
             after=after,
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_replaced_block(
             snapshot,
@@ -727,13 +714,12 @@ class LayoutEditService:
             if snapshot_block.uid == final_primary_snapshot.uid
         )
         after = {"block": self.snapshot_block_state(after_block)}
-        event = self.record_edit(
+        event = self.record_snapshot_edit(
             page,
             "merge_blocks",
-            primary,
+            primary.uid,
             before=before,
             after=after,
-            sync_snapshot=False,
         )
         next_snapshot = self._snapshot_with_blocks(
             snapshot,
