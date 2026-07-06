@@ -38,11 +38,14 @@ from app.core import quality_probe as qp
 from app.engines.hanwang import native_cache
 from app.engines.real_ocr_adapter import create_engine, get_engine_description
 from app.models import (
-    BBox, Block, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot,
+    BBox, Block, BlockOrigin, BlockType, LayoutSnapshot,
     OcrPolicy, OcrProject, Page,
 )
 from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.layout_projection import replace_page_layout_blocks
+from app.models.layout_snapshot_projection import (
+    layout_block_snapshot_from_projection_block,
+    replace_page_layout_projection_from_snapshot,
+)
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
     iter_page_ocr_line_observation_occurrences,
@@ -1111,25 +1114,15 @@ class WorkflowController(QObject):
                 ),
                 ocr_policy=OcrPolicy.TEXT_OCR,
             )
-            replace_page_layout_blocks(page, [block])
-            set_layout_snapshot_for_page(page, LayoutSnapshot(
+            snapshot = LayoutSnapshot(
                 page_uid=page.uid,
                 artifact_uid="",
                 source_engine="parallel_proof",
                 source_run_id=str(getattr(page, PARALLEL_PROOF_PAGE_KEY_ATTR, "")),
-                blocks=(
-                    LayoutBlockSnapshot(
-                        uid=block.uid,
-                        block_type=block.block_type,
-                        bbox=block.bbox,
-                        order=block.order,
-                        source_label=block.source_label,
-                        origin=block.origin,
-                        ocr_policy=block.ocr_policy,
-                        note=block.note,
-                    ),
-                ),
-            ))
+                blocks=(layout_block_snapshot_from_projection_block(block),),
+            )
+            set_layout_snapshot_for_page(page, snapshot)
+            replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=[block])
         return proof_pages
 
     def _on_parallel_proof_done(self, pages: List[Page]) -> None:

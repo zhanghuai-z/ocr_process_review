@@ -109,10 +109,18 @@ def replace_page_layout_projection_from_snapshot(
 
 
 def _snapshot_from_block(block: Block) -> LayoutBlockSnapshot:
+    return layout_block_snapshot_from_projection_block(block)
+
+
+def layout_block_snapshot_from_projection_block(
+    block: Block,
+    *,
+    order: int | None = None,
+) -> LayoutBlockSnapshot:
     return LayoutBlockSnapshot(
         block_type=block.block_type,
         bbox=block.bbox,
-        order=block.order,
+        order=block.order if order is None else order,
         source_label=block.source_label,
         origin=block.origin or _origin_from_block(block),
         ocr_policy=block.ocr_policy,
@@ -190,6 +198,7 @@ __all__ = [
     "adopt_page_layout_snapshot",
     "apply_layout_snapshot_block_to_projection",
     "block_from_layout_snapshot",
+    "layout_block_snapshot_from_projection_block",
     "layout_snapshot_from_blocks",
     "project_layout_snapshot_to_blocks",
     "replace_page_layout_projection_from_snapshot",
