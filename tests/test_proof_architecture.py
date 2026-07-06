@@ -1485,10 +1485,14 @@ def test_proof_change_contract_names_scope_requirement():
 def test_layout_panel_user_edits_go_through_layout_edit_service():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
+    viewer_source = Path("app/ui/widgets/image_viewer.py").read_text(encoding="utf-8")
 
     assert "LayoutEditService" in layout_source
     assert "LayoutEditCommand" in layout_source
     assert "self._layout_edit_service.apply(" in layout_source
+    assert "block_geometry_change_requested" in viewer_source
+    assert "self._viewer.block_geometry_change_requested.connect(" in layout_source
+    assert "self._viewer.block_moved.connect(" not in layout_source
     for retired_helper in (
         "def _apply_subtype_to_block",
         "def _merge_blocks_into_bbox",

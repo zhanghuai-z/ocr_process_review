@@ -388,7 +388,7 @@ class LayoutPanel(QWidget):
         self._viewer = ImageViewer()
         self._viewer.block_clicked.connect(self._on_block_clicked)
         self._viewer.block_edit_started.connect(self._on_block_edit_started)
-        self._viewer.block_moved.connect(self._on_block_moved)
+        self._viewer.block_geometry_change_requested.connect(self._on_block_geometry_change_requested)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted.connect(self._on_block_deleted)
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
@@ -1429,14 +1429,24 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         self._layout_edit_start_state[block.uid] = self._layout_block_state(block)
 
-    def _on_block_moved(self, block: Block) -> None:
-        bb = block.bbox
+    def _runtime_block_by_uid(self, page: Page, block_uid: str) -> Block | None:
+        for view in iter_page_layout_block_views(page):
+            if view.uid == block_uid:
+                return view.runtime_block
+        return None
+
+    def _on_block_geometry_change_requested(self, block_uid: str, bbox: BBox) -> None:
+        if not block_uid or not self._pages:
+            return
         page = self._pages[self._current_page_idx]
-        before = self._layout_edit_start_state.pop(block.uid, self._layout_block_state(block))
+        block = self._runtime_block_by_uid(page, block_uid)
+        if block is None:
+            return
+        before = self._layout_edit_start_state.pop(block_uid, self._layout_block_state(block))
         self._layout_edit_service.apply(LayoutEditCommand.update_geometry(
             page,
             block,
-            bbox=block.bbox,
+            bbox=bbox,
             before=before,
         ))
         self._update_project_stats()

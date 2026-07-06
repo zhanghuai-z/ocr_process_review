@@ -174,6 +174,7 @@ class _BBoxSignals(QObject):
     """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
     edit_started = Signal(object)  # payload = block
     moved = Signal(object)  # payload = block
+    geometry_changed = Signal(str, object)  # payload = block_uid, BBox
 
 
 class BBoxItem(QGraphicsRectItem):
@@ -258,20 +259,7 @@ class BBoxItem(QGraphicsRectItem):
             self._emit_edit_started_once()
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._update_tooltip()
-            if self._block is not None and hasattr(self._block, "bbox"):
-                pos = self.scenePos()
-                r = self.rect()
-                bb = self._block.bbox
-                set_layout_block_bbox(
-                    self._block,
-                    BBox(
-                        int(pos.x() + r.x()),
-                        int(pos.y() + r.y()),
-                        bb.w,
-                        bb.h,
-                    ),
-                )
-                self.signals.moved.emit(self._block)
+            self._emit_geometry_changed(self._scene_bbox())
         if change == QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged:
             # 选中时显示手柄，取消选中时隐藏
             editable = bool(self.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
@@ -292,6 +280,26 @@ class BBoxItem(QGraphicsRectItem):
             return
         self._edit_started_for_drag = True
         self.signals.edit_started.emit(self._block)
+
+    def _scene_bbox(self) -> BBox:
+        pos = self.scenePos()
+        rect = self.rect()
+        return BBox(
+            int(pos.x() + rect.x()),
+            int(pos.y() + rect.y()),
+            int(rect.width()),
+            int(rect.height()),
+        )
+
+    def _emit_geometry_changed(self, bbox: BBox) -> None:
+        if self._block is None or not hasattr(self._block, "bbox"):
+            return
+        if isinstance(self._block, Block):
+            if self._block.uid:
+                self.signals.geometry_changed.emit(self._block.uid, bbox)
+            return
+        set_layout_block_bbox(self._block, bbox)
+        self.signals.moved.emit(self._block)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -316,7 +324,7 @@ class ImageViewer(QGraphicsView):
 
     block_clicked  = Signal(object)  # Block
     block_edit_started = Signal(object)  # Block — 用于上层在几何变化前记录撤销点
-    block_moved    = Signal(object)  # Block
+    block_geometry_change_requested = Signal(str, object)  # block_uid, BBox
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted  = Signal(object)  # Block — Delete 键删除选中框
     char_bbox_moved = Signal(object)  # Char
@@ -427,7 +435,7 @@ class ImageViewer(QGraphicsView):
         item.setZValue(self._block_z_value(block))
         item.setData(0, block)
         item.signals.edit_started.connect(self.block_edit_started.emit)
-        item.signals.moved.connect(self.block_moved.emit)
+        item.signals.geometry_changed.connect(self.block_geometry_change_requested.emit)
         self._scene.addItem(item)
         self._block_items.append((item, block))
 

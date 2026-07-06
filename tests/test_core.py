@@ -7142,8 +7142,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             assert inline.origin.original_bbox == BBox.from_xyxy(40, 0, 70, 30)
             assert inline.origin.raw_index == 0
 
-            inline.bbox = BBox.from_xyxy(45, 0, 75, 30)
-            panel._on_block_moved(inline)
+            panel._on_block_geometry_change_requested(inline.uid, BBox.from_xyxy(45, 0, 75, 30))
             from app.core.raw_ocr_artifact import layout_route_attachments
 
             assert ROUTE_SUBBLOCKS_FIELD not in _raw_layout_records(page)[0]
@@ -7159,8 +7158,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             # Real resize drags emit several geometry changes. Once the original
             # Paddle inline formula is marked handled, later drag events must
             # keep the already-established binding and only update manual_bbox.
-            inline.bbox = BBox.from_xyxy(50, 0, 80, 30)
-            panel._on_block_moved(inline)
+            panel._on_block_geometry_change_requested(inline.uid, BBox.from_xyxy(50, 0, 80, 30))
             panel._refresh_current_page_layers()
             app.processEvents()
 
@@ -7188,6 +7186,50 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             panel.close()
 
     print("test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry PASSED")
+
+
+def test_layout_panel_geometry_request_uses_event_bbox_when_runtime_block_drifts():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType, Page
+    from app.models.layout_block_state import set_layout_block_bbox
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image = QImage(140, 90, QImage.Format.Format_RGB888)
+        image.fill(0xFFFFFFFF)
+        image.save(str(image_path))
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(10, 10, 50, 30))
+        page = Page(
+            image_path=str(image_path),
+            width=140,
+            height=90,
+            blocks=[block],
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.show_analysis_result([page])
+            app.processEvents()
+
+            set_layout_block_bbox(block, BBox.from_xyxy(90, 60, 130, 80))
+            event_bbox = BBox.from_xyxy(20, 16, 70, 36)
+            panel._on_block_geometry_change_requested(block.uid, event_bbox)
+
+            snapshot = layout_snapshot_for_page(page)
+            assert block.bbox == event_bbox
+            assert snapshot is not None
+            assert snapshot.blocks[0].bbox == event_bbox
+        finally:
+            panel.close()
+
+    print("test_layout_panel_geometry_request_uses_event_bbox_when_runtime_block_drifts PASSED")
 
 
 def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
@@ -7239,8 +7281,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
             inline = next(block for block in page.blocks if block.source_label == "inline_formula")
             assert inline.bbox.to_xyxy() == (40, 0, 120, 30)
 
-            inline.bbox = BBox.from_xyxy(80, 0, 120, 30)
-            panel._on_block_moved(inline)
+            panel._on_block_geometry_change_requested(inline.uid, BBox.from_xyxy(80, 0, 120, 30))
 
             ocr_blocks = _page_blocks_from_layout(page)
             parent = ocr_blocks[0]
@@ -20766,6 +20807,33 @@ def test_image_viewer_right_drag_selects_blocks_without_creating_bbox():
     viewer.close()
 
     print("test_image_viewer_right_drag_selects_blocks_without_creating_bbox PASSED")
+
+
+def test_image_viewer_block_geometry_signal_does_not_mutate_block():
+    from PySide6.QtGui import QImage
+
+    from app.models import BBox, Block, BlockType
+    from app.ui.widgets.image_viewer import ImageViewer
+
+    app = _get_qapp()
+    viewer = ImageViewer()
+    viewer.set_image_from_qimage(QImage(120, 80, QImage.Format.Format_RGB888))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 20, 12))
+    viewer.show_blocks([block])
+    events = []
+    viewer.block_geometry_change_requested.connect(lambda uid, bbox: events.append((uid, bbox)))
+
+    item = viewer._block_items[0][0]
+    item.setPos(30, 24)
+    app.processEvents()
+
+    assert events
+    assert events[-1][0] == block.uid
+    assert events[-1][1] == BBox(30, 24, 20, 12)
+    assert block.bbox == BBox(10, 10, 20, 12)
+    viewer.close()
+
+    print("test_image_viewer_block_geometry_signal_does_not_mutate_block PASSED")
 
 
 def test_image_viewer_frame_selection_ignores_box_interior():
