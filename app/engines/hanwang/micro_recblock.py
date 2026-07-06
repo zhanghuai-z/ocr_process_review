@@ -121,7 +121,7 @@ from app.models.layout_block_state import (
     set_layout_block_order,
     set_layout_block_source_label,
 )
-from app.models.ocr_character_observation import replace_line_ocr_chars
+from app.models.ocr_character_observation import replace_line_ocr_char_observations
 from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.proof_line_state_store import set_proof_state_for_line
 
@@ -3007,7 +3007,7 @@ def _line_to_model(line: LineResult, width: int, height: int, review_flags: list
         source_text=line.text,
         review_flags=merged_review_flags,
     )
-    replace_line_ocr_chars(model, chars)
+    replace_line_ocr_char_observations(model.uid, chars)
     set_proof_state_for_line(
         model,
         ProofLineState(
