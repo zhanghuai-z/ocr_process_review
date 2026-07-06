@@ -236,7 +236,7 @@ class LayoutPanel(QWidget):
         super().__init__(parent)
         self._pages: List[Page] = []
         self._current_page_idx: int = 0
-        self._selected_block: Optional[Block] = None
+        self._selected_block_uid: str | None = None
         self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._layout_edit_service = LayoutEditService()
@@ -693,7 +693,7 @@ class LayoutPanel(QWidget):
         self.finish_analysis_progress()
         self._pages = []
         self._current_page_idx = 0
-        self._selected_block = None
+        self._selected_block_uid = None
         self._page_gate_states.clear()
         self._primary_actions.clear()
         self._undo_stack.clear()
@@ -1083,7 +1083,7 @@ class LayoutPanel(QWidget):
             self._on_block_clicked(block)
         else:
             self._viewer.highlight_bbox(block.bbox, zoom=True)
-            self._selected_block = block
+            self._selected_block_uid = block.uid
             self._sync_selected_type_buttons(block)
 
     def _current_checked_subtype(self) -> LayoutSubtypeSpec:
@@ -1247,11 +1247,11 @@ class LayoutPanel(QWidget):
     def _set_new_block_type(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
         self._new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
         self._new_block_type = self._new_subtype.block_type
-        if self._selected_block is None:
+        if self._selected_block_uid is None:
             self._sync_type_buttons(None)
 
     def _on_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
-        if self._selected_block is not None:
+        if self._selected_block_for_current_page() is not None:
             self._on_selected_type_button_clicked(subtype)
             return
         self._set_new_block_type(subtype)
@@ -1391,7 +1391,7 @@ class LayoutPanel(QWidget):
             self._show_page_layers(page)
         elif page_error_message(page):
             self._set_status_text(f"第 {page.page_number} 页分析失败：{page_error_message(page)}")
-        self._selected_block = None
+        self._selected_block_uid = None
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
         self._update_project_stats()
@@ -1410,14 +1410,13 @@ class LayoutPanel(QWidget):
         self._show_page_layers(self._pages[self._current_page_idx])
 
     def _clear_selection_ui(self, page: Page) -> None:
-        self._selected_block = None
+        self._selected_block_uid = None
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
         self._update_project_stats()
 
     def _on_block_clicked(self, block: Block) -> None:
-        self._selected_block = block
-        bb = block.bbox
+        self._selected_block_uid = block.uid
         self._sync_selected_type_buttons(block)
         self._prop_conf.set_score(_ocr_observation_avg_confidence(block))
 
@@ -1434,6 +1433,12 @@ class LayoutPanel(QWidget):
             if view.uid == block_uid:
                 return view.runtime_block
         return None
+
+    def _selected_block_for_current_page(self) -> Block | None:
+        if self._selected_block_uid is None or not self._pages:
+            return None
+        page = self._pages[self._current_page_idx]
+        return self._runtime_block_by_uid(page, self._selected_block_uid)
 
     def _on_block_geometry_change_requested(self, block_uid: str, bbox: BBox) -> None:
         if not block_uid or not self._pages:
@@ -1517,8 +1522,8 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
         self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block))
-        if self._selected_block is block:
-            self._selected_block = None
+        if self._selected_block_uid == block.uid:
+            self._selected_block_uid = None
             self._selected_char_box_index = -1
             self._prop_conf.hide()
         self._rebuild_heading_outline()
@@ -1535,27 +1540,30 @@ class LayoutPanel(QWidget):
         self._viewer.delete_selected()
 
     def _on_selected_type_button_clicked(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
-        if self._selected_block is None:
+        selected_block = self._selected_block_for_current_page()
+        if selected_block is None:
+            self._selected_block_uid = None
+            self._sync_selected_type_buttons(None)
             return
         new_subtype = self._coerce_subtype_spec(subtype, DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"])
         new_label = new_subtype.normalized_source_label
-        current_label = self._button_source_label_for_block(self._selected_block)
-        if self._selected_block.block_type == new_subtype.block_type and current_label == new_label:
-            self._sync_selected_type_buttons(self._selected_block)
+        current_label = self._button_source_label_for_block(selected_block)
+        if selected_block.block_type == new_subtype.block_type and current_label == new_label:
+            self._sync_selected_type_buttons(selected_block)
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        source_label = self._source_label_for_subtype(page, self._selected_block, new_subtype)
+        source_label = self._source_label_for_subtype(page, selected_block, new_subtype)
         result = self._layout_edit_service.apply(LayoutEditCommand.change_kind(
             page,
-            self._selected_block,
+            selected_block,
             block_type=new_subtype.block_type,
             source_label=source_label,
         ))
         self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
-        self._viewer.select_block(self._selected_block)
-        self._sync_selected_type_buttons(self._selected_block)
+        self._viewer.select_block(selected_block)
+        self._sync_selected_type_buttons(selected_block)
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()

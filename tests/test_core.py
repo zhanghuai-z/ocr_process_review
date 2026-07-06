@@ -5617,7 +5617,7 @@ def test_layout_panel_auto_text_blocks_are_editable_frames():
             assert bool(formula_item.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
 
             panel._on_block_clicked(text_block)
-            assert panel._selected_block is text_block
+            assert panel._selected_block_uid == text_block.uid
         finally:
             panel.close()
 
@@ -5990,7 +5990,7 @@ def test_layout_panel_drawn_block_is_selected_and_type_editable():
 
             assert len(page.blocks) == 1
             block = page.blocks[0]
-            assert panel._selected_block is block
+            assert panel._selected_block_uid == block.uid
             assert panel._selected_type_buttons[BlockType.TABLE].isEnabled()
             assert any(item.isSelected() and item_block is block for item, item_block in panel._viewer._block_items)
 
@@ -6036,7 +6036,7 @@ def test_layout_panel_draw_snaps_to_image_ink_without_existing_blocks():
             assert len(page.blocks) == 1
             assert page.blocks[0].bbox == BBox(20, 20, 20, 10)
             assert page.blocks[0].block_type == BlockType.EQUATION
-            assert panel._selected_block is page.blocks[0]
+            assert panel._selected_block_uid == page.blocks[0].uid
             assert any(item.isSelected() and item_block is page.blocks[0] for item, item_block in panel._viewer._block_items)
         finally:
             panel.close()
@@ -6822,7 +6822,7 @@ def test_layout_panel_heading_outline_uses_layout_snapshot_view():
             assert item.text(0) == "第一章"
             assert item.data(0, Qt.ItemDataRole.UserRole) == (0, block.uid)
             panel._on_outline_item_clicked(item)
-            assert panel._selected_block is block
+            assert panel._selected_block_uid == block.uid
         finally:
             panel.close()
 
