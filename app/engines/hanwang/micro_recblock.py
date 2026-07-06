@@ -20,7 +20,8 @@ from app.models.block_state import (
     paddle_binding_dict,
     set_paddle_binding,
 )
-from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
+from app.models.layout_projection import replace_page_layout_blocks
 from app.models.ocr_observation import block_ocr_lines, replace_block_ocr_lines
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
@@ -302,6 +303,13 @@ class _TextRoute:
 class _LayoutOcrInputPlan:
     rows: tuple[dict[str, Any], ...]
     preserved_manual_blocks: tuple[Block, ...]
+
+
+@dataclass(frozen=True)
+class _LayoutOcrEntry:
+    view: LayoutBlockView
+    block: Block
+    row: dict[str, Any]
 
 
 def _label_from_block(block: dict[str, Any], default: str = "unknown") -> str:
@@ -3059,7 +3067,12 @@ def _origin_raw_index(block: Block) -> int:
     return _int_value(getattr(origin, "raw_index", None))
 
 
-def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
+def _layout_row_from_block(
+    page: Page,
+    block: Block,
+    *,
+    view: LayoutBlockView | None = None,
+) -> dict[str, Any]:
     raw_payload = raw_block_payload(block, page)
     raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
     parent_index = _origin_raw_index(block)
@@ -3068,15 +3081,18 @@ def _layout_row_from_block(page: Page, block: Block) -> dict[str, Any]:
     binding = paddle_binding_dict(block)
     if parent_index < 0 and isinstance(binding, dict):
         parent_index = _int_value(binding.get("parent_index"))
-    source_label = route_source_label(block)
+    layout_bbox = view.bbox if view is not None else block.bbox
+    source_label = view.source_label if view is not None else route_source_label(block)
+    ocr_policy = view.ocr_policy if view is not None else block.ocr_policy
+    note = view.note if view is not None else block.note
     row = {
         **raw_payload,
         "block_label": source_label,
-        "block_bbox": list(block.bbox.to_xyxy()),
-        "block_content": _layout_block_content(block, raw_payload),
+        "block_bbox": list(layout_bbox.to_xyxy()),
+        "block_content": _layout_block_content(block, raw_payload, note=note),
         "source_label": source_label,
         "_layout_block_source": block_source_value(block),
-        "_layout_block_ocr_policy": block.ocr_policy.value,
+        "_layout_block_ocr_policy": ocr_policy.value,
     }
     if binding:
         row[ROUTE_ROW_PADDLE_BINDING_KEY] = dict(binding)
@@ -3137,17 +3153,22 @@ def _origin_from_route_row(
     )
 
 
-def _layout_block_content(block: Block, raw_payload: dict[str, Any] | None = None) -> str:
+def _layout_block_content(
+    block: Block,
+    raw_payload: dict[str, Any] | None = None,
+    *,
+    note: str | None = None,
+) -> str:
     raw_text = paddle_block_text(raw_payload or {})
     if raw_text:
         return raw_text
     text = proof_block_text(block)
     if text:
         return text
-    note = str(block.note or "")
-    if note in _INTERNAL_LAYOUT_NOTES:
+    note_text = str(block.note if note is None else note or "")
+    if note_text in _INTERNAL_LAYOUT_NOTES:
         return ""
-    return note
+    return note_text
 
 
 def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
@@ -3180,9 +3201,8 @@ def _row_matches_paddle_parent_record(page: Page, row: dict[str, Any], parent_in
     return not row_label or not parent_label or row_label == parent_label
 
 
-def _manual_bbox_from_binding(block: Block, binding: dict[str, Any]) -> tuple[int, int, int, int]:
-    bbox = bbox_from_variant(binding.get("manual_bbox")) or block.bbox
-    return tuple(int(value) for value in bbox.to_xyxy())
+def _manual_bbox_from_entry(entry: _LayoutOcrEntry) -> tuple[int, int, int, int]:
+    return tuple(int(value) for value in entry.view.bbox.to_xyxy())
 
 
 def _route_subblock_overlaps_bbox(
@@ -3203,9 +3223,10 @@ def _route_subblock_overlaps_bbox(
     return area / min(current_area, bbox_area) >= 0.7
 
 
-def _manual_binding_route_subblock(block: Block, binding: dict[str, Any]) -> dict[str, Any]:
-    manual_bbox = _manual_bbox_from_binding(block, binding)
-    label = str(binding.get("source_label") or route_source_label(block))
+def _manual_binding_route_subblock(entry: _LayoutOcrEntry, binding: dict[str, Any]) -> dict[str, Any]:
+    block = entry.block
+    manual_bbox = _manual_bbox_from_entry(entry)
+    label = str(binding.get("source_label") or entry.view.source_label)
     text_is_stale = _manual_binding_text_is_stale(manual_bbox, binding)
     text = "" if text_is_stale else str(binding.get("text") or proof_block_text(block) or "")
     payload = {
@@ -3232,10 +3253,11 @@ def _manual_binding_text_is_stale(
     return candidate_bbox != manual_bbox
 
 
-def _manual_unbound_route_subblock(block: Block) -> dict[str, Any]:
-    manual_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
-    label = route_source_label(block)
-    if block.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
+def _manual_unbound_route_subblock(entry: _LayoutOcrEntry) -> dict[str, Any]:
+    block = entry.block
+    manual_bbox = _manual_bbox_from_entry(entry)
+    label = entry.view.source_label
+    if entry.view.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
         label = "inline_formula"
     return {
         "block_label": label,
@@ -3314,19 +3336,19 @@ def _append_manual_route_subblock(
 
 
 def _manual_structure_parent_row(
-    entries: list[tuple[Block, dict[str, Any]]],
-    block: Block,
-    row: dict[str, Any],
+    entries: list[_LayoutOcrEntry],
+    entry: _LayoutOcrEntry,
     page: Page,
 ) -> dict[str, Any] | None:
-    if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
+    if entry.view.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
         return None
-    if not is_user_authored_layout_block(block):
+    if not is_user_authored_layout_block(entry.block):
         return None
-    block_bbox = tuple(int(value) for value in block.bbox.to_xyxy())
+    block_bbox = tuple(int(value) for value in entry.view.bbox.to_xyxy())
     best: tuple[float, dict[str, Any]] | None = None
-    for candidate_block, candidate_row in entries:
-        if candidate_block is block or candidate_row is row:
+    for candidate in entries:
+        candidate_row = candidate.row
+        if candidate is entry:
             continue
         label = route_authority_label(candidate_row)
         if map_paddle_label_to_block_type(label) != BlockType.TEXT:
@@ -3355,10 +3377,11 @@ def _apply_manual_parent_binding(
     *,
     page: Page,
     parent_row: dict[str, Any],
-    block: Block,
+    entry: _LayoutOcrEntry,
     binding: dict[str, Any],
 ) -> None:
-    block_type = map_paddle_label_to_block_type(str(binding.get("block_type") or block.block_type.value))
+    block = entry.block
+    block_type = map_paddle_label_to_block_type(str(binding.get("block_type") or entry.view.block_type.value))
     parent_index = _int_value(binding.get("parent_index"))
     records = raw_layout_records(page)
     parent_record = records[parent_index] if 0 <= parent_index < len(records) else {}
@@ -3367,7 +3390,7 @@ def _apply_manual_parent_binding(
         if parent_text:
             parent_row["block_content"] = parent_text
             parent_row["_layout_block_content_authority"] = "paddle_parent_binding"
-        route_subblock = _manual_binding_route_subblock(block, binding)
+        route_subblock = _manual_binding_route_subblock(entry, binding)
         _replace_or_append_route_subblock(
             parent_row,
             route_subblock,
@@ -3377,7 +3400,7 @@ def _apply_manual_parent_binding(
         )
         return
 
-    manual_bbox = list(_manual_bbox_from_binding(block, binding))
+    manual_bbox = list(_manual_bbox_from_entry(entry))
     parent_row["block_bbox"] = manual_bbox
     if binding.get("text"):
         parent_row["block_content"] = str(binding.get("text") or "")
@@ -3388,19 +3411,28 @@ def _apply_manual_unbound_parent_route(
     *,
     page: Page,
     parent_row: dict[str, Any],
-    block: Block,
+    entry: _LayoutOcrEntry,
 ) -> None:
-    route_subblock = _manual_unbound_route_subblock(block)
+    route_subblock = _manual_unbound_route_subblock(entry)
     _append_manual_route_subblock(parent_row, route_subblock, page.width, page.height)
 
 
 def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
-    entries: list[tuple[Block, dict[str, Any]]] = [
-        (block, _layout_row_from_block(page, block))
-        for block in page_layout_blocks(page)
-    ]
+    entries: list[_LayoutOcrEntry] = []
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
+            continue
+        entries.append(
+            _LayoutOcrEntry(
+                view=view,
+                block=block,
+                row=_layout_row_from_block(page, block, view=view),
+            )
+        )
     parent_rows: dict[int, dict[str, Any]] = {}
-    for _block, row in entries:
+    for entry in entries:
+        row = entry.row
         parent_index = _int_value(row.get("_layout_paddle_parent_index"))
         if (
             parent_index >= 0
@@ -3411,38 +3443,40 @@ def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
 
     skip_block_ids: set[int] = set()
     preserved_manual_blocks: list[Block] = []
-    for block, row in entries:
-        if block.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
+    for entry in entries:
+        block = entry.block
+        row = entry.row
+        if entry.view.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
             continue
         binding = _binding_payload_from_block(block)
         parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
         if parent_row is None:
-            parent_row = _manual_structure_parent_row(entries, block, row, page)
+            parent_row = _manual_structure_parent_row(entries, entry, page)
         if parent_row is None or parent_row is row:
             continue
         if binding is not None:
             _apply_manual_parent_binding(
                 page=page,
                 parent_row=parent_row,
-                block=block,
+                entry=entry,
                 binding=binding,
             )
         else:
             _apply_manual_unbound_parent_route(
                 page=page,
                 parent_row=parent_row,
-                block=block,
+                entry=entry,
             )
         skip_block_ids.add(id(block))
         if is_user_authored_layout_block(block):
             preserved_manual_blocks.append(block)
 
     blocks: list[dict] = []
-    for block in page_layout_blocks(page):
+    for entry in entries:
+        block = entry.block
         if id(block) in skip_block_ids:
             continue
-        row = next(entry_row for entry_block, entry_row in entries if entry_block is block)
-        blocks.append(row)
+        blocks.append(entry.row)
     return _LayoutOcrInputPlan(
         rows=tuple(blocks),
         preserved_manual_blocks=tuple(preserved_manual_blocks),
@@ -3466,7 +3500,9 @@ def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
 def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
     return [
         line
-        for block in page_layout_blocks(page)
+        for view in iter_page_layout_block_views(page)
+        for block in (view.runtime_block,)
+        if block is not None
         for line in block_ocr_lines(block)
         if line.bbox is not None
         and line.bbox.area > 0
@@ -3480,18 +3516,21 @@ def _routed_manual_structure_blocks(page: Page) -> list[Block]:
 
 
 def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
-    targets: list[Block] = []
-    for block in page_layout_blocks(page):
-        if block.block_type != BlockType.EQUATION:
+    targets: list[tuple[LayoutBlockView, Block]] = []
+    for view in iter_page_layout_block_views(page):
+        block = view.runtime_block
+        if block is None:
             continue
-        label = route_source_label(block)
+        if view.block_type != BlockType.EQUATION:
+            continue
+        label = view.source_label
         if label not in {"inline_formula", "formula"}:
             continue
-        if block.bbox is None or block.bbox.area <= 0:
+        if view.bbox is None or view.bbox.area <= 0:
             continue
-        targets.append(block)
-    targets.sort(key=lambda item: (item.bbox.y, item.bbox.x, item.order))
-    return targets
+        targets.append((view, block))
+    targets.sort(key=lambda item: (item[0].bbox.y, item[0].bbox.x, item[0].order))
+    return [block for _view, block in targets]
 
 
 def _existing_parent_index(block: Block) -> int:
