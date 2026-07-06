@@ -12,11 +12,11 @@ import re
 from typing import Iterable, List
 
 from app.core.proof_line_facts import proof_display_text
-from app.models import Block, Line, OcrProject, Page
+from app.models import Line, OcrProject, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_observation import (
     block_has_ocr_line_observations,
-    block_ocr_line_observations,
+    block_ocr_line_observations_by_uid,
 )
 from app.services.ocr_dispatch_plan import iter_text_ocr_blocks
 from app.services.proof_stats_service import ProofStatsService
@@ -88,9 +88,9 @@ def iter_export_block_views(page: Page, *, include_empty: bool = False) -> Itera
             yield view
 
 
-def iter_export_lines(block: Block) -> Iterable[Line]:
+def iter_export_lines(view: LayoutBlockView) -> Iterable[Line]:
     """输出块内行，统一文本来源由 get_export_text 控制。"""
-    return block_ocr_line_observations(block)
+    return block_ocr_line_observations_by_uid(view.uid)
 
 
 def build_export_summary(project: OcrProject) -> dict:

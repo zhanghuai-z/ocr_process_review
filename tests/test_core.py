@@ -3576,7 +3576,7 @@ def test_export_ir_reads_lines_from_ocr_observation_store_when_projection_is_emp
     from app.export.ir_builder import build_export_ir
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.models.ocr_observation import replace_block_ocr_line_observations
-    from app.services.export_service import build_export_summary, iter_export_lines
+    from app.services.export_service import build_export_summary, iter_export_block_views, iter_export_lines
 
     bb = BBox(0, 0, 120, 24)
     line = Line(text="OCR observation truth", confidence=0.9, bbox=bb)
@@ -3588,7 +3588,8 @@ def test_export_ir_reads_lines_from_ocr_observation_store_when_projection_is_emp
         pages=[Page(image_path="/tmp/export-observation.png", width=200, height=120, blocks=[block])],
     )
 
-    assert list(iter_export_lines(block)) == [line]
+    view = next(iter_export_block_views(project.pages[0]))
+    assert list(iter_export_lines(view)) == [line]
     document = build_export_ir(project, "json")
     element = document.to_dict()["pages"][0]["elements"][0]
     assert element["payload"]["text"] == "OCR observation truth"

@@ -2038,14 +2038,16 @@ def test_layout_status_and_panel_do_not_read_projection_truth():
 def test_table_text_layer_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/table_text_layer_service.py").read_text(encoding="utf-8")
 
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert "block_ocr_line_observations(" not in source
     assert "block_ocr_lines" not in source
 
 
 def test_export_service_reads_ocr_lines_from_observation_store():
     source = Path("app/services/export_service.py").read_text(encoding="utf-8")
 
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert "block_ocr_line_observations(" not in source
     assert "block_has_ocr_line_observations" in source
     assert "block_ocr_lines" not in source
     assert "block_has_ocr_lines" not in source
@@ -2061,7 +2063,8 @@ def test_proof_stats_service_reads_ocr_lines_from_observation_store():
 def test_proof_line_utils_reads_ocr_lines_from_observation_store():
     source = Path("app/core/proof_line_utils.py").read_text(encoding="utf-8")
 
-    assert "block_ocr_line_observations" in source
+    assert "block_ocr_line_observations_by_uid" in source
+    assert "block_ocr_line_observations(" not in source
     assert "block_ocr_lines" not in source
 
 
@@ -2079,7 +2082,9 @@ def test_proof_readers_use_ocr_observation_store_not_block_lines_projection():
         assert "block_has_ocr_lines" not in source
 
     assert "block_ocr_line_observations" in Path("app/core/proof_line_facts.py").read_text(encoding="utf-8")
-    assert "block_ocr_line_observations" in Path("app/core/proof_occurrence.py").read_text(encoding="utf-8")
+    proof_occurrence_source = Path("app/core/proof_occurrence.py").read_text(encoding="utf-8")
+    assert "block_ocr_line_observations_by_uid" in proof_occurrence_source
+    assert "block_ocr_line_observations(" not in proof_occurrence_source
     assert "block_has_ocr_line_observations" in Path("app/core/quality_probe.py").read_text(encoding="utf-8")
     assert "block_ocr_line_observations" in Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
 

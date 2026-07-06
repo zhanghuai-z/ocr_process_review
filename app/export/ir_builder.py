@@ -131,7 +131,7 @@ def _build_element(
     fallback_rule = rules.fallback_for_kind(kind)
     asset_kind = str(rule.get("asset_kind") or "page_region")
     element_id = f"el-p{page.page_number}-{index:04d}"
-    lines = list(iter_export_lines(block))
+    lines = list(iter_export_lines(view))
     line_payloads = [_line_payload(line, idx) for idx, line in enumerate(lines)]
     text = "\n".join(item["text"] for item in line_payloads if item["text"].strip())
     fallback: ExportFallback | None = None

@@ -5,8 +5,8 @@ from app.core.proof_line_facts import proof_ocr_text
 from app.core.raw_ocr_artifact import raw_block_text_values
 from app.core.table_text_layer import build_table_text_layer_cells
 from app.models import Block, BlockType, Page
-from app.models.layout_block_view import iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_line_observations
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
+from app.models.ocr_observation import block_ocr_line_observations_by_uid
 
 
 class TableTextLayerService:
@@ -18,7 +18,7 @@ class TableTextLayerService:
             if view.block_type != BlockType.TABLE or view.runtime_block is None:
                 continue
             block = view.runtime_block
-            html = self._table_html(page, block)
+            html = self._table_html(page, view, block)
             if not html:
                 block.table_text_layer_cells = []
                 continue
@@ -37,9 +37,9 @@ class TableTextLayerService:
         return updated
 
     @staticmethod
-    def _table_html(page: Page, block: Block) -> str:
+    def _table_html(page: Page, view: LayoutBlockView, block: Block) -> str:
         candidates: list[str] = []
-        lines = block_ocr_line_observations(block)
+        lines = block_ocr_line_observations_by_uid(view.uid)
         for line in lines:
             ocr_text = proof_ocr_text(line)
             if ocr_text:
