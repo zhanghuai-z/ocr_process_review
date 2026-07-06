@@ -6184,6 +6184,77 @@ def test_layout_panel_search_results_can_batch_apply_heading_level():
     print("test_layout_panel_search_results_can_batch_apply_heading_level PASSED")
 
 
+def test_layout_panel_search_source_filter_uses_layout_snapshot_view():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        Line,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
+        block = Block(
+            block_type=BlockType.TEXT,
+            bbox=BBox(10, 10, 120, 20),
+            source_label="text",
+            lines=[Line(text="一、引言", confidence=0.9, bbox=BBox(10, 10, 120, 20))],
+        )
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[block])
+        set_layout_snapshot_for_page(
+            page,
+            LayoutSnapshot(
+                page_uid=page.uid,
+                artifact_uid="artifact-1",
+                source_engine="paddleocr-vl",
+                source_run_id="layout-run-1",
+                blocks=(
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.TITLE,
+                        bbox=block.bbox,
+                        order=0,
+                        source_label="heading_1",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="heading_1"),
+                        ocr_policy=OcrPolicy.TEXT_OCR,
+                        uid=block.uid,
+                    ),
+                ),
+            ),
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+            panel._search_regex.setChecked(True)
+            panel._search_input.setText("^一、")
+            source_idx = panel._search_source_filter.findData("title")
+            assert source_idx >= 0
+            panel._search_source_filter.setCurrentIndex(source_idx)
+
+            assert len(panel._block_search_matches) == 1
+            assert panel._block_search_matches[0] == (0, block)
+            assert panel._search_results.item(0).text() == "一、引言"
+        finally:
+            panel.close()
+
+    print("test_layout_panel_search_source_filter_uses_layout_snapshot_view PASSED")
+
+
 def test_layout_panel_search_batch_apply_undo_restores_all_pages():
     from pathlib import Path
     import tempfile

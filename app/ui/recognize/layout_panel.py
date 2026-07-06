@@ -20,7 +20,7 @@ from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, Page
-from app.models.layout_block_view import iter_page_layout_block_views
+from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.layout_block_state import set_layout_block_order
 from app.models.layout_projection import page_has_layout_blocks, page_layout_blocks
 from app.models.ocr_character_observation import line_ocr_chars
@@ -886,6 +886,52 @@ class LayoutPanel(QWidget):
             return block.block_type == BlockType.REFERENCE or label == "reference_content"
         return True
 
+    @staticmethod
+    def _layout_view_search_fields(view: LayoutBlockView, block: Block) -> list[str]:
+        parts: list[str] = [
+            view.source_label,
+            getattr(view.block_type, "value", str(view.block_type)),
+            view.note,
+        ]
+        for line in block_ocr_lines(block):
+            parts.extend(proof_search_texts(line))
+        return [str(part or "").strip() for part in parts if str(part or "").strip()]
+
+    @staticmethod
+    def _layout_view_preview_text(view: LayoutBlockView, block: Block) -> str:
+        for line in block_ocr_lines(block):
+            text = proof_display_text(line)
+            if text:
+                return _compact_status_text(text)
+        if view.note:
+            return _compact_status_text(view.note.split("|", 1)[0])
+        return view.source_label or getattr(view.block_type, "value", str(view.block_type))
+
+    @staticmethod
+    def _layout_view_matches_search_source_filter(view: LayoutBlockView, filter_key: str) -> bool:
+        if filter_key == "any":
+            return True
+        label = normalize_paddle_label(view.source_label or view.block_type.value)
+        if filter_key == "title":
+            return LayoutPanel._is_title_like_layout_view(view)
+        if filter_key == "text":
+            return view.block_type == BlockType.TEXT and label not in {"header", "footer", "number", "footnote"}
+        if filter_key == "equation":
+            return view.block_type == BlockType.EQUATION or label in {
+                "formula", "inline_formula", "display_formula", "equation",
+            }
+        if filter_key == "figure":
+            return view.block_type in {BlockType.FIGURE, BlockType.FIGURE_CAPTION} or label in {
+                "figure", "chart", "figure_title",
+            }
+        if filter_key == "table":
+            return view.block_type in {BlockType.TABLE, BlockType.TABLE_CAPTION} or label in {
+                "table", "table_title",
+            }
+        if filter_key == "reference":
+            return view.block_type == BlockType.REFERENCE or label == "reference_content"
+        return True
+
     def _refresh_block_search(self) -> None:
         if not hasattr(self, "_search_results"):
             return
@@ -915,13 +961,16 @@ class LayoutPanel(QWidget):
             needle = query if self._search_case.isChecked() else query.lower()
 
         for page_idx, page in enumerate(self._pages):
-            for block in page_layout_blocks(page):
-                if not self._block_matches_search_source_filter(block, str(source_filter or "any")):
+            for view in iter_page_layout_block_views(page):
+                block = view.runtime_block
+                if block is None:
+                    continue
+                if not self._layout_view_matches_search_source_filter(view, str(source_filter or "any")):
                     continue
                 fields = (
                     self._block_text_search_fields(block)
                     if self._search_text_fields_only
-                    else self._block_search_fields(block)
+                    else self._layout_view_search_fields(view, block)
                 )
                 if matcher is not None:
                     matched = any(bool(matcher.search(field)) for field in fields)
@@ -934,7 +983,7 @@ class LayoutPanel(QWidget):
                     continue
                 match_idx = len(self._block_search_matches)
                 self._block_search_matches.append((page_idx, block))
-                item = QListWidgetItem(self._block_preview_text(block))
+                item = QListWidgetItem(self._layout_view_preview_text(view, block))
                 item.setData(Qt.ItemDataRole.UserRole, match_idx)
                 self._search_results.addItem(item)
 
@@ -1219,6 +1268,17 @@ class LayoutPanel(QWidget):
     def _is_title_like_block(block: Block) -> bool:
         label = normalize_paddle_label(block.source_label)
         return block.block_type == BlockType.TITLE or label in {
+            "doc_title",
+            "paragraph_title",
+            "section_title",
+            "chapter_title",
+            "title",
+        } or bool(re.fullmatch(r"heading_[1-6]", label))
+
+    @staticmethod
+    def _is_title_like_layout_view(view: LayoutBlockView) -> bool:
+        label = normalize_paddle_label(view.source_label)
+        return view.block_type == BlockType.TITLE or label in {
             "doc_title",
             "paragraph_title",
             "section_title",
