@@ -7,7 +7,7 @@ from app.core import quality_probe as qp
 from app.core.proof_change import ProofChangeSet, ProofLineRef
 from app.core.project_store import ProjectStore
 from app.models import Block, Line, OcrProject, Page
-from app.models.ocr_observation import iter_project_ocr_line_occurrences
+from app.models.ocr_observation import iter_project_ocr_line_observation_occurrences
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ class ProofPersistenceService:
 
     def _persist_all_lines(self) -> bool:
         updates: list[tuple[Line, bool]] = []
-        for occurrence in iter_project_ocr_line_occurrences(self._project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(self._project):
             if not occurrence.line.id:
                 continue
             updates.append((occurrence.line, True))
@@ -96,7 +96,7 @@ class ProofPersistenceService:
         return True
 
     def _resolve_line_ref(self, ref: ProofLineRef) -> Line | None:
-        for occurrence in iter_project_ocr_line_occurrences(self._project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(self._project):
             page = occurrence.page
             block = occurrence.block
             line = occurrence.line

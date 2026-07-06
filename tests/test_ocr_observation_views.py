@@ -5,8 +5,8 @@ from app.models.layout_projection import replace_page_layout_blocks
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.ocr_observation import (
     find_block_ocr_line_index,
-    iter_page_ocr_line_occurrences,
-    iter_project_ocr_line_occurrences,
+    iter_page_ocr_line_observation_occurrences,
+    iter_project_ocr_line_observation_occurrences,
 )
 
 
@@ -29,7 +29,7 @@ def test_ocr_line_occurrences_use_layout_snapshot_order_when_runtime_projection_
     sync_page_layout_snapshot_from_projection(page, source_engine="test")
     replace_page_layout_blocks(page, [second, first])
 
-    occurrences = list(iter_page_ocr_line_occurrences(page))
+    occurrences = list(iter_page_ocr_line_observation_occurrences(page))
 
     assert [(occ.block, occ.line, occ.block_index) for occ in occurrences] == [
         (first, first_line, 0),
@@ -46,7 +46,7 @@ def test_project_ocr_line_occurrences_delegate_to_snapshot_order():
     sync_page_layout_snapshot_from_projection(page, source_engine="test")
     project = OcrProject(name="project", pages=[page])
 
-    occurrences = list(iter_project_ocr_line_occurrences(project))
+    occurrences = list(iter_project_ocr_line_observation_occurrences(project))
 
     assert len(occurrences) == 1
     assert occurrences[0].page is page

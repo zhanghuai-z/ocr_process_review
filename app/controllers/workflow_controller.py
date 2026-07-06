@@ -45,7 +45,7 @@ from app.models.layout_block_view import iter_page_layout_block_views
 from app.models.layout_projection import replace_page_layout_blocks
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import (
-    iter_page_ocr_line_occurrences,
+    iter_page_ocr_line_observation_occurrences,
     line_ocr_bbox,
     page_has_ocr_result,
     project_all_pages_ocr_done,
@@ -1143,7 +1143,7 @@ class WorkflowController(QObject):
     def _collect_proof_lines(self, page: Page):
         return [
             occurrence.line
-            for occurrence in iter_page_ocr_line_occurrences(page)
+            for occurrence in iter_page_ocr_line_observation_occurrences(page)
         ]
 
     def _make_parallel_page_key(self, page: Page, index: int) -> tuple[int, str, str, int, int]:

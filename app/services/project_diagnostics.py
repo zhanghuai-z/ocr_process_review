@@ -15,7 +15,10 @@ from app.models import Block, Char, Line, OcrProject, Page
 from app.models.layout_projection import iter_page_layout_block_occurrences, page_layout_blocks
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import iter_line_ocr_char_occurrences, line_ocr_chars
-from app.models.ocr_observation import iter_page_ocr_line_occurrences, iter_project_ocr_line_occurrences
+from app.models.ocr_observation import (
+    iter_page_ocr_line_observation_occurrences,
+    iter_project_ocr_line_observation_occurrences,
+)
 
 
 @dataclass(frozen=True)
@@ -137,7 +140,7 @@ def _diagnose_duplicate_uids(project: OcrProject) -> list[ProjectDiagnosticIssue
                 block_occurrence.block,
                 block_occurrence.block_index,
             )
-        for line_occurrence in iter_page_ocr_line_occurrences(page):
+        for line_occurrence in iter_page_ocr_line_observation_occurrences(page):
             _record_uid(
                 buckets["line"],
                 line_occurrence.line.uid,
@@ -352,7 +355,7 @@ def _probe_block_occurrence(page: Page, block_index: int):
 
 
 def _probe_line_occurrence(page: Page, block_index: int, line_index: int):
-    for occurrence in iter_page_ocr_line_occurrences(page):
+    for occurrence in iter_page_ocr_line_observation_occurrences(page):
         if occurrence.block_index == block_index and occurrence.line_index == line_index:
             return occurrence
     return None
@@ -427,7 +430,7 @@ def _diagnose_probe_anchors(
 
 
 def _iter_lines(project: OcrProject) -> Iterable[tuple[Page, Block, Line, int, int]]:
-    for occurrence in iter_project_ocr_line_occurrences(project):
+    for occurrence in iter_project_ocr_line_observation_occurrences(project):
         yield (
             occurrence.page,
             occurrence.block,

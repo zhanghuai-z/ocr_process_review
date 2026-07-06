@@ -196,29 +196,28 @@ def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
     assert line.review_flags == ["legacy", "new-flag"]
 
 
-def test_ocr_observation_runtime_store_keeps_block_projection_in_sync():
+def test_ocr_observation_runtime_store_is_uid_scoped_without_projection_sync():
     from app.models import BBox, Block, BlockType, Line
     from app.models.ocr_observation import (
-        append_block_ocr_line,
-        block_ocr_lines,
-        clear_block_ocr_lines,
-        replace_block_ocr_lines,
+        block_ocr_line_observations,
+        clear_block_ocr_line_observations,
+        replace_block_ocr_line_observations,
     )
 
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
     first = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
     second = Line(text="乙", confidence=0.8, bbox=BBox(0, 12, 10, 10))
 
-    replace_block_ocr_lines(block, [first])
-    assert block_ocr_lines(block) == [first]
-    assert block.lines is block_ocr_lines(block)
+    replace_block_ocr_line_observations(block.uid, [first])
+    assert block_ocr_line_observations(block) == [first]
+    assert block.lines == []
 
-    append_block_ocr_line(block, second)
-    assert block_ocr_lines(block) == [first, second]
-    assert block.lines == [first, second]
+    replace_block_ocr_line_observations(block.uid, [first, second])
+    assert block_ocr_line_observations(block) == [first, second]
+    assert block.lines == []
 
-    clear_block_ocr_lines(block)
-    assert block_ocr_lines(block) == []
+    clear_block_ocr_line_observations(block.uid)
+    assert block_ocr_line_observations(block) == []
     assert block.lines == []
 
 
@@ -226,45 +225,39 @@ def test_ocr_observation_uid_store_overrides_stale_block_projection():
     from app.models import BBox, Block, BlockType, Line
     from app.models.ocr_observation import (
         block_ocr_line_observations,
-        block_ocr_lines,
         clear_block_ocr_line_observations,
         replace_block_ocr_line_observations,
-        replace_block_ocr_lines,
     )
 
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
     stale = Line(text="旧", confidence=0.1, bbox=BBox(0, 0, 10, 10))
     fresh = Line(text="新", confidence=0.9, bbox=BBox(0, 0, 10, 10))
 
-    replace_block_ocr_lines(block, [stale])
+    replace_block_ocr_line_observations(block.uid, [stale])
     block.lines = [stale]
     replace_block_ocr_line_observations(block.uid, [fresh])
 
     assert block.lines == [stale]
     assert block_ocr_line_observations(block) == [fresh]
-    assert block_ocr_lines(block) == [fresh]
 
     clear_block_ocr_line_observations(block.uid)
     assert block_ocr_line_observations(block) == []
-    assert block_ocr_lines(block) == []
 
 
 def test_ocr_observation_store_ignores_replaced_legacy_line_projection():
     from app.models import BBox, Block, BlockType, Line
-    from app.models.ocr_observation import block_ocr_line_observations, block_ocr_lines, replace_block_ocr_lines
+    from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 40))
     line1 = Line(text="甲", confidence=0.9, bbox=BBox(0, 0, 10, 10))
     line2 = Line(text="乙", confidence=0.8, bbox=BBox(0, 12, 10, 10))
-    replace_block_ocr_lines(block, [line1])
+    replace_block_ocr_line_observations(block.uid, [line1])
 
     block.lines = [line2]
     assert block_ocr_line_observations(block) == [line1]
-    assert block_ocr_lines(block) == [line1]
 
-    replace_block_ocr_lines(block, [line2])
+    replace_block_ocr_line_observations(block.uid, [line2])
     assert block_ocr_line_observations(block) == [line2]
-    assert block_ocr_lines(block) == [line2]
 
 
 def test_raw_block_payload_prefers_page_artifact_origin_record():
@@ -2175,7 +2168,7 @@ def test_project_store_rejects_legacy_page_model_on_save():
 def test_project_store_save_project_preserves_child_rowids():
     from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
     from app.core.project_store import ProjectStore
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
 
     with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as f:
         db_path = f.name
@@ -2221,7 +2214,7 @@ def test_project_store_save_project_preserves_child_rowids():
             set_line_proof_text(line1, "第一行已校对")
             line1.chars[0].char = "一"
             block.note = "updated without id churn"
-            replace_block_ocr_lines(block, [line1])
+            replace_block_ocr_line_observations(block.uid, [line1])
             store.save_project(project)
             loaded = store.load_project(project_id=project.id)
 
@@ -3452,13 +3445,13 @@ def test_export_formats_share_structured_blocks():
 def test_export_ir_reads_lines_from_ocr_observation_store_when_projection_is_empty():
     from app.export.ir_builder import build_export_ir
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.export_service import build_export_summary, iter_export_lines
 
     bb = BBox(0, 0, 120, 24)
     line = Line(text="OCR observation truth", confidence=0.9, bbox=bb)
     block = Block(block_type=BlockType.TEXT, bbox=bb, order=0)
-    replace_block_ocr_lines(block, [line])
+    replace_block_ocr_line_observations(block.uid, [line])
     block.lines = []
     project = OcrProject(
         name="ExportObservationTruth",
@@ -4485,7 +4478,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 
     from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4500,7 +4493,7 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
 
         html = "<table><tr><td>A</td><td>B</td><td>C</td></tr><tr><td>D</td><td>E</td><td>F</td></tr></table>"
         block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 500, 160), order=0)
-        replace_block_ocr_lines(block, [
+        replace_block_ocr_line_observations(block.uid, [
             Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160))
         ])
         page = Page(image_path=image_path, width=700, height=320, blocks=[block])
@@ -4526,7 +4519,7 @@ def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
         Line, OcrPolicy, Page,
     )
     from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4539,7 +4532,7 @@ def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
 
         html = "<table><tr><td>A</td><td>B</td></tr></table>"
         block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 10, 10), order=0)
-        replace_block_ocr_lines(block, [
+        replace_block_ocr_line_observations(block.uid, [
             Line(text=html, confidence=1.0, bbox=BBox(50, 50, 500, 160))
         ])
         page = Page(image_path=image_path, width=700, height=320, blocks=[block])
@@ -4575,7 +4568,7 @@ def test_table_text_layer_service_reads_table_html_from_ocr_observation_store():
     from PIL import Image, ImageDraw, ImageFont
 
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4587,7 +4580,7 @@ def test_table_text_layer_service_reads_table_html_from_ocr_observation_store():
 
         html = "<table><tr><td>A</td></tr></table>"
         block = Block(block_type=BlockType.TABLE, bbox=BBox(50, 50, 180, 80), order=0)
-        replace_block_ocr_lines(block, [
+        replace_block_ocr_line_observations(block.uid, [
             Line(text=html, confidence=1.0, bbox=BBox(50, 50, 180, 80))
         ])
         block.lines = []
@@ -5543,7 +5536,7 @@ def test_layout_panel_reads_ocr_lines_from_observation_store_when_projection_is_
 
     from app.models import BBox, Block, BlockType, Line, Page
     from app.models.layout_block_view import iter_page_layout_block_views
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -5552,7 +5545,7 @@ def test_layout_panel_reads_ocr_lines_from_observation_store_when_projection_is_
         QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
         line = Line(text="观察正文", confidence=0.84, bbox=BBox(10, 10, 120, 20))
         block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 120, 20), source_label="text")
-        replace_block_ocr_lines(block, [line])
+        replace_block_ocr_line_observations(block.uid, [line])
         block.lines = []
         page = Page(image_path=str(image_path), width=160, height=120, blocks=[block])
 
@@ -6897,7 +6890,7 @@ def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
     from PySide6.QtGui import QImage
 
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -6918,7 +6911,7 @@ def test_layout_panel_heading_outline_refreshes_after_ocr_text_arrives():
             app.processEvents()
             assert panel._outline_tree.topLevelItem(0).text(0) == "Paddle 标题预览"
 
-            replace_block_ocr_lines(heading, [
+            replace_block_ocr_line_observations(heading.uid, [
                 Line(text="Hanwang 标题文本", confidence=0.95, bbox=BBox(10, 10, 120, 20))
             ])
             panel.refresh_text_indexes()
@@ -15589,7 +15582,7 @@ def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
 
 def test_export_service():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.export_service import (
         check_export_readiness, get_export_text,
     )
@@ -15612,7 +15605,7 @@ def test_export_service():
     block = Block(block_type=BlockType.TEXT, bbox=bb, lines=[
         Line(text="未校对", confidence=0.6, bbox=bb),
     ])
-    replace_block_ocr_lines(block, list(block.lines))
+    replace_block_ocr_line_observations(block.uid, list(block.lines))
     page.blocks = [block]
     project = OcrProject(name="test", pages=[page])
     warnings = check_export_readiness(project)
@@ -16571,7 +16564,7 @@ def test_page_image_cache():
 
 def test_proof_stats_service():
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page, ProofStatus
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.proof_stats_service import ProofStatsService
 
     bb = BBox(0, 0, 100, 20)
@@ -16583,7 +16576,7 @@ def test_proof_stats_service():
     flagged = Line(text="疑点", confidence=0.6, bbox=bb, review_flags=["low_confidence"])
     pending = Line(text="待处理", confidence=0.9, bbox=bb)
     block = Block(block_type=BlockType.TEXT, bbox=bb)
-    replace_block_ocr_lines(block, [confirmed, modified, flagged, pending])
+    replace_block_ocr_line_observations(block.uid, [confirmed, modified, flagged, pending])
     block.lines = []
     page.blocks = [block]
 
@@ -18706,11 +18699,11 @@ def test_proof_line_iterator_excludes_equation_lines():
 def test_proof_line_iterator_reads_ocr_observation_store_when_projection_is_empty():
     from app.core.proof_line_utils import iter_unique_page_hproof_lines, iter_unique_page_text_lines
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
 
     line = Line(text="来自 observation", confidence=0.9, bbox=BBox(1, 1, 90, 12))
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 20), order=0)
-    replace_block_ocr_lines(block, [line])
+    replace_block_ocr_line_observations(block.uid, [line])
     block.lines = []
     page = Page(image_path="/tmp/proof-lines-observation.png", width=120, height=80, blocks=[block])
 
@@ -21051,13 +21044,13 @@ def test_image_viewer_reads_block_confidence_from_ocr_observation_store():
     from PySide6.QtGui import QImage
 
     from app.models import BBox, Block, BlockType, Line
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.ui.widgets.image_viewer import ImageViewer
 
     _get_qapp()
     line = Line(text="置信度", confidence=0.73, bbox=BBox(5, 6, 30, 10))
     block = Block(block_type=BlockType.TEXT, bbox=BBox(5, 6, 30, 20), order=0)
-    replace_block_ocr_lines(block, [line])
+    replace_block_ocr_line_observations(block.uid, [line])
     block.lines = []
 
     viewer = ImageViewer()
@@ -21140,13 +21133,13 @@ def test_ocr_panel_reads_lines_from_ocr_observation_store_when_projection_is_emp
     from PySide6.QtCore import Qt
 
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.models.ocr_observation import replace_block_ocr_lines
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.ui.recognize.ocr_panel import OcrPanel
 
     _get_qapp()
     line = Line(text="观察行", confidence=0.8, bbox=BBox(5, 6, 30, 10))
     block = Block(block_type=BlockType.TEXT, bbox=BBox(5, 6, 30, 20), order=0)
-    replace_block_ocr_lines(block, [line])
+    replace_block_ocr_line_observations(block.uid, [line])
     block.lines = []
     page = Page(image_path="/tmp/ocr-panel-observation-lines.png", width=80, height=60, blocks=[block])
 

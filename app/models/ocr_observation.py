@@ -1,8 +1,7 @@
 """Access boundary for OCR line observations.
 
-``Block.lines`` is a current runtime projection. Application code should use
-these helpers so OCR observations live behind one boundary instead of being
-owned by the layout block model.
+Application code reads OCR line facts through this boundary so layout blocks do
+not own OCR text state.
 """
 from __future__ import annotations
 
@@ -14,12 +13,10 @@ from .layout_block_view import iter_page_layout_block_views
 from .ocr_observation_store import (
     ocr_lines_for_block,
     ocr_lines_for_block_uid,
-    set_ocr_lines_for_block,
     set_ocr_lines_for_block_uid,
 )
 from .page_workflow_status import OCR_AVAILABLE_PAGE_STATUSES
 from .project import BBox, Block, Line, OcrProject, Page
-from .ocr_text_observation import line_ocr_confidence
 
 
 @dataclass(frozen=True)
@@ -31,12 +28,8 @@ class OcrLineOccurrence:
     line_index: int
 
 
-def block_ocr_lines(block: Block) -> list[Line]:
-    return ocr_lines_for_block(block, block.lines)
-
-
 def block_ocr_line_observations(block: Block) -> list[Line]:
-    """Return OCR line observations without adopting ``Block.lines`` projection."""
+    """Return OCR line observations for ``block``."""
     return ocr_lines_for_block(block)
 
 
@@ -48,27 +41,6 @@ def block_ocr_line_observations_by_uid(block_uid: str) -> list[Line]:
 def block_has_ocr_line_observations(block: Block) -> bool:
     """Return whether OCR observations exist without reading ``Block.lines``."""
     return bool(block_ocr_line_observations(block))
-
-
-def block_ocr_line_count(block: Block) -> int:
-    return len(block_ocr_lines(block))
-
-
-def block_has_ocr_lines(block: Block) -> bool:
-    return bool(block_ocr_lines(block))
-
-
-def block_avg_confidence(block: Block) -> float:
-    lines = block_ocr_lines(block)
-    if not lines:
-        return 0.0
-    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
-
-
-def replace_block_ocr_lines(block: Block, lines: Iterable[Line]) -> None:
-    projected = list(lines)
-    block.lines = projected
-    set_ocr_lines_for_block(block, projected)
 
 
 def replace_block_ocr_line_observations(block_uid: str, lines: Iterable[Line]) -> None:
@@ -88,24 +60,12 @@ def line_ocr_bbox(line: Line) -> BBox:
     return line.bbox
 
 
-def clear_block_ocr_lines(block: Block) -> None:
-    replace_block_ocr_lines(block, [])
-
-
 def clear_block_ocr_line_observations(block_uid: str) -> None:
     replace_block_ocr_line_observations(block_uid, [])
 
 
-def append_block_ocr_line(block: Block, line: Line) -> None:
-    block_ocr_lines(block).append(line)
-
-
-def block_ocr_line_at(block: Block, index: int) -> Line:
-    return block_ocr_lines(block)[index]
-
-
 def line_belongs_to_block(block: Block, line: Line) -> bool:
-    return any(candidate is line for candidate in block_ocr_lines(block))
+    return any(candidate is line for candidate in block_ocr_line_observations(block))
 
 
 def find_block_ocr_line_index(
@@ -121,7 +81,7 @@ def find_block_ocr_line_index(
     if block_index is None:
         return None
     try:
-        line_index = block_ocr_lines(block).index(line)
+        line_index = block_ocr_line_observations(block).index(line)
     except ValueError:
         return None
     return block_index, line_index
@@ -145,23 +105,8 @@ def find_block_ocr_line_occurrence(
     )
 
 
-def iter_page_ocr_line_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
-    for view in iter_page_layout_block_views(page):
-        block = view.runtime_block
-        if block is None:
-            continue
-        for line_index, line in enumerate(block_ocr_lines(block)):
-            yield OcrLineOccurrence(
-                page=page,
-                block=block,
-                line=line,
-                block_index=view.snapshot_index,
-                line_index=line_index,
-            )
-
-
 def iter_page_ocr_line_observation_occurrences(page: Page) -> Iterator[OcrLineOccurrence]:
-    """Yield OCR line observations without adopting ``Block.lines`` projection."""
+    """Yield OCR line observations in layout snapshot order."""
     for view in iter_page_layout_block_views(page):
         block = view.runtime_block
         if block is None:
@@ -176,23 +121,16 @@ def iter_page_ocr_line_observation_occurrences(page: Page) -> Iterator[OcrLineOc
             )
 
 
-def iter_project_ocr_line_occurrences(
-    project: OcrProject,
-) -> Iterator[OcrLineOccurrence]:
-    for page in project.pages:
-        yield from iter_page_ocr_line_occurrences(page)
-
-
 def iter_project_ocr_line_observation_occurrences(
     project: OcrProject,
 ) -> Iterator[OcrLineOccurrence]:
-    """Yield project OCR line observations without adopting runtime projections."""
+    """Yield project OCR line observations in layout snapshot order."""
     for page in project.pages:
         yield from iter_page_ocr_line_observation_occurrences(page)
 
 
 def page_ocr_line_count(page: Page) -> int:
-    return sum(1 for _occurrence in iter_page_ocr_line_occurrences(page))
+    return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
 
 
 def page_has_ocr_result(page: Page) -> bool:
@@ -200,7 +138,7 @@ def page_has_ocr_result(page: Page) -> bool:
 
 
 def project_ocr_line_count(project: OcrProject) -> int:
-    return sum(1 for _occurrence in iter_project_ocr_line_occurrences(project))
+    return sum(1 for _occurrence in iter_project_ocr_line_observation_occurrences(project))
 
 
 def project_has_any_ocr_result(project: OcrProject) -> bool:

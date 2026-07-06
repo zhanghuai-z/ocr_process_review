@@ -446,8 +446,8 @@ def test_block_ocr_lines_access_goes_through_observation_boundary():
                 offenders.append(f"{path}:{node.lineno}")
     assert offenders == []
     source = Path("app/models/ocr_observation.py").read_text(encoding="utf-8")
-    assert "ocr_lines_for_block(block, block.lines)" in source
-    assert "set_ocr_lines_for_block(block, projected)" in source
+    assert "ocr_lines_for_block(block, block.lines)" not in source
+    assert "set_ocr_lines_for_block(block, projected)" not in source
 
 
 def test_page_layout_blocks_access_goes_through_projection_boundary():
@@ -957,7 +957,7 @@ def test_proof_line_occurrence_lookup_stays_in_ocr_observation_boundary():
     assert "def resolve_block_line_index" not in probe_source
     assert "find_block_ocr_line_index" in probe_source
     assert "def _iter_project_lines" not in persist_source
-    assert "iter_project_ocr_line_occurrences" in persist_source
+    assert "iter_project_ocr_line_observation_occurrences" in persist_source
 
 
 def test_proof_refresh_signatures_use_line_signature_contract():
@@ -1736,8 +1736,7 @@ def test_ocr_pipeline_writes_ocr_lines_to_uid_observations():
     assert "block_ocr_lines(" not in source
 
 
-def test_legacy_block_ocr_line_projection_api_stays_inside_observation_boundary():
-    allowed = {Path("app/models/ocr_observation.py")}
+def test_retired_block_ocr_line_projection_api_is_not_restored():
     forbidden = (
         "replace_block_ocr_lines(",
         "append_block_ocr_line(",
@@ -1746,8 +1745,6 @@ def test_legacy_block_ocr_line_projection_api_stays_inside_observation_boundary(
     )
     offenders: list[str] = []
     for path in sorted(APP_DIR.rglob("*.py")):
-        if path in allowed:
-            continue
         source = path.read_text(encoding="utf-8")
         for token in forbidden:
             if token in source:

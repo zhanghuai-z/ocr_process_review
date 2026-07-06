@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from app.core.proof_line_facts import proof_status
 from app.models import Page, ProofStatus
-from app.models.ocr_observation import iter_page_ocr_line_occurrences
+from app.models.ocr_observation import iter_page_ocr_line_observation_occurrences
 from app.models.ocr_text_observation import line_ocr_confidence
 from app.services.proof_edit_service import ProofEditService
 
@@ -20,7 +20,7 @@ class ProofAutoFlagService:
         """Auto-flag suspicious lines, returning the number of changed lines."""
         count = 0
         for page in pages:
-            for occurrence in iter_page_ocr_line_occurrences(page):
+            for occurrence in iter_page_ocr_line_observation_occurrences(page):
                 line = occurrence.line
                 if proof_status(line) in (ProofStatus.MODIFIED, ProofStatus.OK):
                     continue

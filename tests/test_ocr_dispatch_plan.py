@@ -11,7 +11,7 @@ from app.models.enums import OcrPolicy
 from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
 from app.models.layout_projection import replace_page_layout_blocks
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
-from app.models.ocr_observation import block_avg_confidence, block_ocr_lines, replace_block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations, replace_block_ocr_line_observations
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
 from app.services.ocr_pipeline import OcrPipeline
 from app.services.proof_crop_service import ProofCropService
@@ -103,8 +103,8 @@ def test_page_ocr_assignment_uses_dispatch_plan_blockers_before_text_container()
 
     OcrPipeline().assign_page_ocr_lines_to_blocks(page, [formula_line, normal_line])
 
-    assert block_ocr_lines(text) == [normal_line]
-    assert block_ocr_lines(formula) == []
+    assert block_ocr_line_observations(text) == [normal_line]
+    assert block_ocr_line_observations(formula) == []
 
 
 def test_page_ocr_assignment_uses_snapshot_geometry_when_runtime_projection_drifts():
@@ -124,16 +124,16 @@ def test_page_ocr_assignment_uses_snapshot_geometry_when_runtime_projection_drif
 
     OcrPipeline().assign_page_ocr_lines_to_blocks(page, [formula_line, normal_line])
 
-    assert block_ocr_lines(text) == [normal_line]
-    assert block_ocr_lines(formula) == []
+    assert block_ocr_line_observations(text) == [normal_line]
+    assert block_ocr_line_observations(formula) == []
     assert len(page.blocks) == 2
 
 
 def test_proof_crop_service_uses_dispatch_plan_not_block_type_text_blocks():
     text = _block(BlockType.TEXT, BBox(0, 0, 60, 30), policy=OcrPolicy.TEXT_OCR, order=1)
-    replace_block_ocr_lines(text, [Line(text="甲", confidence=0.9, bbox=BBox(5, 5, 20, 20))])
+    replace_block_ocr_line_observations(text.uid, [Line(text="甲", confidence=0.9, bbox=BBox(5, 5, 20, 20))])
     skipped_title = _block(BlockType.TITLE, BBox(0, 40, 60, 30), policy=OcrPolicy.SKIP, order=2)
-    replace_block_ocr_lines(skipped_title, [Line(text="乙", confidence=0.9, bbox=BBox(5, 45, 20, 20))])
+    replace_block_ocr_line_observations(skipped_title.uid, [Line(text="乙", confidence=0.9, bbox=BBox(5, 45, 20, 20))])
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -149,20 +149,10 @@ def test_proof_crop_service_uses_dispatch_plan_not_block_type_text_blocks():
         stats = ProofCropService().normalize_pages([page])
 
         assert stats.lines == 1
-        assert [char.char for char in text.lines[0].chars] == ["甲"]
-        assert skipped_title.lines[0].chars == []
+        assert [char.char for char in block_ocr_line_observations(text)[0].chars] == ["甲"]
+        assert block_ocr_line_observations(skipped_title)[0].chars == []
     finally:
         try:
             os.unlink(img_path)
         except FileNotFoundError:
             pass
-
-
-def test_block_average_confidence_lives_in_observation_boundary():
-    block = _block(BlockType.TEXT, BBox(0, 0, 60, 30), policy=OcrPolicy.TEXT_OCR, order=1)
-    block.lines = [
-        Line(text="甲", confidence=0.8, bbox=BBox(0, 0, 10, 10)),
-        Line(text="乙", confidence=0.6, bbox=BBox(0, 10, 10, 10)),
-    ]
-
-    assert block_avg_confidence(block) == 0.7

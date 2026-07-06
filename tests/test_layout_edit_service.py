@@ -14,7 +14,7 @@ from app.models import (
     Page,
 )
 from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
-from app.models.ocr_observation import block_ocr_lines
+from app.models.ocr_observation import block_ocr_line_observations
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
 
@@ -341,7 +341,7 @@ def test_layout_edit_service_merge_blocks_invalidates_primary_and_clears_ocr_lin
     assert result.block is primary
     assert page.blocks == [primary]
     assert primary.bbox == BBox.from_xyxy(10, 10, 90, 40)
-    assert block_ocr_lines(primary) == []
+    assert block_ocr_line_observations(primary) == []
     assert primary.source == BlockSource.USER_EDITED
     assert primary.source_label == "display_formula"
     assert primary.note == "manual_geometry_empty_formula_review"
@@ -429,7 +429,7 @@ def test_layout_edit_service_merge_blocks_uses_snapshot_order_and_geometry_when_
     assert result.block is primary
     assert page.blocks == [primary, kept]
     assert primary.bbox == BBox.from_xyxy(10, 10, 90, 40)
-    assert block_ocr_lines(primary) == []
+    assert block_ocr_line_observations(primary) == []
     assert kept.bbox == kept_snapshot_bbox
     assert [block.order for block in page.blocks] == [0, 1]
     assert [item["uid"] for item in page.layout_edit_events[-1].before["blocks"]] == [

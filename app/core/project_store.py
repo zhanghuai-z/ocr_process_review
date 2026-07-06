@@ -35,7 +35,7 @@ from app.models.layout_block_state import (
 from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_chars
 from app.models.ocr_observation import (
     block_ocr_line_observations,
-    iter_project_ocr_line_occurrences,
+    iter_project_ocr_line_observation_occurrences,
     line_ocr_bbox,
     replace_block_ocr_line_observations,
 )
@@ -1603,7 +1603,7 @@ class ProjectStore:
         if project.id is None:
             return
         current_line_uids: set[str] = set()
-        for occurrence in iter_project_ocr_line_occurrences(project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(project):
             line = occurrence.line
             if not str(line.uid or "").strip():
                 continue
@@ -2088,7 +2088,7 @@ class ProjectStore:
         states = {str(row["line_uid"] or ""): row for row in rows}
         if not states:
             return
-        for occurrence in iter_project_ocr_line_occurrences(project):
+        for occurrence in iter_project_ocr_line_observation_occurrences(project):
             line = occurrence.line
             row = states.get(line.uid)
             if row is None:
