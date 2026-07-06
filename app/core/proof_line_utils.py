@@ -54,7 +54,7 @@ def _is_duplicate_line(line: Line, seen: list[tuple[str, BBox]]) -> bool:
     return False
 
 
-def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]:
+def iter_unique_page_text_line_views(page: Page) -> Iterator[tuple[LayoutBlockView, Block, Line, int]]:
     """Yield text lines once per page, suppressing duplicate OCR rows.
 
     Paddle/layout retries can leave the same text line in overlapping blocks.
@@ -75,7 +75,13 @@ def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]
                 continue
             if _is_duplicate_line(line, seen):
                 continue
-            yield block, line, line_idx
+            yield view, block, line, line_idx
+
+
+def iter_unique_page_text_lines(page: Page) -> Iterator[tuple[Block, Line, int]]:
+    """Yield text lines once per page, suppressing duplicate OCR rows."""
+    for _view, block, line, line_idx in iter_unique_page_text_line_views(page):
+        yield block, line, line_idx
 
 
 def iter_unique_page_hproof_lines(page: Page) -> Iterator[tuple[Block, Line, int]]:

@@ -18,7 +18,7 @@ from app.core.ocr_ir import is_cjk_char, is_formula_char, is_formula_token
 from app.core.proof_char_text import chars_display_text, is_display_carrier
 from app.core.proof_geometry_quality import is_char_index_hidden_geometry
 from app.core.proof_line_facts import proof_display_text
-from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_line_utils import iter_unique_page_text_line_views, iter_unique_page_text_lines
 from app.core.proof_occurrence import (
     line_signature,
     proof_entry_page_identity_key,
@@ -215,13 +215,13 @@ class CharIndexService:
 
         for page_idx, page in enumerate(pages):
             page_image = self._load_page_image(page.display_image_path) if self._page_needs_image(page) else None
-            for block, line, line_idx in iter_unique_page_text_lines(page):
+            for view, block, line, line_idx in iter_unique_page_text_line_views(page):
                 self._index_line(
                     page_idx=page_idx,
                     page=page,
                     page_image=page_image,
-                    block_order=block.order,
-                    block_uid=block.uid,
+                    block_order=view.order,
+                    block_uid=view.uid,
                     line_idx=line_idx,
                     line=line,
                     seen=seen,

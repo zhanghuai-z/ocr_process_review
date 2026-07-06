@@ -189,6 +189,48 @@ def test_char_index_build_does_not_mutate_source_char_granularity():
     assert line.chars[0].bbox_granularity == ""
 
 
+def test_char_index_entries_use_layout_snapshot_order():
+    line = _line(
+        "甲",
+        [
+            Char(
+                "甲",
+                0.9,
+                BBox(0, 0, 10, 20),
+                bbox_source="ocr",
+                bbox_granularity="char",
+                token_text="甲",
+            )
+        ],
+    )
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 20, 20), lines=[line], order=9)
+    page = Page(image_path="/tmp/char-index-snapshot-order.png", width=40, height=40, page_number=1)
+    page.blocks = [block]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-char-index-order",
+        source_engine="test",
+        source_run_id="run-char-index-order",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.TEXT,
+                bbox=block.bbox,
+                order=2,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
+
+    index = CharIndexService().build_index(OcrProject(name="char-index-snapshot-order", pages=[page]))
+    entry = index.query("甲")[0]
+
+    assert entry.block_order == 2
+    assert entry.block_uid == block.uid
+
+
 def test_single_char_token_text_syncs_after_proof_edit():
     line = _line(
         "甲",

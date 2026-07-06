@@ -52,7 +52,7 @@ from app.models.ocr_observation import (
 from app.core.page_image_cache import PageImageCache
 from app.core.proof_change import ProofChangeSet
 from app.core.proof_line_facts import proof_display_text, proof_ocr_text, proof_status
-from app.core.proof_line_utils import iter_unique_page_text_lines
+from app.core.proof_line_utils import iter_unique_page_text_line_views, iter_unique_page_text_lines
 from app.core.proof_occurrence import (
     ProofOccurrence,
     line_signature,
@@ -1334,13 +1334,13 @@ class VProofPanel(QWidget):
             page.width,
             page.height,
         )]
-        for block, line, line_idx in iter_unique_page_text_lines(page):
+        for view, block, line, line_idx in iter_unique_page_text_line_views(page):
             parts.append((
                 "line",
-                block.uid,
+                view.uid,
                 block.id,
-                block.order,
-                block.block_type.value,
+                view.order,
+                view.block_type.value,
                 line.uid,
                 line.id,
                 line_idx,

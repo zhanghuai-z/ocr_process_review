@@ -1867,6 +1867,8 @@ def test_hproof_formula_debug_uses_layout_snapshot_type_over_runtime_projection(
 
 
 def test_vproof_entry_lookup_uses_stable_block_uid_when_runtime_order_drifts():
+    from app.models import LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
     from app.services.char_index_service import CharEntry
     from app.ui.proof.v_proof import VProofPanel
 
@@ -1882,6 +1884,23 @@ def test_vproof_entry_lookup_uses_stable_block_uid_when_runtime_order_drifts():
     block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 40, 12), lines=[line], order=9)
     page = Page(image_path="/tmp/vproof-entry-owner.png", width=100, height=50, page_number=1)
     page.blocks = [block]
+    set_layout_snapshot_for_page(page, LayoutSnapshot(
+        page_uid=page.uid,
+        artifact_uid="artifact-vproof-entry",
+        source_engine="test",
+        source_run_id="run-vproof-entry",
+        blocks=(
+            LayoutBlockSnapshot(
+                uid=block.uid,
+                block_type=BlockType.TEXT,
+                bbox=block.bbox,
+                order=2,
+                source_label="text",
+                origin=BlockOrigin(source_label="text"),
+                ocr_policy=OcrPolicy.TEXT_OCR,
+            ),
+        ),
+    ))
     entry = CharEntry(
         char="乙",
         page_path=page.display_image_path,
@@ -1901,6 +1920,7 @@ def test_vproof_entry_lookup_uses_stable_block_uid_when_runtime_order_drifts():
 
     assert panel._block_for_entry(entry) is block
     assert panel._lookup_token_at_entry_position(entry) == "乙"
+    assert panel._char_index_page_signature(page)[1][3] == 2
     panel.close()
 
 
