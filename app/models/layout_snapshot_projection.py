@@ -36,8 +36,8 @@ def layout_snapshot_from_blocks(
         source_engine=source_engine,
         source_run_id=source_run_id,
         blocks=tuple(
-            _snapshot_from_block(block, order=order)
-            for order, block in enumerate(page_layout_blocks(page))
+            _snapshot_from_block(block)
+            for block in page_layout_blocks(page)
         ),
     )
 
@@ -66,11 +66,11 @@ def adopt_page_layout_snapshot(page: Page, snapshot: LayoutSnapshot) -> list[Blo
     return blocks
 
 
-def _snapshot_from_block(block: Block, *, order: int) -> LayoutBlockSnapshot:
+def _snapshot_from_block(block: Block) -> LayoutBlockSnapshot:
     return LayoutBlockSnapshot(
         block_type=block.block_type,
         bbox=block.bbox,
-        order=order,
+        order=block.order,
         source_label=block.source_label,
         origin=block.origin or _origin_from_block(block),
         ocr_policy=block.ocr_policy,

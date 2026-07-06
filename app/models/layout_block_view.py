@@ -80,6 +80,9 @@ def iter_page_layout_block_views(page: Page) -> Iterator[LayoutBlockView]:
         runtime_block: Block | None = None
         if runtime_pair is not None:
             runtime_block_index, runtime_block = runtime_pair
+        elif snapshot.source_engine == "layout_projection_view" and snapshot_index < len(runtime_blocks):
+            runtime_block_index = snapshot_index
+            runtime_block = runtime_blocks[snapshot_index]
         yield LayoutBlockView(
             page=page,
             snapshot_block=snapshot_block,
