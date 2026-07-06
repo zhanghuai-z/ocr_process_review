@@ -1555,7 +1555,7 @@ class LayoutPanel(QWidget):
 
     def _show_page_layers(self, page: Page) -> None:
         self._ensure_inline_formula_blocks(page)
-        self._viewer.show_blocks(page_layout_blocks(page))
+        self._viewer.show_layout_block_views(list(iter_page_layout_block_views(page)))
         self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from app.core.block_attributes import block_attributes
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockType, Char
+from app.models.layout_block_view import LayoutBlockView
 from app.models.layout_block_state import set_layout_block_bbox
 from app.models.ocr_observation import block_avg_confidence
 
@@ -387,20 +388,40 @@ class ImageViewer(QGraphicsView):
         for block in blocks:
             attrs = block_attributes(block)
             color = BLOCK_COLORS.get(attrs.semantic_block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-            bb = block.bbox
-            rect = QRectF(0, 0, bb.w, bb.h)
             label = f"[{attrs.display_label}] 置信度: {block_avg_confidence(block):.2f}"
-            item = BBoxItem(rect, color, label)
-            item.setPos(bb.x, bb.y)
-            item.set_block(block)
-            item.set_selectable(True)
-            item.set_editable(self._block_is_editable(block))
-            item.setZValue(self._block_z_value(block))
-            item.setData(0, block)
-            item.signals.edit_started.connect(self.block_edit_started.emit)
-            item.signals.moved.connect(self.block_moved.emit)
-            self._scene.addItem(item)
-            self._block_items.append((item, block))
+            self._add_block_item(block, bbox=block.bbox, color=color, label=label)
+
+    def show_layout_block_views(self, views: List[LayoutBlockView]) -> None:
+        self._clear_overlays()
+        for view in views:
+            block = view.runtime_block
+            if block is None:
+                continue
+            color = BLOCK_COLORS.get(view.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+            display_label = view.source_label or getattr(view.block_type, "value", str(view.block_type))
+            label = f"[{display_label}] 置信度: {block_avg_confidence(block):.2f}"
+            self._add_block_item(block, bbox=view.bbox, color=color, label=label)
+
+    def _add_block_item(
+        self,
+        block: Block,
+        *,
+        bbox: BBox,
+        color: QColor,
+        label: str,
+    ) -> None:
+        rect = QRectF(0, 0, bbox.w, bbox.h)
+        item = BBoxItem(rect, color, label)
+        item.setPos(bbox.x, bbox.y)
+        item.set_block(block)
+        item.set_selectable(True)
+        item.set_editable(self._block_is_editable(block))
+        item.setZValue(self._block_z_value(block))
+        item.setData(0, block)
+        item.signals.edit_started.connect(self.block_edit_started.emit)
+        item.signals.moved.connect(self.block_moved.emit)
+        self._scene.addItem(item)
+        self._block_items.append((item, block))
 
     def show_readonly_overlays(self, overlays: List[Tuple[str, BBox]]) -> None:
         """Show read-only layout geometry that should not become editable blocks."""

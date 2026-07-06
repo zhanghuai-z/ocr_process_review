@@ -5320,6 +5320,71 @@ def test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspect
     print("test_layout_panel_right_sidebar_uses_project_stats_without_selection_inspector PASSED")
 
 
+def test_layout_panel_show_page_layers_uses_layout_snapshot_view_geometry():
+    from pathlib import Path
+    import tempfile
+
+    from PySide6.QtGui import QImage
+
+    from app.models import (
+        BBox,
+        Block,
+        BlockOrigin,
+        BlockType,
+        LayoutBlockSnapshot,
+        LayoutSnapshot,
+        OcrPolicy,
+        Page,
+    )
+    from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    app = _get_qapp()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        QImage(160, 120, QImage.Format.Format_RGB888).save(str(image_path))
+        block = Block(block_type=BlockType.TEXT, bbox=BBox.from_xyxy(90, 80, 140, 100), source_label="text")
+        snapshot_bbox = BBox.from_xyxy(10, 20, 60, 40)
+        page = Page(image_path=str(image_path), width=160, height=120, blocks=[block])
+        set_layout_snapshot_for_page(
+            page,
+            LayoutSnapshot(
+                page_uid=page.uid,
+                artifact_uid="artifact-1",
+                source_engine="paddleocr-vl",
+                source_run_id="layout-run-1",
+                blocks=(
+                    LayoutBlockSnapshot(
+                        block_type=BlockType.TITLE,
+                        bbox=snapshot_bbox,
+                        order=0,
+                        source_label="heading_1",
+                        origin=BlockOrigin(source_engine="paddleocr-vl", source_label="heading_1"),
+                        ocr_policy=OcrPolicy.TEXT_OCR,
+                        uid=block.uid,
+                    ),
+                ),
+            ),
+        )
+
+        panel = LayoutPanel()
+        try:
+            panel.set_pages([page])
+            app.processEvents()
+
+            assert len(panel._viewer._block_items) == 1
+            item, item_block = panel._viewer._block_items[0]
+            assert item_block is block
+            assert int(item.pos().x()) == snapshot_bbox.x
+            assert int(item.pos().y()) == snapshot_bbox.y
+            assert int(item.rect().width()) == snapshot_bbox.w
+            assert int(item.rect().height()) == snapshot_bbox.h
+        finally:
+            panel.close()
+
+    print("test_layout_panel_show_page_layers_uses_layout_snapshot_view_geometry PASSED")
+
+
 def test_layout_panel_auto_text_blocks_are_editable_frames():
     from pathlib import Path
     import tempfile
