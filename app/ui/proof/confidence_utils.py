@@ -5,6 +5,7 @@ from typing import Optional
 
 from app.models import Line
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
+from app.models.ocr_text_observation import line_ocr_confidence
 
 
 def normalize_confidence(raw) -> Optional[float]:
@@ -31,7 +32,7 @@ def line_confidence(line: Line) -> Optional[float]:
     ]
     if char_scores:
         return sum(char_scores) / len(char_scores)
-    return normalize_confidence(getattr(line, "confidence", None))
+    return normalize_confidence(line_ocr_confidence(line))
 
 
 def char_confidence(line: Line, idx: int) -> Optional[float]:

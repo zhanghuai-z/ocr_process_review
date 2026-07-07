@@ -2379,7 +2379,7 @@ def test_proof_ui_does_not_read_line_text_or_status_directly():
         PROOF_UI_DIR / "h_proof.py",
         PROOF_UI_DIR / "v_proof.py",
     ]
-    forbidden_attrs = {"display_text", "proof_status", "ocr_text", "review_flags"}
+    forbidden_attrs = {"display_text", "proof_status", "ocr_text", "review_flags", "confidence"}
     offenders: list[str] = []
     for path in target_files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -2390,6 +2390,14 @@ def test_proof_ui_does_not_read_line_text_or_status_directly():
             if owner in {"line", "entry.line", "projection.line", "self._line"}:
                 offenders.append(f"{path}:{node.lineno}: {owner}.{node.attr}")
     assert offenders == []
+
+
+def test_proof_confidence_utils_reads_line_confidence_through_ocr_text_boundary():
+    source = (PROOF_UI_DIR / "confidence_utils.py").read_text(encoding="utf-8")
+
+    assert "line_ocr_confidence" in source
+    assert 'getattr(line, "confidence"' not in source
+    assert "line.confidence" not in source
 
 
 def test_hproof_uses_projection_as_single_line_runtime_fact():
