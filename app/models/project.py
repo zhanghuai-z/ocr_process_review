@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 import time
 
 from .enums import BlockSource, BlockType, OcrPolicy, PageStatus
@@ -165,11 +165,30 @@ class PaddleBinding:
     manual_bbox: List[int] = field(default_factory=list)
     review_flags: List[str] = field(default_factory=list)
     candidates: List[str] = field(default_factory=list)
+    ALLOWED_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "status",
+            "source",
+            "block_type",
+            "source_label",
+            "text",
+            "parent_index",
+            "candidate_index",
+            "score",
+            "candidate_bbox",
+            "manual_bbox",
+            "review_flags",
+            "candidates",
+        }
+    )
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "PaddleBinding | None":
         if not isinstance(payload, dict) or not payload:
             return None
+        unknown = sorted(set(payload) - cls.ALLOWED_FIELDS)
+        if unknown:
+            raise ValueError(f"unknown PaddleBinding field(s): {', '.join(unknown)}")
         return cls(
             status=_string_or_default(payload, "status"),
             source=_string_or_default(payload, "source"),

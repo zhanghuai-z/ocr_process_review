@@ -2081,6 +2081,13 @@ def test_ocr_character_observation_store_has_no_object_read_adapter():
     assert "def line_ocr_chars_by_uid(" in observation_source
 
 
+def test_ocr_text_observation_store_has_no_object_text_read_adapter():
+    observation_source = Path("app/models/ocr_text_observation.py").read_text(encoding="utf-8")
+
+    assert "def line_ocr_text(" not in observation_source
+    assert '"line_ocr_text"' not in observation_source
+
+
 def test_production_code_reads_ocr_chars_by_line_uid():
     offenders: list[str] = []
     forbidden = (

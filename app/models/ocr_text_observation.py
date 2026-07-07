@@ -45,12 +45,6 @@ def line_ocr_text_observation(line: object) -> OcrTextObservation:
     return ocr_text_observation_for_line(line, _projection_observation(line))
 
 
-def line_ocr_text(line: object) -> str:
-    """Return the OCR source text attached to a proof line."""
-    observation = line_ocr_text_observation(line)
-    return observation.ocr_text or observation.text
-
-
 def line_ocr_confidence(line: object) -> float:
     """Return OCR confidence without exposing the physical line projection."""
     return float(line_ocr_text_observation(line).confidence or 0.0)
@@ -142,7 +136,6 @@ __all__ = [
     "line_has_ocr_review_flag",
     "line_ocr_confidence",
     "line_ocr_review_flags",
-    "line_ocr_text",
     "line_ocr_text_observation",
     "refresh_line_ocr_text_observation_from_projection",
     "set_line_ocr_review_flags",

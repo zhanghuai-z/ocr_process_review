@@ -232,18 +232,18 @@ def test_ocr_text_observation_boundary_tracks_current_line_text_projection():
         append_line_ocr_review_flag_once,
         line_has_ocr_review_flag,
         line_ocr_review_flags,
-        line_ocr_text,
         line_ocr_text_observation,
         set_line_ocr_text_observation,
     )
     from app.models.ocr_text_observation_store import OcrTextObservation
+    from app.core.line_text_contract import line_text_contract
 
     line = Line(text="OCR", confidence=0.8, bbox=BBox(0, 0, 20, 10), ocr_text="OCR源")
 
     observation = line_ocr_text_observation(line)
     assert observation.text == "OCR"
     assert observation.ocr_text == "OCR源"
-    assert line_ocr_text(line) == "OCR源"
+    assert line_text_contract(line).ocr_text == "OCR源"
 
     set_line_ocr_text_observation(
         line,
@@ -1407,6 +1407,21 @@ def test_paddle_binding_rejects_malformed_typed_fields():
 
     from app.models import PaddleBinding
 
+    assert PaddleBinding.ALLOWED_FIELDS == {
+        "status",
+        "source",
+        "block_type",
+        "source_label",
+        "text",
+        "parent_index",
+        "candidate_index",
+        "score",
+        "candidate_bbox",
+        "manual_bbox",
+        "review_flags",
+        "candidates",
+    }
+
     with pytest.raises(ValueError, match="parent_index must be int"):
         PaddleBinding.from_dict({"status": "hit", "parent_index": "3"})
 
@@ -1415,6 +1430,9 @@ def test_paddle_binding_rejects_malformed_typed_fields():
 
     with pytest.raises(ValueError, match=r"review_flags\[0\] must be str"):
         PaddleBinding.from_dict({"status": "hit", "review_flags": [1]})
+
+    with pytest.raises(ValueError, match="unknown PaddleBinding field"):
+        PaddleBinding.from_dict({"status": "hit", "next_app_payload": True})
 
     print("test_paddle_binding_rejects_malformed_typed_fields PASSED")
 
