@@ -1485,13 +1485,13 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
 
     h = HProofPanel()
     h.load_pages([page])
-    assert [projection.line.text for projection in h._session.projections] == [
+    assert [proof_display_text(projection.line) for projection in h._session.projections] == [
         "正文",
         "含$ A $公式",
     ]
 
     h._btn_debug_formula.setChecked(True)
-    assert [projection.line.text for projection in h._session.projections] == [
+    assert [proof_display_text(projection.line) for projection in h._session.projections] == [
         "含$ A $公式",
         "$$ E=mc^2 $$",
         line_less_formula,
@@ -1540,7 +1540,7 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
 
     h._btn_debug_formula.setChecked(False)
     h._btn_debug_table.setChecked(True)
-    assert [projection.line.text for projection in h._session.projections] == [
+    assert [proof_display_text(projection.line) for projection in h._session.projections] == [
         "表格OCR",
         "表格子区",
     ]
@@ -1551,7 +1551,7 @@ def test_hproof_debug_buttons_filter_formula_and_table_lines():
     assert [pair._debug_badge for pair in h._pairs] == ["表格", "表格"]
 
     h._btn_debug_formula.setChecked(True)
-    assert [projection.line.text for projection in h._session.projections] == [
+    assert [proof_display_text(projection.line) for projection in h._session.projections] == [
         "含$ A $公式",
         "$$ E=mc^2 $$",
         line_less_formula,
@@ -1829,7 +1829,7 @@ def test_hproof_formula_debug_ignores_superscript_marker_inline_formula():
 
     rows = list(iter_unique_page_hproof_debug_lines(page, formulas=True))
 
-    assert [line.text for _block, line, _idx in rows] == ["其中 $ \\beta_t $ 显著"]
+    assert [proof_display_text(line) for _block, line, _idx in rows] == ["其中 $ \\beta_t $ 显著"]
 
 
 def test_hproof_formula_debug_uses_layout_snapshot_type_over_runtime_projection():
@@ -1870,7 +1870,7 @@ def test_hproof_formula_debug_uses_layout_snapshot_type_over_runtime_projection(
 
     rows = list(iter_unique_page_hproof_debug_lines(page, formulas=True))
 
-    assert [(line.text, idx) for _block, line, idx in rows] == [("E=mc2", 0)]
+    assert [(proof_display_text(line), idx) for _block, line, idx in rows] == [("E=mc2", 0)]
 
 
 def test_vproof_entry_lookup_uses_stable_block_uid_when_runtime_order_drifts():

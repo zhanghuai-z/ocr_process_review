@@ -47,6 +47,7 @@ from PySide6.QtWidgets import (
 from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
+from app.models.ocr_text_observation import create_ocr_text_line
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
 )
@@ -508,11 +509,11 @@ def _synthetic_block_debug_line(page: Page, block: Block) -> Line | None:
     text = _block_debug_content(page, block).strip()
     if not text:
         return None
-    return Line(
+    return create_ocr_text_line(
         text=text,
         confidence=1.0,
         bbox=block.bbox,
-        ocr_text=text,
+        source_text=text,
     )
 
 
