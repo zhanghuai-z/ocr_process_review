@@ -12240,7 +12240,7 @@ def test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text():
     print("test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text PASSED")
 
 
-def test_paddle_line_routing_merges_ppocr_fragments_as_bbox_only_physical_row():
+def test_paddle_line_routing_keeps_ppocr_page_line_hints_unmerged():
     from app.core.paddle_line_routing import (
         PageOcrLineHint,
         attach_page_ocr_line_routes,
@@ -12268,28 +12268,26 @@ def test_paddle_line_routing_merges_ppocr_fragments_as_bbox_only_physical_row():
     attach_page_ocr_line_routes([parent], ppocr_fragments, 2320, 3416)
 
     routes = parent["_layout_line_routes"]
-    assert len(routes) == 1
-    assert routes[0]["bbox"] == [295, 555, 2052, 626]
-    assert [segment["kind"] for segment in routes[0]["segments"]] == [
-        "text",
-        "formula",
-        "text",
-        "formula",
-        "text",
+    assert len(routes) == len(ppocr_fragments)
+    assert [route["bbox"] for route in routes] == [
+        [295, 555, 792, 623],
+        [766, 555, 901, 620],
+        [875, 555, 1347, 626],
+        [1326, 555, 1461, 620],
+        [1438, 556, 2052, 626],
+        [536, 556, 560, 620],
+        [1334, 556, 1358, 620],
     ]
-    assert [segment["bbox"] for segment in routes[0]["segments"]] == [
-        [295, 555, 445, 626],
-        [445, 556, 884, 620],
-        [884, 555, 1242, 626],
-        [1242, 556, 1453, 620],
-        [1453, 555, 2052, 626],
+    formula_texts = [
+        segment["text"]
+        for route in routes
+        for segment in route["segments"]
+        if segment["kind"] == "formula"
     ]
-    assert [segment["text"] for segment in routes[0]["segments"] if segment["kind"] == "formula"] == [
-        "$ GGF_{it}^{Post-short} $",
-        "$ GGF_{it}^{Post-long} $",
-    ]
+    assert "$ GGF_{it}^{Post-short} $" in formula_texts
+    assert "$ GGF_{it}^{Post-long} $" in formula_texts
 
-    print("test_paddle_line_routing_merges_ppocr_fragments_as_bbox_only_physical_row PASSED")
+    print("test_paddle_line_routing_keeps_ppocr_page_line_hints_unmerged PASSED")
 
 
 def test_paddle_line_routing_restores_inter_formula_punctuation_gap():
@@ -21685,6 +21683,7 @@ if __name__ == "__main__":
     test_paddle_line_routing_marker_formula_from_120169_does_not_eat_zero()
     test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text()
     test_paddle_line_routing_complete_formula_geometry_ignores_ppocr_text()
+    test_paddle_line_routing_keeps_ppocr_page_line_hints_unmerged()
     test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes()
     test_paddle_line_routing_restores_inter_formula_punctuation_gap()
     test_paddle_line_routing_formula_number_is_skip_not_formula_carrier()

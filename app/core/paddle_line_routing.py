@@ -51,9 +51,6 @@ _FORMULA_COMMAND_ALIASES = {
     "phi": ("phi", "φ"),
     "varphi": ("varphi", "phi", "φ"),
 }
-_PHYSICAL_LINE_MIN_VERTICAL_OVERLAP = 0.25
-_PHYSICAL_LINE_MAX_CENTER_GAP_RATIO = 0.65
-_PHYSICAL_LINE_MAX_CENTER_GAP_PX = 18
 _INTER_FORMULA_TEXT_GAP_MIN_WIDTH = 16
 
 
@@ -416,59 +413,6 @@ def _line_assignment_score(
     return area / line_area
 
 
-def _line_height(bbox: tuple[int, int, int, int]) -> int:
-    return max(1, int(bbox[3]) - int(bbox[1]))
-
-
-def _line_center_y(bbox: tuple[int, int, int, int]) -> float:
-    return (int(bbox[1]) + int(bbox[3])) / 2.0
-
-
-def _same_physical_line(
-    a: tuple[int, int, int, int],
-    b: tuple[int, int, int, int],
-) -> bool:
-    if vertical_overlap_ratio(a, b) >= _PHYSICAL_LINE_MIN_VERTICAL_OVERLAP:
-        return True
-    max_center_gap = max(
-        _PHYSICAL_LINE_MAX_CENTER_GAP_PX,
-        int(round(max(_line_height(a), _line_height(b)) * _PHYSICAL_LINE_MAX_CENTER_GAP_RATIO)),
-    )
-    return abs(_line_center_y(a) - _line_center_y(b)) <= max_center_gap
-
-
-def _bbox_only_physical_line_hints(
-    line_hints: list[PageOcrLineHint],
-) -> list[PageOcrLineHint]:
-    """Collapse PP-OCRv5 fragments into physical row hints.
-
-    PP-OCRv5 may return superscripts, subscripts, inline formulas, and ordinary
-    text chunks as separate OCR lines.  Routing only trusts the merged
-    page-space row geometry.  The concatenated text is retained only as weak
-    context for mapping Paddle parent formula spans back to row geometry; it is
-    never emitted as Hanwang OCR text.
-    """
-    buckets: list[list[PageOcrLineHint]] = []
-    for hint in sorted(line_hints, key=lambda item: (_line_center_y(item.bbox), item.bbox[0])):
-        for bucket in buckets:
-            if any(_same_physical_line(item.bbox, hint.bbox) for item in bucket):
-                bucket.append(hint)
-                break
-        else:
-            buckets.append([hint])
-
-    merged: list[PageOcrLineHint] = []
-    for bucket in buckets:
-        bbox = union_xyxy([item.bbox for item in bucket])
-        text = "".join(
-            str(item.text or "")
-            for item in sorted(bucket, key=lambda value: (value.bbox[0], value.bbox[1]))
-        )
-        merged.append(PageOcrLineHint(text=text, bbox=bbox))
-    merged.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
-    return merged
-
-
 def attach_page_ocr_line_routes(
     ppvl_blocks: list[dict[str, Any]],
     page_ocr_lines: list[Any],
@@ -493,7 +437,6 @@ def build_page_ocr_line_route_attachment(
     ]
     if not line_hints:
         return PageOcrLineRouteAttachment({}, frozenset())
-    line_hints = _bbox_only_physical_line_hints(line_hints)
 
     parent_entries: list[tuple[int, dict[str, Any], tuple[int, int, int, int]]] = []
     for block_idx, block in enumerate(ppvl_blocks):
