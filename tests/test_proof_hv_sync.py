@@ -2070,6 +2070,8 @@ def test_vproof_page_badge_marks_missing_confidence_unavailable():
 
 def test_vproof_entry_diagnostics_do_not_report_fake_zero_confidence():
     from app.ui.proof.v_proof import VProofPanel
+    from app.models.ocr_text_observation import line_ocr_text_observation, set_line_ocr_text_observation
+    from app.models.ocr_text_observation_store import OcrTextObservation
 
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
@@ -2081,7 +2083,16 @@ def test_vproof_entry_diagnostics_do_not_report_fake_zero_confidence():
     v.load_pages(proj.pages)
     entry = v._char_svc.query("甲")[0]
     assert v._format_entry_confidence(entry) == "0.91"
-    line.confidence = 0.0
+    current = line_ocr_text_observation(line)
+    set_line_ocr_text_observation(
+        line,
+        OcrTextObservation(
+            text=current.text,
+            ocr_text=current.ocr_text,
+            confidence=0.0,
+            review_flags=current.review_flags,
+        ),
+    )
     assert v._format_entry_confidence(entry) == "缺失"
     v.deleteLater()
 
