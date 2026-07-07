@@ -16,7 +16,7 @@ from app.core.proof_state_bus import ProofStateBus
 from app.core import quality_probe as qp_mod
 from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
 from app.models import BBox, Block, BlockOrigin, BlockType, Char, Line, OcrProject, Page
-from app.models.ocr_character_observation import line_ocr_chars, replace_line_ocr_char_observations
+from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import replace_block_ocr_line_observations
 
 
@@ -414,7 +414,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     page2.page_number = 2
     line2 = page2.blocks[0].lines[0]
     set_line_proof_text(line2, "BB")
-    for char in line_ocr_chars(line2):
+    for char in line_ocr_chars_by_uid(line2.uid):
         char.char = "B"
         char.token_text = "B"
 
@@ -428,7 +428,7 @@ def test_v_proof_external_refresh_updates_offscreen_page_char_index_without_relo
     v._load_page = lambda i, _o=orig_load: (calls.__setitem__("load", calls["load"] + 1), _o(i))[1]  # type: ignore
 
     set_line_proof_text(line2, "CC")
-    for char in line_ocr_chars(line2):
+    for char in line_ocr_chars_by_uid(line2.uid):
         char.char = "C"
         char.token_text = "C"
 
@@ -706,7 +706,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
     v.proof_changed.connect(changes.append)
 
     set_line_proof_text(line0, "DDDD")
-    for char in line_ocr_chars(line0):
+    for char in line_ocr_chars_by_uid(line0.uid):
         char.char = "D"
     v._bus.publish_line_update(ProofUpdateRequest(
         page_id=page.id,
@@ -718,7 +718,7 @@ def test_v_proof_external_refresh_updates_reference_from_model():
 
     assert proof_final_text(line0) == "DDDD"
     assert proof_display_text(line0) == "DDDD"
-    assert [char.char for char in line_ocr_chars(line0)] == ["D", "D", "D", "D"]
+    assert [char.char for char in line_ocr_chars_by_uid(line0.uid)] == ["D", "D", "D", "D"]
     assert v._text_edit.toPlainText().startswith("DDDD")
     assert v._session.loaded_text == v._text_edit.toPlainText()
     assert changes == []
@@ -2044,7 +2044,7 @@ def test_vproof_page_badge_uses_char_confidence_when_line_score_is_zero():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 0.0
-    for ch in line_ocr_chars(line):
+    for ch in line_ocr_chars_by_uid(line.uid):
         ch.confidence = 87
 
     v = VProofPanel()
@@ -2059,7 +2059,7 @@ def test_vproof_page_badge_marks_missing_confidence_unavailable():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 0.0
-    for ch in line_ocr_chars(line):
+    for ch in line_ocr_chars_by_uid(line.uid):
         ch.confidence = 0.0
 
     v = VProofPanel()
@@ -2074,7 +2074,7 @@ def test_vproof_entry_diagnostics_do_not_report_fake_zero_confidence():
     proj = _make_project_with_char_crops("甲乙丙")
     line = proj.pages[0].blocks[0].lines[0]
     line.confidence = 91
-    for ch in line_ocr_chars(line):
+    for ch in line_ocr_chars_by_uid(line.uid):
         ch.confidence = 0.0
 
     v = VProofPanel()

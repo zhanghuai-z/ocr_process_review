@@ -1064,7 +1064,7 @@ def test_proof_refresh_signatures_use_line_signature_contract():
     char_index_signature_source = _function_source(vproof_source, "_char_index_page_signature")
     assert "line_signature(line)" in char_index_signature_source
     for forbidden in (
-        "line_ocr_chars(line)",
+        "line_ocr_chars_by_uid(line.uid)",
         "char.token_text",
         "char.confidence",
         "char.bbox_source",
@@ -1094,7 +1094,7 @@ def test_proof_fallback_warning_is_owned_by_proof_crop_service():
     service_source = Path("app/services/proof_crop_service.py").read_text(encoding="utf-8")
 
     assert "def _proof_fallback_warning" not in controller_source
-    assert "line_ocr_chars" not in controller_source
+    assert "line_ocr_chars_by_uid" not in controller_source
     assert "proof_fallback_warning(" in controller_source
     assert "def proof_fallback_warning" in service_source
 
@@ -2073,8 +2073,12 @@ def test_ocr_character_observation_store_has_no_object_read_adapter():
 
     assert "def ocr_chars_for_line(" not in store_source
     assert "ocr_chars_for_line_uid" in store_source
+    assert "def line_ocr_chars(" not in observation_source
+    assert "def line_ocr_char_count(" not in observation_source
+    assert "def line_ocr_char_at(" not in observation_source
+    assert "def iter_line_ocr_char_occurrences(" not in observation_source
     assert "ocr_chars_for_line(" not in observation_source
-    assert "ocr_chars_for_line_uid(line.uid)" in observation_source
+    assert "def line_ocr_chars_by_uid(" in observation_source
 
 
 def test_production_code_reads_ocr_chars_by_line_uid():

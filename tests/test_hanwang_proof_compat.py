@@ -167,9 +167,9 @@ def test_hanwang_ir_to_line_conversion_keeps_final_text_and_fallback_source():
     assert proof_display_text(line) == "已"
     assert line.ocr_text == "已"
     assert line.review_flags == ["hanwang_char_fallback"]
-    from app.models.ocr_character_observation import line_ocr_chars
+    from app.models.ocr_character_observation import line_ocr_chars_by_uid
 
-    chars = line_ocr_chars(line)
+    chars = line_ocr_chars_by_uid(line.uid)
     assert len(chars) == 1
     assert chars[0].bbox_source == "hanwang:CharRcg:char_fallback"
     assert chars[0].bbox_granularity == "char"

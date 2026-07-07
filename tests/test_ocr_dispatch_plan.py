@@ -11,7 +11,7 @@ from app.models.enums import OcrPolicy
 from app.models.layout_block_state import set_layout_block_bbox, set_layout_block_ocr_policy
 from app.models.layout_projection import replace_page_layout_blocks
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     replace_block_ocr_line_observations,
@@ -153,8 +153,10 @@ def test_proof_crop_service_uses_dispatch_plan_not_block_type_text_blocks():
         stats = ProofCropService().normalize_pages([page])
 
         assert stats.lines == 1
-        assert [char.char for char in line_ocr_chars(block_ocr_line_observations_by_uid(text.uid)[0])] == ["甲"]
-        assert line_ocr_chars(block_ocr_line_observations_by_uid(skipped_title.uid)[0]) == []
+        text_line = block_ocr_line_observations_by_uid(text.uid)[0]
+        skipped_line = block_ocr_line_observations_by_uid(skipped_title.uid)[0]
+        assert [char.char for char in line_ocr_chars_by_uid(text_line.uid)] == ["甲"]
+        assert line_ocr_chars_by_uid(skipped_line.uid) == []
     finally:
         try:
             os.unlink(img_path)

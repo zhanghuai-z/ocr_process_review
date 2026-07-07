@@ -15,7 +15,7 @@ from app.models.layout_snapshot_projection import (
     sync_page_layout_snapshot_from_projection,
 )
 from app.models.layout_snapshot_store import clear_layout_snapshot_for_page, layout_snapshot_for_page
-from app.models.ocr_character_observation import line_ocr_chars
+from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
     replace_block_ocr_line_observations,
@@ -164,7 +164,7 @@ def test_project_store_load_rebuilds_layout_and_ocr_runtime_stores(tmp_path):
     loaded_line = block_ocr_line_observations_by_uid(loaded_block.uid)[0]
     assert loaded_block.lines == []
     assert loaded_line.chars == []
-    assert line_ocr_chars(loaded_line)[0].char == "甲"
+    assert line_ocr_chars_by_uid(loaded_line.uid)[0].char == "甲"
 
 
 def test_project_store_persists_layout_snapshot_independently_from_block_projection(tmp_path):
