@@ -2379,7 +2379,7 @@ def test_proof_ui_does_not_read_line_text_or_status_directly():
         PROOF_UI_DIR / "h_proof.py",
         PROOF_UI_DIR / "v_proof.py",
     ]
-    forbidden_attrs = {"display_text", "proof_status", "ocr_text"}
+    forbidden_attrs = {"display_text", "proof_status", "ocr_text", "review_flags"}
     offenders: list[str] = []
     for path in target_files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

@@ -47,7 +47,7 @@ from PySide6.QtWidgets import (
 from app.models import Block, BlockType, Line, Page, ProofStatus
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
-from app.models.ocr_text_observation import create_ocr_text_line
+from app.models.ocr_text_observation import create_ocr_text_line, line_ocr_review_flags
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
 )
@@ -473,7 +473,7 @@ def _debug_block_labels(block: Block) -> set[str]:
 
 
 def _line_has_formula_source(line: Line) -> bool:
-    has_formula_route = any(flag in _DEBUG_FORMULA_LINE_FLAGS for flag in line.review_flags)
+    has_formula_route = any(flag in _DEBUG_FORMULA_LINE_FLAGS for flag in line_ocr_review_flags(line))
     formula_texts: list[str] = []
     for char in line_ocr_chars_by_uid(line.uid):
         source = normalize_source_label(getattr(char, "bbox_source", ""))
@@ -518,7 +518,7 @@ def _synthetic_block_debug_line(page: Page, block: Block) -> Line | None:
 
 
 def _line_has_table_source(line: Line) -> bool:
-    return any(flag in _DEBUG_TABLE_LINE_FLAGS for flag in line.review_flags)
+    return any(flag in _DEBUG_TABLE_LINE_FLAGS for flag in line_ocr_review_flags(line))
 
 
 def _is_debug_formula_block(block: Block) -> bool:

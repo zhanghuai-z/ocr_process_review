@@ -9,8 +9,8 @@
 具体到目前 codebase 可见的数据源：
 
   - ``Char.confidence``        OCR 自评（每字一个 [0,1] 分数）
-  - ``Line.ocr_text``          OCR 原始识别结果（用于判断"用户是否改过"）
-  - ``Line.text``              当前显示的文本（可能已被用户编辑覆写）
+  - ``proof_ocr_text(line)``   OCR 原始识别结果（用于判断"用户是否改过"）
+  - ``proof_display_text(line)`` 当前显示文本（可能已被用户编辑覆写）
 
 ** 缺失但用户期望存在的判定链 **（写在 handoff，不在本模块里造假）：
 
@@ -84,7 +84,7 @@ def classify_char(
     text_char : str
         当前显示文本中该位置的字（用于和 OCR 原文比较）。
     ocr_char : Optional[str]
-        OCR 原始字（``Line.ocr_text[i]``）。None 表示未取到；
+        OCR 原始字（由调用方通过 ``proof_ocr_text(line)[i]`` 取得）。None 表示未取到；
         ``user_modified`` 仅在拿得到时才可能为 True。
     """
     user_modified = ocr_char is not None and text_char != ocr_char
