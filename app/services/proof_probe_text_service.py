@@ -261,7 +261,7 @@ def _mark_probe_corrected(
 
 
 def _sync_chars_glyphs(line: Line, new_text: str) -> None:
-    """改字后同步 ``line.chars`` 表达的文本事实。
+    """改字后同步 OCR character observation 表达的文本事实。
 
     ``token_text`` 在 word/formula 场景可能是多字符载体。同步时不能只看
     ``len(new_text) == len(chars)``，而要先用当前 chars 重建旧显示串，再按
