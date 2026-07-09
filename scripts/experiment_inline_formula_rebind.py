@@ -28,11 +28,13 @@ from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, block_text  # no
 from app.core.api_profiles import resolve_api_endpoint_for_role  # noqa: E402
 from app.core.api_profiles import FIXED_LAYOUT_PROFILE  # noqa: E402
 from app.engines.hanwang.micro_recblock import _page_blocks_from_layout  # noqa: E402
-from app.experimental.inline_formula_rebind import (  # noqa: E402
+from app.services.formula_crop_ocr_service import (  # noqa: E402
     build_formula_pseudo_page,
     formula_crop_bboxes_from_route_subblocks,
     recognize_formula_pseudo_page,
     recognitions_from_paddle_response,
+)
+from app.experimental.inline_formula_rebind import (  # noqa: E402
     suggest_formula_bindings,
 )
 
