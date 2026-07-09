@@ -712,16 +712,10 @@ class OcrPipeline:
             image_path=page_image_path,
             width=img.shape[1],
             height=img.shape[0],
-            blocks=[block],
         )
         lines = self._process_block(img, block, page, 0)
         replace_block_ocr_line_observations(block.uid, lines)
-        self._normalize_proof_crops(
-            page,
-            page_idx=0,
-            total_pages=1,
-            progress_callback=None,
-        )
+        self._proof_crop_service.normalize_block(block)
         return block
 
     @staticmethod

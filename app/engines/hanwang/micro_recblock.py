@@ -3221,6 +3221,16 @@ def _layout_block_uid_from_route_row(row: BlockResult) -> str:
     return uid
 
 
+def _ocr_audit_from_route_row(row: BlockResult) -> dict[str, Any]:
+    raw = dict(row.raw_block or {})
+    value = raw.get(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _apply_row_ocr_audit(block: Block, *, ocr_audit: dict[str, Any]) -> None:
+    block.ocr_audit = dict(ocr_audit)
+
+
 def _layout_block_content(
     block: Block,
     raw_payload: dict[str, Any] | None = None,
@@ -3408,9 +3418,10 @@ def _manual_structure_parent_row(
     entry: _LayoutOcrEntry,
     page: Page,
 ) -> dict[str, Any] | None:
+    block = entry.block
     if entry.view.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
         return None
-    if not is_user_authored_layout_block(entry.block):
+    if not is_user_authored_layout_block(block):
         return None
     block_bbox = tuple(int(value) for value in entry.view.bbox.to_xyxy())
     best: tuple[float, dict[str, Any]] | None = None
@@ -3763,6 +3774,11 @@ class HanwangMicroRecBlockEngine:
         )
 
         height, width = image_bgr.shape[:2]
+        runtime_blocks_by_uid = {
+            view.uid: view.runtime_block
+            for view in iter_page_layout_block_views(page)
+            if view.runtime_block is not None
+        }
         written_uids: set[str] = set()
         line_updates: list[tuple[str, list[Line]]] = []
         for row in rows:
@@ -3793,6 +3809,10 @@ class HanwangMicroRecBlockEngine:
                     )
                 ]
             line_updates.append((block_uid, lines))
+            ocr_audit = _ocr_audit_from_route_row(row)
+            block = runtime_blocks_by_uid.get(block_uid)
+            if block is not None and ocr_audit:
+                _apply_row_ocr_audit(block, ocr_audit=ocr_audit)
         missing_uids = sorted(expected_uids - written_uids)
         if missing_uids:
             raise RuntimeError(

@@ -298,6 +298,14 @@ class Block:
 
     def __post_init__(self) -> None:
         self.uid = ensure_entity_uid(self.uid, "block")
+        if self.ocr_policy == OcrPolicy.TEXT_OCR:
+            if self.block_type == BlockType.EQUATION:
+                # Constructor-time invariant; runtime writes use layout_block_state.
+                object.__setattr__(self, "ocr_policy", OcrPolicy.PRESERVE_AS_FORMULA)
+            elif self.block_type == BlockType.TABLE:
+                object.__setattr__(self, "ocr_policy", OcrPolicy.PRESERVE_AS_TABLE)
+            elif self.block_type in (BlockType.FIGURE, BlockType.UNKNOWN):
+                object.__setattr__(self, "ocr_policy", OcrPolicy.SKIP)
 
 
 @dataclass

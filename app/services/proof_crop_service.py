@@ -15,7 +15,7 @@ from app.core.proof_char_text import is_display_carrier
 from app.core.proof_geometry_quality import is_estimated_or_unavailable_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
-from app.models import BBox, Char, Line, OcrProject, Page
+from app.models import BBox, Block, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
@@ -104,71 +104,77 @@ class ProofCropService:
             self._normalize_page(page, stats)
         return stats
 
+    def normalize_block(self, block: Block) -> ProofCropStats:
+        stats = ProofCropStats()
+        self._normalize_block_uid(block.uid, stats)
+        return stats
+
     def _normalize_page(self, page: Page, stats: ProofCropStats) -> None:
         image = cv2.imread(page.display_image_path, cv2.IMREAD_COLOR)
         if image is None:
             return
 
         page_changed = False
-        page_line_updates = 0
-        page_char_updates = 0
 
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         for target in dispatch_plan.text_blocks:
-            for line in block_ocr_line_observations_by_uid(target.view.uid):
-                stats.lines += 1
-                old_line_bbox = line_ocr_bbox(line)
-                old_char_boxes = [
-                    char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line_ocr_chars_by_uid(line.uid)
-                ]
-
-                chars = line_ocr_chars_by_uid(line.uid)
-                has_tokenized_chars = any(is_display_carrier(char) for char in chars)
-                needs_fallback_chars = (
-                    not chars
-                    or (
-                        not has_tokenized_chars
-                        and len(chars) != len(proof_display_text(line))
-                    )
-                )
-                if needs_fallback_chars and not line_has_ocr_review_flag(line, INLINE_FORMULA_REVIEW_FLAG):
-                    text = proof_display_text(line)
-                    if text and line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
-                        stats.fallback_lines += 1
-                        stats.unavailable_chars += len(text)
-                        replace_line_ocr_char_observations(line.uid, [
-                            _fallback_char(
-                                glyph,
-                                line,
-                                None,
-                                BBOX_SOURCE_UNAVAILABLE,
-                                BBOX_GRANULARITY_UNAVAILABLE,
-                            )
-                            for glyph in text
-                        ])
-                    elif text:
-                        boxes = split_line_bbox_into_char_bboxes(line_ocr_bbox(line), text)
-                        stats.fallback_lines += 1
-                        stats.fallback_chars += len(text)
-                        replace_line_ocr_char_observations(
-                            line.uid,
-                            _complete_positional_chars(line, text, boxes),
-                        )
-
-                if line_ocr_bbox(line) != old_line_bbox:
-                    page_line_updates += 1
-                    page_changed = True
-
-                new_char_boxes = [
-                    char.bbox.to_dict() if char.bbox is not None else None
-                    for char in line_ocr_chars_by_uid(line.uid)
-                ]
-                if new_char_boxes != old_char_boxes:
-                    page_char_updates += 1
-                    page_changed = True
+            page_changed = self._normalize_block_uid(target.view.uid, stats) or page_changed
 
         if page_changed:
             stats.pages += 1
-        stats.line_bbox_updates += page_line_updates
-        stats.char_bbox_updates += page_char_updates
+
+    def _normalize_block_uid(self, block_uid: str, stats: ProofCropStats) -> bool:
+        changed = False
+        for line in block_ocr_line_observations_by_uid(block_uid):
+            stats.lines += 1
+            old_line_bbox = line_ocr_bbox(line)
+            old_char_boxes = [
+                char.bbox.to_dict() if char.bbox is not None else None
+                for char in line_ocr_chars_by_uid(line.uid)
+            ]
+
+            chars = line_ocr_chars_by_uid(line.uid)
+            has_tokenized_chars = any(is_display_carrier(char) for char in chars)
+            needs_fallback_chars = (
+                not chars
+                or (
+                    not has_tokenized_chars
+                    and len(chars) != len(proof_display_text(line))
+                )
+            )
+            if needs_fallback_chars and not line_has_ocr_review_flag(line, INLINE_FORMULA_REVIEW_FLAG):
+                text = proof_display_text(line)
+                if text and line_has_ocr_review_flag(line, MISSING_LINE_BBOX_FLAG):
+                    stats.fallback_lines += 1
+                    stats.unavailable_chars += len(text)
+                    replace_line_ocr_char_observations(line.uid, [
+                        _fallback_char(
+                            glyph,
+                            line,
+                            None,
+                            BBOX_SOURCE_UNAVAILABLE,
+                            BBOX_GRANULARITY_UNAVAILABLE,
+                        )
+                        for glyph in text
+                    ])
+                elif text:
+                    boxes = split_line_bbox_into_char_bboxes(line_ocr_bbox(line), text)
+                    stats.fallback_lines += 1
+                    stats.fallback_chars += len(text)
+                    replace_line_ocr_char_observations(
+                        line.uid,
+                        _complete_positional_chars(line, text, boxes),
+                    )
+
+            if line_ocr_bbox(line) != old_line_bbox:
+                stats.line_bbox_updates += 1
+                changed = True
+
+            new_char_boxes = [
+                char.bbox.to_dict() if char.bbox is not None else None
+                for char in line_ocr_chars_by_uid(line.uid)
+            ]
+            if new_char_boxes != old_char_boxes:
+                stats.char_bbox_updates += 1
+                changed = True
+        return changed

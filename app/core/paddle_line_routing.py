@@ -527,15 +527,15 @@ def build_page_ocr_line_route_attachment(
         routes = [
             _build_route_line(
                 _horizontal_gap_segments(
-                    line.bbox,
+                    hint.bbox,
                     routed_subblocks,
                     formula_texts_by_bbox,
                     block_text(block),
-                    line.text,
+                    hint.text,
                 ),
                 source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
             )
-            for line in lines
+            for hint in lines
         ]
         if routes:
             route_records_by_block_index[block_idx] = routes
