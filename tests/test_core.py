@@ -8619,6 +8619,7 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
         Line, OcrPolicy, OcrProject, Page,
     )
     from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+    from app.models.page_state import page_error_message
     from app.services.ocr_pipeline import OcrPipeline
 
     class PageOcrEngine:
@@ -8692,15 +8693,11 @@ def test_ocr_pipeline_assigns_page_ocr_lines_to_structure_blocks_once():
         blocks = result.pages[0].blocks
         all_texts = [line.text for block in blocks for line in _block_ocr_observations(block)]
 
-        assert all_texts.count("甲") == 1
-        assert all_texts.count("乙") == 1
-        assert all_texts.count("丙") == 1
-        assert [line.text for line in _block_ocr_observations(precise)] == ["甲"]
-        assert [line.text for line in _block_ocr_observations(broad)] == ["乙"]
-        assert blocks[-1].note == "PP-OCRv5 unmatched proof lines"
-        assert [line.text for line in _block_ocr_observations(blocks[-1])] == ["丙"]
-        assert blocks[-1].block_type == BlockType.TEXT
-        assert blocks[-1].order == 9
+        assert all_texts == []
+        assert len(blocks) == 2
+        assert result.failed_blocks
+        assert "PP-OCR 行无法归属到当前版面框" in page_error_message(result.pages[0])
+        assert "unmatched=1" in page_error_message(result.pages[0])
     finally:
         os.unlink(img_path)
 
@@ -13333,7 +13330,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 text="汉王",
                 ppvl_text="PPVL文本",
                 group_count=1,
-                raw_block={"block_label": "text", "block_content": "PPVL文本", "extra": {"role": "body"}},
+                raw_block=dict(ppvl_blocks[0]),
                 lines=[
                     LineResult(
                         text="汉王",
@@ -13353,7 +13350,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 source="ppvl",
                 text="$$x+y$$",
                 ppvl_text="$$x+y$$",
-                raw_block={"block_label": "display_formula", "block_content": "$$x+y$$", "formula_format": "latex"},
+                raw_block=dict(ppvl_blocks[1]),
                 lines=[LineResult(text="$$x+y$$", bbox=(20, 80, 180, 120), source="ppvl")],
             ),
             BlockResult(
@@ -13363,7 +13360,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                 source="hanwang",
                 text="",
                 ppvl_text="参考文献",
-                raw_block={"block_label": "reference", "block_content": "参考文献", "ref_level": 1},
+                raw_block=dict(ppvl_blocks[2]),
                 lines=[],
             ),
         ], RunStats(n_blocks_total=3, n_blocks_hanwang=2, n_blocks_ppvl=1, n_blocks_fallback=0)
@@ -13401,6 +13398,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
                     bbox=BBox.from_xyxy(20, 80, 180, 120),
                     source_label="display_formula",
                     origin=BlockOrigin(source_label="display_formula", raw_index=1),
+                    ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
                 ),
                 Block(
                     block_type=BlockType.REFERENCE,
@@ -13429,6 +13427,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
             [20, 140, 180, 180],
         ]
         assert [block["block_content"] for block in calls[0][0]] == ["PPVL文本", "$$x+y$$", "参考文献"]
+        assert all(block.get("_layout_block_uid") for block in calls[0][0])
         assert calls[0][1]["include_chars"] is True
         assert len(calls[0][1]["page_ocr_lines"]) == 1
         assert calls[0][1]["page_ocr_lines"][0].text == "预识别"
@@ -13466,7 +13465,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert out_page.blocks[2].origin.raw_index == 2
         snapshot = layout_snapshot_for_page(out_page)
         assert snapshot is not None
-        assert snapshot.source_engine == "hanwang.micro_recblock"
+        assert snapshot.source_engine != "hanwang.micro_recblock"
         assert [block.uid for block in out_page.blocks] == [block.uid for block in snapshot.blocks]
         assert [block.block_type for block in snapshot.blocks] == [
             BlockType.TEXT,

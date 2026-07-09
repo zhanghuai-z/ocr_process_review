@@ -503,7 +503,7 @@ def test_layout_block_view_boundary_is_used_by_migrated_consumers():
     assert "app.models.layout_projection" not in edit_source
 
     ocr_source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
-    assert "replace_page_layout_projection_from_snapshot" in ocr_source
+    assert "replace_page_layout_projection_from_snapshot" not in ocr_source
     assert "app.models.layout_projection" not in ocr_source
 
     controller_source = Path("app/controllers/workflow_controller.py").read_text(encoding="utf-8")
@@ -511,8 +511,38 @@ def test_layout_block_view_boundary_is_used_by_migrated_consumers():
     assert "app.models.layout_projection" not in controller_source
 
     hanwang_source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
-    assert "replace_page_layout_projection_from_snapshot" in hanwang_source
+    assert "replace_page_layout_projection_from_snapshot" not in hanwang_source
     assert "app.models.layout_projection" not in hanwang_source
+
+
+def test_ocr_layer_cannot_write_layout_snapshot_or_layout_block_state():
+    forbidden_tokens = {
+        "set_layout_snapshot_for_page",
+        "replace_page_layout_projection_from_snapshot",
+        "sync_page_layout_snapshot_from_projection",
+        "adopt_page_layout_snapshot",
+        "layout_block_snapshot_from_projection_block",
+        "LayoutSnapshot(",
+        "LayoutBlockSnapshot(",
+        "set_layout_block_bbox",
+        "set_layout_block_type",
+        "set_layout_block_order",
+        "set_layout_block_source_label",
+        "set_layout_block_ocr_policy",
+    }
+    scanned = [
+        Path("app/services/ocr_pipeline.py"),
+        *Path("app/engines/hanwang").rglob("*.py"),
+    ]
+
+    offenders: list[str] = []
+    for path in scanned:
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            if token in source:
+                offenders.append(f"{path}: {token}")
+
+    assert offenders == []
 
 
 def test_layout_snapshot_docs_do_not_name_current_projection_legacy():

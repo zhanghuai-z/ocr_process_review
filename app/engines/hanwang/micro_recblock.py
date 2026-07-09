@@ -21,16 +21,9 @@ from app.models.block_state import (
     set_paddle_binding,
 )
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_snapshot import LayoutSnapshot
-from app.models.layout_snapshot_projection import (
-    layout_block_snapshot_from_projection_block,
-    replace_page_layout_projection_from_snapshot,
-)
-from app.models.layout_snapshot_store import set_layout_snapshot_for_page
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, replace_block_ocr_line_observations
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
-from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
 from app.core.ocr_line_hints import is_ppocr_page_line_hint
 from app.core.logging import get_logger
 from app.core.latin_span_recovery import (
@@ -103,13 +96,10 @@ from app.engines import OCR_BBOX_SPACE_PAGE
 from app.models import (
     BBox,
     Block,
-    BlockOrigin,
-    BlockSource,
     BlockType,
     Char,
     Line,
     OcrPolicy,
-    PaddleBinding,
     Page,
     ProofLineState,
 )
@@ -117,9 +107,6 @@ from app.models.layout_block_state import (
     block_source_value,
     is_user_authored_layout_block,
     is_user_authored_layout_source,
-    set_layout_block_ocr_policy,
-    set_layout_block_order,
-    set_layout_block_source_label,
 )
 from app.models.ocr_character_observation import replace_line_ocr_char_observations
 from app.models.ocr_text_observation import create_ocr_text_line
@@ -135,6 +122,7 @@ def _replace_line_result_char_span(line: "LineResult", start: int, end: int, cha
 
 ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
+ROUTE_ROW_LAYOUT_BLOCK_UID_KEY = "_layout_block_uid"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
@@ -308,7 +296,6 @@ class _TextRoute:
 @dataclass(frozen=True)
 class _LayoutOcrInputPlan:
     rows: tuple[dict[str, Any], ...]
-    preserved_manual_blocks: tuple[Block, ...]
 
 
 @dataclass(frozen=True)
@@ -3103,6 +3090,7 @@ def _layout_row_from_block(
         "block_bbox": list(layout_bbox.to_xyxy()),
         "block_content": _layout_block_content(block, raw_payload, note=note),
         "source_label": source_label,
+        ROUTE_ROW_LAYOUT_BLOCK_UID_KEY: view.uid if view is not None else block.uid,
         "_layout_block_source": block_source_value(block),
         "_layout_block_ocr_policy": ocr_policy.value,
     }
@@ -3121,48 +3109,13 @@ def _layout_row_from_block(
     return row
 
 
-def _persistent_state_from_route_row(
-    raw_block: dict[str, Any],
-) -> tuple[PaddleBinding | None, dict[str, Any]]:
-    """Extract typed persisted state from the current Hanwang route row.
-
-    Route rows temporarily carry app-owned data such as paddle binding and
-    Hanwang bbox audit next to vendor fields. Persisted ``Block`` objects keep
-    those fields in typed state; route rows are not copied back into a raw
-    payload attribute.
-    """
-    route_row = dict(raw_block or {})
-    binding = route_row.pop(ROUTE_ROW_PADDLE_BINDING_KEY, None)
-    audit = route_row.pop(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, None)
-    return (
-        PaddleBinding.from_dict(binding if isinstance(binding, dict) else None),
-        dict(audit) if isinstance(audit, dict) else {},
-    )
-
-
-def _origin_from_route_row(
-    page: Page,
-    row: LayoutRouteRow,
-    *,
-    block_type: BlockType,
-    bbox: BBox,
-) -> BlockOrigin:
-    raw_block = dict(row.raw_block or {})
-    raw_index = _int_value(raw_block.get("_layout_paddle_parent_index"))
-    if raw_index < 0:
-        raw_index = _parent_index_for_raw_payload(page, raw_block)
-    artifact = page.raw_layout_artifact
-    return BlockOrigin(
-        created_by=BlockSource.AUTO_LAYOUT.value,
-        source_engine=str(getattr(artifact, "engine", "") or "paddleocr-vl"),
-        source_run_id=str(getattr(artifact, "run_id", "") or ""),
-        source_label=row.block_label,
-        original_bbox=bbox,
-        original_kind=block_type,
-        raw_artifact_uid=str(getattr(artifact, "uid", "") or ""),
-        raw_json_path=str(getattr(artifact, "artifact_path", "") or ""),
-        raw_index=raw_index if raw_index >= 0 else None,
-    )
+def _layout_block_uid_from_route_row(row: BlockResult) -> str:
+    uid = str(dict(row.raw_block or {}).get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
+    if not uid:
+        raise RuntimeError(
+            "Hanwang route row missing layout block uid; OCR cannot write layout observations safely"
+        )
+    return uid
 
 
 def _layout_block_content(
@@ -3454,7 +3407,6 @@ def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
             parent_rows[parent_index] = row
 
     skip_block_ids: set[int] = set()
-    preserved_manual_blocks: list[Block] = []
     for entry in entries:
         block = entry.block
         row = entry.row
@@ -3480,8 +3432,6 @@ def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
                 entry=entry,
             )
         skip_block_ids.add(id(block))
-        if is_user_authored_layout_block(block):
-            preserved_manual_blocks.append(block)
 
     blocks: list[dict] = []
     for entry in entries:
@@ -3491,7 +3441,6 @@ def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
         blocks.append(entry.row)
     return _LayoutOcrInputPlan(
         rows=tuple(blocks),
-        preserved_manual_blocks=tuple(preserved_manual_blocks),
     )
 
 
@@ -3520,11 +3469,6 @@ def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
         and line.bbox.area > 0
         and is_ppocr_page_line_hint(line)
     ]
-
-
-def _routed_manual_structure_blocks(page: Page) -> list[Block]:
-    """Manual structural boxes consumed by parent routing must survive OCR writeback."""
-    return list(_compile_layout_ocr_input_plan(page).preserved_manual_blocks)
 
 
 def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
@@ -3572,8 +3516,6 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         "manual_bbox": bbox_xyxy,
         "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
     }
-    set_layout_block_source_label(block, "inline_formula")
-    set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, binding)
     clear_ocr_text_invalidation(block)
     replace_block_ocr_line_observations(block.uid, [
@@ -3593,8 +3535,6 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
     flags = ["manual_formula_needs_text"]
     if reason:
         flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
-    set_layout_block_source_label(block, "inline_formula")
-    set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
     set_paddle_binding(block, {
             "status": BINDING_EMPTY_REVIEW,
             "source": "paddle_formula_crop_ocr_empty",
@@ -3700,10 +3640,14 @@ class HanwangMicroRecBlockEngine:
             progress_callback=progress_callback,
         )
         input_plan = _compile_layout_ocr_input_plan(page)
-        preserved_manual_blocks = list(input_plan.preserved_manual_blocks)
         ppvl_blocks = deepcopy(list(input_plan.rows))
         if not ppvl_blocks:
             raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
+        expected_uids = {
+            str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
+            for row in ppvl_blocks
+        }
+        expected_uids.discard("")
 
         rows, stats = self._runner(
             image_bgr,
@@ -3715,10 +3659,12 @@ class HanwangMicroRecBlockEngine:
             progress_callback=progress_callback,
         )
 
-        new_blocks: list[Block] = []
         height, width = image_bgr.shape[:2]
-        for order, row in enumerate(rows):
-            bbox = _bbox_from_xyxy_tuple(row.block_bbox, width, height)
+        written_uids: set[str] = set()
+        line_updates: list[tuple[str, list[Line]]] = []
+        for row in rows:
+            block_uid = _layout_block_uid_from_route_row(row)
+            written_uids.add(block_uid)
             block_type = map_paddle_label_to_block_type(row.block_label)
             flags: list[str] = []
             if (
@@ -3743,50 +3689,15 @@ class HanwangMicroRecBlockEngine:
                         flags,
                     )
                 ]
-            note_parts = [
-                f"source_label={row.block_label}",
-                f"micro_recblock_source={row.source}",
-            ]
-            if row.ppvl_text:
-                note_parts.append(f"ppvl_text={row.ppvl_text[:120]}")
-            paddle_binding, ocr_audit = _persistent_state_from_route_row(row.raw_block)
-            audit = ocr_audit
-            if isinstance(audit, dict):
-                failed_groups = int(audit.get("hanwang_recog_group_failed_count") or 0)
-                if failed_groups:
-                    note_parts.append(f"hanwang_recog_group_failed={failed_groups}")
-                if audit.get("paddle_label_unknown"):
-                    note_parts.append(f"unknown_paddle_label={row.block_label}")
-            new_block = Block(
-                block_type=block_type,
-                bbox=bbox,
-                order=order,
-                source=BlockSource.AUTO_LAYOUT,
-                note=" | ".join(note_parts),
-                source_label=row.block_label,
-                origin=_origin_from_route_row(page, row, block_type=block_type, bbox=bbox),
-                paddle_binding=paddle_binding,
-                ocr_audit=ocr_audit,
+            line_updates.append((block_uid, lines))
+        missing_uids = sorted(expected_uids - written_uids)
+        if missing_uids:
+            raise RuntimeError(
+                "Hanwang OCR did not return rows for layout blocks: "
+                + ", ".join(missing_uids[:5])
             )
-            replace_block_ocr_line_observations(new_block.uid, lines)
-            set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
-            if row.source != "hanwang" and new_block.ocr_policy == OcrPolicy.TEXT_OCR:
-                set_layout_block_ocr_policy(new_block, OcrPolicy.MANUAL_ONLY)
-            new_blocks.append(new_block)
-
-        if preserved_manual_blocks:
-            new_blocks.extend(preserved_manual_blocks)
-        for order, block in enumerate(new_blocks):
-            set_layout_block_order(block, order)
-        snapshot = LayoutSnapshot(
-            page_uid=page.uid,
-            artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
-            source_engine=self.engine_id,
-            source_run_id=page.raw_layout_artifact.run_id if page.raw_layout_artifact else "",
-            blocks=tuple(layout_block_snapshot_from_projection_block(block) for block in new_blocks),
-        )
-        set_layout_snapshot_for_page(page, snapshot)
-        replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=new_blocks)
+        for block_uid, lines in line_updates:
+            replace_block_ocr_line_observations(block_uid, lines)
         logger.info(
             "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
             "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "

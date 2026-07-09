@@ -26,19 +26,13 @@ from app.core.ocr_dispatch_policy import (
 )
 from app.core.ocr_line_hints import is_ppocr_page_line_hint, mark_ppocr_page_line_hint
 from app.core.page_errors import is_ocr_error_message
-from app.core.spatial_matching import merge_bboxes, select_container_block_for_line
+from app.core.spatial_matching import select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
 from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
-    Block, BlockType, BBox, LayoutSnapshot, Line, OcrProject, Page,
+    Block, BlockType, BBox, Line, OcrProject, Page,
 )
-from app.models.layout_block_state import append_layout_block_note_once, set_layout_block_bbox
-from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
-from app.models.layout_snapshot_projection import (
-    layout_block_snapshot_from_projection_block,
-    replace_page_layout_projection_from_snapshot,
-)
-from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+from app.models.layout_block_state import append_layout_block_note_once
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, set_ocr_char_bbox
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
@@ -657,34 +651,11 @@ class OcrPipeline:
             else:
                 assigned.setdefault(target.block.uid, []).append(line)
 
+        if unmatched:
+            raise RuntimeError(self._unmatched_ocr_lines_message(page, unmatched))
+
         for target in containers:
             replace_block_ocr_line_observations(target.block.uid, assigned.get(target.block.uid, []))
-
-        if not unmatched:
-            return
-        merged = self._merge_line_bboxes(unmatched)
-        if merged is None:
-            return
-        synthetic = Block(
-            block_type=BlockType.TEXT,
-            bbox=merged,
-            order=(max((view.order for view in iter_page_layout_block_views(page)), default=-1) + 1),
-            note="PP-OCRv5 unmatched proof lines",
-        )
-        replace_block_ocr_line_observations(synthetic.uid, unmatched)
-        snapshot = current_layout_snapshot(page)
-        next_snapshot = LayoutSnapshot(
-            page_uid=snapshot.page_uid,
-            artifact_uid=snapshot.artifact_uid,
-            source_engine="ocr_pipeline_unmatched_lines",
-            source_run_id=synthetic.uid,
-            blocks=(
-                *snapshot.blocks,
-                layout_block_snapshot_from_projection_block(synthetic),
-            ),
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(page, next_snapshot, candidate_blocks=[synthetic])
 
     def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
         """Assign PP-OCRv5 geometry hints to text containers for Hanwang routing.
@@ -710,8 +681,18 @@ class OcrPipeline:
         """Public wrapper used when PP-OCRv5 proof lines finish before layout."""
         self._assign_page_ocr_lines_to_blocks(page, lines)
 
-    def _merge_line_bboxes(self, lines: list[Line]) -> BBox | None:
-        return merge_bboxes([line_ocr_bbox(line) for line in lines])
+    @staticmethod
+    def _unmatched_ocr_lines_message(page: Page, lines: list[Line]) -> str:
+        bboxes = [
+            line_ocr_bbox(line).to_xyxy()
+            for line in lines[:5]
+            if line_ocr_bbox(line) is not None
+        ]
+        suffix = f"，示例 bbox={bboxes}" if bboxes else ""
+        return (
+            f"PP-OCR 行无法归属到当前版面框：page_uid={page.uid} "
+            f"page_number={page.page_number} unmatched={len(lines)}{suffix}"
+        )
 
     def process_block(
         self,
@@ -731,16 +712,8 @@ class OcrPipeline:
             image_path=page_image_path,
             width=img.shape[1],
             height=img.shape[0],
+            blocks=[block],
         )
-        snapshot = LayoutSnapshot(
-            page_uid=page.uid,
-            artifact_uid="",
-            source_engine="ocr_pipeline_process_block",
-            source_run_id=block.uid,
-            blocks=(layout_block_snapshot_from_projection_block(block),),
-        )
-        set_layout_snapshot_for_page(page, snapshot)
-        replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=[block])
         lines = self._process_block(img, block, page, 0)
         replace_block_ocr_line_observations(block.uid, lines)
         self._normalize_proof_crops(
@@ -767,7 +740,6 @@ class OcrPipeline:
             return []
 
         bb = block.bbox.normalize().clamp(img.shape[1], img.shape[0])
-        set_layout_block_bbox(block, bb)
         # clamp to image boundaries
         x1 = max(0, bb.x)
         y1 = max(0, bb.y)
