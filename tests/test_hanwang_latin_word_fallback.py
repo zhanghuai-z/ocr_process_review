@@ -37,6 +37,27 @@ def _eng20_payload(text: str, *, overlap_of: bool = False) -> dict:
     return {"lines": [{"groups": [{"chars": chars}]}]}
 
 
+def _eng20_grouped_payload(groups: list[str]) -> dict:
+    payload_groups = []
+    cursor = 0
+    for text in groups:
+        chars = []
+        for idx, char in enumerate(text):
+            left = cursor + idx * 10
+            chars.append({
+                "codes": [ord(char)],
+                "bbox": {
+                    "left": left,
+                    "top": 2,
+                    "right": left + 8,
+                    "bottom": 22,
+                },
+            })
+        cursor += len(text) * 10 + 12
+        payload_groups.append({"chars": chars})
+    return {"lines": [{"groups": payload_groups}]}
+
+
 def _linecut_payload(text: str) -> dict:
     chars = []
     for idx, char in enumerate(text):
@@ -152,6 +173,46 @@ def test_overlap_merge_does_not_rewrite_low_conf_digit_string_as_percent():
     assert stats.overlap_merge_clusters == 1
     assert stats.overlap_merge_probe_calls == 1
     assert stats.overlap_merge_replacements == 0
+
+
+def test_text_latin_route_uses_engcut_without_linecut():
+    from app.core.paddle_line_routing import PageOcrLineHint
+
+    image = np.full((80, 240, 3), 255, dtype=np.uint8)
+    blocks = [{
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 50],
+        "block_content": "Urban Crisis",
+    }]
+    linecut_called = False
+
+    def fake_linecut(*_args, **_kwargs):
+        nonlocal linecut_called
+        linecut_called = True
+        raise AssertionError("LineCut should not receive text_latin routes")
+
+    original_linecut = micro_module.native_bridge.run_linecut_segimg
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_linecut_segimg = fake_linecut
+    micro_module.native_bridge.run_eng20_recogline = (
+        lambda image_bgr, *, timeout=0: _eng20_grouped_payload(["Urban", "Crisis"])
+    )
+    try:
+        rows, stats = micro_module.run_micro_recblock(
+            image,
+            blocks,
+            page_ocr_lines=[PageOcrLineHint(text="Urban Crisis", bbox=(0, 0, 220, 40))],
+        )
+    finally:
+        micro_module.native_bridge.run_linecut_segimg = original_linecut
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    assert linecut_called is False
+    assert stats.latin_engcut_probe_calls == 1
+    assert len(rows) == 1
+    assert rows[0].lines[0].text == "Urban Crisis"
+    assert rows[0].lines[0].source == "hanwang:EngCut:latin_route"
+    assert [char.text for char in rows[0].lines[0].chars] == list("Urban Crisis")
 
 
 def test_latin_engcut_overlapped_exact_word_becomes_word_granularity():

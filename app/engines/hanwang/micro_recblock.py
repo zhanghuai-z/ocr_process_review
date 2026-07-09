@@ -136,6 +136,7 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 LATIN_ENGCUT_TEXT_REWRITE_MAX_CONFIDENCE = 0.25
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
+LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
 _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
@@ -294,6 +295,10 @@ class _TextRoute:
     @property
     def key(self) -> tuple[int, int, int]:
         return self.block_idx, self.line_idx, self.segment_idx
+
+
+def _is_latin_text_route(route: _TextRoute) -> bool:
+    return route.kind == "text_latin"
 
 
 @dataclass(frozen=True)
@@ -2060,6 +2065,84 @@ def _line_has_text_token(line: LineResult) -> bool:
     return bool(text_token_spans(line.text, skip_formula_spans=False))
 
 
+def _engcut_route_line_text_and_chars(
+    chars: list[EngcutChar],
+) -> tuple[str, list[CharResult]]:
+    text_parts: list[str] = []
+    results: list[CharResult] = []
+    previous_group: tuple[int, int] | None = None
+    for char in chars:
+        text = str(char.text or "")
+        if not text:
+            continue
+        group = (char.line_index, char.group_index)
+        if previous_group is not None and group != previous_group:
+            text_parts.append(" ")
+            results.append(
+                CharResult(
+                    text=" ",
+                    confidence=0.0,
+                    bbox=None,
+                    candidates=[" "],
+                    source=LATIN_ENGCUT_ROUTE_SOURCE,
+                    bbox_granularity="space",
+                    token_text=" ",
+                )
+            )
+        text_parts.append(text)
+        results.append(
+            CharResult(
+                text=text,
+                confidence=0.0,
+                bbox=char.bbox,
+                candidates=[text],
+                source=LATIN_ENGCUT_ROUTE_SOURCE,
+                bbox_granularity="char",
+                token_text=text,
+            )
+        )
+        previous_group = group
+    return "".join(text_parts), results
+
+
+def _recognize_text_latin_route_with_engcut(
+    image_bgr: np.ndarray,
+    route: _TextRoute,
+    stats: RunStats,
+    *,
+    timeout: float,
+) -> LineResult:
+    height, width = image_bgr.shape[:2]
+    x1, y1, x2, y2 = _expand_xyxy(
+        route.bbox,
+        width,
+        height,
+        pad_x=ENGCUT_LINE_CROP_PAD_X,
+        pad_y=ENGCUT_LINE_CROP_PAD_Y,
+    )
+    if x2 <= x1 or y2 <= y1:
+        raise RuntimeError(f"invalid text_latin route bbox: {route.bbox}")
+    crop = image_bgr[y1:y2, x1:x2].copy()
+    if crop.size == 0:
+        raise RuntimeError(f"empty text_latin route crop: {route.bbox}")
+    stats.latin_engcut_probe_calls += 1
+    raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
+    page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=x1, dy=y1)
+    text, chars = _engcut_route_line_text_and_chars(page_chars)
+    if not text or not any(char.text.strip() for char in chars):
+        raise RuntimeError(f"EngCut returned no text for text_latin route bbox={route.bbox}")
+    boxes = [char.bbox for char in chars if char.bbox is not None]
+    return LineResult(
+        text=text,
+        bbox=union_xyxy(boxes) if boxes else route.bbox,
+        confidence=0.0,
+        chars=chars,
+        source=LATIN_ENGCUT_ROUTE_SOURCE,
+        bbox_source="text_latin_route_engcut",
+        review_flags=[],
+    )
+
+
 def _subsequence_length(left: str, right: str) -> int:
     if not left or not right:
         return 0
@@ -2209,6 +2292,8 @@ def _enhance_lines_with_latin_engcut(
     target_orders = _engcut_target_line_orders(lines, block_tokens)
     records: list[_EngcutLine] = []
     for order, line in enumerate(lines):
+        if line.source == LATIN_ENGCUT_ROUTE_SOURCE:
+            continue
         if not line.text or not line.chars:
             continue
         if order not in target_orders:
@@ -2494,7 +2579,9 @@ def run_micro_recblock(
         for route in routes:
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
-    text_route_recblocks = [route.bbox for route in text_routes]
+    latin_text_routes = [route for route in text_routes if _is_latin_text_route(route)]
+    linecut_text_routes = [route for route in text_routes if not _is_latin_text_route(route)]
+    text_route_recblocks = [route.bbox for route in linecut_text_routes]
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
@@ -2519,19 +2606,22 @@ def run_micro_recblock(
 
     if text_routes:
         recblocks = text_route_recblocks
-        if progress_callback:
+        if progress_callback and linecut_text_routes:
             progress_callback(
                 0,
-                max(1, len(text_routes)),
+                max(1, len(linecut_text_routes)),
                 "Hanwang micro-recblock SegImg 分块中…",
             )
-        started = time.time()
-        seg = native_bridge.run_linecut_segimg(
-            image_bgr,
-            recblocks_xyxy=recblocks,
-            timeout=seg_timeout,
-        )
-        stats.seg_seconds = time.time() - started
+        if linecut_text_routes:
+            started = time.time()
+            seg = native_bridge.run_linecut_segimg(
+                image_bgr,
+                recblocks_xyxy=recblocks,
+                timeout=seg_timeout,
+            )
+            stats.seg_seconds = time.time() - started
+        else:
+            seg = {"lines": []}
 
         groups: list[dict] = []
         for area_idx, area in enumerate(seg.get("lines", []) or []):
@@ -2551,12 +2641,21 @@ def run_micro_recblock(
             route.key: []
             for route in text_routes
         }
+        for route in latin_text_routes:
+            grouped_lines[route.key].append(
+                _recognize_text_latin_route_with_engcut(
+                    image_bgr,
+                    route,
+                    stats,
+                    timeout=min(30.0, max(1.0, float(recog_timeout))),
+                )
+            )
         total_groups = max(1, len(groups))
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []
         for group in groups:
             recblock = recblocks[group["_area_idx"]]
-            route = text_routes[group["_area_idx"]]
+            route = linecut_text_routes[group["_area_idx"]]
             raw_group_bbox = _clamp_xyxy(
                 _bbox_tuple(group.get("bbox"), recblock),
                 width,
@@ -2592,7 +2691,7 @@ def run_micro_recblock(
             recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
 
         def update_recog_group_audit(placement: _GroupPlacement, values: dict[str, Any]) -> None:
-            route = text_routes[placement.area_idx]
+            route = linecut_text_routes[placement.area_idx]
             audits = segimg_group_audits_by_route.setdefault(route.key, [])
             for item in audits:
                 if item.get("recog_group_bbox") == list(placement.page_bbox):
@@ -2735,7 +2834,7 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                route = text_routes[placement.area_idx]
+                route = linecut_text_routes[placement.area_idx]
                 offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
                 grouped_lines[route.key].extend(
                     _filter_line_results_to_route_bbox(offset_lines, route.bbox)
@@ -2768,7 +2867,7 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                route = text_routes[placement.area_idx]
+                route = linecut_text_routes[placement.area_idx]
                 offset_lines = _offset_line_results(
                     local_lines,
                     dx=placement.page_bbox[0],
