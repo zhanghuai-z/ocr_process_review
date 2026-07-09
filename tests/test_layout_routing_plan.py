@@ -274,6 +274,42 @@ def test_page_ocr_line_route_attachment_builds_without_mutating_blocks():
     assert parent[LAYOUT_LINE_ROUTES_FIELD] is attachment.route_records_by_block_index[0]
 
 
+def test_ppocr_latin_line_hint_marks_text_latin_segment():
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 50],
+        "block_content": "Urban Crisis 2026",
+    }
+
+    attachment = build_page_ocr_line_route_attachment(
+        [parent],
+        [PageOcrLineHint(text="Urban Crisis 2026", bbox=(0, 0, 220, 40))],
+        240,
+        80,
+    )
+
+    route = attachment.route_records_by_block_index[0][0]
+    assert [segment["kind"] for segment in route["segments"]] == ["text_latin"]
+
+
+def test_ppocr_mixed_line_hint_stays_generic_text_until_splitter_runs():
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 50],
+        "block_content": "城市 Urban Crisis",
+    }
+
+    attachment = build_page_ocr_line_route_attachment(
+        [parent],
+        [PageOcrLineHint(text="城市 Urban Crisis", bbox=(0, 0, 220, 40))],
+        240,
+        80,
+    )
+
+    route = attachment.route_records_by_block_index[0][0]
+    assert [segment["kind"] for segment in route["segments"]] == ["text"]
+
+
 def test_page_ocr_line_route_attachment_clears_stale_routes_explicitly():
     parent = {
         "block_label": "text",

@@ -7,7 +7,7 @@ from typing import Any
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.ocr_ir import is_formula_marker_token, is_formula_token
+from app.core.ocr_ir import is_cjk_char, is_formula_marker_token, is_formula_token
 from app.core.layout_routing_contract import (
     RoutingLine,
     RoutingPlan,
@@ -208,8 +208,10 @@ def _horizontal_gap_segments(
     subblocks: list[dict[str, Any]],
     formula_texts_by_bbox: dict[tuple[int, int, int, int], str],
     parent_text: str = "",
+    line_text: str = "",
 ) -> list[dict[str, Any]]:
     lx1, ly1, lx2, ly2 = line_bbox
+    text_kind = _text_segment_kind_for_ppocr_line_text(line_text)
     cuts: list[dict[str, Any]] = []
     for subblock in subblocks:
         sub_bbox = tuple(subblock["bbox"])
@@ -236,23 +238,24 @@ def _horizontal_gap_segments(
         )
     cuts.sort(key=lambda item: (item["bbox"][0], item["bbox"][1]))
     if not cuts:
-        return [{"kind": "text", "bbox": line_bbox}]
+        return [{"kind": text_kind, "bbox": line_bbox}]
 
     segments: list[dict[str, Any]] = []
     cursor = lx1
     for cut in cuts:
         cx1, cy1, cx2, cy2 = cut["bbox"]
         if cx1 > cursor:
-            segments.append({"kind": "text", "bbox": (cursor, ly1, cx1, ly2)})
+            segments.append({"kind": text_kind, "bbox": (cursor, ly1, cx1, ly2)})
         segments.append({**cut, "bbox": (max(cx1, lx1), cy1, min(cx2, lx2), cy2)})
         cursor = max(cursor, cx2)
     if cursor < lx2:
-        segments.append({"kind": "text", "bbox": (cursor, ly1, lx2, ly2)})
+        segments.append({"kind": text_kind, "bbox": (cursor, ly1, lx2, ly2)})
     segments = _restore_expected_inter_formula_text_gaps(
         line_bbox,
         segments,
         cuts,
         parent_text,
+        text_kind,
     )
     return [
         segment for segment in segments
@@ -265,6 +268,7 @@ def _restore_expected_inter_formula_text_gaps(
     segments: list[dict[str, Any]],
     cuts: list[dict[str, Any]],
     parent_text: str,
+    text_kind: str = "text",
 ) -> list[dict[str, Any]]:
     formula_cuts = [
         cut for cut in cuts
@@ -302,7 +306,7 @@ def _restore_expected_inter_formula_text_gaps(
             continue
         restored.append(
             {
-                "kind": "text",
+                "kind": text_kind,
                 "label": "inter_formula_text_gap",
                 "bbox": gap_bbox,
                 "text": between_text.strip(),
@@ -336,6 +340,22 @@ def _match_formula_cuts_to_parent_spans(
 
 def _has_visible_inter_formula_text(text: str) -> bool:
     return any(not ch.isspace() for ch in str(text or ""))
+
+
+def _text_segment_kind_for_ppocr_line_text(text: str) -> str:
+    """Classify a whole PP-OCR physical line for routing.
+
+    Mixed lines remain generic ``text`` until a separate mask/token splitter
+    produces explicit child segments.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return "text"
+    if any(is_cjk_char(ch) for ch in value):
+        return "text"
+    if any(ch.isascii() and ch.isalnum() for ch in value):
+        return "text_latin"
+    return "text"
 
 
 def _inter_formula_text_gap_bbox(
@@ -509,6 +529,7 @@ def build_page_ocr_line_route_attachment(
                     routed_subblocks,
                     formula_texts_by_bbox,
                     block_text(block),
+                    line.text,
                 ),
                 source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
             )
