@@ -13776,6 +13776,96 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
     print("test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass PASSED")
 
 
+def test_ocr_pipeline_parallel_hanwang_page_failure_does_not_stop_other_pages():
+    import os
+    import tempfile
+    import cv2
+    import numpy as np
+    from app.engines.hanwang.micro_recblock import BlockResult, HanwangMicroRecBlockEngine, LineResult, RunStats
+    from app.models import BBox, Block, BlockOrigin, BlockType, OcrProject, Page
+    from app.models.page_state import page_error_message
+    from app.services.ocr_pipeline import OcrPipeline
+
+    def fake_runner(image_bgr, ppvl_blocks, **kwargs):
+        page_name = ppvl_blocks[0]["block_content"]
+        if page_name == "p1":
+            raise RuntimeError("latin route failed")
+        return [
+            BlockResult(
+                block_idx=0,
+                block_label="text",
+                block_bbox=(0, 0, 80, 40),
+                source="hanwang",
+                text="完成p2",
+                ppvl_text=page_name,
+                lines=[
+                    LineResult(
+                        text="完成p2",
+                        bbox=(0, 0, 80, 40),
+                        chars=[],
+                    )
+                ],
+                raw_block=dict(ppvl_blocks[0]),
+            )
+        ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
+
+    class FakePrepassEngine:
+        prefer_page_ocr = True
+        bbox_space = "page"
+
+        def recognize(self, image_bgr, context):
+            return []
+
+    paths = []
+    try:
+        for _ in range(2):
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                path = f.name
+            cv2.imwrite(path, np.ones((80, 100, 3), dtype=np.uint8) * 255)
+            paths.append(path)
+
+        pages = []
+        for index, name in enumerate(("p1", "p2"), start=1):
+            pages.append(Page(
+                image_path=paths[index - 1],
+                width=100,
+                height=80,
+                page_number=index,
+                blocks=[
+                    Block(
+                        block_type=BlockType.TEXT,
+                        bbox=BBox.from_xyxy(0, 0, 80, 40),
+                        source_label="text",
+                        origin=BlockOrigin(source_label="text", raw_index=0),
+                    )
+                ],
+                raw_layout_artifact=_paddle_layout_artifact([
+                    {"block_label": "text", "block_bbox": [0, 0, 80, 40], "block_content": name},
+                ]),
+            ))
+
+        pipeline = OcrPipeline(
+            engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            page_concurrency=2,
+        )
+        pipeline._hybrid_page_ocr_prepass_engine = lambda: FakePrepassEngine()
+        result = pipeline.process_project(OcrProject(name="parallel-hanwang-failure", pages=pages))
+
+        assert result.failed_blocks == [(0, -1, "latin route failed")]
+        assert "latin route failed" in page_error_message(result.pages[0])
+        assert page_error_message(result.pages[1]) == ""
+        assert _block_ocr_observations(result.pages[0].blocks[0]) == []
+        assert _block_ocr_observations(result.pages[1].blocks[0])[0].text == "完成p2"
+    finally:
+        for path in paths:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    print("test_ocr_pipeline_parallel_hanwang_page_failure_does_not_stop_other_pages PASSED")
+
+
 def test_hanwang_page_blocks_from_layout_preserves_raw_source_label():
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockOrigin, BlockType, Page
