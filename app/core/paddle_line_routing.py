@@ -12,6 +12,8 @@ from app.core.layout_routing_contract import (
     RoutingLine,
     RoutingPlan,
     TextSliceRoute,
+    is_text_route_segment_kind,
+    normalize_route_segment_kind,
     routing_line_from_record,
     routing_line_to_record,
     text_slice_to_record,
@@ -362,7 +364,7 @@ def _text_segment_covers_gap(
 ) -> bool:
     gap_center = (gap_bbox[0] + gap_bbox[2]) / 2.0
     for segment in segments:
-        if segment.get("kind") != "text":
+        if not is_text_route_segment_kind(str(segment.get("kind") or "")):
             continue
         bbox = tuple(segment["bbox"])
         if vertical_overlap_ratio(bbox, gap_bbox) < 0.25:
@@ -942,7 +944,7 @@ def _filter_thin_text_artifact_routes(routes: list[dict[str, Any]]) -> list[dict
             filtered.append(route)
             continue
         segments = route.get("segments", [])
-        if not segments or any(segment.get("kind") != "text" for segment in segments):
+        if not segments or any(not is_text_route_segment_kind(str(segment.get("kind") or "")) for segment in segments):
             filtered.append(route)
             continue
         height = int(route["bbox"][3]) - int(route["bbox"][1])
@@ -1124,7 +1126,7 @@ def _normalize_cached_line_routes(
             bbox = block_bbox_xyxy({"block_bbox": segment.get("bbox")}, width, height)
             normalized_segments.append(
                 {
-                    "kind": str(segment.get("kind") or "").strip() or "text",
+                    "kind": normalize_route_segment_kind(segment.get("kind")),
                     "label": str(segment.get("label") or ""),
                     "bbox": list(bbox),
                     "text": str(segment.get("text") or ""),
@@ -1175,7 +1177,7 @@ def _text_slice_routes_from_lines(
     slices: list[TextSliceRoute] = []
     for line in lines:
         for segment_idx, segment in enumerate(line.segments):
-            if segment.kind != "text":
+            if not is_text_route_segment_kind(segment.kind):
                 continue
             slices.append(
                 TextSliceRoute(

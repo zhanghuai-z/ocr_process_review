@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from app.core.layout_routing_contract import routing_segment_from_record
 from app.services.layout_routing_plan import (
     RoutingLine,
     RoutingSegment,
@@ -68,6 +71,42 @@ def test_routing_plan_preserves_ppocr_runtime_route_source():
     assert plan.text_slices[0].bbox == (0, 0, 120, 30)
 
 
+def test_routing_contract_rejects_catch_all_segment_kinds():
+    for kind in ("text_mixed", "unknown"):
+        with pytest.raises(ValueError):
+            routing_segment_from_record({"kind": kind, "bbox": [0, 0, 10, 10]})
+
+
+def test_explicit_text_segment_kinds_are_text_slices():
+    block = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 80],
+        LAYOUT_LINE_ROUTES_FIELD: [
+            {
+                "bbox": [0, 0, 160, 30],
+                LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+                "segments": [
+                    {"kind": "text_zh", "bbox": [0, 0, 60, 30], "text": ""},
+                    {"kind": "formula", "bbox": [60, 0, 100, 30], "text": "$ A $"},
+                    {"kind": "text_latin", "bbox": [100, 0, 160, 30], "text": ""},
+                ],
+            }
+        ],
+    }
+
+    plan = routing_plan_for_block_record(block, 240, 120)
+
+    assert [segment.kind for segment in plan.lines[0].segments] == [
+        "text_zh",
+        "formula",
+        "text_latin",
+    ]
+    assert [(route.segment_index, route.bbox) for route in plan.text_slices] == [
+        (0, (0, 0, 60, 30)),
+        (2, (100, 0, 160, 30)),
+    ]
+
+
 def test_routing_line_to_record_serializes_runtime_cache_shape():
     line = RoutingLine(
         index=2,
@@ -91,6 +130,53 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
         ],
         LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
     }
+
+
+def test_hanwang_assembles_explicit_text_segment_kinds():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 160, 30),
+        segments=(
+            RoutingSegment(kind="text_zh", bbox=(0, 0, 60, 30)),
+            RoutingSegment(kind="formula", label="inline_formula", bbox=(60, 0, 100, 30), text="$ A $"),
+            RoutingSegment(kind="text_latin", bbox=(100, 0, 160, 30)),
+        ),
+    )
+    grouped = {
+        (0, 0, 0): [
+            micro_module.LineResult(
+                text="甲",
+                bbox=(0, 0, 60, 30),
+                confidence=0.9,
+                chars=[micro_module.CharResult(text="甲", confidence=0.9, bbox=(0, 0, 20, 30))],
+            )
+        ],
+        (0, 0, 2): [
+            micro_module.LineResult(
+                text="abc",
+                bbox=(100, 0, 160, 30),
+                confidence=0.9,
+                chars=[
+                    micro_module.CharResult(text="a", confidence=0.9, bbox=(100, 0, 112, 30)),
+                    micro_module.CharResult(text="b", confidence=0.9, bbox=(116, 0, 128, 30)),
+                    micro_module.CharResult(text="c", confidence=0.9, bbox=(132, 0, 144, 30)),
+                ],
+            )
+        ],
+    }
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "甲$ A $abc"
+    assert [char.text for char in lines[0].chars] == ["甲", "$ A $", "a", "b", "c"]
 
 
 def test_paddle_routing_producer_builds_typed_plan_before_legacy_records():

@@ -67,6 +67,7 @@ from app.core.paddle_line_routing import (
 )
 from app.services.layout_routing_plan import (
     RoutingLine,
+    is_text_route_segment_kind,
     routing_line_to_record,
     routing_plan_for_block_record,
 )
@@ -433,7 +434,7 @@ def _refine_layout_text_route_bands_from_image(
             route_changed = False
             for segment in route.segments:
                 next_segment = segment
-                if segment.kind == "text":
+                if is_text_route_segment_kind(segment.kind):
                     bbox = _clamp_xyxy(segment.bbox, width, height)
                     refined_bbox = _refined_text_segment_bbox_from_ink(image_bgr, bbox)
                     if refined_bbox is not None and refined_bbox != segment.bbox:
@@ -707,7 +708,7 @@ def _assemble_layout_route_line(
     all_text_lines: list[LineResult] = []
     has_formula = any(segment.kind == "formula" for segment in segments)
     for segment_idx, segment in enumerate(segments):
-        if segment.kind != "text":
+        if not is_text_route_segment_kind(segment.kind):
             continue
         key = (block_idx, line_idx, segment_idx)
         current_lines = [
@@ -741,7 +742,7 @@ def _assemble_layout_route_line(
         for segment_idx, segment in enumerate(segments):
             segment_bbox = segment.bbox
             kind = segment.kind
-            if kind == "text":
+            if is_text_route_segment_kind(kind):
                 segment_lines = [
                     line
                     for line in slice_lines_by_segment.get(segment_idx, [])

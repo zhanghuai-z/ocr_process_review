@@ -6,6 +6,21 @@ from typing import Any
 
 
 XYXY = tuple[int, int, int, int]
+ROUTE_SEGMENT_TEXT = "text"
+ROUTE_SEGMENT_TEXT_ZH = "text_zh"
+ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
+ROUTE_SEGMENT_FORMULA = "formula"
+ROUTE_SEGMENT_SKIP = "skip"
+TEXT_ROUTE_SEGMENT_KINDS = frozenset({
+    ROUTE_SEGMENT_TEXT,
+    ROUTE_SEGMENT_TEXT_ZH,
+    ROUTE_SEGMENT_TEXT_LATIN,
+})
+VALID_ROUTE_SEGMENT_KINDS = frozenset({
+    *TEXT_ROUTE_SEGMENT_KINDS,
+    ROUTE_SEGMENT_FORMULA,
+    ROUTE_SEGMENT_SKIP,
+})
 
 
 @dataclass(frozen=True)
@@ -14,6 +29,9 @@ class RoutingSegment:
     bbox: XYXY
     label: str = ""
     text: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
 
 
 @dataclass(frozen=True)
@@ -25,7 +43,18 @@ class RoutingLine:
 
     @property
     def has_formula(self) -> bool:
-        return any(segment.kind == "formula" for segment in self.segments)
+        return any(segment.kind == ROUTE_SEGMENT_FORMULA for segment in self.segments)
+
+
+def is_text_route_segment_kind(kind: str) -> bool:
+    return kind in TEXT_ROUTE_SEGMENT_KINDS
+
+
+def normalize_route_segment_kind(value: object) -> str:
+    kind = str(value or ROUTE_SEGMENT_TEXT).strip() or ROUTE_SEGMENT_TEXT
+    if kind not in VALID_ROUTE_SEGMENT_KINDS:
+        raise ValueError(f"unsupported layout route segment kind: {kind!r}")
+    return kind
 
 
 @dataclass(frozen=True)
@@ -63,7 +92,7 @@ def routing_line_from_record(
 
 def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
     return RoutingSegment(
-        kind=str(segment.get("kind") or "text"),
+        kind=normalize_route_segment_kind(segment.get("kind")),
         label=str(segment.get("label") or ""),
         bbox=xyxy(segment.get("bbox")),
         text=str(segment.get("text") or ""),
@@ -131,7 +160,16 @@ __all__ = [
     "RoutingLine",
     "RoutingPlan",
     "RoutingSegment",
+    "ROUTE_SEGMENT_FORMULA",
+    "ROUTE_SEGMENT_SKIP",
+    "ROUTE_SEGMENT_TEXT",
+    "ROUTE_SEGMENT_TEXT_LATIN",
+    "ROUTE_SEGMENT_TEXT_ZH",
+    "TEXT_ROUTE_SEGMENT_KINDS",
     "TextSliceRoute",
+    "VALID_ROUTE_SEGMENT_KINDS",
+    "is_text_route_segment_kind",
+    "normalize_route_segment_kind",
     "routing_line_from_record",
     "routing_line_to_record",
     "routing_segment_from_record",
