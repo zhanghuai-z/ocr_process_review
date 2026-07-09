@@ -70,6 +70,7 @@ from app.services.layout_routing_plan import (
     routing_line_to_record,
     routing_plan_for_block_record,
 )
+from app.services.formula_crop_ocr_service import recognize_formula_bboxes_with_retry
 from app.core.paddle_artifact_index import (
     BINDING_AMBIGUOUS,
     BINDING_EMPTY_REVIEW,
@@ -3759,38 +3760,41 @@ class HanwangMicroRecBlockEngine:
         if progress_callback:
             progress_callback(0, max(1, len(targets)), f"Paddle 公式重识别中… {len(targets)} 个框")
         try:
-            from app.experimental.inline_formula_rebind import (
-                build_formula_pseudo_page,
-                recognize_formula_pseudo_page,
-            )
-
             bboxes = [tuple(int(value) for value in block.bbox.to_xyxy()) for block in targets]
-            pseudo_page = build_formula_pseudo_page(image_bgr, bboxes)
-            recognitions, _response = recognize_formula_pseudo_page(
-                pseudo_page,
+            outcome = recognize_formula_bboxes_with_retry(
+                image_bgr,
+                bboxes,
                 client=client,
-                batch_id=f"ocr-process-formula-{page.page_number}-{int(time.time() * 1000)}",
-                filename=f"page-{page.page_number}-inline-formula-pseudo.png",
+                batch_id_prefix=f"ocr-process-formula-{page.page_number}-{int(time.time() * 1000)}",
+                filename_prefix=f"page-{page.page_number}-inline-formula-pseudo",
             )
         except Exception as exc:
             logger.warning("Paddle formula crop OCR failed for page=%s: %s", page.page_number, exc)
             _mark_formula_crop_ocr_failed(targets, str(exc))
             if progress_callback:
-                progress_callback(0, max(1, len(targets)), f"Paddle 公式重识别失败：{exc}")
+                progress_callback(0, max(1, len(targets)), "公式文本为空，需人工补全")
             return
 
-        text_by_index = {item.crop_index: item.text for item in recognitions if str(item.text or "").strip()}
+        if outcome.error:
+            logger.warning(
+                "Paddle formula crop OCR left empty formulas page=%s failed=%s error=%s",
+                page.page_number,
+                list(outcome.failed_indices),
+                outcome.error,
+            )
+        text_by_index = outcome.texts_by_index
         for index, block in enumerate(targets):
             text = str(text_by_index.get(index) or "").strip()
             if text:
                 _set_inline_formula_crop_ocr_text(block, text)
             else:
-                _mark_inline_formula_needs_text(block)
+                reason = outcome.error if index in outcome.failed_indices else ""
+                _mark_inline_formula_needs_text(block, reason)
         if progress_callback:
             progress_callback(
                 len(text_by_index),
                 max(1, len(targets)),
-                f"Paddle 公式重识别完成：{len(text_by_index)}/{len(targets)}",
+                f"公式文本识别：{len(text_by_index)}/{len(targets)}",
             )
 
 

@@ -1,10 +1,13 @@
 import numpy as np
 
-from app.experimental.inline_formula_rebind import (
+from app.services.formula_crop_ocr_service import (
     build_formula_pseudo_page,
     formula_crop_bboxes_from_route_subblocks,
-    formula_spans,
     recognitions_from_paddle_response,
+    recognize_formula_bboxes_with_retry,
+)
+from app.experimental.inline_formula_rebind import (
+    formula_spans,
     suggest_formula_bindings,
 )
 
@@ -126,3 +129,48 @@ def test_formula_crop_recognition_fuzzy_matches_missing_delimiters():
     assert suggestions[0].span_index == 0
     assert suggestions[0].span_text == "$ GGF_{it}^{Post-long} $"
     assert suggestions[0].status == "exact"
+
+
+def test_formula_crop_ocr_retries_empty_crop_once():
+    image = np.full((100, 220, 3), 255, dtype=np.uint8)
+    calls = []
+
+    class FakeClient:
+        def analyze_image_bytes(self, image_bytes, *, optional_payload=None, batch_id="", filename="page.png"):
+            calls.append((batch_id, filename, image_bytes))
+            if len(calls) == 1:
+                return {
+                    "result": {
+                        "layoutParsingResults": [
+                            {
+                                "block_label": "inline_formula",
+                                "block_bbox": [24, 24, 70, 72],
+                                "block_content": "$ A $",
+                            }
+                        ]
+                    }
+                }
+            return {
+                "result": {
+                    "layoutParsingResults": [
+                        {
+                            "block_label": "inline_formula",
+                            "block_bbox": [24, 24, 70, 72],
+                            "block_content": "$ B $",
+                        }
+                    ]
+                }
+            }
+
+    outcome = recognize_formula_bboxes_with_retry(
+        image,
+        [(20, 10, 90, 40), (120, 60, 180, 80)],
+        client=FakeClient(),
+        batch_id_prefix="test-formula",
+        filename_prefix="test-formula",
+    )
+
+    assert len(calls) == 2
+    assert outcome.texts_by_index == {0: "$ A $", 1: "$ B $"}
+    assert outcome.failed_indices == ()
+    assert outcome.attempts == 2
