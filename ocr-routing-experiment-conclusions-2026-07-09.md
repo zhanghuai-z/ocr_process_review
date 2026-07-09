@@ -22,6 +22,9 @@ It is not a permanent architecture map.
 - EngCut exact output is reliable when binding succeeds. LineCut remains better
   for Chinese character geometry. Mixed lines need routing before Hanwang, not a
   late fallback after bad crops have already been sent.
+- Mixed line is a physical-line condition, not a route segment kind. A mixed
+  line may contain `formula`, `text_zh`, `text_latin`, and `skip` segments, but
+  `text_mixed` and `unknown` are not valid crop destinations.
 
 ## Routing Direction
 
