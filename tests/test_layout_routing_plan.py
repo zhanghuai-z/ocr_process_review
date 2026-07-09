@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.layout_routing_contract import routing_segment_from_record
+from app.core.layout_routing_contract import TextSliceRoute, routing_segment_from_record
 from app.services.layout_routing_plan import (
     RoutingLine,
     RoutingSegment,
@@ -105,6 +105,18 @@ def test_explicit_text_segment_kinds_are_text_slices():
         (0, (0, 0, 60, 30)),
         (2, (100, 0, 160, 30)),
     ]
+    assert [route.kind for route in plan.text_slices] == ["text_zh", "text_latin"]
+
+
+def test_text_slice_route_rejects_non_text_kind():
+    with pytest.raises(ValueError):
+        TextSliceRoute(
+            line_index=0,
+            segment_index=1,
+            bbox=(0, 0, 10, 10),
+            carved=True,
+            kind="formula",
+        )
 
 
 def test_routing_line_to_record_serializes_runtime_cache_shape():

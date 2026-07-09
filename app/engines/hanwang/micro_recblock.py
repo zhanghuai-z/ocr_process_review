@@ -289,6 +289,7 @@ class _TextRoute:
     segment_idx: int
     bbox: tuple[int, int, int, int]
     carved: bool = False
+    kind: str = "text"
 
     @property
     def key(self) -> tuple[int, int, int]:
@@ -370,6 +371,7 @@ def _text_route_bboxes_for_block(
             segment_idx=route.segment_index,
             bbox=route.bbox,
             carved=route.carved,
+            kind=route.kind,
         )
         for route in routes
     ]

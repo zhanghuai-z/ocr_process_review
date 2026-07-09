@@ -63,6 +63,13 @@ class TextSliceRoute:
     segment_index: int
     bbox: XYXY
     carved: bool
+    kind: str = ROUTE_SEGMENT_TEXT
+
+    def __post_init__(self) -> None:
+        normalized = normalize_route_segment_kind(self.kind)
+        if not is_text_route_segment_kind(normalized):
+            raise ValueError(f"text slice route cannot use non-text kind: {normalized!r}")
+        object.__setattr__(self, "kind", normalized)
 
 
 @dataclass(frozen=True)
@@ -127,6 +134,7 @@ def text_slice_from_record(route: dict[str, Any]) -> TextSliceRoute:
         segment_index=int_or_default(route.get("segment_idx"), 0),
         bbox=xyxy(route.get("bbox")),
         carved=bool(route.get("carved", False)),
+        kind=normalize_route_segment_kind(route.get("kind")),
     )
 
 
@@ -136,6 +144,7 @@ def text_slice_to_record(route: TextSliceRoute) -> dict[str, Any]:
         "segment_idx": route.segment_index,
         "bbox": list(route.bbox),
         "carved": route.carved,
+        "kind": route.kind,
     }
 
 

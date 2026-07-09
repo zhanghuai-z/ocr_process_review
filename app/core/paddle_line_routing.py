@@ -1172,6 +1172,7 @@ def _text_slice_routes_from_lines(
                 segment_index=0,
                 bbox=block_bbox_xyxy(block, width, height),
                 carved=False,
+                kind="text",
             ),
         )
     slices: list[TextSliceRoute] = []
@@ -1185,6 +1186,7 @@ def _text_slice_routes_from_lines(
                     segment_index=segment_idx,
                     bbox=block_bbox_xyxy({"block_bbox": segment.bbox}, width, height),
                     carved=True,
+                    kind=segment.kind,
                 )
             )
     slices.sort(key=lambda item: (item.bbox[1], item.bbox[0]))
