@@ -292,6 +292,24 @@ def test_ppocr_latin_line_hint_marks_text_latin_segment():
     assert [segment["kind"] for segment in route["segments"]] == ["text_latin"]
 
 
+def test_ppocr_cjk_line_hint_marks_text_zh_segment():
+    parent = {
+        "block_label": "text",
+        "block_bbox": [0, 0, 220, 50],
+        "block_content": "城市生产率2026",
+    }
+
+    attachment = build_page_ocr_line_route_attachment(
+        [parent],
+        [PageOcrLineHint(text="城市生产率2026", bbox=(0, 0, 220, 40))],
+        240,
+        80,
+    )
+
+    route = attachment.route_records_by_block_index[0][0]
+    assert [segment["kind"] for segment in route["segments"]] == ["text_zh"]
+
+
 def test_ppocr_mixed_line_hint_stays_generic_text_until_splitter_runs():
     parent = {
         "block_label": "text",

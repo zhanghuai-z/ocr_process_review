@@ -351,8 +351,10 @@ def _text_segment_kind_for_ppocr_line_text(text: str) -> str:
     value = str(text or "").strip()
     if not value:
         return "text"
-    if any(is_cjk_char(ch) for ch in value):
-        return "text"
+    has_cjk = any(is_cjk_char(ch) for ch in value)
+    has_ascii_alpha = any(ch.isascii() and ch.isalpha() for ch in value)
+    if has_cjk:
+        return "text" if has_ascii_alpha else "text_zh"
     if any(ch.isascii() and ch.isalnum() for ch in value):
         return "text_latin"
     return "text"
