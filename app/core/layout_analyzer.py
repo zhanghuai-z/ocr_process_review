@@ -32,6 +32,7 @@ from app.core.api_profiles import (
     resolve_api_endpoint_for_role,
 )
 from app.adapters.paddle import map_paddle_label_to_block_type
+from app.utils.image_io import read_cv_image
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
 from app.core.logging import get_logger
@@ -758,7 +759,7 @@ class LayoutAnalyzer:
         image_path = page.display_image_path
         if not image_path:
             return
-        img = cv2.imread(image_path)
+        img = read_cv_image(image_path)
         if img is None:
             return
 
@@ -873,7 +874,7 @@ class LayoutAnalyzer:
         import cv2
 
         engine = self._get_engine()
-        img = cv2.imread(page.display_image_path)
+        img = read_cv_image(page.display_image_path)
         if img is None:
             raise RuntimeError(f"Cannot read image: {page.display_image_path}")
         page.height, page.width = img.shape[:2]
@@ -952,7 +953,7 @@ class LayoutAnalyzer:
         if page.width <= 0 or page.height <= 0:
             import cv2
 
-            img = cv2.imread(str(image_path))
+            img = read_cv_image(image_path)
             if img is None:
                 raise RuntimeError(f"Cannot decode image dimensions: {page.display_image_path}")
             page.height, page.width = img.shape[:2]

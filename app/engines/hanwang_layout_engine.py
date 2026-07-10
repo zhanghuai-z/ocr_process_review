@@ -3,12 +3,11 @@ from __future__ import annotations
 
 from typing import List
 
-import cv2
-
 from app.core.logging import get_logger
 from app.engines.hanwang.native_bridge import HanwangNativeError, run_docseg
 from app.engines.hanwang.translator import translate_docseg
 from app.models import Block
+from app.utils.image_io import read_cv_image
 
 logger = get_logger(__name__)
 
@@ -20,7 +19,7 @@ class HanwangLayoutEngine:
         self._timeout = timeout
 
     def analyze(self, image_path: str) -> List[Block]:
-        image = cv2.imread(image_path)
+        image = read_cv_image(image_path)
         if image is None:
             raise RuntimeError(f"Cannot read image: {image_path}")
         try:

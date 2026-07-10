@@ -20,6 +20,7 @@ from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
 from app.services.ocr_dispatch_plan import build_text_ocr_dispatch_plan
+from app.utils.image_io import read_cv_image
 
 INLINE_FORMULA_REVIEW_FLAG = "hanwang_route_inline_formula"
 
@@ -110,7 +111,7 @@ class ProofCropService:
         return stats
 
     def _normalize_page(self, page: Page, stats: ProofCropStats) -> None:
-        image = cv2.imread(page.display_image_path, cv2.IMREAD_COLOR)
+        image = read_cv_image(page.display_image_path, cv2.IMREAD_COLOR)
         if image is None:
             return
 

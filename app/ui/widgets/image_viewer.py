@@ -25,12 +25,13 @@ from app.models.layout_block_view import LayoutBlockView
 from app.models.ocr_character_observation import set_ocr_char_bbox
 from app.models.ocr_observation import block_ocr_line_observations_by_uid
 from app.models.ocr_text_observation import line_ocr_confidence
+from app.utils.image_io import read_cv_image
 
 
 def _pixmap_from_path(image_path: str) -> QPixmap:
     """通过 cv2 加载图片并转为 QPixmap，避免 EXIF 自动旋转造成的坐标错位。"""
     import cv2
-    img = cv2.imread(image_path)
+    img = read_cv_image(image_path)
     if img is None:
         return QPixmap(image_path)
     h, w = img.shape[:2]

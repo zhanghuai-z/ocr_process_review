@@ -11,6 +11,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from app.utils.image_io import read_cv_image
+
 TABLE_TEXT_LAYER_CELLS_KEY = "table_text_layer_cells"
 
 
@@ -203,7 +205,7 @@ def infer_table_cell_bboxes_from_image(
     except Exception:
         return {}
 
-    full_image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    full_image = read_cv_image(path, cv2.IMREAD_GRAYSCALE)
     if full_image is None:
         return {}
     image_height, image_width = full_image.shape[:2]

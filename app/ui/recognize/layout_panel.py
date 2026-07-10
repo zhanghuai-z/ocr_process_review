@@ -39,6 +39,7 @@ from app.services.layout_overlay_service import LayoutOverlayService
 from app.ui.widgets.image_viewer import ImageViewer
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
+from app.utils.image_io import read_cv_image
 
 STATUS_LABEL_MAX_CHARS = 96
 STRUCTURAL_DRAW_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
@@ -1831,7 +1832,7 @@ class LayoutPanel(QWidget):
             return cached
         try:
             import cv2
-            gray = cv2.imread(key, cv2.IMREAD_GRAYSCALE)
+            gray = read_cv_image(key, cv2.IMREAD_GRAYSCALE)
         except Exception:
             return None
         if gray is None or gray.size == 0:

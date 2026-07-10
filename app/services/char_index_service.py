@@ -28,6 +28,7 @@ from app.models import BBox, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
+from app.utils.image_io import read_cv_image
 
 try:
     from pypinyin import Style, lazy_pinyin  # type: ignore
@@ -238,7 +239,7 @@ class CharIndexService:
         cached = self._image_cache.get(path)
         if cached is not None:
             return cached
-        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        image = read_cv_image(path, cv2.IMREAD_COLOR)
         if image is not None:
             self._image_cache[path] = image
         return image

@@ -13,6 +13,7 @@ from app.core.table_text_layer import TABLE_TEXT_LAYER_CELLS_KEY
 from app.export.ir import ExportDocument, ExportElement, ExportPage
 from app.export.ir_builder import build_export_ir
 from app.models import OcrProject
+from app.utils.image_io import read_cv_image
 
 _RESOURCES_FONTS = Path(__file__).parent.parent.parent / "resources" / "fonts"
 logger = get_logger(__name__)
@@ -674,7 +675,7 @@ def _infer_table_cell_bboxes_from_image(
     except Exception:
         return {}
 
-    full_image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    full_image = read_cv_image(image_path, cv2.IMREAD_GRAYSCALE)
     if full_image is None:
         return {}
     page_height, page_width = full_image.shape[:2]

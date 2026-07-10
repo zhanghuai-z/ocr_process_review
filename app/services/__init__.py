@@ -179,7 +179,7 @@ class ImportService:
     @classmethod
     def _pdf_page_cache_name(cls, src: Path, page_index: int) -> str:
         digest = cls._source_digest(src)
-        return f"{src.stem}_{digest}_p{page_index + 1:04d}.png"
+        return f"page_{digest}_p{page_index + 1:04d}.png"
 
     def _materialize_image(self, src_path: str, src: Path) -> str:
         """生成统一工作图，消除 EXIF/格式差异带来的坐标漂移。"""
@@ -189,7 +189,7 @@ class ImportService:
         from PIL import Image, ImageOps
 
         digest = self._source_digest(src)
-        dst = self._get_cache_path() / f"{src.stem}_{digest}.png"
+        dst = self._get_cache_path() / f"image_{digest}.png"
         if not dst.exists():
             with Image.open(src_path) as img:
                 normalized = ImageOps.exif_transpose(img)

@@ -6288,10 +6288,10 @@ def test_layout_panel_ink_snap_reuses_cached_image_mask():
     from pathlib import Path
     import tempfile
 
-    import cv2
     from PySide6.QtGui import QColor, QImage, QPainter
 
     from app.models import BBox, Page
+    from app.ui.recognize import layout_panel as layout_panel_module
     from app.ui.recognize.layout_panel import LayoutPanel
 
     _get_qapp()
@@ -6306,18 +6306,18 @@ def test_layout_panel_ink_snap_reuses_cached_image_mask():
         page = Page(image_path=str(image_path), width=140, height=90)
         panel = LayoutPanel()
         calls = []
-        original_imread = cv2.imread
+        original_read_image = layout_panel_module.read_cv_image
 
-        def fake_imread(path, flags):
+        def fake_read_image(path, flags):
             calls.append((path, flags))
-            return original_imread(path, flags)
+            return original_read_image(path, flags)
 
-        cv2.imread = fake_imread
+        layout_panel_module.read_cv_image = fake_read_image
         try:
             first = panel._snap_drawn_bbox(page, BBox(17, 19, 25, 13))
             second = panel._snap_drawn_bbox(page, BBox(18, 18, 25, 13))
         finally:
-            cv2.imread = original_imread
+            layout_panel_module.read_cv_image = original_read_image
             panel.close()
 
         assert first == BBox(20, 20, 20, 10)
@@ -14427,9 +14427,9 @@ def test_pdf_import_cache_name_includes_source_path_hash(tmp_path):
     second_name = ImportService._pdf_page_cache_name(second, 0)
 
     assert first_name != second_name
-    assert first_name.startswith("same_")
+    assert first_name.startswith("page_")
     assert first_name.endswith("_p0001.png")
-    assert second_name.startswith("same_")
+    assert second_name.startswith("page_")
     assert second_name.endswith("_p0001.png")
 
     print("test_pdf_import_cache_name_includes_source_path_hash PASSED")

@@ -47,6 +47,9 @@ class ProjectWorkspaceService:
 
     @staticmethod
     def default_workspace_root() -> Path:
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            return Path(local_appdata) / "ocr_process" / "workspaces"
         value = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppLocalDataLocation
         )

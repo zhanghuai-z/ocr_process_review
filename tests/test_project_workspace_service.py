@@ -29,6 +29,15 @@ def _service(tmp_path: Path) -> ProjectWorkspaceService:
     )
 
 
+def test_default_workspace_root_uses_ascii_local_appdata(monkeypatch, tmp_path: Path):
+    local_appdata = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+
+    assert ProjectWorkspaceService.default_workspace_root() == (
+        local_appdata / "ocr_process" / "workspaces"
+    )
+
+
 def _imported_page(working_db: Path) -> Page:
     image_dir = working_db.parent / ".cache" / "images"
     thumb_dir = working_db.parent / ".cache" / "thumbnails"

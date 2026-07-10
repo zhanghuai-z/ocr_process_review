@@ -22,6 +22,7 @@ from app.core.coordinate_seam import (
 )
 from app.core.char_bbox_utils import refine_line_bbox
 from app.models import BBox
+from app.utils.image_io import read_cv_image
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class PageImageCache:
             self._cache.move_to_end(page_path)
             return cached
 
-        img = cv2.imread(page_path, cv2.IMREAD_COLOR)
+        img = read_cv_image(page_path, cv2.IMREAD_COLOR)
         if img is None:
             logger.warning("PageImageCache: cannot read %s", page_path)
             return None

@@ -53,6 +53,7 @@ from app.services.ocr_run_result import (
     OcrRunResult,
     PageOcrRunResult,
 )
+from app.utils.image_io import read_cv_image
 
 logger = get_logger(__name__)
 OCR_PAGE_CONCURRENCY_CAP = 20
@@ -113,7 +114,7 @@ class OcrPipeline:
                         completed_pages=page_idx,
                         message=f"OCR 识别准备中… 第 {page_idx + 1}/{total_pages} 页",
                     ))
-                img = cv2.imread(page.display_image_path)
+                img = read_cv_image(page.display_image_path)
                 if img is None:
                     logger.warning("Cannot read image: %s", page.display_image_path)
                     mark_page_ocr_failed(page, f"OCR 图像读取失败：{page.display_image_path}")
@@ -361,7 +362,7 @@ class OcrPipeline:
             message=f"CharOCR 准备中… 第 {page_idx + 1}/{total_pages} 页",
         ))
 
-        img = cv2.imread(page.display_image_path)
+        img = read_cv_image(page.display_image_path)
         if img is None:
             logger.warning("Cannot read image: %s", page.display_image_path)
             mark_page_ocr_failed(page, f"OCR 图像读取失败：{page.display_image_path}")
@@ -649,7 +650,7 @@ class OcrPipeline:
         if not should_dispatch_to_text_ocr(block):
             return block
 
-        img = cv2.imread(page_image_path)
+        img = read_cv_image(page_image_path)
         if img is None:
             logger.warning("Cannot read image: %s", page_image_path)
             return block
