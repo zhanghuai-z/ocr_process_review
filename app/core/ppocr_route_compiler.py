@@ -273,7 +273,7 @@ def _segments_for_line(
         if segment.kind != "text_other" and segment.kind != "text_latin":
             output.append(segment)
             continue
-        if not _line_contains_latin_or_digit(prepass_line.text):
+        if not _line_requires_mixed_text_partition(prepass_line.text):
             output.append(segment)
             continue
         partition = partition_charocr_text_region(page_image_bgr, prepass_line, segment.bbox)
@@ -314,8 +314,12 @@ def _whole_line_text_kind(text: str) -> str:
     return "text_other"
 
 
-def _line_contains_latin_or_digit(text: str) -> bool:
-    return any(char.isascii() and char.isalnum() for char in str(text or ""))
+def _line_requires_mixed_text_partition(text: str) -> bool:
+    value = str(text or "")
+    return (
+        any(is_cjk_char(char) for char in value)
+        and any(char.isascii() and char.isalnum() for char in value)
+    )
 
 
 def _clamp(bbox: XYXY, width: int, height: int) -> XYXY:

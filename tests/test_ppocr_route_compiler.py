@@ -189,6 +189,25 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     ]
 
 
+def test_compiler_dispatches_pure_latin_row_to_engcut_without_word_masks():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="vol. 26, no. 2, 1998.",
+        bbox=(10, 5, 170, 40),
+        words=(),
+    ))
+
+    plan = compile_page_routing_plan(snapshot, prepass, page_width=180, page_height=50)
+
+    assert plan.is_dispatchable is True
+    assert [(segment.kind, segment.bbox) for segment in plan.for_block("text-1").lines[0].segments] == [
+        ("text_latin", (10, 5, 170, 40)),
+    ]
+
+
 def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0),
@@ -197,14 +216,16 @@ def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
     image[10:30, 10:30] = 0
     image[10:30, 43:50] = 0
     image[10:30, 52:80] = 0
+    image[8:32, 100:124] = 0
     prepass = _prepass(PpOcrV6LineHint(
         index=0,
-        text="one two",
-        bbox=(0, 0, 120, 40),
+        text="one two甲",
+        bbox=(0, 0, 130, 40),
         words=(
             PpOcrV6WordBox(0, 0, "one", (8, 8, 40, 32)),
             PpOcrV6WordBox(0, 1, " ", (40, 8, 43, 32)),
             PpOcrV6WordBox(0, 2, "two", (46, 8, 85, 32)),
+            PpOcrV6WordBox(0, 3, "甲", (98, 8, 126, 32)),
         ),
     ))
 
@@ -229,15 +250,17 @@ def test_compiler_reclaims_displaced_narrow_latin_glyph_from_punctuation_seam():
     image = np.full((50, 120, 3), 255, dtype=np.uint8)
     image[8:30, 42:48] = 0
     image[10:30, 70:90] = 0
+    image[8:32, 100:118] = 0
     prepass = _prepass(PpOcrV6LineHint(
         index=0,
-        text=". I word",
+        text=". I word甲",
         bbox=(0, 0, 110, 40),
         words=(
             PpOcrV6WordBox(0, 0, ". ", (20, 8, 43, 32)),
             PpOcrV6WordBox(0, 1, "I", (49, 8, 55, 32)),
             PpOcrV6WordBox(0, 2, " ", (56, 8, 65, 32)),
             PpOcrV6WordBox(0, 3, "word", (68, 8, 95, 32)),
+            PpOcrV6WordBox(0, 4, "甲", (98, 8, 120, 32)),
         ),
     ))
 
