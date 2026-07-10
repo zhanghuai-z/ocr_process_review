@@ -21,6 +21,10 @@ import numpy as np
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6PrepassArtifact, PpOcrV6PrepassClient
 from app.core.ppocr_route_compiler import compile_page_routing_plan
+from app.diagnostics.charocr_route_artifacts import (
+    route_debug_output_root,
+    write_charocr_route_artifacts,
+)
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
     should_dispatch_to_text_ocr,
@@ -570,6 +574,19 @@ class OcrPipeline:
             page_height=page.height,
             page_image_bgr=img,
         )
+        from app.core.app_config import get_config
+
+        debug_root = route_debug_output_root(
+            page.display_image_path,
+            debug_enabled=bool(get_config().get("layout_debug_artifacts", False)),
+        )
+        if debug_root is not None:
+            write_charocr_route_artifacts(
+                image_bgr=img,
+                source_image_path=page.display_image_path,
+                routing_plan=routing_plan,
+                output_root=debug_root,
+            )
         if not routing_plan.is_dispatchable:
             details = "; ".join(
                 f"{issue.code}({issue.message})@line={issue.line_index} bbox={issue.bbox}"
