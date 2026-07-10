@@ -37,6 +37,7 @@ from app.core.proof_line_facts import (
     proof_status,
 )
 from app.core.proof_line_mutation import apply_line_proof_state, set_line_proof_status, set_line_proof_text
+from tests.charocr_native_route_fixture import run_micro_recblock_with_explicit_routes
 
 
 def _paddle_layout_artifact(records):
@@ -63,7 +64,6 @@ def _ppocr_v6_prepass_artifact(page_uid, *line_specs):
         PpOcrV6LineHint,
         PpOcrV6PrepassArtifact,
     )
-
     return PpOcrV6PrepassArtifact(
         page_uid=page_uid,
         run_id="test-ppocrv6-prepass",
@@ -71,6 +71,31 @@ def _ppocr_v6_prepass_artifact(page_uid, *line_specs):
             PpOcrV6LineHint(index=index, text=text, bbox=tuple(bbox), words=())
             for index, (text, bbox) in enumerate(line_specs)
         ),
+    )
+
+
+def _page_routing_plan_for_test(page):
+    """Build the same explicit route contract required by production CharOCR."""
+    from app.core.ppocr_route_compiler import compile_page_routing_plan
+    from app.models import BlockType
+    from app.models.layout_snapshot_store import layout_snapshot_for_page
+
+    snapshot = layout_snapshot_for_page(page)
+    if snapshot is None:
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_charocr_route")
+        snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    line_specs = [
+        ("正文", block.bbox.to_xyxy())
+        for block in snapshot.blocks
+        if block.ocr_policy == OcrPolicy.TEXT_OCR
+        and block.block_type not in {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE, BlockType.UNKNOWN}
+    ]
+    return compile_page_routing_plan(
+        snapshot,
+        _ppocr_v6_prepass_artifact(page.uid, *line_specs),
+        page_width=page.width,
+        page_height=page.height,
     )
 
 
@@ -5926,8 +5951,8 @@ def test_layout_panel_has_no_hanwang_bbox_audit_overlay_toggle():
                 "schema": "hanwang_bbox_audit.v1",
                 "layout_block_bbox": [0, 0, 120, 40],
                 "effective_block_bbox": [0, 0, 120, 40],
-                "effective_block_bbox_source": "layout_line_routes_union",
-                "layout_line_route_bboxes": [[0, 0, 120, 40]],
+                "effective_block_bbox_source": "page_routing_plan_union",
+                "routing_line_bboxes": [[0, 0, 120, 40]],
                 "route_text_slice_bboxes": [[0, 0, 40, 40], [70, 0, 120, 40]],
                 "hanwang_recog_group_bboxes": [[0, 2, 40, 38], [70, 2, 120, 38]],
                 "hanwang_segimg_group_clipped_count": 1,
@@ -7932,7 +7957,7 @@ def test_main_window_close_project_saves_dirty_project_before_reset():
     _get_qapp()
     save_calls = []
     original_question = QMessageBox.question
-    QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+    QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Save
 
     class FakeStore:
         def close(self):
@@ -9068,7 +9093,7 @@ def test_hanwang_micro_recblock_routes_and_fallbacks():
             {"block_label": "display_formula", "block_bbox": [10, 80, 180, 120], "block_content": "$$x+y$$"},
             {"block_label": "reference", "block_bbox": [20, 140, 160, 180], "block_content": "参考文献很长"},
         ]
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((220, 240, 3), dtype=np.uint8),
             blocks,
             include_chars=True,
@@ -9117,7 +9142,8 @@ def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
         seg_timeout=0,
         recog_timeout=0,
         include_chars=True,
-        page_ocr_lines=None,
+        routing_plan=None,
+        page=None,
         progress_callback=None,
     ):
         captured["blocks"] = ppvl_blocks
@@ -9153,7 +9179,11 @@ def test_hanwang_engine_uses_user_edited_layout_for_manual_formula_boxes():
     ]
 
     engine = micro_module.HanwangMicroRecBlockEngine(runner=fake_runner)
-    engine.recognize_page_blocks(np.zeros((90, 120, 3), dtype=np.uint8), page)
+    engine.recognize_page_blocks(
+        np.zeros((90, 120, 3), dtype=np.uint8),
+        page,
+        routing_plan=_page_routing_plan_for_test(page),
+    )
 
     assert captured["blocks"][0]["block_label"] == "equation"
     assert captured["blocks"][0]["block_bbox"] == [20, 30, 80, 54]
@@ -9563,7 +9593,8 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
         seg_timeout=0,
         recog_timeout=0,
         include_chars=True,
-        page_ocr_lines=None,
+        routing_plan=None,
+        page=None,
         progress_callback=None,
     ):
         captured["blocks"] = ppvl_blocks
@@ -9628,6 +9659,7 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     micro_module.HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
         np.zeros((60, 220, 3), dtype=np.uint8),
         page,
+        routing_plan=_page_routing_plan_for_test(page),
     )
 
     assert len(captured["blocks"]) == 1
@@ -9676,7 +9708,8 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
         seg_timeout=0,
         recog_timeout=0,
         include_chars=True,
-        page_ocr_lines=None,
+        routing_plan=None,
+        page=None,
         progress_callback=None,
     ):
         captured["blocks"] = ppvl_blocks
@@ -9747,6 +9780,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     ).recognize_page_blocks(
         np.zeros((60, 220, 3), dtype=np.uint8),
         page,
+        routing_plan=_page_routing_plan_for_test(page),
     )
 
     assert client.calls == 1
@@ -9782,7 +9816,8 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
         seg_timeout=0,
         recog_timeout=0,
         include_chars=True,
-        page_ocr_lines=None,
+        routing_plan=None,
+        page=None,
         progress_callback=None,
     ):
         captured["blocks"] = ppvl_blocks
@@ -9832,6 +9867,7 @@ def test_hanwang_recognize_preserves_parent_unbound_manual_formula_block():
     micro_module.HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
         np.zeros((60, 240, 3), dtype=np.uint8),
         page,
+        routing_plan=_page_routing_plan_for_test(page),
     )
 
     assert len(captured["blocks"]) == 1
@@ -9949,10 +9985,14 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
                 },
             ],
         }]
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((100, 220, 3), dtype=np.uint8),
             blocks,
             include_chars=True,
+            page_ocr_lines=[
+                {"text": "甲甲 $ Y_{ct} $乙乙。", "bbox": [0, 0, 210, 30]},
+                {"text": "丙 $ Incentive_{c} $ 丁 $ Post_{t} $戊", "bbox": [0, 40, 210, 70]},
+            ],
         )
 
         assert seen_recblocks == [
@@ -10063,614 +10103,6 @@ def test_hanwang_recog_filters_empty_decoded_char_boxes():
     assert [char.bbox for char in lines[0].chars] == [(0, 0, 30, 30), (60, 0, 90, 30)]
 
     print("test_hanwang_recog_filters_empty_decoded_char_boxes PASSED")
-
-
-def test_hanwang_latin_engcut_updates_geometry_without_changing_text():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    def code(ch):
-        return int.from_bytes(ch.encode("gbk"), "little")
-
-    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
-        return {
-            "lines": [
-                {
-                    "groups": [
-                        {
-                            "bbox": {
-                                "left": 0,
-                                "top": 0,
-                                "right": image_bgr.shape[1],
-                                "bottom": image_bgr.shape[0],
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-
-    def fake_recog(
-        image_bgr,
-        *,
-        recblock_xyxy=None,
-        recblocks_xyxy=None,
-        with_charrcg=True,
-        timeout=0,
-    ):
-        text = "甲PE/VC乙"
-        return {
-            "lines": [
-                {
-                    "groups": [
-                        {
-                            "bbox": {
-                                "left": 0,
-                                "top": 0,
-                                "right": image_bgr.shape[1],
-                                "bottom": image_bgr.shape[0],
-                            },
-                            "chars": [
-                                {
-                                    "codes": [code(ch)],
-                                    "scores": [5],
-                                    "bbox": {
-                                        "left": idx * 20,
-                                        "top": 0,
-                                        "right": idx * 20 + 18,
-                                        "bottom": 30,
-                                    },
-                                }
-                                for idx, ch in enumerate(text)
-                            ],
-                        }
-                    ]
-                }
-            ]
-        }
-
-    eng20_calls = []
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        eng20_calls.append(image_bgr.shape[:2])
-        text = "~PE/VC~"
-        return {
-            "lines": [
-                {
-                    "groups": [
-                        {
-                            "chars": [
-                                {
-                                    "codes": [ord(ch)],
-                                    "bbox": {
-                                        "left": idx * 9,
-                                        "top": 2,
-                                        "right": idx * 9 + 7,
-                                        "bottom": 22,
-                                    },
-                                }
-                                for idx, ch in enumerate(text)
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-
-    original_segimg = micro_module.native_bridge.run_linecut_segimg
-    original_recog = micro_module.native_bridge.run_linecut_recog
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_linecut_segimg = fake_segimg
-    micro_module.native_bridge.run_linecut_recog = fake_recog
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-
-    try:
-        rows, stats = micro_module.run_micro_recblock(
-            np.zeros((40, 160, 3), dtype=np.uint8),
-            [{
-                "block_label": "text",
-                "block_bbox": [0, 0, 160, 40],
-                "block_content": "甲PE/VC乙",
-            }],
-        )
-
-        line = rows[0].lines[0]
-        assert line.text == "甲PE/VC乙"
-        assert [char.text for char in line.chars] == list("甲PE/VC乙")
-        assert eng20_calls == [(40, 160)]
-        assert stats.latin_engcut_probe_calls == 1
-        assert stats.latin_engcut_probe_failures == 0
-        assert stats.latin_engcut_exact_tokens == 1
-        assert stats.latin_engcut_review_tokens == 0
-        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG not in line.review_flags
-        assert [
-            (char.text, char.source, char.bbox, char.bbox_granularity, char.token_text)
-            for char in line.chars[1:6]
-        ] == [
-            ("P", "hanwang:EngCut:latin_exact", (9, 2, 16, 22), "char", "PE/VC"),
-            ("E", "hanwang:EngCut:latin_exact", (18, 2, 25, 22), "char", "PE/VC"),
-            ("/", "hanwang:EngCut:latin_exact", (27, 2, 34, 22), "char", "PE/VC"),
-            ("V", "hanwang:EngCut:latin_exact", (36, 2, 43, 22), "char", "PE/VC"),
-            ("C", "hanwang:EngCut:latin_exact", (45, 2, 52, 22), "char", "PE/VC"),
-        ]
-        assert line.chars[0].source == "hanwang:micro_recblock"
-        assert line.chars[-1].source == "hanwang:micro_recblock"
-    finally:
-        micro_module.native_bridge.run_linecut_segimg = original_segimg
-        micro_module.native_bridge.run_linecut_recog = original_recog
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_updates_geometry_without_changing_text PASSED")
-
-
-def test_hanwang_latin_engcut_rejects_engcut_stream_span_for_line_chars():
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    def chars_for(text):
-        return [
-            micro_module.CharResult(
-                text=ch,
-                confidence=0.9,
-                bbox=(idx * 10, 0, idx * 10 + 8, 20),
-            )
-            for idx, ch in enumerate(text)
-        ]
-
-    line = micro_module.LineResult(
-        text="综合2016年增值税",
-        bbox=(0, 0, 130, 20),
-        confidence=0.9,
-        chars=chars_for("综合2016年增值税"),
-    )
-    record = micro_module._EngcutLine(
-        line=line,
-        bbox=(0, 0, 130, 20),
-        chars=[],
-        text="",
-        order=0,
-    )
-    binding = micro_module._TokenBinding(
-        token=micro_module.LatinToken(text="2016", start=0, end=4),
-        status=micro_module.LATIN_ENGCUT_EXACT_STATUS,
-        matched_text="2016",
-        chars=[
-            micro_module.EngcutChar(text=ch, bbox=((idx + 2) * 10, 1, (idx + 2) * 10 + 7, 19))
-            for idx, ch in enumerate("2016")
-        ],
-        line_records=[record],
-        line_span=(0, 4),
-    )
-
-    assert micro_module._replace_line_span_with_binding(line, binding)
-    assert line.text == "综合2016年增值税"
-    assert [char.source for char in line.chars[:2]] == ["hanwang:micro_recblock"] * 2
-    assert [char.source for char in line.chars[2:6]] == ["hanwang:EngCut:latin_exact"] * 4
-    assert [char.text for char in line.chars[2:6]] == list("2016")
-    assert [char.source for char in line.chars[6:]] == ["hanwang:micro_recblock"] * 4
-
-    print("test_hanwang_latin_engcut_rejects_engcut_stream_span_for_line_chars PASSED")
-
-
-def test_hanwang_latin_engcut_failure_is_line_local():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    def _line(text, y):
-        return micro_module.LineResult(
-            text=text,
-            bbox=(0, y, 80, y + 30),
-            chars=[
-                micro_module.CharResult(
-                    text=ch,
-                    bbox=(idx * 20, y, idx * 20 + 18, y + 30),
-                )
-                for idx, ch in enumerate(text)
-            ],
-        )
-
-    calls = []
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        calls.append(image_bgr.shape[:2])
-        if len(calls) == 1:
-            raise RuntimeError("bad line crop")
-        return {
-            "lines": [
-                {
-                    "groups": [
-                        {
-                            "chars": [
-                                {
-                                    "codes": [ord(ch)],
-                                    "bbox": {
-                                        "left": idx * 9,
-                                        "top": 2,
-                                        "right": idx * 9 + 7,
-                                        "bottom": 22,
-                                    },
-                                }
-                                for idx, ch in enumerate("~CD~")
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-
-    try:
-        stats = micro_module.RunStats()
-        first = _line("AB", 0)
-        second = _line("CD", 40)
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((80, 100, 3), dtype=np.uint8),
-            [first, second],
-            stats,
-            timeout=1.0,
-        )
-
-        assert calls == [(32, 82), (34, 82)]
-        assert stats.latin_engcut_probe_calls == 2
-        assert stats.latin_engcut_probe_failures == 1
-        assert stats.latin_engcut_exact_tokens == 1
-        assert [char.source for char in first.chars] == ["hanwang:micro_recblock", "hanwang:micro_recblock"]
-        assert [
-            (char.text, char.source, char.bbox, char.token_text)
-            for char in second.chars
-        ] == [
-            ("C", "hanwang:EngCut:latin_exact", (9, 40, 16, 60), "CD"),
-            ("D", "hanwang:EngCut:latin_exact", (18, 40, 25, 60), "CD"),
-        ]
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_failure_is_line_local PASSED")
-
-
-def test_hanwang_latin_engcut_targets_token_lines_without_chinese_only_probe():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    lines = [
-        micro_module.LineResult(
-            text="纯中文",
-            bbox=(0, 0, 80, 30),
-            chars=[
-                micro_module.CharResult(text=ch, bbox=(idx * 18, 0, idx * 18 + 16, 26))
-                for idx, ch in enumerate("纯中文")
-            ],
-        ),
-        micro_module.LineResult(
-            text="PE/VC",
-            bbox=(0, 40, 90, 72),
-            chars=[
-                micro_module.CharResult(text=ch, bbox=(idx * 14, 40, idx * 14 + 10, 68))
-                for idx, ch in enumerate("PE/VC")
-            ],
-        ),
-        micro_module.LineResult(
-            text="2026",
-            bbox=(0, 80, 90, 112),
-            chars=[
-                micro_module.CharResult(text=ch, bbox=(idx * 14, 80, idx * 14 + 10, 108))
-                for idx, ch in enumerate("2026")
-            ],
-        ),
-    ]
-    engcut_texts = ["PE/VC", "2026"]
-    calls = []
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        calls.append(image_bgr.shape[:2])
-        text = engcut_texts.pop(0)
-        return {
-            "lines": [{
-                "groups": [{
-                    "chars": [
-                        {
-                            "codes": [ord(ch)],
-                            "bbox": {
-                                "left": idx * 14,
-                                "top": 2,
-                                "right": idx * 14 + 10,
-                                "bottom": 28,
-                            },
-                        }
-                        for idx, ch in enumerate(text)
-                    ]
-                }]
-            }]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-    try:
-        stats = micro_module.RunStats()
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((120, 120, 3), dtype=np.uint8),
-            lines,
-            stats,
-            timeout=1.0,
-            block_text="纯中文 PE/VC 2026",
-        )
-
-        assert calls == [(36, 92), (36, 92)]
-        assert stats.latin_engcut_probe_calls == 2
-        assert [char.source for char in lines[0].chars] == ["hanwang:micro_recblock"] * 3
-        assert [char.source for char in lines[1].chars] == ["hanwang:EngCut:latin_exact"] * 5
-        assert [char.source for char in lines[2].chars] == ["hanwang:EngCut:latin_exact"] * 4
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_targets_token_lines_without_chinese_only_probe PASSED")
-
-
-def test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    line = micro_module.LineResult(
-        text="Gua吨lia",
-        bbox=(0, 0, 120, 32),
-        chars=[
-            micro_module.CharResult(text="G", bbox=(0, 0, 10, 28)),
-            micro_module.CharResult(text="u", bbox=(12, 8, 22, 28)),
-            micro_module.CharResult(text="a", bbox=(24, 8, 34, 28)),
-            micro_module.CharResult(text="吨", confidence=0.19, bbox=(36, 0, 70, 32)),
-            micro_module.CharResult(text="l", bbox=(72, 0, 82, 28)),
-            micro_module.CharResult(text="i", bbox=(84, 0, 94, 28)),
-            micro_module.CharResult(text="a", bbox=(96, 8, 106, 28)),
-        ],
-    )
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        return {
-            "lines": [{
-                "groups": [{
-                    "chars": [
-                        {
-                            "codes": [ord(ch)],
-                            "bbox": {
-                                "left": idx * 12,
-                                "top": 2,
-                                "right": idx * 12 + 10,
-                                "bottom": 30,
-                            },
-                        }
-                        for idx, ch in enumerate("Guariglia")
-                    ]
-                }]
-            }]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-    try:
-        stats = micro_module.RunStats()
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((40, 140, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-            block_text="Chen和Guariglia，",
-        )
-
-        assert line.text == "Guariglia"
-        assert [char.text for char in line.chars] == list("Guariglia")
-        assert all(char.source == "hanwang:EngCut:latin_exact" for char in line.chars)
-        assert all(char.token_text == "Guariglia" for char in line.chars)
-        assert stats.latin_engcut_exact_tokens == 1
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_uses_paddle_token_to_repair_bad_span PASSED")
-
-
-def test_hanwang_latin_engcut_uses_formula_letter_list_and_low_confidence_fallback():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    chars = [
-        ("自", 0.91, (0, 0, 30, 46)),
-        ("然", 0.92, (45, 0, 89, 45)),
-        ("对", 0.84, (100, 0, 146, 45)),
-        ("数", 0.80, (154, 0, 200, 47)),
-        ("形", 0.93, (208, 0, 252, 45)),
-        ("式", 0.91, (260, 0, 306, 46)),
-        ("，", 0.52, (322, 35, 329, 48)),
-        ("即", 0.82, (346, 0, 385, 44)),
-        ("y", 0.19, (400, 20, 427, 51)),
-        ("、", 0.56, (428, 35, 438, 47)),
-        ("尼", 0.19, (450, 6, 470, 41)),
-        ("、", 0.49, (475, 36, 484, 47)),
-        ("Z", 0.19, (497, 6, 509, 41)),
-        ("、", 0.50, (514, 36, 523, 48)),
-        ("m", 0.19, (536, 21, 569, 42)),
-        ("分", 0.97, (583, 1, 629, 47)),
-        ("别", 0.93, (636, 1, 679, 48)),
-    ]
-    line = micro_module.LineResult(
-        text="自然对数形式，即y、尼、Z、m分别",
-        bbox=(0, 0, 690, 60),
-        chars=[
-            micro_module.CharResult(
-                text=text,
-                confidence=confidence,
-                bbox=bbox,
-                candidates=[text],
-                source="hanwang:micro_recblock",
-                bbox_granularity="char",
-                token_text=text,
-            )
-            for text, confidence, bbox in chars
-        ],
-    )
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        return {
-            "lines": [{
-                "groups": [{
-                    "chars": [
-                        {"codes": [ord("l")], "bbox": {"left": 166, "top": 0, "right": 177, "bottom": 21}},
-                        {"codes": [ord("y")], "bbox": {"left": 400, "top": 20, "right": 427, "bottom": 51}},
-                        {"codes": [ord("k")], "bbox": {"left": 450, "top": 6, "right": 470, "bottom": 41}},
-                        {"codes": [ord("l")], "bbox": {"left": 497, "top": 6, "right": 509, "bottom": 41}},
-                        {"codes": [ord("m")], "bbox": {"left": 536, "top": 21, "right": 569, "bottom": 42}},
-                    ]
-                }]
-            }]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-    try:
-        stats = micro_module.RunStats()
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((50, 260, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-            block_text="其中，即 $ y, k, l, m $ 分别指企业的产量",
-        )
-
-        assert line.text == "自然对数形式，即y、k、l、m分别"
-        assert line.chars[3].text == "数"
-        assert line.chars[3].source == "hanwang:micro_recblock"
-        assert [char.text for char in line.chars[8:15]] == ["y", "、", "k", "、", "l", "、", "m"]
-        assert line.chars[10].source == "hanwang:EngCut:latin_exact"
-        assert line.chars[12].source == "hanwang:EngCut:latin_exact"
-        assert stats.latin_engcut_probe_calls == 1
-        assert stats.latin_engcut_exact_tokens == 4
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_uses_formula_letter_list_and_low_confidence_fallback PASSED")
-
-
-def test_hanwang_latin_engcut_marks_slash_variant_for_review_without_text_rewrite():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    line = micro_module.LineResult(
-        text="PE!VC",
-        bbox=(0, 0, 90, 32),
-        chars=[
-            micro_module.CharResult(text=ch, bbox=(idx * 14, 0, idx * 14 + 10, 28))
-            for idx, ch in enumerate("PE!VC")
-        ],
-    )
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        return {
-            "lines": [{
-                "groups": [{
-                    "chars": [
-                        {
-                            "codes": [ord(ch)],
-                            "bbox": {
-                                "left": idx * 14,
-                                "top": 2,
-                                "right": idx * 14 + 10,
-                                "bottom": 30,
-                            },
-                        }
-                        for idx, ch in enumerate("PE!VC")
-                    ]
-                }]
-            }]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-    try:
-        stats = micro_module.RunStats()
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((40, 100, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-            block_text="其他PE/VC基金",
-        )
-
-        assert line.text == "PE!VC"
-        assert [char.text for char in line.chars] == list("PE!VC")
-        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG in line.review_flags
-        assert stats.latin_engcut_exact_tokens == 0
-        assert stats.latin_engcut_review_tokens == 1
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_marks_slash_variant_for_review_without_text_rewrite PASSED")
-
-
-def test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_guard():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    lines = [
-        micro_module.LineResult(
-            text="Other",
-            bbox=(0, 0, 80, 30),
-            chars=[
-                micro_module.CharResult(text=ch, bbox=(idx * 12, 0, idx * 12 + 10, 26))
-                for idx, ch in enumerate("Other")
-            ],
-        ),
-        micro_module.LineResult(
-            text="PE/VC",
-            bbox=(0, 40, 90, 72),
-            chars=[
-                micro_module.CharResult(text=ch, bbox=(idx * 14, 40, idx * 14 + 10, 68))
-                for idx, ch in enumerate("PE/VC")
-            ],
-        ),
-    ]
-    engcut_texts = ["Other", "PE/VC"]
-
-    def fake_eng20(image_bgr, *, timeout=0):
-        text = engcut_texts.pop(0)
-        return {
-            "lines": [{
-                "groups": [{
-                    "chars": [
-                        {
-                            "codes": [ord(ch)],
-                            "bbox": {
-                                "left": idx * 14,
-                                "top": 2,
-                                "right": idx * 14 + 10,
-                                "bottom": 28,
-                            },
-                        }
-                        for idx, ch in enumerate(text)
-                    ]
-                }]
-            }]
-        }
-
-    original_eng20 = micro_module.native_bridge.run_eng20_recogline
-    micro_module.native_bridge.run_eng20_recogline = fake_eng20
-    try:
-        stats = micro_module.RunStats()
-        micro_module._enhance_lines_with_latin_engcut(
-            np.zeros((90, 120, 3), dtype=np.uint8),
-            lines,
-            stats,
-            timeout=1.0,
-            block_text="PE/VC Other",
-        )
-
-        assert lines[1].text == "PE/VC"
-        assert [char.source for char in lines[1].chars] == ["hanwang:EngCut:latin_exact"] * 5
-        assert micro_module.LATIN_ENGCUT_REVIEW_FLAG not in lines[1].review_flags
-        assert stats.latin_engcut_exact_tokens == 2
-        assert stats.latin_engcut_review_tokens == 0
-    finally:
-        micro_module.native_bridge.run_eng20_recogline = original_eng20
-
-    print("test_hanwang_latin_engcut_reverse_fallback_accepts_exact_after_source_order_guard PASSED")
 
 
 def test_hanwang_crop_padding_expands_without_leaving_page():
@@ -10915,7 +10347,7 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
     micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((100, 200, 3), dtype=np.uint8),
             [{
                 "block_label": "text",
@@ -11072,47 +10504,6 @@ def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
     print("test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise PASSED")
 
 
-def test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg():
-    import numpy as np
-    import app.engines.hanwang.micro_recblock as micro_module
-
-    seen_recblocks = []
-
-    def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
-        seen_recblocks.extend(recblocks_xyxy or [])
-        return {"lines": [{"groups": []} for _ in (recblocks_xyxy or [])]}
-
-    original_segimg = micro_module.native_bridge.run_linecut_segimg
-    original_batch_disabled = micro_module._BATCH_DISABLED_FOR_SESSION
-    micro_module.native_bridge.run_linecut_segimg = fake_segimg
-    micro_module._BATCH_DISABLED_FOR_SESSION = True
-    try:
-        rows, stats = micro_module.run_micro_recblock(
-            np.zeros((80, 200, 3), dtype=np.uint8),
-            [
-                {
-                    "block_label": "text",
-                    "block_bbox": [0, 0, 180, 50],
-                    "block_content": "甲 $ A $、$ B $ 乙",
-                    "_route_subblocks": [
-                        {"block_label": "inline_formula", "block_bbox": [40, 0, 82, 40]},
-                        {"block_label": "inline_formula", "block_bbox": [78, 0, 120, 40]},
-                    ],
-                }
-            ],
-            include_chars=True,
-        )
-
-        assert any(left < 82 and right > 78 and right - left >= 16 for left, _top, right, _bottom in seen_recblocks)
-        assert stats.n_blocks_hanwang == 1
-        assert rows[0].source == "hanwang"
-    finally:
-        micro_module.native_bridge.run_linecut_segimg = original_segimg
-        micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
-
-    print("test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg PASSED")
-
-
 def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
@@ -11162,7 +10553,7 @@ def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hi
     micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
-        rows, _stats = micro_module.run_micro_recblock(
+        rows, _stats = run_micro_recblock_with_explicit_routes(
             np.zeros((60, 150, 3), dtype=np.uint8),
             [{
                 "block_label": "text",
@@ -11295,6 +10686,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
     HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
         np.zeros((60, 150, 3), dtype=np.uint8),
         page,
+        routing_plan=_page_routing_plan_for_test(page),
     )
 
     assert LAYOUT_LINE_ROUTES_FIELD not in _raw_layout_records(page)[0]
@@ -11376,7 +10768,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
     micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((60, 140, 3), dtype=np.uint8),
             [
                 {
@@ -11395,7 +10787,7 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert stats.n_blocks_hanwang == 1
         assert rows[0].text == "甲$ A $乙"
         assert rows[0].layout_bbox == (0, 0, 120, 40)
-        assert rows[0].block_bbox_source == "layout_line_routes_union"
+        assert rows[0].block_bbox_source == "page_routing_plan_union"
         assert rows[0].route_text_slice_bboxes == [(0, 0, 40, 40), (70, 0, 120, 40)]
         assert rows[0].recog_group_bboxes == [(0, 0, 48, 48), (62, 0, 128, 48)]
         assert rows[0].segimg_group_audits == [
@@ -11423,8 +10815,8 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert audit["schema"] == "hanwang_bbox_audit.v1"
         assert audit["layout_block_bbox"] == [0, 0, 120, 40]
         assert audit["effective_block_bbox"] == [0, 0, 120, 40]
-        assert audit["effective_block_bbox_source"] == "layout_line_routes_union"
-        assert audit["layout_line_route_bboxes"] == [[0, 0, 120, 40]]
+        assert audit["effective_block_bbox_source"] == "page_routing_plan_union"
+        assert audit["routing_line_bboxes"] == [[0, 0, 120, 40]]
         assert audit["route_text_slice_bboxes"] == [[0, 0, 40, 40], [70, 0, 120, 40]]
         assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 48, 48], [62, 0, 128, 48]]
         assert audit["hanwang_segimg_group_clipped_count"] == 2
@@ -11494,7 +10886,7 @@ def test_hanwang_micro_recblock_short_chinese_group_keeps_vertical_context():
     micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
-        rows, _stats = micro_module.run_micro_recblock(
+        rows, _stats = run_micro_recblock_with_explicit_routes(
             np.zeros((1400, 1900, 3), dtype=np.uint8),
             [{"block_label": "text", "block_bbox": [1661, 1269, 1773, 1330], "block_content": "表示"}],
             include_chars=True,
@@ -11569,7 +10961,7 @@ def test_hanwang_digitlike_numeric_context_normalizes_low_confidence_binary_valu
     print("test_hanwang_digitlike_numeric_context_normalizes_low_confidence_binary_values PASSED")
 
 
-def test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands():
+def test_hanwang_micro_recblock_keeps_explicit_formula_route_bands_without_ink_refinement():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
     from app.core.paddle_line_routing import PageOcrLineHint
@@ -11588,7 +10980,7 @@ def test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands():
         image[12:42, 10:90] = 0
         image[12:42, 170:290] = 0
         image[25:70, 105:145] = 0
-        rows, _stats = micro_module.run_micro_recblock(
+        rows, _stats = run_micro_recblock_with_explicit_routes(
             image,
             [
                 {
@@ -11610,17 +11002,17 @@ def test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands():
         )
 
         assert seen_recblocks == [
-            (0, 6, 100, 48),
-            (150, 6, 300, 48),
+            (0, 0, 100, 80),
+            (150, 0, 300, 80),
         ]
         assert rows[0].route_text_slice_bboxes == [
-            (0, 6, 100, 48),
-            (150, 6, 300, 48),
+            (0, 0, 100, 80),
+            (150, 0, 300, 80),
         ]
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
-    print("test_hanwang_micro_recblock_refines_formula_mixed_ppocr_line_text_bands PASSED")
+    print("test_hanwang_micro_recblock_keeps_explicit_formula_route_bands_without_ink_refinement PASSED")
 
 
 def test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback():
@@ -11654,7 +11046,7 @@ def test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
     micro_module.native_bridge.run_linecut_recog = fake_recog
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((60, 120, 3), dtype=np.uint8),
             [
                 {
@@ -11741,7 +11133,7 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
     micro_module.native_bridge.run_linecut_recog = fake_recog
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((60, 120, 3), dtype=np.uint8),
             [
                 {
@@ -12835,7 +12227,7 @@ def test_hanwang_inline_formula_empty_text_slices_keeps_empty_hanwang_result():
 
     try:
         parent_text = "前文正文 $ x+y $ 后文正文"
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((40, 140, 3), dtype=np.uint8),
             [{
                 "block_label": "text",
@@ -12921,7 +12313,7 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
                 {"block_label": "inline_formula", "block_bbox": [40, 0, 60, 20]},
             ],
         }]
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((40, 120, 3), dtype=np.uint8),
             blocks,
             include_chars=True,
@@ -12961,7 +12353,7 @@ def test_hanwang_formula_style_footer_bypasses_hanwang():
     micro_module.native_bridge.run_linecut_segimg = fake_segimg
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((60, 120, 3), dtype=np.uint8),
             [
                 {
@@ -13035,7 +12427,7 @@ def test_hanwang_footnote_labels_route_through_hanwang():
     micro_module._BATCH_DISABLED_FOR_SESSION = True
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((100, 300, 3), dtype=np.uint8),
             [
                 {
@@ -13103,7 +12495,7 @@ def test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit()
     micro_module.native_bridge.run_linecut_recog = fake_recog
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((80, 140, 3), dtype=np.uint8),
             [
                 {
@@ -13192,7 +12584,7 @@ def test_hanwang_micro_recblock_circuit_breaks_after_batch_failure():
     micro_module._BATCH_DISABLE_REASON = ""
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((80, 140, 3), dtype=np.uint8),
             [{"block_label": "text", "block_bbox": [0, 0, 140, 80], "block_content": "甲甲甲甲甲"}],
             include_chars=True,
@@ -13276,7 +12668,7 @@ def test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_gu
     micro_module._BATCH_DISABLE_REASON = ""
 
     try:
-        rows, stats = micro_module.run_micro_recblock(
+        rows, stats = run_micro_recblock_with_explicit_routes(
             np.zeros((120, 2000, 3), dtype=np.uint8),
             [{"block_label": "text", "block_bbox": [0, 0, 2000, 120], "block_content": "乙乙"}],
             include_chars=True,
@@ -13423,7 +12815,8 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert [block["block_content"] for block in calls[0][0]] == ["PPVL文本", "$$x+y$$", "参考文献"]
         assert all(block.get("_layout_block_uid") for block in calls[0][0])
         assert calls[0][1]["include_chars"] is True
-        assert calls[0][1]["page_ocr_lines"] is None
+        assert "page_ocr_lines" not in calls[0][1]
+        assert calls[0][1]["page"] is page
         assert calls[0][1]["routing_plan"].is_dispatchable
         assert any("PP-OCRv6 路由预处理完成：1 行" in event.message for event in progress_events)
         assert any(
@@ -13487,7 +12880,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
-        assert kwargs["page_ocr_lines"] is None
+        assert "page_ocr_lines" not in kwargs
         assert len(kwargs["routing_plan"].for_block(ppvl_blocks[0]["_layout_block_uid"]).lines) == 1
         return [
             BlockResult(
@@ -13547,7 +12940,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
         )
 
         assert len(calls) == 1
-        assert calls[0]["page_ocr_lines"] is None
+        assert "page_ocr_lines" not in calls[0]
         assert calls[0]["routing_plan"].is_dispatchable
         assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "重跑结果"
         assert any(
@@ -13575,7 +12968,7 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
-        assert kwargs["page_ocr_lines"] is None
+        assert "page_ocr_lines" not in kwargs
         assert kwargs["routing_plan"].is_dispatchable
         return [
             BlockResult(
@@ -13992,6 +13385,7 @@ def test_hanwang_ppvl_skip_uses_current_layout_label_over_raw_payload_label():
     HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
         np.zeros((100, 100, 3), dtype=np.uint8),
         page,
+        routing_plan=_page_routing_plan_for_test(page),
     )
 
     assert len(calls) == 1
@@ -17462,7 +16856,6 @@ def test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere(
 
     from app.core.block_attributes import block_attributes
     from app.core.layout_analyzer import LayoutAnalyzer
-    from app.engines.hanwang.micro_recblock import run_micro_recblock
     from app.models import BlockType, Page
 
     analyzer = LayoutAnalyzer()
@@ -17488,7 +16881,7 @@ def test_paddle_authority_prefers_block_label_over_conflicting_label_everywhere(
 
     blocks, _overlays = analyzer._extract_api_blocks(page, data)
     attrs = block_attributes(blocks[0])
-    rows, stats = run_micro_recblock(
+    rows, stats = run_micro_recblock_with_explicit_routes(
         np.zeros((100, 100, 3), dtype=np.uint8),
         [{"block_label": "equation", "label": "text", "block_bbox": [10, 10, 80, 30], "block_content": "E=mc^2"}],
     )

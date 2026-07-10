@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import json
-import re
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -24,52 +23,30 @@ from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, replace_block_ocr_line_observations
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
-from app.core.ocr_line_hints import is_ppocr_page_line_hint
+from app.models.charocr_routing import (
+    PageRoutingPlan,
+    RoutingLine,
+    is_text_route_segment_kind,
+)
 from app.core.logging import get_logger
-from app.core.latin_span_recovery import (
-    LATIN_ENGCUT_BBOX_GRANULARITY,
-    LATIN_ENGCUT_BBOX_SOURCE,
-    LATIN_ENGCUT_EXACT_STATUS,
-    LATIN_ENGCUT_MULTILINE_STATUS,
-    LATIN_ENGCUT_REVIEW_FLAG,
-    LATIN_ENGCUT_REVERSE_STATUS,
-    LATIN_ENGCUT_VARIANT_STATUS,
-    LATIN_ENGCUT_WORD_BBOX_GRANULARITY,
-    LATIN_ENGCUT_WORD_BBOX_SOURCE,
-    LATIN_ENGCUT_WORD_FALLBACK_STATUS,
+from .engcut_payload import (
     EngcutChar,
-    LatinToken,
-    bind_latin_tokens_to_engcut_chars,
-    compact_latin_key,
     engcut_chars_from_payload,
-    engcut_geometry_reasons,
-    fuzzy_latin_word_allowed,
     offset_engcut_chars,
-    text_token_spans,
-    token_variants,
 )
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_INLINE_FORMULA_FLAG,
     ROUTE_SUBBLOCKS_FIELD,
     ROUTE_TABLE_FLAG,
-    apply_page_ocr_line_route_attachment,
     block_bbox_xyxy,
     block_text as paddle_block_text,
-    build_page_ocr_line_route_attachment,
     is_formula_label,
     is_formula_style_position_block,
     is_table_label,
     route_authority_label,
-    route_subblocks_for_block,
     union_xyxy,
     vertical_overlap_ratio,
-)
-from app.services.layout_routing_plan import (
-    RoutingLine,
-    is_text_route_segment_kind,
-    routing_line_to_record,
-    routing_plan_for_block_record,
 )
 from app.services.formula_crop_ocr_service import recognize_formula_bboxes_with_retry
 from app.core.paddle_artifact_index import (
@@ -128,23 +105,14 @@ ROUTE_ROW_LAYOUT_BLOCK_UID_KEY = "_layout_block_uid"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
-TEXT_ROUTE_INK_THRESHOLD = 220
-TEXT_ROUTE_INK_MIN_ROW_PIXELS = 2
-TEXT_ROUTE_INK_MIN_ROW_RATIO = 0.015
-TEXT_ROUTE_INK_PAD_Y = 6
 DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
-LATIN_ENGCUT_TEXT_REWRITE_MAX_CONFIDENCE = 0.25
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
+CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
 _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
-_INLINE_FORMULA_SPAN_RE = re.compile(
-    r"(?<!\\)\$\$.*?(?<!\\)\$\$|(?<!\\)\$(?!\$).*?(?<!\\)\$(?!\$)",
-    re.DOTALL,
-)
-_SIMPLE_FORMULA_LETTER_LIST_RE = re.compile(r"[A-Za-z\s,，、;；]+")
 
 MAX_RECOG_BATCH_GROUPS = int(os.environ.get("HANWANG_MICRO_RECBLOCK_BATCH_GROUPS", "64"))
 _BATCH_ENABLED_BY_ENV = (
@@ -265,12 +233,7 @@ class RunStats:
     recog_max_batch_crop_width: int = 0
     recog_max_batch_crop_height: int = 0
     recog_max_batch_crop_pixels: int = 0
-    latin_engcut_probe_calls: int = 0
-    latin_engcut_probe_failures: int = 0
-    latin_engcut_exact_tokens: int = 0
-    latin_engcut_word_tokens: int = 0
-    latin_engcut_review_tokens: int = 0
-    latin_engcut_disabled: bool = False
+    latin_engcut_route_calls: int = 0
     overlap_merge_probe_calls: int = 0
     overlap_merge_probe_failures: int = 0
     overlap_merge_clusters: int = 0
@@ -358,140 +321,24 @@ def _intersect_xyxy(
     return x1, y1, x2, y2
 
 
-def _route_subblocks(block: dict[str, Any], width: int, height: int) -> list[dict[str, Any]]:
-    return route_subblocks_for_block(block, width, height)
-
-
-def _text_route_bboxes_for_block(
-    block: dict[str, Any],
+def _text_route_bboxes_from_lines(
     block_idx: int,
-    width: int,
-    height: int,
+    lines: tuple[RoutingLine, ...],
 ) -> list[_TextRoute]:
-    routes = routing_plan_for_block_record(block, width, height).text_slices
+    """Expand typed page routes without reading raw Paddle route fields."""
     return [
         _TextRoute(
             block_idx=block_idx,
-            line_idx=route.line_index,
-            segment_idx=route.segment_index,
-            bbox=route.bbox,
-            carved=route.carved,
-            kind=route.kind,
+            line_idx=line_idx,
+            segment_idx=segment_idx,
+            bbox=segment.bbox,
+            carved=len(line.segments) > 1,
+            kind=segment.kind,
         )
-        for route in routes
+        for line_idx, line in enumerate(lines)
+        for segment_idx, segment in enumerate(line.segments)
+        if is_text_route_segment_kind(segment.kind)
     ]
-
-
-def _refined_text_segment_bbox_from_ink(
-    image_bgr: np.ndarray,
-    bbox: tuple[int, int, int, int],
-) -> tuple[int, int, int, int] | None:
-    left, top, right, bottom = bbox
-    if right <= left or bottom <= top:
-        return None
-    page_h, page_w = image_bgr.shape[:2]
-    left, top, right, bottom = _clamp_xyxy((left, top, right, bottom), page_w, page_h)
-    if right <= left or bottom <= top:
-        return None
-    crop = image_bgr[top:bottom, left:right]
-    if crop.size == 0:
-        return None
-    if crop.ndim == 3 and crop.shape[2] >= 3:
-        gray = (
-            crop[:, :, 0].astype(np.float32) * 0.114
-            + crop[:, :, 1].astype(np.float32) * 0.587
-            + crop[:, :, 2].astype(np.float32) * 0.299
-        )
-    else:
-        gray = crop.astype(np.float32)
-    dark = gray < TEXT_ROUTE_INK_THRESHOLD
-    row_counts = dark.sum(axis=1)
-    min_pixels = max(TEXT_ROUTE_INK_MIN_ROW_PIXELS, int(round((right - left) * TEXT_ROUTE_INK_MIN_ROW_RATIO)))
-    rows = np.flatnonzero(row_counts >= min_pixels)
-    if rows.size == 0:
-        return None
-    refined_top = max(top, top + int(rows[0]) - TEXT_ROUTE_INK_PAD_Y)
-    refined_bottom = min(bottom, top + int(rows[-1]) + 1 + TEXT_ROUTE_INK_PAD_Y)
-    if refined_bottom <= refined_top:
-        return None
-    return left, refined_top, right, refined_bottom
-
-
-def _refine_layout_text_route_bands_from_image(
-    image_bgr: np.ndarray,
-    ppvl_blocks: list[dict],
-    width: int,
-    height: int,
-) -> dict[int, list[dict[str, Any]]]:
-    """Tighten text route vertical bands using page pixels, not formula-heavy PP-OCR rows."""
-    if image_bgr.size == 0:
-        return {}
-    refined_by_block_index: dict[int, list[dict[str, Any]]] = {}
-    for block_idx, block in enumerate(ppvl_blocks):
-        routes = routing_plan_for_block_record(block, width, height).lines
-        if not routes:
-            continue
-        changed = False
-        refined_routes: list[RoutingLine] = []
-        for route in routes:
-            if not route.has_formula:
-                refined_routes.append(route)
-                continue
-            refined_segments = []
-            route_changed = False
-            for segment in route.segments:
-                next_segment = segment
-                if is_text_route_segment_kind(segment.kind):
-                    bbox = _clamp_xyxy(segment.bbox, width, height)
-                    refined_bbox = _refined_text_segment_bbox_from_ink(image_bgr, bbox)
-                    if refined_bbox is not None and refined_bbox != segment.bbox:
-                        next_segment = replace(segment, bbox=refined_bbox)
-                        route_changed = True
-                refined_segments.append(next_segment)
-            if route_changed and refined_segments:
-                refined_routes.append(
-                    replace(
-                        route,
-                        segments=tuple(refined_segments),
-                        bbox=union_xyxy([segment.bbox for segment in refined_segments]),
-                    )
-                )
-                changed = True
-            else:
-                refined_routes.append(route)
-        if changed:
-            refined_by_block_index[block_idx] = [
-                routing_line_to_record(route)
-                for route in refined_routes
-            ]
-    return refined_by_block_index
-
-
-def _apply_layout_line_route_records(
-    ppvl_blocks: list[dict],
-    route_records_by_block_index: dict[int, list[dict[str, Any]]],
-) -> None:
-    for block_idx, records in route_records_by_block_index.items():
-        if 0 <= block_idx < len(ppvl_blocks):
-            ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD] = records
-
-
-def _has_route_subblocks(block: dict[str, Any], width: int, height: int) -> bool:
-    return routing_plan_for_block_record(block, width, height).has_layout_routes
-
-
-def _semantic_text_routes(
-    ppvl_blocks: list[dict],
-    width: int,
-    height: int,
-) -> list[_TextRoute]:
-    routes: list[_TextRoute] = []
-    for block_idx, block in enumerate(ppvl_blocks):
-        label = _effective_label_for_block(block)
-        if not _is_text_label(label):
-            continue
-        routes.extend(_text_route_bboxes_for_block(block, block_idx, width, height))
-    return routes
 
 
 def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
@@ -773,20 +620,21 @@ def _assemble_layout_route_line(
                 formula_text = segment.text
                 if not formula_text:
                     continue
+                content_bbox = segment.content_bbox or segment_bbox
                 text_parts.append(formula_text)
-                component_boxes.append(segment_bbox)
+                component_boxes.append(content_bbox)
                 chars.append(
                     CharResult(
                         text=formula_text,
                         confidence=0.0,
-                        bbox=segment_bbox,
+                        bbox=content_bbox,
                         candidates=[formula_text],
                         source="paddle_inline_formula",
                         bbox_granularity="word",
                         token_text=formula_text,
                     )
                 )
-                char_bounds.append(segment_bbox)
+                char_bounds.append(content_bbox)
                 flags.add(ROUTE_INLINE_FORMULA_FLAG)
         merged_text = "".join(text_parts)
         if not merged_text:
@@ -812,15 +660,12 @@ def _assemble_layout_route_line(
     return assembled
 
 
-def _assemble_layout_route_lines(
+def _assemble_routing_lines(
     *,
     block_idx: int,
-    block: dict[str, Any],
+    line_routes: tuple[RoutingLine, ...],
     grouped_lines: dict[tuple[int, int, int], list[LineResult]],
-    width: int,
-    height: int,
 ) -> list[LineResult]:
-    line_routes = routing_plan_for_block_record(block, width, height).lines
     if not line_routes:
         return []
     assembled: list[LineResult] = []
@@ -915,27 +760,25 @@ def _layout_block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, in
     return block_bbox_xyxy(raw, width, height)
 
 
-def _layout_line_route_bboxes(raw: dict, width: int, height: int) -> list[tuple[int, int, int, int]]:
-    return [
-        route.bbox
-        for route in routing_plan_for_block_record(raw, width, height).lines
-        if route.bbox != (0, 0, 0, 0)
-    ]
-
-
-def _effective_block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, int, int]:
-    line_routes = _layout_line_route_bboxes(raw, width, height)
-    if line_routes:
-        return union_xyxy(line_routes)
-    return _layout_block_bbox(raw, width, height)
-
-
-def _effective_block_bbox_source(raw: dict, width: int, height: int) -> str:
-    return "layout_line_routes_union" if _layout_line_route_bboxes(raw, width, height) else "layout_block_bbox"
+def _block_geometry_from_page_routes(
+    raw: dict,
+    width: int,
+    height: int,
+    routes: tuple[RoutingLine, ...],
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], str]:
+    """Get native audit geometry from the explicit typed plan, not raw fields."""
+    layout_bbox = _layout_block_bbox(raw, width, height)
+    if routes:
+        return (
+            union_xyxy([route.bbox for route in routes]),
+            layout_bbox,
+            "page_routing_plan_union",
+        )
+    return layout_bbox, layout_bbox, "layout_block_bbox"
 
 
 def _block_bbox(raw: dict, width: int, height: int) -> tuple[int, int, int, int]:
-    return _effective_block_bbox(raw, width, height)
+    return _layout_block_bbox(raw, width, height)
 
 
 def _bbox_lists(values: list[tuple[int, int, int, int]]) -> list[list[int]]:
@@ -948,12 +791,14 @@ def _hanwang_bbox_audit(
     height: int,
     *,
     block_bbox: tuple[int, int, int, int] | None = None,
+    block_bbox_source: str | None = None,
+    routing_line_bboxes: list[tuple[int, int, int, int]],
     route_text_slice_bboxes: list[tuple[int, int, int, int]] | None = None,
     recog_group_bboxes: list[tuple[int, int, int, int]] | None = None,
     segimg_group_audits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     layout_bbox = _layout_block_bbox(raw, width, height)
-    line_route_bboxes = _layout_line_route_bboxes(raw, width, height)
+    line_route_bboxes = list(routing_line_bboxes)
     effective_bbox = block_bbox or (union_xyxy(line_route_bboxes) if line_route_bboxes else layout_bbox)
     text_slice_bboxes = route_text_slice_bboxes or []
     group_bboxes = recog_group_bboxes or []
@@ -967,10 +812,8 @@ def _hanwang_bbox_audit(
         "paddle_label_unknown_action": "default_text_ocr" if unknown_label else "",
         "layout_block_bbox": list(layout_bbox),
         "effective_block_bbox": list(effective_bbox),
-        "effective_block_bbox_source": (
-            "layout_line_routes_union" if line_route_bboxes else "layout_block_bbox"
-        ),
-        "layout_line_route_bboxes": _bbox_lists(line_route_bboxes),
+        "effective_block_bbox_source": block_bbox_source or "layout_block_bbox",
+        "routing_line_bboxes": _bbox_lists(line_route_bboxes),
         "route_text_slice_bboxes": _bbox_lists(text_slice_bboxes),
         "hanwang_recog_group_bboxes": _bbox_lists(group_bboxes),
         "hanwang_segimg_groups": [dict(item) for item in group_audits],
@@ -988,6 +831,8 @@ def _raw_block_with_bbox_audit(
     height: int,
     *,
     block_bbox: tuple[int, int, int, int] | None = None,
+    block_bbox_source: str | None = None,
+    routing_line_bboxes: list[tuple[int, int, int, int]],
     route_text_slice_bboxes: list[tuple[int, int, int, int]] | None = None,
     recog_group_bboxes: list[tuple[int, int, int, int]] | None = None,
     segimg_group_audits: list[dict[str, Any]] | None = None,
@@ -998,6 +843,8 @@ def _raw_block_with_bbox_audit(
         width,
         height,
         block_bbox=block_bbox,
+        block_bbox_source=block_bbox_source,
+        routing_line_bboxes=routing_line_bboxes,
         route_text_slice_bboxes=route_text_slice_bboxes,
         recog_group_bboxes=recog_group_bboxes,
         segimg_group_audits=segimg_group_audits,
@@ -1223,8 +1070,8 @@ def _overlap_merge_pair(left: CharResult, right: CharResult) -> bool:
     vertical = _axis_overlap_fraction(left.bbox[1], left.bbox[3], right.bbox[1], right.bbox[3])
     if ioa < OVERLAP_MERGE_IOA_THRESHOLD or vertical < OVERLAP_MERGE_VERTICAL_THRESHOLD:
         return False
-    left_cx, _ = _box_center(left.bbox)
-    right_cx, _ = _box_center(right.bbox)
+    left_cx, _ = _bbox_center(left.bbox)
+    right_cx, _ = _bbox_center(right.bbox)
     max_height = max(left.bbox[3] - left.bbox[1], right.bbox[3] - right.bbox[1])
     return abs(right_cx - left_cx) <= max(8.0, max_height * 0.85)
 
@@ -1456,24 +1303,6 @@ def _refine_overlap_fragments_with_recrop(
                 line.confidence = sum(char.confidence for char in line.chars) / len(line.chars)
 
 
-def _line_char_offset_map(line: LineResult) -> list[int] | None:
-    char_text = "".join(char.text for char in line.chars)
-    if char_text != line.text:
-        return None
-    offsets: list[int] = []
-    for char_index, char in enumerate(line.chars):
-        offsets.extend([char_index] * len(char.text))
-    return offsets
-
-
-def _mark_latin_engcut_review(line: LineResult) -> None:
-    if LATIN_ENGCUT_REVIEW_FLAG not in line.review_flags:
-        line.review_flags.append(LATIN_ENGCUT_REVIEW_FLAG)
-
-
-CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
-LATIN_REVERSE_OCCUPY_CONFIDENCE = 0.50
-LATIN_CANDIDATE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./&+-")
 RECOG_GROUP_CROP_PAD_X = 8
 RECOG_GROUP_CROP_PAD_Y = 10
 RECOG_GROUP_RETRY_TOP_TRIM = 3
@@ -1485,584 +1314,6 @@ OVERLAP_MERGE_VERTICAL_THRESHOLD = 0.55
 OVERLAP_MERGE_MAX_CLUSTER_CHARS = 5
 OVERLAP_MERGE_PAD_X = 3
 OVERLAP_MERGE_PAD_Y = 3
-
-
-@dataclass
-class _EngcutLine:
-    line: LineResult
-    bbox: tuple[int, int, int, int]
-    chars: list[EngcutChar]
-    text: str
-    order: int
-
-
-@dataclass
-class _EngcutEntry:
-    char: EngcutChar
-    line_record: _EngcutLine
-
-
-@dataclass
-class _TokenBinding:
-    token: LatinToken
-    status: str
-    matched_text: str
-    chars: list[EngcutChar]
-    line_records: list[_EngcutLine]
-    line_span: tuple[int, int] | None = None
-
-    @property
-    def bbox(self) -> tuple[int, int, int, int] | None:
-        boxes = [char.bbox for char in self.chars if char.bbox is not None]
-        if not boxes:
-            return None
-        return (
-            min(box[0] for box in boxes),
-            min(box[1] for box in boxes),
-            max(box[2] for box in boxes),
-            max(box[3] for box in boxes),
-        )
-
-
-def _looks_cjk_text(text: str) -> bool:
-    return any(
-        "\u3400" <= char <= "\u4dbf"
-        or "\u4e00" <= char <= "\u9fff"
-        or "\uf900" <= char <= "\ufaff"
-        for char in text or ""
-    )
-
-
-def _is_occupied_cjk_or_punct(char: CharResult) -> bool:
-    if not char.text or char.bbox is None:
-        return False
-    if char.confidence < LATIN_REVERSE_OCCUPY_CONFIDENCE:
-        return False
-    return _looks_cjk_text(char.text) or char.text in CHINESE_PUNCT
-
-
-def _box_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
-    return (float(box[0] + box[2]) / 2.0, float(box[1] + box[3]) / 2.0)
-
-
-def _contains_point(box: tuple[int, int, int, int], point: tuple[float, float]) -> bool:
-    return box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]
-
-
-def _overlap_ratio(
-    candidate: tuple[int, int, int, int],
-    blocker: tuple[int, int, int, int],
-) -> float:
-    area = _intersection_area(candidate, blocker)
-    if area <= 0:
-        return 0.0
-    return area / max(1, (candidate[2] - candidate[0]) * (candidate[3] - candidate[1]))
-
-
-def _engcut_candidate_char(text: str) -> bool:
-    return len(text) == 1 and text in LATIN_CANDIDATE_CHARS
-
-
-def _engcut_char_blocked(char: EngcutChar, occupied: list[tuple[int, int, int, int]]) -> bool:
-    if char.bbox is None:
-        return True
-    point = _box_center(char.bbox)
-    for blocker in occupied:
-        if _contains_point(blocker, point):
-            return True
-    return any(_overlap_ratio(char.bbox, blocker) >= 0.55 for blocker in occupied)
-
-
-def _engcut_stream(records: list[_EngcutLine]) -> tuple[str, list[_EngcutEntry | None]]:
-    parts: list[str] = []
-    entries: list[_EngcutEntry | None] = []
-    for record in records:
-        for char in record.chars:
-            parts.append(char.text)
-            entries.append(_EngcutEntry(char=char, line_record=record))
-        parts.append("\n")
-        entries.append(None)
-    return "".join(parts), entries
-
-
-def _future_token_before(
-    stream_text: str,
-    cursor: int,
-    candidate_start: int,
-    future_tokens: list[LatinToken],
-) -> bool:
-    for future in future_tokens:
-        for variant in token_variants(future.text):
-            pos = stream_text.find(variant, cursor)
-            if 0 <= pos < candidate_start:
-                return True
-    return False
-
-
-def _line_span_from_stream_entries(
-    entries: list[_EngcutEntry | None],
-    start: int,
-    end: int,
-    record: _EngcutLine,
-) -> tuple[int, int] | None:
-    if start < 0 or end <= start or end > len(entries):
-        return None
-    if any(item is None or item.line_record is not record for item in entries[start:end]):
-        return None
-    line_start = start
-    while line_start > 0:
-        previous = entries[line_start - 1]
-        if previous is None or previous.line_record is not record:
-            break
-        line_start -= 1
-    return start - line_start, end - line_start
-
-
-def _bind_token_in_stream(
-    token: LatinToken,
-    future_tokens: list[LatinToken],
-    stream_text: str,
-    entries: list[_EngcutEntry | None],
-    cursor: int,
-) -> tuple[_TokenBinding | None, int]:
-    search_cursor = cursor
-    while search_cursor < len(stream_text):
-        best: tuple[int, str] | None = None
-        for variant in token_variants(token.text):
-            pos = stream_text.find(variant, search_cursor)
-            if pos >= 0 and (best is None or pos < best[0]):
-                best = (pos, variant)
-        if best is None:
-            return _bind_token_from_word_fallback_group(token, future_tokens, stream_text, entries, cursor)
-        found, variant = best
-        if token.kind != "formula_letter" and _future_token_before(stream_text, cursor, found, future_tokens):
-            return None, cursor
-        end = found + len(variant)
-        entry_slice = entries[found:end]
-        if len(entry_slice) != len(variant) or any(item is None or item.char.bbox is None for item in entry_slice):
-            search_cursor = found + 1
-            continue
-        records: list[_EngcutLine] = []
-        chars: list[EngcutChar] = []
-        for item in entry_slice:
-            assert item is not None
-            chars.append(item.char)
-            if item.line_record not in records:
-                records.append(item.line_record)
-        status = LATIN_ENGCUT_EXACT_STATUS if variant == token.text else LATIN_ENGCUT_VARIANT_STATUS
-        if len(records) > 1:
-            status = LATIN_ENGCUT_MULTILINE_STATUS
-        line_span = _line_span_from_stream_entries(entries, found, end, records[0]) if len(records) == 1 else None
-        binding = _TokenBinding(
-            token=token,
-            status=status,
-            matched_text=variant,
-            chars=chars,
-            line_records=records,
-            line_span=line_span,
-        )
-        if _formula_letter_binding_hits_protected_span(binding):
-            search_cursor = found + 1
-            continue
-        return binding, end
-    return _bind_token_from_word_fallback_group(token, future_tokens, stream_text, entries, cursor)
-
-
-def _bind_token_from_word_fallback_group(
-    token: LatinToken,
-    future_tokens: list[LatinToken],
-    stream_text: str,
-    entries: list[_EngcutEntry | None],
-    cursor: int,
-) -> tuple[_TokenBinding | None, int]:
-    if not token.text.isalpha():
-        return None, cursor
-    index = cursor
-    while index < len(entries):
-        item = entries[index]
-        if item is None:
-            index += 1
-            continue
-        group_key = (id(item.line_record), item.char.line_index, item.char.group_index)
-        end = index + 1
-        while end < len(entries):
-            next_item = entries[end]
-            if next_item is None:
-                break
-            next_key = (id(next_item.line_record), next_item.char.line_index, next_item.char.group_index)
-            if next_key != group_key:
-                break
-            end += 1
-        group_entries = [entry for entry in entries[index:end] if entry is not None and entry.char.bbox is not None]
-        candidate_text = "".join(entry.char.text for entry in group_entries)
-        if (
-            len(group_entries) == end - index
-            and fuzzy_latin_word_allowed(token.text, candidate_text)
-            and not _future_token_before(stream_text, cursor, index, future_tokens)
-        ):
-            records: list[_EngcutLine] = []
-            chars: list[EngcutChar] = []
-            for entry in group_entries:
-                chars.append(entry.char)
-                if entry.line_record not in records:
-                    records.append(entry.line_record)
-            return (
-                _TokenBinding(
-                    token=token,
-                    status=LATIN_ENGCUT_WORD_FALLBACK_STATUS,
-                    matched_text=candidate_text,
-                    chars=chars,
-                    line_records=records,
-                    line_span=_line_span_from_stream_entries(entries, index, end, records[0]) if len(records) == 1 else None,
-                ),
-                end,
-            )
-        index = end
-    return None, cursor
-
-
-def _reverse_groups(records: list[_EngcutLine]) -> list[_TokenBinding]:
-    groups: list[_TokenBinding] = []
-    for record in records:
-        occupied = [
-            char.bbox
-            for char in record.line.chars
-            if _is_occupied_cjk_or_punct(char) and char.bbox is not None
-        ]
-        current: list[EngcutChar] = []
-        for char in record.chars:
-            keep = (
-                _engcut_candidate_char(char.text)
-                and char.bbox is not None
-                and not _engcut_char_blocked(char, occupied)
-            )
-            if keep:
-                current.append(char)
-                continue
-            if current:
-                text = "".join(item.text for item in current)
-                groups.append(_TokenBinding(
-                    token=LatinToken(text=text, start=-1, end=-1),
-                    status=LATIN_ENGCUT_REVERSE_STATUS,
-                    matched_text=text,
-                    chars=current,
-                    line_records=[record],
-                ))
-                current = []
-        if current:
-            text = "".join(item.text for item in current)
-            groups.append(_TokenBinding(
-                token=LatinToken(text=text, start=-1, end=-1),
-                status=LATIN_ENGCUT_REVERSE_STATUS,
-                matched_text=text,
-                chars=current,
-                line_records=[record],
-            ))
-    return [group for group in groups if len(group.matched_text) >= 2]
-
-
-def _reverse_group_matches(group_text: str, token_text: str) -> tuple[bool, str]:
-    for variant in token_variants(token_text):
-        if group_text == variant:
-            return True, variant
-        if group_text.strip("/f!lI1|") == variant:
-            return True, group_text
-    return False, ""
-
-
-def _bind_token_from_reverse_groups(
-    token: LatinToken,
-    groups: list[_TokenBinding],
-    cursor: int,
-) -> tuple[_TokenBinding | None, int]:
-    for idx in range(cursor, len(groups)):
-        group = groups[idx]
-        ok, variant = _reverse_group_matches(group.matched_text, token.text)
-        if ok:
-            return _TokenBinding(
-                token=token,
-                status=LATIN_ENGCUT_REVERSE_STATUS,
-                matched_text=variant,
-                chars=group.chars,
-                line_records=group.line_records,
-            ), idx + 1
-    return None, cursor
-
-
-def _formula_letter_binding_hits_protected_span(binding: _TokenBinding) -> bool:
-    if binding.token.kind != "formula_letter":
-        return False
-    if len(binding.line_records) != 1 or not binding.chars:
-        return False
-    binding_bbox = binding.bbox
-    if binding_bbox is None:
-        return False
-    line = binding.line_records[0].line
-    span = _span_for_binding(line, binding_bbox, binding.token.text, binding.matched_text, binding.line_span)
-    if span is None:
-        return False
-    start, end = span
-    return any(_is_occupied_cjk_or_punct(char) for char in line.chars[start:end])
-
-
-def _char_center_inside_binding(
-    char: CharResult,
-    binding_bbox: tuple[int, int, int, int],
-) -> bool:
-    if char.bbox is None:
-        return False
-    x1, y1, x2, y2 = binding_bbox
-    cx, cy = _box_center(char.bbox)
-    return (x1 - 2) <= cx <= (x2 + 2) and (y1 - 4) <= cy <= (y2 + 4)
-
-
-def _span_text_for_chars(chars: list[CharResult], start: int, end: int) -> str:
-    return "".join(char.text for char in chars[start:end])
-
-
-def _span_matches_binding_text(span_text: str, token: str, matched_text: str) -> bool:
-    if not span_text:
-        return False
-    for candidate in (token, matched_text):
-        if not candidate:
-            continue
-        if span_text == candidate:
-            return True
-        if span_text in token_variants(candidate) or candidate in token_variants(span_text):
-            return True
-    return False
-
-
-def _low_confidence_latin_rewrite_candidate(char: CharResult) -> bool:
-    if float(char.confidence or 0.0) > LATIN_ENGCUT_TEXT_REWRITE_MAX_CONFIDENCE:
-        return False
-    text = str(char.text or "")
-    if len(text) != 1:
-        return False
-    return text in LATIN_CANDIDATE_CHARS or _looks_cjk_text(text)
-
-
-def _span_allows_engcut_text_rewrite(chars: list[CharResult], token_text: str) -> bool:
-    current = [str(char.text or "") for char in chars]
-    if len(chars) == len(token_text):
-        changed = False
-        for char, expected in zip(chars, token_text):
-            if str(char.text or "") == expected:
-                continue
-            changed = True
-            if not _low_confidence_latin_rewrite_candidate(char):
-                return False
-        return changed
-
-    prefix = 0
-    while prefix < len(current) and prefix < len(token_text) and current[prefix] == token_text[prefix]:
-        prefix += 1
-    suffix = 0
-    while (
-        suffix < len(current) - prefix
-        and suffix < len(token_text) - prefix
-        and current[len(current) - 1 - suffix] == token_text[len(token_text) - 1 - suffix]
-    ):
-        suffix += 1
-
-    changed_chars = chars[prefix:len(chars) - suffix if suffix else len(chars)]
-    replacement_text = token_text[prefix:len(token_text) - suffix if suffix else len(token_text)]
-    if not changed_chars or not replacement_text:
-        return False
-    if not all(ch in LATIN_CANDIDATE_CHARS for ch in replacement_text):
-        return False
-    return all(_low_confidence_latin_rewrite_candidate(char) for char in changed_chars)
-
-
-def _binding_span_score(
-    line: LineResult,
-    span: tuple[int, int],
-    binding_bbox: tuple[int, int, int, int],
-) -> int:
-    start, end = span
-    return sum(
-        1
-        for char in line.chars[start:end]
-        if _char_center_inside_binding(char, binding_bbox)
-    )
-
-
-def _find_text_span_for_binding(
-    line: LineResult,
-    binding_bbox: tuple[int, int, int, int],
-    token: str,
-    matched_text: str,
-) -> tuple[int, int] | None:
-    offset_map = _line_char_offset_map(line)
-    best: tuple[int, int, int] | None = None
-    for candidate in (token, matched_text):
-        if not candidate:
-            continue
-        cursor = 0
-        while True:
-            pos = line.text.find(candidate, cursor)
-            if pos < 0:
-                break
-            cursor = pos + 1
-            if offset_map is not None and pos + len(candidate) <= len(offset_map):
-                mapped = offset_map[pos:pos + len(candidate)]
-                if not mapped:
-                    continue
-                span = (min(mapped), max(mapped) + 1)
-            else:
-                span = (pos, pos + len(candidate))
-            start, end = span
-            if start < 0 or end > len(line.chars) or start >= end:
-                continue
-            score = _binding_span_score(line, span, binding_bbox)
-            if best is None or score > best[0] or (score == best[0] and start < best[1]):
-                best = (score, start, end)
-    if best is None:
-        return None
-    return best[1], best[2]
-
-
-def _span_for_binding(
-    line: LineResult,
-    binding_bbox: tuple[int, int, int, int],
-    token: str,
-    matched_text: str,
-    line_span: tuple[int, int] | None = None,
-) -> tuple[int, int] | None:
-    offset_map = _line_char_offset_map(line)
-    if line_span is not None:
-        start, end = line_span
-        if 0 <= start < end:
-            if offset_map is not None and end <= len(offset_map):
-                mapped = offset_map[start:end]
-                if mapped and _span_matches_binding_text(
-                    _span_text_for_chars(line.chars, min(mapped), max(mapped) + 1),
-                    token,
-                    matched_text,
-                ):
-                    return min(mapped), max(mapped) + 1
-            if end <= len(line.chars) and _span_matches_binding_text(
-                _span_text_for_chars(line.chars, start, end),
-                token,
-                matched_text,
-            ):
-                return start, end
-    text_span = _find_text_span_for_binding(line, binding_bbox, token, matched_text)
-    if text_span is not None:
-        return text_span
-    indices = [
-        idx
-        for idx, char in enumerate(line.chars)
-        if _char_center_inside_binding(char, binding_bbox)
-    ]
-    if indices:
-        return min(indices), max(indices) + 1
-    return None
-
-
-def _replace_line_span_with_binding(line: LineResult, binding: _TokenBinding) -> bool:
-    if len(binding.line_records) != 1 or not binding.chars:
-        return False
-    if binding.line_records[0].line is not line:
-        return False
-    binding_bbox = binding.bbox
-    if binding_bbox is None:
-        return False
-    span = _span_for_binding(line, binding_bbox, binding.token.text, binding.matched_text, binding.line_span)
-    if span is None:
-        return False
-    start, end = span
-    token_text = binding.token.text
-    if len(binding.chars) != len(token_text):
-        return False
-    current_chars = line.chars[start:end]
-    if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
-        if not _span_allows_engcut_text_rewrite(current_chars, token_text):
-            return False
-    replacement = [
-        CharResult(
-            text=token_text[idx],
-            confidence=line.confidence,
-            bbox=char.bbox,
-            candidates=[token_text[idx]],
-            source=LATIN_ENGCUT_BBOX_SOURCE,
-            bbox_granularity=LATIN_ENGCUT_BBOX_GRANULARITY,
-            token_text=token_text,
-        )
-        for idx, char in enumerate(binding.chars)
-    ]
-    _replace_line_result_char_span(line, start, end, replacement)
-    line.text = "".join(char.text for char in line.chars)
-    return True
-
-
-def _binding_word_fallback_reasons(binding: _TokenBinding) -> tuple[str, ...]:
-    if not binding.token.text.isalpha():
-        return ()
-    if binding.status == LATIN_ENGCUT_WORD_FALLBACK_STATUS:
-        return ("word_text_fallback",)
-    return engcut_geometry_reasons(binding.chars)
-
-
-def _replace_line_span_with_word_binding(line: LineResult, binding: _TokenBinding) -> bool:
-    if len(binding.line_records) != 1 or not binding.chars:
-        return False
-    if binding.line_records[0].line is not line:
-        return False
-    binding_bbox = binding.bbox
-    if binding_bbox is None:
-        return False
-    span = _span_for_binding(line, binding_bbox, binding.token.text, binding.matched_text, binding.line_span)
-    if span is None:
-        return False
-    start, end = span
-    token_text = binding.token.text
-    current_chars = line.chars[start:end]
-    if _span_text_for_chars(current_chars, 0, len(current_chars)) != token_text:
-        if not all(_low_confidence_latin_rewrite_candidate(char) for char in current_chars):
-            return False
-    _replace_line_result_char_span(
-        line,
-        start,
-        end,
-        [
-            CharResult(
-                text=token_text,
-                confidence=line.confidence,
-                bbox=binding_bbox,
-                candidates=[token_text],
-                source=LATIN_ENGCUT_WORD_BBOX_SOURCE,
-                bbox_granularity=LATIN_ENGCUT_WORD_BBOX_GRANULARITY,
-                token_text=token_text,
-            )
-        ],
-    )
-    line.text = "".join(char.text for char in line.chars)
-    return True
-
-
-def _binding_can_update_text(binding: _TokenBinding) -> bool:
-    if binding.status == LATIN_ENGCUT_EXACT_STATUS:
-        return binding.matched_text == binding.token.text
-    if binding.status == LATIN_ENGCUT_REVERSE_STATUS:
-        return binding.matched_text == binding.token.text
-    return False
-
-
-def _line_text_stream(lines: list[LineResult]) -> tuple[str, list[int | None]]:
-    parts: list[str] = []
-    entries: list[int | None] = []
-    for order, line in enumerate(lines):
-        for char in line.text:
-            parts.append(char)
-            entries.append(order)
-        parts.append("\n")
-        entries.append(None)
-    return "".join(parts), entries
-
-
-def _line_has_text_token(line: LineResult) -> bool:
-    return bool(text_token_spans(line.text, skip_formula_spans=False))
 
 
 def _engcut_route_line_text_and_chars(
@@ -2125,7 +1376,7 @@ def _recognize_text_latin_route_with_engcut(
     crop = image_bgr[y1:y2, x1:x2].copy()
     if crop.size == 0:
         raise RuntimeError(f"empty text_latin route crop: {route.bbox}")
-    stats.latin_engcut_probe_calls += 1
+    stats.latin_engcut_route_calls += 1
     raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
     page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=x1, dy=y1)
     text, chars = _engcut_route_line_text_and_chars(page_chars)
@@ -2143,291 +1394,6 @@ def _recognize_text_latin_route_with_engcut(
     )
 
 
-def _subsequence_length(left: str, right: str) -> int:
-    if not left or not right:
-        return 0
-    cursor = 0
-    matched = 0
-    for char in left:
-        pos = right.find(char, cursor)
-        if pos < 0:
-            continue
-        matched += 1
-        cursor = pos + 1
-    return matched
-
-
-def _line_may_contain_block_token(line_text: str, token_text: str) -> bool:
-    line_key = compact_latin_key(line_text)
-    token_key = compact_latin_key(token_text)
-    if len(line_key) < 2 or len(token_key) < 2:
-        return False
-    if token_key in line_key or line_key in token_key:
-        return True
-    common = _subsequence_length(line_key, token_key)
-    return common >= 3 and common / max(1, len(token_key)) >= 0.55
-
-
-def _block_text_engcut_tokens(block_text: str) -> list[LatinToken]:
-    tokens = list(text_token_spans(block_text)) if block_text else []
-    tokens.extend(_simple_formula_letter_tokens(block_text))
-    tokens.sort(key=lambda token: (token.start, token.end, token.text))
-    deduped: list[LatinToken] = []
-    seen: set[tuple[int, int, str]] = set()
-    for token in tokens:
-        key = (token.start, token.end, token.text)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(token)
-    return deduped
-
-
-def _simple_formula_letter_tokens(block_text: str) -> list[LatinToken]:
-    tokens: list[LatinToken] = []
-    for match in _INLINE_FORMULA_SPAN_RE.finditer(block_text or ""):
-        raw = match.group(0)
-        if raw.startswith("$$") and raw.endswith("$$"):
-            inner = raw[2:-2]
-            offset = 2
-        elif raw.startswith("$") and raw.endswith("$"):
-            inner = raw[1:-1]
-            offset = 1
-        else:
-            continue
-        if not _SIMPLE_FORMULA_LETTER_LIST_RE.fullmatch(inner.strip()):
-            continue
-        letters = list(re.finditer(r"[A-Za-z]", inner))
-        if len(letters) < 2:
-            continue
-        for letter in letters:
-            start = match.start() + offset + letter.start()
-            tokens.append(LatinToken(text=letter.group(0), start=start, end=start + 1, kind="formula_letter"))
-    return tokens
-
-
-def _has_formula_letter_tokens(tokens: list[LatinToken]) -> bool:
-    return any(token.kind == "formula_letter" for token in tokens)
-
-
-def _line_has_low_confidence_formula_letter_candidate(line: LineResult) -> bool:
-    if not line.chars:
-        return False
-    has_latin_hint = any(
-        len(char.text or "") == 1 and (char.text in LATIN_CANDIDATE_CHARS)
-        for char in line.chars
-    )
-    has_low_confidence_candidate = any(
-        float(char.confidence or 0.0) <= 0.25
-        and len(char.text or "") == 1
-        and (
-            char.text in LATIN_CANDIDATE_CHARS
-            or _looks_cjk_text(char.text)
-        )
-        for char in line.chars
-    )
-    return has_latin_hint and has_low_confidence_candidate
-
-
-def _engcut_target_line_orders(
-    lines: list[LineResult],
-    block_tokens: list[LatinToken],
-) -> set[int]:
-    if not block_tokens:
-        return {
-            order
-            for order, line in enumerate(lines)
-            if _line_has_text_token(line)
-        }
-
-    stream_text, entries = _line_text_stream(lines)
-    cursor = 0
-    target_orders: set[int] = set()
-    unresolved_tokens: list[LatinToken] = []
-    for token_index, token in enumerate(block_tokens):
-        best: tuple[int, str] | None = None
-        for variant in token_variants(token.text):
-            pos = stream_text.find(variant, cursor)
-            if pos >= 0 and (best is None or pos < best[0]):
-                best = (pos, variant)
-        if best is None:
-            unresolved_tokens.append(token)
-            continue
-        found, variant = best
-        if _future_token_before(stream_text, cursor, found, block_tokens[token_index + 1:]):
-            unresolved_tokens.append(token)
-            continue
-        end = found + len(variant)
-        for order in entries[found:end]:
-            if order is not None:
-                target_orders.add(order)
-        cursor = end
-
-    # Lightweight fallback: if Hanwang has already exposed Latin/digit fragments
-    # on a line, probe that line. This preserves cases such as "Gua吨lia" where
-    # Paddle has "Guariglia" but Hanwang damaged the middle span before EngCut.
-    has_formula_letter_tokens = _has_formula_letter_tokens(block_tokens)
-    for order, line in enumerate(lines):
-        if _line_has_text_token(line):
-            target_orders.add(order)
-            continue
-        if has_formula_letter_tokens and _line_has_low_confidence_formula_letter_candidate(line):
-            target_orders.add(order)
-            continue
-        if any(_line_may_contain_block_token(line.text, token.text) for token in unresolved_tokens):
-            target_orders.add(order)
-    return target_orders
-
-
-def _enhance_lines_with_latin_engcut(
-    image_bgr: np.ndarray,
-    lines: list[LineResult],
-    stats: RunStats,
-    *,
-    timeout: float,
-    block_text: str = "",
-) -> None:
-    height, width = image_bgr.shape[:2]
-    block_tokens = _block_text_engcut_tokens(block_text)
-    target_orders = _engcut_target_line_orders(lines, block_tokens)
-    records: list[_EngcutLine] = []
-    for order, line in enumerate(lines):
-        if line.source == LATIN_ENGCUT_ROUTE_SOURCE:
-            continue
-        if not line.text or not line.chars:
-            continue
-        if order not in target_orders:
-            continue
-        x1, y1, x2, y2 = _expand_xyxy(
-            line.bbox,
-            width,
-            height,
-            pad_x=ENGCUT_LINE_CROP_PAD_X,
-            pad_y=ENGCUT_LINE_CROP_PAD_Y,
-        )
-        if x2 <= x1 or y2 <= y1:
-            continue
-        crop = image_bgr[y1:y2, x1:x2].copy()
-        if crop.size == 0:
-            continue
-        try:
-            stats.latin_engcut_probe_calls += 1
-            raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
-        except Exception as exc:
-            stats.latin_engcut_probe_failures += 1
-            logger.debug("EngCut Latin geometry probe failed bbox=%s text=%r: %s", line.bbox, line.text, exc)
-            continue
-        local_chars = engcut_chars_from_payload(raw_eng20)
-        page_chars = offset_engcut_chars(local_chars, dx=x1, dy=y1)
-        records.append(_EngcutLine(
-            line=line,
-            bbox=(x1, y1, x2, y2),
-            chars=page_chars,
-            text="".join(char.text for char in page_chars),
-            order=order,
-        ))
-
-    if not records:
-        return
-
-    if not block_tokens:
-        for record in records:
-            exact_count = 0
-            word_count = 0
-            review_count = 0
-            bindings = bind_latin_tokens_to_engcut_chars(record.line.text, record.chars)
-            for binding in bindings:
-                if binding.status == LATIN_ENGCUT_WORD_FALLBACK_STATUS:
-                    token_binding = _TokenBinding(
-                        token=binding.token,
-                        status=binding.status,
-                        matched_text=binding.token.text,
-                        chars=[
-                            EngcutChar(text=record.chars[binding.engcut_start + idx].text, bbox=box)
-                            for idx, box in enumerate(binding.char_bboxes)
-                        ],
-                        line_records=[record],
-                        line_span=(binding.token.start, binding.token.end),
-                    )
-                    if _replace_line_span_with_word_binding(record.line, token_binding):
-                        word_count += 1
-                    else:
-                        review_count += 1
-                    continue
-                if binding.status != LATIN_ENGCUT_EXACT_STATUS:
-                    review_count += 1
-                    continue
-                token_binding = _TokenBinding(
-                    token=binding.token,
-                    status=binding.status,
-                    matched_text=binding.token.text,
-                    chars=[
-                        EngcutChar(text=binding.token.text[idx], bbox=box)
-                        for idx, box in enumerate(binding.char_bboxes)
-                    ],
-                    line_records=[record],
-                    line_span=(binding.token.start, binding.token.end),
-                )
-                fallback_reasons = _binding_word_fallback_reasons(token_binding)
-                if fallback_reasons and _replace_line_span_with_word_binding(record.line, token_binding):
-                    word_count += 1
-                elif not fallback_reasons and _replace_line_span_with_binding(record.line, token_binding):
-                    exact_count += 1
-                else:
-                    review_count += 1
-            if review_count:
-                _mark_latin_engcut_review(record.line)
-            stats.latin_engcut_exact_tokens += exact_count
-            stats.latin_engcut_word_tokens += word_count
-            stats.latin_engcut_review_tokens += review_count
-        return
-
-    stream_text, entries = _engcut_stream(records)
-    reverse = _reverse_groups(records)
-    stream_cursor = 0
-    reverse_cursor = 0
-    exact_count = 0
-    word_count = 0
-    review_count = 0
-    for token_idx, token in enumerate(block_tokens):
-        binding, next_cursor = _bind_token_in_stream(
-            token,
-            block_tokens[token_idx + 1:],
-            stream_text,
-            entries,
-            stream_cursor,
-        )
-        if binding is not None:
-            stream_cursor = next_cursor
-        else:
-            binding, next_reverse = _bind_token_from_reverse_groups(token, reverse, reverse_cursor)
-            if binding is not None:
-                reverse_cursor = next_reverse
-
-        if binding is None:
-            continue
-        if binding.status == LATIN_ENGCUT_MULTILINE_STATUS:
-            for record in binding.line_records:
-                _mark_latin_engcut_review(record.line)
-            review_count += 1
-            continue
-        target_line = binding.line_records[0].line if binding.line_records else None
-        if target_line is None:
-            review_count += 1
-            continue
-        fallback_reasons = _binding_word_fallback_reasons(binding)
-        if fallback_reasons and _replace_line_span_with_word_binding(target_line, binding):
-            word_count += 1
-        elif _binding_can_update_text(binding) and _replace_line_span_with_binding(target_line, binding):
-            exact_count += 1
-        else:
-            _mark_latin_engcut_review(target_line)
-            review_count += 1
-    stats.latin_engcut_exact_tokens += exact_count
-    stats.latin_engcut_word_tokens += word_count
-    stats.latin_engcut_review_tokens += review_count
-
-
 def _intersection_area(
     a: tuple[int, int, int, int],
     b: tuple[int, int, int, int],
@@ -2437,6 +1403,10 @@ def _intersection_area(
     right = min(a[2], b[2])
     bottom = min(a[3], b[3])
     return max(0, right - left) * max(0, bottom - top)
+
+
+def _bbox_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
+    return (float(box[0] + box[2]) / 2.0, float(box[1] + box[3]) / 2.0)
 
 
 def _chunk_group_bboxes(
@@ -2523,17 +1493,11 @@ def _write_micro_recblock_hook(
         logger.warning("Failed to write Hanwang micro_recblock hook: %s", exc)
 
 
-def _drop_cached_layout_line_routes(ppvl_blocks: list[dict]) -> None:
-    for block in ppvl_blocks:
-        if isinstance(block, dict):
-            block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-
-
 def _formula_texts_by_layout_bbox(page: Page) -> dict[tuple[int, int, int, int], str]:
     """Read current formula observations only while projecting a routing plan.
 
-    Formula text remains owned by the formula branch.  This bridge only carries
-    it into the temporary legacy row shape required by the native runner.
+    Formula text remains owned by the formula branch.  This bridge supplies it
+    to the transient typed route map consumed by the native runner.
     """
     values: dict[tuple[int, int, int, int], str] = {}
     for view in iter_page_layout_block_views(page):
@@ -2546,55 +1510,75 @@ def _formula_texts_by_layout_bbox(page: Page) -> dict[tuple[int, int, int, int],
     return values
 
 
-def _routing_line_record_for_native_runner(
+def _routing_line_for_native_runner(
     line: RoutingLine,
     formula_texts_by_bbox: dict[tuple[int, int, int, int], str],
-) -> dict[str, Any]:
+) -> RoutingLine:
     segments = []
     for segment in line.segments:
         text = segment.text
         if segment.kind == "formula" and not text:
-            text = formula_texts_by_bbox.get(segment.bbox, "")
+            content_bbox = segment.content_bbox or segment.bbox
+            text = formula_texts_by_bbox.get(content_bbox, "")
             if not text:
                 containing = [
                     candidate_text
                     for bbox, candidate_text in formula_texts_by_bbox.items()
-                    if bbox[0] <= segment.bbox[0]
-                    and bbox[1] <= segment.bbox[1]
-                    and bbox[2] >= segment.bbox[2]
-                    and bbox[3] >= segment.bbox[3]
+                    if bbox[0] <= content_bbox[0]
+                    and bbox[1] <= content_bbox[1]
+                    and bbox[2] >= content_bbox[2]
+                    and bbox[3] >= content_bbox[3]
                 ]
                 if len(containing) == 1:
                     text = containing[0]
         segments.append(replace(segment, text=text))
-    return routing_line_to_record(replace(line, segments=tuple(segments)))
+    return replace(line, segments=tuple(segments))
 
 
-def _apply_page_routing_plan_to_native_rows(
+def _compile_native_route_map(
     ppvl_blocks: list[dict],
-    routing_plan: Any,
+    routing_plan: PageRoutingPlan,
     page: Page,
-) -> None:
-    """Project immutable routing input into the native runner's temporary rows."""
+) -> dict[int, tuple[RoutingLine, ...]]:
+    """Map immutable page routes to transient native row indexes.
+
+    ``PageRoutingPlan`` is the only production CharOCR dispatch input.  Native
+    rows still carry PP-VL metadata required by Hanwang, but are never mutated
+    with route records or treated as a second routing authority.
+    """
     if not routing_plan.is_dispatchable:
         raise RuntimeError("Hanwang native runner received a non-dispatchable page routing plan")
-    rows_by_uid: dict[str, dict] = {}
-    for row in ppvl_blocks:
+    rows_by_uid: dict[str, tuple[int, dict]] = {}
+    for index, row in enumerate(ppvl_blocks):
         uid = str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
         if uid:
-            rows_by_uid[uid] = row
+            rows_by_uid[uid] = (index, row)
     formula_texts_by_bbox = _formula_texts_by_layout_bbox(page)
+    routes_by_block_index: dict[int, tuple[RoutingLine, ...]] = {}
     for block_route in routing_plan.blocks:
-        row = rows_by_uid.get(block_route.block_uid)
-        if row is None:
+        entry = rows_by_uid.get(block_route.block_uid)
+        if entry is None:
             raise RuntimeError(
                 "CharOCR routing plan references a layout block missing from native input: "
                 f"{block_route.block_uid}"
             )
-        row[LAYOUT_LINE_ROUTES_FIELD] = [
-            _routing_line_record_for_native_runner(line, formula_texts_by_bbox)
+        block_index, _row = entry
+        routes_by_block_index[block_index] = tuple(
+            _routing_line_for_native_runner(line, formula_texts_by_bbox)
             for line in block_route.plan.lines
-        ]
+        )
+    missing_text_rows = [
+        index
+        for index, row in enumerate(ppvl_blocks)
+        if _is_text_label(_effective_label_for_block(row))
+        and index not in routes_by_block_index
+    ]
+    if missing_text_rows:
+        raise RuntimeError(
+            "CharOCR native input contains text rows outside the explicit page routing plan: "
+            + ", ".join(str(index) for index in missing_text_rows)
+        )
+    return routes_by_block_index
 
 
 def run_micro_recblock(
@@ -2604,29 +1588,16 @@ def run_micro_recblock(
     seg_timeout: float = 120.0,
     recog_timeout: float = 60.0,
     include_chars: bool = True,
-    page_ocr_lines: list[Any] | None = None,
-    routing_plan: Any | None = None,
-    page: Page | None = None,
+    routing_plan: PageRoutingPlan,
+    page: Page,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
-    """Run Hanwang Recog for text-like PP-VL blocks and keep PP-VL for others."""
+    """Run native CharOCR from one explicit page routing plan."""
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
-    if routing_plan is not None:
-        if page is None:
-            raise RuntimeError("Hanwang native runner requires page with explicit routing plan")
-        _apply_page_routing_plan_to_native_rows(ppvl_blocks, routing_plan, page)
-    elif page_ocr_lines:
-        apply_page_ocr_line_route_attachment(
-            ppvl_blocks,
-            build_page_ocr_line_route_attachment(ppvl_blocks, page_ocr_lines, width, height),
-        )
-        _apply_layout_line_route_records(
-            ppvl_blocks,
-            _refine_layout_text_route_bands_from_image(image_bgr, ppvl_blocks, width, height),
-        )
-    else:
-        _drop_cached_layout_line_routes(ppvl_blocks)
+    if routing_plan.page_uid != page.uid:
+        raise RuntimeError("Hanwang native runner requires the current page's explicit routing plan")
+    native_routes_by_block_index = _compile_native_route_map(ppvl_blocks, routing_plan, page)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
     skip_indices: list[int] = []
@@ -2647,7 +1618,10 @@ def run_micro_recblock(
     recog_group_bboxes_by_route: dict[tuple[int, int, int], list[tuple[int, int, int, int]]] = {}
     segimg_group_audits_by_route: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
     for block_idx in text_indices:
-        routes = _text_route_bboxes_for_block(ppvl_blocks[block_idx], block_idx, width, height)
+        routes = _text_route_bboxes_from_lines(
+            block_idx,
+            native_routes_by_block_index.get(block_idx, ()),
+        )
         block_text_routes[block_idx] = routes
         text_routes.extend(routes)
         for route in routes:
@@ -2662,7 +1636,7 @@ def run_micro_recblock(
         label = _effective_label_for_block(block)
         bbox = _block_bbox(block, width, height)
         layout_bbox = _layout_block_bbox(block, width, height)
-        block_bbox_source = _effective_block_bbox_source(block, width, height)
+        block_bbox_source = "layout_block_bbox"
         ppvl_text = _block_text(block)
         synthesize_chars = map_paddle_label_to_block_type(label) != BlockType.EQUATION
         rows[idx] = BlockResult(
@@ -2675,7 +1649,14 @@ def run_micro_recblock(
             text=ppvl_text,
             ppvl_text=ppvl_text,
             lines=[_fallback_line(ppvl_text, bbox, source="ppvl", synthesize_chars=synthesize_chars)],
-            raw_block=_raw_block_with_bbox_audit(block, width, height, block_bbox=bbox),
+            raw_block=_raw_block_with_bbox_audit(
+                block,
+                width,
+                height,
+                block_bbox=bbox,
+                block_bbox_source="layout_block_bbox",
+                routing_line_bboxes=[],
+            ),
         )
 
     if text_routes:
@@ -3025,9 +2006,13 @@ def run_micro_recblock(
         for block_idx in text_indices:
             block = ppvl_blocks[block_idx]
             label = _effective_label_for_block(block)
-            bbox = _block_bbox(block, width, height)
-            layout_bbox = _layout_block_bbox(block, width, height)
-            block_bbox_source = _effective_block_bbox_source(block, width, height)
+            native_line_routes = native_routes_by_block_index.get(block_idx, ())
+            bbox, layout_bbox, block_bbox_source = _block_geometry_from_page_routes(
+                block,
+                width,
+                height,
+                native_line_routes,
+            )
             ppvl_text = _block_text(block)
             route_text_slice_bboxes = [route.bbox for route in block_text_routes.get(block_idx, [])]
             recog_group_bboxes = [
@@ -3040,28 +2025,10 @@ def run_micro_recblock(
                 for route in block_text_routes.get(block_idx, [])
                 for item in segimg_group_audits_by_route.get(route.key, [])
             ]
-            raw_text_lines: list[LineResult] = []
-            for route in block_text_routes.get(block_idx, []):
-                raw_text_lines.extend(grouped_lines.get(route.key, []))
-            lines = [
-                line for line in raw_text_lines
-                if line.text or line.chars
-            ]
-            lines.sort(key=lambda line: (line.bbox[1], line.bbox[0]))
-            if _has_route_subblocks(block, width, height):
-                lines = _assemble_layout_route_lines(
-                    block_idx=block_idx,
-                    block=block,
-                    grouped_lines=grouped_lines,
-                    width=width,
-                    height=height,
-                )
-            _enhance_lines_with_latin_engcut(
-                image_bgr,
-                lines,
-                stats,
-                timeout=min(30.0, max(1.0, float(recog_timeout))),
-                block_text=ppvl_text,
+            lines = _assemble_routing_lines(
+                block_idx=block_idx,
+                line_routes=native_line_routes,
+                grouped_lines=grouped_lines,
             )
             _normalize_digitlike_numeric_context_lines(lines)
             hw_text = "".join(line.text for line in lines).strip()
@@ -3087,6 +2054,8 @@ def run_micro_recblock(
                     width,
                     height,
                     block_bbox=bbox,
+                    block_bbox_source=block_bbox_source,
+                    routing_line_bboxes=[line.bbox for line in native_line_routes],
                     route_text_slice_bboxes=route_text_slice_bboxes,
                     recog_group_bboxes=recog_group_bboxes,
                     segimg_group_audits=segimg_group_audits,
@@ -3098,9 +2067,13 @@ def run_micro_recblock(
             continue
         block = ppvl_blocks[block_idx]
         label = _effective_label_for_block(block)
-        bbox = _block_bbox(block, width, height)
-        layout_bbox = _layout_block_bbox(block, width, height)
-        block_bbox_source = _effective_block_bbox_source(block, width, height)
+        native_line_routes = native_routes_by_block_index.get(block_idx, ())
+        bbox, layout_bbox, block_bbox_source = _block_geometry_from_page_routes(
+            block,
+            width,
+            height,
+            native_line_routes,
+        )
         route_text_slice_bboxes = [route.bbox for route in block_text_routes.get(block_idx, [])]
         recog_group_bboxes = [
             bbox
@@ -3133,6 +2106,8 @@ def run_micro_recblock(
                 width,
                 height,
                 block_bbox=bbox,
+                block_bbox_source=block_bbox_source,
+                routing_line_bboxes=[line.bbox for line in native_line_routes],
                 route_text_slice_bboxes=route_text_slice_bboxes,
                 recog_group_bboxes=recog_group_bboxes,
                 segimg_group_audits=segimg_group_audits,
@@ -3646,19 +2621,6 @@ def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
     return _page_blocks_from_layout(page)
 
 
-def _page_ocr_lines_from_layout(page: Page) -> list[Line]:
-    return [
-        line
-        for view in iter_page_layout_block_views(page)
-        for block in (view.runtime_block,)
-        if block is not None
-        for line in block_ocr_line_observations_by_uid(view.uid)
-        if line.bbox is not None
-        and line.bbox.area > 0
-        and is_ppocr_page_line_hint(line)
-    ]
-
-
 def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
     targets: list[tuple[LayoutBlockView, Block]] = []
     for view in iter_page_layout_block_views(page):
@@ -3821,8 +2783,13 @@ class HanwangMicroRecBlockEngine:
         image_bgr: np.ndarray,
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
-        routing_plan: Any | None = None,
+        routing_plan: object | None = None,
     ) -> RunStats:
+        if not isinstance(routing_plan, PageRoutingPlan):
+            raise RuntimeError(
+                "Hanwang micro_recblock requires an explicit PageRoutingPlan; "
+                "legacy page-line routing is not a production OCR path"
+            )
         self._refresh_inline_formula_texts_from_current_crops(
             image_bgr,
             page,
@@ -3842,12 +2809,10 @@ class HanwangMicroRecBlockEngine:
             "seg_timeout": self._seg_timeout,
             "recog_timeout": self._recog_timeout,
             "include_chars": True,
-            "page_ocr_lines": None if routing_plan is not None else _page_ocr_lines_from_layout(page),
+            "routing_plan": routing_plan,
+            "page": page,
             "progress_callback": progress_callback,
         }
-        if routing_plan is not None:
-            runner_kwargs["routing_plan"] = routing_plan
-            runner_kwargs["page"] = page
         rows, stats = self._runner(image_bgr, ppvl_blocks, **runner_kwargs)
 
         height, width = image_bgr.shape[:2]
@@ -3904,8 +2869,7 @@ class HanwangMicroRecBlockEngine:
             "batch_failures=%d batch_disabled=%s "
             "seg=%.2fs recog=%.2fs "
             "max_batch_crop=%dx%d probe_calls=%d recog_pixels=%d/%d "
-            "latin_engcut_calls=%d latin_engcut_failures=%d latin_engcut_exact=%d "
-            "latin_engcut_review=%d latin_engcut_disabled=%s "
+            "latin_engcut_route_calls=%d "
             "overlap_merge_clusters=%d overlap_merge_calls=%d overlap_merge_failures=%d "
             "overlap_merge_replacements=%d",
             page.page_number,
@@ -3927,11 +2891,7 @@ class HanwangMicroRecBlockEngine:
             stats.recog_probe_calls,
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
-            stats.latin_engcut_probe_calls,
-            stats.latin_engcut_probe_failures,
-            stats.latin_engcut_exact_tokens,
-            stats.latin_engcut_review_tokens,
-            stats.latin_engcut_disabled,
+            stats.latin_engcut_route_calls,
             stats.overlap_merge_clusters,
             stats.overlap_merge_probe_calls,
             stats.overlap_merge_probe_failures,

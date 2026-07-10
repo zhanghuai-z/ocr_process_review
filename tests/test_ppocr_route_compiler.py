@@ -7,7 +7,7 @@ from app.adapters.paddle.ppocr_v6_prepass import (
     PpOcrV6PrepassArtifact,
     PpOcrV6WordBox,
 )
-from app.core.layout_routing_contract import ROUTE_SEGMENT_TEXT_OTHER, TextSliceRoute
+from app.models.charocr_routing import ROUTE_SEGMENT_TEXT_OTHER, TextSliceRoute
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.models import BBox, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
 
@@ -72,6 +72,42 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
         ("text_other", (220, 0, 300, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
+
+
+def test_compiler_keeps_formula_content_geometry_when_line_mask_is_clipped():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 240, 100), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block("formula-1", BlockType.EQUATION, (90, 10, 150, 80), policy=OcrPolicy.PRESERVE_AS_FORMULA, order=1, label="inline_formula"),
+    )
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(PpOcrV6LineHint(index=0, text="甲乙", bbox=(0, 30, 220, 60), words=())),
+        page_width=240,
+        page_height=100,
+    )
+
+    formula = next(segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "formula")
+    assert formula.bbox == (90, 30, 150, 60)
+    assert formula.content_bbox == (90, 10, 150, 80)
+
+
+def test_compiler_blocks_page_when_formula_masks_overlap_in_one_text_line():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 240, 80), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block("formula-1", BlockType.EQUATION, (40, 0, 100, 50), policy=OcrPolicy.PRESERVE_AS_FORMULA, order=1, label="inline_formula"),
+        _block("formula-2", BlockType.EQUATION, (96, 0, 150, 50), policy=OcrPolicy.PRESERVE_AS_FORMULA, order=2, label="inline_formula"),
+    )
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(PpOcrV6LineHint(index=0, text="甲乙", bbox=(0, 0, 220, 40), words=())),
+        page_width=240,
+        page_height=80,
+    )
+
+    assert plan.is_dispatchable is False
+    assert [(issue.code, issue.bbox) for issue in plan.validation_issues] == [
+        ("overlapping_formula_masks", (96, 0, 100, 40)),
+    ]
 
 
 def test_compiler_stops_only_current_page_when_a_text_line_has_no_layout_owner():
@@ -139,7 +175,7 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     ]
 
 
-def test_compiler_blocks_mixed_line_without_ppocr_word_boxes():
+def test_compiler_blocks_latin_containing_line_without_ppocr_word_boxes():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 160, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -149,5 +185,5 @@ def test_compiler_blocks_mixed_line_without_ppocr_word_boxes():
 
     assert plan.is_dispatchable is False
     assert [(issue.code, issue.line_index) for issue in plan.validation_issues] == [
-        ("mixed_line_missing_word_boxes", 4),
+        ("latin_line_missing_word_boxes", 4),
     ]

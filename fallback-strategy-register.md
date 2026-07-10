@@ -1,6 +1,6 @@
 # Fallback 策略登记
 
-生成时间：2026-07-04
+生成时间：2026-07-10
 
 本文登记当前允许存在的 fallback / 降级策略。它的目的不是鼓励兜底逻辑继续扩散，而是规定：
 
@@ -25,9 +25,6 @@
 | Paddle 行框缺失降级 | `build_ir_lines_from_item()` + `MISSING_LINE_BBOX_FLAG` | Paddle OCR line 文本存在，但 line bbox 缺失或无效 | 使用调用方提供的 `fallback_bbox`，并写 `missing_line_bbox` review flag | 后续 proof crop / char index 可识别 | 低可信 OCR line 几何 |
 | proof 几何补框 | `ProofCropService.normalize_pages()` / `ensure_line_char_bboxes()` | line 有文本但没有可用 char bbox，或 char 数量无法表达显示文本 | 生成 `bbox_source="fallback"` / `bbox_granularity="fallback"`；若 line bbox 不可信则写 `unavailable` | `proof_fallback_warning()` 给出非阻塞警告；`is_char_index_hidden_geometry()` 默认隐藏 | 估算几何，不是一手字符真值 |
 | Hanwang 字符 fallback | `hanwang:CharRcg:char_fallback` | Hanwang native 返回单字 fallback 字符框 | 保留 `bbox_source` 中的 `hanwang:` 前缀和 `bbox_granularity="char"` | CharIndex 可索引；不按普通估算 fallback 隐藏 | Hanwang 一手字符几何 |
-| 拉丁 EngCut exact | `bind_latin_tokens_to_engcut_chars()` / `LATIN_ENGCUT_BBOX_SOURCE` | Paddle token 或行文本中的拉丁 token 能和 EngCut char 精确对齐 | 写入单字符 bbox，source 为 `hanwang:EngCut:latin_exact` | stats 记录 exact token 数 | 拉丁字符几何真值候选 |
-| 拉丁 EngCut word fallback | `_word_fallback_binding()` / `LATIN_ENGCUT_WORD_FALLBACK_STATUS` | exact 找不到，但 EngCut 的词组边界和 token 安全 fuzzy 匹配 | 写入词级 bbox，source 为 `hanwang:EngCut:latin_word_fallback`，status 为 `latin_token_engcut_word_fallback` | stats 记录 word fallback；不成功则标 review | 词级几何，不能冒充逐字符真值 |
-| 拉丁低置信目标行探测 | `_engcut_target_line_orders()` | Paddle token 未覆盖，Hanwang 行内出现低置信拉丁候选或疑似 CJK 混淆 | 只决定哪些行送 EngCut probe；不直接改文本 | stats 记录 probe 调用和 review token | 探测策略，不是项目真值 |
 | 表格 cell bbox 网格降级 | `table_text_layer.build_table_text_layer_cells()` / `equal_grid_fallback` | 图像聚类无法推断 cell bbox，但已有 row/col 结构 | 按表格 bbox 等分生成 cell bbox，标记 `bbox_source="equal_grid_fallback"` | Export/Text layer 可见 | 表格文本层辅助几何，不是字符真值 |
 | 导出资产降级 | `ExportFallback` / `image_fallback` / `text_fallback` / `plain_paragraph` | 结构化 table/equation/unknown block 无法完整表达 | Export IR 中写 `fallback`，并在 diagnostics 追加 warning | Markdown/XML/archive/PDF 导出诊断可见 | 导出表达策略，不回写项目真值 |
 

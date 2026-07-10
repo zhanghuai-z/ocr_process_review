@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6PrepassArtifact
 from app.core.ppocr_route_compiler import compile_page_routing_plan
@@ -9,7 +10,7 @@ from app.engines.hanwang.micro_recblock import (
     HanwangMicroRecBlockEngine,
     LineResult,
     RunStats,
-    _apply_page_routing_plan_to_native_rows,
+    _compile_native_route_map,
 )
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
@@ -70,7 +71,7 @@ def test_hanwang_receives_only_explicit_page_routing_plan_for_text_blocks():
         routing_plan=routing_plan,
     )
 
-    assert captured["kwargs"]["page_ocr_lines"] is None
+    assert "page_ocr_lines" not in captured["kwargs"]
     assert captured["kwargs"]["routing_plan"] is routing_plan
     # The engine hands an immutable plan to the native-runner boundary.  The
     # runner alone projects it to its temporary row dictionaries, so an
@@ -78,7 +79,7 @@ def test_hanwang_receives_only_explicit_page_routing_plan_for_text_blocks():
     assert all("_layout_line_routes" not in row for row in captured["blocks"])
 
 
-def test_native_row_projection_carries_routes_only_for_text_block_uid():
+def test_native_route_map_keeps_typed_routes_out_of_ppvl_rows():
     text = Block(BlockType.TEXT, BBox.from_xyxy(0, 0, 280, 60), source_label="text")
     table = Block(
         BlockType.TABLE,
@@ -103,7 +104,34 @@ def test_native_row_projection_carries_routes_only_for_text_block_uid():
         {"block_label": "table", "_layout_block_uid": table.uid},
     ]
 
-    _apply_page_routing_plan_to_native_rows(native_rows, plan, page)
+    route_map = _compile_native_route_map(native_rows, plan, page)
 
-    assert native_rows[0]["_layout_line_routes"][0]["segments"][1]["kind"] == "skip"
+    assert route_map[0][0].segments[1].kind == "skip"
+    assert "_layout_line_routes" not in native_rows[0]
     assert "_layout_line_routes" not in native_rows[1]
+
+
+def test_native_route_map_rejects_text_row_missing_from_page_plan():
+    text = Block(BlockType.TEXT, BBox.from_xyxy(0, 0, 120, 40), source_label="text")
+    page = Page(image_path="/tmp/route-missing-row.png", width=180, height=80, blocks=[text])
+    snapshot = sync_page_layout_snapshot_from_projection(page, source_engine="test")
+    plan = compile_page_routing_plan(
+        snapshot,
+        PpOcrV6PrepassArtifact(
+            page_uid=page.uid,
+            run_id="ppocr-job-3",
+            lines=(PpOcrV6LineHint(index=0, text="正文", bbox=(0, 0, 120, 40), words=()),),
+        ),
+        page_width=page.width,
+        page_height=page.height,
+    )
+
+    with pytest.raises(RuntimeError, match="outside the explicit page routing plan"):
+        _compile_native_route_map(
+            [
+                {"block_label": "text", "_layout_block_uid": text.uid},
+                {"block_label": "text", "_layout_block_uid": "unexpected-text-block"},
+            ],
+            plan,
+            page,
+        )

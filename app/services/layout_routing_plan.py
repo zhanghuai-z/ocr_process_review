@@ -1,7 +1,7 @@
 """Typed read model for layout routing plans.
 
 This module is the stable service boundary for consumers. The contract types
-live in ``app.core.layout_routing_contract`` so both producers and consumers can
+live in ``app.models.charocr_routing`` so both producers and consumers can
 share the same typed model without depending on UI or service internals.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from app.core.paddle_line_routing import (
     LAYOUT_ROUTE_SOURCE_FIELD,
     layout_routing_plan_for_block,
 )
-from app.core.layout_routing_contract import (
+from app.models.charocr_routing import (
     RoutingLine,
     RoutingPlan,
     RoutingSegment,

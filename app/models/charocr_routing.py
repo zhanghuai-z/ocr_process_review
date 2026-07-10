@@ -24,10 +24,19 @@ VALID_ROUTE_SEGMENT_KINDS = frozenset({
 
 @dataclass(frozen=True)
 class RoutingSegment:
+    """One page-routing segment.
+
+    ``bbox`` is the line-local routing mask used to subtract structural areas
+    from CharOCR crops.  A formula can also carry ``content_bbox``: its
+    canonical layout geometry used when materializing the formula observation.
+    The two differ when a PP-OCR line intersects only part of a taller formula.
+    """
+
     kind: str
     bbox: XYXY
     label: str = ""
     text: str = ""
+    content_bbox: XYXY | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
@@ -150,11 +159,13 @@ def routing_line_from_record(
 
 
 def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
+    content_bbox = segment.get("content_bbox")
     return RoutingSegment(
         kind=normalize_route_segment_kind(segment.get("kind")),
         label=str(segment.get("label") or ""),
         bbox=xyxy(segment.get("bbox")),
         text=str(segment.get("text") or ""),
+        content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
     )
 
 
@@ -171,6 +182,7 @@ def routing_line_to_record(
                 "label": segment.label,
                 "bbox": list(segment.bbox),
                 "text": segment.text,
+                **({"content_bbox": list(segment.content_bbox)} if segment.content_bbox else {}),
             }
             for segment in line.segments
         ],

@@ -1,115 +1,44 @@
-# 路由真值契约
+# CharOCR 路由真值契约
 
-本文档定义 Paddle/VL、PP-OCRv5、Hanwang 在混合 OCR 链路中的职责边界。后续排查和改代码时，以这里的真值归属为准。
+本文档记录当前代码已实现的 CharOCR 输入边界。它不定义 UI 行为，也不替代代码或测试。
 
-## 核心边界
+## 真值与派生物
 
-### PaddleOCR-VL 1.6
+| 对象 | 归属 | 是否可写 | 用途 |
+| --- | --- | --- | --- |
+| `LayoutSnapshot` | 版面编辑 | 仅版面编辑链路 | 当前页面的块类型、几何和 OCR 策略真值。 |
+| Paddle VL 1.6 响应 | 原始外部事实 | 否 | 版面块、公式/表格/图片等结构事实及其文本。 |
+| PP-OCRv6 prepass | 本次 OCR 输入事实 | 否 | 正文物理行与 word-box 几何提议；其文本不进入校对或导出真值。 |
+| `PageRoutingPlan` | 路由编译器 | 否 | 由当前快照和本次 prepass 导出的、页面级、一次性派生计划。 |
+| CharOCR observation | Hanwang/EngCut 输出 | 仅 OCR 写入链路 | 正文字、字符框和识别置信度。 |
 
-VL 是版面结构真值来源。
+`PageRoutingPlan` 不是布局真值，也不会写回 `LayoutSnapshot`、Paddle 原始响应或项目模型。计划无效只阻断对应页面的 CharOCR；不会猜测整块 crop 继续执行。
 
-- 提供页面级结构块：正文、标题、表格、图片、公式、页码、脚注等。
-- 提供父级 `block_content`，其中公式以 LaTeX 文本出现。
-- 提供公式/表格/图片等非正文块的几何框。
-- 对 `inline_formula`，几何框用于从正文行中扣除公式区域。
-- 对 `footnote`、`vision_footnote`、表格、图片、display formula，默认不送 Hanwang 正文 OCR。
+## 当前生产链
 
-VL 不负责正文纵校 OCR 的最终文字。
+1. Paddle VL 1.6 产生并确认当前 `LayoutSnapshot`。
+2. PP-OCRv6 对整页产生行框和 word-box 提议。
+3. `compile_page_routing_plan()` 先把行框裁到允许文本 OCR 的布局块内，再扣除公式、表格、图片和其他结构区域。
+4. 对剩余正文区域：
+   - 不含拉丁字母或数字：一个 `text_other` slice，交给 LineCut。
+   - 含拉丁字母或数字：用 PP-OCR word-box 与页面真实墨迹连通域进行所有权分配；拉丁/数字 token 形成 `text_latin` slice，交给 EngCut；中文和符号形成 `text_other` slice，交给 LineCut。
+5. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 PP-VL 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
+6. CharOCR 输出写入 OCR observation；公式文本仍由公式分支保有，不由 Hanwang 回填。
 
-### PP-OCRv5
+EngCut 只处理已编译为 `text_latin` 的 crop。旧的“Hanwang 识别完成后按
+PP-OCR/文本猜测回填 EngCut 字符”的链路已删除，不能作为失败兜底重新接入。
 
-PP-OCRv5 在 Hanwang 混合链路中只作为行几何提示。
+路由 segment 的 `bbox` 是行内 mask/crop 几何；公式 segment 另外保留 `content_bbox`，即完整的布局公式框。两者在 PP-OCR 行只覆盖公式局部时会不同：前者保证 Hanwang 不读取公式像素，后者保证公式 atom、横校和导出仍使用真实公式位置。
 
-- 允许使用 `rec_boxes` / `rec_polys` 作为正文物理行框。
-- 不允许把 PP-OCRv5 的正文识别文本作为纵校正文真值。
-- 在公式几何完整时，不允许 PP-OCRv5 文本覆盖 VL 父级公式文本。
-- 只有当公式几何缺失导致父级公式序列和公式框数量不一致时，PP-OCRv5 行文本可以作为弱对齐提示，用于避免后续公式整体错位；该文本仍不得进入最终正文。
+## 2026-07-10 混合行实验结论
 
-### Hanwang
+- 纯中文、纯英文/数字和混合行都必须先经过同一阶段的结构扣除；公式优先级高于文字分流。
+- PP-OCR word-box 只承担几何 proposal，不承担最终文字真值。
+- 标点不得凭邻近距离侵占拉丁字母的墨迹。它只能认领位于自身 proposal 内或与 proposal 有充分重叠的连通域。
+- 真实可见墨迹没有 owner、或非符号 token 没有可归属墨迹时，视为路由不完整并阻断该页。当前不使用“整行回退”“PP-OCR 文本回填”或静默猜测。
 
-Hanwang 是正文 OCR 真值来源。
+## 退役路径
 
-- 输入为 PP-OCRv5 行框扣除 VL 公式框后的 text slice。
-- Hanwang `linecut_segimg` 会对 text slice 再切 group。
-- Hanwang `linecut_recog` 实际识别的是 group crop，而不是最初的整条 text slice。
-- Hanwang 字符框是横校/纵校的主要字框来源。
+`_layout_line_routes` 和由 PP-VL 原始字典推导的旧 route 仅用于旧诊断/低层测试，不是生产 CharOCR 输入，也不应再被新代码写入或读取。新功能必须从 `LayoutSnapshot + PP-OCRv6 prepass -> PageRoutingPlan` 开始。
 
-公式框扣除后，公式文本由 VL 父级 `block_content` 回填，不能由 Hanwang 识别公式，也不能由 PP-OCRv5 回填公式文本。
-
-## Route 字段语义
-
-### `_route_subblocks`
-
-来源：VL 几何记录挂到父级正文块后的结构子框。
-
-用途：
-
-- 表示父块内部需要特殊处理的结构区域。
-- `inline_formula` 用于扣除公式区域并回填 VL 公式文本。
-- `formula_number`、table、image 等按 skip/非正文逻辑处理。
-
-### `_layout_line_routes`
-
-来源：
-
-- 优先由 PP-OCRv5 行框 + `_route_subblocks` 重建。
-- 如果没有 PP-OCRv5 行框，可由 VL 父框和子框推导，作为降级路径。
-
-用途：
-
-- 描述正文父块内每一物理行的 route。
-- `text` segment 是送 Hanwang SegImg 的候选区域。
-- `formula` segment 是不送 Hanwang、由 VL 公式文本回填的区域。
-- marker-only 公式序号如 `$ ^{②} $` 默认不扣洞、不回填，只保留在 Hanwang 文本路径中。
-
-生命周期：
-
-- 有 PP-OCRv5 page-line prepass 时，应重新生成。
-- 某个父块没有匹配到 PP-OCRv5 行框时，必须清理旧缓存，避免旧 route 继续参与切图。
-- 人工改框、合并、改类型后，必须使旧 OCR 文本和旧 route 失效。
-
-## 调试视图
-
-至少区分三层框：
-
-- `layout_bbox`：VL 父级版面框。
-- `route_text_slice_bbox`：扣掉公式后送入 Hanwang SegImg 的区域。
-- `recog_group_bbox`：Hanwang SegImg 二次切分后，实际送入 Hanwang Recog 的区域。
-
-如果只看 `route_text_slice_bbox`，可能漏掉 Hanwang 二次切分导致的问题。
-
-当前代码在 Hanwang micro-recblock 输出中写入 `_hanwang_bbox_audit`：
-
-- `layout_block_bbox`：原始 VL/Paddle 父级版面框。
-- `effective_block_bbox`：最终 `BlockResult.block_bbox` 使用的框；有 `_layout_line_routes` 时为物理行 route 的 union，否则为父级版面框。
-- `effective_block_bbox_source`：`layout_line_routes_union` 或 `layout_block_bbox`。
-- `layout_line_route_bboxes`：每条物理行 route 的框。
-- `route_text_slice_bboxes`：实际传给 `linecut_segimg` 的 text slice 框。
-- `hanwang_recog_group_bboxes`：SegImg 返回并与 text slice 相交后的实际 Recog crop 框。
-- `hanwang_segimg_groups`：每个 SegImg group 的审计记录，包含 route slice、SegImg 原始 group、最终 Recog group、是否被裁剪、是否被丢弃。
-- `hanwang_segimg_group_clipped_count`：SegImg group 超出 route slice 后被裁剪的数量。
-- `hanwang_segimg_group_dropped_count`：SegImg group 与 route slice 不相交而被丢弃的数量。
-
-`LineResult.bbox_source` 也需要保留：
-
-- `hanwang_recog_group`：来自 Hanwang Recog/SegImg group。
-- `layout_route_assembled`：由 route text slice + VL inline formula 合成后的行。
-- `ppvl_route_skip_segment`：表格、公式等 skip segment 直接由 PPVL route 回填。
-
-普通文字路径不再使用 PPVL 文本 fallback。Hanwang 识别为空时保持空结果，通过审计字段定位问题。
-
-## 120169 当前结论
-
-真实 PP-OCRv5 行框正常。
-
-- `Time_t` 和 `beta_t` 都被正确扣除并由 VL 回填。
-- marker-only `②` 不再扣洞，保留给 Hanwang 识别。
-- `② -> 1g` 未复现。
-- 当前仍存在的 `t -> ，`、`0 -> o` 是 Hanwang 在正常输入框内的局部识别错误，不是切框错误。
-
-## 后续收口方向
-
-1. 给 route/cache 增加明确来源标记，例如 `line_geometry_source=ppocrv5`、`formula_text_source=vl_parent`。
-2. UI 调试层读取 `_hanwang_bbox_audit`，同时显示 route text slice 和 Hanwang recog group。
-3. 保持正文不采信 PP-OCRv5 文本，只在公式几何缺失时保留弱对齐能力。
-4. 建立 Hanwang 局部 token 纠错层，优先处理 `t/c`、`0/o`、`1/l/I`、公式序号等低风险模式。
+当前尚未解决的英文复杂场景（邮箱、网址、斜体和公式误分类）必须作为新的、可验证的路由/公式识别策略处理；不得重新启用旧 raw route 或把 PP-OCR 文本提升为业务真值。

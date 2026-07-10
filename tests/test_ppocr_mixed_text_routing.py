@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.core.ppocr_mixed_text_routing import partition_mixed_text_segment
+from app.core.charocr_text_partition import partition_charocr_text_region
 
 
 def _image() -> np.ndarray:
@@ -35,13 +35,13 @@ def test_mixed_partition_routes_latin_mask_and_keeps_punctuation_with_other_rout
         ),
     )
 
-    result = partition_mixed_text_segment(image, prepass_line, (0, 0, 140, 40))
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 140, 40))
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_other", (10, 0, 28, 40), "甲"),
-        ("text_latin", (43, 0, 66, 40), "ABC"),
-        ("text_other", (83, 0, 120, 40), ",乙"),
+        ("text_other", (10, 10, 28, 30), "甲"),
+        ("text_latin", (43, 10, 66, 30), "ABC"),
+        ("text_other", (83, 10, 120, 30), ",乙"),
     ]
 
 
@@ -65,11 +65,11 @@ def test_punctuation_capacity_cannot_claim_leading_i_after_its_comma_is_owned():
         ),
     )
 
-    result = partition_mixed_text_segment(image, prepass_line, (0, 0, 100, 40))
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
 
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
-    assert [(segment.bbox, segment.text) for segment in latin] == [((30, 0, 43, 40), "in")]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((30, 4, 43, 30), "in")]
 
 
 def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
@@ -92,11 +92,11 @@ def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
         ),
     )
 
-    result = partition_mixed_text_segment(image, prepass_line, (0, 0, 130, 40))
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 130, 40))
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_other", (10, 0, 32, 40), "甲"),
-        ("text_latin", (46, 0, 69, 40), "ABC"),
-        ("text_other", (92, 0, 110, 40), "乙"),
+        ("text_other", (10, 10, 32, 30), "甲"),
+        ("text_latin", (46, 10, 69, 30), "ABC"),
+        ("text_other", (92, 10, 110, 30), "乙"),
     ]

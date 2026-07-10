@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.core.layout_routing_contract import TextSliceRoute, routing_segment_from_record
+from app.models.charocr_routing import TextSliceRoute, routing_segment_from_record
 from app.services.layout_routing_plan import (
     RoutingLine,
     RoutingSegment,
@@ -142,6 +142,30 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
         ],
         LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
     }
+
+
+def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 30, 180, 60),
+        segments=(
+            RoutingSegment(
+                kind="formula",
+                label="inline_formula",
+                bbox=(70, 30, 110, 60),
+                content_bbox=(70, 10, 110, 82),
+                text="$ A $",
+            ),
+        ),
+    )
+
+    record = routing_line_to_record(line)
+    restored = routing_segment_from_record(record["segments"][0])
+
+    assert record["segments"][0]["bbox"] == [70, 30, 110, 60]
+    assert record["segments"][0]["content_bbox"] == [70, 10, 110, 82]
+    assert restored.bbox == (70, 30, 110, 60)
+    assert restored.content_bbox == (70, 10, 110, 82)
 
 
 def test_hanwang_assembles_explicit_text_segment_kinds():

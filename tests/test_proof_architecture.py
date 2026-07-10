@@ -188,9 +188,6 @@ def test_fallback_strategy_register_covers_current_boundaries():
         "proof_fallback_warning",
         "is_char_index_hidden_geometry",
         "hanwang:CharRcg:char_fallback",
-        "bind_latin_tokens_to_engcut_chars",
-        "LATIN_ENGCUT_WORD_FALLBACK_STATUS",
-        "latin_token_engcut_word_fallback",
         "equal_grid_fallback",
         "ExportFallback",
         "image_fallback",
@@ -716,7 +713,7 @@ def test_ocr_line_bbox_reads_go_through_observation_boundary():
     allowed = {
         Path("app/models/ocr_observation.py"),
         # These use the typed RoutingLine/PaddleRouteLineHint DTOs, not app.models.Line.
-        Path("app/core/layout_routing_contract.py"),
+        Path("app/models/charocr_routing.py"),
         Path("app/core/paddle_line_routing.py"),
     }
     offenders: list[str] = []
@@ -1938,7 +1935,7 @@ def test_truth_map_records_layout_snapshot_as_current_boundary():
     assert "后续应抽 `PaddleArtifact`、`LayoutSnapshot`" not in source
 
 
-def test_hanwang_text_slice_routing_reads_routing_plan():
+def test_charocr_production_path_uses_direct_page_routing_plan_map():
     source = Path("app/engines/hanwang/micro_recblock.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     functions: dict[str, str] = {}
@@ -1946,31 +1943,29 @@ def test_hanwang_text_slice_routing_reads_routing_plan():
         if isinstance(node, ast.FunctionDef):
             functions[node.name] = ast.get_source_segment(source, node) or ""
 
-    text_route_source = functions["_text_route_bboxes_for_block"]
-    assert "routing_plan_for_block_record(block, width, height).text_slices" in text_route_source
-    assert "text_slice_routes_for_block(" not in text_route_source
+    native_map_source = functions["_compile_native_route_map"]
+    assert "routing_plan.blocks" in native_map_source
+    assert "_layout_line_routes" not in native_map_source
+    assert "routing_line_to_record(" not in native_map_source
 
-    has_routes_source = functions["_has_route_subblocks"]
-    assert "routing_plan_for_block_record(block, width, height).has_layout_routes" in has_routes_source
-    assert "has_layout_line_routes(" not in has_routes_source
+    typed_routes_source = functions["_text_route_bboxes_from_lines"]
+    assert "for line_idx, line in enumerate(lines)" in typed_routes_source
+    assert "routing_plan_for_block_record" not in typed_routes_source
 
-    assemble_routes_source = functions["_assemble_layout_route_lines"]
-    assert "routing_plan_for_block_record(block, width, height).lines" in assemble_routes_source
-    assert "line_routes_for_block(block" not in assemble_routes_source
-
-    refine_routes_source = functions["_refine_layout_text_route_bands_from_image"]
-    assert "routing_plan_for_block_record(block, width, height).lines" in refine_routes_source
-    assert "line_routes_for_block(block" not in refine_routes_source
-    assert "routing_line_to_record(route)" in refine_routes_source
-    assert "block[LAYOUT_LINE_ROUTES_FIELD]" not in refine_routes_source
-    apply_routes_source = functions["_apply_layout_line_route_records"]
-    assert "ppvl_blocks[block_idx][LAYOUT_LINE_ROUTES_FIELD]" in apply_routes_source
+    assemble_source = functions["_assemble_routing_lines"]
+    assert "line_routes: tuple[RoutingLine, ...]" in assemble_source
+    assert "routing_plan_for_block_record" not in assemble_source
 
     run_source = functions["run_micro_recblock"]
-    assert "build_page_ocr_line_route_attachment(" in run_source
-    assert "apply_page_ocr_line_route_attachment(" in run_source
-    assert "attach_page_ocr_line_routes(" not in run_source
-    assert "line_routes_for_block" not in source
+    assert "_compile_native_route_map(ppvl_blocks, routing_plan, page)" in run_source
+    assert "page_ocr_lines" not in run_source
+    assert "_layout_line_routes" not in run_source
+    assert "routing_plan_for_block_record" not in run_source
+    assert "_enhance_lines_with_latin_engcut" not in source
+    assert "def _enhance_lines_with_latin_engcut" not in source
+    engine_source = functions["recognize_page_blocks"]
+    assert "requires an explicit PageRoutingPlan" in engine_source
+    assert '"page_ocr_lines"' not in engine_source
     assert "block_ocr_line_observations_by_uid" in source
     assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
 
