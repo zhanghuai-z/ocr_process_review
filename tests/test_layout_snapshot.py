@@ -329,7 +329,7 @@ def test_project_store_rejects_project_without_layout_snapshot(tmp_path):
         store.conn.commit()
 
     with ProjectStore(db_path) as store:
-        with pytest.raises(ProjectDataError, match="has no persisted layout snapshot"):
+        with pytest.raises(ProjectDataError, match="has layout blocks without a layout snapshot"):
             store.load_project(saved.id)
 
 

@@ -1194,6 +1194,26 @@ class ProjectStore:
 
         self._save_layout_edit_events(cur, page, project_id)
 
+        if layout_snapshot_for_page(page) is None:
+            old_block_uids = [
+                str(row["uid"] or "")
+                for row in cur.execute(
+                    "SELECT uid FROM block WHERE page_id=?", (page.id,)
+                ).fetchall()
+            ]
+            cur.execute(
+                "DELETE FROM layout_snapshot WHERE project_id=? AND page_uid=?",
+                (project_id, page.uid),
+            )
+            cur.execute("DELETE FROM block WHERE page_id=?", (page.id,))
+            for block_uid in old_block_uids:
+                if block_uid:
+                    cur.execute(
+                        "DELETE FROM block_origin WHERE project_id=? AND block_uid=?",
+                        (project_id, block_uid),
+                    )
+            return
+
         old_block_ids = {
             r["id"] for r in cur.execute(
                 "SELECT id FROM block WHERE page_id=?", (page.id,)
@@ -1904,7 +1924,7 @@ class ProjectStore:
                 str(pr["raw_layout_artifact_uid"] or ""),
             )
             page = Page(
-                image_path=pr["image_path"],
+                image_path=self._resolve_project_path(pr["image_path"]),
                 width=pr["width"],
                 height=pr["height"],
                 page_number=pr["page_number"],
@@ -1913,23 +1933,27 @@ class ProjectStore:
                 source_path=pr["source_path"],
                 source_type=pr["source_type"],
                 source_page_index=pr["source_page_index"],
-                cache_image_path=pr["cache_image_path"],
-                thumbnail_path=pr["thumbnail_path"],
+                cache_image_path=self._resolve_project_path(pr["cache_image_path"]),
+                thumbnail_path=self._resolve_project_path(pr["thumbnail_path"]),
                 status=_enum_from_db(PageStatus, pr["status"], field="page.status"),
                 error_message=pr["error_message"],
                 ocr_invalidated_reason=pr["ocr_invalidated_reason"],
                 raw_layout_artifact=raw_layout_artifact,
                 layout_edit_events=self._load_layout_edit_events(project.id, str(pr["uid"] or "")),
             )
-            replace_page_layout_blocks(page, self._load_blocks(page.id, project.id))
             snapshot = self._load_layout_snapshot(project.id, page.uid)
             if snapshot is not None:
+                replace_page_layout_blocks(page, self._load_blocks(page.id, project.id))
                 set_layout_snapshot_for_page(page, snapshot)
                 self._sync_layout_projection_from_snapshot(page)
             else:
-                raise ProjectDataError(
-                    f"page {page.uid or page.page_number!r} has no persisted layout snapshot"
-                )
+                persisted_blocks = self.conn.execute(
+                    "SELECT COUNT(*) FROM block WHERE page_id=?", (page.id,)
+                ).fetchone()[0]
+                if persisted_blocks:
+                    raise ProjectDataError(
+                        f"page {page.uid or page.page_number!r} has layout blocks without a layout snapshot"
+                    )
             reconcile_page_ocr_done_from_result(page)
             project.pages.append(page)
 
@@ -1956,7 +1980,7 @@ class ProjectStore:
             engine=row["engine"],
             engine_version=row["engine_version"],
             run_id=row["run_id"],
-            artifact_path=row["artifact_path"],
+            artifact_path=self._resolve_project_path(row["artifact_path"]),
             artifact_hash=row["artifact_hash"],
             records=_dict_list(
                 _json_to_list(row["records_json"], field="raw_ocr_artifact.records_json"),
@@ -1968,6 +1992,15 @@ class ProjectStore:
             ),
             created_at=row["created_at"],
         )
+
+    def _resolve_project_path(self, raw_value: object) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        path = Path(value)
+        if path.is_absolute():
+            return str(path)
+        return str(Path(self.db_path).resolve().parent / path)
 
     def _load_layout_snapshot(
         self,

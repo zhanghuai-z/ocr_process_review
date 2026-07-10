@@ -35,6 +35,7 @@ def main() -> None:
 
     from app.ui.main_window import MainWindow
     win = MainWindow()
+    win.restore_working_project()
     win.show()
     sys.exit(app.exec())
 

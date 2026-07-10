@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from app.models import Block, BlockOrigin, OcrPolicy, Page
 from app.models.layout_block_view import iter_page_layout_block_views
+from app.models.layout_projection import page_layout_blocks
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 
 
 class ModelValidationError(ValueError):
@@ -21,6 +23,12 @@ def validate_block_model(block: Block) -> None:
 def validate_page_model(page: Page) -> None:
     if hasattr(page, "ppvl_parsing_res_list"):
         raise ModelValidationError("Page active model must not expose ppvl_parsing_res_list")
+    if layout_snapshot_for_page(page) is None:
+        if page_layout_blocks(page):
+            raise ModelValidationError(
+                "page without a layout snapshot cannot contain runtime layout blocks"
+            )
+        return
     for view in iter_page_layout_block_views(page):
         block = view.runtime_block
         if block is None:

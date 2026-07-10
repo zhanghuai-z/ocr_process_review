@@ -534,7 +534,8 @@ class MainWindow(QMainWindow):
         menu.hide()
 
         file_m = QMenu("文件", self)
-        act_save = QAction("保存项目(&S)", self)
+        act_save = QAction("保存项目快照(&S)…", self)
+        act_save.setShortcut(QKeySequence.StandardKey.Save)
         act_close_project = QAction("关闭项目(&W)", self)
         act_close_project.setShortcut(QKeySequence("Ctrl+W"))
         act_save.triggered.connect(self._save_project)
@@ -750,30 +751,35 @@ class MainWindow(QMainWindow):
         if not path:
             return
         if self._controller.open_project(path):
-            self._controller.reset_proof_sync_state()
-            if self._controller.has_pages:
-                pages = self._controller.pages
-                self._layout_panel.set_pages(pages)
-                self._controller.set_layout_run_enabled(True)
-                if self._controller.is_fully_analyzed:
-                    self._layout_panel.show_analysis_result(pages)
-                if self._controller.has_any_ocr_result:
-                    # 全量初始化 proof 面板（force_load=True 跳过 merge 路径）
-                    self._controller.sync_proof_panels(force_load=True)
-            self._go_to_step(self._controller.get_open_step())
+            self._show_opened_project()
+
+    def restore_working_project(self) -> bool:
+        """Restore the managed cache left by the previous application process."""
+        if not self._controller.resume_working_project():
+            return False
+        self._show_opened_project()
+        return True
+
+    def _show_opened_project(self) -> None:
+        """Hydrate UI projections after a snapshot or working-cache load."""
+        self._controller.reset_proof_sync_state()
+        if self._controller.has_pages:
+            pages = self._controller.pages
+            self._layout_panel.set_pages(pages)
+            self._controller.set_layout_run_enabled(True)
+            if self._controller.is_fully_analyzed:
+                self._layout_panel.show_analysis_result(pages)
+            if self._controller.has_any_ocr_result:
+                self._controller.sync_proof_panels(force_load=True)
+        self._go_to_step(self._controller.get_open_step())
 
     def _save_project(self) -> bool:
-        return self._save_project_interactive()
-
-    def _save_project_interactive(self) -> bool:
         if not self._controller.project:
             QMessageBox.information(self, "提示", "当前无项目，请先导入或打开项目")
             return False
-        if not self._controller.store:
-            return self._save_project_as()
-        return self._controller.save_project()
+        return self._save_project_snapshot_dialog()
 
-    def _save_project_as(self) -> bool:
+    def _save_project_snapshot_dialog(self) -> bool:
         project = self._controller.project
         if not project:
             return False
@@ -783,48 +789,19 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return False
-        return self._controller.save_project_as(path)
-
-    def _ask_save_before_close(self, title: str, message: str) -> str:
-        box = QMessageBox(self)
-        box.setWindowTitle(title)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText(message)
-        btn_save = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
-        btn_discard = box.addButton("不保存", QMessageBox.ButtonRole.DestructiveRole)
-        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        btn_save.setObjectName("primaryBtn")
-        btn_discard.setObjectName("dangerBtn")
-        btn_cancel.setObjectName("secondaryBtn")
-        for btn in (btn_save, btn_discard, btn_cancel):
-            btn.setMinimumHeight(30)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
-        box.setDefaultButton(btn_save)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == btn_save:
-            return "save"
-        if clicked == btn_discard:
-            return "discard"
-        if clicked == btn_cancel:
-            return "cancel"
-        return "cancel"
+        return self._controller.save_project_snapshot(path)
 
     def _confirm_close_project_save(self) -> bool:
         if not self._controller.project:
             return True
-        result = self._ask_save_before_close(
+        reply = QMessageBox.question(
+            self,
             "关闭项目",
-            "关闭当前项目前是否保存？\n选择“取消”会保留当前项目。",
+            "关闭后将保存当前工作状态到内部缓存。是否关闭项目？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if result == "cancel":
-            return False
-        if result == "save" and not self._save_project_interactive():
-            QMessageBox.warning(self, "保存失败", "项目未保存，已取消关闭。")
-            return False
-        return True
+        return reply == QMessageBox.StandardButton.Yes
 
     def _close_project(self) -> None:
         if not self._controller.project:
@@ -871,7 +848,7 @@ class MainWindow(QMainWindow):
             return
         project = self._controller.project
         if not project:
-            self._controller.ensure_transient_project("未命名项目")
+            self._controller.ensure_working_project("未命名项目")
 
         try:
             cache_dir = self._controller.cache_dir
@@ -1028,19 +1005,9 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
             return
         if self._controller.project:
-            if self._controller.store:
-                self._controller.save_project()
-            else:
-                result = self._ask_save_before_close(
-                    "保存项目",
-                    "当前项目尚未保存。退出前是否保存？",
-                )
-                if result == "cancel":
-                    event.ignore()
-                    return
-                if result == "save" and not self._save_project_as():
-                    event.ignore()
-                    return
+            if not self._controller.save_project():
+                event.ignore()
+                return
         self._controller.close()
         super().closeEvent(event)
 

@@ -16,6 +16,7 @@ from app.controllers.workflow_controller import (
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import project_ocr_line_count, replace_block_ocr_line_observations
+from app.services.project_workspace_service import ProjectWorkspaceService
 
 
 # ── 辅助 ───────────────────────────────────────────────────────
@@ -38,9 +39,24 @@ def _page(page_no, blocks):
     )
 
 
+class _Settings:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, key: str, default: str = "") -> str:
+        return self.values.get(key, default)
+
+    def set(self, key: str, value: str) -> None:
+        self.values[key] = value
+
+
 @pytest.fixture
-def ctrl():
-    c = WorkflowController()
+def ctrl(tmp_path):
+    service = ProjectWorkspaceService(
+        tmp_path / "workspaces",
+        settings=_Settings(),
+    )
+    c = WorkflowController(workspace_service=service)
     yield c
     c.close()
 
@@ -172,11 +188,11 @@ def test_cache_dir_uses_db_path_parent(ctrl, tmp_path):
     assert ctrl.cache_dir == tmp_path / ".cache"
 
 
-def test_transient_project_binds_charocr_cache_to_project_cache(ctrl, monkeypatch):
+def test_working_project_binds_charocr_cache_to_project_cache(ctrl, monkeypatch):
     from app.engines.hanwang import native_cache
 
     monkeypatch.delenv("HANWANG_NATIVE_CACHE_DIR", raising=False)
-    ctrl.ensure_transient_project("demo")
+    ctrl.ensure_working_project("demo")
 
     assert ctrl.charocr_cache_dir == ctrl.cache_dir / "hanwang_native"
     assert native_cache.cache_dir() == ctrl.charocr_cache_dir

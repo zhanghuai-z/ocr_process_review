@@ -450,7 +450,7 @@ class OcrProject:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     id: Optional[int] = None
-    db_path: Optional[str] = None   # 项目文件 .ocrproj 路径
+    db_path: Optional[str] = None   # 受管工作缓存数据库路径，不是用户快照路径
 
     @property
     def page_count(self) -> int:

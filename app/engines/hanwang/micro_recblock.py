@@ -65,7 +65,6 @@ from app.core.paddle_line_routing import (
     union_xyxy,
     vertical_overlap_ratio,
 )
-from app.core.layout_routing_contract import PageRoutingPlan
 from app.services.layout_routing_plan import (
     RoutingLine,
     is_text_route_segment_kind,
@@ -2573,7 +2572,7 @@ def _routing_line_record_for_native_runner(
 
 def _apply_page_routing_plan_to_native_rows(
     ppvl_blocks: list[dict],
-    routing_plan: PageRoutingPlan,
+    routing_plan: Any,
     page: Page,
 ) -> None:
     """Project immutable routing input into the native runner's temporary rows."""
@@ -2606,7 +2605,7 @@ def run_micro_recblock(
     recog_timeout: float = 60.0,
     include_chars: bool = True,
     page_ocr_lines: list[Any] | None = None,
-    routing_plan: PageRoutingPlan | None = None,
+    routing_plan: Any | None = None,
     page: Page | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
@@ -3822,7 +3821,7 @@ class HanwangMicroRecBlockEngine:
         image_bgr: np.ndarray,
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
-        routing_plan: PageRoutingPlan | None = None,
+        routing_plan: Any | None = None,
     ) -> RunStats:
         self._refresh_inline_formula_texts_from_current_crops(
             image_bgr,

@@ -7355,7 +7355,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
                 {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
             ],
             "_layout_line_routes": [
-                {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text", "bbox": [0, 0, 200, 40]}]},
+                {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text_other", "bbox": [0, 0, 200, 40]}]},
             ],
         }
         page = Page(
@@ -7501,7 +7501,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
                 {"block_label": "inline_formula", "block_bbox": [40, 0, 120, 30]},
             ],
             "_layout_line_routes": [
-                {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text", "bbox": [0, 0, 220, 40]}]},
+                {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text_other", "bbox": [0, 0, 220, 40]}]},
             ],
         }
         page = Page(
@@ -7881,7 +7881,7 @@ def test_main_window_file_menu_uses_close_project_action():
     print("test_main_window_file_menu_uses_close_project_action PASSED")
 
 
-def test_main_window_close_project_prompts_save_and_resets_workspace():
+def test_main_window_close_project_flushes_working_cache_and_resets_workspace():
     from PySide6.QtWidgets import QMessageBox
 
     from app.models import OcrProject
@@ -7890,7 +7890,9 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
     _get_qapp()
     warnings = []
     saves = []
+    original_question = QMessageBox.question
     original_warning = QMessageBox.warning
+    QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
     QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
 
     class FakeStore:
@@ -7906,8 +7908,6 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
         window._controller._project = OcrProject(name="demo")
         window._controller._store = store
         window._controller.save_project = lambda: saves.append(True) or True
-        window._ask_save_before_close = lambda title, message: "save"
-
         window._close_project()
 
         assert saves == [True]
@@ -7918,43 +7918,46 @@ def test_main_window_close_project_prompts_save_and_resets_workspace():
         assert window._layout_panel._pages == []
         assert window.statusBar().currentMessage() == "项目已关闭"
     finally:
+        QMessageBox.question = original_question
         QMessageBox.warning = original_warning
         window.close()
 
-    print("test_main_window_close_project_prompts_save_and_resets_workspace PASSED")
+    print("test_main_window_close_project_flushes_working_cache_and_resets_workspace PASSED")
 
 
-def test_main_window_close_project_save_uses_save_as_for_transient_project():
+def test_main_window_close_project_does_not_offer_snapshot_save():
     from PySide6.QtWidgets import QMessageBox
 
     from app.models import OcrProject
     from app.ui.main_window import MainWindow
 
     _get_qapp()
-    warnings = []
     save_as_calls = []
-    original_warning = QMessageBox.warning
-    QMessageBox.warning = lambda *args, **kwargs: warnings.append(args)
+    original_question = QMessageBox.question
+    QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
+
+    class FakeStore:
+        def close(self):
+            pass
 
     window = MainWindow()
     try:
         window._controller._project = OcrProject(name="draft")
-        window._controller._store = None
-        window._ask_save_before_close = lambda title, message: "save"
-        window._save_project_as = lambda: save_as_calls.append(True) or True
+        window._controller._store = FakeStore()
+        window._controller.save_project = lambda: True
+        window._save_project_snapshot_dialog = lambda: save_as_calls.append(True) or True
 
         window._close_project()
 
-        assert save_as_calls == [True]
-        assert warnings == []
+        assert save_as_calls == []
         assert window._controller.project is None
         assert window._stack.currentWidget() is window._import_panel
         assert window.statusBar().currentMessage() == "项目已关闭"
     finally:
-        QMessageBox.warning = original_warning
+        QMessageBox.question = original_question
         window.close()
 
-    print("test_main_window_close_project_save_uses_save_as_for_transient_project PASSED")
+    print("test_main_window_close_project_does_not_offer_snapshot_save PASSED")
 
 
 # =====================================================================
@@ -9183,7 +9186,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
             {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
         ],
         "_layout_line_routes": [
-            {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text", "bbox": [0, 0, 200, 40]}]},
+            {"bbox": [0, 0, 200, 40], "segments": [{"kind": "text_other", "bbox": [0, 0, 200, 40]}]},
         ],
     }
     page = Page(
@@ -9492,7 +9495,7 @@ def test_hanwang_layout_injects_unbound_manual_formula_into_parent_route():
             {"block_label": "inline_formula", "block_bbox": [40, 0, 70, 30]},
         ],
         "_layout_line_routes": [
-            {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text", "bbox": [0, 0, 220, 40]}]},
+            {"bbox": [0, 0, 220, 40], "segments": [{"kind": "text_other", "bbox": [0, 0, 220, 40]}]},
         ],
     }
     page = Page(
@@ -10969,9 +10972,9 @@ def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
         index=0,
         bbox=(0, 0, 130, 50),
         segments=(
-            RoutingSegment(kind="text", bbox=(0, 0, 40, 50)),
+            RoutingSegment(kind="text_other", bbox=(0, 0, 40, 50)),
             RoutingSegment(kind="formula", bbox=(40, 0, 80, 50), text="$ A $"),
-            RoutingSegment(kind="text", bbox=(80, 0, 130, 50)),
+            RoutingSegment(kind="text_other", bbox=(80, 0, 130, 50)),
         ),
     )
     grouped_lines = {
@@ -11023,9 +11026,9 @@ def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
         index=0,
         bbox=(199, 556, 1453, 620),
         segments=(
-            RoutingSegment(kind="text", bbox=(199, 556, 445, 620)),
+            RoutingSegment(kind="text_other", bbox=(199, 556, 445, 620)),
             RoutingSegment(kind="formula", bbox=(445, 556, 884, 620), text=""),
-            RoutingSegment(kind="text", bbox=(884, 556, 1242, 620)),
+            RoutingSegment(kind="text_other", bbox=(884, 556, 1242, 620)),
             RoutingSegment(kind="formula", bbox=(1242, 562, 1453, 620), text=""),
         ),
     )
@@ -11173,7 +11176,7 @@ def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hi
                 "_layout_line_routes": [
                     {
                         "bbox": [80, 0, 130, 40],
-                        "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                        "segments": [{"kind": "text_other", "bbox": [80, 0, 130, 40], "text": ""}],
                     },
                 ],
             }],
@@ -11245,7 +11248,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
         ppvl_blocks[0][LAYOUT_LINE_ROUTES_FIELD] = [
             {
                 "bbox": [80, 0, 130, 40],
-                "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                "segments": [{"kind": "text_other", "bbox": [80, 0, 130, 40], "text": ""}],
             }
         ]
         return [
@@ -11277,7 +11280,7 @@ def test_hanwang_page_block_writeback_does_not_persist_layout_line_routes():
                 LAYOUT_LINE_ROUTES_FIELD: [
                     {
                         "bbox": [80, 0, 130, 40],
-                        "segments": [{"kind": "text", "bbox": [80, 0, 130, 40], "text": ""}],
+                        "segments": [{"kind": "text_other", "bbox": [80, 0, 130, 40], "text": ""}],
                     }
                 ],
             }
@@ -11918,7 +11921,7 @@ def test_paddle_line_routing_builds_layout_line_routes_from_reading_order():
     assert len(routes) >= 2
     assert [segment["text"] for segment in routes[0]["segments"] if segment["kind"] == "formula"] == ["$ A $"]
     assert [segment["text"] for segment in routes[1]["segments"] if segment["kind"] == "formula"] == ["$ B $", "$ C $"]
-    assert sum(1 for segment in routes[1]["segments"] if segment["kind"] == "text") >= 3
+    assert sum(1 for segment in routes[1]["segments"] if segment["kind"] == "text_other") >= 3
     block[LAYOUT_LINE_ROUTES_FIELD] = routes
     assert block[LAYOUT_LINE_ROUTES_FIELD][0]["segments"][1]["text"] == "$ A $"
 
@@ -12075,11 +12078,11 @@ def test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt():
             {
                 "bbox": [0, 0, 300, 40],
                 "segments": [
-                    {"kind": "text", "bbox": [0, 0, 70, 40]},
+                    {"kind": "text_other", "bbox": [0, 0, 70, 40]},
                     {"kind": "formula", "bbox": [70, 0, 100, 40], "text": "$ ^{②} $"},
-                    {"kind": "text", "bbox": [100, 0, 170, 40]},
+                    {"kind": "text_other", "bbox": [100, 0, 170, 40]},
                     {"kind": "formula", "bbox": [170, 0, 200, 40], "text": "$ B $"},
-                    {"kind": "text", "bbox": [200, 0, 300, 40]},
+                    {"kind": "text_other", "bbox": [200, 0, 300, 40]},
                 ],
             }
         ],
@@ -12096,7 +12099,7 @@ def test_paddle_line_routing_cached_marker_formula_routes_are_rebuilt():
         segment["bbox"]
         for route in routes
         for segment in route["segments"]
-        if segment["kind"] == "text"
+        if segment["kind"] == "text_other"
     ]
 
     assert formula_texts == ["$ B $"]
@@ -12189,7 +12192,7 @@ def test_paddle_line_routing_ppocr_prefiltered_marker_keeps_later_formula_text()
         tuple(segment["bbox"])
         for route in parent["_layout_line_routes"]
         for segment in route["segments"]
-        if segment["kind"] == "text"
+        if segment["kind"] == "text_other"
     ]
 
     assert [segment["text"] for segment in formula_segments] == ["$ Time_{t} $", "$ \\beta_{t} $"]
@@ -12300,7 +12303,7 @@ def test_paddle_line_routing_restores_inter_formula_punctuation_gap():
     segments = routes[0]["segments"]
     gap_segments = [
         segment for segment in segments
-        if segment.get("kind") == "text" and segment.get("label") == "inter_formula_text_gap"
+        if segment.get("kind") == "text_other" and segment.get("label") == "inter_formula_text_gap"
     ]
 
     assert len(gap_segments) == 1
@@ -12331,7 +12334,7 @@ def test_paddle_line_routing_page_ocr_miss_invalidates_cached_routes():
         LAYOUT_LINE_ROUTES_FIELD: [
             {
                 "bbox": [0, 80, 100, 95],
-                "segments": [{"kind": "text", "bbox": [0, 80, 100, 95]}],
+                "segments": [{"kind": "text_other", "bbox": [0, 80, 100, 95]}],
             }
         ],
     }
@@ -12427,13 +12430,13 @@ def test_paddle_line_routing_formula_rows_use_single_horizontal_band():
         [160, 8, 190, 36],
     ]
     assert [segment["kind"] for segment in formula_route["segments"]] == [
-        "text",
+        "text_other",
         "formula",
-        "text",
+        "text_other",
         "formula",
-        "text",
+        "text_other",
         "formula",
-        "text",
+        "text_other",
     ]
 
     print("test_paddle_line_routing_formula_rows_use_single_horizontal_band PASSED")
@@ -12466,7 +12469,7 @@ def test_paddle_line_routing_has_layout_routes_is_pure():
     stale_routes = [
         {
             "bbox": [90, 0, 120, 30],
-            "segments": [{"kind": "text", "bbox": [90, 0, 120, 30], "text": ""}],
+            "segments": [{"kind": "text_other", "bbox": [90, 0, 120, 30], "text": ""}],
         }
     ]
     block[LAYOUT_LINE_ROUTES_FIELD] = stale_routes
@@ -15000,28 +15003,40 @@ def test_main_window_find_action_opens_layout_find_dialog():
     print("test_main_window_find_action_opens_layout_find_dialog PASSED")
 
 
-def test_workflow_controller_normalizes_loaded_project_geometry():
-    import tempfile
+def test_workflow_controller_normalizes_loaded_project_geometry(tmp_path):
     import cv2
     import numpy as np
 
     from app.controllers.workflow_controller import WorkflowController
-    from app.core.project_store import ProjectStore
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.project_workspace_service import ProjectWorkspaceService
 
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file, \
-            tempfile.NamedTemporaryFile(suffix=".png", delete=False) as img_file:
-        db_path = db_file.name
-        img_path = img_file.name
+    class _Settings:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key, default=""):
+            return self.values.get(key, default)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+    service = ProjectWorkspaceService(
+        tmp_path / "workspaces",
+        settings=_Settings(),
+    )
+    working = service.create_working_project("LoadedProof")
+    img_path = tmp_path / "source.png"
+    snapshot_path = tmp_path / "loaded.ocrproj"
 
     try:
         img = np.full((120, 220, 3), 255, dtype=np.uint8)
         cv2.rectangle(img, (16, 18), (204, 30), (0, 0, 0), -1)
         cv2.rectangle(img, (18, 68), (196, 82), (0, 0, 0), -1)
-        cv2.imwrite(img_path, img)
+        cv2.imwrite(str(img_path), img)
 
         page = Page(
-            image_path=img_path,
+            image_path=str(img_path),
             width=220,
             height=120,
             blocks=[Block(
@@ -15030,23 +15045,29 @@ def test_workflow_controller_normalizes_loaded_project_geometry():
                 lines=[Line(text="甲乙", confidence=0.95, bbox=BBox(10, 44, 160, 40))],
             )],
         )
-        project = OcrProject(name="LoadedProof", pages=[page], db_path=db_path)
+        project = working.project
+        project.pages = [page]
         _seed_project_ocr_observations(project)
 
-        with ProjectStore(db_path) as store:
-            store.save_project(project)
+        working.store.save_project(project)
+        service.write_snapshot(
+            active_store=working.store,
+            project=project,
+            target_path=snapshot_path,
+        )
+        working.store.close()
 
-        controller = WorkflowController()
+        controller = WorkflowController(workspace_service=service)
         try:
-            assert controller.open_project(db_path) is True
+            assert controller.open_project(str(snapshot_path)) is True
             loaded_line = _block_ocr_observations(controller.project.pages[0].blocks[0])[0]
             assert loaded_line.bbox == BBox(10, 44, 160, 40)
             assert len(line_ocr_chars_by_uid(loaded_line.uid)) == 2
         finally:
             controller.close()
     finally:
-        os.unlink(db_path)
-        os.unlink(img_path)
+        if img_path.exists():
+            img_path.unlink()
 
 
 def test_workflow_controller_auto_save_persists_quality_probe_sidecar():
@@ -15768,30 +15789,48 @@ def test_proof_persistence_scoped_lines_commit_atomically():
     print("test_proof_persistence_scoped_lines_commit_atomically PASSED")
 
 
-def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
-    import os
-    import tempfile
-
+def test_workflow_controller_snapshot_persists_quality_probe_sidecar(tmp_path):
     from app.controllers.workflow_controller import WorkflowController
     from app.core import quality_probe as qp
-    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockType, Line, Page
+    from app.services.project_workspace_service import ProjectWorkspaceService
 
-    with tempfile.NamedTemporaryFile(suffix=".ocrproj", delete=False) as db_file:
-        db_path = db_file.name
-    os.unlink(db_path)
-    sidecar_path = qp.sidecar_path_for_project(db_path)
-    controller = WorkflowController()
+    class _Settings:
+        def __init__(self):
+            self.values = {}
+
+        def get(self, key, default=""):
+            return self.values.get(key, default)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+    controller = WorkflowController(
+        workspace_service=ProjectWorkspaceService(
+            tmp_path / "workspaces",
+            settings=_Settings(),
+        )
+    )
+    snapshot_path = tmp_path / "qprobe.ocrproj"
+    sidecar_path = qp.sidecar_path_for_project(str(snapshot_path))
     try:
+        project = controller.ensure_working_project("qprobe-snapshot")
+        assert controller.store is not None
+        image_path = Path(controller.store.db_path).parent / ".cache" / "images" / "page.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"image")
         line = Line(text="已", confidence=0.9, bbox=BBox(1, 2, 30, 12))
         page = Page(
-            image_path="/tmp/save-as-qprobe.png",
+            image_path=str(image_path),
+            cache_image_path=str(image_path),
             width=100,
             height=100,
             page_number=1,
             blocks=[Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])],
         )
-        controller._project = OcrProject(name="qprobe-save-as", pages=[page])
-        _seed_project_layout_snapshots(controller._project)
+        project.pages = [page]
+        _seed_project_layout_snapshots(project)
+        assert controller.save_project() is True
 
         probe_store = qp.ProbeStore()
         probe_store.add(qp.Probe(
@@ -15802,7 +15841,7 @@ def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
         ))
         qp.set_active_store(probe_store)
 
-        assert controller.save_project_as(db_path) is True
+        assert controller.save_project_snapshot(str(snapshot_path)) is True
 
         assert sidecar_path is not None
         loaded = qp.load_store_from_path(sidecar_path)
@@ -15810,19 +15849,9 @@ def test_workflow_controller_save_project_as_persists_quality_probe_sidecar():
         assert next(iter(loaded.all())).observation == "corrected"
     finally:
         qp.reset_active_store()
-        if controller.store is not None:
-            controller.store.close()
-        if sidecar_path:
-            try:
-                os.unlink(sidecar_path)
-            except FileNotFoundError:
-                pass
-        try:
-            os.unlink(db_path)
-        except FileNotFoundError:
-            pass
+        controller.close()
 
-    print("test_workflow_controller_save_project_as_persists_quality_probe_sidecar PASSED")
+    print("test_workflow_controller_snapshot_persists_quality_probe_sidecar PASSED")
 
 
 # =====================================================================

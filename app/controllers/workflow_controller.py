@@ -74,6 +74,7 @@ from app.services.ocr_run_result import OcrProgress
 from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService, proof_fallback_warning
 from app.services.proof_persistence_service import ProofPersistenceService
+from app.services.project_workspace_service import ProjectWorkspaceService, WorkingProject
 
 logger = get_logger(__name__)
 PARALLEL_PROOF_PAGE_KEY_ATTR = "_parallel_proof_page_key"
@@ -105,10 +106,16 @@ class WorkflowController(QObject):
     page_gate_state = Signal(int, str, bool, str, str)  # page_number, page_state, is_pending, reason_code, reason_text
     primary_action = Signal(int, str, str, bool)  # page_number, action_key, label, enabled
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        workspace_service: ProjectWorkspaceService | None = None,
+    ):
         super().__init__(parent)
         self._project: Optional[OcrProject] = None
         self._store: Optional[ProjectStore] = None
+        self._workspace_service = workspace_service or ProjectWorkspaceService()
         self._proof_auto_flag_service = ProofAutoFlagService()
         self._proof_crop_service = ProofCropService()
         self._max_step: int = STEP_IMPORT
@@ -147,10 +154,12 @@ class WorkflowController(QObject):
     def max_step(self) -> int:
         return self._max_step
 
-    def ensure_transient_project(self, name: str = "未命名项目") -> OcrProject:
-        """确保存在一个临时项目对象，便于未保存状态下也能走通工作流。"""
+    def ensure_working_project(self, name: str = "未命名项目") -> OcrProject:
+        """Ensure an active project backed by an internal working cache."""
         if self._project is None:
-            self._project = OcrProject(name=name)
+            working = self._workspace_service.create_working_project(name)
+            self._store = working.store
+            self._project = working.project
             self._sync_native_cache_dir()
             self.project_changed.emit(self._project)
         return self._project
@@ -214,12 +223,7 @@ class WorkflowController(QObject):
 
     @property
     def cache_dir(self) -> "Path":
-        """项目对应的缓存目录：``<.ocrproj 所在目录>/.cache``；
-        临时项目（未保存）落在当前工作目录的 ``./.cache``。
-
-        把 ``self._controller._project.db_path`` 这种私有访问收掉，避免
-        MainWindow 触手伸进 controller 的实现细节。
-        """
+        """Return the active working cache directory, never a user snapshot path."""
         from pathlib import Path as _Path
         db_path = self._project.db_path if self._project else None
         return _Path(db_path or ".").parent / ".cache"
@@ -425,77 +429,93 @@ class WorkflowController(QObject):
         self._emit_view_state()
 
     def open_project(self, db_path: str) -> bool:
-        """打开项目。"""
+        """Open a user snapshot into a fresh managed working cache."""
         try:
-            if self._store:
-                self._store.close()
-            self._store = ProjectStore(db_path)
-            self._store.open()
-            self._project = self._store.load_project(project_id=1)
-            if not self._project:
-                self.worker_error.emit("项目文件无效或为空")
-                return False
-            self._sync_native_cache_dir()
-            proof_stats = self._proof_crop_service.normalize_project(self._project)
-
-            # 切换项目：先清空全局评测状态，再尝试从 sidecar 恢复
-            qp.reset_active_store()
-            side = qp.sidecar_path_for_project(self._project.db_path)
-            if side:
-                loaded = qp.load_store_from_path(side)
-                if loaded is not None and len(loaded) > 0:
-                    qp.set_active_store(loaded)
-                    logger.info("Loaded quality probe sidecar: %d probes", len(loaded))
-
-            self._max_step = self._compute_max_step()
-            self.project_changed.emit(self._project)
-            self.step_enabled_changed.emit(self._max_step)
-            self._emit_view_state()
-            fallback_warning = proof_fallback_warning(proof_stats, self._project.pages)
-            if fallback_warning:
-                self.status_message.emit(f"已打开：{db_path}；{fallback_warning}")
-            else:
-                self.status_message.emit(f"已打开：{db_path}")
+            working = self._workspace_service.open_snapshot_into_workspace(db_path)
+            previous_store = self._store
+            if previous_store:
+                previous_store.close()
+            self._activate_working_project(working, status_prefix=f"已打开项目快照：{db_path}")
             return True
         except Exception as e:
             logger.error("Failed to open project: %s", e)
             self.worker_error.emit(f"打开项目失败：{e}")
             return False
 
-    def save_project_as(self, db_path: str) -> bool:
-        """Save the current in-memory project to a project database path."""
-        if not self._project:
+    def resume_working_project(self) -> bool:
+        """Restore the last active cache after an application restart."""
+        if self._project is not None or self._store is not None:
             return False
         try:
-            if self._store:
-                self._store.close()
-            self._store = ProjectStore(db_path)
-            self._store.open()
-            self._project.db_path = db_path
-            self._project = self._store.save_project(self._project)
-            self._save_quality_probe_sidecar()
-            self._sync_native_cache_dir()
-            self.project_changed.emit(self._project)
-            self.status_message.emit(f"项目已保存：{db_path}")
+            working = self._workspace_service.resume_working_project()
+            if working is None:
+                return False
+            self._activate_working_project(working, status_prefix="已恢复上次工作缓存")
             return True
         except Exception as e:
-            logger.error("Save as failed: %s", e)
-            self.worker_error.emit(f"保存失败：{e}")
+            logger.error("Failed to resume working project: %s", e)
+            self.worker_error.emit(f"恢复工作缓存失败：{e}")
+            return False
+
+    def save_project_snapshot(self, db_path: str) -> bool:
+        """Generate a complete user-facing snapshot without rebinding the cache."""
+        if not self._project or not self._store:
+            return False
+        try:
+            self._save_quality_probe_sidecar()
+            target = self._workspace_service.write_snapshot(
+                active_store=self._store,
+                project=self._project,
+                target_path=db_path,
+            )
+            self.status_message.emit(f"项目快照已保存：{target}")
+            return True
+        except Exception as e:
+            logger.error("Save project snapshot failed: %s", e)
+            self.worker_error.emit(f"保存项目快照失败：{e}")
             return False
 
     def save_project(self) -> bool:
-        """保存项目。"""
+        """Persist current state to the managed working cache."""
         if not self._project or not self._store:
             return False
         try:
             self._store.save_project(self._project)
             self._save_quality_probe_sidecar()
-            self.status_message.emit("项目已保存")
             return True
         except Exception as e:
             logger.error("Save failed: %s", e)
             self.worker_error.emit(f"保存失败：{e}")
             return False
+
+    def _activate_working_project(
+        self,
+        working: WorkingProject,
+        *,
+        status_prefix: str,
+    ) -> None:
+        self._store = working.store
+        self._project = working.project
+        self._sync_native_cache_dir()
+        proof_stats = self._proof_crop_service.normalize_project(self._project)
+
+        qp.reset_active_store()
+        side = qp.sidecar_path_for_project(self._project.db_path)
+        if side:
+            loaded = qp.load_store_from_path(side)
+            if loaded is not None and len(loaded) > 0:
+                qp.set_active_store(loaded)
+                logger.info("Loaded quality probe sidecar: %d probes", len(loaded))
+
+        self._max_step = self._compute_max_step()
+        self.project_changed.emit(self._project)
+        self.step_enabled_changed.emit(self._max_step)
+        self._emit_view_state()
+        fallback_warning = proof_fallback_warning(proof_stats, self._project.pages)
+        if fallback_warning:
+            self.status_message.emit(f"{status_prefix}；{fallback_warning}")
+        else:
+            self.status_message.emit(status_prefix)
 
     def _save_quality_probe_sidecar(self) -> bool:
         """Persist active quality-probe sidecar for the current project path."""
@@ -557,8 +577,13 @@ class WorkflowController(QObject):
         if self.has_running_workers():
             self.status_message.emit("后台任务仍在运行，请等待完成后再关闭项目")
             return False
+        if self._project is not None and self._store is not None and not self.save_project():
+            self.status_message.emit("工作缓存保存失败，已取消关闭项目")
+            return False
+        workspace_path = self._project.db_path if self._project else None
         if self._store:
             self._store.close()
+        self._workspace_service.forget_working_project(workspace_path)
         self._store = None
         self._project = None
         self._pending_layout_pages = None
@@ -638,6 +663,8 @@ class WorkflowController(QObject):
             return False
 
     def close(self) -> None:
+        if self._project is not None and self._store is not None:
+            self.save_project()
         if self._store:
             self._store.close()
         native_cache.reset_runtime_cache_dir()
@@ -828,7 +855,7 @@ class WorkflowController(QObject):
     def on_images_ready(self, pages: List[Page]) -> None:
         """导入图片/PDF 后的处理。"""
         if not self._project:
-            self._project = OcrProject(name="未命名项目")
+            self.ensure_working_project("未命名项目")
 
         self._project.pages = pages
 

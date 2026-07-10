@@ -120,6 +120,8 @@ def iter_project_ocr_line_observation_occurrences(
 ) -> Iterator[OcrLineOccurrence]:
     """Yield project OCR line observations in layout snapshot order."""
     for page in project.pages:
+        if layout_snapshot_for_page(page) is None:
+            continue
         yield from iter_page_ocr_line_observation_occurrences(page)
 
 
