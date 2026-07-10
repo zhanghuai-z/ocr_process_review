@@ -61,18 +61,18 @@ class TableTextLayerService:
         if prepass is None:
             return []
         rows: list[tuple[tuple[int, int, int, int], str]] = []
-        for line in prepass.lines:
-            clipped = _intersect_xyxy(line.bbox, table_bbox)
+        for prepass_line in prepass.lines:
+            clipped = _intersect_xyxy(prepass_line.bbox, table_bbox)
             if clipped is None:
                 continue
-            center_x = (line.bbox[0] + line.bbox[2]) / 2.0
-            center_y = (line.bbox[1] + line.bbox[3]) / 2.0
+            center_x = (prepass_line.bbox[0] + prepass_line.bbox[2]) / 2.0
+            center_y = (prepass_line.bbox[1] + prepass_line.bbox[3]) / 2.0
             if not (
                 table_bbox[0] <= center_x <= table_bbox[2]
                 and table_bbox[1] <= center_y <= table_bbox[3]
             ):
                 continue
-            text = str(line.text or "").strip()
+            text = str(prepass_line.text or "").strip()
             if text:
                 rows.append((clipped, text))
         if not rows:

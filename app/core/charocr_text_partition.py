@@ -102,10 +102,7 @@ def partition_charocr_text_region(
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox),))
 
     components = _ink_components(image_bgr, region_bbox)
-    component_owners = {
-        component: _component_owner_token_index(component[:4], tokens, region_bbox)
-        for component in components
-    }
+    component_owners = _component_owner_token_indices(components, tokens, region_bbox)
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
     issues: list[RoutePartitionIssue] = []
     for token in latin_tokens:
@@ -212,50 +209,110 @@ def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
     )
 
 
-def _component_owner_token_index(
-    component: XYXY,
+def _component_owner_token_indices(
+    components: list[tuple[int, int, int, int, int]],
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
-) -> int | None:
-    """Assign one ink component to one PP-OCR token.
+) -> dict[tuple[int, int, int, int, int], int | None]:
+    """Assign every ink component to at most one PP-OCR token.
 
     Word boxes are approximate and commonly meet on the wrong side of a narrow
-    glyph.  Ownership therefore uses the component center first.  When no box
-    contains that center, the nearest non-symbol token owns the component;
-    punctuation may own only ink whose center is actually inside its proposal.
-    This prevents adjacent Latin tokens from independently claiming the same
-    slanted glyph and lets a displaced ``I``/digit be reclaimed from a nearby
-    punctuation box.
+    glyph.  Exact center containment is authoritative.  A displaced symbol may
+    then reclaim nearby ink only when its proposal has not already claimed a
+    component; this keeps a comma from also taking the following ``i``.  The
+    remaining ink goes to the nearest non-symbol token inside that token's
+    measured search window.  The staged assignment preserves detached ``i/j``
+    dots while keeping punctuation out of EngCut masks.
     """
-    centered: list[tuple[float, int, float, int]] = []
-    nearest: list[tuple[int, float, int]] = []
-    center_x = (component[0] + component[2]) / 2.0
-    for token in tokens:
-        token_bbox = _clip(token.bbox, region_bbox)
-        if not _is_nonempty(token_bbox):
-            continue
-        vertical_overlap = min(component[3], token_bbox[3]) - max(component[1], token_bbox[1])
-        if vertical_overlap <= 0:
-            continue
-        token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
-        if _center_inside(component, token_bbox):
+    owners: dict[tuple[int, int, int, int, int], int | None] = {
+        component: None for component in components
+    }
+
+    # First preserve the strongest fact: the component center is inside a raw
+    # PP-OCR proposal.  The tie-breaker makes shared proposal seams stable.
+    for component in components:
+        centered: list[tuple[float, int, float, int]] = []
+        center_x = (component[0] + component[2]) / 2.0
+        for token in tokens:
+            token_bbox = _clip(token.bbox, region_bbox)
+            if not _is_nonempty(token_bbox) or not _center_inside(component[:4], token_bbox):
+                continue
+            token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
             centered.append((
-                -_overlap_ratio(token_bbox, component),
+                -_overlap_ratio(token_bbox, component[:4]),
                 token_bbox[2] - token_bbox[0],
                 abs(center_x - token_center_x),
                 token.token_index,
             ))
-        elif _token_branch(token.text) != "symbol":
-            nearest.append((
-                _horizontal_gap(component, token_bbox),
+        if centered:
+            owners[component] = min(centered)[3]
+
+    occupied = {owner for owner in owners.values() if owner is not None}
+    for token in tokens:
+        if _token_branch(token.text) != "symbol" or token.token_index in occupied:
+            continue
+        seed_bbox = _symbol_seed_bbox(token, region_bbox)
+        candidates = [
+            component
+            for component in components
+            if owners[component] is None
+            and _intersect(component[:4], seed_bbox) is not None
+            and _nearest_token_index(component[:4], tokens, region_bbox) == token.token_index
+        ]
+        for component in candidates:
+            owners[component] = token.token_index
+
+    for component in components:
+        if owners[component] is not None:
+            continue
+        candidates: list[tuple[int, float, int]] = []
+        center_x = (component[0] + component[2]) / 2.0
+        for token in tokens:
+            if _token_branch(token.text) == "symbol":
+                continue
+            search_bbox = (
+                _latin_seed_bbox(token, region_bbox)
+                if _token_branch(token.text) == "latin"
+                else _clip(token.bbox, region_bbox)
+            )
+            if _intersect(component[:4], search_bbox) is None:
+                continue
+            token_bbox = _clip(token.bbox, region_bbox)
+            token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
+            candidates.append((
+                _horizontal_gap(component[:4], token_bbox),
                 abs(center_x - token_center_x),
                 token.token_index,
             ))
-    if centered:
-        return min(centered)[3]
-    if nearest:
-        return min(nearest)[2]
-    return None
+        if candidates:
+            owners[component] = min(candidates)[2]
+    return owners
+
+
+def _symbol_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
+    core = _clip(token.bbox, region_bbox)
+    width = max(1, core[2] - core[0])
+    vertical_margin = max(1, ceil((core[3] - core[1]) / 5))
+    return _clip(
+        (core[0] - width, core[1] - vertical_margin, core[2] + width, core[3] + vertical_margin),
+        region_bbox,
+    )
+
+
+def _nearest_token_index(
+    component: XYXY,
+    tokens: tuple[PpOcrV6WordBox, ...],
+    region_bbox: XYXY,
+) -> int | None:
+    center_x = (component[0] + component[2]) / 2.0
+    candidates: list[tuple[float, int]] = []
+    for token in tokens:
+        token_bbox = _clip(token.bbox, region_bbox)
+        if not _is_nonempty(token_bbox):
+            continue
+        token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
+        candidates.append((abs(center_x - token_center_x), token.token_index))
+    return min(candidates)[1] if candidates else None
 
 
 def _latin_glyph_advance(token: PpOcrV6WordBox, region_bbox: XYXY) -> int:
