@@ -6,15 +6,18 @@ from typing import Any
 
 
 XYXY = tuple[int, int, int, int]
+ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
 ROUTE_SEGMENT_TEXT = "text"
 ROUTE_SEGMENT_TEXT_ZH = "text_zh"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
+ROUTE_SEGMENT_TEXT_SYMBOL = "text_symbol"
 ROUTE_SEGMENT_FORMULA = "formula"
 ROUTE_SEGMENT_SKIP = "skip"
 TEXT_ROUTE_SEGMENT_KINDS = frozenset({
     ROUTE_SEGMENT_TEXT,
     ROUTE_SEGMENT_TEXT_ZH,
     ROUTE_SEGMENT_TEXT_LATIN,
+    ROUTE_SEGMENT_TEXT_SYMBOL,
 })
 VALID_ROUTE_SEGMENT_KINDS = frozenset({
     *TEXT_ROUTE_SEGMENT_KINDS,
@@ -77,6 +80,59 @@ class RoutingPlan:
     lines: tuple[RoutingLine, ...]
     text_slices: tuple[TextSliceRoute, ...]
     has_layout_routes: bool
+
+
+@dataclass(frozen=True)
+class BlockRoutingPlan:
+    """Immutable CharOCR routes for one adopted layout block."""
+
+    block_uid: str
+    plan: RoutingPlan
+
+    def __post_init__(self) -> None:
+        if not self.block_uid:
+            raise ValueError("block routing plan requires block_uid")
+
+
+@dataclass(frozen=True)
+class RouteValidationIssue:
+    """A page-local routing fact that prevents CharOCR dispatch for that page."""
+
+    code: str
+    message: str
+    line_index: int
+    bbox: XYXY
+
+
+@dataclass(frozen=True)
+class PageRoutingPlan:
+    """Immutable CharOCR dispatch input compiled from layout and PP-OCR facts.
+
+    This object is a derived plan, not a layout/OCR source of truth.  It is
+    intentionally page-scoped so an invalid route stops only that page.
+    """
+
+    page_uid: str
+    prepass_run_id: str
+    blocks: tuple[BlockRoutingPlan, ...]
+    validation_issues: tuple[RouteValidationIssue, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.page_uid:
+            raise ValueError("page routing plan requires page_uid")
+        block_uids = [block.block_uid for block in self.blocks]
+        if len(set(block_uids)) != len(block_uids):
+            raise ValueError("page routing plan contains duplicate block routes")
+
+    @property
+    def is_dispatchable(self) -> bool:
+        return not self.validation_issues
+
+    def for_block(self, block_uid: str) -> RoutingPlan | None:
+        for block in self.blocks:
+            if block.block_uid == block_uid:
+                return block.plan
+        return None
 
 
 def routing_line_from_record(
@@ -166,6 +222,10 @@ def int_or_default(value: object, default: int) -> int:
 
 
 __all__ = [
+    "BlockRoutingPlan",
+    "PageRoutingPlan",
+    "RouteValidationIssue",
+    "ROUTING_SOURCE_PPOCR_V6_PREPASS",
     "RoutingLine",
     "RoutingPlan",
     "RoutingSegment",
@@ -173,6 +233,7 @@ __all__ = [
     "ROUTE_SEGMENT_SKIP",
     "ROUTE_SEGMENT_TEXT",
     "ROUTE_SEGMENT_TEXT_LATIN",
+    "ROUTE_SEGMENT_TEXT_SYMBOL",
     "ROUTE_SEGMENT_TEXT_ZH",
     "TEXT_ROUTE_SEGMENT_KINDS",
     "TextSliceRoute",

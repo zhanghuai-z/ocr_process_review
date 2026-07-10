@@ -9,6 +9,7 @@ from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.ocr_ir import is_cjk_char, is_formula_marker_token, is_formula_token
 from app.core.layout_routing_contract import (
+    ROUTING_SOURCE_PPOCR_V6_PREPASS,
     RoutingLine,
     RoutingPlan,
     TextSliceRoute,
@@ -1177,7 +1178,10 @@ def _routes_have_marker_formula(routes: list[dict[str, Any]]) -> bool:
 
 def _routes_are_runtime_ppocr_line_routes(routes: list[dict[str, Any]]) -> bool:
     return bool(routes) and all(
-        route.get(LAYOUT_ROUTE_SOURCE_FIELD) == LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS
+        route.get(LAYOUT_ROUTE_SOURCE_FIELD) in {
+            LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+            ROUTING_SOURCE_PPOCR_V6_PREPASS,
+        }
         for route in routes
     )
 

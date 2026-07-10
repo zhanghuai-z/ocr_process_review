@@ -254,14 +254,14 @@ def test_page_scoped_ocr_pipeline_selection_uses_dispatch_plan():
         "process_project",
         "_process_page_hybrid_work",
         "_process_page_with_hybrid_blocks",
-        "_has_reusable_page_line_hints",
-        "_reusable_page_line_hint_summary",
         "_assign_page_ocr_lines_to_blocks",
-        "_assign_page_ocr_line_hints_to_blocks",
     ]
     for function_name in required_functions:
         function_source = _function_source(source, function_name)
         assert "build_text_ocr_dispatch_plan(page)" in function_source
+    hybrid_source = _function_source(source, "_process_page_with_hybrid_blocks")
+    assert "compile_page_routing_plan(" in hybrid_source
+    assert "mark_page_line_hints" not in source
 
 
 def test_ocr_run_result_contract_is_not_defined_inside_pipeline():
@@ -1722,7 +1722,7 @@ def test_paddle_raw_label_fields_are_not_app_payload_state():
         assert f"app_payload.pop({key}" not in store_source
 
 
-def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
+def test_block_ocr_invalidation_is_typed_state_and_hybrid_routing_is_rebuilt():
     block_state_source = Path("app/models/block_state.py").read_text(encoding="utf-8")
     edit_service_source = Path("app/services/layout_edit_service.py").read_text(encoding="utf-8")
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
@@ -1736,8 +1736,12 @@ def test_block_ocr_invalidation_is_typed_state_not_app_payload_write_path():
     assert "mark_ocr_text_invalidated(block" in edit_service_source
     assert "mark_ocr_text_invalidated(block" not in layout_source
     assert "is_ocr_text_invalidated(block)" in layout_source
-    assert "is_ocr_text_invalidated(block)" in ocr_source
     assert "is_ocr_text_invalidated(block)" in hanwang_source
+    # A layout edit invalidates prior observations, but hybrid OCR never
+    # recycles them as line geometry.  It compiles the current snapshot with
+    # a fresh PP-OCRv6 artifact for every page run.
+    assert "compile_page_routing_plan(" in ocr_source
+    assert "_has_reusable_page_line_hints" not in ocr_source
     assert "ocr_invalidated_reason" in store_source
     assert "app_payload[OCR_TEXT_INVALIDATED_KEY]" not in layout_source
     assert "set_payload_entries(block, {\n            OCR_TEXT_INVALIDATED_KEY" not in layout_source
@@ -1902,7 +1906,6 @@ def test_ocr_pipeline_writes_ocr_lines_to_uid_observations():
     source = Path("app/services/ocr_pipeline.py").read_text(encoding="utf-8")
 
     assert "replace_block_ocr_line_observations" in source
-    assert "block_ocr_line_observations_by_uid" in source
     assert re.search(r"(?<!replace_)(?<!clear_)block_ocr_line_observations\(", source) is None
     assert "replace_block_ocr_lines" not in source
     assert "append_block_ocr_line" not in source

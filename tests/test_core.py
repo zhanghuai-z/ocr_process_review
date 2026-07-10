@@ -57,6 +57,23 @@ def _raw_layout_records(page):
     return raw_layout_records(page)
 
 
+def _ppocr_v6_prepass_artifact(page_uid, *line_specs):
+    """Build the explicit PP-OCRv6 routing input used by hybrid OCR tests."""
+    from app.adapters.paddle.ppocr_v6_prepass import (
+        PpOcrV6LineHint,
+        PpOcrV6PrepassArtifact,
+    )
+
+    return PpOcrV6PrepassArtifact(
+        page_uid=page_uid,
+        run_id="test-ppocrv6-prepass",
+        lines=tuple(
+            PpOcrV6LineHint(index=index, text=text, bbox=tuple(bbox), words=())
+            for index, (text, bbox) in enumerate(line_specs)
+        ),
+    )
+
+
 def _seed_page_ocr_observations(page):
     """Register test layout and OCR facts through the current boundaries."""
     from app.models.ocr_observation import replace_block_ocr_line_observations
@@ -1757,7 +1774,8 @@ def test_project_store_persists_layout_edit_events():
 
 
 def test_line_final_text_contract_and_project_store_roundtrip():
-    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, OcrPolicy, Page
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.models.ocr_text_observation import set_line_ocr_text_observation
     from app.models.ocr_text_observation_store import OcrTextObservation
     from app.core.project_store import ProjectStore
@@ -8852,58 +8870,6 @@ def test_page_ocr_nested_equation_blocks_before_parent_text_assignment():
     print("test_page_ocr_nested_equation_blocks_before_parent_text_assignment PASSED")
 
 
-def test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block():
-    import numpy as np
-
-    from app.core.ocr_line_hints import is_ppocr_page_line_hint
-    from app.models import BBox, Block, BlockType, Line, Page
-    from app.services.ocr_pipeline import OcrPipeline
-
-    class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return [
-                Line(
-                    text="PP-OCRv5 hint text is ignored",
-                    confidence=0.95,
-                    bbox=BBox.from_xyxy(0, 10, 180, 40),
-                )
-            ]
-
-    text = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 190, 50), order=0)
-    equation = Block(
-        block_type=BlockType.EQUATION,
-        bbox=BBox.from_xyxy(50, 10, 130, 40),
-        order=1,
-        ocr_policy=OcrPolicy.TEXT_OCR,
-    )
-    page = Page(
-        image_path="/tmp/hybrid-prepass-hint.png",
-        width=200,
-        height=80,
-        blocks=[text, equation],
-    )
-
-    OcrPipeline()._process_page_with_page_ocr(
-        np.ones((80, 200, 3), dtype=np.uint8) * 255,
-        page,
-        0,
-        engine=FakePrepassEngine(),
-        mark_page_line_hints=True,
-    )
-
-    text_lines = _block_ocr_observations(text)
-    assert len(text_lines) == 1
-    assert text_lines[0].bbox == BBox.from_xyxy(0, 10, 180, 40)
-    assert is_ppocr_page_line_hint(text_lines[0]) is True
-    assert _block_ocr_observations(equation) == []
-    assert len(page.blocks) == 2
-
-    print("test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block PASSED")
-
-
 def test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula():
     import tempfile
     import cv2
@@ -11798,7 +11764,8 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
     import app.engines.hanwang.micro_recblock as micro_module
 
     from app.engines.hanwang.micro_recblock import HanwangMicroRecBlockEngine
-    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, Page
+    from app.models import BBox, Block, BlockOrigin, BlockType, Line, OcrProject, OcrPolicy, Page
+    from app.models.ocr_observation import replace_block_ocr_line_observations
     from app.services.ocr_pipeline import OcrPipeline
 
     def code(ch):
@@ -11843,11 +11810,8 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         }
 
     class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return [Line(text="甲乙", bbox=BBox.from_xyxy(0, 10, 180, 30), confidence=0.9)]
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid, ("甲乙", (0, 10, 180, 30)))
 
     original_segimg = micro_module.native_bridge.run_linecut_segimg
     original_recog = micro_module.native_bridge.run_linecut_recog
@@ -11872,7 +11836,13 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
                     bbox=BBox.from_xyxy(0, 0, 190, 50),
                     source_label="text",
                     origin=BlockOrigin(source_label="text", raw_index=0),
-                )
+                ),
+                Block(
+                    block_type=BlockType.EQUATION,
+                    bbox=BBox.from_xyxy(60, 0, 90, 40),
+                    source_label="inline_formula",
+                    ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                ),
             ],
             raw_layout_artifact=_paddle_layout_artifact([{
                 "block_label": "text",
@@ -11880,6 +11850,11 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
                 "block_content": "甲 $ A $ 乙",
                 "_route_subblocks": route_subblocks,
             }]),
+        )
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_ppocrv6_route")
+        replace_block_ocr_line_observations(
+            page.blocks[1].uid,
+            [Line(text="$ A $", bbox=BBox.from_xyxy(60, 0, 90, 40), confidence=1.0)],
         )
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(),
@@ -13370,11 +13345,8 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         cv2.imwrite(img_path, np.ones((220, 240, 3), dtype=np.uint8) * 255)
 
     class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return [Line(text="预识别", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.9)]
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid, ("预识别", (10, 20, 110, 60)))
 
     try:
         ppvl_records = [
@@ -13429,9 +13401,9 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         assert [block["block_content"] for block in calls[0][0]] == ["PPVL文本", "$$x+y$$", "参考文献"]
         assert all(block.get("_layout_block_uid") for block in calls[0][0])
         assert calls[0][1]["include_chars"] is True
-        assert len(calls[0][1]["page_ocr_lines"]) == 1
-        assert calls[0][1]["page_ocr_lines"][0].text == "预识别"
-        assert any("PP-OCRv5 page-line prepass complete: 1 lines" in event.message for event in progress_events)
+        assert calls[0][1]["page_ocr_lines"] is None
+        assert calls[0][1]["routing_plan"].is_dispatchable
+        assert any("PP-OCRv6 路由预处理完成：1 行" in event.message for event in progress_events)
         assert any(
             event.current_block == 1
             and event.total_blocks == 3
@@ -13486,7 +13458,6 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
     from app.engines.hanwang.micro_recblock import (
         BlockResult, CharResult, HanwangMicroRecBlockEngine, LineResult, RunStats,
     )
-    from app.core.paddle_line_routing import LAYOUT_LINE_ROUTES_FIELD
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
     from app.services.ocr_pipeline import OcrPipeline
 
@@ -13494,10 +13465,8 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
-        line_hints = kwargs["page_ocr_lines"]
-        assert len(line_hints) == 1
-        assert line_hints[0].text == "PP行"
-        assert LAYOUT_LINE_ROUTES_FIELD not in ppvl_blocks[0]
+        assert kwargs["page_ocr_lines"] is None
+        assert len(kwargs["routing_plan"].for_block(ppvl_blocks[0]["_layout_block_uid"]).lines) == 1
         return [
             BlockResult(
                 block_idx=0,
@@ -13519,11 +13488,8 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
         ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
 
     class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return [Line(text="PP行", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.98)]
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid, ("正文", (10, 20, 110, 60)))
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -13546,12 +13512,6 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
                     "block_label": "text",
                     "block_bbox": [10, 20, 110, 60],
                     "block_content": "PPVL文本",
-                    LAYOUT_LINE_ROUTES_FIELD: [
-                        {
-                            "bbox": [10, 20, 110, 60],
-                            "segments": [{"kind": "text", "bbox": [10, 20, 110, 60], "text": ""}],
-                        }
-                    ],
                 }
             ]),
         )
@@ -13565,11 +13525,11 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
         )
 
         assert len(calls) == 1
-        assert len(calls[0]["page_ocr_lines"]) == 1
-        assert calls[0]["page_ocr_lines"][0].text == "PP行"
+        assert calls[0]["page_ocr_lines"] is None
+        assert calls[0]["routing_plan"].is_dispatchable
         assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "重跑结果"
         assert any(
-            "PP-OCRv5 page-line prepass complete: 1 lines" in event.message
+            "PP-OCRv6 路由预处理完成：1 行" in event.message
             for event in progress_events
         )
     finally:
@@ -13593,9 +13553,8 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
 
     def fake_runner(image_bgr, ppvl_blocks, **kwargs):
         calls.append(kwargs)
-        line_hints = kwargs["page_ocr_lines"]
-        assert len(line_hints) == 1
-        assert line_hints[0].text == "PP行"
+        assert kwargs["page_ocr_lines"] is None
+        assert kwargs["routing_plan"].is_dispatchable
         return [
             BlockResult(
                 block_idx=0,
@@ -13610,11 +13569,8 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
         ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
 
     class PrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return [Line(text="PP行", bbox=BBox.from_xyxy(10, 20, 110, 60), confidence=0.91)]
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid, ("正文", (10, 20, 110, 60)))
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         img_path = f.name
@@ -13647,7 +13603,7 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
 
         assert len(calls) == 1
         assert _block_ocr_observations(result.pages[0].blocks[0])[0].text == "重跑结果"
-        assert any("PP-OCRv5 page-line prepass complete: 1 lines" in event.message for event in progress_events)
+        assert any("PP-OCRv6 路由预处理完成：1 行" in event.message for event in progress_events)
     finally:
         os.unlink(img_path)
 
@@ -13697,11 +13653,8 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
         ], RunStats(n_blocks_total=1, n_blocks_hanwang=1, n_groups=2)
 
     class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return []
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid)
 
     paths = []
     try:
@@ -13810,11 +13763,8 @@ def test_ocr_pipeline_parallel_hanwang_page_failure_does_not_stop_other_pages():
         ], RunStats(n_blocks_total=1, n_blocks_hanwang=1)
 
     class FakePrepassEngine:
-        prefer_page_ocr = True
-        bbox_space = "page"
-
-        def recognize(self, image_bgr, context):
-            return []
+        def analyze_page(self, image_bgr, *, page_uid):
+            return _ppocr_v6_prepass_artifact(page_uid)
 
     paths = []
     try:
@@ -21746,7 +21696,6 @@ if __name__ == "__main__":
     test_ocr_dispatch_policy_blocks_structural_and_paddle_skip_labels()
     test_page_ocr_refills_caption_blocks_and_preserves_equation_blocks()
     test_page_ocr_nested_equation_blocks_before_parent_text_assignment()
-    test_hanwang_prepass_keeps_line_hint_overlapping_nested_formula_block()
     test_ocr_pipeline_skips_equation_block_ocr_when_policy_preserves_formula()
     test_ocr_pipeline_avoids_double_shift_for_page_space_boxes()
     test_ocr_pipeline_preserves_hanwang_crop_lines_and_chars()

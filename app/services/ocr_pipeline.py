@@ -19,12 +19,12 @@ import cv2
 import numpy as np
 
 from app.core.coordinate_seam import CropCoordinateSeam
-from app.models.block_state import is_ocr_text_invalidated
+from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6PrepassArtifact, PpOcrV6PrepassClient
+from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.core.line_text_contract import ensure_line_text_contract
 from app.core.ocr_dispatch_policy import (
     should_dispatch_to_text_ocr,
 )
-from app.core.ocr_line_hints import is_ppocr_page_line_hint, mark_ppocr_page_line_hint
 from app.core.page_errors import is_ocr_error_message
 from app.core.spatial_matching import select_container_block_for_line
 from app.engines import OcrContext, get_engine_bbox_space, supports_page_block_ocr
@@ -32,10 +32,10 @@ from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
+from app.models.layout_block_view import current_layout_snapshot
 from app.models.layout_block_state import append_layout_block_note_once
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, set_ocr_char_bbox
 from app.models.ocr_observation import (
-    block_ocr_line_observations_by_uid,
     line_ocr_bbox,
     iter_page_ocr_line_observation_occurrences,
     replace_block_ocr_line_observations,
@@ -492,8 +492,6 @@ class OcrPipeline:
         page: Page,
         page_idx: int,
         engine: object | None = None,
-        *,
-        mark_page_line_hints: bool = False,
     ) -> None:
         """Run PP-OCRv5 once on the page, then assign each line to one layout block.
 
@@ -520,18 +518,31 @@ class OcrPipeline:
         )
         lines = ocr_engine.recognize(img, context)
         self._normalize_engine_lines(lines, seam, bbox_space)
-        if mark_page_line_hints:
-            for line in lines:
-                mark_ppocr_page_line_hint(line)
-            self._assign_page_ocr_line_hints_to_blocks(page, lines)
-        else:
-            self._assign_page_ocr_lines_to_blocks(page, lines)
+        self._assign_page_ocr_lines_to_blocks(page, lines)
 
     def _hybrid_page_ocr_prepass_engine(self) -> object:
         if self._hybrid_prepass_engine is not None:
             return self._hybrid_prepass_engine
-        from app.engines.real_ocr_adapter import ApiOcrEngine
-        return ApiOcrEngine()
+        from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
+        from app.core.app_config import get_config
+        from app.core.paddle_v16_client import PaddleV16LayoutClient, is_paddle_v16_endpoint
+
+        cfg = get_config()
+        jobs_url = resolve_api_endpoint_for_role(
+            cfg.get("api_url", ""),
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
+        )
+        if not jobs_url or not is_paddle_v16_endpoint(jobs_url):
+            raise RuntimeError("Hanwang hybrid OCR requires a Paddle jobs endpoint for PP-OCRv6 prepass")
+        configured_timeout = max(1, int(cfg.get("api_timeout", 180)))
+        return PpOcrV6PrepassClient(PaddleV16LayoutClient(
+            jobs_url=jobs_url,
+            token=str(cfg.get("api_token", "") or ""),
+            request_timeout=min(max(10, configured_timeout), 30),
+            poll_timeout=max(configured_timeout, 180),
+            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
+        ))
 
     def _process_page_with_hybrid_blocks(
         self,
@@ -542,84 +553,39 @@ class OcrPipeline:
     ) -> None:
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         total_text_blocks = max(1, dispatch_plan.total_text_blocks)
-        if self._has_reusable_page_line_hints(page):
-            if progress_callback:
-                progress_callback(
-                    0,
-                    total_text_blocks,
-                    "PP-OCRv5 page-line prepass skipped: "
-                    f"{self._reusable_page_line_hint_summary(page)}",
-                )
-        else:
-            prepass_engine = self._hybrid_page_ocr_prepass_engine()
-            if not bool(getattr(prepass_engine, "prefer_page_ocr", False)):
-                raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv5 page-line prepass engine")
-            if progress_callback:
-                progress_callback(0, total_text_blocks, "PP-OCRv5 page-line prepass 中…")
-            self._process_page_with_page_ocr(
-                img,
-                page,
-                page_idx,
-                engine=prepass_engine,
-                mark_page_line_hints=True,
+        prepass_engine = self._hybrid_page_ocr_prepass_engine()
+        analyze_page = getattr(prepass_engine, "analyze_page", None)
+        if not callable(analyze_page):
+            raise RuntimeError("Hanwang hybrid OCR requires a PP-OCRv6 prepass client")
+        if progress_callback:
+            progress_callback(0, total_text_blocks, "PP-OCRv6 路由预处理…")
+        prepass = analyze_page(img, page_uid=page.uid)
+        if not isinstance(prepass, PpOcrV6PrepassArtifact):
+            raise RuntimeError("PP-OCRv6 prepass client returned an invalid routing artifact")
+        routing_plan = compile_page_routing_plan(
+            current_layout_snapshot(page),
+            prepass,
+            page_width=page.width,
+            page_height=page.height,
+            page_image_bgr=img,
+        )
+        if not routing_plan.is_dispatchable:
+            details = "; ".join(
+                f"{issue.code}@line={issue.line_index} bbox={issue.bbox}"
+                for issue in routing_plan.validation_issues[:5]
             )
-            if progress_callback:
-                line_count = sum(
-                    len(block_ocr_line_observations_by_uid(target.view.uid))
-                    for target in dispatch_plan.text_blocks
-                )
-                progress_callback(0, total_text_blocks, f"PP-OCRv5 page-line prepass complete: {line_count} lines")
+            raise RuntimeError(f"PP-OCRv6 路由无法归属到当前版面框：{details}")
+        if progress_callback:
+            route_count = sum(len(item.plan.text_slices) for item in routing_plan.blocks)
+            progress_callback(0, total_text_blocks, f"PP-OCRv6 路由预处理完成：{len(prepass.lines)} 行，{route_count} 个文字切片")
         if not supports_page_block_ocr(self._engine):
             raise RuntimeError("Configured OCR engine does not support page-block OCR")
         self._engine.recognize_page_blocks(
             img,
             page,
             progress_callback=progress_callback,
+            routing_plan=routing_plan,
         )
-
-    def _has_reusable_page_line_hints(self, page: Page) -> bool:
-        """Return whether routing already has trusted PP-OCRv5 line geometry.
-
-        CharOCR/Hanwang result lines are not reusable as page-line hints: they
-        are produced after formula/table slicing and may be narrower than the
-        original PP-OCRv5 row. Reusing them would feed derived geometry back
-        into the next OCR run and can make formula regions affect text crops.
-        """
-        dispatch_plan = build_text_ocr_dispatch_plan(page)
-        if not dispatch_plan.text_blocks:
-            return True
-        for target in dispatch_plan.text_blocks:
-            block = target.block
-            if is_ocr_text_invalidated(block):
-                return False
-            if self._has_marked_page_line_hints(block):
-                continue
-            return False
-        return True
-
-    @staticmethod
-    def _has_marked_page_line_hints(block: Block) -> bool:
-        return any(
-            line_ocr_bbox(line) is not None
-            and line_ocr_bbox(line).area > 0
-            and is_ppocr_page_line_hint(line)
-            for line in block_ocr_line_observations_by_uid(block.uid)
-        )
-
-    def _reusable_page_line_hint_summary(self, page: Page) -> str:
-        dispatch_plan = build_text_ocr_dispatch_plan(page)
-        marked_lines = sum(
-            1
-            for target in dispatch_plan.text_blocks
-            for line in block_ocr_line_observations_by_uid(target.view.uid)
-            if line_ocr_bbox(line) is not None
-            and line_ocr_bbox(line).area > 0
-            and is_ppocr_page_line_hint(line)
-        )
-        parts: list[str] = []
-        if marked_lines:
-            parts.append(f"reused {marked_lines} PP-OCRv5 line hints")
-        return "; ".join(parts) if parts else "reused trusted line geometry"
 
     def _normalize_engine_lines(
         self,
@@ -653,26 +619,6 @@ class OcrPipeline:
 
         if unmatched:
             raise RuntimeError(self._unmatched_ocr_lines_message(page, unmatched))
-
-        for target in containers:
-            replace_block_ocr_line_observations(target.block.uid, assigned.get(target.block.uid, []))
-
-    def _assign_page_ocr_line_hints_to_blocks(self, page: Page, lines: list[Line]) -> None:
-        """Assign PP-OCRv5 geometry hints to text containers for Hanwang routing.
-
-        These lines are not proof text.  They are only physical row geometry used
-        to split text slices before Hanwang OCR, so inline formulas/tables must
-        not drop the whole row here.  Structural regions are carved out later by
-        the route builder.
-        """
-        dispatch_plan = build_text_ocr_dispatch_plan(page)
-        containers = list(dispatch_plan.text_blocks)
-        assigned: dict[str, list[Line]] = {target.block.uid: [] for target in containers}
-
-        for line in sorted(lines, key=lambda item: (line_ocr_bbox(item).y, line_ocr_bbox(item).x)):
-            target = select_container_block_for_line(line, containers)
-            if target is not None:
-                assigned.setdefault(target.block.uid, []).append(line)
 
         for target in containers:
             replace_block_ocr_line_observations(target.block.uid, assigned.get(target.block.uid, []))

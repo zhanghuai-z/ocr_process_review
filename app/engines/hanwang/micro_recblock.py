@@ -65,6 +65,7 @@ from app.core.paddle_line_routing import (
     union_xyxy,
     vertical_overlap_ratio,
 )
+from app.core.layout_routing_contract import PageRoutingPlan
 from app.services.layout_routing_plan import (
     RoutingLine,
     is_text_route_segment_kind,
@@ -87,7 +88,7 @@ from app.core.paddle_labels import (
     is_hanwang_skip_label,
     normalize_paddle_label,
 )
-from app.core.proof_line_facts import proof_block_text
+from app.core.proof_line_facts import proof_block_text, proof_display_text
 from app.core.proof_status import proof_status_for
 from app.core.raw_ocr_artifact import (
     layout_records_with_route_attachments,
@@ -2529,6 +2530,74 @@ def _drop_cached_layout_line_routes(ppvl_blocks: list[dict]) -> None:
             block.pop(LAYOUT_LINE_ROUTES_FIELD, None)
 
 
+def _formula_texts_by_layout_bbox(page: Page) -> dict[tuple[int, int, int, int], str]:
+    """Read current formula observations only while projecting a routing plan.
+
+    Formula text remains owned by the formula branch.  This bridge only carries
+    it into the temporary legacy row shape required by the native runner.
+    """
+    values: dict[tuple[int, int, int, int], str] = {}
+    for view in iter_page_layout_block_views(page):
+        if view.block_type != BlockType.EQUATION:
+            continue
+        lines = block_ocr_line_observations_by_uid(view.uid)
+        text = "".join(proof_display_text(line) for line in lines if proof_display_text(line)).strip()
+        if text:
+            values[tuple(int(value) for value in view.bbox.to_xyxy())] = text
+    return values
+
+
+def _routing_line_record_for_native_runner(
+    line: RoutingLine,
+    formula_texts_by_bbox: dict[tuple[int, int, int, int], str],
+) -> dict[str, Any]:
+    segments = []
+    for segment in line.segments:
+        text = segment.text
+        if segment.kind == "formula" and not text:
+            text = formula_texts_by_bbox.get(segment.bbox, "")
+            if not text:
+                containing = [
+                    candidate_text
+                    for bbox, candidate_text in formula_texts_by_bbox.items()
+                    if bbox[0] <= segment.bbox[0]
+                    and bbox[1] <= segment.bbox[1]
+                    and bbox[2] >= segment.bbox[2]
+                    and bbox[3] >= segment.bbox[3]
+                ]
+                if len(containing) == 1:
+                    text = containing[0]
+        segments.append(replace(segment, text=text))
+    return routing_line_to_record(replace(line, segments=tuple(segments)))
+
+
+def _apply_page_routing_plan_to_native_rows(
+    ppvl_blocks: list[dict],
+    routing_plan: PageRoutingPlan,
+    page: Page,
+) -> None:
+    """Project immutable routing input into the native runner's temporary rows."""
+    if not routing_plan.is_dispatchable:
+        raise RuntimeError("Hanwang native runner received a non-dispatchable page routing plan")
+    rows_by_uid: dict[str, dict] = {}
+    for row in ppvl_blocks:
+        uid = str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
+        if uid:
+            rows_by_uid[uid] = row
+    formula_texts_by_bbox = _formula_texts_by_layout_bbox(page)
+    for block_route in routing_plan.blocks:
+        row = rows_by_uid.get(block_route.block_uid)
+        if row is None:
+            raise RuntimeError(
+                "CharOCR routing plan references a layout block missing from native input: "
+                f"{block_route.block_uid}"
+            )
+        row[LAYOUT_LINE_ROUTES_FIELD] = [
+            _routing_line_record_for_native_runner(line, formula_texts_by_bbox)
+            for line in block_route.plan.lines
+        ]
+
+
 def run_micro_recblock(
     image_bgr: np.ndarray,
     ppvl_blocks: list[dict],
@@ -2537,12 +2606,18 @@ def run_micro_recblock(
     recog_timeout: float = 60.0,
     include_chars: bool = True,
     page_ocr_lines: list[Any] | None = None,
+    routing_plan: PageRoutingPlan | None = None,
+    page: Page | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[BlockResult], RunStats]:
     """Run Hanwang Recog for text-like PP-VL blocks and keep PP-VL for others."""
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
-    if page_ocr_lines:
+    if routing_plan is not None:
+        if page is None:
+            raise RuntimeError("Hanwang native runner requires page with explicit routing plan")
+        _apply_page_routing_plan_to_native_rows(ppvl_blocks, routing_plan, page)
+    elif page_ocr_lines:
         apply_page_ocr_line_route_attachment(
             ppvl_blocks,
             build_page_ocr_line_route_attachment(ppvl_blocks, page_ocr_lines, width, height),
@@ -3747,6 +3822,7 @@ class HanwangMicroRecBlockEngine:
         image_bgr: np.ndarray,
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
+        routing_plan: PageRoutingPlan | None = None,
     ) -> RunStats:
         self._refresh_inline_formula_texts_from_current_crops(
             image_bgr,
@@ -3763,15 +3839,17 @@ class HanwangMicroRecBlockEngine:
         }
         expected_uids.discard("")
 
-        rows, stats = self._runner(
-            image_bgr,
-            ppvl_blocks,
-            seg_timeout=self._seg_timeout,
-            recog_timeout=self._recog_timeout,
-            include_chars=True,
-            page_ocr_lines=_page_ocr_lines_from_layout(page),
-            progress_callback=progress_callback,
-        )
+        runner_kwargs: dict[str, Any] = {
+            "seg_timeout": self._seg_timeout,
+            "recog_timeout": self._recog_timeout,
+            "include_chars": True,
+            "page_ocr_lines": None if routing_plan is not None else _page_ocr_lines_from_layout(page),
+            "progress_callback": progress_callback,
+        }
+        if routing_plan is not None:
+            runner_kwargs["routing_plan"] = routing_plan
+            runner_kwargs["page"] = page
+        rows, stats = self._runner(image_bgr, ppvl_blocks, **runner_kwargs)
 
         height, width = image_bgr.shape[:2]
         runtime_blocks_by_uid = {

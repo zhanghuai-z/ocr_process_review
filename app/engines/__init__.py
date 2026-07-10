@@ -6,6 +6,7 @@ from typing import Callable, List, Optional, Protocol, TypeGuard
 import numpy as np
 
 from app.models import Block, BlockType, BBox, Line, Page
+from app.core.layout_routing_contract import PageRoutingPlan
 
 OCR_BBOX_SPACE_CROP = "crop"
 OCR_BBOX_SPACE_PAGE = "page"
@@ -61,8 +62,9 @@ class PageBlockOcrEngine(Protocol):
         image_bgr: np.ndarray,
         page: Page,
         progress_callback: Callable[[int, int, str], None] | None = None,
+        routing_plan: PageRoutingPlan | None = None,
     ) -> object:
-        """Recognize a full page using existing layout blocks."""
+        """Recognize a full page using an explicit CharOCR routing plan."""
         ...
 
 
