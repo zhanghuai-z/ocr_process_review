@@ -5565,6 +5565,27 @@ def test_layout_panel_analysis_progress_lifecycle():
     print("test_layout_panel_analysis_progress_lifecycle PASSED")
 
 
+def test_layout_panel_set_pages_allows_imported_page_without_layout_snapshot():
+    from app.models.layout_snapshot_store import clear_layout_snapshot_for_page
+    from app.models import Page
+    from app.ui.recognize.layout_panel import LayoutPanel
+
+    _get_qapp()
+    page = Page(image_path="/tmp/imported-layout-panel.png", width=100, height=100)
+    clear_layout_snapshot_for_page(page)
+    panel = LayoutPanel()
+    try:
+        panel.set_pages([page])
+
+        assert panel._outline_tree.topLevelItemCount() == 0
+        assert "页面：0/1 已分析" in panel._project_stats_lbl.text()
+        assert "框：0 个" in panel._project_stats_lbl.text()
+    finally:
+        panel.close()
+
+    print("test_layout_panel_set_pages_allows_imported_page_without_layout_snapshot PASSED")
+
+
 def test_layout_panel_workbench_height_is_not_forced_by_sidebar():
     from app.ui.recognize.layout_panel import LayoutPanel
 

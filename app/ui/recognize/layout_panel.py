@@ -20,6 +20,7 @@ from app.core.proof_line_facts import proof_display_text, proof_search_texts
 from app.core.proof_char_text import char_display_text
 from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot, Page
 from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import (
     block_ocr_line_observations_by_uid,
@@ -48,6 +49,8 @@ def _ocr_observation_lines(block: Block):
 
 
 def _ocr_observation_line_count(page: Page) -> int:
+    if layout_snapshot_for_page(page) is None:
+        return 0
     return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
 
 
@@ -823,11 +826,12 @@ class LayoutPanel(QWidget):
         total_pages = len(self._pages)
         analyzed_pages = sum(1 for page in self._pages if page_is_layout_analyzed(page))
         failed_pages = sum(1 for page in self._pages if page_has_error(page))
-        total_blocks = sum(self._layout_block_count(page) for page in self._pages)
-        text_ocr_blocks = count_text_ocr_blocks(self._pages)
+        layout_pages = [page for page in self._pages if layout_snapshot_for_page(page) is not None]
+        total_blocks = sum(self._layout_block_count(page) for page in layout_pages)
+        text_ocr_blocks = count_text_ocr_blocks(layout_pages)
         total_lines = sum(_ocr_observation_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
-        for page in self._pages:
+        for page in layout_pages:
             for view in iter_page_layout_block_views(page):
                 label = _block_type_label(view.block_type)
                 counts[label] = counts.get(label, 0) + 1
@@ -848,6 +852,8 @@ class LayoutPanel(QWidget):
 
     @staticmethod
     def _layout_block_count(page: Page) -> int:
+        if layout_snapshot_for_page(page) is None:
+            return 0
         return sum(1 for _view in iter_page_layout_block_views(page))
 
     @staticmethod
@@ -984,6 +990,8 @@ class LayoutPanel(QWidget):
             needle = query if self._search_case.isChecked() else query.lower()
 
         for page_idx, page in enumerate(self._pages):
+            if layout_snapshot_for_page(page) is None:
+                continue
             for view in iter_page_layout_block_views(page):
                 block = view.runtime_block
                 if block is None:
@@ -1337,6 +1345,8 @@ class LayoutPanel(QWidget):
         self._outline_tree.clear()
         stack: list[tuple[int, QTreeWidgetItem]] = []
         for page_idx, page in enumerate(self._pages):
+            if layout_snapshot_for_page(page) is None:
+                continue
             heading_blocks = [
                 (view, view.runtime_block)
                 for view in iter_page_layout_block_views(page)
