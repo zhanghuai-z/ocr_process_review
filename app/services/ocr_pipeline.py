@@ -140,6 +140,7 @@ class OcrPipeline:
                 total_blocks = dispatch_plan.total_text_blocks
 
                 if self._prefers_page_hybrid_blocks():
+                    table_prepass = None
                     def emit_hybrid_progress(current: int, total: int, message: str) -> None:
                         if progress_callback:
                             progress_callback(OcrProgress(
@@ -151,7 +152,7 @@ class OcrPipeline:
                                 message=message,
                             ))
                     try:
-                        self._process_page_with_hybrid_blocks(
+                        table_prepass = self._process_page_with_hybrid_blocks(
                             img,
                             page,
                             page_idx=page_idx,
@@ -179,7 +180,7 @@ class OcrPipeline:
                         total_pages=total_pages,
                         progress_callback=progress_callback,
                     )
-                    self._enrich_table_text_layer(page)
+                    self._enrich_table_text_layer(page, prepass=table_prepass)
                     result.pages.append(page)
                     continue
 
@@ -395,8 +396,9 @@ class OcrPipeline:
             ))
 
         failed: list[tuple[int, int, str]] = []
+        table_prepass = None
         try:
-            self._process_page_with_hybrid_blocks(
+            table_prepass = self._process_page_with_hybrid_blocks(
                 img,
                 page,
                 page_idx=page_idx,
@@ -408,7 +410,7 @@ class OcrPipeline:
             failed.append((page_idx, -1, str(exc)))
 
         stats = self._proof_crop_service.normalize_pages([page])
-        self._enrich_table_text_layer(page)
+        self._enrich_table_text_layer(page, prepass=table_prepass)
         fallback_total = stats.fallback_chars + stats.unavailable_chars
         if fallback_total > 0:
             message = (
@@ -437,9 +439,14 @@ class OcrPipeline:
             completion_message=completion,
         )
 
-    def _enrich_table_text_layer(self, page: Page) -> None:
+    def _enrich_table_text_layer(
+        self,
+        page: Page,
+        *,
+        prepass: PpOcrV6PrepassArtifact | None = None,
+    ) -> None:
         try:
-            updated = self._table_text_layer_service.enrich_page(page)
+            updated = self._table_text_layer_service.enrich_page(page, prepass=prepass)
         except Exception as exc:
             logger.warning("Table text-layer enrichment failed: page=%s: %s", page.page_number, exc)
             return
@@ -555,7 +562,7 @@ class OcrPipeline:
         page: Page,
         page_idx: int = 0,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    ) -> None:
+    ) -> PpOcrV6PrepassArtifact:
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         total_text_blocks = max(1, dispatch_plan.total_text_blocks)
         prepass_engine = self._hybrid_page_ocr_prepass_engine()
@@ -604,6 +611,7 @@ class OcrPipeline:
             progress_callback=progress_callback,
             routing_plan=routing_plan,
         )
+        return prepass
 
     def _normalize_engine_lines(
         self,

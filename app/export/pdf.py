@@ -749,20 +749,31 @@ def _span_font_size(plan: PdfPagePlan, span: PdfTextSpan, default_font_size: flo
         item = span.items[0]
         return max(1.0, min(72.0, item.h * plan.text_font_size_to_bbox_ratio))
     body_items = _body_text_items(span.items) or list(span.items)
-    heights = [item.h for item in body_items if item.h > 0]
-    if not heights:
+    envelope_height = _vertical_envelope_height(body_items)
+    if envelope_height <= 0:
         return default_font_size
-    return max(1.0, min(72.0, _median_float(heights) * plan.text_font_size_to_bbox_ratio))
+    return max(1.0, min(72.0, envelope_height * plan.text_font_size_to_bbox_ratio))
 
 
 def _span_baseline_top_y(plan: PdfPagePlan, span: PdfTextSpan, font_size: float) -> float:
     baseline_items = _body_text_items(span.items) or list(span.items)
     if baseline_items:
-        y2 = _median_float(item.y + item.h for item in baseline_items)
+        # ``item.y`` uses bottom-up PDF coordinates.  The largest y+h is the
+        # highest observed glyph top.  Aligning the font ascender there keeps
+        # capitals, ascenders, superscripts, and italic overhang inside the
+        # searchable rectangle instead of clipping them to a median baseline.
+        y2 = max(item.y + item.h for item in baseline_items)
     else:
         y2 = span.y + span.h
     baseline_pdf_y = y2 - font_size * PDF_TEXT_ASCENDER_RATIO
     return plan.height_pt - baseline_pdf_y
+
+
+def _vertical_envelope_height(items: list[PdfTextItem] | tuple[PdfTextItem, ...]) -> float:
+    valid = [item for item in items if item.h > 0]
+    if not valid:
+        return 0.0
+    return max(item.y + item.h for item in valid) - min(item.y for item in valid)
 
 
 def _median_float(values) -> float:
