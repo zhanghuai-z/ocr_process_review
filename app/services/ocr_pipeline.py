@@ -571,7 +571,7 @@ class OcrPipeline:
         )
         if not routing_plan.is_dispatchable:
             details = "; ".join(
-                f"{issue.code}@line={issue.line_index} bbox={issue.bbox}"
+                f"{issue.code}({issue.message})@line={issue.line_index} bbox={issue.bbox}"
                 for issue in routing_plan.validation_issues[:5]
             )
             raise RuntimeError(f"PP-OCRv6 路由无法归属到当前版面框：{details}")

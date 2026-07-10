@@ -71,3 +71,33 @@ def test_punctuation_capacity_cannot_claim_leading_i_after_its_comma_is_owned():
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [((30, 0, 43, 40), "in")]
+
+
+def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
+    image = _image()
+    _ink(image, (10, 10, 28, 30))       # 甲
+    _ink(image, (28, 24, 32, 30))       # actual comma, left of its proposal
+    _ink(image, (46, 10, 51, 30))       # A
+    _ink(image, (55, 10, 60, 30))       # B
+    _ink(image, (64, 10, 69, 30))       # C
+    _ink(image, (92, 10, 110, 30))      # 乙
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲,ABC乙",
+        bbox=(0, 0, 130, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (8, 8, 30, 32)),
+            PpOcrV6WordBox(0, 1, ",", (32, 8, 38, 32)),
+            PpOcrV6WordBox(0, 2, "ABC", (43, 8, 75, 32)),
+            PpOcrV6WordBox(0, 3, "乙", (90, 8, 112, 32)),
+        ),
+    )
+
+    result = partition_mixed_text_segment(image, prepass_line, (0, 0, 130, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_zh", (10, 0, 32, 40), "甲"),
+        ("text_latin", (46, 0, 69, 40), "ABC"),
+        ("text_zh", (92, 0, 110, 40), "乙"),
+    ]

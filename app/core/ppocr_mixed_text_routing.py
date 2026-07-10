@@ -95,6 +95,14 @@ def partition_mixed_text_segment(
     for token in tokens:
         owned = ownership.get(token.token_index, [])
         if not owned:
+            # Word boxes are only proposals. A punctuation token can be shifted
+            # beside its actual glyph while that glyph is already part of an
+            # adjacent CJK/symbol crop. It has no OCR-engine route of its own,
+            # so do not emit a duplicate empty route or reject a line whose
+            # physical ink is fully accounted for. Non-symbol tokens remain
+            # mandatory because they select the LineCut/EngCut dispatch.
+            if _token_kind(token.text) == "symbol":
+                continue
             issues.append(RoutePartitionIssue(
                 code="missing_token_mask",
                 message=f"PP-OCRv6 token has no owned ink: {token.text!r}",
