@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 
 from .layout_block_view import iter_page_layout_block_views
+from .layout_snapshot_store import layout_snapshot_for_page
 from .ocr_observation_store import (
     ocr_lines_for_block_uid,
     set_ocr_lines_for_block_uid,
@@ -123,6 +124,15 @@ def iter_project_ocr_line_observation_occurrences(
 
 
 def page_ocr_line_count(page: Page) -> int:
+    """Return zero until the page has adopted authoritative layout truth.
+
+    Imported pages legitimately have no ``LayoutSnapshot`` yet.  OCR
+    observations cannot be authoritative before layout adoption, so status and
+    summary queries report zero instead of asking the snapshot-ordered iterator
+    to enumerate a non-existent layout.
+    """
+    if layout_snapshot_for_page(page) is None:
+        return 0
     return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
 
 
@@ -131,7 +141,7 @@ def page_has_ocr_result(page: Page) -> bool:
 
 
 def project_ocr_line_count(project: OcrProject) -> int:
-    return sum(1 for _occurrence in iter_project_ocr_line_observation_occurrences(project))
+    return sum(page_ocr_line_count(page) for page in project.pages)
 
 
 def project_has_any_ocr_result(project: OcrProject) -> bool:

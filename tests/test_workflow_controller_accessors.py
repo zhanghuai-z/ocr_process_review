@@ -59,6 +59,14 @@ def test_total_line_count_zero_when_no_project(ctrl):
     assert ctrl.total_line_count == 0
 
 
+def test_on_images_ready_allows_pages_before_layout_snapshot(ctrl):
+    page = _page(1, [])
+
+    ctrl.on_images_ready([page])
+
+    assert ctrl.total_line_count == 0
+
+
 def test_is_fully_analyzed_false_when_no_project(ctrl):
     assert ctrl.is_fully_analyzed is False
 

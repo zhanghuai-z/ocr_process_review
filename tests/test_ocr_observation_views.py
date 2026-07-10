@@ -3,10 +3,13 @@ from __future__ import annotations
 from app.models import BBox, Block, BlockType, Line, OcrProject, Page
 from app.models.layout_projection import replace_page_layout_blocks
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+from app.models.layout_snapshot_store import clear_layout_snapshot_for_page
 from app.models.ocr_observation import (
     find_block_ocr_line_index,
     iter_page_ocr_line_observation_occurrences,
     iter_project_ocr_line_observation_occurrences,
+    page_ocr_line_count,
+    project_ocr_line_count,
 )
 
 
@@ -53,3 +56,16 @@ def test_project_ocr_line_occurrences_delegate_to_snapshot_order():
     assert occurrences[0].block is block
     assert occurrences[0].line is line
     assert occurrences[0].block_index == 0
+
+
+def test_ocr_line_counts_are_zero_before_layout_snapshot_adoption():
+    line = Line(text="not authoritative yet", confidence=0.9, bbox=BBox(0, 0, 20, 10))
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 80, 20), lines=[line])
+    page = Page(image_path="/tmp/imported.png", width=120, height=80, blocks=[block])
+    project = OcrProject(name="imported", pages=[page])
+    # The shared test fixture supplies snapshots for legacy constructor-based
+    # fixtures. Remove it here to model a real page immediately after import.
+    clear_layout_snapshot_for_page(page)
+
+    assert page_ocr_line_count(page) == 0
+    assert project_ocr_line_count(project) == 0
