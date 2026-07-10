@@ -102,13 +102,17 @@ def partition_charocr_text_region(
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox),))
 
     components = _ink_components(image_bgr, region_bbox)
+    component_owners = {
+        component: _component_owner_token_index(component[:4], tokens, region_bbox)
+        for component in components
+    }
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
     issues: list[RoutePartitionIssue] = []
     for token in latin_tokens:
         mask_components = _latin_mask_components(
             components,
             token,
-            tokens,
+            component_owners,
             region_bbox,
         )
         if not mask_components:
@@ -180,41 +184,16 @@ def _segments_from_latin_masks(
 def _latin_mask_components(
     components: list[tuple[int, int, int, int, int]],
     token: PpOcrV6WordBox,
-    all_tokens: tuple[PpOcrV6WordBox, ...],
+    component_owners: dict[tuple[int, int, int, int, int], int | None],
     region_bbox: XYXY,
 ) -> list[tuple[int, int, int, int, int]]:
-    core_bbox = _clip(token.bbox, region_bbox)
     seed_bbox = _latin_seed_bbox(token, region_bbox)
-    selected = [
+    return [
         component
         for component in components
-        if _intersect(component[:4], core_bbox) is not None
-        and not _component_is_anchored_by_other_token(component[:4], token, all_tokens, region_bbox)
+        if component_owners.get(component) == token.token_index
+        and _intersect(component[:4], seed_bbox) is not None
     ]
-    if not selected:
-        return selected
-    reference_height = _reference_body_height(selected)
-    glyph_advance = _latin_glyph_advance(token, region_bbox)
-    while True:
-        reclaimed_body = [
-            component
-            for component in components
-            if component not in selected
-            and _intersect(component[:4], seed_bbox) is not None
-            and not _component_is_anchored_by_other_token(component[:4], token, all_tokens, region_bbox)
-            and _is_adjacent_body_component(component, selected, reference_height, glyph_advance)
-        ]
-        if not reclaimed_body:
-            break
-        selected.extend(reclaimed_body)
-    for component in components:
-        if component in selected or _intersect(component[:4], seed_bbox) is None:
-            continue
-        if _component_is_anchored_by_other_token(component[:4], token, all_tokens, region_bbox):
-            continue
-        if _is_detached_mark(component, selected, reference_height):
-            selected.append(component)
-    return selected
 
 
 def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
@@ -233,67 +212,56 @@ def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
     )
 
 
-def _component_is_anchored_by_other_token(
+def _component_owner_token_index(
     component: XYXY,
-    current_token: PpOcrV6WordBox,
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
-) -> bool:
+) -> int | None:
+    """Assign one ink component to one PP-OCR token.
+
+    Word boxes are approximate and commonly meet on the wrong side of a narrow
+    glyph.  Ownership therefore uses the component center first.  When no box
+    contains that center, the nearest non-symbol token owns the component;
+    punctuation may own only ink whose center is actually inside its proposal.
+    This prevents adjacent Latin tokens from independently claiming the same
+    slanted glyph and lets a displaced ``I``/digit be reclaimed from a nearby
+    punctuation box.
+    """
+    centered: list[tuple[float, int, float, int]] = []
+    nearest: list[tuple[int, float, int]] = []
+    center_x = (component[0] + component[2]) / 2.0
     for token in tokens:
-        if token.token_index == current_token.token_index:
-            continue
         token_bbox = _clip(token.bbox, region_bbox)
-        if _center_inside(component, token_bbox) or _overlap_ratio(token_bbox, component) >= 0.30:
-            return True
-    return False
+        if not _is_nonempty(token_bbox):
+            continue
+        vertical_overlap = min(component[3], token_bbox[3]) - max(component[1], token_bbox[1])
+        if vertical_overlap <= 0:
+            continue
+        token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
+        if _center_inside(component, token_bbox):
+            centered.append((
+                -_overlap_ratio(token_bbox, component),
+                token_bbox[2] - token_bbox[0],
+                abs(center_x - token_center_x),
+                token.token_index,
+            ))
+        elif _token_branch(token.text) != "symbol":
+            nearest.append((
+                _horizontal_gap(component, token_bbox),
+                abs(center_x - token_center_x),
+                token.token_index,
+            ))
+    if centered:
+        return min(centered)[3]
+    if nearest:
+        return min(nearest)[2]
+    return None
 
 
 def _latin_glyph_advance(token: PpOcrV6WordBox, region_bbox: XYXY) -> int:
     core = _clip(token.bbox, region_bbox)
     glyph_count = max(1, sum(1 for char in str(token.text or "") if char.isascii() and char.isalnum()))
     return max(1, ceil((core[2] - core[0]) / glyph_count))
-
-
-def _reference_body_height(
-    components: list[tuple[int, int, int, int, int]],
-) -> int:
-    heights = sorted(component[3] - component[1] for component in components)
-    return max(1, heights[len(heights) // 2])
-
-
-def _is_adjacent_body_component(
-    component: tuple[int, int, int, int, int],
-    selected: list[tuple[int, int, int, int, int]],
-    reference_height: int,
-    glyph_advance: int,
-) -> bool:
-    """Accept a detached body only when it matches and neighbours known word ink."""
-    x1, y1, x2, y2, _area = component
-    if y2 - y1 < ceil(reference_height * 0.70):
-        return False
-    for body_x1, body_y1, body_x2, body_y2, _body_area in selected:
-        vertical_overlap = min(y2, body_y2) - max(y1, body_y1)
-        if vertical_overlap <= 0:
-            continue
-        if _horizontal_gap((x1, y1, x2, y2), (body_x1, body_y1, body_x2, body_y2)) <= glyph_advance:
-            return True
-    return False
-
-
-def _is_detached_mark(
-    component: tuple[int, int, int, int, int],
-    selected: list[tuple[int, int, int, int, int]],
-    reference_height: int,
-) -> bool:
-    """Accept a detached mark only when it is vertically attached to word ink."""
-    x1, y1, x2, y2, _area = component
-    if y2 - y1 > ceil(reference_height * 0.55):
-        return False
-    for body_x1, body_y1, body_x2, _body_y2, _body_area in selected:
-        horizontal_overlap = min(x2, body_x2) - max(x1, body_x1)
-        if horizontal_overlap > 0 and y2 <= body_y1 and body_y1 - y2 <= reference_height:
-            return True
-    return False
 
 
 def _has_visible_ink(

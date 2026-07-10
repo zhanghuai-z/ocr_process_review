@@ -213,8 +213,15 @@ def _line_is_structural_only(
 ) -> bool:
     if not cuts:
         return False
-    covered_width = _merged_horizontal_coverage([(bbox[0], bbox[2]) for _block, bbox, _content_bbox in cuts])
-    return covered_width >= (line_bbox[2] - line_bbox[0])
+    line_area = _area(line_bbox)
+    center_x = (line_bbox[0] + line_bbox[2]) / 2.0
+    center_y = (line_bbox[1] + line_bbox[3]) / 2.0
+    return any(
+        block_bbox[0] <= center_x <= block_bbox[2]
+        and block_bbox[1] <= center_y <= block_bbox[3]
+        and _area(overlap_bbox) / max(1, line_area) >= 0.5
+        for _block, overlap_bbox, block_bbox in cuts
+    )
 
 
 def _overlapping_formula_mask(

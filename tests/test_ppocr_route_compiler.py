@@ -126,6 +126,20 @@ def test_compiler_stops_only_current_page_when_a_text_line_has_no_layout_owner()
     ]
 
 
+def test_compiler_accepts_detector_seam_inside_structural_block():
+    snapshot = _snapshot(
+        _block("header-1", BlockType.FIGURE, (10, 10, 90, 50), policy=OcrPolicy.SKIP, order=0),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(index=3, text="header", bbox=(5, 5, 95, 55), words=()),
+    )
+
+    plan = compile_page_routing_plan(snapshot, prepass, page_width=100, page_height=60)
+
+    assert plan.is_dispatchable is True
+    assert plan.validation_issues == ()
+
+
 def test_text_other_is_an_explicit_text_route_kind():
     route = TextSliceRoute(
         line_index=0,
@@ -173,6 +187,72 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     assert [segment.kind for segment in plan.for_block("text-1").lines[0].segments] == [
         "text_other", "text_latin", "text_other",
     ]
+
+
+def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    image = np.full((50, 140, 3), 255, dtype=np.uint8)
+    image[10:30, 10:30] = 0
+    image[10:30, 43:50] = 0
+    image[10:30, 52:80] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="one two",
+        bbox=(0, 0, 120, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "one", (8, 8, 40, 32)),
+            PpOcrV6WordBox(0, 1, " ", (40, 8, 43, 32)),
+            PpOcrV6WordBox(0, 2, "two", (46, 8, 85, 32)),
+        ),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=140,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    latin = [segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "text_latin"]
+    assert len(latin) == 1
+    assert latin[0].text == "onetwo"
+
+
+def test_compiler_reclaims_displaced_narrow_latin_glyph_from_punctuation_seam():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 120, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    image = np.full((50, 120, 3), 255, dtype=np.uint8)
+    image[8:30, 42:48] = 0
+    image[10:30, 70:90] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text=". I word",
+        bbox=(0, 0, 110, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, ". ", (20, 8, 43, 32)),
+            PpOcrV6WordBox(0, 1, "I", (49, 8, 55, 32)),
+            PpOcrV6WordBox(0, 2, " ", (56, 8, 65, 32)),
+            PpOcrV6WordBox(0, 3, "word", (68, 8, 95, 32)),
+        ),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=120,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    latin = [segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "text_latin"]
+    assert latin[0].bbox[0] == 42
+    assert latin[0].text.startswith("I")
 
 
 def test_compiler_blocks_latin_containing_line_without_ppocr_word_boxes():
