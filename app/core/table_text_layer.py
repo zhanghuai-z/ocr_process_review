@@ -266,10 +266,13 @@ def resolve_page_image_path(raw_path: str) -> Path:
     path = Path(raw_path)
     if path.exists():
         return path
-    cache_candidate = Path(__file__).parent.parent.parent / ".cache" / "images" / path.name
+    normalized = Path(str(raw_path).replace("\\", "/"))
+    if normalized.exists():
+        return normalized
+    cache_candidate = Path(__file__).parent.parent.parent / ".cache" / "images" / normalized.name
     if cache_candidate.exists():
         return cache_candidate
-    return path
+    return normalized
 
 
 def bbox_dict_to_xyxy(bbox: dict[str, Any], width: int, height: int) -> tuple[int, int, int, int]:

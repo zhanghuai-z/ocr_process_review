@@ -4155,6 +4155,160 @@ def test_pdf_dual_positions_mixed_chars_without_copy_spaces():
     print("test_pdf_dual_positions_mixed_chars_without_copy_spaces PASSED")
 
 
+def test_pdf_dual_uses_line_local_geometry_across_columns_and_font_sizes():
+    import fitz
+    from PIL import Image
+
+    from app.export.pdf import PdfExporter
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    def chars(specs):
+        return [
+            Char(
+                char=text,
+                confidence=0.99,
+                bbox=BBox(x, y, w, h),
+                bbox_source="ocr",
+                bbox_granularity="char",
+            )
+            for text, x, y, w, h in specs
+        ]
+
+    title = Line(
+        text="大字",
+        confidence=0.99,
+        bbox=BBox(80, 40, 130, 70),
+        chars=chars([("大", 80, 40, 60, 70), ("字", 145, 48, 55, 62)]),
+    )
+    mixed = Line(
+        text="甲A1，",
+        confidence=0.99,
+        bbox=BBox(80, 170, 130, 40),
+        chars=chars([
+            ("甲", 80, 170, 38, 40),
+            ("A", 122, 176, 30, 32),
+            ("1", 156, 176, 20, 32),
+            ("，", 183, 198, 10, 12),
+        ]),
+    )
+    right_column = Line(
+        text="R2",
+        confidence=0.99,
+        bbox=BBox(620, 170, 70, 40),
+        chars=chars([("R", 620, 176, 30, 32), ("2", 655, 176, 22, 32)]),
+    )
+    superscript = Line(
+        text="x2y",
+        confidence=0.99,
+        bbox=BBox(80, 260, 90, 52),
+        chars=chars([
+            ("x", 80, 280, 26, 32),
+            ("2", 109, 260, 14, 16),
+            ("y", 127, 280, 26, 32),
+        ]),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = os.path.join(tmpdir, "page.png")
+        pdf_path = os.path.join(tmpdir, "dual.pdf")
+        Image.new("RGB", (900, 420), "white").save(image_path)
+        project = OcrProject(name="PdfGeometry", pages=[
+            Page(image_path=image_path, width=900, height=420, blocks=[
+                Block(block_type=BlockType.TITLE, bbox=BBox(80, 40, 130, 70), order=0, lines=[title]),
+                Block(block_type=BlockType.TEXT, bbox=BBox(80, 170, 130, 142), order=1, lines=[mixed, superscript]),
+                Block(block_type=BlockType.TEXT, bbox=BBox(620, 170, 70, 40), order=2, lines=[right_column]),
+            ]),
+        ])
+        _seed_project_ocr_observations(project)
+        PdfExporter("pdf-dual").export(project, pdf_path)
+
+        doc = fitz.open(pdf_path)
+        try:
+            page = doc[0]
+            scale = 72 / 300
+            assert len(page.search_for("大字")) == 1
+            assert len(page.search_for("甲A1，")) == 1
+            assert len(page.search_for("R2")) == 1
+            assert len(page.search_for("x2y")) == 1
+
+            title_rect = page.search_for("大字")[0]
+            mixed_rect = page.search_for("甲A1，")[0]
+            right_rect = page.search_for("R2")[0]
+            superscript_rect = page.search_for("x2y")[0]
+            assert title_rect.height > mixed_rect.height * 1.5
+            assert abs(mixed_rect.x0 - 80 * scale) < 0.4
+            assert abs(mixed_rect.x1 - 193 * scale) < 0.5
+            assert abs(right_rect.x0 - 620 * scale) < 0.4
+            assert abs(superscript_rect.x0 - 80 * scale) < 0.4
+            assert abs(superscript_rect.x1 - 153 * scale) < 0.5
+        finally:
+            doc.close()
+
+    print("test_pdf_dual_uses_line_local_geometry_across_columns_and_font_sizes PASSED")
+
+
+def test_pdf_dual_missing_char_geometry_degrades_to_one_line_region():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    project = OcrProject(name="PdfLineRegion", pages=[
+        Page(image_path="/tmp/pdf-line-region.png", width=300, height=160, blocks=[
+            Block(block_type=BlockType.TEXT, bbox=BBox(30, 40, 180, 30), order=0, lines=[
+                Line(text="ABCDE", confidence=0.9, bbox=BBox(30, 40, 180, 30)),
+            ]),
+        ]),
+    ])
+    _seed_project_ocr_observations(project)
+    plan = build_pdf_page_plans(build_export_ir(project, "pdf-dual"), include_text=True, dpi=100)[0]
+
+    assert len(plan.text_items) == 1
+    assert plan.text_items[0].text == "ABCDE"
+    assert plan.text_items[0].bbox_granularity == "line"
+    assert plan.text_items[0].geometry_quality == "region_only"
+    assert len(plan.text_spans) == 1
+
+    print("test_pdf_dual_missing_char_geometry_degrades_to_one_line_region PASSED")
+
+
+def test_pdf_dual_incomplete_visible_char_geometry_degrades_to_line_region():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
+
+    project = OcrProject(name="PdfIncompleteChars", pages=[
+        Page(image_path="/tmp/pdf-incomplete-chars.png", width=300, height=160, blocks=[
+            Block(block_type=BlockType.TEXT, bbox=BBox(30, 40, 180, 30), order=0, lines=[
+                Line(text="AB", confidence=0.9, bbox=BBox(30, 40, 180, 30), chars=[
+                    Char(
+                        char="A",
+                        confidence=0.9,
+                        bbox=BBox(30, 40, 40, 30),
+                        bbox_source="ocr",
+                        bbox_granularity="char",
+                    ),
+                    Char(
+                        char="B",
+                        confidence=0.9,
+                        bbox=None,
+                        bbox_source="ocr",
+                        bbox_granularity="char",
+                    ),
+                ]),
+            ]),
+        ]),
+    ])
+    _seed_project_ocr_observations(project)
+    plan = build_pdf_page_plans(build_export_ir(project, "pdf-dual"), include_text=True, dpi=100)[0]
+
+    assert len(plan.text_items) == 1
+    assert plan.text_items[0].text == "AB"
+    assert plan.text_items[0].bbox_granularity == "line"
+    assert plan.text_items[0].geometry_quality == "invalid_char_geometry"
+
+    print("test_pdf_dual_incomplete_visible_char_geometry_degrades_to_line_region PASSED")
+
+
 def test_pdf_dual_inline_formula_item_does_not_shift_text_baseline():
     from app.export.pdf import (
         PDF_TEXT_ASCENDER_RATIO,
@@ -4484,6 +4638,7 @@ def test_pdf_dual_html_table_text_layer_splits_cells_without_tags():
     from app.export.ir_builder import build_export_ir
     from app.export.pdf import build_pdf_page_plans
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.table_text_layer_service import TableTextLayerService
 
     html = (
         '<table><tr><td rowspan="2">变量</td><td>(1)</td><td>(2)</td></tr>'
@@ -4498,6 +4653,7 @@ def test_pdf_dual_html_table_text_layer_splits_cells_without_tags():
 
     project = OcrProject(name="PdfHtmlTableRows", pages=[page])
     _seed_project_ocr_observations(project)
+    assert TableTextLayerService().enrich_page(page) == 1
     document = build_export_ir(project, "pdf-dual")
     plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
@@ -4526,6 +4682,30 @@ def test_pdf_dual_html_table_text_layer_splits_cells_without_tags():
     assert round(plan.text_spans[1].w, 2) == round((180 / 3) * 72 / 100, 2)
 
     print("test_pdf_dual_html_table_text_layer_splits_cells_without_tags PASSED")
+
+
+def test_pdf_dual_does_not_infer_table_cell_geometry_during_export():
+    from app.export.ir_builder import build_export_ir
+    from app.export.pdf import build_pdf_page_plans
+    from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+
+    html = "<table><tr><td>A</td><td>B</td></tr></table>"
+    page = Page(image_path="/tmp/pdf-table-no-cells.png", width=260, height=180, blocks=[
+        Block(block_type=BlockType.TABLE, bbox=BBox(20, 30, 180, 90), order=0, lines=[
+            Line(text=html, confidence=0.9, bbox=BBox(20, 30, 180, 90)),
+        ]),
+    ])
+    project = OcrProject(name="PdfTableNoCells", pages=[page])
+    _seed_project_ocr_observations(project)
+    plan = build_pdf_page_plans(build_export_ir(project, "pdf-dual"), include_text=True, dpi=100)[0]
+
+    assert len(plan.text_items) == 1
+    assert plan.text_items[0].text == "A  B"
+    assert plan.text_items[0].bbox_granularity == "table_row"
+    assert plan.text_items[0].geometry_quality == "region_only"
+    assert "<table" not in plan.text_items[0].text
+
+    print("test_pdf_dual_does_not_infer_table_cell_geometry_during_export PASSED")
 
 
 def test_pdf_dual_generated_table_rows_stay_inside_table_lines():
@@ -4575,6 +4755,7 @@ def test_pdf_dual_generated_html_table_cells_stay_inside_cells():
 
     from app.export.pdf import PdfExporter
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.table_text_layer_service import TableTextLayerService
 
     html = (
         '<table><tr><td rowspan="2">变量</td><td>(1)</td><td>(2)</td></tr>'
@@ -4593,6 +4774,7 @@ def test_pdf_dual_generated_html_table_cells_stay_inside_cells():
             ]),
         ])
         _seed_project_ocr_observations(project)
+        assert TableTextLayerService().enrich_page(project.pages[0]) == 1
 
         PdfExporter("pdf-dual").export(project, pdf_path)
         doc = fitz.open(pdf_path)
@@ -4624,6 +4806,7 @@ def test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid():
     from app.export.ir_builder import build_export_ir
     from app.export.pdf import build_pdf_page_plans
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
+    from app.services.table_text_layer_service import TableTextLayerService
 
     with tempfile.TemporaryDirectory() as tmpdir:
         image_path = os.path.join(tmpdir, "page.png")
@@ -4646,6 +4829,7 @@ def test_pdf_dual_html_table_cells_prefer_image_text_clusters_over_equal_grid():
 
         project = OcrProject(name="PdfClusterTable", pages=[page])
         _seed_project_ocr_observations(project)
+        assert TableTextLayerService().enrich_page(page) == 1
         document = build_export_ir(project, "pdf-dual")
         plan = build_pdf_page_plans(document, include_text=True, dpi=100)[0]
 
@@ -4697,6 +4881,19 @@ def test_table_text_layer_service_writes_hidden_cells_for_table_block():
         assert cells[1]["bbox"]["w"] < 40
 
     print("test_table_text_layer_service_writes_hidden_cells_for_table_block PASSED")
+
+
+def test_table_text_layer_image_path_accepts_foreign_path_separators():
+    from app.core.table_text_layer import resolve_page_image_path
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        image_path = Path(tmpdir) / "page.png"
+        image_path.write_bytes(b"image")
+        foreign_path = str(image_path).replace("/", "\\")
+
+        assert resolve_page_image_path(foreign_path) == image_path
+
+    print("test_table_text_layer_image_path_accepts_foreign_path_separators PASSED")
 
 
 def test_table_text_layer_service_reads_table_bbox_from_layout_snapshot():
