@@ -260,6 +260,21 @@ class _TextRoute:
         return self.block_idx, self.line_idx, self.segment_idx
 
 
+@dataclass(frozen=True)
+class _LatinMaskedLineRoute:
+    """One physical routing line materialized as a white EngCut canvas.
+
+    The routing plan remains segment-oriented.  This is only the native-input
+    representation needed by EngCut: it keeps the PP-OCR line geometry while
+    exposing pixels from Latin/digit segments and whitening every other region.
+    """
+
+    block_idx: int
+    line_idx: int
+    bbox: tuple[int, int, int, int]
+    segments: tuple[_TextRoute, ...]
+
+
 def _is_latin_text_route(route: _TextRoute) -> bool:
     return route.kind == "text_latin"
 
@@ -339,6 +354,42 @@ def _text_route_bboxes_from_lines(
         for segment_idx, segment in enumerate(line.segments)
         if is_text_route_segment_kind(segment.kind)
     ]
+
+
+def _latin_masked_line_routes_from_lines(
+    block_idx: int,
+    lines: tuple[RoutingLine, ...],
+) -> list[_LatinMaskedLineRoute]:
+    """Group typed Latin routes by their physical PP-OCR line.
+
+    This is deliberately derived from ``RoutingLine`` rather than from raw
+    Paddle payloads.  The selected segments remain the only places whose
+    pixels may appear in the EngCut input canvas.
+    """
+    grouped: list[_LatinMaskedLineRoute] = []
+    for line_idx, line in enumerate(lines):
+        segments = tuple(
+            _TextRoute(
+                block_idx=block_idx,
+                line_idx=line_idx,
+                segment_idx=segment_idx,
+                bbox=segment.bbox,
+                carved=len(line.segments) > 1,
+                kind=segment.kind,
+            )
+            for segment_idx, segment in enumerate(line.segments)
+            if segment.kind == "text_latin"
+        )
+        if segments:
+            grouped.append(
+                _LatinMaskedLineRoute(
+                    block_idx=block_idx,
+                    line_idx=line_idx,
+                    bbox=line.bbox,
+                    segments=segments,
+                )
+            )
+    return grouped
 
 
 def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
@@ -1356,13 +1407,17 @@ def _engcut_route_line_text_and_chars(
     return "".join(text_parts), results
 
 
-def _recognize_text_latin_route_with_engcut(
+def _materialize_latin_masked_line_crop(
     image_bgr: np.ndarray,
-    route: _TextRoute,
-    stats: RunStats,
-    *,
-    timeout: float,
-) -> LineResult:
+    route: _LatinMaskedLineRoute,
+) -> tuple[np.ndarray, int, int]:
+    """Return a full-line EngCut canvas containing only approved Latin pixels.
+
+    Segment padding is intentionally identical to the former per-segment
+    EngCut crop.  The difference is geometric context: EngCut sees one
+    physical line, while CJK, punctuation, formulas, and structural regions
+    are painted white instead of being cut away or passed through.
+    """
     height, width = image_bgr.shape[:2]
     x1, y1, x2, y2 = _expand_xyxy(
         route.bbox,
@@ -1372,26 +1427,185 @@ def _recognize_text_latin_route_with_engcut(
         pad_y=ENGCUT_LINE_CROP_PAD_Y,
     )
     if x2 <= x1 or y2 <= y1:
-        raise RuntimeError(f"invalid text_latin route bbox: {route.bbox}")
-    crop = image_bgr[y1:y2, x1:x2].copy()
+        raise RuntimeError(f"invalid masked EngCut line bbox: {route.bbox}")
+    canvas = np.full_like(image_bgr[y1:y2, x1:x2], 255)
+    for segment in route.segments:
+        sx1, sy1, sx2, sy2 = _expand_xyxy(
+            segment.bbox,
+            width,
+            height,
+            pad_x=ENGCUT_LINE_CROP_PAD_X,
+            pad_y=ENGCUT_LINE_CROP_PAD_Y,
+        )
+        sx1 = max(x1, sx1)
+        sy1 = max(y1, sy1)
+        sx2 = min(x2, sx2)
+        sy2 = min(y2, sy2)
+        if sx2 <= sx1 or sy2 <= sy1:
+            raise RuntimeError(
+                "masked EngCut segment does not intersect its physical line: "
+                f"line={route.bbox} segment={segment.bbox}"
+            )
+        canvas[sy1 - y1:sy2 - y1, sx1 - x1:sx2 - x1] = image_bgr[sy1:sy2, sx1:sx2]
+    return canvas, x1, y1
+
+
+def _write_masked_latin_line_hook(
+    crop: np.ndarray,
+    route: _LatinMaskedLineRoute,
+    *,
+    offset_x: int,
+    offset_y: int,
+) -> None:
+    """Write the actual EngCut input only when the native debug hook is enabled."""
+    hook_dir = os.environ.get("HANWANG_MICRO_RECBLOCK_HOOK_DIR", "").strip()
+    if not hook_dir:
+        return
+    try:
+        import cv2
+
+        out_dir = Path(hook_dir) / "engcut_masked_inputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.time_ns()
+        stem = (
+            f"engcut_masked_{stamp}_block_{route.block_idx:03d}_"
+            f"line_{route.line_idx:03d}"
+        )
+        image_path = out_dir / f"{stem}.png"
+        if not cv2.imwrite(str(image_path), crop):
+            raise RuntimeError(f"cannot write {image_path.name}")
+        crop_bbox = [
+            offset_x,
+            offset_y,
+            offset_x + int(crop.shape[1]),
+            offset_y + int(crop.shape[0]),
+        ]
+        (out_dir / f"{stem}.json").write_text(
+            json.dumps(
+                {
+                    "schema": "hanwang_engcut_masked_input.v1",
+                    "line_bbox": list(route.bbox),
+                    "crop_bbox": crop_bbox,
+                    "latin_segments": [
+                        {
+                            "route_key": list(segment.key),
+                            "bbox": list(segment.bbox),
+                        }
+                        for segment in route.segments
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Failed to write masked EngCut input hook: %s", exc)
+
+
+def _engcut_groups(chars: list[EngcutChar]) -> list[list[EngcutChar]]:
+    """Preserve native group order while exposing the geometry of each group."""
+    groups: dict[tuple[int, int], list[EngcutChar]] = {}
+    order: list[tuple[int, int]] = []
+    for char in chars:
+        key = char.line_index, char.group_index
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(char)
+    return [groups[key] for key in order if groups[key]]
+
+
+def _latin_segment_for_engcut_group(
+    group: list[EngcutChar],
+    segments: tuple[_TextRoute, ...],
+) -> _TextRoute:
+    boxes = [char.bbox for char in group if char.bbox is not None]
+    if len(boxes) != len(group):
+        raise RuntimeError("EngCut masked-line group has a character without page geometry")
+    group_bbox = union_xyxy(boxes)
+    owners: dict[tuple[int, int, int], _TextRoute] = {}
+    for char in group:
+        assert char.bbox is not None
+        center_x, center_y = _bbox_center(char.bbox)
+        matches = [
+            segment
+            for segment in segments
+            if segment.bbox[0] <= center_x < segment.bbox[2]
+            and segment.bbox[1] <= center_y < segment.bbox[3]
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "EngCut masked-line character cannot be uniquely rebound to a Latin route: "
+                f"char_bbox={char.bbox} group_bbox={group_bbox} "
+                f"owners={[item.bbox for item in matches]}"
+            )
+        owners[matches[0].key] = matches[0]
+    if len(owners) != 1:
+        raise RuntimeError(
+            "EngCut masked-line group spans multiple Latin routes: "
+            f"group_bbox={group_bbox} owners={[item.bbox for item in owners.values()]}"
+        )
+    return next(iter(owners.values()))
+
+
+def _recognize_latin_masked_line_with_engcut(
+    image_bgr: np.ndarray,
+    route: _LatinMaskedLineRoute,
+    stats: RunStats,
+    *,
+    timeout: float,
+) -> dict[tuple[int, int, int], LineResult]:
+    """Recognize a white-masked physical line and strictly rebind native groups.
+
+    There is intentionally no per-segment fallback.  A group that cannot be
+    attributed to exactly one routing segment means the CharOCR dispatch plan
+    and native result disagree, so the caller must fail the page rather than
+    persist ambiguous character geometry.
+    """
+    crop, offset_x, offset_y = _materialize_latin_masked_line_crop(image_bgr, route)
     if crop.size == 0:
-        raise RuntimeError(f"empty text_latin route crop: {route.bbox}")
+        raise RuntimeError(f"empty masked EngCut line crop: {route.bbox}")
+    _write_masked_latin_line_hook(
+        crop,
+        route,
+        offset_x=offset_x,
+        offset_y=offset_y,
+    )
     stats.latin_engcut_route_calls += 1
     raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
-    page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=x1, dy=y1)
-    text, chars = _engcut_route_line_text_and_chars(page_chars)
-    if not text or not any(char.text.strip() for char in chars):
-        raise RuntimeError(f"EngCut returned no text for text_latin route bbox={route.bbox}")
-    boxes = [char.bbox for char in chars if char.bbox is not None]
-    return LineResult(
-        text=text,
-        bbox=union_xyxy(boxes) if boxes else route.bbox,
-        confidence=0.0,
-        chars=chars,
-        source=LATIN_ENGCUT_ROUTE_SOURCE,
-        bbox_source="text_latin_route_engcut",
-        review_flags=[],
-    )
+    page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=offset_x, dy=offset_y)
+    groups = _engcut_groups(page_chars)
+    if not groups:
+        raise RuntimeError(f"EngCut returned no groups for masked line bbox={route.bbox}")
+
+    grouped_by_route: dict[tuple[int, int, int], list[EngcutChar]] = {
+        segment.key: [] for segment in route.segments
+    }
+    for group in groups:
+        owner = _latin_segment_for_engcut_group(group, route.segments)
+        grouped_by_route[owner.key].extend(group)
+
+    results: dict[tuple[int, int, int], LineResult] = {}
+    for segment in route.segments:
+        chars = grouped_by_route[segment.key]
+        text, char_results = _engcut_route_line_text_and_chars(chars)
+        if not text or not any(char.text.strip() for char in char_results):
+            raise RuntimeError(
+                "EngCut masked-line result is missing a Latin routing segment: "
+                f"line={route.bbox} segment={segment.bbox}"
+            )
+        boxes = [char.bbox for char in char_results if char.bbox is not None]
+        results[segment.key] = LineResult(
+            text=text,
+            bbox=union_xyxy(boxes) if boxes else segment.bbox,
+            confidence=0.0,
+            chars=char_results,
+            source=LATIN_ENGCUT_ROUTE_SOURCE,
+            bbox_source="text_latin_masked_line_engcut",
+            review_flags=[],
+        )
+    return results
 
 
 def _intersection_area(
@@ -1614,6 +1828,7 @@ def run_micro_recblock(
     stats.n_blocks_ppvl = len(skip_indices)
     rows: list[BlockResult | None] = [None] * len(ppvl_blocks)
     text_routes: list[_TextRoute] = []
+    latin_masked_line_routes: list[_LatinMaskedLineRoute] = []
     block_text_routes: dict[int, list[_TextRoute]] = {}
     recog_group_bboxes_by_route: dict[tuple[int, int, int], list[tuple[int, int, int, int]]] = {}
     segimg_group_audits_by_route: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
@@ -1624,10 +1839,15 @@ def run_micro_recblock(
         )
         block_text_routes[block_idx] = routes
         text_routes.extend(routes)
+        latin_masked_line_routes.extend(
+            _latin_masked_line_routes_from_lines(
+                block_idx,
+                native_routes_by_block_index.get(block_idx, ()),
+            )
+        )
         for route in routes:
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
-    latin_text_routes = [route for route in text_routes if _is_latin_text_route(route)]
     linecut_text_routes = [route for route in text_routes if not _is_latin_text_route(route)]
     text_route_recblocks = [route.bbox for route in linecut_text_routes]
 
@@ -1696,15 +1916,15 @@ def run_micro_recblock(
             route.key: []
             for route in text_routes
         }
-        for route in latin_text_routes:
-            grouped_lines[route.key].append(
-                _recognize_text_latin_route_with_engcut(
-                    image_bgr,
-                    route,
-                    stats,
-                    timeout=min(30.0, max(1.0, float(recog_timeout))),
-                )
+        for masked_line_route in latin_masked_line_routes:
+            latin_results = _recognize_latin_masked_line_with_engcut(
+                image_bgr,
+                masked_line_route,
+                stats,
+                timeout=min(30.0, max(1.0, float(recog_timeout))),
             )
+            for route_key, result in latin_results.items():
+                grouped_lines[route_key].append(result)
         total_groups = max(1, len(groups))
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []

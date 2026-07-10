@@ -55,7 +55,7 @@ def write_charocr_route_artifacts(
     routing_plan: PageRoutingPlan,
     output_root: Path,
 ) -> Path | None:
-    """Render the immutable dispatch plan and its route-boundary crop masks.
+    """Render the immutable dispatch plan and route-boundary visualizations.
 
     A failed diagnostic write only emits a warning. The OCR path must not depend
     on debug output being writable.
@@ -116,28 +116,29 @@ def _route_records(
     height, width = image_bgr.shape[:2]
     records: list[dict[str, Any]] = []
     for block_route in routing_plan.blocks:
-        for line in block_route.plan.lines:
+        for routing_line in block_route.plan.lines:
             segments: list[dict[str, Any]] = []
-            for segment_index, segment in enumerate(line.segments):
+            for segment_index, segment in enumerate(routing_line.segments):
                 record = _segment_record(segment)
                 if segment.kind in _TEXT_KINDS:
                     crop = _crop(image_bgr, segment.bbox)
                     crop_name = (
-                        f"line_{line.index:04d}_segment_{segment_index:02d}_"
+                        f"line_{routing_line.index:04d}_segment_{segment_index:02d}_"
                         f"{segment.kind}_{_bbox_name(segment.bbox)}.png"
                     )
                     _write_png(crops_dir / crop_name, crop)
                     record["native_branch"] = "engcut" if segment.kind == "text_latin" else "linecut"
                     record["crop_file"] = f"crops/{crop_name}"
                     record["crop_shape"] = list(crop.shape)
+                    record["crop_role"] = "route_segment_visualization"
                 else:
                     record["native_branch"] = "excluded"
                 segments.append(record)
             records.append({
                 "block_uid": block_route.block_uid,
-                "line_index": line.index,
-                "line_bbox": list(_clamp(line.bbox, width, height)),
-                "source": line.source,
+                "line_index": routing_line.index,
+                "line_bbox": list(_clamp(routing_line.bbox, width, height)),
+                "source": routing_line.source,
                 "segments": segments,
             })
     return records
@@ -156,13 +157,13 @@ def _segment_record(segment: RoutingSegment) -> dict[str, Any]:
 def _draw_overlay(canvas: np.ndarray, routing_plan: PageRoutingPlan) -> None:
     height, width = canvas.shape[:2]
     for block_route in routing_plan.blocks:
-        for line in block_route.plan.lines:
-            _draw_bbox(canvas, _clamp(line.bbox, width, height), _COLORS["line"], 1)
-            for segment_index, segment in enumerate(line.segments):
+        for routing_line in block_route.plan.lines:
+            _draw_bbox(canvas, _clamp(routing_line.bbox, width, height), _COLORS["line"], 1)
+            for segment_index, segment in enumerate(routing_line.segments):
                 color = _COLORS.get(segment.kind, _COLORS["skip"])
                 bbox = _clamp(segment.bbox, width, height)
                 _draw_bbox(canvas, bbox, color, 2)
-                label = f"L{line.index}:{segment_index} {segment.kind}"
+                label = f"L{routing_line.index}:{segment_index} {segment.kind}"
                 _draw_label(canvas, bbox, label, color)
 
 
@@ -245,7 +246,7 @@ def _readme_text(routing_plan: PageRoutingPlan, records: list[dict[str, Any]]) -
         f"- Page UID: `{routing_plan.page_uid}`",
         f"- PP-OCRv6 run: `{routing_plan.prepass_run_id}`",
         f"- 可分派: `{routing_plan.is_dispatchable}`",
-        f"- 实际文字 crop 数: `{text_count}`",
+        f"- 文字路由段数: `{text_count}`",
         "",
         "`route-overlay.png` 是当前内存中的 `PageRoutingPlan`：",
         "- 蓝色：PP-OCRv6 行几何；",
@@ -254,10 +255,12 @@ def _readme_text(routing_plan: PageRoutingPlan, records: list[dict[str, Any]]) -
         "- 绿色：公式，明确不送 Hanwang；",
         "- 灰色：表格/图片等跳过区域。",
         "",
-        "`crops/` 内每张图是 `PageRoutingPlan` 的文字路由 crop。",
-        "其中 `text_other` 是 LineCut SegImg 的输入区域；`text_latin` 是 EngCut",
-        "进入引擎前的路由 mask，EngCut 在引擎内还会加自己的固定边距。",
-        "`route-plan.json` 记录 crop 文件、bbox、所属 block、行号和路由类型。",
+        "`crops/` 内每张图只是 `PageRoutingPlan` 的原始矩形路由段回显，不是",
+        "对 native 调用的逐像素复刻。`text_other` 由 LineCut 在整页和 route bbox",
+        "上执行 SegImg；`text_latin` 由 EngCut 物化为同一物理行的白底蒙版。",
+        "启用 `HANWANG_MICRO_RECBLOCK_HOOK_DIR` 后，实际 EngCut 白底输入会写入",
+        "该目录的 `engcut_masked_inputs/`。",
+        "`route-plan.json` 记录路由段、bbox、所属 block、行号和原始回显文件。",
     )) + "\n"
 
 

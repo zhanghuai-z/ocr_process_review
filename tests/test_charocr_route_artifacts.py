@@ -63,7 +63,11 @@ def test_route_artifact_emits_only_text_route_crops(tmp_path):
     payload = json.loads((output / "route-plan.json").read_text(encoding="utf-8"))
     segments = payload["routes"][0]["segments"]
     assert [segment["native_branch"] for segment in segments] == ["linecut", "excluded", "engcut"]
+    assert segments[0]["crop_role"] == "route_segment_visualization"
+    assert segments[2]["crop_role"] == "route_segment_visualization"
     assert segments[1].get("crop_file") is None
+    readme = (output / "README.md").read_text(encoding="utf-8")
+    assert "不是\n对 native 调用的逐像素复刻" in readme
 
 
 def test_hybrid_pipeline_writes_current_route_plan_before_native_dispatch(tmp_path, monkeypatch):
