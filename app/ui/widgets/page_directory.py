@@ -134,7 +134,11 @@ class PageDirectoryList(QListWidget):
     # ── internal ──────────────────────────────────────────────
 
     def _make_thumbnail(self, page: Page) -> QPixmap | None:
-        img_path = getattr(page, "image_path", None) or getattr(page, "source_path", None)
+        img_path = (
+            getattr(page, "thumbnail_path", None)
+            or getattr(page, "image_path", None)
+            or getattr(page, "source_path", None)
+        )
         if not img_path:
             return None
         try:

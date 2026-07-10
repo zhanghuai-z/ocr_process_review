@@ -1028,6 +1028,48 @@ def test_phase24_h_proof_left_uses_shared_page_directory_list():
     lp.deleteLater()
 
 
+def test_page_directory_prefers_imported_thumbnail(tmp_path):
+    from PySide6.QtGui import QColor, QImage
+    from app.ui.widgets.page_directory import PageDirectoryList
+
+    full_path = tmp_path / "full.png"
+    thumb_path = tmp_path / "thumb.png"
+    full = QImage(80, 80, QImage.Format.Format_RGB32)
+    full.fill(QColor("blue"))
+    assert full.save(str(full_path))
+    thumb = QImage(20, 20, QImage.Format.Format_RGB32)
+    thumb.fill(QColor("red"))
+    assert thumb.save(str(thumb_path))
+    page = Page(
+        image_path=str(full_path),
+        thumbnail_path=str(thumb_path),
+        width=80,
+        height=80,
+    )
+
+    directory = PageDirectoryList()
+    pixmap = directory._make_thumbnail(page)
+
+    assert pixmap is not None
+    center = pixmap.toImage().pixelColor(pixmap.width() // 2, pixmap.height() // 2)
+    assert center.red() > center.blue()
+    directory.deleteLater()
+
+
+def test_hproof_initial_selected_page_builds_only_that_page_rows():
+    from app.ui.proof.h_proof import HProofPanel
+
+    project = _make_project_with_char_crops("甲乙", n_pages=3, lines_per_page=4)
+    panel = HProofPanel()
+
+    panel.load_pages(project.pages, selected_page_number=2)
+
+    assert panel._session.selected_page_number == 2
+    assert len(panel._pairs) == 4
+    assert all(projection.page.page_number == 2 for projection in panel._session.projections)
+    panel.deleteLater()
+
+
 def test_phase24_quality_stats_dialog_table_has_corrected_column():
     """Phase 24 blocker 4：弹窗表格新增"是否修正"列（真字/假字/是否修正/观察）。"""
     from app.ui.widgets.quality_stats_dialog import QualityStatsDialog

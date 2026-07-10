@@ -2109,7 +2109,10 @@ class _LinePair(QFrame):
         self._opacity_effect.setOpacity(1.0)
         self.setGraphicsEffect(self._opacity_effect)
         # 最近一次行图像缩放比例，用于把 _img_lbl 上的点击位置反查回原图坐标
-        self._render_scale: float = 1.0
+        # Slot geometry is meaningful only after the real line crop has been
+        # loaded and scaled.  Keeping this at zero avoids building a temporary
+        # page-coordinate projection for every hidden row during panel load.
+        self._render_scale: float = 0.0
         # hproof-visual-marking：editor 鼠标悬停的字符索引（-1 = 未悬停）。
         # _render_line_image 会按 active 选区/光标 + 这个 hover idx 联合画框。
         self._hover_char_idx: int = -1
@@ -3603,8 +3606,19 @@ class HProofPanel(QWidget):
 
     # ── 公共 API ───────────────────────────────────────────────
 
-    def load_pages(self, pages: List[Page]) -> None:
+    def load_pages(
+        self,
+        pages: List[Page],
+        *,
+        selected_page_number: int | None = None,
+    ) -> None:
+        if selected_page_number is not None:
+            self._session.selected_page_number = int(selected_page_number)
         self._session.set_pages(pages, page_has_lines=self._page_has_lines)
+        if selected_page_number is not None and self._session.selected_page_number is None:
+            usable_pages = self._session.usable_pages(self._page_has_lines)
+            if usable_pages:
+                self._session.selected_page_number = usable_pages[0].page_number
         self._refresh_page_filter()
         self._render_pages(self._filtered_pages())
 

@@ -195,11 +195,13 @@ class _StubPanel:
 
     def __init__(self):
         self.load_calls = []
+        self.load_kwargs = []
         self.merge_calls = []
         self.refresh_calls = 0
 
-    def load_pages(self, pages):
+    def load_pages(self, pages, **kwargs):
         self.load_calls.append(list(pages))
+        self.load_kwargs.append(dict(kwargs))
 
     def merge_pages(self, pages):
         self.merge_calls.append(list(pages))
@@ -227,6 +229,8 @@ def test_sync_proof_panels_first_call_loads(ctrl):
     assert len(h.load_calls) == 1
     assert len(v.load_calls) == 1
     assert h.merge_calls == [] and v.merge_calls == []
+    assert h.load_kwargs == [{"selected_page_number": ctrl.current_page_number}]
+    assert v.load_kwargs == [{}]
     assert ctrl._proof_loaded_line_count == ctrl.total_line_count
 
 

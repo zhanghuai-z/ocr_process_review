@@ -341,8 +341,11 @@ class WorkflowController(QObject):
             return
         signature = self._proof_pages_signature()
         if force_load:
-            for p in panels:
-                p.load_pages(self._project.pages)
+            self._hproof_panel.load_pages(
+                self._project.pages,
+                selected_page_number=self.current_page_number,
+            )
+            self._vproof_panel.load_pages(self._project.pages)
             self._proof_loaded_line_count = line_count
             self._proof_loaded_signature = signature
             return
@@ -352,8 +355,11 @@ class WorkflowController(QObject):
             for p in panels:
                 p.merge_pages(self._project.pages)
         else:
-            for p in panels:
-                p.load_pages(self._project.pages)
+            self._hproof_panel.load_pages(
+                self._project.pages,
+                selected_page_number=self.current_page_number,
+            )
+            self._vproof_panel.load_pages(self._project.pages)
         self._proof_loaded_line_count = line_count
         self._proof_loaded_signature = signature
 
