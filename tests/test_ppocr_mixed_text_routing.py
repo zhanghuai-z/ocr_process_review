@@ -289,3 +289,29 @@ def test_latin_token_recovers_only_its_fragment_from_fused_punctuation_component
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [((42, 10, 50, 30), "h")]
+
+
+def test_shifted_comma_reclaims_its_mark_without_taking_following_latin_body():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))
+    _ink(image, (27, 24, 31, 30))       # comma left of its proposal
+    _ink(image, (36, 10, 52, 30))       # C body closer to comma than word center
+    _ink(image, (56, 10, 66, 30))
+    _ink(image, (70, 10, 80, 30))
+    _ink(image, (84, 10, 94, 30))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲,China",
+        bbox=(0, 0, 110, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, ",", (31, 8, 39, 32)),
+            PpOcrV6WordBox(0, 2, "China", (40, 8, 100, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 110, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 94, 30), "China")]

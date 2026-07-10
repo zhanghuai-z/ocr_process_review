@@ -21,7 +21,8 @@
 3. `compile_page_routing_plan()` 先把行框裁到允许文本 OCR 的布局块内，再扣除公式、表格、图片和其他结构区域。
 4. 对剩余正文区域：
    - 不含拉丁字母或数字：一个 `text_other` slice，交给 LineCut。
-   - 含拉丁字母或数字：仅 PP-OCR 拉丁/数字 word-box 生成 `text_latin` mask。先取与该 word-box 相交的墨迹；只对高度与已选字母主体相符且相邻的 detached body、或位于主体上方并水平对齐的 detached mark 做一个字宽内的补足。已被任何其他 token 锚定的墨迹不能进入该 mask。相邻 mask 之间只有空白时合并为一个 EngCut crop；含可见墨迹的间隙才生成 `text_other` slice，交给 LineCut。
+   - 纯拉丁/数字行：整条物理行作为一个 `text_latin` route，交给 EngCut。
+   - 汉字与拉丁/数字混合行：PP-OCR word-box 只提供 token proposal。行图先按边界背景自动判断黑底白字或白底黑字；每个连通域只能归属一个 token。中心落入 proposal 是第一优先级；偏移标点只能认领最近锚点及与其水平相连的同一符号组件，不能扩大认领邻近字母；剩余墨迹才由非符号 token 在各自搜索窗内认领。超长横线保留给非 Latin 区域，不能扩大 EngCut mask。若拉丁字符与标点物理黏连，只取黏连组件和该拉丁 proposal 的交集，不迁移完整标点组件。相邻 Latin mask 之间只有空白时合并；存在其他墨迹时生成 `text_other` slice。
 5. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 PP-VL 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
 6. CharOCR 输出写入 OCR observation；公式文本仍由公式分支保有，不由 Hanwang 回填。
 
@@ -36,6 +37,8 @@ PP-OCR/文本猜测回填 EngCut 字符”的链路已删除，不能作为失�
 - PP-OCR word-box 只承担几何 proposal，不承担最终文字真值。
 - PP-OCR 的拉丁 token 只能生成自己的 mask；标点、中文和 token 外区域默认属于 LineCut，不参与 EngCut 的归属竞争。
 - PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。当前不使用“整行回退”“PP-OCR 文本回填”或静默猜测。
+- 深色底白字和表格横线属于同一连通域分流算法的输入场景，不建立页面类型特判。
+- PP token proposal 与黏连组件存在交集时可生成受限片段；片段仍只是本次路由 mask，不进入 OCR 文本、校对或导出真值。
 
 ## 退役路径
 

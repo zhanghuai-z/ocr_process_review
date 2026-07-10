@@ -271,6 +271,7 @@ def _component_owner_token_indices(
     for token in tokens:
         if _token_branch(token.text) != "symbol" or token.token_index in occupied:
             continue
+        token_bbox = _clip(token.bbox, region_bbox)
         seed_bbox = _symbol_seed_bbox(token, region_bbox)
         candidates = [
             component
@@ -279,7 +280,23 @@ def _component_owner_token_indices(
             and _intersect(component[:4], seed_bbox) is not None
             and _nearest_token_index(component[:4], tokens, region_bbox) == token.token_index
         ]
-        for component in candidates:
+        if not candidates:
+            continue
+        anchor = min(
+            candidates,
+            key=lambda component: (
+                _horizontal_gap(component[:4], token_bbox),
+                abs((component[0] + component[2]) - (token_bbox[0] + token_bbox[2])),
+                component[1],
+            ),
+        )
+        symbol_components = [
+            component
+            for component in candidates
+            if component is anchor
+            or min(component[2], anchor[2]) > max(component[0], anchor[0])
+        ]
+        for component in symbol_components:
             owners[component] = token.token_index
 
     for component in eligible_components:

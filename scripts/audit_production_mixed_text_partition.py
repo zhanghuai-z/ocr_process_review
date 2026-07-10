@@ -144,17 +144,21 @@ def _masked_panel(
     return panel
 
 
-def _token_conflicts(line: PpOcrV6LineHint, latin_boxes: list[tuple[int, int, int, int]]) -> list[dict]:
-    conflicts = []
+def _proposal_center_overlaps(
+    line: PpOcrV6LineHint,
+    latin_boxes: list[tuple[int, int, int, int]],
+) -> list[dict]:
+    """Report raw proposal overlap without claiming pixel misrouting."""
+    overlaps = []
     for token in line.words:
-        if _has_ascii_alnum(token.text):
+        if _has_ascii_alnum(token.text) or not token.text.strip():
             continue
         cx = (token.bbox[0] + token.bbox[2]) / 2.0
         cy = (token.bbox[1] + token.bbox[3]) / 2.0
         owners = [box for box in latin_boxes if box[0] <= cx <= box[2] and box[1] <= cy <= box[3]]
         if owners:
-            conflicts.append({"token_index": token.token_index, "text": token.text, "bbox": token.bbox})
-    return conflicts
+            overlaps.append({"token_index": token.token_index, "text": token.text, "bbox": token.bbox})
+    return overlaps
 
 
 def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> dict:
@@ -185,11 +189,11 @@ def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> d
         partition = partition_charocr_text_region(page_bgr, line, line.bbox)
         latin_boxes = [segment.bbox for segment in partition.segments if segment.kind == "text_latin"]
         other_boxes = [segment.bbox for segment in partition.segments if segment.kind == "text_other"]
-        conflicts = _token_conflicts(line, latin_boxes)
+        proposal_overlaps = _proposal_center_overlaps(line, latin_boxes)
         counts["mixed_issues"] += len(partition.issues)
         counts["latin_segments"] += len(latin_boxes)
         counts["other_segments"] += len(other_boxes)
-        counts["latin_nonlatin_token_conflicts"] += len(conflicts)
+        counts["latin_nonlatin_proposal_center_overlaps"] += len(proposal_overlaps)
         for box in latin_boxes:
             overview_draw.rectangle(box, outline=LATIN_COLOR, width=3)
         for issue in partition.issues:
@@ -220,7 +224,7 @@ def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> d
             "latin_segments": [list(box) for box in latin_boxes],
             "other_segments": [list(box) for box in other_boxes],
             "issues": [{"code": issue.code, "bbox": list(issue.bbox), "message": issue.message} for issue in partition.issues],
-            "nonlatin_token_conflicts": conflicts,
+            "nonlatin_proposal_center_overlaps": proposal_overlaps,
             "file": str(output),
         })
     if scale != 1:
