@@ -2216,6 +2216,39 @@ def test_hproof_slot_geometry_clears_when_edit_breaks_alignment():
     panel.deleteLater()
 
 
+def test_hproof_engcut_word_atom_keeps_every_character_slot_visible():
+    """EngCut 字符可组成 word atom，但横校仍须按每个真实字符框绘制。"""
+    from app.ui.proof.h_proof import HProofPanel
+
+    text = "Shanghai"
+    line = Line(text=text, confidence=0.0, bbox=BBox(0, 0, 96, 24))
+    replace_line_ocr_char_observations(line.uid, [
+        Char(
+            char=char,
+            confidence=0.0,
+            bbox=BBox(index * 12, 0, 10, 22),
+            bbox_source="hanwang:engcut_exact",
+            bbox_granularity="char",
+            token_text=char,
+        )
+        for index, char in enumerate(text)
+    ])
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 100, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    pair = panel._pairs[0]
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    pair._sync_editor_slot_geometry()
+
+    assert len(pair._unit.atoms) == 1
+    assert pair._unit.atoms[0].kind.value == "word"
+    assert pair._editor._slot_x_centers == [5.0 + index * 12 for index in range(len(text))]
+    panel.deleteLater()
+
+
 def test_hproof_formula_slot_geometry_keeps_single_char_word_atom_visible():
     from app.ui.proof.h_proof import HProofPanel
 
@@ -2243,6 +2276,35 @@ def test_hproof_formula_slot_geometry_keeps_single_char_word_atom_visible():
     assert centers[text.index("o")] is not None
     assert widths is not None
     assert widths[text.index("；")] <= 8.0
+    panel.deleteLater()
+
+
+def test_hproof_formula_slot_geometry_keeps_all_engcut_word_characters_visible():
+    from app.ui.proof.h_proof import HProofPanel
+
+    formula = "$ F $"
+    text = f"US{formula}在"
+    line = Line(text=text, confidence=0.9, bbox=BBox(0, 0, 100, 24))
+    replace_line_ocr_char_observations(line.uid, [
+        Char(char="U", confidence=0.0, bbox=BBox(0, 0, 10, 22), bbox_source="hanwang:engcut_exact", bbox_granularity="char", token_text="U"),
+        Char(char="S", confidence=0.0, bbox=BBox(12, 0, 10, 22), bbox_source="hanwang:engcut_exact", bbox_granularity="char", token_text="S"),
+        Char(char=formula, confidence=0.0, bbox=BBox(26, 0, 40, 22), bbox_source="paddle_inline_formula", bbox_granularity="formula", token_text=formula),
+        Char(char="在", confidence=0.9, bbox=BBox(70, 0, 18, 22), bbox_source="hanwang:micro_recblock", bbox_granularity="char", token_text="在"),
+    ])
+    block = Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 110, 30), lines=[line])
+    page = Page(page_number=1, blocks=[block], image_path="/tmp/none.png", width=120, height=40)
+
+    panel = HProofPanel()
+    panel.load_pages([page])
+    pair = panel._pairs[0]
+    pair._line_crop_origin = (0, 0)
+    pair._render_scale = 1.0
+    _overlays, centers, _widths = pair._formula_atom_visual_data(text)
+
+    assert centers is not None
+    assert centers[0] == 5.0
+    assert centers[1] == 17.0
+    assert centers[-1] == 79.0
     panel.deleteLater()
 
 

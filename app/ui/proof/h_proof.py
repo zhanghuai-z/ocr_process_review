@@ -216,14 +216,14 @@ def _is_punctuation_slot_text(text: str) -> bool:
 
 def _formula_overlay_slot_width(
     text_char: str,
-    atom: ProofAtom,
+    bbox: BBox | None,
     font_metrics: QFontMetrics,
     scale: float,
 ) -> float:
     width = _slot_visual_width(text_char, font_metrics)
-    if not _is_punctuation_slot_text(text_char) or atom.bbox is None or scale <= 0:
+    if not _is_punctuation_slot_text(text_char) or bbox is None or scale <= 0:
         return width
-    bbox_width = max(TEXT_SLOT_CLIPPED_MIN_W, float(atom.bbox.w) * scale)
+    bbox_width = max(TEXT_SLOT_CLIPPED_MIN_W, float(bbox.w) * scale)
     return min(width, bbox_width)
 
 
@@ -2288,6 +2288,9 @@ class _LinePair(QFrame):
         chars = self._line_chars()
         if self._unit is None or not self._unit.atoms or not chars:
             return self._fallback_formula_visual_data(text), None, None
+        formula_atoms = [atom for atom in self._unit.atoms if atom.kind == ProofAtomKind.FORMULA]
+        if not formula_atoms:
+            return self._fallback_formula_visual_data(text), None, None
         span_by_char_index = self._span_by_char_index_for_formula_text(text)
         if span_by_char_index is None:
             return self._fallback_formula_visual_data(text), None, None
@@ -2300,23 +2303,31 @@ class _LinePair(QFrame):
             for atom in self._unit.atoms:
                 if atom.kind == ProofAtomKind.FORMULA:
                     continue
-                if atom.bbox is None or not atom.char_indices:
+                if not atom.char_indices:
                     continue
-                span = span_by_char_index.get(atom.char_indices[0])
-                if span is None:
-                    continue
-                span_start, span_end = span
-                if span_end - span_start != 1:
-                    continue
-                idx = span_start
-                if not (0 <= idx < len(text)):
-                    continue
-                centers[idx] = ((atom.bbox.x + atom.bbox.x2) / 2.0 - float(ox)) * scale
-                widths[idx] = _formula_overlay_slot_width(text[idx], atom, fm, scale)
+                for char_index in atom.char_indices:
+                    if not (0 <= char_index < len(chars)):
+                        continue
+                    span = span_by_char_index.get(char_index)
+                    char_bbox = chars[char_index].bbox
+                    if span is None or char_bbox is None:
+                        continue
+                    span_start, span_end = span
+                    if span_end - span_start != 1 or not (0 <= span_start < len(text)):
+                        continue
+                    centers[span_start] = (
+                        (char_bbox.x + char_bbox.x2) / 2.0 - float(ox)
+                    ) * scale
+                    widths[span_start] = _formula_overlay_slot_width(
+                        text[span_start],
+                        char_bbox,
+                        fm,
+                        scale,
+                    )
 
         overlays: list[_AtomVisualOverlay] = []
-        for atom in self._unit.atoms:
-            if atom.kind != ProofAtomKind.FORMULA or not atom.char_indices:
+        for atom in formula_atoms:
+            if not atom.char_indices:
                 continue
             span = span_by_char_index.get(atom.char_indices[0])
             if span is None:
