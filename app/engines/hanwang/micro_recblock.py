@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -34,6 +35,13 @@ from .engcut_payload import (
     engcut_chars_from_payload,
     offset_engcut_chars,
 )
+
+
+_ENGCUT_NATIVE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="charocr-engcut",
+)
+_MAX_ENGCUT_LINES_PER_PAGE = 4
 from app.core.paddle_line_routing import (
     LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_INLINE_FORMULA_FLAG,
@@ -1608,6 +1616,46 @@ def _recognize_latin_masked_line_with_engcut(
     return results
 
 
+def _recognize_latin_masked_lines_with_engcut(
+    image_bgr: np.ndarray,
+    routes: list[_LatinMaskedLineRoute],
+    stats: RunStats,
+    *,
+    timeout: float,
+) -> list[tuple[_LatinMaskedLineRoute, dict[tuple[int, int, int], LineResult]]]:
+    """Recognize independent physical lines with bounded native concurrency.
+
+    The process-wide executor caps total EngCut subprocess pressure while the
+    per-page chunks keep one page from occupying every worker when page OCR is
+    already concurrent.
+    """
+    results: list[tuple[_LatinMaskedLineRoute, dict[tuple[int, int, int], LineResult]]] = []
+
+    def recognize(route: _LatinMaskedLineRoute):
+        local_stats = RunStats()
+        route_results = _recognize_latin_masked_line_with_engcut(
+            image_bgr,
+            route,
+            local_stats,
+            timeout=timeout,
+        )
+        return route_results, local_stats.latin_engcut_route_calls
+
+    for start in range(0, len(routes), _MAX_ENGCUT_LINES_PER_PAGE):
+        chunk = routes[start:start + _MAX_ENGCUT_LINES_PER_PAGE]
+        if len(chunk) == 1:
+            route_results, call_count = recognize(chunk[0])
+            stats.latin_engcut_route_calls += call_count
+            results.append((chunk[0], route_results))
+            continue
+        futures = [_ENGCUT_NATIVE_EXECUTOR.submit(recognize, route) for route in chunk]
+        for route, future in zip(chunk, futures):
+            route_results, call_count = future.result()
+            stats.latin_engcut_route_calls += call_count
+            results.append((route, route_results))
+    return results
+
+
 def _intersection_area(
     a: tuple[int, int, int, int],
     b: tuple[int, int, int, int],
@@ -1916,13 +1964,12 @@ def run_micro_recblock(
             route.key: []
             for route in text_routes
         }
-        for masked_line_route in latin_masked_line_routes:
-            latin_results = _recognize_latin_masked_line_with_engcut(
-                image_bgr,
-                masked_line_route,
-                stats,
-                timeout=min(30.0, max(1.0, float(recog_timeout))),
-            )
+        for _masked_line_route, latin_results in _recognize_latin_masked_lines_with_engcut(
+            image_bgr,
+            latin_masked_line_routes,
+            stats,
+            timeout=min(30.0, max(1.0, float(recog_timeout))),
+        ):
             for route_key, result in latin_results.items():
                 grouped_lines[route_key].append(result)
         total_groups = max(1, len(groups))

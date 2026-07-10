@@ -286,6 +286,61 @@ def test_masked_latin_line_rejects_group_spanning_multiple_segments():
         micro_module._latin_segment_for_engcut_group(group, segments)
 
 
+def test_masked_latin_lines_use_bounded_parallel_native_calls():
+    import threading
+    import time
+
+    image = np.full((40, 120, 3), 255, dtype=np.uint8)
+    routes = [
+        micro_module._LatinMaskedLineRoute(
+            block_idx=0,
+            line_idx=line_idx,
+            bbox=(0, 0, 100, 36),
+            segments=(
+                micro_module._TextRoute(
+                    0,
+                    line_idx,
+                    0,
+                    (20, 0, 50, 36),
+                    kind="text_latin",
+                ),
+            ),
+        )
+        for line_idx in range(4)
+    ]
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_eng20(_crop, *, timeout=0):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return _eng20_grouped_payload_at([(25, "A")])
+
+    stats = micro_module.RunStats()
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = fake_eng20
+    try:
+        results = micro_module._recognize_latin_masked_lines_with_engcut(
+            image,
+            routes,
+            stats,
+            timeout=1.0,
+        )
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    assert max_active > 1
+    assert max_active <= micro_module._MAX_ENGCUT_LINES_PER_PAGE
+    assert stats.latin_engcut_route_calls == 4
+    assert [route.line_idx for route, _route_results in results] == [0, 1, 2, 3]
+
+
 def test_masked_latin_line_hook_writes_actual_engcut_input(tmp_path, monkeypatch):
     monkeypatch.setenv("HANWANG_MICRO_RECBLOCK_HOOK_DIR", str(tmp_path))
     route = micro_module._LatinMaskedLineRoute(
