@@ -19,7 +19,6 @@ from app.core.ocr_ir import is_cjk_char
 
 
 XYXY = tuple[int, int, int, int]
-_INK_THRESHOLD = 180
 _MIN_COMPONENT_AREA = 3
 
 
@@ -106,20 +105,20 @@ def partition_charocr_text_region(
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
     issues: list[RoutePartitionIssue] = []
     for token in latin_tokens:
-        mask_components = _latin_mask_components(
+        mask_bbox = _latin_mask_bbox(
             components,
             token,
             component_owners,
             region_bbox,
         )
-        if not mask_components:
+        if mask_bbox is None:
             issues.append(RoutePartitionIssue(
                 code="missing_latin_token_ink",
                 message=f"PP-OCRv6 Latin/digit token has no unambiguous ink: {token.text!r}",
                 bbox=_clip(token.bbox, region_bbox),
             ))
             continue
-        masks.append((token, _union([component[:4] for component in mask_components])))
+        masks.append((token, mask_bbox))
 
     if issues:
         return RoutePartition((), tuple(issues))
@@ -178,19 +177,35 @@ def _segments_from_latin_masks(
     return RoutePartition(tuple(segments))
 
 
-def _latin_mask_components(
+def _latin_mask_bbox(
     components: list[tuple[int, int, int, int, int]],
     token: PpOcrV6WordBox,
     component_owners: dict[tuple[int, int, int, int, int], int | None],
     region_bbox: XYXY,
-) -> list[tuple[int, int, int, int, int]]:
+) -> XYXY | None:
     seed_bbox = _latin_seed_bbox(token, region_bbox)
-    return [
+    owned = [
         component
         for component in components
         if component_owners.get(component) == token.token_index
         and _intersect(component[:4], seed_bbox) is not None
     ]
+    if owned:
+        return _union([component[:4] for component in owned])
+
+    # A low-resolution glyph can be physically connected to adjacent
+    # punctuation, for example ``(h)``.  Whole-component ownership must remain
+    # unique, but the Latin proposal can still recover its own intersecting
+    # pixels without taking the punctuation owner's full component.
+    core_bbox = _clip(token.bbox, region_bbox)
+    fragments = [
+        overlap
+        for component in components
+        if not _is_rule_like_component(component, region_bbox)
+        for overlap in [_intersect(component[:4], core_bbox)]
+        if overlap is not None
+    ]
+    return _union(fragments) if fragments else None
 
 
 def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
@@ -227,10 +242,15 @@ def _component_owner_token_indices(
     owners: dict[tuple[int, int, int, int, int], int | None] = {
         component: None for component in components
     }
+    eligible_components = [
+        component
+        for component in components
+        if not _is_rule_like_component(component, region_bbox)
+    ]
 
     # First preserve the strongest fact: the component center is inside a raw
     # PP-OCR proposal.  The tie-breaker makes shared proposal seams stable.
-    for component in components:
+    for component in eligible_components:
         centered: list[tuple[float, int, float, int]] = []
         center_x = (component[0] + component[2]) / 2.0
         for token in tokens:
@@ -254,7 +274,7 @@ def _component_owner_token_indices(
         seed_bbox = _symbol_seed_bbox(token, region_bbox)
         candidates = [
             component
-            for component in components
+            for component in eligible_components
             if owners[component] is None
             and _intersect(component[:4], seed_bbox) is not None
             and _nearest_token_index(component[:4], tokens, region_bbox) == token.token_index
@@ -262,7 +282,7 @@ def _component_owner_token_indices(
         for component in candidates:
             owners[component] = token.token_index
 
-    for component in components:
+    for component in eligible_components:
         if owners[component] is not None:
             continue
         candidates: list[tuple[int, float, int]] = []
@@ -334,13 +354,46 @@ def _ink_components(image_bgr: np.ndarray, bbox: XYXY) -> list[tuple[int, int, i
     x1, y1, x2, y2 = _clip(bbox, (0, 0, page_width, page_height))
     if x2 <= x1 or y2 <= y1:
         return []
-    binary = (gray[y1:y2, x1:x2] < _INK_THRESHOLD).astype(np.uint8)
+    binary = _foreground_mask(gray[y1:y2, x1:x2])
     count, _labels, stats, _centers = cv2.connectedComponentsWithStats(binary, 8)
     return [
         (x1 + left, y1 + top, x1 + left + width, y1 + top + height, area)
         for left, top, width, height, area in (tuple(int(value) for value in stats[index]) for index in range(1, count))
         if area >= _MIN_COMPONENT_AREA
     ]
+
+
+def _foreground_mask(crop: np.ndarray) -> np.ndarray:
+    """Return line foreground for either dark-on-light or light-on-dark text."""
+    if crop.size == 0:
+        return np.zeros(crop.shape, dtype=np.uint8)
+    threshold, _unused = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    border = np.concatenate((crop[0], crop[-1], crop[:, 0], crop[:, -1]))
+    background = float(np.median(border))
+    if background <= threshold:
+        return (crop > threshold).astype(np.uint8)
+    return (crop <= threshold).astype(np.uint8)
+
+
+def _is_rule_like_component(
+    component: tuple[int, int, int, int, int],
+    region_bbox: XYXY,
+) -> bool:
+    """Keep long horizontal rules out of Latin ownership.
+
+    The component remains in the line's visible-ink set, so it can still form a
+    LineCut region.  It is only forbidden from widening an EngCut mask across
+    neighboring tokens.
+    """
+    width = component[2] - component[0]
+    height = component[3] - component[1]
+    region_width = max(1, region_bbox[2] - region_bbox[0])
+    region_height = max(1, region_bbox[3] - region_bbox[1])
+    return (
+        width >= max(8, ceil(region_width * 0.20))
+        and width >= max(12, height * 12)
+        and height <= max(4, ceil(region_height * 0.12))
+    )
 
 
 def _token_branch(text: str) -> str:

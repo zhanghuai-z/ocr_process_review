@@ -206,3 +206,86 @@ def test_blank_gap_between_latin_masks_stays_in_one_engcut_crop():
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
         ("text_latin", (20, 10, 55, 30), "AB"),
     ]
+
+
+def test_light_text_on_dark_background_uses_the_same_mixed_route_contract():
+    image = np.full((50, 120, 3), 70, dtype=np.uint8)
+    image[10:30, 5:23] = 240       # 甲
+    image[10:30, 36:43] = 240      # 2
+    image[10:30, 46:53] = 240      # 0
+    image[10:30, 56:63] = 240      # 2
+    image[10:30, 66:73] = 240      # 4
+    image[10:30, 90:108] = 240     # 乙
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲2024乙",
+        bbox=(0, 0, 115, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (4, 8, 24, 32)),
+            PpOcrV6WordBox(0, 1, "2024", (34, 8, 76, 32)),
+            PpOcrV6WordBox(0, 2, "乙", (88, 8, 110, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 115, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 73, 30), "2024")]
+
+
+def test_horizontal_table_rule_cannot_widen_or_overlap_latin_masks():
+    image = _image()
+    _ink(image, (4, 8, 20, 28))
+    _ink(image, (30, 8, 35, 28))
+    _ink(image, (45, 8, 61, 28))
+    _ink(image, (70, 8, 75, 28))
+    _ink(image, (82, 8, 98, 28))
+    _ink(image, (0, 34, 110, 36))       # table border in the same detector row
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲A乙B丙",
+        bbox=(0, 0, 110, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 6, 22, 30)),
+            PpOcrV6WordBox(0, 1, "A", (28, 6, 38, 30)),
+            PpOcrV6WordBox(0, 2, "乙", (43, 6, 63, 30)),
+            PpOcrV6WordBox(0, 3, "B", (68, 6, 78, 30)),
+            PpOcrV6WordBox(0, 4, "丙", (80, 6, 100, 30)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 110, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((30, 8, 35, 28), "A"),
+        ((70, 8, 75, 28), "B"),
+    ]
+
+
+def test_latin_token_recovers_only_its_fragment_from_fused_punctuation_component():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))
+    _ink(image, (30, 10, 50, 30))       # fused left parenthesis + h
+    _ink(image, (56, 10, 61, 30))
+    _ink(image, (72, 10, 88, 30))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲(h)乙",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "(", (28, 8, 42, 32)),
+            PpOcrV6WordBox(0, 2, "h", (42, 8, 50, 32)),
+            PpOcrV6WordBox(0, 3, ")", (54, 8, 63, 32)),
+            PpOcrV6WordBox(0, 4, "乙", (70, 8, 90, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((42, 10, 50, 30), "h")]
