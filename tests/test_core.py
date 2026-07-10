@@ -7881,7 +7881,7 @@ def test_main_window_file_menu_uses_close_project_action():
     print("test_main_window_file_menu_uses_close_project_action PASSED")
 
 
-def test_main_window_close_project_flushes_working_cache_and_resets_workspace():
+def test_main_window_close_project_discards_clean_bound_project_and_resets_ui():
     from PySide6.QtWidgets import QMessageBox
 
     from app.models import OcrProject
@@ -7889,7 +7889,6 @@ def test_main_window_close_project_flushes_working_cache_and_resets_workspace():
 
     _get_qapp()
     warnings = []
-    saves = []
     original_question = QMessageBox.question
     original_warning = QMessageBox.warning
     QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
@@ -7905,12 +7904,11 @@ def test_main_window_close_project_flushes_working_cache_and_resets_workspace():
     window = MainWindow()
     store = FakeStore()
     try:
-        window._controller._project = OcrProject(name="demo")
+        window._controller._project = OcrProject(name="demo", db_path="/tmp/demo.ocrproj")
         window._controller._store = store
-        window._controller.save_project = lambda: saves.append(True) or True
+        window._controller._dirty = False
         window._close_project()
 
-        assert saves == [True]
         assert warnings == []
         assert store.closed is True
         assert window._controller.project is None
@@ -7922,17 +7920,17 @@ def test_main_window_close_project_flushes_working_cache_and_resets_workspace():
         QMessageBox.warning = original_warning
         window.close()
 
-    print("test_main_window_close_project_flushes_working_cache_and_resets_workspace PASSED")
+    print("test_main_window_close_project_discards_clean_bound_project_and_resets_ui PASSED")
 
 
-def test_main_window_close_project_does_not_offer_snapshot_save():
+def test_main_window_close_project_saves_dirty_project_before_reset():
     from PySide6.QtWidgets import QMessageBox
 
     from app.models import OcrProject
     from app.ui.main_window import MainWindow
 
     _get_qapp()
-    save_as_calls = []
+    save_calls = []
     original_question = QMessageBox.question
     QMessageBox.question = lambda *args, **kwargs: QMessageBox.StandardButton.Yes
 
@@ -7942,14 +7940,14 @@ def test_main_window_close_project_does_not_offer_snapshot_save():
 
     window = MainWindow()
     try:
-        window._controller._project = OcrProject(name="draft")
+        window._controller._project = OcrProject(name="draft", db_path="/tmp/draft.ocrproj")
         window._controller._store = FakeStore()
-        window._controller.save_project = lambda: True
-        window._save_project_snapshot_dialog = lambda: save_as_calls.append(True) or True
+        window._controller._dirty = True
+        window._save_project = lambda: save_calls.append(True) or True
 
         window._close_project()
 
-        assert save_as_calls == []
+        assert save_calls == [True]
         assert window._controller.project is None
         assert window._stack.currentWidget() is window._import_panel
         assert window.statusBar().currentMessage() == "项目已关闭"
@@ -7957,7 +7955,7 @@ def test_main_window_close_project_does_not_offer_snapshot_save():
         QMessageBox.question = original_question
         window.close()
 
-    print("test_main_window_close_project_does_not_offer_snapshot_save PASSED")
+    print("test_main_window_close_project_saves_dirty_project_before_reset PASSED")
 
 
 # =====================================================================
@@ -15009,23 +15007,9 @@ def test_workflow_controller_normalizes_loaded_project_geometry(tmp_path):
 
     from app.controllers.workflow_controller import WorkflowController
     from app.models import BBox, Block, BlockType, Line, OcrProject, Page
-    from app.services.project_workspace_service import ProjectWorkspaceService
+    from app.services.project_file_service import ProjectFileService
 
-    class _Settings:
-        def __init__(self):
-            self.values = {}
-
-        def get(self, key, default=""):
-            return self.values.get(key, default)
-
-        def set(self, key, value):
-            self.values[key] = value
-
-    service = ProjectWorkspaceService(
-        tmp_path / "workspaces",
-        settings=_Settings(),
-    )
-    working = service.create_working_project("LoadedProof")
+    service = ProjectFileService()
     img_path = tmp_path / "source.png"
     snapshot_path = tmp_path / "loaded.ocrproj"
 
@@ -15045,19 +15029,13 @@ def test_workflow_controller_normalizes_loaded_project_geometry(tmp_path):
                 lines=[Line(text="甲乙", confidence=0.95, bbox=BBox(10, 44, 160, 40))],
             )],
         )
-        project = working.project
-        project.pages = [page]
+        project = OcrProject(name="LoadedProof", pages=[page])
         _seed_project_ocr_observations(project)
 
-        working.store.save_project(project)
-        service.write_snapshot(
-            active_store=working.store,
-            project=project,
-            target_path=snapshot_path,
-        )
-        working.store.close()
+        bound = service.bind_project(project, snapshot_path)
+        bound.store.close()
 
-        controller = WorkflowController(workspace_service=service)
+        controller = WorkflowController()
         try:
             assert controller.open_project(str(snapshot_path)) is True
             loaded_line = _block_ocr_observations(controller.project.pages[0].blocks[0])[0]
@@ -15793,30 +15771,12 @@ def test_workflow_controller_snapshot_persists_quality_probe_sidecar(tmp_path):
     from app.controllers.workflow_controller import WorkflowController
     from app.core import quality_probe as qp
     from app.models import BBox, Block, BlockType, Line, Page
-    from app.services.project_workspace_service import ProjectWorkspaceService
-
-    class _Settings:
-        def __init__(self):
-            self.values = {}
-
-        def get(self, key, default=""):
-            return self.values.get(key, default)
-
-        def set(self, key, value):
-            self.values[key] = value
-
-    controller = WorkflowController(
-        workspace_service=ProjectWorkspaceService(
-            tmp_path / "workspaces",
-            settings=_Settings(),
-        )
-    )
+    controller = WorkflowController()
     snapshot_path = tmp_path / "qprobe.ocrproj"
     sidecar_path = qp.sidecar_path_for_project(str(snapshot_path))
     try:
-        project = controller.ensure_working_project("qprobe-snapshot")
-        assert controller.store is not None
-        image_path = Path(controller.store.db_path).parent / ".cache" / "images" / "page.png"
+        project = controller.ensure_project("qprobe-snapshot")
+        image_path = tmp_path / "session" / "page.png"
         image_path.parent.mkdir(parents=True, exist_ok=True)
         image_path.write_bytes(b"image")
         line = Line(text="已", confidence=0.9, bbox=BBox(1, 2, 30, 12))
@@ -15830,8 +15790,6 @@ def test_workflow_controller_snapshot_persists_quality_probe_sidecar(tmp_path):
         )
         project.pages = [page]
         _seed_project_layout_snapshots(project)
-        assert controller.save_project() is True
-
         probe_store = qp.ProbeStore()
         probe_store.add(qp.Probe(
             key=qp.ProbeKey(page.page_number, 0, 0, 0),
@@ -15841,7 +15799,7 @@ def test_workflow_controller_snapshot_persists_quality_probe_sidecar(tmp_path):
         ))
         qp.set_active_store(probe_store)
 
-        assert controller.save_project_snapshot(str(snapshot_path)) is True
+        assert controller.save_project_as(str(snapshot_path)) is True
 
         assert sidecar_path is not None
         loaded = qp.load_store_from_path(sidecar_path)
@@ -21724,8 +21682,8 @@ if __name__ == "__main__":
     test_main_window_initial_import_window_is_screen_centered()
     test_main_window_maximize_state_is_not_forced_back_to_normal()
     test_main_window_file_menu_uses_close_project_action()
-    test_main_window_close_project_prompts_save_and_resets_workspace()
-    test_main_window_close_project_save_uses_save_as_for_transient_project()
+    test_main_window_close_project_discards_clean_bound_project_and_resets_ui()
+    test_main_window_close_project_saves_dirty_project_before_reset()
     test_fake_ocr_engine()
     test_create_engine_hanwang_exposes_page_block_capability()
     test_confidence_normalization()

@@ -1156,6 +1156,9 @@ class ProjectStore:
             project_id=project_id,
         )
         raw_layout_artifact_uid = self._save_raw_layout_artifact(cur, page, project_id)
+        stored_image_path = self._storage_path(page.image_path)
+        stored_cache_image_path = self._storage_path(page.cache_image_path)
+        stored_thumbnail_path = self._storage_path(page.thumbnail_path)
         if page.id is None:
             cur.execute(
                 "INSERT INTO page (uid, project_id, image_path, width, height, "
@@ -1163,10 +1166,10 @@ class ProjectStore:
                 "cache_image_path, thumbnail_path, status, error_message, "
                 "ocr_invalidated_reason, raw_layout_artifact_uid) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (page.uid, project_id, page.image_path, page.width, page.height,
+                (page.uid, project_id, stored_image_path, page.width, page.height,
                  page.page_number, page.source_path, page.source_type,
-                 page.source_page_index, page.cache_image_path,
-                 page.thumbnail_path, page.status.value, page.error_message,
+                 page.source_page_index, stored_cache_image_path,
+                 stored_thumbnail_path, page.status.value, page.error_message,
                  page.ocr_invalidated_reason,
                  raw_layout_artifact_uid),
             )
@@ -1179,9 +1182,9 @@ class ProjectStore:
                 "ocr_invalidated_reason=?, "
                 "raw_layout_artifact_uid=?, project_id=? "
                 "WHERE id=? AND uid=?",
-                (page.image_path, page.width, page.height, page.page_number,
+                (stored_image_path, page.width, page.height, page.page_number,
                  page.source_path, page.source_type, page.source_page_index,
-                 page.cache_image_path, page.thumbnail_path, page.status.value,
+                 stored_cache_image_path, stored_thumbnail_path, page.status.value,
                  page.error_message,
                  page.ocr_invalidated_reason,
                  raw_layout_artifact_uid,
@@ -1384,7 +1387,7 @@ class ProjectStore:
             artifact.engine,
             artifact.engine_version,
             artifact.run_id,
-            artifact.artifact_path,
+            self._storage_path(artifact.artifact_path),
             artifact.artifact_hash,
             json.dumps(_dict_list(artifact.records, field="raw_ocr_artifact.records"), ensure_ascii=False),
             json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
@@ -1417,7 +1420,7 @@ class ProjectStore:
                     artifact.engine,
                     artifact.engine_version,
                     artifact.run_id,
-                    artifact.artifact_path,
+                    self._storage_path(artifact.artifact_path),
                     artifact.artifact_hash,
                     json.dumps(_dict_list(artifact.records, field="raw_ocr_artifact.records"), ensure_ascii=False),
                     json.dumps(_route_attachments_to_json_dict(artifact.route_attachments), ensure_ascii=False),
@@ -2001,6 +2004,26 @@ class ProjectStore:
         if path.is_absolute():
             return str(path)
         return str(Path(self.db_path).resolve().parent / path)
+
+    def _storage_path(self, raw_value: object) -> str:
+        """Serialize project-owned assets relative to the bound project file.
+
+        Import source paths deliberately remain external metadata.  This helper
+        is used only for working images, thumbnails, and raw OCR artifacts so a
+        project plus its sibling ``.assets`` directory stays portable after
+        normal incremental saves.
+        """
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        path = Path(value)
+        if not path.is_absolute():
+            return path.as_posix()
+        root = Path(self.db_path).resolve().parent
+        try:
+            return path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            return str(path)
 
     def _load_layout_snapshot(
         self,

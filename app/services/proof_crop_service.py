@@ -16,6 +16,7 @@ from app.core.proof_geometry_quality import is_estimated_or_unavailable_geometry
 from app.core.proof_line_facts import proof_display_text
 from app.core.proof_line_utils import iter_unique_page_text_lines
 from app.models import BBox, Block, Char, Line, OcrProject, Page
+from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import block_ocr_line_observations_by_uid, line_ocr_bbox
 from app.models.ocr_text_observation import line_has_ocr_review_flag, line_ocr_confidence
@@ -75,6 +76,8 @@ def proof_fallback_warning(stats: ProofCropStats, pages: Iterable[Page] | None =
     if fallback_total <= 0 and pages:
         seen_lines: set[int] = set()
         for page in pages:
+            if layout_snapshot_for_page(page) is None:
+                continue
             for _block, line, _line_idx in iter_unique_page_text_lines(page):
                 line_fallback_chars = 0
                 for char in line_ocr_chars_by_uid(line.uid):
@@ -111,6 +114,10 @@ class ProofCropService:
         return stats
 
     def _normalize_page(self, page: Page, stats: ProofCropStats) -> None:
+        # Imported pages have no adopted layout or OCR observations yet.  They
+        # are valid project state, but not proof input.
+        if layout_snapshot_for_page(page) is None:
+            return
         image = read_cv_image(page.display_image_path, cv2.IMREAD_COLOR)
         if image is None:
             return

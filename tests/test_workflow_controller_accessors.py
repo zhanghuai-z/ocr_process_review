@@ -16,7 +16,6 @@ from app.controllers.workflow_controller import (
 from app.models import BBox, Block, BlockType, Char, Line, OcrProject, Page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, replace_line_ocr_char_observations
 from app.models.ocr_observation import project_ocr_line_count, replace_block_ocr_line_observations
-from app.services.project_workspace_service import ProjectWorkspaceService
 
 
 # ── 辅助 ───────────────────────────────────────────────────────
@@ -39,24 +38,9 @@ def _page(page_no, blocks):
     )
 
 
-class _Settings:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-
-    def get(self, key: str, default: str = "") -> str:
-        return self.values.get(key, default)
-
-    def set(self, key: str, value: str) -> None:
-        self.values[key] = value
-
-
 @pytest.fixture
 def ctrl(tmp_path):
-    service = ProjectWorkspaceService(
-        tmp_path / "workspaces",
-        settings=_Settings(),
-    )
-    c = WorkflowController(workspace_service=service)
+    c = WorkflowController()
     yield c
     c.close()
 
@@ -91,10 +75,11 @@ def test_has_any_ocr_result_false_when_no_project(ctrl):
     assert ctrl.has_any_ocr_result is False
 
 
-def test_cache_dir_falls_back_to_dot_when_no_project(ctrl):
-    out = ctrl.cache_dir
+def test_import_dir_is_session_scoped_when_no_project(ctrl):
+    out = ctrl.import_dir
     assert isinstance(out, Path)
-    assert out.name == ".cache"
+    assert out.name == "imports"
+    assert out.is_dir()
 
 
 def test_page_number_at_returns_none_when_no_project(ctrl):
@@ -182,19 +167,14 @@ def test_page_number_at_returns_correct_value(ctrl):
     assert ctrl.page_number_at(-1) is None
 
 
-def test_cache_dir_uses_db_path_parent(ctrl, tmp_path):
-    db = tmp_path / "demo.ocrproj"
-    ctrl._project = OcrProject(name="t", pages=[], db_path=str(db))
-    assert ctrl.cache_dir == tmp_path / ".cache"
-
-
-def test_working_project_binds_charocr_cache_to_project_cache(ctrl, monkeypatch):
+def test_in_memory_project_binds_charocr_cache_to_session_dir(ctrl, monkeypatch):
     from app.engines.hanwang import native_cache
 
     monkeypatch.delenv("HANWANG_NATIVE_CACHE_DIR", raising=False)
-    ctrl.ensure_working_project("demo")
+    ctrl.ensure_project("demo")
 
-    assert ctrl.charocr_cache_dir == ctrl.cache_dir / "hanwang_native"
+    assert ctrl.charocr_cache_dir.parent == ctrl.import_dir.parent
+    assert ctrl.charocr_cache_dir.name == "charocr_native"
     assert native_cache.cache_dir() == ctrl.charocr_cache_dir
     assert ctrl.active_charocr_cache_dir == ctrl.charocr_cache_dir
 

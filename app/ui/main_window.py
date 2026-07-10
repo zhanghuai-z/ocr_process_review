@@ -231,14 +231,14 @@ class ImportWorker(QThread):
     all_done = Signal(object)
     error = Signal(str)
 
-    def __init__(self, paths: List[str], cache_dir: Path, parent=None):
+    def __init__(self, paths: List[str], import_dir: Path, parent=None):
         super().__init__(parent)
         self._paths = list(paths)
-        self._cache_dir = cache_dir
+        self._import_dir = import_dir
 
     def run(self) -> None:
         try:
-            importer = ImportService(cache_dir=self._cache_dir)
+            importer = ImportService(cache_dir=self._import_dir)
             self.all_done.emit(importer.import_paths(self._paths))
         except Exception as exc:
             logger.error("Import worker failed: %s", exc)
@@ -519,7 +519,7 @@ class MainWindow(QMainWindow):
         self._controller.ocr_progress.connect(self._on_ocr_progress)
         self._controller.worker_error.connect(self._on_worker_error)
         self._controller.status_message.connect(self._set_status_message)
-        self._layout_panel.geometry_changed.connect(self._controller.save_project)
+        self._layout_panel.geometry_changed.connect(self._controller.record_project_mutation)
         self._layout_panel.block_contract_changed.connect(self._controller.handle_block_contract_changed)
         self._layout_panel.ocr_entry_requested.connect(self._controller.handle_ocr_entry_requested)
         self._layout_panel.analysis_cancel_requested.connect(self._cancel_layout_analysis)
@@ -534,13 +534,16 @@ class MainWindow(QMainWindow):
         menu.hide()
 
         file_m = QMenu("文件", self)
-        act_save = QAction("保存项目快照(&S)…", self)
+        act_save = QAction("保存项目(&S)", self)
         act_save.setShortcut(QKeySequence.StandardKey.Save)
+        act_save_as = QAction("另存为…", self)
+        act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         act_close_project = QAction("关闭项目(&W)", self)
         act_close_project.setShortcut(QKeySequence("Ctrl+W"))
         act_save.triggered.connect(self._save_project)
+        act_save_as.triggered.connect(self._save_project_as_dialog)
         act_close_project.triggered.connect(self._close_project)
-        for a in (act_save, None, act_close_project):
+        for a in (act_save, act_save_as, None, act_close_project):
             if a is None:
                 file_m.addSeparator()
             else:
@@ -548,6 +551,7 @@ class MainWindow(QMainWindow):
 
         # 隐藏菜单栏后快捷键需绑定至窗口才能生效
         self.addAction(act_save)
+        self.addAction(act_save_as)
         self.addAction(act_close_project)
 
         more_m = QMenu("更多", self)
@@ -745,6 +749,8 @@ class MainWindow(QMainWindow):
     # ── 文件操作 ───────────────────────────────────────────────
 
     def _open_project(self) -> None:
+        if not self._confirm_save_before_discard("打开项目"):
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "打开项目文件", "", "OCR 项目 (*.ocrproj)"
         )
@@ -753,15 +759,8 @@ class MainWindow(QMainWindow):
         if self._controller.open_project(path):
             self._show_opened_project()
 
-    def restore_working_project(self) -> bool:
-        """Restore the managed cache left by the previous application process."""
-        if not self._controller.resume_working_project():
-            return False
-        self._show_opened_project()
-        return True
-
     def _show_opened_project(self) -> None:
-        """Hydrate UI projections after a snapshot or working-cache load."""
+        """Hydrate UI projections after opening a user project file."""
         self._controller.reset_proof_sync_state()
         if self._controller.has_pages:
             pages = self._controller.pages
@@ -777,9 +776,11 @@ class MainWindow(QMainWindow):
         if not self._controller.project:
             QMessageBox.information(self, "提示", "当前无项目，请先导入或打开项目")
             return False
-        return self._save_project_snapshot_dialog()
+        if self._controller.is_bound_project:
+            return self._controller.save_project()
+        return self._save_project_as_dialog()
 
-    def _save_project_snapshot_dialog(self) -> bool:
+    def _save_project_as_dialog(self) -> bool:
         project = self._controller.project
         if not project:
             return False
@@ -789,19 +790,23 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return False
-        return self._controller.save_project_snapshot(path)
+        return self._controller.save_project_as(path)
 
-    def _confirm_close_project_save(self) -> bool:
-        if not self._controller.project:
+    def _confirm_save_before_discard(self, title: str) -> bool:
+        if not self._controller.project or not self._controller.is_dirty:
             return True
         reply = QMessageBox.question(
             self,
-            "关闭项目",
-            "关闭后将保存当前工作状态到内部缓存。是否关闭项目？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            title,
+            "当前项目有未保存的修改。",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
         )
-        return reply == QMessageBox.StandardButton.Yes
+        if reply == QMessageBox.StandardButton.Save:
+            return self._save_project()
+        return reply == QMessageBox.StandardButton.Discard
 
     def _close_project(self) -> None:
         if not self._controller.project:
@@ -813,10 +818,12 @@ class MainWindow(QMainWindow):
             if not self._stop_running_tasks_for_close():
                 QMessageBox.warning(self, "关闭项目", "后台任务仍未停止，已取消关闭项目。")
                 return
+            if not self._confirm_save_before_discard("关闭项目"):
+                return
             if self._controller.close_project():
                 self._reset_workspace_after_project_closed()
             return
-        if not self._confirm_close_project_save():
+        if not self._confirm_save_before_discard("关闭项目"):
             return
         if self._controller.close_project():
             self._reset_workspace_after_project_closed()
@@ -848,13 +855,13 @@ class MainWindow(QMainWindow):
             return
         project = self._controller.project
         if not project:
-            self._controller.ensure_working_project("未命名项目")
+            self._controller.ensure_project("未命名项目")
 
         try:
-            cache_dir = self._controller.cache_dir
+            import_dir = self._controller.import_dir
             self._import_panel.setEnabled(False)
             self._set_status_message(f"正在导入 {len(paths)} 个文件…")
-            self._import_worker = ImportWorker(paths, cache_dir, self)
+            self._import_worker = ImportWorker(paths, import_dir, self)
             self._import_worker.all_done.connect(self._on_import_done)
             self._import_worker.error.connect(self._on_import_error)
             self._import_worker.finished.connect(self._on_import_finished)
@@ -1001,13 +1008,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "关闭程序", "后台任务仍未停止，已取消关闭。")
                 event.ignore()
                 return
+            if not self._confirm_save_before_discard("关闭程序"):
+                event.ignore()
+                return
             self._controller.close()
             super().closeEvent(event)
             return
-        if self._controller.project:
-            if not self._controller.save_project():
-                event.ignore()
-                return
+        if not self._confirm_save_before_discard("关闭程序"):
+            event.ignore()
+            return
         self._controller.close()
         super().closeEvent(event)
 
