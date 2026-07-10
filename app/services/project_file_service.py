@@ -18,6 +18,7 @@ from app.core import quality_probe as qp
 from app.core.project_store import ProjectDataError, ProjectStore
 from app.models import OcrProject, Page
 from app.models.layout_block_view import iter_page_layout_block_views
+from app.models.layout_projection import page_layout_blocks
 from app.models.layout_snapshot_store import layout_snapshot_for_page
 from app.models.ocr_character_observation import line_ocr_chars_by_uid
 from app.models.ocr_observation import block_ocr_line_observations_by_uid
@@ -340,7 +341,7 @@ class ProjectFileService:
     @staticmethod
     def _blocks_for_page(page: Page) -> list[object]:
         if layout_snapshot_for_page(page) is None:
-            return list(page.blocks)
+            return list(page_layout_blocks(page))
         return [
             view.runtime_block
             for view in iter_page_layout_block_views(page)
