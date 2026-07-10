@@ -7,17 +7,13 @@ from typing import Any
 
 XYXY = tuple[int, int, int, int]
 ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
-ROUTE_SEGMENT_TEXT = "text"
-ROUTE_SEGMENT_TEXT_ZH = "text_zh"
+ROUTE_SEGMENT_TEXT_OTHER = "text_other"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
-ROUTE_SEGMENT_TEXT_SYMBOL = "text_symbol"
 ROUTE_SEGMENT_FORMULA = "formula"
 ROUTE_SEGMENT_SKIP = "skip"
 TEXT_ROUTE_SEGMENT_KINDS = frozenset({
-    ROUTE_SEGMENT_TEXT,
-    ROUTE_SEGMENT_TEXT_ZH,
+    ROUTE_SEGMENT_TEXT_OTHER,
     ROUTE_SEGMENT_TEXT_LATIN,
-    ROUTE_SEGMENT_TEXT_SYMBOL,
 })
 VALID_ROUTE_SEGMENT_KINDS = frozenset({
     *TEXT_ROUTE_SEGMENT_KINDS,
@@ -54,7 +50,7 @@ def is_text_route_segment_kind(kind: str) -> bool:
 
 
 def normalize_route_segment_kind(value: object) -> str:
-    kind = str(value or ROUTE_SEGMENT_TEXT).strip() or ROUTE_SEGMENT_TEXT
+    kind = str(value or ROUTE_SEGMENT_TEXT_OTHER).strip() or ROUTE_SEGMENT_TEXT_OTHER
     if kind not in VALID_ROUTE_SEGMENT_KINDS:
         raise ValueError(f"unsupported layout route segment kind: {kind!r}")
     return kind
@@ -66,7 +62,7 @@ class TextSliceRoute:
     segment_index: int
     bbox: XYXY
     carved: bool
-    kind: str = ROUTE_SEGMENT_TEXT
+    kind: str = ROUTE_SEGMENT_TEXT_OTHER
 
     def __post_init__(self) -> None:
         normalized = normalize_route_segment_kind(self.kind)
@@ -231,10 +227,8 @@ __all__ = [
     "RoutingSegment",
     "ROUTE_SEGMENT_FORMULA",
     "ROUTE_SEGMENT_SKIP",
-    "ROUTE_SEGMENT_TEXT",
     "ROUTE_SEGMENT_TEXT_LATIN",
-    "ROUTE_SEGMENT_TEXT_SYMBOL",
-    "ROUTE_SEGMENT_TEXT_ZH",
+    "ROUTE_SEGMENT_TEXT_OTHER",
     "TEXT_ROUTE_SEGMENT_KINDS",
     "TextSliceRoute",
     "VALID_ROUTE_SEGMENT_KINDS",

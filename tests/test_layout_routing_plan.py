@@ -58,7 +58,7 @@ def test_routing_plan_preserves_ppocr_runtime_route_source():
             {
                 "bbox": [0, 0, 120, 30],
                 LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
-                "segments": [{"kind": "text", "bbox": [0, 0, 120, 30], "text": ""}],
+                "segments": [{"kind": "text_other", "bbox": [0, 0, 120, 30], "text": ""}],
             }
         ],
     }
@@ -71,8 +71,8 @@ def test_routing_plan_preserves_ppocr_runtime_route_source():
     assert plan.text_slices[0].bbox == (0, 0, 120, 30)
 
 
-def test_routing_contract_rejects_catch_all_segment_kinds():
-    for kind in ("text_mixed", "unknown"):
+def test_routing_contract_rejects_retired_and_catch_all_segment_kinds():
+    for kind in ("text", "text_zh", "text_symbol", "text_mixed", "unknown"):
         with pytest.raises(ValueError):
             routing_segment_from_record({"kind": kind, "bbox": [0, 0, 10, 10]})
 
@@ -86,7 +86,7 @@ def test_explicit_text_segment_kinds_are_text_slices():
                 "bbox": [0, 0, 160, 30],
                 LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
                 "segments": [
-                    {"kind": "text_zh", "bbox": [0, 0, 60, 30], "text": ""},
+                    {"kind": "text_other", "bbox": [0, 0, 60, 30], "text": ""},
                     {"kind": "formula", "bbox": [60, 0, 100, 30], "text": "$ A $"},
                     {"kind": "text_latin", "bbox": [100, 0, 160, 30], "text": ""},
                 ],
@@ -97,7 +97,7 @@ def test_explicit_text_segment_kinds_are_text_slices():
     plan = routing_plan_for_block_record(block, 240, 120)
 
     assert [segment.kind for segment in plan.lines[0].segments] == [
-        "text_zh",
+        "text_other",
         "formula",
         "text_latin",
     ]
@@ -105,7 +105,7 @@ def test_explicit_text_segment_kinds_are_text_slices():
         (0, (0, 0, 60, 30)),
         (2, (100, 0, 160, 30)),
     ]
-    assert [route.kind for route in plan.text_slices] == ["text_zh", "text_latin"]
+    assert [route.kind for route in plan.text_slices] == ["text_other", "text_latin"]
 
 
 def test_text_slice_route_rejects_non_text_kind():
@@ -125,9 +125,9 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
         bbox=(10, 20, 90, 60),
         source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
         segments=(
-            RoutingSegment(kind="text", bbox=(10, 20, 40, 60)),
+            RoutingSegment(kind="text_other", bbox=(10, 20, 40, 60)),
             RoutingSegment(kind="formula", label="inline_formula", bbox=(40, 20, 70, 60), text="$ A $"),
-            RoutingSegment(kind="text", bbox=(70, 20, 90, 60)),
+            RoutingSegment(kind="text_other", bbox=(70, 20, 90, 60)),
         ),
     )
 
@@ -136,9 +136,9 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
     assert record == {
         "bbox": [10, 20, 90, 60],
         "segments": [
-            {"kind": "text", "label": "", "bbox": [10, 20, 40, 60], "text": ""},
+            {"kind": "text_other", "label": "", "bbox": [10, 20, 40, 60], "text": ""},
             {"kind": "formula", "label": "inline_formula", "bbox": [40, 20, 70, 60], "text": "$ A $"},
-            {"kind": "text", "label": "", "bbox": [70, 20, 90, 60], "text": ""},
+            {"kind": "text_other", "label": "", "bbox": [70, 20, 90, 60], "text": ""},
         ],
         LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
     }
@@ -151,7 +151,7 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
         index=0,
         bbox=(0, 0, 160, 30),
         segments=(
-            RoutingSegment(kind="text_zh", bbox=(0, 0, 60, 30)),
+            RoutingSegment(kind="text_other", bbox=(0, 0, 60, 30)),
             RoutingSegment(kind="formula", label="inline_formula", bbox=(60, 0, 100, 30), text="$ A $"),
             RoutingSegment(kind="text_latin", bbox=(100, 0, 160, 30)),
         ),
@@ -215,9 +215,9 @@ def test_layout_routing_plan_ignores_stale_cache_without_mutating_block():
             "bbox": [0, 0, 300, 40],
             LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
             "segments": [
-                {"kind": "text", "bbox": [0, 0, 70, 40]},
+                    {"kind": "text_other", "bbox": [0, 0, 70, 40]},
                 {"kind": "formula", "bbox": [70, 0, 100, 40], "text": "$ ^{②} $"},
-                {"kind": "text", "bbox": [100, 0, 300, 40]},
+                    {"kind": "text_other", "bbox": [100, 0, 300, 40]},
             ],
         }
     ]
@@ -248,7 +248,7 @@ def test_page_ocr_line_route_attachment_builds_without_mutating_blocks():
         {
             "bbox": [0, 0, 90, 30],
             LAYOUT_ROUTE_SOURCE_FIELD: LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
-            "segments": [{"kind": "text", "bbox": [0, 0, 90, 30], "text": ""}],
+            "segments": [{"kind": "text_other", "bbox": [0, 0, 90, 30], "text": ""}],
         }
     ]
     parent = {
@@ -292,7 +292,7 @@ def test_ppocr_latin_line_hint_marks_text_latin_segment():
     assert [segment["kind"] for segment in route["segments"]] == ["text_latin"]
 
 
-def test_ppocr_cjk_line_hint_marks_text_zh_segment():
+def test_ppocr_cjk_line_hint_marks_text_other_segment():
     parent = {
         "block_label": "text",
         "block_bbox": [0, 0, 220, 50],
@@ -307,10 +307,10 @@ def test_ppocr_cjk_line_hint_marks_text_zh_segment():
     )
 
     route = attachment.route_records_by_block_index[0][0]
-    assert [segment["kind"] for segment in route["segments"]] == ["text_zh"]
+    assert [segment["kind"] for segment in route["segments"]] == ["text_other"]
 
 
-def test_ppocr_mixed_line_hint_stays_generic_text_until_splitter_runs():
+def test_ppocr_mixed_line_hint_stays_other_until_splitter_runs():
     parent = {
         "block_label": "text",
         "block_bbox": [0, 0, 220, 50],
@@ -325,7 +325,7 @@ def test_ppocr_mixed_line_hint_stays_generic_text_until_splitter_runs():
     )
 
     route = attachment.route_records_by_block_index[0][0]
-    assert [segment["kind"] for segment in route["segments"]] == ["text"]
+    assert [segment["kind"] for segment in route["segments"]] == ["text_other"]
 
 
 def test_page_ocr_line_route_attachment_clears_stale_routes_explicitly():

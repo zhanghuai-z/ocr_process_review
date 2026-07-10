@@ -230,7 +230,7 @@ def _segments_for_line(
     output: list[RoutingSegment] = []
     issues = []
     for segment in segments:
-        if segment.kind != "text":
+        if not _is_mixed_ppocr_text(prepass_line.text):
             output.append(segment)
             continue
         if _is_mixed_ppocr_text(prepass_line.text) and not prepass_line.words:
@@ -275,16 +275,16 @@ def _non_overlapping_cuts(
 def _whole_line_text_kind(text: str) -> str:
     value = str(text or "").strip()
     if not value:
-        return "text"
+        return "text_other"
     has_cjk = any(is_cjk_char(char) for char in value)
     has_latin_or_digit = any(char.isascii() and char.isalnum() for char in value)
     if has_cjk and not has_latin_or_digit:
-        return "text_zh"
+        return "text_other"
     if has_latin_or_digit and not has_cjk:
         return "text_latin"
     if value and not has_cjk and not has_latin_or_digit:
-        return "text_symbol"
-    return "text"
+        return "text_other"
+    return "text_other"
 
 
 def _is_mixed_ppocr_text(text: str) -> bool:

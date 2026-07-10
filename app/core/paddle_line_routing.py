@@ -351,14 +351,14 @@ def _text_segment_kind_for_ppocr_line_text(text: str) -> str:
     """
     value = str(text or "").strip()
     if not value:
-        return "text"
+        return "text_other"
     has_cjk = any(is_cjk_char(ch) for ch in value)
     has_ascii_alpha = any(ch.isascii() and ch.isalpha() for ch in value)
     if has_cjk:
-        return "text" if has_ascii_alpha else "text_zh"
+        return "text_other"
     if any(ch.isascii() and ch.isalnum() for ch in value):
         return "text_latin"
-    return "text"
+    return "text_other"
 
 
 def _inter_formula_text_gap_bbox(
@@ -1012,7 +1012,7 @@ def _build_layout_line_route_records(
     skip_subblocks = [item for item in routed_subblocks if not _is_route_formula_label(item["label"])]
 
     bucket_candidates = [
-        {"kind": "text", "bbox": rect}
+        {"kind": "text_other", "bbox": rect}
         for rect in sorted(text_rects, key=lambda item: (item[1], item[0]))
         if rect[2] > rect[0] and rect[3] > rect[1]
     ]
@@ -1073,7 +1073,7 @@ def _build_layout_line_route_records(
                 )
             )
         else:
-            text_segments = [segment for segment in bucket if segment["kind"] == "text"]
+            text_segments = [segment for segment in bucket if segment["kind"] == "text_other"]
             if text_segments:
                 routes.append(_build_route_line(text_segments))
 
@@ -1199,7 +1199,7 @@ def _text_slice_routes_from_lines(
                 segment_index=0,
                 bbox=block_bbox_xyxy(block, width, height),
                 carved=False,
-                kind="text",
+                kind="text_other",
             ),
         )
     slices: list[TextSliceRoute] = []

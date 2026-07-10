@@ -7,7 +7,7 @@ from app.adapters.paddle.ppocr_v6_prepass import (
     PpOcrV6PrepassArtifact,
     PpOcrV6WordBox,
 )
-from app.core.layout_routing_contract import ROUTE_SEGMENT_TEXT_SYMBOL, TextSliceRoute
+from app.core.layout_routing_contract import ROUTE_SEGMENT_TEXT_OTHER, TextSliceRoute
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.models import BBox, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
 
@@ -65,11 +65,11 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
     assert plan.for_block("figure-1") is None
     route = plan.for_block("text-1").lines[0]
     assert [(segment.kind, segment.bbox) for segment in route.segments] == [
-        ("text_zh", (0, 0, 100, 40)),
+        ("text_other", (0, 0, 100, 40)),
         ("skip", (100, 0, 180, 40)),
-        ("text_zh", (180, 0, 200, 40)),
+        ("text_other", (180, 0, 200, 40)),
         ("formula", (200, 0, 220, 40)),
-        ("text_zh", (220, 0, 300, 40)),
+        ("text_other", (220, 0, 300, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
 
@@ -90,16 +90,16 @@ def test_compiler_stops_only_current_page_when_a_text_line_has_no_layout_owner()
     ]
 
 
-def test_text_symbol_is_an_explicit_text_route_kind():
+def test_text_other_is_an_explicit_text_route_kind():
     route = TextSliceRoute(
         line_index=0,
         segment_index=0,
         bbox=(0, 0, 10, 10),
         carved=False,
-        kind=ROUTE_SEGMENT_TEXT_SYMBOL,
+        kind=ROUTE_SEGMENT_TEXT_OTHER,
     )
 
-    assert route.kind == "text_symbol"
+    assert route.kind == "text_other"
 
 
 def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
@@ -135,7 +135,7 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
 
     assert plan.is_dispatchable is True
     assert [segment.kind for segment in plan.for_block("text-1").lines[0].segments] == [
-        "text_zh", "text_latin", "text_symbol", "text_zh",
+        "text_other", "text_latin", "text_other",
     ]
 
 

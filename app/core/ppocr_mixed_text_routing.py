@@ -40,11 +40,11 @@ def partition_mixed_text_segment(
     prepass_line: PpOcrV6LineHint,
     segment_bbox: XYXY,
 ) -> RoutePartition:
-    """Split one non-structural line area into Latin, CJK, and symbol crops.
+    """Split one non-structural line area into Latin and other-text crops.
 
     Pure lines do not use word boxes.  A mixed line requires PP-OCRv6 word-box
     output: Latin/digit masks go to EngCut; all remaining physical ink becomes
-    CJK or symbol input for LineCut.
+    one ``text_other`` input for LineCut.
     """
     mixed = _has_cjk(prepass_line.text) and _has_latin_or_digit(prepass_line.text)
     if not mixed:
@@ -74,9 +74,7 @@ def partition_mixed_text_segment(
 
     latin_tokens = [token for token in tokens if _token_kind(token.text) == "latin"]
     if not latin_tokens:
-        kinds = {_token_kind(token.text) for token in tokens}
-        kind = "text_zh" if "cjk" in kinds else "text_symbol" if "symbol" in kinds else "text"
-        return RoutePartition((RoutingSegment(kind=kind, bbox=segment_bbox),))
+        return RoutePartition((RoutingSegment(kind="text_other", bbox=segment_bbox),))
 
     components = _ink_components(image_bgr, segment_bbox)
     ownership, unowned = _assign_components_in_reading_order(components, tokens)
@@ -97,9 +95,9 @@ def partition_mixed_text_segment(
         if not owned:
             # Word boxes are only proposals. A punctuation token can be shifted
             # beside its actual glyph while that glyph is already part of an
-            # adjacent CJK/symbol crop. It has no OCR-engine route of its own,
+            # adjacent other-text crop. It has no OCR-engine route of its own,
             # so do not emit a duplicate empty route or reject a line whose
-            # physical ink is fully accounted for. Non-symbol tokens remain
+            # physical ink is fully accounted for. Non-punctuation tokens remain
             # mandatory because they select the LineCut/EngCut dispatch.
             if _token_kind(token.text) == "symbol":
                 continue
@@ -128,7 +126,7 @@ def _segments_from_owned_masks(
     for token, mask in sorted(masks, key=lambda item: item[0].token_index):
         mask = _clip(mask, segment_bbox)
         kind = _route_kind_for_token(token.text)
-        if grouped and kind == "text_zh" and grouped[-1][0] == "text_zh":
+        if grouped and kind == "text_other" and grouped[-1][0] == "text_other":
             previous_kind, previous_text, previous_bbox, _previous_index = grouped[-1]
             grouped[-1] = (
                 previous_kind,
@@ -148,12 +146,7 @@ def _segments_from_owned_masks(
 
 
 def _route_kind_for_token(text: str) -> str:
-    kind = _token_kind(text)
-    if kind == "latin":
-        return "text_latin"
-    if kind == "cjk":
-        return "text_zh"
-    return "text_symbol"
+    return "text_latin" if _token_kind(text) == "latin" else "text_other"
 
 
 def _assign_components_in_reading_order(
@@ -246,13 +239,9 @@ def _token_kind(text: str) -> str:
 
 
 def _whole_text_kind(text: str) -> str:
-    if _has_cjk(text) and not _has_latin_or_digit(text):
-        return "text_zh"
     if _has_latin_or_digit(text) and not _has_cjk(text):
         return "text_latin"
-    if str(text or "").strip() and not _has_cjk(text) and not _has_latin_or_digit(text):
-        return "text_symbol"
-    return "text"
+    return "text_other"
 
 
 def _has_cjk(text: str) -> bool:

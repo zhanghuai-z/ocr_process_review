@@ -15,7 +15,7 @@ def _ink(image: np.ndarray, bbox: tuple[int, int, int, int]) -> None:
     image[y1:y2, x1:x2] = 0
 
 
-def test_mixed_partition_routes_latin_mask_and_leaves_punctuation_to_symbol_route():
+def test_mixed_partition_routes_latin_mask_and_keeps_punctuation_with_other_route():
     image = _image()
     _ink(image, (10, 10, 28, 30))
     _ink(image, (43, 10, 48, 30))
@@ -39,10 +39,9 @@ def test_mixed_partition_routes_latin_mask_and_leaves_punctuation_to_symbol_rout
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_zh", (10, 0, 28, 40), "甲"),
+        ("text_other", (10, 0, 28, 40), "甲"),
         ("text_latin", (43, 0, 66, 40), "ABC"),
-        ("text_symbol", (83, 0, 87, 40), ","),
-        ("text_zh", (102, 0, 120, 40), "乙"),
+        ("text_other", (83, 0, 120, 40), ",乙"),
     ]
 
 
@@ -97,7 +96,7 @@ def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_zh", (10, 0, 32, 40), "甲"),
+        ("text_other", (10, 0, 32, 40), "甲"),
         ("text_latin", (46, 0, 69, 40), "ABC"),
-        ("text_zh", (92, 0, 110, 40), "乙"),
+        ("text_other", (92, 0, 110, 40), "乙"),
     ]
