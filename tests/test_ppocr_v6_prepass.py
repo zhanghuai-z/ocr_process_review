@@ -61,6 +61,14 @@ def test_parse_ppocr_v6_prepass_rejects_word_count_mismatch():
         )
 
 
+def test_parse_ppocr_v6_prepass_rejects_word_text_stream_mismatch():
+    with pytest.raises(ValueError, match="word tokens do not reproduce"):
+        parse_ppocr_v6_prepass_result(
+            _result(words=["Urban", "2025"]),
+            page_uid="page-1",
+        )
+
+
 def test_parse_ppocr_v6_prepass_jsonl_rejects_multi_page_result_for_one_page_input():
     jsonl = "\n".join(
         json.dumps({"result": {"ocrResults": [_result()]}}, ensure_ascii=False)

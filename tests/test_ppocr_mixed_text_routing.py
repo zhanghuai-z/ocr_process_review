@@ -39,9 +39,9 @@ def test_mixed_partition_routes_latin_mask_and_keeps_punctuation_with_other_rout
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_other", (10, 10, 28, 30), "甲"),
+        ("text_other", (0, 0, 43, 40), ""),
         ("text_latin", (43, 10, 66, 30), "ABC"),
-        ("text_other", (83, 10, 120, 30), ",乙"),
+        ("text_other", (66, 0, 140, 40), ""),
     ]
 
 
@@ -96,7 +96,113 @@ def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_other", (10, 10, 32, 30), "甲"),
+        ("text_other", (0, 0, 46, 40), ""),
         ("text_latin", (46, 10, 69, 30), "ABC"),
-        ("text_other", (92, 10, 110, 30), "乙"),
+        ("text_other", (69, 0, 130, 40), ""),
+    ]
+
+
+def test_punctuation_fragment_before_latin_mask_cannot_pull_cjk_into_engcut():
+    image = _image()
+    _ink(image, (10, 10, 28, 30))      # 甲
+    _ink(image, (38, 20, 43, 28))      # detached quote fragment
+    _ink(image, (58, 10, 76, 30))      # 乙
+    _ink(image, (82, 10, 100, 30))     # 丙
+    _ink(image, (132, 10, 137, 30))    # A
+    _ink(image, (141, 10, 146, 30))    # B
+    _ink(image, (150, 10, 155, 30))    # C
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='甲”乙丙ABC',
+        bbox=(0, 0, 170, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (8, 8, 30, 32)),
+            PpOcrV6WordBox(0, 1, "”", (44, 8, 50, 32)),
+            PpOcrV6WordBox(0, 2, "乙", (54, 8, 78, 32)),
+            PpOcrV6WordBox(0, 3, "丙", (80, 8, 104, 32)),
+            PpOcrV6WordBox(0, 4, "ABC", (130, 8, 160, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 170, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_other", (0, 0, 132, 40), ""),
+        ("text_latin", (132, 10, 155, 30), "ABC"),
+    ]
+
+
+def test_punctuation_between_latin_masks_is_not_absorbed_by_either_engcut_crop():
+    image = _image()
+    _ink(image, (20, 10, 25, 30))      # A
+    _ink(image, (37, 20, 42, 28))      # detached quote fragment
+    _ink(image, (64, 10, 69, 30))      # B
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='A”B',
+        bbox=(0, 0, 90, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "A", (18, 8, 28, 32)),
+            PpOcrV6WordBox(0, 1, "”", (43, 8, 49, 32)),
+            PpOcrV6WordBox(0, 2, "B", (62, 8, 72, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_latin", (20, 10, 25, 30), "A"),
+        ("text_other", (25, 0, 64, 40), ""),
+        ("text_latin", (64, 10, 69, 30), "B"),
+    ]
+
+
+def test_short_quote_fragment_cannot_be_reclaimed_as_a_latin_body():
+    image = _image()
+    _ink(image, (20, 10, 25, 30))      # A body
+    _ink(image, (39, 17, 44, 29))      # quote fragment, inside the measured seed only
+    _ink(image, (64, 10, 69, 30))      # B body
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='AA”B',
+        bbox=(0, 0, 90, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "AA", (18, 8, 34, 32)),
+            PpOcrV6WordBox(0, 1, "”", (45, 8, 51, 32)),
+            PpOcrV6WordBox(0, 2, "B", (62, 8, 72, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_latin", (20, 10, 25, 30), "AA"),
+        ("text_other", (25, 0, 64, 40), ""),
+        ("text_latin", (64, 10, 69, 30), "B"),
+    ]
+
+
+def test_blank_gap_between_latin_masks_stays_in_one_engcut_crop():
+    image = _image()
+    _ink(image, (20, 10, 25, 30))      # A
+    _ink(image, (50, 10, 55, 30))      # B
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="A B",
+        bbox=(0, 0, 80, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "A", (18, 8, 28, 32)),
+            PpOcrV6WordBox(0, 1, " ", (34, 8, 38, 32)),
+            PpOcrV6WordBox(0, 2, "B", (48, 8, 58, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 80, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_latin", (20, 10, 55, 30), "AB"),
     ]

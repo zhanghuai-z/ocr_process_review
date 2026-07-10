@@ -201,6 +201,10 @@ def parse_ppocr_v6_prepass_result(
                 f"PP-OCRv6 line {line_index} has mismatched text_word/text_word_boxes lengths: "
                 f"{len(raw_words)} != {len(raw_word_boxes)}"
             )
+        if raw_words and _normalize_text_stream(raw_text) != _normalize_text_stream("".join(str(word or "") for word in raw_words)):
+            raise ValueError(
+                f"PP-OCRv6 line {line_index} word tokens do not reproduce its line text"
+            )
         words: list[PpOcrV6WordBox] = []
         for token_index, (raw_word, raw_bbox) in enumerate(zip(raw_words, raw_word_boxes)):
             word_bbox = _parse_bbox(raw_bbox, width=width, height=height)
@@ -226,6 +230,10 @@ def _parse_bbox(value: object, *, width: int | None, height: int | None) -> tupl
     if bbox is None or bbox.area <= 0:
         return None
     return bbox.to_xyxy()
+
+
+def _normalize_text_stream(value: object) -> str:
+    return "".join(str(value or "").split())
 
 
 __all__ = [
