@@ -8,6 +8,7 @@ from unicodedata import category
 
 XYXY = tuple[int, int, int, int]
 ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
+ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT = "layout_vertical_text"
 ROUTE_SEGMENT_TEXT_OTHER = "text_other"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
 ROUTE_SEGMENT_FORMULA = "formula"
@@ -265,6 +266,7 @@ __all__ = [
     "PageRoutingPlan",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",
+    "ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT",
     "RoutingLine",
     "RoutingPlan",
     "RoutingSegment",

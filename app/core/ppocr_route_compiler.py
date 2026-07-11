@@ -10,6 +10,7 @@ from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
     RouteValidationIssue,
+    ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT,
     ROUTING_SOURCE_PPOCR_V6_PREPASS,
     RoutingLine,
     RoutingPlan,
@@ -69,6 +70,9 @@ def compile_page_routing_plan(
     routes_by_block_uid: dict[str, list[RoutingLine]] = {
         item.block.uid: [] for item in text_blocks
     }
+    for candidate in text_blocks:
+        if _is_vertical_text_block(candidate.block):
+            routes_by_block_uid[candidate.block.uid].append(_vertical_text_route(candidate))
     issues: list[RouteValidationIssue] = []
     for prepass_line in prepass.lines:
         line_bbox = _clamp(prepass_line.bbox, page_width, page_height)
@@ -96,6 +100,11 @@ def compile_page_routing_plan(
                 line_index=prepass_line.index,
                 bbox=line_bbox,
             ))
+            continue
+        if _is_vertical_text_block(target.block):
+            # VL owns vertical text geometry. PP-OCR may return no row or a
+            # horizontal fragment for this region; neither should replace or
+            # duplicate the explicit vertical route.
             continue
 
         clipped_line = _intersect(line_bbox, target.bbox)
@@ -181,6 +190,19 @@ def compile_page_routing_plan(
 
 def _is_text_dispatch_block(block: LayoutBlockSnapshot) -> bool:
     return block.ocr_policy == OcrPolicy.TEXT_OCR and block.block_type not in _STRUCTURAL_BLOCK_TYPES
+
+
+def _is_vertical_text_block(block: LayoutBlockSnapshot) -> bool:
+    return str(block.source_label or "").strip().lower() == "vertical_text"
+
+
+def _vertical_text_route(candidate: _BlockCandidate) -> RoutingLine:
+    return RoutingLine(
+        index=-1,
+        bbox=candidate.bbox,
+        segments=(RoutingSegment(kind="text_other", bbox=candidate.bbox),),
+        source=ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT,
+    )
 
 
 def _select_text_container(line_bbox: XYXY, candidates: list[_BlockCandidate]) -> _BlockCandidate | None:

@@ -7,7 +7,11 @@ from app.adapters.paddle.ppocr_v6_prepass import (
     PpOcrV6PrepassArtifact,
     PpOcrV6WordBox,
 )
-from app.models.charocr_routing import ROUTE_SEGMENT_TEXT_OTHER, TextSliceRoute
+from app.models.charocr_routing import (
+    ROUTE_SEGMENT_TEXT_OTHER,
+    ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT,
+    TextSliceRoute,
+)
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.models import BBox, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
 
@@ -72,6 +76,62 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
         ("text_other", (220, 0, 300, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
+
+
+def test_compiler_routes_vertical_text_from_layout_without_ppocr_line():
+    snapshot = _snapshot(
+        _block(
+            "vertical-1",
+            BlockType.TEXT,
+            (20, 30, 80, 520),
+            policy=OcrPolicy.TEXT_OCR,
+            order=0,
+            label="vertical_text",
+        ),
+    )
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(),
+        page_width=300,
+        page_height=600,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("vertical-1").lines[0]
+    assert route.source == ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT
+    assert route.bbox == (20, 30, 80, 520)
+    assert [(segment.kind, segment.bbox) for segment in route.segments] == [
+        ("text_other", (20, 30, 80, 520)),
+    ]
+
+
+def test_compiler_does_not_duplicate_ppocr_fragments_inside_vertical_text():
+    snapshot = _snapshot(
+        _block(
+            "vertical-1",
+            BlockType.TEXT,
+            (20, 30, 80, 520),
+            policy=OcrPolicy.TEXT_OCR,
+            order=0,
+            label="vertical_text",
+        ),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(index=4, text="宁", bbox=(25, 40, 75, 100), words=()),
+    )
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=300,
+        page_height=600,
+    )
+
+    assert plan.is_dispatchable is True
+    routes = plan.for_block("vertical-1").lines
+    assert len(routes) == 1
+    assert routes[0].source == ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT
 
 
 def test_compiler_keeps_formula_content_geometry_when_line_mask_is_clipped():
