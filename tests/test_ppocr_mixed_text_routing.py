@@ -485,6 +485,10 @@ def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot()
     assert result.issues == ()
     assert result.segments[1].text == "? "
     assert [
+        (token.text, token.bbox)
+        for token in result.segments[0].ppocr_latin_tokens
+    ] == [("China", (20, 9, 89, 48))]
+    assert [
         (segment.kind, segment.bbox, segment.component_grouping, segment.ppocr_punctuation_candidate)
         for segment in result.segments
     ] == [

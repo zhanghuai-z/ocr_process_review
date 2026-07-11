@@ -29,6 +29,20 @@ VALID_ROUTE_SEGMENT_KINDS = frozenset({
 
 
 @dataclass(frozen=True)
+class PpOcrLatinTokenObservation:
+    """One PP-OCR Latin/digit token retained as a route-side observation."""
+
+    text: str
+    bbox: XYXY
+
+    def __post_init__(self) -> None:
+        if not self.text or not any(char.isascii() and char.isalnum() for char in self.text):
+            raise ValueError("PP-OCR Latin token observation requires Latin/digit text")
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("PP-OCR Latin token observation requires non-empty geometry")
+
+
+@dataclass(frozen=True)
 class RoutingSegment:
     """One page-routing segment.
 
@@ -46,6 +60,7 @@ class RoutingSegment:
     content_bbox: XYXY | None = None
     component_grouping: str = ""
     ppocr_punctuation_candidate: str = ""
+    ppocr_latin_tokens: tuple[PpOcrLatinTokenObservation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
@@ -72,6 +87,12 @@ class RoutingSegment:
             if self.text and self.text.strip() != candidate:
                 raise ValueError("single-glyph symbol text may only add surrounding whitespace")
         object.__setattr__(self, "ppocr_punctuation_candidate", candidate)
+        latin_tokens = tuple(self.ppocr_latin_tokens or ())
+        if latin_tokens and self.kind != ROUTE_SEGMENT_TEXT_LATIN:
+            raise ValueError("PP-OCR Latin token observations require a text_latin route")
+        if any(not isinstance(token, PpOcrLatinTokenObservation) for token in latin_tokens):
+            raise TypeError("PP-OCR Latin token observations require typed values")
+        object.__setattr__(self, "ppocr_latin_tokens", latin_tokens)
 
 
 @dataclass(frozen=True)
@@ -200,6 +221,14 @@ def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
         content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
         component_grouping=str(segment.get("component_grouping") or ""),
         ppocr_punctuation_candidate=str(segment.get("ppocr_punctuation_candidate") or ""),
+        ppocr_latin_tokens=tuple(
+            PpOcrLatinTokenObservation(
+                text=str(item.get("text") or ""),
+                bbox=xyxy(item.get("bbox")),
+            )
+            for item in segment.get("ppocr_latin_tokens", [])
+            if isinstance(item, dict)
+        ),
     )
 
 
@@ -221,6 +250,16 @@ def routing_line_to_record(
                 **(
                     {"ppocr_punctuation_candidate": segment.ppocr_punctuation_candidate}
                     if segment.ppocr_punctuation_candidate
+                    else {}
+                ),
+                **(
+                    {
+                        "ppocr_latin_tokens": [
+                            {"text": token.text, "bbox": list(token.bbox)}
+                            for token in segment.ppocr_latin_tokens
+                        ]
+                    }
+                    if segment.ppocr_latin_tokens
                     else {}
                 ),
             }
@@ -273,6 +312,7 @@ __all__ = [
     "BlockRoutingPlan",
     "COMPONENT_GROUPING_SINGLE_GLYPH",
     "PageRoutingPlan",
+    "PpOcrLatinTokenObservation",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",
     "ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT",

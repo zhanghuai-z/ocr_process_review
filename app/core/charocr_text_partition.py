@@ -15,7 +15,11 @@ import cv2
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH, RoutingSegment
+from app.models.charocr_routing import (
+    COMPONENT_GROUPING_SINGLE_GLYPH,
+    PpOcrLatinTokenObservation,
+    RoutingSegment,
+)
 from app.core.ocr_ir import is_cjk_char
 
 
@@ -148,13 +152,13 @@ def _segments_from_latin_masks(
     tokens: tuple[PpOcrV6WordBox, ...],
     component_owners: dict[tuple[int, int, int, int, int], int | None],
 ) -> RoutePartition:
-    groups: list[tuple[list[PpOcrV6WordBox], XYXY]] = []
-    current_tokens: list[PpOcrV6WordBox] = []
+    groups: list[tuple[list[tuple[PpOcrV6WordBox, XYXY]], XYXY]] = []
+    current_tokens: list[tuple[PpOcrV6WordBox, XYXY]] = []
     current_bbox: XYXY | None = None
     rx1, ry1, rx2, ry2 = region_bbox
     for token, bbox in sorted(masks, key=lambda item: (item[1][0], item[0].token_index)):
         if current_bbox is None:
-            current_tokens = [token]
+            current_tokens = [(token, bbox)]
             current_bbox = bbox
             continue
         if bbox[0] < current_bbox[2]:
@@ -168,17 +172,18 @@ def _segments_from_latin_masks(
         gap = (current_bbox[2], ry1, bbox[0], ry2)
         if _has_visible_ink(components, gap):
             groups.append((current_tokens, current_bbox))
-            current_tokens = [token]
+            current_tokens = [(token, bbox)]
             current_bbox = bbox
             continue
-        current_tokens.append(token)
+        current_tokens.append((token, bbox))
         current_bbox = _union([current_bbox, bbox])
     if current_bbox is not None:
         groups.append((current_tokens, current_bbox))
 
     segments: list[RoutingSegment] = []
     cursor = rx1
-    for group_tokens, bbox in groups:
+    for group_items, bbox in groups:
+        group_tokens = [token for token, _token_bbox in group_items]
         x1, _y1, x2, _y2 = bbox
         before = (cursor, ry1, x1, ry2)
         if _is_nonempty(before) and _has_visible_ink(components, before):
@@ -192,6 +197,10 @@ def _segments_from_latin_masks(
             kind="text_latin",
             bbox=bbox,
             text=_latin_group_fallback_text(group_tokens, tokens),
+            ppocr_latin_tokens=tuple(
+                PpOcrLatinTokenObservation(text=token.text, bbox=token_bbox)
+                for token, token_bbox in group_items
+            ),
         ))
         cursor = x2
     after = (cursor, ry1, rx2, ry2)

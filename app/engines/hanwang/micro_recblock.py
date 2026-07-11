@@ -27,6 +27,7 @@ from app.core.inline_formula_edit_state import filter_handled_inline_formula_sub
 from app.models.charocr_routing import (
     COMPONENT_GROUPING_SINGLE_GLYPH,
     PageRoutingPlan,
+    PpOcrLatinTokenObservation,
     ROUTE_SEGMENT_TEXT_LATIN,
     ROUTE_SEGMENT_TEXT_SYMBOL,
     RoutingLine,
@@ -122,6 +123,8 @@ FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 PPOCR_SYMBOL_ROUTE_SOURCE = "ppocrv6:single_glyph_punctuation"
+PPOCR_LATIN_TOKEN_FALLBACK_SOURCE = "ppocrv6:latin_token_geometry_fallback"
+PPOCR_LATIN_TOKEN_FALLBACK_FLAG = "latin_token_geometry_fallback"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
@@ -255,6 +258,7 @@ class RunStats:
     overlap_merge_clusters: int = 0
     overlap_merge_replacements: int = 0
     latin_empty_native_fallbacks: int = 0
+    latin_token_geometry_fallbacks: int = 0
 
 
 @dataclass
@@ -276,6 +280,7 @@ class _TextRoute:
     ppocr_punctuation_candidate: str = ""
     ppocr_latin_fallback_text: str = ""
     ppocr_symbol_text: str = ""
+    ppocr_latin_tokens: tuple[PpOcrLatinTokenObservation, ...] = ()
     content_bbox: tuple[int, int, int, int] | None = None
 
     @property
@@ -391,6 +396,7 @@ def _text_route_bboxes_from_lines(
             ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
             ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
             ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
+            ppocr_latin_tokens=segment.ppocr_latin_tokens,
             content_bbox=segment.content_bbox,
         )
         for line_idx, line in enumerate(lines)
@@ -423,6 +429,7 @@ def _engcut_masked_line_routes_from_lines(
                 ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
                 ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
                 ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
+                ppocr_latin_tokens=segment.ppocr_latin_tokens,
                 content_bbox=segment.content_bbox,
             )
             for segment_idx, segment in enumerate(line.segments)
@@ -1433,14 +1440,26 @@ def _engcut_route_line_text_and_chars(
     chars: list[EngcutChar],
     *,
     source: str = LATIN_ENGCUT_ROUTE_SOURCE,
+    ppocr_tokens: tuple[PpOcrLatinTokenObservation, ...] = (),
 ) -> tuple[str, list[CharResult]]:
     text_parts: list[str] = []
     results: list[CharResult] = []
     has_output_group = False
-    for group in _engcut_groups(chars):
-        visible = [char for char in group if str(char.text or "")]
-        if not visible:
-            continue
+    visible_groups = [
+        visible
+        for group in _engcut_groups(chars)
+        if (visible := [char for char in group if str(char.text or "")])
+    ]
+    token_bindings = [
+        _ppocr_token_for_engcut_group(group, ppocr_tokens)
+        for group in visible_groups
+    ]
+    token_binding_counts = {
+        token: token_bindings.count(token)
+        for token in token_bindings
+        if token is not None
+    }
+    for visible, token in zip(visible_groups, token_bindings):
         if has_output_group:
             text_parts.append(" ")
             results.append(
@@ -1455,10 +1474,32 @@ def _engcut_route_line_text_and_chars(
                 )
             )
         group_text = "".join(str(char.text or "") for char in visible)
-        text_parts.append(group_text)
         has_output_group = True
-        if _engcut_group_has_overlapping_char_bboxes(visible):
-            boxes = [char.bbox for char in visible if char.bbox is not None]
+        boxes = [char.bbox for char in visible if char.bbox is not None]
+        geometry_unreliable = _engcut_group_has_overlapping_char_bboxes(visible)
+        use_ppocr_token = (
+            token is not None
+            and token_binding_counts.get(token) == 1
+            and (geometry_unreliable or group_text != token.text)
+        )
+        if use_ppocr_token:
+            assert token is not None
+            token_bbox = union_xyxy([*boxes, token.bbox]) if boxes else token.bbox
+            text_parts.append(token.text)
+            results.append(
+                CharResult(
+                    text=token.text,
+                    confidence=0.0,
+                    bbox=token_bbox,
+                    candidates=list(dict.fromkeys([group_text, token.text])),
+                    source=PPOCR_LATIN_TOKEN_FALLBACK_SOURCE,
+                    bbox_granularity="word",
+                    token_text=token.text,
+                )
+            )
+            continue
+        text_parts.append(group_text)
+        if geometry_unreliable:
             results.append(
                 CharResult(
                     text=group_text,
@@ -1484,6 +1525,23 @@ def _engcut_route_line_text_and_chars(
             for char in visible
         )
     return "".join(text_parts), results
+
+
+def _ppocr_token_for_engcut_group(
+    chars: list[EngcutChar],
+    tokens: tuple[PpOcrLatinTokenObservation, ...],
+) -> PpOcrLatinTokenObservation | None:
+    boxes = [char.bbox for char in chars if char.bbox is not None]
+    if len(boxes) != len(chars) or not boxes:
+        return None
+    center_x, center_y = _bbox_center(union_xyxy(boxes))
+    matches = [
+        token
+        for token in tokens
+        if token.bbox[0] <= center_x < token.bbox[2]
+        and token.bbox[1] <= center_y < token.bbox[3]
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
@@ -1563,7 +1621,7 @@ def _write_masked_engcut_line_hook(
         (out_dir / f"{stem}.json").write_text(
             json.dumps(
                 {
-                    "schema": "hanwang_engcut_masked_input.v2",
+                    "schema": "hanwang_engcut_masked_input.v3",
                     "line_bbox": list(route.bbox),
                     "crop_bbox": crop_bbox,
                     "engcut_segments": [
@@ -1578,6 +1636,16 @@ def _write_masked_engcut_line_hook(
                             **(
                                 {"content_bbox": list(segment.content_bbox)}
                                 if segment.content_bbox is not None
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "ppocr_latin_tokens": [
+                                        {"text": token.text, "bbox": list(token.bbox)}
+                                        for token in segment.ppocr_latin_tokens
+                                    ]
+                                }
+                                if segment.ppocr_latin_tokens
                                 else {}
                             ),
                         }
@@ -1666,7 +1734,11 @@ def _recognize_engcut_masked_line(
             raise RuntimeError(f"EngCut received a non-Latin route: {segment.kind!r}")
         chars = grouped_by_route[segment.key]
         source = LATIN_ENGCUT_ROUTE_SOURCE
-        text, char_results = _engcut_route_line_text_and_chars(chars, source=source)
+        text, char_results = _engcut_route_line_text_and_chars(
+            chars,
+            source=source,
+            ppocr_tokens=segment.ppocr_latin_tokens,
+        )
         if not text or not any(char.text.strip() for char in char_results):
             fallback_text = str(segment.ppocr_latin_fallback_text or "").strip()
             if not fallback_text:
@@ -1695,14 +1767,27 @@ def _recognize_engcut_masked_line(
             )
             continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
+        token_fallback_count = sum(
+            char.source == PPOCR_LATIN_TOKEN_FALLBACK_SOURCE
+            for char in char_results
+        )
+        stats.latin_token_geometry_fallbacks += token_fallback_count
         results[segment.key] = LineResult(
             text=text,
             bbox=union_xyxy(boxes) if boxes else segment.bbox,
             confidence=0.0,
             chars=char_results,
-            source=source,
+            source=(
+                f"{source}+ppocrv6_token"
+                if token_fallback_count
+                else source
+            ),
             bbox_source="text_latin_masked_line_engcut",
-            review_flags=[],
+            review_flags=(
+                [PPOCR_LATIN_TOKEN_FALLBACK_FLAG]
+                if token_fallback_count
+                else []
+            ),
         )
     return results
 
@@ -1738,6 +1823,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = recognize(chunk[0])
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
+            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             results.append((chunk[0], route_results))
             continue
         futures = [_ENGCUT_NATIVE_EXECUTOR.submit(recognize, route) for route in chunk]
@@ -1745,6 +1831,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = future.result()
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
+            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
             results.append((route, route_results))
     return results
 

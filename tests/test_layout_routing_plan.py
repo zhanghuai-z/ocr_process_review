@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from app.models.charocr_routing import TextSliceRoute, routing_segment_from_record
+from app.models.charocr_routing import (
+    PpOcrLatinTokenObservation,
+    TextSliceRoute,
+    routing_segment_from_record,
+)
 from app.services.layout_routing_plan import (
     RoutingLine,
     RoutingSegment,
@@ -184,6 +188,28 @@ def test_punctuation_candidate_round_trips_only_on_single_glyph_symbol_route():
     assert record["segments"][0]["ppocr_punctuation_candidate"] == "’"
     assert record["segments"][0]["content_bbox"] == [24, 18, 32, 42]
     assert restored.ppocr_punctuation_candidate == "’"
+
+
+def test_latin_token_observations_round_trip_only_on_latin_routes():
+    segment = RoutingSegment(
+        kind="text_latin",
+        bbox=(20, 10, 90, 50),
+        text="UrbanCrisis",
+        ppocr_latin_tokens=(
+            PpOcrLatinTokenObservation("Urban", (20, 10, 52, 50)),
+            PpOcrLatinTokenObservation("Crisis", (58, 10, 90, 50)),
+        ),
+    )
+    line = RoutingLine(index=0, bbox=(0, 0, 100, 60), segments=(segment,))
+
+    record = routing_line_to_record(line)
+    restored = routing_segment_from_record(record["segments"][0])
+
+    assert record["segments"][0]["ppocr_latin_tokens"] == [
+        {"text": "Urban", "bbox": [20, 10, 52, 50]},
+        {"text": "Crisis", "bbox": [58, 10, 90, 50]},
+    ]
+    assert restored.ppocr_latin_tokens == segment.ppocr_latin_tokens
 
 
 def test_punctuation_candidate_rejects_math_symbols_and_unscoped_routes():

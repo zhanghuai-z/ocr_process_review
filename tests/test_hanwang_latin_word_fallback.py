@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 import app.engines.hanwang.micro_recblock as micro_module
-from app.models.charocr_routing import RoutingLine, RoutingSegment
+from app.models.charocr_routing import (
+    PpOcrLatinTokenObservation,
+    RoutingLine,
+    RoutingSegment,
+)
 from tests.charocr_native_route_fixture import run_micro_recblock_with_explicit_routes
 
 
@@ -223,6 +227,56 @@ def test_engcut_overlapping_native_group_degrades_to_one_word_observation():
     assert results[0].source.endswith(":overlap_word")
 
 
+def test_engcut_overlapping_group_uses_uniquely_bound_ppocr_word_observation():
+    chars = [
+        micro_module.EngcutChar("o", bbox=(10, 5, 24, 30), group_index=0, char_index=0),
+        micro_module.EngcutChar("f", bbox=(22, 4, 36, 30), group_index=0, char_index=1),
+    ]
+
+    text, results = micro_module._engcut_route_line_text_and_chars(
+        chars,
+        ppocr_tokens=(PpOcrLatinTokenObservation("of", (14, 4, 32, 31)),),
+    )
+
+    assert text == "of"
+    assert [(char.text, char.bbox, char.source, char.bbox_granularity) for char in results] == [
+        ("of", (10, 4, 36, 31), "ppocrv6:latin_token_geometry_fallback", "word"),
+    ]
+
+
+def test_engcut_text_disagreement_uses_uniquely_bound_ppocr_word_observation():
+    chars = [
+        micro_module.EngcutChar(char, bbox=(10 + index * 10, 4, 19 + index * 10, 30), group_index=0, char_index=index)
+        for index, char in enumerate("Unbalan,ced")
+    ]
+
+    text, results = micro_module._engcut_route_line_text_and_chars(
+        chars,
+        ppocr_tokens=(PpOcrLatinTokenObservation("Unbalanced", (10, 3, 130, 31)),),
+    )
+
+    assert text == "Unbalanced"
+    assert len(results) == 1
+    assert results[0].text == "Unbalanced"
+    assert results[0].candidates == ["Unbalan,ced", "Unbalanced"]
+    assert results[0].source == "ppocrv6:latin_token_geometry_fallback"
+
+
+def test_engcut_cannot_reuse_one_ppocr_token_for_multiple_native_groups():
+    chars = [
+        micro_module.EngcutChar("A", bbox=(10, 4, 18, 30), group_index=0, char_index=0),
+        micro_module.EngcutChar("B", bbox=(24, 4, 32, 30), group_index=1, char_index=0),
+    ]
+
+    text, results = micro_module._engcut_route_line_text_and_chars(
+        chars,
+        ppocr_tokens=(PpOcrLatinTokenObservation("AB", (8, 3, 34, 31)),),
+    )
+
+    assert text == "A B"
+    assert all(char.source != "ppocrv6:latin_token_geometry_fallback" for char in results)
+
+
 def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     image = np.full((40, 180, 3), 255, dtype=np.uint8)
     image[8:30, 8:25] = 0
@@ -265,6 +319,44 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
         (2, 4, 3): "CD",
     }
     assert all(result.bbox_source == "text_latin_masked_line_engcut" for result in results.values())
+
+
+def test_masked_latin_line_audits_ppocr_word_geometry_fallback():
+    image = np.full((40, 120, 3), 255, dtype=np.uint8)
+    route = micro_module._EngCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(0, 0, 100, 36),
+        segments=(
+            micro_module._TextRoute(
+                0,
+                0,
+                0,
+                (20, 0, 80, 36),
+                kind="text_latin",
+                ppocr_latin_tokens=(PpOcrLatinTokenObservation("Word", (24, 3, 68, 31)),),
+            ),
+        ),
+    )
+    stats = micro_module.RunStats()
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = (
+        lambda _crop, *, timeout=0: _eng20_grouped_payload_at([(25, "W0rd")])
+    )
+    try:
+        result = micro_module._recognize_engcut_masked_line(
+            image,
+            route,
+            stats,
+            timeout=1.0,
+        )[(0, 0, 0)]
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    assert result.text == "Word"
+    assert result.source.endswith("+ppocrv6_token")
+    assert result.review_flags == ["latin_token_geometry_fallback"]
+    assert stats.latin_token_geometry_fallbacks == 1
 
 
 def test_ppocr_symbol_route_materializes_exact_text_and_component_geometry():
@@ -445,6 +537,47 @@ def test_masked_latin_lines_use_bounded_parallel_native_calls():
     assert max_active <= micro_module._MAX_ENGCUT_LINES_PER_PAGE
     assert stats.engcut_route_calls == 4
     assert [route.line_idx for route, _route_results in results] == [0, 1, 2, 3]
+
+
+def test_masked_latin_parallel_runner_aggregates_token_fallback_stats():
+    image = np.full((40, 120, 3), 255, dtype=np.uint8)
+    routes = [
+        micro_module._EngCutMaskedLineRoute(
+            block_idx=0,
+            line_idx=line_idx,
+            bbox=(0, 0, 100, 36),
+            segments=(
+                micro_module._TextRoute(
+                    0,
+                    line_idx,
+                    0,
+                    (20, 0, 80, 36),
+                    kind="text_latin",
+                    ppocr_latin_tokens=(
+                        PpOcrLatinTokenObservation("Word", (20, 2, 70, 30)),
+                    ),
+                ),
+            ),
+        )
+        for line_idx in range(2)
+    ]
+    stats = micro_module.RunStats()
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = (
+        lambda _crop, *, timeout=0: _eng20_grouped_payload_at([(22, "W0rd")])
+    )
+    try:
+        results = micro_module._recognize_engcut_masked_lines(
+            image,
+            routes,
+            stats,
+            timeout=1.0,
+        )
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    assert len(results) == 2
+    assert stats.latin_token_geometry_fallbacks == 2
 
 
 def test_masked_latin_line_hook_writes_actual_engcut_input(tmp_path, monkeypatch):
