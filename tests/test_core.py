@@ -892,6 +892,7 @@ def test_block_type_mapping():
     assert map_paddle_label_to_block_type("math_formula") == BlockType.EQUATION
     assert map_paddle_label_to_block_type("bibliography") == BlockType.REFERENCE
     assert map_paddle_label_to_block_type("vision_footnote") == BlockType.TEXT
+    assert map_paddle_label_to_block_type("vertical_text") == BlockType.TEXT
     assert normalize_paddle_label("vision_footnote") == "footnote"
     assert map_paddle_label_to_block_type("custom_formula_noise") == BlockType.UNKNOWN
     assert map_paddle_label_to_block_type("not_table") == BlockType.UNKNOWN

@@ -85,6 +85,24 @@ def test_layout_snapshot_deduplicates_regions_by_label_and_bbox():
     assert snapshot.blocks[0].order == 0
 
 
+def test_vertical_text_is_adopted_as_explicit_text_ocr_content():
+    page = Page(image_path="", width=300, height=600)
+    set_paddle_raw_layout_records(page, [{
+        "block_label": "vertical_text",
+        "block_bbox": [20, 30, 80, 520],
+        "block_content": "宁海林\n郑凯业",
+    }])
+
+    snapshot = layout_snapshot_from_normalized_artifact(
+        normalized_layout_artifact_from_page(page)
+    )
+
+    assert len(snapshot.blocks) == 1
+    assert snapshot.blocks[0].source_label == "vertical_text"
+    assert snapshot.blocks[0].block_type == BlockType.TEXT
+    assert snapshot.blocks[0].ocr_policy == OcrPolicy.TEXT_OCR
+
+
 def test_adopt_layout_snapshot_stores_truth_and_projects_blocks():
     page = Page(image_path="", width=300, height=220)
     set_paddle_raw_layout_records(page, [

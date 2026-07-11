@@ -42,6 +42,7 @@ _PADDLE_LABEL_TO_BLOCK_TYPE: dict[str, BlockType] = {
     "footnote": BlockType.TEXT,
     "vision_footnote": BlockType.TEXT,
     "sidebar_text": BlockType.TEXT,
+    "vertical_text": BlockType.TEXT,
     "algorithm": BlockType.TEXT,
     "figure": BlockType.FIGURE,
     "graphic": BlockType.FIGURE,
