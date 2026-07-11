@@ -315,3 +315,55 @@ def test_shifted_comma_reclaims_its_mark_without_taking_following_latin_body():
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 94, 30), "China")]
+
+
+def test_shifted_multi_part_symbol_reclaims_component_from_adjacent_latin_token():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))
+    _ink(image, (30, 10, 35, 30))       # digit body
+    _ink(image, (40, 9, 46, 15))        # upper percent dot, inside digit proposal
+    _ink(image, (43, 17, 48, 22))       # percent slash, owned by symbol proposal
+    _ink(image, (46, 24, 52, 30))       # lower percent dot; projection chain
+    _ink(image, (68, 10, 84, 30))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲1%乙",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "1", (28, 8, 43, 32)),
+            PpOcrV6WordBox(0, 2, "%", (45, 8, 54, 32)),
+            PpOcrV6WordBox(0, 3, "乙", (66, 8, 86, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((30, 10, 35, 30), "1")]
+
+
+def test_fused_superscript_uses_symbol_proposal_to_keep_latin_masks_disjoint():
+    image = _image()
+    _ink(image, (20, 10, 42, 30))       # fused x + superscript 2
+    _ink(image, (44, 10, 50, 30))       # following digit 2
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="x²2",
+        bbox=(0, 0, 70, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "x", (20, 8, 29, 32)),
+            PpOcrV6WordBox(0, 1, "²", (32, 8, 42, 32)),
+            PpOcrV6WordBox(0, 2, "2", (44, 8, 52, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 70, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((20, 10, 29, 30), "x"),
+        ((44, 10, 50, 30), "2"),
+    ]

@@ -207,6 +207,7 @@ def test_text_latin_route_uses_engcut_without_linecut():
 def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     image = np.full((40, 180, 3), 255, dtype=np.uint8)
     image[8:30, 8:25] = 0
+    image[8:30, 33:35] = 0
     image[8:30, 42:68] = 0
     image[8:30, 112:138] = 0
     route = micro_module._LatinMaskedLineRoute(
@@ -237,6 +238,7 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     assert stats.latin_engcut_route_calls == 1
     assert len(captured) == 1
     assert np.all(captured[0][10, 12] == 255)
+    assert np.all(captured[0][10, 34] == 255)
     assert np.all(captured[0][10, 48] == 0)
     assert np.all(captured[0][10, 118] == 0)
     assert {key: result.text for key, result in results.items()} == {

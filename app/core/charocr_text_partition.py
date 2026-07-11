@@ -232,16 +232,17 @@ def _component_owner_token_indices(
     """Assign every ink component to at most one PP-OCR token.
 
     Word boxes are approximate and commonly meet on the wrong side of a narrow
-    glyph.  Exact center containment is authoritative.  A displaced symbol may
-    then reclaim nearby ink only when its proposal has not already claimed a
-    component; this keeps a comma from also taking the following ``i``.  The
-    remaining ink goes to the nearest non-symbol token inside that token's
-    measured search window.  The staged assignment preserves detached ``i/j``
-    dots while keeping punctuation out of EngCut masks.
+    glyph.  Exact center containment is authoritative.  A symbol then anchors
+    to ink carrying its proposal center, or to the nearest unowned component,
+    and reclaims its horizontally connected component stack.  This completes
+    multi-part marks such as percent/equal without taking the following ``i``
+    or ``C``.  Remaining ink goes to the nearest non-symbol token inside that
+    token's measured search window.
     """
     owners: dict[tuple[int, int, int, int, int], int | None] = {
         component: None for component in components
     }
+    token_branches = {token.token_index: _token_branch(token.text) for token in tokens}
     eligible_components = [
         component
         for component in components
@@ -267,37 +268,84 @@ def _component_owner_token_indices(
         if centered:
             owners[component] = min(centered)[3]
 
-    occupied = {owner for owner in owners.values() if owner is not None}
     for token in tokens:
-        if _token_branch(token.text) != "symbol" or token.token_index in occupied:
+        if _token_branch(token.text) != "symbol":
             continue
         token_bbox = _clip(token.bbox, region_bbox)
         seed_bbox = _symbol_seed_bbox(token, region_bbox)
+        anchors = [
+            component
+            for component in eligible_components
+            if owners[component] == token.token_index
+        ]
         candidates = [
             component
             for component in eligible_components
-            if owners[component] is None
+            if owners[component] != token.token_index
+            and (
+                owners[component] is None
+                or token_branches.get(owners[component]) == "latin"
+            )
             and _intersect(component[:4], seed_bbox) is not None
-            and _nearest_token_index(component[:4], tokens, region_bbox) == token.token_index
         ]
-        if not candidates:
-            continue
-        anchor = min(
-            candidates,
-            key=lambda component: (
-                _horizontal_gap(component[:4], token_bbox),
-                abs((component[0] + component[2]) - (token_bbox[0] + token_bbox[2])),
-                component[1],
-            ),
-        )
-        symbol_components = [
-            component
-            for component in candidates
-            if component is anchor
-            or min(component[2], anchor[2]) > max(component[0], anchor[0])
-        ]
-        for component in symbol_components:
-            owners[component] = token.token_index
+        if not anchors:
+            unowned = [
+                component
+                for component in candidates
+                if owners[component] is None
+            ]
+            if not unowned:
+                continue
+            token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
+            token_center_y = (token_bbox[1] + token_bbox[3]) / 2.0
+            center_carriers = [
+                component
+                for component in unowned
+                if component[0] <= token_center_x <= component[2]
+                and component[1] <= token_center_y <= component[3]
+            ]
+            if center_carriers:
+                unowned = center_carriers
+            else:
+                unowned = [
+                    component
+                    for component in unowned
+                    if _nearest_token_index(component[:4], tokens, region_bbox) == token.token_index
+                ]
+                if not unowned:
+                    continue
+            anchor = min(
+                unowned,
+                key=lambda component: (
+                    -_overlap_ratio(token_bbox, component[:4]),
+                    _horizontal_gap(component[:4], token_bbox),
+                    abs((component[0] + component[2]) - (token_bbox[0] + token_bbox[2])),
+                    component[1],
+                ),
+            )
+            owners[anchor] = token.token_index
+            anchors = [anchor]
+
+        # Multi-part marks (%, =, :, !) can have one detached component land
+        # inside an adjacent word proposal when PP geometry is shifted.  Their
+        # components share a horizontal projection, unlike the following C in
+        # `,China`, so reclaim that vertical stack as one symbol owner.
+        remaining = list(candidates)
+        while True:
+            symbol_components = [
+                component
+                for component in remaining
+                if any(
+                    min(component[2], anchor[2]) > max(component[0], anchor[0])
+                    for anchor in anchors
+                )
+            ]
+            if not symbol_components:
+                break
+            for component in symbol_components:
+                owners[component] = token.token_index
+                anchors.append(component)
+                remaining.remove(component)
 
     for component in eligible_components:
         if owners[component] is not None:

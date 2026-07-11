@@ -1365,8 +1365,8 @@ def _refine_overlap_fragments_with_recrop(
 RECOG_GROUP_CROP_PAD_X = 8
 RECOG_GROUP_CROP_PAD_Y = 10
 RECOG_GROUP_RETRY_TOP_TRIM = 3
-ENGCUT_LINE_CROP_PAD_X = 2
-ENGCUT_LINE_CROP_PAD_Y = 2
+ENGCUT_LINE_CONTEXT_PAD_X = 2
+ENGCUT_LINE_CONTEXT_PAD_Y = 2
 OVERLAP_MERGE_LOW_CONFIDENCE = 0.35
 OVERLAP_MERGE_IOA_THRESHOLD = 0.45
 OVERLAP_MERGE_VERTICAL_THRESHOLD = 0.55
@@ -1421,30 +1421,24 @@ def _materialize_latin_masked_line_crop(
 ) -> tuple[np.ndarray, int, int]:
     """Return a full-line EngCut canvas containing only approved Latin pixels.
 
-    Segment padding is intentionally identical to the former per-segment
-    EngCut crop.  The difference is geometric context: EngCut sees one
-    physical line, while CJK, punctuation, formulas, and structural regions
-    are painted white instead of being cut away or passed through.
+    EngCut sees one physical line with a small outer context margin.  Approved
+    segment pixels are copied without expansion; CJK, punctuation, formulas,
+    and structural regions stay white and cannot leak back across a route
+    boundary.
     """
     height, width = image_bgr.shape[:2]
     x1, y1, x2, y2 = _expand_xyxy(
         route.bbox,
         width,
         height,
-        pad_x=ENGCUT_LINE_CROP_PAD_X,
-        pad_y=ENGCUT_LINE_CROP_PAD_Y,
+        pad_x=ENGCUT_LINE_CONTEXT_PAD_X,
+        pad_y=ENGCUT_LINE_CONTEXT_PAD_Y,
     )
     if x2 <= x1 or y2 <= y1:
         raise RuntimeError(f"invalid masked EngCut line bbox: {route.bbox}")
     canvas = np.full_like(image_bgr[y1:y2, x1:x2], 255)
     for segment in route.segments:
-        sx1, sy1, sx2, sy2 = _expand_xyxy(
-            segment.bbox,
-            width,
-            height,
-            pad_x=ENGCUT_LINE_CROP_PAD_X,
-            pad_y=ENGCUT_LINE_CROP_PAD_Y,
-        )
+        sx1, sy1, sx2, sy2 = segment.bbox
         sx1 = max(x1, sx1)
         sy1 = max(y1, sy1)
         sx2 = min(x2, sx2)
