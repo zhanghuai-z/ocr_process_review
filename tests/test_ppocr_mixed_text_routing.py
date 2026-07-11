@@ -423,10 +423,13 @@ def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
         ("text_latin", (92, 10, 97, 30)),
     ]
     assert [
-        segment.component_grouping
+        (segment.component_grouping, segment.ppocr_punctuation_candidate)
         for segment in result.segments
         if segment.kind == "text_other"
-    ] == [COMPONENT_GROUPING_SINGLE_GLYPH, COMPONENT_GROUPING_SINGLE_GLYPH]
+    ] == [
+        (COMPONENT_GROUPING_SINGLE_GLYPH, "”"),
+        (COMPONENT_GROUPING_SINGLE_GLYPH, "“"),
+    ]
 
 
 def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot():
@@ -454,7 +457,10 @@ def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot()
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.component_grouping) for segment in result.segments] == [
-        ("text_latin", (20, 9, 89, 48), ""),
-        ("text_other", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH),
+    assert [
+        (segment.kind, segment.bbox, segment.component_grouping, segment.ppocr_punctuation_candidate)
+        for segment in result.segments
+    ] == [
+        ("text_latin", (20, 9, 89, 48), "", ""),
+        ("text_other", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH, "?"),
     ]

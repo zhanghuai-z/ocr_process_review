@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+from unicodedata import category
 
 import cv2
 import numpy as np
@@ -236,7 +237,9 @@ def _text_other_segments(
     if any(component_owners.get(component) is None for component in gap_components):
         return [RoutingSegment(kind="text_other", bbox=bbox)]
 
-    clusters: list[list[tuple[int, int, int, int, int]]] = []
+    clusters_with_candidates: list[
+        tuple[list[tuple[int, int, int, int, int]], str]
+    ] = []
     expected_glyph_count = 0
     for owner in sorted(
         gap_owners,
@@ -249,13 +252,19 @@ def _text_other_segments(
         )
         if not owned:
             continue
-        glyph_count = max(1, _nonspace_glyph_count(token.text))
+        glyphs = [char for char in str(token.text or "") if not char.isspace()]
+        glyph_count = max(1, len(glyphs))
         expected_glyph_count += glyph_count
-        clusters.extend(_split_components_by_largest_gaps(owned, glyph_count))
-    clusters.sort(key=lambda cluster: (
-        min(component[0] for component in cluster),
-        min(component[1] for component in cluster),
+        split_clusters = _split_components_by_largest_gaps(owned, glyph_count)
+        if len(split_clusters) != len(glyphs):
+            return [RoutingSegment(kind="text_other", bbox=bbox)]
+        clusters_with_candidates.extend(zip(split_clusters, glyphs))
+    clusters_with_candidates.sort(key=lambda item: (
+        min(component[0] for component in item[0]),
+        min(component[1] for component in item[0]),
     ))
+    clusters = [cluster for cluster, _candidate in clusters_with_candidates]
+    candidates = [candidate for _cluster, candidate in clusters_with_candidates]
     if len(clusters) != expected_glyph_count:
         return [RoutingSegment(kind="text_other", bbox=bbox)]
     if len(clusters) == 1:
@@ -263,6 +272,7 @@ def _text_other_segments(
             kind="text_other",
             bbox=bbox,
             component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+            ppocr_punctuation_candidate=_punctuation_candidate(candidates[0]),
         )]
 
     cluster_boxes = [_union([component[:4] for component in cluster]) for cluster in clusters]
@@ -277,6 +287,7 @@ def _text_other_segments(
             kind="text_other",
             bbox=(edges[index], bbox[1], edges[index + 1], bbox[3]),
             component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+            ppocr_punctuation_candidate=_punctuation_candidate(candidates[index]),
         )
         for index in range(len(edges) - 1)
         if edges[index + 1] > edges[index]
@@ -309,6 +320,10 @@ def _split_components_by_largest_gaps(
     if current:
         clusters.append(current)
     return clusters
+
+
+def _punctuation_candidate(value: str) -> str:
+    return value if len(value) == 1 and category(value).startswith("P") else ""
 
 
 def _latin_mask_bbox(

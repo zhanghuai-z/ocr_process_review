@@ -264,6 +264,7 @@ class _TextRoute:
     carved: bool = False
     kind: str = "text"
     component_grouping: str = ""
+    ppocr_punctuation_candidate: str = ""
 
     @property
     def key(self) -> tuple[int, int, int]:
@@ -360,6 +361,7 @@ def _text_route_bboxes_from_lines(
             carved=len(line.segments) > 1,
             kind=segment.kind,
             component_grouping=segment.component_grouping,
+            ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
         )
         for line_idx, line in enumerate(lines)
         for segment_idx, segment in enumerate(line.segments)
@@ -388,6 +390,7 @@ def _latin_masked_line_routes_from_lines(
                 carved=len(line.segments) > 1,
                 kind=segment.kind,
                 component_grouping=segment.component_grouping,
+                ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
             )
             for segment_idx, segment in enumerate(line.segments)
             if segment.kind == "text_latin"
@@ -444,16 +447,16 @@ def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
     return merged
 
 
-def _recover_single_glyph_route_component_bbox(
+def _apply_single_glyph_route_contract(
     route: _TextRoute,
     lines: list[LineResult],
     segimg_group_audits: list[dict[str, Any]],
 ) -> None:
-    """Join native SegImg components for one routed punctuation glyph.
+    """Apply geometry and candidate constraints for one routed symbol glyph.
 
-    The routing plan supplies only the grouping contract.  Recognized text
-    remains native output; if native returns zero or multiple characters this
-    function leaves the observations untouched.
+    PP-OCR supplies neither final text nor a synthetic character.  Its symbol
+    hint may only select a value already returned by the native candidate list.
+    If native returns zero or multiple characters, the observation is untouched.
     """
     if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
         return
@@ -471,22 +474,41 @@ def _recover_single_glyph_route_component_bbox(
         if isinstance(item.get("segimg_group_bbox"), (list, tuple))
         and len(item["segimg_group_bbox"]) == 4
     ]
-    if len(component_boxes) <= 1:
-        return
-    component_bbox = union_xyxy(component_boxes)
     line_index, char_index = char_locations[0]
     line = lines[line_index]
     char = line.chars[char_index]
     chars = list(line.chars)
-    chars[char_index] = replace(
-        char,
-        bbox=component_bbox,
-        source=f"{char.source}:native_component_union",
-        bbox_granularity=char.bbox_granularity or "char",
-    )
+    next_char = char
+    changed = False
+    if (
+        route.ppocr_punctuation_candidate
+        and route.ppocr_punctuation_candidate != char.text
+        and route.ppocr_punctuation_candidate in char.candidates
+    ):
+        next_char = replace(
+            next_char,
+            text=route.ppocr_punctuation_candidate,
+            token_text=route.ppocr_punctuation_candidate,
+            source=f"{next_char.source}:native_candidate_selected_by_ppocr_punctuation",
+        )
+        changed = True
+    component_bbox = None
+    if len(component_boxes) > 1:
+        component_bbox = union_xyxy(component_boxes)
+        next_char = replace(
+            next_char,
+            bbox=component_bbox,
+            source=f"{next_char.source}:native_component_union",
+            bbox_granularity=next_char.bbox_granularity or "char",
+        )
+        changed = True
+    if not changed:
+        return
+    chars[char_index] = next_char
     lines[line_index] = replace(
         line,
-        bbox=union_xyxy([line.bbox, component_bbox]),
+        text="".join(item.text for item in chars),
+        bbox=(union_xyxy([line.bbox, component_bbox]) if component_bbox is not None else line.bbox),
         chars=chars,
     )
 
@@ -2337,7 +2359,7 @@ def run_micro_recblock(
                     f"Hanwang OCR 已完成 {completed_groups}/{total_groups}",
                 )
         for route in linecut_text_routes:
-            _recover_single_glyph_route_component_bbox(
+            _apply_single_glyph_route_contract(
                 route,
                 grouped_lines.get(route.key, []),
                 segimg_group_audits_by_route.get(route.key, []),

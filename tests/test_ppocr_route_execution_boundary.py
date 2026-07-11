@@ -13,7 +13,7 @@ from app.engines.hanwang.micro_recblock import (
     RunStats,
     _TextRoute,
     _compile_native_route_map,
-    _recover_single_glyph_route_component_bbox,
+    _apply_single_glyph_route_contract,
 )
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
@@ -35,7 +35,7 @@ def test_single_glyph_route_unions_detached_native_component_geometry():
         chars=[CharResult(text="?", bbox=(108, 28, 132, 64))],
     )]
 
-    _recover_single_glyph_route_component_bbox(
+    _apply_single_glyph_route_contract(
         route,
         lines,
         [
@@ -47,6 +47,51 @@ def test_single_glyph_route_unions_detached_native_component_geometry():
     assert lines[0].bbox == (108, 28, 132, 79)
     assert lines[0].chars[0].bbox == (108, 28, 132, 79)
     assert lines[0].chars[0].source.endswith(":native_component_union")
+
+
+def test_single_glyph_route_selects_only_an_existing_native_symbol_candidate():
+    route = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(100, 20, 150, 90),
+        kind="text_other",
+        component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+        ppocr_punctuation_candidate="’",
+    )
+    lines = [LineResult(
+        text="，",
+        bbox=(108, 28, 132, 64),
+        chars=[CharResult(text="，", bbox=(108, 28, 132, 64), candidates=["，", "’", "'"])],
+    )]
+
+    _apply_single_glyph_route_contract(route, lines, [])
+
+    assert lines[0].text == "’"
+    assert lines[0].chars[0].text == "’"
+    assert lines[0].chars[0].source.endswith(":native_candidate_selected_by_ppocr_punctuation")
+
+
+def test_single_glyph_route_does_not_inject_a_symbol_missing_from_native_candidates():
+    route = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(100, 20, 150, 90),
+        kind="text_other",
+        component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+        ppocr_punctuation_candidate="’",
+    )
+    lines = [LineResult(
+        text="，",
+        bbox=(108, 28, 132, 64),
+        chars=[CharResult(text="，", bbox=(108, 28, 132, 64), candidates=["，", "。"])],
+    )]
+
+    _apply_single_glyph_route_contract(route, lines, [])
+
+    assert lines[0].text == "，"
+    assert lines[0].chars[0].text == "，"
 
 
 def test_hanwang_receives_only_explicit_page_routing_plan_for_text_blocks():

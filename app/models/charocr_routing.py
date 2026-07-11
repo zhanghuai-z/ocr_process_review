@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unicodedata import category
 
 
 XYXY = tuple[int, int, int, int]
@@ -40,6 +41,7 @@ class RoutingSegment:
     text: str = ""
     content_bbox: XYXY | None = None
     component_grouping: str = ""
+    ppocr_punctuation_candidate: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
@@ -49,6 +51,17 @@ class RoutingSegment:
         if grouping and self.kind != ROUTE_SEGMENT_TEXT_OTHER:
             raise ValueError("component grouping is only valid for text_other routes")
         object.__setattr__(self, "component_grouping", grouping)
+        candidate = str(self.ppocr_punctuation_candidate or "")
+        if candidate:
+            if grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
+                raise ValueError("PP-OCR punctuation candidate requires single-glyph component grouping")
+            if (
+                len(candidate) != 1
+                or candidate.isspace()
+                or not category(candidate).startswith("P")
+            ):
+                raise ValueError(f"invalid PP-OCR punctuation candidate: {candidate!r}")
+        object.__setattr__(self, "ppocr_punctuation_candidate", candidate)
 
 
 @dataclass(frozen=True)
@@ -176,6 +189,7 @@ def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
         text=str(segment.get("text") or ""),
         content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
         component_grouping=str(segment.get("component_grouping") or ""),
+        ppocr_punctuation_candidate=str(segment.get("ppocr_punctuation_candidate") or ""),
     )
 
 
@@ -194,6 +208,11 @@ def routing_line_to_record(
                 "text": segment.text,
                 **({"content_bbox": list(segment.content_bbox)} if segment.content_bbox else {}),
                 **({"component_grouping": segment.component_grouping} if segment.component_grouping else {}),
+                **(
+                    {"ppocr_punctuation_candidate": segment.ppocr_punctuation_candidate}
+                    if segment.ppocr_punctuation_candidate
+                    else {}
+                ),
             }
             for segment in line.segments
         ],

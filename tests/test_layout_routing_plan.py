@@ -168,6 +168,38 @@ def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
     assert restored.content_bbox == (70, 10, 110, 82)
 
 
+def test_punctuation_candidate_round_trips_only_on_single_glyph_other_route():
+    segment = RoutingSegment(
+        kind="text_other",
+        bbox=(20, 10, 40, 50),
+        component_grouping="single_glyph",
+        ppocr_punctuation_candidate="’",
+    )
+    line = RoutingLine(index=0, bbox=(0, 0, 80, 60), segments=(segment,))
+
+    record = routing_line_to_record(line)
+    restored = routing_segment_from_record(record["segments"][0])
+
+    assert record["segments"][0]["ppocr_punctuation_candidate"] == "’"
+    assert restored.ppocr_punctuation_candidate == "’"
+
+
+def test_punctuation_candidate_rejects_math_symbols_and_unscoped_routes():
+    with pytest.raises(ValueError, match="punctuation candidate"):
+        RoutingSegment(
+            kind="text_other",
+            bbox=(0, 0, 20, 20),
+            component_grouping="single_glyph",
+            ppocr_punctuation_candidate="+",
+        )
+    with pytest.raises(ValueError, match="single-glyph"):
+        RoutingSegment(
+            kind="text_other",
+            bbox=(0, 0, 20, 20),
+            ppocr_punctuation_candidate="’",
+        )
+
+
 def test_hanwang_assembles_explicit_text_segment_kinds():
     import app.engines.hanwang.micro_recblock as micro_module
 
