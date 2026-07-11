@@ -1431,13 +1431,12 @@ def _engcut_route_line_text_and_chars(
 ) -> tuple[str, list[CharResult]]:
     text_parts: list[str] = []
     results: list[CharResult] = []
-    previous_group: tuple[int, int] | None = None
-    for char in chars:
-        text = str(char.text or "")
-        if not text:
+    has_output_group = False
+    for group in _engcut_groups(chars):
+        visible = [char for char in group if str(char.text or "")]
+        if not visible:
             continue
-        group = (char.line_index, char.group_index)
-        if previous_group is not None and group != previous_group:
+        if has_output_group:
             text_parts.append(" ")
             results.append(
                 CharResult(
@@ -1450,20 +1449,44 @@ def _engcut_route_line_text_and_chars(
                     token_text=" ",
                 )
             )
-        text_parts.append(text)
-        results.append(
+        group_text = "".join(str(char.text or "") for char in visible)
+        text_parts.append(group_text)
+        has_output_group = True
+        if _engcut_group_has_overlapping_char_bboxes(visible):
+            boxes = [char.bbox for char in visible if char.bbox is not None]
+            results.append(
+                CharResult(
+                    text=group_text,
+                    confidence=0.0,
+                    bbox=union_xyxy(boxes),
+                    candidates=[group_text],
+                    source=f"{LATIN_ENGCUT_ROUTE_SOURCE}:overlap_word",
+                    bbox_granularity="word",
+                    token_text=group_text,
+                )
+            )
+            continue
+        results.extend(
             CharResult(
-                text=text,
+                text=str(char.text or ""),
                 confidence=0.0,
                 bbox=char.bbox,
-                candidates=[text],
+                candidates=[str(char.text or "")],
                 source=LATIN_ENGCUT_ROUTE_SOURCE,
                 bbox_granularity="char",
-                token_text=text,
+                token_text=str(char.text or ""),
             )
+            for char in visible
         )
-        previous_group = group
     return "".join(text_parts), results
+
+
+def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
+    boxes = [char.bbox for char in chars]
+    if any(box is None for box in boxes):
+        return False
+    ordered = sorted((box for box in boxes if box is not None), key=lambda box: (box[0], box[1]))
+    return any(right[0] < left[2] for left, right in zip(ordered, ordered[1:]))
 
 
 def _materialize_latin_masked_line_crop(

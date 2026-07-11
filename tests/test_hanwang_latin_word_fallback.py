@@ -204,6 +204,24 @@ def test_text_latin_route_uses_engcut_without_linecut():
     assert [char.text for char in rows[0].lines[0].chars] == list("Urban Crisis")
 
 
+def test_engcut_overlapping_native_group_degrades_to_one_word_observation():
+    chars = [
+        micro_module.EngcutChar("o", bbox=(10, 5, 24, 30), group_index=0, char_index=0),
+        micro_module.EngcutChar("f", bbox=(22, 4, 36, 30), group_index=0, char_index=1),
+        micro_module.EngcutChar("A", bbox=(50, 4, 64, 30), group_index=1, char_index=0),
+    ]
+
+    text, results = micro_module._engcut_route_line_text_and_chars(chars)
+
+    assert text == "of A"
+    assert [(char.text, char.bbox, char.bbox_granularity) for char in results] == [
+        ("of", (10, 4, 36, 30), "word"),
+        (" ", None, "space"),
+        ("A", (50, 4, 64, 30), "char"),
+    ]
+    assert results[0].source.endswith(":overlap_word")
+
+
 def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     image = np.full((40, 180, 3), 255, dtype=np.uint8)
     image[8:30, 8:25] = 0
