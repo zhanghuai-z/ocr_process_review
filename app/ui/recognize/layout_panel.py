@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.utils.icon_manager import get_icon
+from app.core.app_config import get_config
 from app.models.block_state import is_ocr_text_invalidated
 from app.core.paddle_labels import normalize_paddle_label
 from app.core.proof_line_facts import proof_display_text, proof_search_texts
@@ -253,7 +254,11 @@ class LayoutPanel(QWidget):
         self._type_group: QButtonGroup | None = None
         self._block_search_matches: list[tuple[int, str]] = []
         self._search_text_fields_only = False
+        self._order_mode = ""
+        self._order_sequence: list[str] = []
+        self._order_tools_enabled = False
         self._build_ui()
+        self.refresh_experimental_features()
 
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -336,6 +341,35 @@ class LayoutPanel(QWidget):
         self._btn_char_boxes.clicked.connect(self._refresh_current_page_layers)
         vtl.addWidget(self._btn_char_boxes)
 
+        self._btn_order_numbers = QPushButton("框序")
+        self._btn_order_numbers.setObjectName("pillToolBtn")
+        self._btn_order_numbers.setCheckable(True)
+        self._btn_order_numbers.setChecked(True)
+        self._btn_order_numbers.setFixedHeight(28)
+        self._btn_order_numbers.setToolTip("显示或隐藏版面框顺序")
+        self._btn_order_numbers.toggled.connect(self._refresh_current_page_layers)
+        vtl.addWidget(self._btn_order_numbers)
+
+        self._btn_order_click = QPushButton("点击调序")
+        self._btn_order_click.setObjectName("pillToolBtn")
+        self._btn_order_click.setCheckable(True)
+        self._btn_order_click.setFixedHeight(28)
+        self._btn_order_click.setToolTip("按新顺序逐个点击全部版面框")
+        self._btn_order_click.toggled.connect(
+            lambda checked: self._on_order_mode_toggled("click", checked)
+        )
+        vtl.addWidget(self._btn_order_click)
+
+        self._btn_order_path = QPushButton("轨迹调序")
+        self._btn_order_path.setObjectName("pillToolBtn")
+        self._btn_order_path.setCheckable(True)
+        self._btn_order_path.setFixedHeight(28)
+        self._btn_order_path.setToolTip("按新顺序画线穿过全部版面框")
+        self._btn_order_path.toggled.connect(
+            lambda checked: self._on_order_mode_toggled("path", checked)
+        )
+        vtl.addWidget(self._btn_order_path)
+
         self._btn_delete = QPushButton("删除")
         self._btn_delete.setIcon(get_icon("delete", color="#6B6B6B"))
         self._btn_delete.setIconSize(QSize(16, 16))
@@ -391,6 +425,9 @@ class LayoutPanel(QWidget):
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted_uid.connect(self._on_block_deleted_uid)
         self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
+        self._viewer.order_block_activated.connect(self._on_order_block_activated)
+        self._viewer.order_path_finished.connect(self._on_order_path_finished)
+        self._viewer.order_mode_cancelled.connect(self._cancel_order_mode)
         self._viewer.set_bbox_snapper(self._snap_current_draw_bbox)
         vw_lay.addWidget(self._viewer, 1)
         splitter.addWidget(vw_wrap)
@@ -677,6 +714,7 @@ class LayoutPanel(QWidget):
 
     def set_pages(self, pages: List[Page]) -> None:
         """设置待分析的页面（已加载图片路径）。"""
+        self._cancel_order_mode()
         self._pages = pages
         self._ink_mask_cache.clear()
         self._page_list.set_pages(pages)
@@ -689,6 +727,7 @@ class LayoutPanel(QWidget):
         self._update_page_nav()
 
     def reset(self) -> None:
+        self._cancel_order_mode()
         self.finish_analysis_progress()
         self._pages = []
         self._current_page_idx = 0
@@ -714,6 +753,7 @@ class LayoutPanel(QWidget):
 
     def show_analysis_result(self, pages: List[Page]) -> None:
         """版面分析完成后，更新显示并保持当前选中页。"""
+        self._cancel_order_mode()
         self.finish_analysis_progress()
         self._pages = pages
         self._ink_mask_cache.clear()
@@ -1390,6 +1430,7 @@ class LayoutPanel(QWidget):
 
     def _on_page_selected(self, idx: int) -> None:
         if 0 <= idx < len(self._pages):
+            self._cancel_order_mode()
             self._current_page_idx = idx
             self._update_viewer(idx)
             self._update_page_nav()
@@ -1622,10 +1663,125 @@ class LayoutPanel(QWidget):
         return chars
 
     def _show_page_layers(self, page: Page) -> None:
-        self._viewer.show_layout_block_views(list(iter_page_layout_block_views(page)))
+        views = list(iter_page_layout_block_views(page))
+        self._viewer.show_layout_block_views(views)
         self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
         if self._btn_char_boxes.isChecked():
             self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)
+        if self._order_tools_enabled and self._btn_order_numbers.isChecked():
+            self._viewer.show_block_orders(views, self._temporary_order_numbers(views))
+
+    def refresh_experimental_features(self) -> None:
+        enabled = bool(get_config().get("layout_order_tools_enabled", False))
+        self._order_tools_enabled = enabled
+        for button in (
+            self._btn_order_numbers,
+            self._btn_order_click,
+            self._btn_order_path,
+        ):
+            button.setVisible(enabled)
+        if not enabled:
+            self._cancel_order_mode()
+        self._refresh_current_page_layers()
+
+    def _on_order_mode_toggled(self, mode: str, checked: bool) -> None:
+        if not self._order_tools_enabled:
+            return
+        if checked:
+            self._set_order_mode(mode)
+        elif self._order_mode == mode:
+            self._cancel_order_mode()
+
+    def _set_order_mode(self, mode: str) -> None:
+        if mode not in {"click", "path"} or not self._pages:
+            self._cancel_order_mode()
+            return
+        self._order_mode = mode
+        self._order_sequence = []
+        for button, button_mode in (
+            (self._btn_order_click, "click"),
+            (self._btn_order_path, "path"),
+        ):
+            button.blockSignals(True)
+            button.setChecked(button_mode == mode)
+            button.blockSignals(False)
+        self._viewer.set_order_mode(mode)
+        self._refresh_current_page_layers()
+        if mode == "click":
+            self._set_status_text("请按新顺序逐个点击全部框，Esc 取消")
+        else:
+            self._set_status_text("请画一条轨迹依次穿过全部框，Esc 取消")
+
+    def _cancel_order_mode(self) -> None:
+        self._order_mode = ""
+        self._order_sequence = []
+        if not hasattr(self, "_viewer"):
+            return
+        self._viewer.set_order_mode("")
+        for button in (self._btn_order_click, self._btn_order_path):
+            button.blockSignals(True)
+            button.setChecked(False)
+            button.blockSignals(False)
+        self._refresh_current_page_layers()
+
+    def _on_order_block_activated(self, block_uid: str) -> None:
+        if self._order_mode != "click" or not block_uid or not self._pages:
+            return
+        if block_uid in self._order_sequence:
+            return
+        current_uids = self._current_layout_uids()
+        if block_uid not in current_uids:
+            return
+        self._order_sequence.append(block_uid)
+        if len(self._order_sequence) == len(current_uids):
+            self._commit_block_order(tuple(self._order_sequence))
+            return
+        self._refresh_current_page_layers()
+        self._set_status_text(f"已选择 {len(self._order_sequence)} / {len(current_uids)} 个框")
+
+    def _on_order_path_finished(self, block_uids: object) -> None:
+        if self._order_mode != "path" or not self._pages:
+            return
+        requested = tuple(str(uid) for uid in block_uids) if isinstance(block_uids, tuple) else ()
+        current_uids = self._current_layout_uids()
+        if len(requested) != len(current_uids) or set(requested) != set(current_uids):
+            self._set_status_text(f"轨迹经过 {len(requested)} / {len(current_uids)} 个框，请重画")
+            return
+        self._commit_block_order(requested)
+
+    def _commit_block_order(self, block_uids: tuple[str, ...]) -> None:
+        page = self._pages[self._current_page_idx]
+        self._push_undo_snapshot()
+        try:
+            self._layout_edit_service.apply(LayoutEditCommand.reorder_blocks(page, block_uids))
+        except ValueError as exc:
+            self._set_status_text(f"框序调整失败：{exc}")
+            return
+        self._cancel_order_mode()
+        self._rebuild_heading_outline()
+        self._refresh_block_search()
+        self._update_project_stats()
+        self._set_status_text("框序已更新")
+        self.geometry_changed.emit()
+        self.block_contract_changed.emit(page.page_number, "block_order_changed")
+
+    def _current_layout_uids(self) -> tuple[str, ...]:
+        if not self._pages:
+            return ()
+        return tuple(
+            view.uid
+            for view in iter_page_layout_block_views(self._pages[self._current_page_idx])
+        )
+
+    def _temporary_order_numbers(
+        self,
+        views: list[LayoutBlockView],
+    ) -> dict[str, int] | None:
+        if self._order_mode != "click" or not self._order_sequence:
+            return None
+        remaining = [view.uid for view in views if view.uid not in self._order_sequence]
+        ordered = [*self._order_sequence, *remaining]
+        return {uid: index + 1 for index, uid in enumerate(ordered)}
 
     def _select_block_uid_for_edit(self, block_uid: str) -> None:
         self._viewer.select_block_uid(block_uid)
@@ -1967,6 +2123,7 @@ class LayoutPanel(QWidget):
             return
         new_idx = self._current_page_idx + delta
         if 0 <= new_idx < len(self._pages):
+            self._cancel_order_mode()
             self._page_list.set_current_index(new_idx)
             # 手动触发 viewer 更新（set_current_index 不会发 currentRowChanged）
             self._current_page_idx = new_idx

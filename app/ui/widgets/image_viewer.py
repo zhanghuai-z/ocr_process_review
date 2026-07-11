@@ -10,12 +10,13 @@ from typing import Callable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
 from PySide6.QtGui import (
-    QColor, QImage, QPainter, QPainterPath, QPainterPathStroker,
+    QColor, QFont, QImage, QPainter, QPainterPath, QPainterPathStroker,
     QPen, QPixmap, QCursor,
 )
 from PySide6.QtWidgets import (
-    QApplication, QGraphicsItem, QGraphicsPixmapItem, QGraphicsRectItem,
-    QGraphicsScene, QGraphicsView,
+    QApplication, QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem,
+    QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
+    QGraphicsSimpleTextItem, QGraphicsView,
 )
 
 from app.core.block_attributes import block_attributes
@@ -334,6 +335,9 @@ class ImageViewer(QGraphicsView):
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted_uid = Signal(str)
     char_bbox_moved = Signal(object)  # Char
+    order_block_activated = Signal(str)
+    order_path_finished = Signal(object)  # tuple[str, ...]
+    order_mode_cancelled = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -344,6 +348,7 @@ class ImageViewer(QGraphicsView):
         self._block_items: List[Tuple[BBoxItem, Block]] = []
         self._char_items: List[Tuple[BBoxItem, Char]] = []
         self._readonly_overlay_items: List[QGraphicsRectItem] = []
+        self._order_overlay_items: list[QGraphicsItem] = []
         self._highlight_item = None  # highlight_bbox 使用
 
         # Shift+左键拖拽画框状态
@@ -354,6 +359,11 @@ class ImageViewer(QGraphicsView):
         self._bbox_snapper: Optional[Callable[[BBox], BBox]] = None
         self._edit_mode = True
         self._space_pan_active = False
+        self._order_mode = ""
+        self._order_path: Optional[QPainterPath] = None
+        self._order_path_item: Optional[QGraphicsPathItem] = None
+        self._order_path_uids: list[str] = []
+        self._order_path_last_pos: Optional[QPointF] = None
 
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -368,10 +378,12 @@ class ImageViewer(QGraphicsView):
 
     def set_image(self, image_path: str) -> None:
         self._highlight_item = None
+        self._clear_order_path()
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
         self._readonly_overlay_items.clear()
+        self._order_overlay_items.clear()
         pixmap = _pixmap_from_path(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._scene.setSceneRect(self._pixmap_item.boundingRect())
@@ -380,6 +392,7 @@ class ImageViewer(QGraphicsView):
 
     def set_image_from_qimage(self, qimage: QImage) -> None:
         self._highlight_item = None
+        self._clear_order_path()
         self._scene.clear()
         self._block_items.clear()
         self._char_items.clear()
@@ -397,6 +410,7 @@ class ImageViewer(QGraphicsView):
         self._draw_item = None
         self._selection_start = None
         self._selection_item = None
+        self._clear_order_path()
         self._pixmap_item = None
         self._block_items.clear()
         self._char_items.clear()
@@ -423,6 +437,53 @@ class ImageViewer(QGraphicsView):
             display_label = view.source_label or getattr(view.block_type, "value", str(view.block_type))
             label = f"[{display_label}] 置信度: {_block_observation_avg_confidence(block):.2f}"
             self._add_block_item(block, bbox=view.bbox, color=color, label=label)
+
+    def show_block_orders(
+        self,
+        views: List[LayoutBlockView],
+        order_by_uid: dict[str, int] | None = None,
+    ) -> None:
+        for item in self._order_overlay_items:
+            if item.scene() is self._scene:
+                self._scene.removeItem(item)
+        self._order_overlay_items.clear()
+        for view in views:
+            value = (order_by_uid or {}).get(view.uid, view.order + 1)
+            diameter = 30.0
+            badge = QGraphicsEllipseItem(-diameter, 0, diameter, diameter)
+            badge.setPos(view.bbox.x2, view.bbox.y1)
+            badge.setPen(QPen(QColor("#ffffff"), 2))
+            badge.setBrush(QColor("#C94343"))
+            badge.setZValue(70)
+            badge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            badge.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            badge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            text = QGraphicsSimpleTextItem(str(value), badge)
+            font = QFont()
+            font.setPixelSize(16)
+            font.setBold(True)
+            text.setFont(font)
+            text.setBrush(QColor("#ffffff"))
+            bounds = text.boundingRect()
+            text.setPos(
+                -diameter + (diameter - bounds.width()) / 2,
+                (diameter - bounds.height()) / 2,
+            )
+            text.setZValue(1)
+            text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+            text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._scene.addItem(badge)
+            self._order_overlay_items.append(badge)
+
+    def set_order_mode(self, mode: str) -> None:
+        if mode not in {"", "click", "path"}:
+            raise ValueError(f"unsupported order mode: {mode!r}")
+        self._order_mode = mode
+        self._clear_order_path()
+        self._refresh_item_editability()
+        self.viewport().setCursor(
+            Qt.CursorShape.CrossCursor if mode else Qt.CursorShape.ArrowCursor
+        )
 
     def _add_block_item(
         self,
@@ -607,6 +668,11 @@ class ImageViewer(QGraphicsView):
             event.accept()
 
     def keyPressEvent(self, event) -> None:
+        if self._order_mode:
+            if event.key() == Qt.Key.Key_Escape:
+                self.order_mode_cancelled.emit()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._enter_space_pan()
             event.accept()
@@ -625,6 +691,23 @@ class ImageViewer(QGraphicsView):
         super().keyReleaseEvent(event)
 
     def mousePressEvent(self, event):
+        if self._order_mode and event.button() == Qt.MouseButton.LeftButton:
+            pos = self._map_event_to_scene(event)
+            if self._order_mode == "click":
+                block_uid = self._block_uid_at_scene_pos(pos)
+                if block_uid:
+                    self.order_block_activated.emit(block_uid)
+            else:
+                self._order_path = QPainterPath(pos)
+                self._order_path_uids = []
+                self._order_path_last_pos = pos
+                self._order_path_item = QGraphicsPathItem(self._order_path)
+                self._order_path_item.setPen(QPen(QColor("#C94343"), 5, Qt.PenStyle.SolidLine))
+                self._order_path_item.setZValue(65)
+                self._scene.addItem(self._order_path_item)
+                self._append_order_path_uid(pos)
+            event.accept()
+            return
         if (
             self._edit_mode
             and not self._space_pan_active
@@ -648,6 +731,15 @@ class ImageViewer(QGraphicsView):
                     break
 
     def mouseMoveEvent(self, event):
+        if self._order_mode == "path" and self._order_path is not None:
+            pos = self._map_event_to_scene(event)
+            self._order_path.lineTo(pos)
+            if self._order_path_item is not None:
+                self._order_path_item.setPath(self._order_path)
+            self._append_order_path_segment(self._order_path_last_pos, pos)
+            self._order_path_last_pos = pos
+            event.accept()
+            return
         if self._draw_start is not None and self._draw_item is not None:
             cur = self._map_event_to_scene(event)
             self._draw_item.setRect(QRectF(self._draw_start, cur).normalized())
@@ -661,6 +753,18 @@ class ImageViewer(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if (
+            self._order_mode == "path"
+            and self._order_path is not None
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            pos = self._map_event_to_scene(event)
+            self._append_order_path_segment(self._order_path_last_pos, pos)
+            ordered_uids = tuple(self._order_path_uids)
+            self._clear_order_path()
+            self.order_path_finished.emit(ordered_uids)
+            event.accept()
+            return
         if self._draw_start is not None and event.button() == Qt.MouseButton.LeftButton:
             cur = self._map_event_to_scene(event)
             rect = self._snap_draw_rect(QRectF(self._draw_start, cur).normalized())
@@ -701,6 +805,69 @@ class ImageViewer(QGraphicsView):
         for item in self._readonly_overlay_items:
             self._scene.removeItem(item)
         self._readonly_overlay_items.clear()
+        for item in self._order_overlay_items:
+            self._scene.removeItem(item)
+        self._order_overlay_items.clear()
+
+    def _block_uid_at_scene_pos(self, pos: QPointF) -> str:
+        candidates = sorted(
+            self._block_items,
+            key=lambda pair: pair[0].zValue(),
+            reverse=True,
+        )
+        for item, block in candidates:
+            if item.sceneBoundingRect().contains(pos) and block.uid:
+                return block.uid
+        return ""
+
+    def _append_order_path_uid(self, pos: QPointF) -> None:
+        block_uid = self._block_uid_at_scene_pos(pos)
+        if block_uid and block_uid not in self._order_path_uids:
+            self._order_path_uids.append(block_uid)
+
+    def _append_order_path_segment(
+        self,
+        start: Optional[QPointF],
+        end: QPointF,
+    ) -> None:
+        if start is None:
+            self._append_order_path_uid(end)
+            return
+        segment = QPainterPath(start)
+        segment.lineTo(end)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10.0)
+        hit_shape = stroker.createStroke(segment)
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length_sq = dx * dx + dy * dy
+        hits: list[tuple[float, str]] = []
+        for item, block in self._block_items:
+            if not block.uid or block.uid in self._order_path_uids:
+                continue
+            rect = item.sceneBoundingRect()
+            rect_path = QPainterPath()
+            rect_path.addRect(rect)
+            if not hit_shape.intersects(rect_path):
+                continue
+            center = rect.center()
+            projection = 0.0
+            if length_sq > 0:
+                projection = (
+                    (center.x() - start.x()) * dx
+                    + (center.y() - start.y()) * dy
+                ) / length_sq
+            hits.append((projection, block.uid))
+        for _projection, block_uid in sorted(hits):
+            self._order_path_uids.append(block_uid)
+
+    def _clear_order_path(self) -> None:
+        if self._order_path_item is not None and self._order_path_item.scene() is self._scene:
+            self._scene.removeItem(self._order_path_item)
+        self._order_path = None
+        self._order_path_item = None
+        self._order_path_uids = []
+        self._order_path_last_pos = None
 
     def _begin_draw(self, event) -> None:
         self._draw_start = self._map_event_to_scene(event)
@@ -787,7 +954,7 @@ class ImageViewer(QGraphicsView):
         self.viewport().unsetCursor()
 
     def _block_is_editable(self, block: Block) -> bool:
-        return self._edit_mode and not self._space_pan_active
+        return self._edit_mode and not self._space_pan_active and not self._order_mode
 
     @staticmethod
     def _block_z_value(block: Block) -> int:
@@ -805,6 +972,8 @@ class ImageViewer(QGraphicsView):
             item.set_selectable(True)
             item.set_editable(force if force is not None else self._block_is_editable(block))
             item.setZValue(self._block_z_value(block))
-        char_editable = force if force is not None else (self._edit_mode and not self._space_pan_active)
+        char_editable = force if force is not None else (
+            self._edit_mode and not self._space_pan_active and not self._order_mode
+        )
         for item, _char in self._char_items:
             item.set_editable(char_editable)

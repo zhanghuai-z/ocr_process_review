@@ -30,6 +30,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     # UI 偏好
     "theme": "light",
     "export_default_format": "txt",
+    "layout_order_tools_enabled": False,
 
     # 自动收紧
     "tighten_padding": 6,
@@ -126,6 +127,7 @@ def get_config() -> dict[str, Any]:
         "ocr_page_concurrency": ocr_page_concurrency,
         "paddle_api_network_mode": network_mode,
         "layout_debug_artifacts": _as_bool(cfg.get("layout_debug_artifacts", False)),
+        "layout_order_tools_enabled": _as_bool(cfg.get("layout_order_tools_enabled", False)),
     }
 
 
@@ -143,6 +145,7 @@ def update_config(**kwargs: Any) -> None:
         "ocr_page_concurrency": "ocr_page_concurrency",
         "paddle_api_network_mode": "paddle_api_network_mode",
         "layout_debug_artifacts": "layout_debug_artifacts",
+        "layout_order_tools_enabled": "layout_order_tools_enabled",
     }
     for k, v in kwargs.items():
         if k in mapping:

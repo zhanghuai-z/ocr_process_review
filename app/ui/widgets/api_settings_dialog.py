@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSpinBox,
     QVBoxLayout, QWidget,
 )
@@ -719,6 +719,12 @@ class ApiSettingsDialog(QDialog):
         network_layout.addStretch()
         api_form.addLayout(_form_row("Paddle 网络", network_row))
 
+        experiment_card, experiment_layout = _section_card("实验功能", "")
+        self._layout_order_tools_check = QCheckBox("框序调整")
+        self._layout_order_tools_check.setToolTip("显示框序号，并启用点击调序和轨迹调序。")
+        experiment_layout.addWidget(self._layout_order_tools_check)
+        root.addWidget(experiment_card)
+
         self._summary_model = QLabel()
         self._summary_desc = QLabel()
         self._summary_endpoint_kind = QLabel()
@@ -770,6 +776,7 @@ class ApiSettingsDialog(QDialog):
         self._timeout_spin.setValue(cfg.get("api_timeout", 30))
         self._layout_concurrency_spin.setValue(int(cfg.get("layout_concurrency", 2)))
         self._ocr_page_concurrency_spin.setValue(int(cfg.get("ocr_page_concurrency", 2)))
+        self._layout_order_tools_check.setChecked(bool(cfg.get("layout_order_tools_enabled", False)))
         network_mode = str(cfg.get("paddle_api_network_mode", "auto") or "auto")
         self._set_network_mode(network_mode)
         self._btn_show_token.setChecked(False)
@@ -882,6 +889,7 @@ class ApiSettingsDialog(QDialog):
             layout_concurrency=self._layout_concurrency_spin.value(),
             ocr_page_concurrency=self._ocr_page_concurrency_spin.value(),
             paddle_api_network_mode=self._selected_network_mode(),
+            layout_order_tools_enabled=self._layout_order_tools_check.isChecked(),
         )
         self.accept()
 

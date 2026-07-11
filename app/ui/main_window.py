@@ -1086,4 +1086,5 @@ class MainWindow(QMainWindow):
         from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
         dlg = ApiSettingsDialog(self)
         if dlg.exec():
+            self._layout_panel.refresh_experimental_features()
             self._set_status_message(f"OCR 引擎：{self._controller.ocr_engine_description()}")
