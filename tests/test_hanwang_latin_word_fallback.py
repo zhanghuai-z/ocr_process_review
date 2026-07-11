@@ -266,6 +266,48 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     assert all(result.bbox_source == "text_latin_masked_line_engcut" for result in results.values())
 
 
+def test_masked_latin_line_uses_pp_text_only_when_one_segment_has_zero_native_output():
+    image = np.full((40, 180, 3), 255, dtype=np.uint8)
+    route = micro_module._LatinMaskedLineRoute(
+        block_idx=2,
+        line_idx=4,
+        bbox=(0, 0, 160, 36),
+        segments=(
+            micro_module._TextRoute(
+                2, 4, 1, (35, 0, 80, 36), carved=True, kind="text_latin",
+                ppocr_latin_fallback_text="AB",
+            ),
+            micro_module._TextRoute(
+                2, 4, 3, (105, 0, 150, 36), carved=True, kind="text_latin",
+                ppocr_latin_fallback_text="s",
+            ),
+        ),
+    )
+    stats = micro_module.RunStats()
+    original_eng20 = micro_module.native_bridge.run_eng20_recogline
+    micro_module.native_bridge.run_eng20_recogline = (
+        lambda _crop, *, timeout=0: _eng20_grouped_payload_at([(42, "AB")])
+    )
+    try:
+        results = micro_module._recognize_latin_masked_line_with_engcut(
+            image,
+            route,
+            stats,
+            timeout=1.0,
+        )
+    finally:
+        micro_module.native_bridge.run_eng20_recogline = original_eng20
+
+    assert results[(2, 4, 1)].source == micro_module.LATIN_ENGCUT_ROUTE_SOURCE
+    fallback = results[(2, 4, 3)]
+    assert fallback.text == "s"
+    assert fallback.source == micro_module.LATIN_EMPTY_NATIVE_FALLBACK_SOURCE
+    assert fallback.bbox == (105, 0, 150, 36)
+    assert fallback.chars[0].bbox_granularity == "word"
+    assert fallback.review_flags == [micro_module.LATIN_EMPTY_NATIVE_FALLBACK_FLAG]
+    assert stats.latin_empty_native_fallbacks == 1
+
+
 def test_masked_latin_line_rejects_unbound_native_group():
     image = np.full((40, 120, 3), 255, dtype=np.uint8)
     route = micro_module._LatinMaskedLineRoute(

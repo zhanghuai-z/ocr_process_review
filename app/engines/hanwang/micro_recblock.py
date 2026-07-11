@@ -118,6 +118,8 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
+LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
+LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
@@ -247,6 +249,7 @@ class RunStats:
     overlap_merge_probe_failures: int = 0
     overlap_merge_clusters: int = 0
     overlap_merge_replacements: int = 0
+    latin_empty_native_fallbacks: int = 0
 
 
 @dataclass
@@ -265,6 +268,7 @@ class _TextRoute:
     kind: str = "text"
     component_grouping: str = ""
     ppocr_punctuation_candidate: str = ""
+    ppocr_latin_fallback_text: str = ""
 
     @property
     def key(self) -> tuple[int, int, int]:
@@ -362,6 +366,7 @@ def _text_route_bboxes_from_lines(
             kind=segment.kind,
             component_grouping=segment.component_grouping,
             ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
+            ppocr_latin_fallback_text=(segment.text if segment.kind == "text_latin" else ""),
         )
         for line_idx, line in enumerate(lines)
         for segment_idx, segment in enumerate(line.segments)
@@ -391,6 +396,7 @@ def _latin_masked_line_routes_from_lines(
                 kind=segment.kind,
                 component_grouping=segment.component_grouping,
                 ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
+                ppocr_latin_fallback_text=(segment.text if segment.kind == "text_latin" else ""),
             )
             for segment_idx, segment in enumerate(line.segments)
             if segment.kind == "text_latin"
@@ -407,44 +413,25 @@ def _latin_masked_line_routes_from_lines(
     return grouped
 
 
-def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
-    buckets: list[list[LineResult]] = []
-    for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
-        if ROUTE_TABLE_FLAG in line.review_flags:
-            buckets.append([line])
-            continue
-        for bucket in buckets:
-            head = bucket[0]
-            if ROUTE_TABLE_FLAG in head.review_flags:
-                continue
-            if vertical_overlap_ratio(head.bbox, line.bbox) >= 0.5:
-                bucket.append(line)
-                break
-        else:
-            buckets.append([line])
-
-    merged: list[LineResult] = []
-    for bucket in buckets:
-        if len(bucket) == 1:
-            merged.append(bucket[0])
-            continue
-        bucket.sort(key=lambda item: (item.bbox[0], item.bbox[1]))
-        chars: list[CharResult] = []
-        for line in bucket:
-            chars.extend(line.chars)
-        confidence_values = [line.confidence for line in bucket if line.confidence > 0]
-        flags = sorted({flag for line in bucket for flag in line.review_flags})
-        merged.append(LineResult(
-            text="".join(line.text for line in bucket if line.text),
-            bbox=union_xyxy([line.bbox for line in bucket]),
-            confidence=sum(confidence_values) / len(confidence_values) if confidence_values else 0.0,
-            chars=chars,
-            source="hanwang+ppvl_route_merged",
-            bbox_source="merged_peer_text_lines",
-            review_flags=flags,
-        ))
-    merged.sort(key=lambda line: (line.bbox[1], line.bbox[0]))
-    return merged
+def _merge_physical_routing_line(lines: list[LineResult]) -> list[LineResult]:
+    """Materialize one authoritative PP physical row from all of its slices."""
+    if not lines:
+        return []
+    if len(lines) == 1:
+        return [lines[0]]
+    ordered = sorted(lines, key=lambda item: (item.bbox[0], item.bbox[1]))
+    chars = [char for line in ordered for char in line.chars]
+    confidence_values = [line.confidence for line in ordered if line.confidence > 0]
+    flags = sorted({flag for line in ordered for flag in line.review_flags})
+    return [LineResult(
+        text="".join(line.text for line in ordered if line.text),
+        bbox=union_xyxy([line.bbox for line in ordered]),
+        confidence=sum(confidence_values) / len(confidence_values) if confidence_values else 0.0,
+        chars=chars,
+        source="hanwang+ppocrv6_routing_line",
+        bbox_source="ppocrv6_physical_routing_line",
+        review_flags=flags,
+    )]
 
 
 def _apply_single_glyph_route_contract(
@@ -710,7 +697,7 @@ def _assemble_layout_route_line(
         merged_text_lines: list[LineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _merge_peer_text_lines(merged_text_lines)
+        return _merge_physical_routing_line(merged_text_lines)
 
     clusters = _cluster_lines_by_shape(all_text_lines)
     if not clusters:
@@ -1588,6 +1575,11 @@ def _write_masked_latin_line_hook(
                         {
                             "route_key": list(segment.key),
                             "bbox": list(segment.bbox),
+                            **(
+                                {"ppocr_latin_fallback_text": segment.ppocr_latin_fallback_text}
+                                if segment.ppocr_latin_fallback_text
+                                else {}
+                            ),
                         }
                         for segment in route.segments
                     ],
@@ -1656,10 +1648,10 @@ def _recognize_latin_masked_line_with_engcut(
 ) -> dict[tuple[int, int, int], LineResult]:
     """Recognize a white-masked physical line and strictly rebind native groups.
 
-    There is intentionally no per-segment fallback.  A group that cannot be
-    attributed to exactly one routing segment means the CharOCR dispatch plan
-    and native result disagree, so the caller must fail the page rather than
-    persist ambiguous character geometry.
+    A group that cannot be attributed to exactly one routing segment still
+    fails the page.  The only fallback is an explicit zero-output observation:
+    when one approved Latin segment receives no native group, its PP token text
+    and mask bbox become one reviewable word carrier.
     """
     crop, offset_x, offset_y = _materialize_latin_masked_line_crop(image_bgr, route)
     if crop.size == 0:
@@ -1674,9 +1666,6 @@ def _recognize_latin_masked_line_with_engcut(
     raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
     page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=offset_x, dy=offset_y)
     groups = _engcut_groups(page_chars)
-    if not groups:
-        raise RuntimeError(f"EngCut returned no groups for masked line bbox={route.bbox}")
-
     grouped_by_route: dict[tuple[int, int, int], list[EngcutChar]] = {
         segment.key: [] for segment in route.segments
     }
@@ -1689,10 +1678,32 @@ def _recognize_latin_masked_line_with_engcut(
         chars = grouped_by_route[segment.key]
         text, char_results = _engcut_route_line_text_and_chars(chars)
         if not text or not any(char.text.strip() for char in char_results):
-            raise RuntimeError(
-                "EngCut masked-line result is missing a Latin routing segment: "
-                f"line={route.bbox} segment={segment.bbox}"
+            fallback_text = str(segment.ppocr_latin_fallback_text or "").strip()
+            if not fallback_text:
+                raise RuntimeError(
+                    "EngCut masked-line result is missing a Latin routing segment "
+                    "without PP fallback text: "
+                    f"line={route.bbox} segment={segment.bbox}"
+                )
+            stats.latin_empty_native_fallbacks += 1
+            results[segment.key] = LineResult(
+                text=fallback_text,
+                bbox=segment.bbox,
+                confidence=0.0,
+                chars=[CharResult(
+                    text=fallback_text,
+                    confidence=0.0,
+                    bbox=segment.bbox,
+                    candidates=[fallback_text],
+                    source=LATIN_EMPTY_NATIVE_FALLBACK_SOURCE,
+                    bbox_granularity="word",
+                    token_text=fallback_text,
+                )],
+                source=LATIN_EMPTY_NATIVE_FALLBACK_SOURCE,
+                bbox_source="ppocrv6_latin_route_mask",
+                review_flags=[LATIN_EMPTY_NATIVE_FALLBACK_FLAG],
             )
+            continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
         results[segment.key] = LineResult(
             text=text,
@@ -1729,19 +1740,21 @@ def _recognize_latin_masked_lines_with_engcut(
             local_stats,
             timeout=timeout,
         )
-        return route_results, local_stats.latin_engcut_route_calls
+        return route_results, local_stats
 
     for start in range(0, len(routes), _MAX_ENGCUT_LINES_PER_PAGE):
         chunk = routes[start:start + _MAX_ENGCUT_LINES_PER_PAGE]
         if len(chunk) == 1:
-            route_results, call_count = recognize(chunk[0])
-            stats.latin_engcut_route_calls += call_count
+            route_results, local_stats = recognize(chunk[0])
+            stats.latin_engcut_route_calls += local_stats.latin_engcut_route_calls
+            stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             results.append((chunk[0], route_results))
             continue
         futures = [_ENGCUT_NATIVE_EXECUTOR.submit(recognize, route) for route in chunk]
         for route, future in zip(chunk, futures):
-            route_results, call_count = future.result()
-            stats.latin_engcut_route_calls += call_count
+            route_results, local_stats = future.result()
+            stats.latin_engcut_route_calls += local_stats.latin_engcut_route_calls
+            stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             results.append((route, route_results))
     return results
 

@@ -184,7 +184,7 @@ def _segments_from_latin_masks(
         segments.append(RoutingSegment(
             kind="text_latin",
             bbox=bbox,
-            text="".join(str(token.text or "") for token in group_tokens),
+            text=_latin_group_fallback_text(group_tokens, tokens),
         ))
         cursor = x2
     after = (cursor, ry1, rx2, ry2)
@@ -196,6 +196,28 @@ def _segments_from_latin_masks(
             component_owners=component_owners,
         ))
     return RoutePartition(tuple(segments))
+
+
+def _latin_group_fallback_text(
+    group_tokens: list[PpOcrV6WordBox],
+    all_tokens: tuple[PpOcrV6WordBox, ...],
+) -> str:
+    """Preserve explicit PP whitespace for an empty-native Latin fallback."""
+    ordered = sorted(group_tokens, key=lambda token: token.token_index)
+    by_index = {token.token_index: token for token in all_tokens}
+    parts: list[str] = []
+    for index, token in enumerate(ordered):
+        if index:
+            previous = ordered[index - 1]
+            between = [
+                by_index[token_index]
+                for token_index in range(previous.token_index + 1, token.token_index)
+                if token_index in by_index
+            ]
+            if any(str(item.text or "").isspace() for item in between):
+                parts.append(" ")
+        parts.append(str(token.text or ""))
+    return "".join(parts)
 
 
 def _text_other_segments(

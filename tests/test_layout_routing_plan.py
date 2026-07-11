@@ -247,6 +247,54 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
     assert [char.text for char in lines[0].chars] == ["甲", "$ A $", "a", "b", "c"]
 
 
+def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 160, 50),
+        segments=(
+            RoutingSegment(kind="text_latin", bbox=(0, 0, 100, 45), text="China"),
+            RoutingSegment(
+                kind="text_other",
+                bbox=(100, 0, 120, 45),
+                component_grouping="single_glyph",
+                ppocr_punctuation_candidate="’",
+            ),
+            RoutingSegment(kind="text_latin", bbox=(120, 20, 140, 45), text="s"),
+        ),
+    )
+    grouped = {
+        (0, 0, 0): [micro_module.LineResult(
+            text="China",
+            bbox=(0, 2, 98, 42),
+            chars=[micro_module.CharResult(text="China", bbox=(0, 2, 98, 42))],
+        )],
+        (0, 0, 1): [micro_module.LineResult(
+            text="’",
+            bbox=(102, 4, 112, 18),
+            chars=[micro_module.CharResult(text="’", bbox=(102, 4, 112, 18))],
+        )],
+        (0, 0, 2): [micro_module.LineResult(
+            text="s",
+            bbox=(122, 25, 138, 43),
+            chars=[micro_module.CharResult(text="s", bbox=(122, 25, 138, 43))],
+        )],
+    }
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "China’s"
+    assert [char.text for char in lines[0].chars] == ["China", "’", "s"]
+    assert lines[0].bbox_source == "ppocrv6_physical_routing_line"
+
+
 def test_paddle_routing_producer_builds_typed_plan_before_legacy_records():
     block = {
         "block_label": "text",
