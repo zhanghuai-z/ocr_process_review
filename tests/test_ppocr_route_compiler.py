@@ -189,7 +189,7 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     ]
 
 
-def test_compiler_dispatches_pure_latin_row_to_engcut_without_word_masks():
+def test_compiler_rejects_pure_latin_row_without_word_masks():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -202,9 +202,44 @@ def test_compiler_dispatches_pure_latin_row_to_engcut_without_word_masks():
 
     plan = compile_page_routing_plan(snapshot, prepass, page_width=180, page_height=50)
 
+    assert plan.is_dispatchable is False
+    assert [(issue.code, issue.line_index, issue.bbox) for issue in plan.validation_issues] == [
+        ("latin_line_missing_word_boxes", 0, (10, 5, 170, 40)),
+    ]
+
+
+def test_compiler_partitions_quotes_out_of_pure_latin_row():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 100, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    image = np.full((50, 100, 3), 255, dtype=np.uint8)
+    image[8:30, 10:14] = 0
+    image[8:30, 30:40] = 0
+    image[8:30, 50:54] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text='“A”',
+        bbox=(0, 0, 70, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "“", (8, 8, 16, 32)),
+            PpOcrV6WordBox(0, 1, "A", (28, 8, 42, 32)),
+            PpOcrV6WordBox(0, 2, "”", (48, 8, 56, 32)),
+        ),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
     assert plan.is_dispatchable is True
     assert [(segment.kind, segment.bbox) for segment in plan.for_block("text-1").lines[0].segments] == [
-        ("text_latin", (10, 5, 170, 40)),
+        ("text_other", (0, 0, 30, 40)),
+        ("text_latin", (30, 8, 40, 30)),
+        ("text_other", (40, 0, 70, 40)),
     ]
 
 

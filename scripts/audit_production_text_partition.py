@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Render the production mixed-text partition against cached PP-OCRv6 facts.
+"""Render the production text partition against cached PP-OCRv6 facts.
 
 This diagnostic imports the production partition pure function instead of
 copying its geometry rules.  It does not persist project data or call native
-OCR.  Pure Latin and pure CJK rows are counted but deliberately omitted: they
-take the whole-line EngCut and LineCut routes respectively.
+OCR.  Every Latin/digit row is rendered because punctuation must remain
+outside its EngCut masks.  CJK-only rows are counted but remain whole-line
+LineCut routes.
 """
 from __future__ import annotations
 
@@ -175,7 +176,7 @@ def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> d
         height=height,
     )
     page_dir = out_dir / image_path.stem
-    lines_dir = page_dir / "mixed_lines"
+    lines_dir = page_dir / "routed_lines"
     lines_dir.mkdir(parents=True, exist_ok=True)
     counts: Counter[str] = Counter()
     reports = []
@@ -184,13 +185,13 @@ def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> d
     for line in artifact.lines:
         kind = _line_kind(line)
         counts[f"line:{kind}"] += 1
-        if kind != "mixed":
+        if kind == "other":
             continue
         partition = partition_charocr_text_region(page_bgr, line, line.bbox)
         latin_boxes = [segment.bbox for segment in partition.segments if segment.kind == "text_latin"]
         other_boxes = [segment.bbox for segment in partition.segments if segment.kind == "text_other"]
         proposal_overlaps = _proposal_center_overlaps(line, latin_boxes)
-        counts["mixed_issues"] += len(partition.issues)
+        counts["route_issues"] += len(partition.issues)
         counts["latin_segments"] += len(latin_boxes)
         counts["other_segments"] += len(other_boxes)
         counts["latin_nonlatin_proposal_center_overlaps"] += len(proposal_overlaps)
@@ -229,10 +230,10 @@ def run_page(image_path: Path, raw_path: Path, out_dir: Path, scale: float) -> d
         })
     if scale != 1:
         overview = overview.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
-    overview_path = page_dir / "production_mixed_routes.png"
+    overview_path = page_dir / "production_text_routes.png"
     overview.save(overview_path)
     summary = {
-        "schema": "production-mixed-text-partition-audit.v1",
+        "schema": "production-text-partition-audit.v2",
         "image": str(image_path),
         "raw_pages": str(raw_path),
         "counts": dict(counts),
@@ -261,7 +262,7 @@ def main() -> int:
         totals.update(summary["counts"])
     args.out_dir.mkdir(parents=True, exist_ok=True)
     batch = {
-        "schema": "production-mixed-text-partition-audit-batch.v1",
+        "schema": "production-text-partition-audit-batch.v2",
         "input_dir": str(args.input_dir),
         "raw_dir": str(args.raw_dir),
         "pages": pages,

@@ -367,3 +367,57 @@ def test_fused_superscript_uses_symbol_proposal_to_keep_latin_masks_disjoint():
         ((20, 10, 29, 30), "x"),
         ((44, 10, 50, 30), "2"),
     ]
+
+
+def test_displaced_side_by_side_quote_component_is_reclaimed_from_latin_word():
+    image = _image()
+    _ink(image, (20, 10, 25, 30))       # first Latin glyph
+    _ink(image, (30, 10, 35, 30))       # final Latin glyph
+    _ink(image, (45, 10, 49, 20))       # displaced left half of closing quote
+    _ink(image, (56, 10, 60, 20))       # quote anchor inside its PP proposal
+    _ink(image, (70, 10, 74, 20))       # following opening quote
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='AB” “',
+        bbox=(0, 0, 90, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "AB", (18, 8, 40, 32)),
+            PpOcrV6WordBox(0, 1, '” “', (52, 8, 80, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((20, 10, 35, 30), "AB")]
+
+
+def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
+    image = _image()
+    _ink(image, (10, 10, 15, 30))
+    _ink(image, (30, 10, 34, 20))
+    _ink(image, (40, 10, 44, 20))
+    _ink(image, (64, 10, 68, 20))
+    _ink(image, (74, 10, 78, 20))
+    _ink(image, (92, 10, 97, 30))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='A” “B',
+        bbox=(0, 0, 110, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "A", (8, 8, 18, 32)),
+            PpOcrV6WordBox(0, 1, '” “', (36, 8, 72, 32)),
+            PpOcrV6WordBox(0, 2, "B", (90, 8, 100, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 110, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox) for segment in result.segments] == [
+        ("text_latin", (10, 10, 15, 30)),
+        ("text_other", (15, 0, 54, 40)),
+        ("text_other", (54, 0, 92, 40)),
+        ("text_latin", (92, 10, 97, 30)),
+    ]

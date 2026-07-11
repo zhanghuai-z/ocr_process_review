@@ -1,9 +1,10 @@
 """Build CharOCR text crops from PP-OCRv6 line observations.
 
-PP-OCR word boxes are geometry proposals, not OCR facts.  For a mixed line,
-only Latin/digit proposals create EngCut masks; every remaining horizontal
-region is dispatched to LineCut.  This keeps punctuation and CJK outside
-EngCut without promoting PP-OCR text into OCR truth.
+PP-OCR word boxes are geometry proposals, not OCR facts.  For every line that
+contains Latin letters or digits, only Latin/digit proposals create EngCut
+masks; every remaining horizontal region is dispatched to LineCut.  This
+keeps punctuation and CJK outside EngCut without promoting PP-OCR text into
+OCR truth.
 """
 from __future__ import annotations
 
@@ -122,13 +123,22 @@ def partition_charocr_text_region(
 
     if issues:
         return RoutePartition((), tuple(issues))
-    return _segments_from_latin_masks(region_bbox, masks, components)
+    return _segments_from_latin_masks(
+        region_bbox,
+        masks,
+        components,
+        tokens=tokens,
+        component_owners=component_owners,
+    )
 
 
 def _segments_from_latin_masks(
     region_bbox: XYXY,
     masks: list[tuple[PpOcrV6WordBox, XYXY]],
     components: list[tuple[int, int, int, int, int]],
+    *,
+    tokens: tuple[PpOcrV6WordBox, ...],
+    component_owners: dict[tuple[int, int, int, int, int], int | None],
 ) -> RoutePartition:
     groups: list[tuple[list[PpOcrV6WordBox], XYXY]] = []
     current_tokens: list[PpOcrV6WordBox] = []
@@ -160,21 +170,133 @@ def _segments_from_latin_masks(
 
     segments: list[RoutingSegment] = []
     cursor = rx1
-    for tokens, bbox in groups:
+    for group_tokens, bbox in groups:
         x1, _y1, x2, _y2 = bbox
         before = (cursor, ry1, x1, ry2)
         if _is_nonempty(before) and _has_visible_ink(components, before):
-            segments.append(RoutingSegment(kind="text_other", bbox=before))
+            segments.extend(_text_other_segments(
+                before,
+                components,
+                tokens=tokens,
+                component_owners=component_owners,
+            ))
         segments.append(RoutingSegment(
             kind="text_latin",
             bbox=bbox,
-            text="".join(str(token.text or "") for token in tokens),
+            text="".join(str(token.text or "") for token in group_tokens),
         ))
         cursor = x2
     after = (cursor, ry1, rx2, ry2)
     if _is_nonempty(after) and _has_visible_ink(components, after):
-        segments.append(RoutingSegment(kind="text_other", bbox=after))
+        segments.extend(_text_other_segments(
+            after,
+            components,
+            tokens=tokens,
+            component_owners=component_owners,
+        ))
     return RoutePartition(tuple(segments))
+
+
+def _text_other_segments(
+    bbox: XYXY,
+    components: list[tuple[int, int, int, int, int]],
+    *,
+    tokens: tuple[PpOcrV6WordBox, ...],
+    component_owners: dict[tuple[int, int, int, int, int], int | None],
+) -> list[RoutingSegment]:
+    """Split a symbol-only gap at measured whitespace between symbol glyphs.
+
+    PP token text contributes only the expected glyph count.  LineCut remains
+    responsible for the recognized text and final character geometry.
+    """
+    gap_components = [
+        component
+        for component in components
+        if _intersect(component[:4], bbox) is not None
+    ]
+    if not gap_components:
+        return []
+    token_by_index = {token.token_index: token for token in tokens}
+    gap_owners = {
+        owner
+        for component in gap_components
+        for owner in [component_owners.get(component)]
+        if owner is not None
+    }
+    missing_owners = gap_owners.difference(token_by_index)
+    if missing_owners:
+        raise RuntimeError(
+            f"component owner has no PP-OCR token: {sorted(missing_owners)!r}"
+        )
+    if not gap_owners or any(
+        _token_branch(token_by_index[owner].text) != "symbol"
+        for owner in gap_owners
+    ):
+        return [RoutingSegment(kind="text_other", bbox=bbox)]
+    if any(component_owners.get(component) is None for component in gap_components):
+        return [RoutingSegment(kind="text_other", bbox=bbox)]
+
+    clusters: list[list[tuple[int, int, int, int, int]]] = []
+    for owner in sorted(
+        gap_owners,
+        key=lambda index: (_clip(token_by_index[index].bbox, bbox)[0], index),
+    ):
+        token = token_by_index[owner]
+        owned = sorted(
+            (component for component in gap_components if component_owners.get(component) == owner),
+            key=lambda component: (component[0], component[1]),
+        )
+        if not owned:
+            continue
+        glyph_count = max(1, sum(1 for char in str(token.text or "") if not char.isspace()))
+        clusters.extend(_split_components_by_largest_gaps(owned, glyph_count))
+    clusters.sort(key=lambda cluster: (
+        min(component[0] for component in cluster),
+        min(component[1] for component in cluster),
+    ))
+    if len(clusters) <= 1:
+        return [RoutingSegment(kind="text_other", bbox=bbox)]
+
+    cluster_boxes = [_union([component[:4] for component in cluster]) for cluster in clusters]
+    boundaries: list[int] = []
+    for left, right in zip(cluster_boxes, cluster_boxes[1:]):
+        if right[0] <= left[2]:
+            return [RoutingSegment(kind="text_other", bbox=bbox)]
+        boundaries.append((left[2] + right[0]) // 2)
+    edges = [bbox[0], *boundaries, bbox[2]]
+    return [
+        RoutingSegment(kind="text_other", bbox=(edges[index], bbox[1], edges[index + 1], bbox[3]))
+        for index in range(len(edges) - 1)
+        if edges[index + 1] > edges[index]
+        and _has_visible_ink(components, (edges[index], bbox[1], edges[index + 1], bbox[3]))
+    ]
+
+
+def _split_components_by_largest_gaps(
+    components: list[tuple[int, int, int, int, int]],
+    glyph_count: int,
+) -> list[list[tuple[int, int, int, int, int]]]:
+    if glyph_count <= 1 or len(components) <= 1:
+        return [components]
+    gaps = [
+        (components[index + 1][0] - components[index][2], index)
+        for index in range(len(components) - 1)
+        if components[index + 1][0] > components[index][2]
+    ]
+    split_after = {
+        index
+        for _gap, index in sorted(gaps, key=lambda item: (-item[0], item[1]))[:glyph_count - 1]
+    }
+    clusters: list[list[tuple[int, int, int, int, int]]] = []
+    current: list[tuple[int, int, int, int, int]] = []
+    for index, component in enumerate(components):
+        current.append(component)
+        if index in split_after:
+            clusters.append(current)
+            current = []
+    if current:
+        clusters.append(current)
+    return clusters
 
 
 def _latin_mask_bbox(
@@ -234,10 +356,12 @@ def _component_owner_token_indices(
     Word boxes are approximate and commonly meet on the wrong side of a narrow
     glyph.  Exact center containment is authoritative.  A symbol then anchors
     to ink carrying its proposal center, or to the nearest unowned component,
-    and reclaims its horizontally connected component stack.  This completes
-    multi-part marks such as percent/equal without taking the following ``i``
-    or ``C``.  Remaining ink goes to the nearest non-symbol token inside that
-    token's measured search window.
+    and reclaims its horizontally connected component stack.  A displaced
+    side-by-side component is reclaimed only when it is closer to that symbol
+    anchor than to the remaining components of its current Latin owner.  This
+    completes multi-part marks without taking the following ``i`` or ``C``.
+    Remaining ink goes to the nearest non-symbol token inside that token's
+    measured search window.
     """
     owners: dict[tuple[int, int, int, int, int], int | None] = {
         component: None for component in components
@@ -343,6 +467,44 @@ def _component_owner_token_indices(
             if not symbol_components:
                 break
             for component in symbol_components:
+                owners[component] = token.token_index
+                anchors.append(component)
+                remaining.remove(component)
+
+        while True:
+            reclaimed: list[tuple[int, int, int, int, int]] = []
+            for component in remaining:
+                owner = owners[component]
+                symbol_score = min(_component_neighbor_score(component, anchor) for anchor in anchors)
+                if owner is None:
+                    latin_anchors = [
+                        peer
+                        for peer in eligible_components
+                        if token_branches.get(owners[peer]) == "latin"
+                    ]
+                    if (
+                        latin_anchors
+                        and symbol_score[0] < 0.0
+                        and symbol_score < min(
+                            _component_neighbor_score(component, peer)
+                            for peer in latin_anchors
+                        )
+                    ):
+                        reclaimed.append(component)
+                    continue
+                latin_peers = [
+                    peer
+                    for peer in eligible_components
+                    if peer is not component and owners[peer] == owner
+                ]
+                if not latin_peers:
+                    continue
+                latin_score = min(_component_neighbor_score(component, peer) for peer in latin_peers)
+                if symbol_score < latin_score:
+                    reclaimed.append(component)
+            if not reclaimed:
+                break
+            for component in reclaimed:
                 owners[component] = token.token_index
                 anchors.append(component)
                 remaining.remove(component)
@@ -521,6 +683,21 @@ def _horizontal_gap(left: XYXY, right: XYXY) -> int:
     if right[2] < left[0]:
         return left[0] - right[2]
     return 0
+
+
+def _component_neighbor_score(
+    left: tuple[int, int, int, int, int],
+    right: tuple[int, int, int, int, int],
+) -> tuple[float, int, float]:
+    left_center = (left[0] + left[2]) / 2.0
+    right_center = (right[0] + right[2]) / 2.0
+    overlap_height = max(0, min(left[3], right[3]) - max(left[1], right[1]))
+    max_height = max(1, left[3] - left[1], right[3] - right[1])
+    return (
+        -(overlap_height / max_height),
+        _horizontal_gap(left[:4], right[:4]),
+        abs(left_center - right_center),
+    )
 
 
 __all__ = ["RoutePartition", "RoutePartitionIssue", "partition_charocr_text_region"]
