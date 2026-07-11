@@ -69,6 +69,10 @@ def partition_charocr_text_region(
             ),
         ))
 
+    components = _ink_components(image_bgr, region_bbox)
+    if not components:
+        return RoutePartition(())
+
     tokens = tuple(
         token
         for token in prepass_line.words
@@ -102,7 +106,6 @@ def partition_charocr_text_region(
     if not latin_tokens:
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox),))
 
-    components = _ink_components(image_bgr, region_bbox)
     component_owners = _component_owner_token_indices(components, tokens, region_bbox)
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
     issues: list[RoutePartitionIssue] = []
@@ -114,6 +117,11 @@ def partition_charocr_text_region(
             region_bbox,
         )
         if mask_bbox is None:
+            if _clip(token.bbox, region_bbox) != token.bbox:
+                # A structural cut owns the rest of this PP proposal.  If the
+                # text-side fragment has no ink, it must not become an EngCut
+                # requirement at the formula/table boundary.
+                continue
             issues.append(RoutePartitionIssue(
                 code="missing_latin_token_ink",
                 message=f"PP-OCRv6 Latin/digit token has no unambiguous ink: {token.text!r}",

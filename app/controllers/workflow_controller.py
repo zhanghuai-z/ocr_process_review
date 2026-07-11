@@ -74,6 +74,7 @@ from app.models.page_state import (
 from app.services.ocr_pipeline import OcrPipeline
 from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.ocr_run_result import OcrProgress
+from app.services.inline_formula_layout_service import InlineFormulaLayoutService
 from app.services.proof_auto_flag_service import ProofAutoFlagService
 from app.services.proof_crop_service import ProofCropService, proof_fallback_warning
 from app.services.proof_persistence_service import ProofPersistenceService
@@ -123,6 +124,7 @@ class WorkflowController(QObject):
         self._dirty = False
         self._proof_auto_flag_service = ProofAutoFlagService()
         self._proof_crop_service = ProofCropService()
+        self._inline_formula_layout_service = InlineFormulaLayoutService()
         self._max_step: int = STEP_IMPORT
         self._layout_worker = None
         self._ocr_worker = None
@@ -912,6 +914,7 @@ class WorkflowController(QObject):
             if page_has_error(page):
                 mark_page_layout_failed(page)
             else:
+                self._inline_formula_layout_service.adopt_page(page)
                 mark_page_layout_done(page)
 
         self._update_max_step()

@@ -7476,7 +7476,7 @@ def test_layout_panel_undo_preserves_view_transform():
     print("test_layout_panel_undo_preserves_view_transform PASSED")
 
 
-def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks():
+def test_layout_adoption_promotes_real_inline_formula_regions_before_panel_display():
     import json
     from pathlib import Path
 
@@ -7485,6 +7485,7 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
     from app.core.inline_formula_edit_state import HANDLED_INLINE_FORMULA_ORIGIN_BBOX_KEY
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BlockType, Page
+    from app.services.inline_formula_layout_service import InlineFormulaLayoutService
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -7511,6 +7512,7 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
     top_level_labels = [block.source_label for block in page.blocks]
     assert "display_formula" in top_level_labels
     assert "formula_number" in top_level_labels
+    assert InlineFormulaLayoutService().adopt_page(page) == 7
 
     panel = LayoutPanel()
     try:
@@ -7549,7 +7551,7 @@ def test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
     finally:
         panel.close()
 
-    print("test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks PASSED")
+    print("test_layout_adoption_promotes_real_inline_formula_regions_before_panel_display PASSED")
 
 
 def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
@@ -7562,6 +7564,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockOrigin, BlockType, Page
+    from app.services.inline_formula_layout_service import InlineFormulaLayoutService
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -7595,6 +7598,7 @@ def test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry():
             ],
         )
         _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
+        assert InlineFormulaLayoutService().adopt_page(page) == 1
 
         panel = LayoutPanel()
         try:
@@ -7708,6 +7712,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
     from app.core.paddle_line_routing import ROUTE_SUBBLOCKS_FIELD, line_routes_for_block, text_slice_routes_for_block
     from app.engines.hanwang.micro_recblock import _page_blocks_from_layout
     from app.models import BBox, Block, BlockOrigin, BlockType, Page
+    from app.services.inline_formula_layout_service import InlineFormulaLayoutService
     from app.ui.recognize.layout_panel import LayoutPanel
 
     app = _get_qapp()
@@ -7741,6 +7746,7 @@ def test_layout_panel_corrected_inline_formula_releases_covered_text_slice():
             ],
         )
         _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
+        assert InlineFormulaLayoutService().adopt_page(page) == 1
 
         panel = LayoutPanel()
         try:
@@ -7779,7 +7785,7 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
 
     from app.core.layout_analyzer import LayoutAnalyzer
     from app.models import BlockType, Page
-    from app.services.layout_overlay_service import LayoutOverlayService
+    from app.services.inline_formula_layout_service import InlineFormulaLayoutService
 
     _get_qapp()
     project_root = Path(__file__).resolve().parents[1]
@@ -7799,7 +7805,7 @@ def test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_1201
 
     inline_bboxes = [
         overlay.bbox.to_xyxy()
-        for overlay in LayoutOverlayService().iter_inline_formula_overlays(page)
+        for overlay in InlineFormulaLayoutService().iter_regions(page)
     ]
 
     assert (372, 2022, 440, 2069) not in inline_bboxes  # $ ^{*} $
@@ -21261,7 +21267,7 @@ if __name__ == "__main__":
     test_layout_panel_find_dialog_preset_matches_chinese_heading_forms()
     test_layout_panel_undo_restores_block_edits()
     test_layout_panel_undo_preserves_view_transform()
-    test_layout_panel_promotes_real_inline_formula_overlays_to_editable_blocks()
+    test_layout_adoption_promotes_real_inline_formula_regions_before_panel_display()
     test_layout_panel_moved_generated_inline_formula_keeps_manual_geometry()
     test_layout_panel_skips_superscript_marker_inline_formula_overlays_from_120169()
     test_workflow_controller_layout_progress_signal()

@@ -286,6 +286,49 @@ def test_compiler_partitions_quotes_out_of_pure_latin_row():
     ]
 
 
+def test_compiler_drops_blank_text_sliver_left_by_formula_carving():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block(
+            "formula-1",
+            BlockType.EQUATION,
+            (80, 5, 140, 45),
+            policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            order=1,
+            label="inline_formula",
+        ),
+    )
+    image = np.full((50, 180, 3), 255, dtype=np.uint8)
+    image[10:30, 20:40] = 0
+    image[10:30, 85:125] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="甲D_t",
+        bbox=(0, 0, 160, 50),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (18, 8, 42, 32)),
+            PpOcrV6WordBox(0, 1, "D", (74, 8, 84, 32)),
+            PpOcrV6WordBox(0, 2, "_", (84, 8, 92, 32)),
+            PpOcrV6WordBox(0, 3, "t", (110, 8, 120, 32)),
+        ),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=180,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text-1").lines[0]
+    assert [(segment.kind, segment.bbox) for segment in route.segments] == [
+        ("text_other", (0, 0, 80, 50)),
+        ("formula", (80, 5, 140, 45)),
+    ]
+
+
 def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0),

@@ -1756,7 +1756,7 @@ def test_manual_layout_merge_details_are_events_not_app_payload_state():
 
 def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
-    overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+    adoption_service_source = Path("app/services/inline_formula_layout_service.py").read_text(encoding="utf-8")
     store_source = Path("app/core/project_store.py").read_text(encoding="utf-8")
     inline_state_source = Path("app/core/inline_formula_edit_state.py").read_text(encoding="utf-8")
 
@@ -1768,15 +1768,16 @@ def test_generated_inline_formula_anchor_is_block_origin_not_app_payload_state()
         assert key not in layout_source
         assert f"app_payload.pop({key}" not in store_source
     assert "origin=BlockOrigin(" not in layout_source
-    assert "origin=BlockOrigin(" in overlay_service_source
-    assert "original_bbox=overlay.bbox" in overlay_service_source
-    assert "inline_formula_origin_bbox(block)" in overlay_service_source
+    assert "origin=BlockOrigin(" in adoption_service_source
+    assert "original_bbox=region.bbox" in adoption_service_source
+    assert "inline_formula_origin_bbox(block)" in adoption_service_source
     assert 'get("type")' not in inline_state_source
 
 
 def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
     layout_source = Path("app/ui/recognize/layout_panel.py").read_text(encoding="utf-8")
     overlay_service_source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+    adoption_service_source = Path("app/services/inline_formula_layout_service.py").read_text(encoding="utf-8")
     index_source = Path("app/core/paddle_artifact_index.py").read_text(encoding="utf-8")
     normalized_source = Path("app/core/normalized_layout_artifact.py").read_text(encoding="utf-8")
 
@@ -1794,7 +1795,8 @@ def test_layout_panel_does_not_parse_raw_layout_artifacts_directly():
     assert "raw_layout_records" not in overlay_service_source
     assert "ROUTE_SUBBLOCKS_FIELD" not in overlay_service_source
     assert "line_routes_for_block" not in overlay_service_source
-    assert "routing_plan_for_block_record" in overlay_service_source
+    assert "routing_plan_for_block_record" not in overlay_service_source
+    assert "routing_plan_for_block_record" in adoption_service_source
     assert "normalized_layout_regions(page)" in index_source
     assert "raw_layout_records" not in index_source
     assert "class NormalizedLayoutArtifact" in normalized_source
@@ -1873,8 +1875,8 @@ def test_layout_edit_service_records_snapshot_edits_without_projection_backflow(
     assert "source_engine=" not in record_source
 
 
-def test_layout_overlay_service_promotes_inline_formula_snapshot_first():
-    source = Path("app/services/layout_overlay_service.py").read_text(encoding="utf-8")
+def test_inline_formula_layout_service_promotes_snapshot_first():
+    source = Path("app/services/inline_formula_layout_service.py").read_text(encoding="utf-8")
 
     assert "LayoutBlockSnapshot(" in source
     assert "replace_page_layout_projection_from_snapshot(" in source

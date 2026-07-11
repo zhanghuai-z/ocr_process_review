@@ -1622,7 +1622,6 @@ class LayoutPanel(QWidget):
         return chars
 
     def _show_page_layers(self, page: Page) -> None:
-        self._ensure_inline_formula_blocks(page)
         self._viewer.show_layout_block_views(list(iter_page_layout_block_views(page)))
         self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
         if self._btn_char_boxes.isChecked():
@@ -1873,9 +1872,6 @@ class LayoutPanel(QWidget):
                 continue
             candidates.append(block)
         return candidates
-
-    def _ensure_inline_formula_blocks(self, page: Page) -> None:
-        self._layout_overlay_service.ensure_inline_formula_blocks(page)
 
     def _source_label_for_subtype(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> str:
         if normalize_paddle_label(subtype.source_label) == "formula":
