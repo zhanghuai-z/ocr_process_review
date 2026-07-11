@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.paddle_artifact_index import BINDING_EMPTY_REVIEW
 from app.models import (
     BBox,
@@ -242,6 +244,43 @@ def test_layout_edit_service_restore_blocks_records_event_and_reorders_blocks():
     assert [block.uid for block in snapshot.blocks] == [restored_a.uid, restored_b.uid]
     assert [block.order for block in snapshot.blocks] == [0, 1]
     assert snapshot.source_run_id == page.layout_edit_events[-1].uid
+
+
+def test_layout_edit_service_reorders_complete_page_by_stable_uids():
+    blocks = [
+        Block(BlockType.TEXT, BBox(index * 20, 0, 15, 15), order=index)
+        for index in range(3)
+    ]
+    page = Page(image_path="", width=100, height=50, blocks=blocks)
+    _seed_layout_snapshot(page)
+
+    result = LayoutEditService().apply(LayoutEditCommand.reorder_blocks(
+        page,
+        [blocks[2].uid, blocks[0].uid, blocks[1].uid],
+    ))
+
+    assert result.op == "reorder_blocks"
+    assert [block.uid for block in page.blocks] == [blocks[2].uid, blocks[0].uid, blocks[1].uid]
+    assert [block.order for block in page.blocks] == [0, 1, 2]
+    snapshot = layout_snapshot_for_page(page)
+    assert snapshot is not None
+    assert [block.uid for block in snapshot.blocks] == [blocks[2].uid, blocks[0].uid, blocks[1].uid]
+    assert page.layout_edit_events[-1].op == "reorder_blocks"
+
+
+def test_layout_edit_service_reorder_rejects_partial_or_duplicate_identity_sets():
+    blocks = [
+        Block(BlockType.TEXT, BBox(index * 20, 0, 15, 15), order=index)
+        for index in range(2)
+    ]
+    page = Page(image_path="", width=100, height=50, blocks=blocks)
+    _seed_layout_snapshot(page)
+    service = LayoutEditService()
+
+    with pytest.raises(ValueError, match="every current block"):
+        service.apply(LayoutEditCommand.reorder_blocks(page, [blocks[0].uid]))
+    with pytest.raises(ValueError, match="unique block uids"):
+        service.apply(LayoutEditCommand.reorder_blocks(page, [blocks[0].uid, blocks[0].uid]))
 
 
 def test_layout_edit_service_change_block_kind_updates_policy_and_event():

@@ -148,6 +148,14 @@ class LayoutEditCommand:
     ) -> "LayoutEditCommand":
         return cls("restore_blocks", page, snapshot_blocks=tuple(blocks), before=before)
 
+    @classmethod
+    def reorder_blocks(
+        cls,
+        page: Page,
+        block_uids: Iterable[str],
+    ) -> "LayoutEditCommand":
+        return cls("reorder_blocks", page, block_uids=tuple(block_uids))
+
 
 @dataclass(frozen=True)
 class LayoutEditResult:
@@ -207,6 +215,8 @@ class LayoutEditService:
             )
         if command.op == "restore_blocks":
             return self._restore_blocks(command.page, command.snapshot_blocks, before=command.before)
+        if command.op == "reorder_blocks":
+            return self._reorder_blocks(command.page, command.block_uids)
         raise ValueError(f"Unsupported layout edit command: {command.op}")
 
     @staticmethod
@@ -437,6 +447,46 @@ class LayoutEditService:
         set_layout_snapshot_for_page(page, next_snapshot)
         replace_page_layout_projection_from_snapshot(page, next_snapshot)
         return LayoutEditResult(op="restore_blocks", before=before, after=after)
+
+    def _reorder_blocks(
+        self,
+        page: Page,
+        block_uids: Iterable[str],
+    ) -> LayoutEditResult:
+        snapshot = current_layout_snapshot(page)
+        requested = tuple(block_uids)
+        current_uids = tuple(block.uid for block in snapshot.blocks)
+        if len(requested) != len(set(requested)):
+            raise ValueError("reorder_blocks requires unique block uids")
+        if set(requested) != set(current_uids):
+            missing = sorted(set(current_uids) - set(requested))
+            unknown = sorted(set(requested) - set(current_uids))
+            raise ValueError(
+                f"reorder_blocks must contain every current block exactly once: "
+                f"missing={missing!r} unknown={unknown!r}"
+            )
+        by_uid = {block.uid: block for block in snapshot.blocks}
+        next_snapshot_blocks = tuple(
+            self._snapshot_block_with_order(by_uid[block_uid], order)
+            for order, block_uid in enumerate(requested)
+        )
+        before = {"blocks": [self.snapshot_block_state(block) for block in snapshot.blocks]}
+        after = {"blocks": [self.snapshot_block_state(block) for block in next_snapshot_blocks]}
+        event = self.record_snapshot_edit(
+            page,
+            "reorder_blocks",
+            "",
+            before=before,
+            after=after,
+        )
+        next_snapshot = self._snapshot_with_blocks(
+            snapshot,
+            next_snapshot_blocks,
+            source_run_id=event.uid,
+        )
+        set_layout_snapshot_for_page(page, next_snapshot)
+        replace_page_layout_projection_from_snapshot(page, next_snapshot)
+        return LayoutEditResult(op="reorder_blocks", before=before, after=after)
 
     def _change_block_kind(
         self,
