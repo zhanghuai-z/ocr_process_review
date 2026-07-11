@@ -521,6 +521,7 @@ class MainWindow(QMainWindow):
         self._controller.status_message.connect(self._set_status_message)
         self._layout_panel.geometry_changed.connect(self._controller.record_project_mutation)
         self._layout_panel.block_contract_changed.connect(self._controller.handle_block_contract_changed)
+        self._layout_panel.block_order_changed.connect(self._controller.handle_block_order_changed)
         self._layout_panel.ocr_entry_requested.connect(self._controller.handle_ocr_entry_requested)
         self._layout_panel.analysis_cancel_requested.connect(self._cancel_layout_analysis)
         self._layout_panel.page_selected.connect(self._on_layout_page_selected)

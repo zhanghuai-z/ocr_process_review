@@ -225,6 +225,7 @@ class LayoutPanel(QWidget):
     page_selected = Signal(int)   # payload: page_number
     geometry_changed = Signal()
     block_contract_changed = Signal(int, str)  # page_number, change_kind
+    block_order_changed = Signal(int)
     ocr_entry_requested = Signal(str, int)  # source, page_number
     page_completed = Signal(int)  # 用户点「完成」时（payload: page idx）
     edits_cancelled = Signal(int) # 用户点「取消」时（payload: page idx）
@@ -241,7 +242,9 @@ class LayoutPanel(QWidget):
         self._primary_actions: dict[int, tuple[str, str, bool]] = {}
         self._layout_edit_service = LayoutEditService()
         self._layout_overlay_service = LayoutOverlayService()
-        self._undo_stack: list[list[tuple[int, tuple[LayoutBlockSnapshot, ...]]]] = []
+        self._undo_stack: list[
+            tuple[list[tuple[int, tuple[LayoutBlockSnapshot, ...]]], bool]
+        ] = []
         self._layout_edit_start_state: dict[str, dict] = {}
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
@@ -1696,6 +1699,12 @@ class LayoutPanel(QWidget):
         if mode not in {"click", "path"} or not self._pages:
             self._cancel_order_mode()
             return
+        views = list(iter_page_layout_block_views(self._pages[self._current_page_idx]))
+        missing_projection = [view.uid for view in views if view.runtime_block is None]
+        if missing_projection:
+            self._cancel_order_mode()
+            self._set_status_text("当前版面投影不完整，无法调整框序")
+            return
         self._order_mode = mode
         self._order_sequence = []
         for button, button_mode in (
@@ -1751,7 +1760,11 @@ class LayoutPanel(QWidget):
 
     def _commit_block_order(self, block_uids: tuple[str, ...]) -> None:
         page = self._pages[self._current_page_idx]
-        self._push_undo_snapshot()
+        if block_uids == self._current_layout_uids():
+            self._cancel_order_mode()
+            self._set_status_text("框序未变化")
+            return
+        self._push_undo_snapshot(invalidates_ocr=False)
         try:
             self._layout_edit_service.apply(LayoutEditCommand.reorder_blocks(page, block_uids))
         except ValueError as exc:
@@ -1762,8 +1775,7 @@ class LayoutPanel(QWidget):
         self._refresh_block_search()
         self._update_project_stats()
         self._set_status_text("框序已更新")
-        self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "block_order_changed")
+        self.block_order_changed.emit(page.page_number)
 
     def _current_layout_uids(self) -> tuple[str, ...]:
         if not self._pages:
@@ -1795,15 +1807,31 @@ class LayoutPanel(QWidget):
         elif result.binding_text:
             self._set_status_text("已绑定识别结果")
 
-    def _push_undo_snapshot(self) -> None:
+    def _push_undo_snapshot(self, *, invalidates_ocr: bool = True) -> None:
         if not self._pages:
             return
-        self._push_undo_snapshot_for_page(self._current_page_idx)
+        self._push_undo_snapshot_for_page(
+            self._current_page_idx,
+            invalidates_ocr=invalidates_ocr,
+        )
 
-    def _push_undo_snapshot_for_page(self, page_idx: int) -> None:
-        self._push_undo_snapshot_for_pages([page_idx])
+    def _push_undo_snapshot_for_page(
+        self,
+        page_idx: int,
+        *,
+        invalidates_ocr: bool = True,
+    ) -> None:
+        self._push_undo_snapshot_for_pages(
+            [page_idx],
+            invalidates_ocr=invalidates_ocr,
+        )
 
-    def _push_undo_snapshot_for_pages(self, page_indices) -> None:
+    def _push_undo_snapshot_for_pages(
+        self,
+        page_indices,
+        *,
+        invalidates_ocr: bool = True,
+    ) -> None:
         if not self._pages:
             return
         snapshots: list[tuple[int, tuple[LayoutBlockSnapshot, ...]]] = []
@@ -1818,7 +1846,7 @@ class LayoutPanel(QWidget):
             snapshots.append((page_idx, self._layout_snapshot_blocks_for_undo(page)))
         if not snapshots:
             return
-        self._undo_stack.append(snapshots)
+        self._undo_stack.append((snapshots, invalidates_ocr))
         if len(self._undo_stack) > 50:
             self._undo_stack.pop(0)
         self._btn_undo.setEnabled(True)
@@ -1826,7 +1854,7 @@ class LayoutPanel(QWidget):
     def _undo_last_edit(self) -> None:
         if not self._undo_stack or not self._pages:
             return
-        snapshots = self._undo_stack.pop()
+        snapshots, invalidates_ocr = self._undo_stack.pop()
         previous_idx = self._current_page_idx
         restored_page_indices: list[int] = []
         for page_idx, blocks in snapshots:
@@ -1865,9 +1893,12 @@ class LayoutPanel(QWidget):
         self._set_status_text("已撤销上一步版面编辑")
         self._rebuild_heading_outline()
         self._refresh_block_search()
-        self.geometry_changed.emit()
         for page_idx in restored_page_indices:
-            self.block_contract_changed.emit(self._pages[page_idx].page_number, "layout_undo")
+            page_number = self._pages[page_idx].page_number
+            if invalidates_ocr:
+                self.block_contract_changed.emit(page_number, "layout_undo")
+            else:
+                self.block_order_changed.emit(page_number)
 
     @staticmethod
     def _layout_snapshot_blocks_for_undo(page: Page) -> tuple[LayoutBlockSnapshot, ...]:

@@ -283,6 +283,16 @@ def test_layout_edit_service_reorder_rejects_partial_or_duplicate_identity_sets(
         service.apply(LayoutEditCommand.reorder_blocks(page, [blocks[0].uid, blocks[0].uid]))
 
 
+def test_layout_edit_service_reorder_rejects_duplicate_snapshot_identity():
+    block = Block(BlockType.TEXT, BBox(0, 0, 15, 15), order=0)
+    duplicate = Block(BlockType.TEXT, BBox(20, 0, 15, 15), order=1, uid=block.uid)
+    page = Page(image_path="", width=100, height=50, blocks=[block, duplicate])
+    _seed_layout_snapshot(page)
+
+    with pytest.raises(ValueError, match="snapshot contains duplicate"):
+        LayoutEditService().apply(LayoutEditCommand.reorder_blocks(page, [block.uid]))
+
+
 def test_layout_edit_service_change_block_kind_updates_policy_and_event():
     block = Block(block_type=BlockType.TEXT, bbox=BBox(10, 10, 30, 20), source_label="text")
     page = Page(image_path="", width=200, height=100, blocks=[block])

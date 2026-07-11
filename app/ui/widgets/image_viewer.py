@@ -671,7 +671,16 @@ class ImageViewer(QGraphicsView):
         if self._order_mode:
             if event.key() == Qt.Key.Key_Escape:
                 self.order_mode_cancelled.emit()
-            event.accept()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
+                self._enter_space_pan()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Delete:
+                event.accept()
+                return
+            super().keyPressEvent(event)
             return
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._enter_space_pan()
@@ -691,7 +700,11 @@ class ImageViewer(QGraphicsView):
         super().keyReleaseEvent(event)
 
     def mousePressEvent(self, event):
-        if self._order_mode and event.button() == Qt.MouseButton.LeftButton:
+        if (
+            self._order_mode
+            and not self._space_pan_active
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
             pos = self._map_event_to_scene(event)
             if self._order_mode == "click":
                 block_uid = self._block_uid_at_scene_pos(pos)
@@ -816,7 +829,7 @@ class ImageViewer(QGraphicsView):
             reverse=True,
         )
         for item, block in candidates:
-            if item.sceneBoundingRect().contains(pos) and block.uid:
+            if item.contains(item.mapFromScene(pos)) and block.uid:
                 return block.uid
         return ""
 
@@ -833,33 +846,75 @@ class ImageViewer(QGraphicsView):
         if start is None:
             self._append_order_path_uid(end)
             return
-        segment = QPainterPath(start)
-        segment.lineTo(end)
-        stroker = QPainterPathStroker()
-        stroker.setWidth(10.0)
-        hit_shape = stroker.createStroke(segment)
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        length_sq = dx * dx + dy * dy
         hits: list[tuple[float, str]] = []
         for item, block in self._block_items:
             if not block.uid or block.uid in self._order_path_uids:
                 continue
             rect = item.sceneBoundingRect()
-            rect_path = QPainterPath()
-            rect_path.addRect(rect)
-            if not hit_shape.intersects(rect_path):
+            hit_parameter = self._segment_frame_hit_parameter(start, end, rect)
+            if hit_parameter is None:
                 continue
-            center = rect.center()
-            projection = 0.0
-            if length_sq > 0:
-                projection = (
-                    (center.x() - start.x()) * dx
-                    + (center.y() - start.y()) * dy
-                ) / length_sq
-            hits.append((projection, block.uid))
+            hits.append((hit_parameter, block.uid))
         for _projection, block_uid in sorted(hits):
             self._order_path_uids.append(block_uid)
+
+    @classmethod
+    def _segment_frame_hit_parameter(
+        cls,
+        start: QPointF,
+        end: QPointF,
+        rect: QRectF,
+    ) -> float | None:
+        tolerance = max(_FRAME_HIT_TOLERANCE, 5.0)
+        bands = cls._frame_bands(rect, tolerance)
+        parameters = [
+            parameter
+            for band in bands
+            for parameter in [cls._segment_rect_entry_parameter(start, end, band)]
+            if parameter is not None
+        ]
+        return min(parameters) if parameters else None
+
+    @staticmethod
+    def _segment_rect_entry_parameter(
+        start: QPointF,
+        end: QPointF,
+        rect: QRectF,
+    ) -> float | None:
+        """Return the first normalized segment position inside ``rect``."""
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        lower = 0.0
+        upper = 1.0
+        for p, q in (
+            (-dx, start.x() - rect.left()),
+            (dx, rect.right() - start.x()),
+            (-dy, start.y() - rect.top()),
+            (dy, rect.bottom() - start.y()),
+        ):
+            if p == 0:
+                if q < 0:
+                    return None
+                continue
+            ratio = q / p
+            if p < 0:
+                lower = max(lower, ratio)
+            else:
+                upper = min(upper, ratio)
+            if lower > upper:
+                return None
+        return lower
+
+    @staticmethod
+    def _frame_bands(rect: QRectF, tolerance: float) -> tuple[QRectF, ...]:
+        if rect.width() <= tolerance * 2 or rect.height() <= tolerance * 2:
+            return (rect,)
+        return (
+            QRectF(rect.left(), rect.top(), rect.width(), tolerance),
+            QRectF(rect.left(), rect.bottom() - tolerance, rect.width(), tolerance),
+            QRectF(rect.left(), rect.top(), tolerance, rect.height()),
+            QRectF(rect.right() - tolerance, rect.top(), tolerance, rect.height()),
+        )
 
     def _clear_order_path(self) -> None:
         if self._order_path_item is not None and self._order_path_item.scene() is self._scene:
@@ -951,7 +1006,10 @@ class ImageViewer(QGraphicsView):
             else QGraphicsView.DragMode.ScrollHandDrag
         )
         self._refresh_item_editability()
-        self.viewport().unsetCursor()
+        if self._order_mode:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
 
     def _block_is_editable(self, block: Block) -> bool:
         return self._edit_mode and not self._space_pan_active and not self._order_mode

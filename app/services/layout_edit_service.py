@@ -456,6 +456,8 @@ class LayoutEditService:
         snapshot = current_layout_snapshot(page)
         requested = tuple(block_uids)
         current_uids = tuple(block.uid for block in snapshot.blocks)
+        if len(current_uids) != len(set(current_uids)):
+            raise ValueError("active layout snapshot contains duplicate block uids")
         if len(requested) != len(set(requested)):
             raise ValueError("reorder_blocks requires unique block uids")
         if set(requested) != set(current_uids):

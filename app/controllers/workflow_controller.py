@@ -799,6 +799,17 @@ class WorkflowController(QObject):
         self._mark_project_dirty()
         self._save_if_bound()
 
+    def handle_block_order_changed(self, page_number: int) -> None:
+        """Persist reading-order edits without invalidating OCR observations."""
+        page = self.page_by_number(page_number)
+        if page is None:
+            return
+        self.set_current_page_number(page_number)
+        self._mark_project_dirty()
+        self._save_if_bound()
+        self.sync_proof_panels()
+        self._emit_view_state()
+
     def handle_ocr_entry_requested(self, source: str, page_number: int) -> None:
         if not self.is_hanwang_mode():
             return
