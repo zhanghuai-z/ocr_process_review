@@ -140,6 +140,49 @@ def test_compiler_accepts_detector_seam_inside_structural_block():
     assert plan.validation_issues == ()
 
 
+def test_compiler_assigns_formula_number_row_by_center_when_detector_box_is_larger():
+    snapshot = _snapshot(
+        _block(
+            "formula-number-1",
+            BlockType.EQUATION,
+            (20, 20, 80, 60),
+            policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            order=0,
+            label="formula_number",
+        ),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(index=3, text="(1)", bbox=(5, 5, 95, 75), words=()),
+    )
+
+    plan = compile_page_routing_plan(snapshot, prepass, page_width=100, page_height=80)
+
+    assert plan.is_dispatchable is True
+    assert plan.validation_issues == ()
+
+
+def test_compiler_structural_owner_beats_incidental_text_overlap():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 180, 22), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block(
+            "formula-1",
+            BlockType.EQUATION,
+            (30, 20, 150, 80),
+            policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            order=1,
+            label="display_formula",
+        ),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(index=4, text="x = 1", bbox=(25, 10, 155, 85), words=()),
+    )
+
+    plan = compile_page_routing_plan(snapshot, prepass, page_width=180, page_height=90)
+
+    assert plan.is_dispatchable is True
+    assert plan.for_block("text-1").lines == ()
+
+
 def test_text_other_is_an_explicit_text_route_kind():
     route = TextSliceRoute(
         line_index=0,

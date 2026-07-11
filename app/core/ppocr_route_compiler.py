@@ -82,10 +82,14 @@ def compile_page_routing_plan(
             continue
 
         target = _select_text_container(line_bbox, text_blocks)
-        structural_cuts = _structural_cuts_for_line(line_bbox, structural_blocks)
+        structural_owner = _select_structural_owner(line_bbox, structural_blocks)
+        if structural_owner is not None and (
+            target is None
+            or _overlap_score(line_bbox, structural_owner.bbox)
+            > _overlap_score(line_bbox, target.bbox)
+        ):
+            continue
         if target is None:
-            if _line_is_structural_only(line_bbox, structural_cuts):
-                continue
             issues.append(RouteValidationIssue(
                 code="unmatched_prepass_line",
                 message="PP-OCRv6 line does not belong to a text layout block",
@@ -195,6 +199,39 @@ def _select_text_container(line_bbox: XYXY, candidates: list[_BlockCandidate]) -
     return best[2] if best is not None and best[0] >= 0.1 else None
 
 
+def _select_structural_owner(
+    line_bbox: XYXY,
+    candidates: list[_BlockCandidate],
+) -> _BlockCandidate | None:
+    """Return the strongest structure containing the PP line center.
+
+    PP detector boxes commonly extend beyond a formula or formula-number
+    block.  Center ownership identifies that structural row without weakening
+    the unmatched-line gate.  A surrounding text block can still win by
+    covering more of the row, which preserves inline-formula carving.
+    """
+    center_x = (line_bbox[0] + line_bbox[2]) / 2.0
+    center_y = (line_bbox[1] + line_bbox[3]) / 2.0
+    best: tuple[float, int, _BlockCandidate] | None = None
+    for candidate in candidates:
+        bbox = candidate.bbox
+        if not (
+            bbox[0] <= center_x <= bbox[2]
+            and bbox[1] <= center_y <= bbox[3]
+        ):
+            continue
+        score = _overlap_score(line_bbox, bbox)
+        ranked = (score, -candidate.block.order, candidate)
+        if best is None or ranked[:2] > best[:2]:
+            best = ranked
+    return best[2] if best is not None else None
+
+
+def _overlap_score(line_bbox: XYXY, candidate_bbox: XYXY) -> float:
+    overlap = _intersect(line_bbox, candidate_bbox)
+    return _area(overlap) / max(1, _area(line_bbox)) if overlap is not None else 0.0
+
+
 def _structural_cuts_for_line(
     line_bbox: XYXY,
     candidates: list[_BlockCandidate],
@@ -205,23 +242,6 @@ def _structural_cuts_for_line(
         if overlap is not None:
             cuts.append((candidate.block, overlap, candidate.bbox))
     return sorted(cuts, key=lambda item: (item[1][0], item[1][1], item[0].order))
-
-
-def _line_is_structural_only(
-    line_bbox: XYXY,
-    cuts: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
-) -> bool:
-    if not cuts:
-        return False
-    line_area = _area(line_bbox)
-    center_x = (line_bbox[0] + line_bbox[2]) / 2.0
-    center_y = (line_bbox[1] + line_bbox[3]) / 2.0
-    return any(
-        block_bbox[0] <= center_x <= block_bbox[2]
-        and block_bbox[1] <= center_y <= block_bbox[3]
-        and _area(overlap_bbox) / max(1, line_area) >= 0.5
-        for _block, overlap_bbox, block_bbox in cuts
-    )
 
 
 def _overlapping_formula_mask(
