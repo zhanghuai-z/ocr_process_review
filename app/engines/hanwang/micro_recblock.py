@@ -250,12 +250,14 @@ class RunStats:
     overlap_merge_clusters: int = 0
     overlap_merge_replacements: int = 0
     latin_empty_native_fallbacks: int = 0
+    single_glyph_route_context_recogs: int = 0
 
 
 @dataclass
 class _GroupPlacement:
     area_idx: int
     page_bbox: tuple[int, int, int, int]
+    group_bbox: tuple[int, int, int, int]
 
 
 @dataclass
@@ -1424,7 +1426,6 @@ def _refine_overlap_fragments_with_recrop(
 
 RECOG_GROUP_CROP_PAD_X = 8
 RECOG_GROUP_CROP_PAD_Y = 10
-RECOG_GROUP_RETRY_TOP_TRIM = 3
 ENGCUT_LINE_CONTEXT_PAD_X = 2
 ENGCUT_LINE_CONTEXT_PAD_Y = 2
 OVERLAP_MERGE_LOW_CONFIDENCE = 0.35
@@ -1820,7 +1821,7 @@ def _write_micro_recblock_hook(
             "crop_padding": {
                 "pad_x": RECOG_GROUP_CROP_PAD_X,
                 "pad_y": RECOG_GROUP_CROP_PAD_Y,
-                "retry_top_trim": RECOG_GROUP_RETRY_TOP_TRIM,
+                "retry_strategy": "routing_segment_context",
             },
             "stats": dict(stats.__dict__),
             "input_blocks": ppvl_blocks,
@@ -2055,12 +2056,6 @@ def run_micro_recblock(
                 group["_area_idx"] = area_idx
                 groups.append(group)
         stats.n_groups = len(groups)
-        if progress_callback:
-            progress_callback(
-                0,
-                max(1, len(groups)),
-                f"Hanwang micro-recblock Recog 准备中：{len(groups)} 个 group",
-            )
 
         started = time.time()
         grouped_lines: dict[tuple[int, int, int], list[LineResult]] = {
@@ -2075,9 +2070,12 @@ def run_micro_recblock(
         ):
             for route_key, result in latin_results.items():
                 grouped_lines[route_key].append(result)
-        total_groups = max(1, len(groups))
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []
+        group_core_bboxes: dict[
+            tuple[int, tuple[int, int, int, int]],
+            tuple[int, int, int, int],
+        ] = {}
         for group in groups:
             recblock = recblocks[group["_area_idx"]]
             route = linecut_text_routes[group["_area_idx"]]
@@ -2113,7 +2111,45 @@ def run_micro_recblock(
                 continue
             group_bboxes.append(recog_bbox)
             group_area_indices.append(group["_area_idx"])
+            group_core_bboxes[(group["_area_idx"], recog_bbox)] = bbox
             recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
+
+        for area_idx, route in enumerate(linecut_text_routes):
+            if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
+                continue
+            if recog_group_bboxes_by_route.get(route.key):
+                continue
+            recog_bbox = _expand_xyxy(
+                route.bbox,
+                width,
+                height,
+                pad_x=RECOG_GROUP_CROP_PAD_X,
+                pad_y=RECOG_GROUP_CROP_PAD_Y,
+            )
+            group_bboxes.append(recog_bbox)
+            group_area_indices.append(area_idx)
+            group_core_bboxes[(area_idx, recog_bbox)] = route.bbox
+            recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
+            segimg_group_audits_by_route.setdefault(route.key, []).append({
+                "route_text_slice_bbox": list(route.bbox),
+                "segimg_group_bbox": None,
+                "recog_group_bbox": list(recog_bbox),
+                "recog_group_bbox_before_padding": list(route.bbox),
+                "recog_group_bbox_padded": recog_bbox != route.bbox,
+                "clipped": False,
+                "dropped": False,
+                "segimg_group_missing": True,
+                "recog_strategy": "routing_segment_context",
+            })
+            stats.single_glyph_route_context_recogs += 1
+
+        total_groups = max(1, len(group_bboxes))
+        if progress_callback:
+            progress_callback(
+                0,
+                total_groups,
+                f"Hanwang micro-recblock Recog 准备中：{len(group_bboxes)} 个 group",
+            )
 
         def update_recog_group_audit(placement: _GroupPlacement, values: dict[str, Any]) -> None:
             route = linecut_text_routes[placement.area_idx]
@@ -2146,7 +2182,7 @@ def run_micro_recblock(
             if retry_bbox is not None:
                 values.update({
                     "recog_retry_attempted": True,
-                    "recog_retry_strategy": f"trim_top_{RECOG_GROUP_RETRY_TOP_TRIM}px",
+                    "recog_retry_strategy": "routing_segment_context",
                     "recog_retry_bbox": list(retry_bbox),
                     "recog_retry_succeeded": False,
                 })
@@ -2164,23 +2200,25 @@ def run_micro_recblock(
                 placement,
                 {
                     "recog_retry_attempted": True,
-                    "recog_retry_strategy": f"trim_top_{RECOG_GROUP_RETRY_TOP_TRIM}px",
+                    "recog_retry_strategy": "routing_segment_context",
                     "recog_retry_original_error": str(original_error),
                     "recog_retry_bbox": list(retry_bbox),
                     "recog_retry_succeeded": True,
                 },
             )
 
-        def retry_bbox_after_top_trim(
-            bbox: tuple[int, int, int, int],
+        def retry_bbox_from_routing_segment(
+            placement: _GroupPlacement,
         ) -> tuple[int, int, int, int] | None:
-            left, top, right, bottom = bbox
-            if bottom - top <= RECOG_GROUP_RETRY_TOP_TRIM + 8:
-                return None
-            retry_top = min(bottom - 1, top + RECOG_GROUP_RETRY_TOP_TRIM)
-            if bottom - retry_top < 8:
-                return None
-            return left, retry_top, right, bottom
+            route = linecut_text_routes[placement.area_idx]
+            bbox = _expand_xyxy(
+                route.bbox,
+                width,
+                height,
+                pad_x=RECOG_GROUP_CROP_PAD_X,
+                pad_y=RECOG_GROUP_CROP_PAD_Y,
+            )
+            return bbox if bbox != placement.page_bbox else None
 
         def recognize_individually(placements: list[_GroupPlacement]) -> None:
             for placement in placements:
@@ -2190,6 +2228,7 @@ def run_micro_recblock(
                 offset_left = left
                 offset_top = top
                 active_crop = crop
+                used_route_context_retry = False
                 try:
                     stats.recog_probe_calls += 1
                     raw = native_bridge.run_linecut_recog(
@@ -2199,7 +2238,7 @@ def run_micro_recblock(
                         timeout=recog_timeout,
                     )
                 except Exception as exc:
-                    retry_bbox = retry_bbox_after_top_trim(placement.page_bbox)
+                    retry_bbox = retry_bbox_from_routing_segment(placement)
                     if retry_bbox is not None:
                         retry_left, retry_top, retry_right, retry_bottom = retry_bbox
                         retry_crop = image_bgr[retry_top:retry_bottom, retry_left:retry_right].copy()
@@ -2242,6 +2281,7 @@ def run_micro_recblock(
                             )
                             offset_left, offset_top = retry_left, retry_top
                             active_crop = retry_crop
+                            used_route_context_retry = True
                             crop_h, crop_w = retry_crop.shape[:2]
                     else:
                         logger.warning("Hanwang micro_recblock group failed bbox=%s: %s", placement.page_bbox, exc)
@@ -2261,6 +2301,11 @@ def run_micro_recblock(
                     )
                 route = linecut_text_routes[placement.area_idx]
                 offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
+                if used_route_context_retry:
+                    offset_lines = _filter_line_results_to_route_bbox(
+                        offset_lines,
+                        placement.group_bbox,
+                    )
                 grouped_lines[route.key].extend(
                     _filter_line_results_to_route_bbox(offset_lines, route.bbox)
                 )
@@ -2318,6 +2363,7 @@ def run_micro_recblock(
                     _GroupPlacement(
                         area_idx=area_idx,
                         page_bbox=page_bbox,
+                        group_bbox=group_core_bboxes[(area_idx, page_bbox)],
                     )
                 )
             if not placements:

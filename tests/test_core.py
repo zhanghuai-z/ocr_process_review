@@ -11280,7 +11280,7 @@ def test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
     print("test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback PASSED")
 
 
-def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line():
+def test_hanwang_recog_group_failure_retries_with_routing_segment_context():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -11311,7 +11311,7 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
         calls.append(tuple(image_bgr.shape[:2]))
         if len(calls) == 1:
             raise RuntimeError("native recog access violation")
-        assert calls[-1] == (47, 86)
+        assert calls[-1] == (60, 108)
         return {
             "lines": [
                 {
@@ -11349,10 +11349,10 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
             include_chars=True,
         )
 
-        assert calls == [(50, 86), (47, 86)]
+        assert calls == [(50, 86), (60, 108)]
         assert rows[0].text == "补"
-        assert rows[0].lines[0].bbox == (2, 3, 32, 23)
-        assert rows[0].lines[0].chars[0].bbox == (4, 6, 24, 22)
+        assert rows[0].lines[0].bbox == (0, 0, 30, 20)
+        assert rows[0].lines[0].chars[0].bbox == (2, 3, 22, 19)
         assert stats.recog_probe_calls == 2
         assert stats.recog_group_failures == 0
         assert stats.recog_group_retry_attempts == 1
@@ -11364,13 +11364,14 @@ def test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line(
         assert group_audit["recog_group_bbox"] == [2, 0, 88, 50]
         assert group_audit["recog_retry_attempted"] is True
         assert group_audit["recog_retry_succeeded"] is True
-        assert group_audit["recog_retry_bbox"] == [2, 3, 88, 50]
+        assert group_audit["recog_retry_strategy"] == "routing_segment_context"
+        assert group_audit["recog_retry_bbox"] == [0, 0, 108, 60]
         assert "native recog access violation" in group_audit["recog_retry_original_error"]
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
         micro_module.native_bridge.run_linecut_recog = original_recog
 
-    print("test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line PASSED")
+    print("test_hanwang_recog_group_failure_retries_with_routing_segment_context PASSED")
 
 
 def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
@@ -21344,7 +21345,7 @@ if __name__ == "__main__":
     test_hanwang_footnote_labels_route_through_hanwang()
     test_hanwang_micro_recblock_unknown_label_defaults_to_text_path_with_audit()
     test_hanwang_recog_group_failure_is_visible_in_audit_without_ppvl_fallback()
-    test_hanwang_recog_group_failure_retries_with_top_trim_before_dropping_line()
+    test_hanwang_recog_group_failure_retries_with_routing_segment_context()
     test_hanwang_micro_recblock_circuit_breaks_after_batch_failure()
     test_hanwang_micro_recblock_batch_list_handles_wide_crops_without_collage_guard()
     test_ocr_pipeline_runs_hanwang_micro_recblock_page_path()
