@@ -25,6 +25,7 @@ from app.models.ocr_observation import block_ocr_line_observations_by_uid, repla
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.models.charocr_routing import (
+    COMPONENT_GROUPING_SINGLE_GLYPH,
     PageRoutingPlan,
     RoutingLine,
     is_text_route_segment_kind,
@@ -262,6 +263,7 @@ class _TextRoute:
     bbox: tuple[int, int, int, int]
     carved: bool = False
     kind: str = "text"
+    component_grouping: str = ""
 
     @property
     def key(self) -> tuple[int, int, int]:
@@ -357,6 +359,7 @@ def _text_route_bboxes_from_lines(
             bbox=segment.bbox,
             carved=len(line.segments) > 1,
             kind=segment.kind,
+            component_grouping=segment.component_grouping,
         )
         for line_idx, line in enumerate(lines)
         for segment_idx, segment in enumerate(line.segments)
@@ -384,6 +387,7 @@ def _latin_masked_line_routes_from_lines(
                 bbox=segment.bbox,
                 carved=len(line.segments) > 1,
                 kind=segment.kind,
+                component_grouping=segment.component_grouping,
             )
             for segment_idx, segment in enumerate(line.segments)
             if segment.kind == "text_latin"
@@ -438,6 +442,53 @@ def _merge_peer_text_lines(lines: list[LineResult]) -> list[LineResult]:
         ))
     merged.sort(key=lambda line: (line.bbox[1], line.bbox[0]))
     return merged
+
+
+def _recover_single_glyph_route_component_bbox(
+    route: _TextRoute,
+    lines: list[LineResult],
+    segimg_group_audits: list[dict[str, Any]],
+) -> None:
+    """Join native SegImg components for one routed punctuation glyph.
+
+    The routing plan supplies only the grouping contract.  Recognized text
+    remains native output; if native returns zero or multiple characters this
+    function leaves the observations untouched.
+    """
+    if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
+        return
+    char_locations = [
+        (line_index, char_index)
+        for line_index, line in enumerate(lines)
+        for char_index, char in enumerate(line.chars)
+        if char.text
+    ]
+    if len(char_locations) != 1:
+        return
+    component_boxes = [
+        tuple(int(value) for value in item["segimg_group_bbox"])
+        for item in segimg_group_audits
+        if isinstance(item.get("segimg_group_bbox"), (list, tuple))
+        and len(item["segimg_group_bbox"]) == 4
+    ]
+    if len(component_boxes) <= 1:
+        return
+    component_bbox = union_xyxy(component_boxes)
+    line_index, char_index = char_locations[0]
+    line = lines[line_index]
+    char = line.chars[char_index]
+    chars = list(line.chars)
+    chars[char_index] = replace(
+        char,
+        bbox=component_bbox,
+        source=f"{char.source}:native_component_union",
+        bbox_granularity=char.bbox_granularity or "char",
+    )
+    lines[line_index] = replace(
+        line,
+        bbox=union_xyxy([line.bbox, component_bbox]),
+        chars=chars,
+    )
 
 
 def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
@@ -2262,6 +2313,12 @@ def run_micro_recblock(
                     total_groups,
                     f"Hanwang OCR 已完成 {completed_groups}/{total_groups}",
                 )
+        for route in linecut_text_routes:
+            _recover_single_glyph_route_component_bbox(
+                route,
+                grouped_lines.get(route.key, []),
+                segimg_group_audits_by_route.get(route.key, []),
+            )
         stats.recog_seconds = time.time() - started
 
         for block_idx in text_indices:

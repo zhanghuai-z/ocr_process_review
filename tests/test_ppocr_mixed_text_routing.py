@@ -4,6 +4,7 @@ import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
 from app.core.charocr_text_partition import partition_charocr_text_region
+from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH
 
 
 def _image() -> np.ndarray:
@@ -420,4 +421,40 @@ def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
         ("text_other", (15, 0, 54, 40)),
         ("text_other", (54, 0, 92, 40)),
         ("text_latin", (92, 10, 97, 30)),
+    ]
+    assert [
+        segment.component_grouping
+        for segment in result.segments
+        if segment.kind == "text_other"
+    ] == [COMPONENT_GROUPING_SINGLE_GLYPH, COMPONENT_GROUPING_SINGLE_GLYPH]
+
+
+def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot():
+    image = np.full((60, 220, 3), 255, dtype=np.uint8)
+    for bbox in (
+        (20, 16, 24, 48),
+        (28, 14, 36, 37),
+        (46, 17, 51, 39),
+        (61, 10, 75, 36),
+        (80, 9, 89, 43),
+        (102, 13, 107, 31),
+        (103, 42, 107, 48),
+    ):
+        _ink(image, bbox)
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="China? ",
+        bbox=(0, 0, 200, 55),
+        words=(
+            PpOcrV6WordBox(0, 0, "China", (15, 2, 91, 52)),
+            PpOcrV6WordBox(0, 1, "? ", (108, 2, 116, 52)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.component_grouping) for segment in result.segments] == [
+        ("text_latin", (20, 9, 89, 48), ""),
+        ("text_other", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH),
     ]

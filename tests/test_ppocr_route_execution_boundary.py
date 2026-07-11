@@ -7,13 +7,46 @@ from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6Prepass
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.engines.hanwang.micro_recblock import (
     BlockResult,
+    CharResult,
     HanwangMicroRecBlockEngine,
     LineResult,
     RunStats,
+    _TextRoute,
     _compile_native_route_map,
+    _recover_single_glyph_route_component_bbox,
 )
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
+from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH
+
+
+def test_single_glyph_route_unions_detached_native_component_geometry():
+    route = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(100, 20, 150, 90),
+        kind="text_other",
+        component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+    )
+    lines = [LineResult(
+        text="?",
+        bbox=(108, 28, 132, 64),
+        chars=[CharResult(text="?", bbox=(108, 28, 132, 64))],
+    )]
+
+    _recover_single_glyph_route_component_bbox(
+        route,
+        lines,
+        [
+            {"segimg_group_bbox": [108, 28, 132, 64]},
+            {"segimg_group_bbox": [114, 70, 123, 79]},
+        ],
+    )
+
+    assert lines[0].bbox == (108, 28, 132, 79)
+    assert lines[0].chars[0].bbox == (108, 28, 132, 79)
+    assert lines[0].chars[0].source.endswith(":native_component_union")
 
 
 def test_hanwang_receives_only_explicit_page_routing_plan_for_text_blocks():

@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.models.charocr_routing import RoutingSegment
+from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH, RoutingSegment
 from app.core.ocr_ir import is_cjk_char
 
 
@@ -237,6 +237,7 @@ def _text_other_segments(
         return [RoutingSegment(kind="text_other", bbox=bbox)]
 
     clusters: list[list[tuple[int, int, int, int, int]]] = []
+    expected_glyph_count = 0
     for owner in sorted(
         gap_owners,
         key=lambda index: (_clip(token_by_index[index].bbox, bbox)[0], index),
@@ -248,14 +249,21 @@ def _text_other_segments(
         )
         if not owned:
             continue
-        glyph_count = max(1, sum(1 for char in str(token.text or "") if not char.isspace()))
+        glyph_count = max(1, _nonspace_glyph_count(token.text))
+        expected_glyph_count += glyph_count
         clusters.extend(_split_components_by_largest_gaps(owned, glyph_count))
     clusters.sort(key=lambda cluster: (
         min(component[0] for component in cluster),
         min(component[1] for component in cluster),
     ))
-    if len(clusters) <= 1:
+    if len(clusters) != expected_glyph_count:
         return [RoutingSegment(kind="text_other", bbox=bbox)]
+    if len(clusters) == 1:
+        return [RoutingSegment(
+            kind="text_other",
+            bbox=bbox,
+            component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+        )]
 
     cluster_boxes = [_union([component[:4] for component in cluster]) for cluster in clusters]
     boundaries: list[int] = []
@@ -265,7 +273,11 @@ def _text_other_segments(
         boundaries.append((left[2] + right[0]) // 2)
     edges = [bbox[0], *boundaries, bbox[2]]
     return [
-        RoutingSegment(kind="text_other", bbox=(edges[index], bbox[1], edges[index + 1], bbox[3]))
+        RoutingSegment(
+            kind="text_other",
+            bbox=(edges[index], bbox[1], edges[index + 1], bbox[3]),
+            component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
+        )
         for index in range(len(edges) - 1)
         if edges[index + 1] > edges[index]
         and _has_visible_ink(components, (edges[index], bbox[1], edges[index + 1], bbox[3]))
@@ -471,6 +483,15 @@ def _component_owner_token_indices(
                 anchors.append(component)
                 remaining.remove(component)
 
+        # A single punctuation glyph may have vertically detached ink (for
+        # example the dot in ``?`` or ``!``), which the projection pass above
+        # already closes.  Crossing a horizontal gap is only valid when the
+        # PP token itself contains multiple symbol glyphs, such as ``” “``.
+        # Otherwise a shifted punctuation proposal can consume the final
+        # Latin glyph before it.
+        if _nonspace_glyph_count(token.text) <= 1:
+            continue
+
         while True:
             reclaimed: list[tuple[int, int, int, int, int]] = []
             for component in remaining:
@@ -634,6 +655,10 @@ def _token_branch(text: str) -> str:
 
 def _has_latin_or_digit(text: str) -> bool:
     return any(char.isascii() and char.isalnum() for char in str(text or ""))
+
+
+def _nonspace_glyph_count(text: str) -> int:
+    return sum(1 for char in str(text or "") if not char.isspace())
 
 
 def _clip(bbox: XYXY, bounds: XYXY) -> XYXY:

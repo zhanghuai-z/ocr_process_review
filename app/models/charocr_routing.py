@@ -11,6 +11,8 @@ ROUTE_SEGMENT_TEXT_OTHER = "text_other"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
 ROUTE_SEGMENT_FORMULA = "formula"
 ROUTE_SEGMENT_SKIP = "skip"
+COMPONENT_GROUPING_SINGLE_GLYPH = "single_glyph"
+VALID_COMPONENT_GROUPINGS = frozenset({"", COMPONENT_GROUPING_SINGLE_GLYPH})
 TEXT_ROUTE_SEGMENT_KINDS = frozenset({
     ROUTE_SEGMENT_TEXT_OTHER,
     ROUTE_SEGMENT_TEXT_LATIN,
@@ -37,9 +39,16 @@ class RoutingSegment:
     label: str = ""
     text: str = ""
     content_bbox: XYXY | None = None
+    component_grouping: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
+        grouping = str(self.component_grouping or "")
+        if grouping not in VALID_COMPONENT_GROUPINGS:
+            raise ValueError(f"unsupported route component grouping: {grouping!r}")
+        if grouping and self.kind != ROUTE_SEGMENT_TEXT_OTHER:
+            raise ValueError("component grouping is only valid for text_other routes")
+        object.__setattr__(self, "component_grouping", grouping)
 
 
 @dataclass(frozen=True)
@@ -166,6 +175,7 @@ def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
         bbox=xyxy(segment.get("bbox")),
         text=str(segment.get("text") or ""),
         content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
+        component_grouping=str(segment.get("component_grouping") or ""),
     )
 
 
@@ -183,6 +193,7 @@ def routing_line_to_record(
                 "bbox": list(segment.bbox),
                 "text": segment.text,
                 **({"content_bbox": list(segment.content_bbox)} if segment.content_bbox else {}),
+                **({"component_grouping": segment.component_grouping} if segment.component_grouping else {}),
             }
             for segment in line.segments
         ],
@@ -231,6 +242,7 @@ def int_or_default(value: object, default: int) -> int:
 
 __all__ = [
     "BlockRoutingPlan",
+    "COMPONENT_GROUPING_SINGLE_GLYPH",
     "PageRoutingPlan",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",
@@ -244,6 +256,7 @@ __all__ = [
     "TEXT_ROUTE_SEGMENT_KINDS",
     "TextSliceRoute",
     "VALID_ROUTE_SEGMENT_KINDS",
+    "VALID_COMPONENT_GROUPINGS",
     "is_text_route_segment_kind",
     "normalize_route_segment_kind",
     "routing_line_from_record",
