@@ -1,10 +1,9 @@
 """Build CharOCR text crops from PP-OCRv6 line observations.
 
-PP-OCR word boxes are geometry proposals, not OCR facts.  For every line that
-contains Latin letters or digits, only Latin/digit proposals create EngCut
-masks; every remaining horizontal region is dispatched to LineCut.  This
-keeps punctuation and CJK outside EngCut without promoting PP-OCR text into
-OCR truth.
+PP-OCR word boxes are geometry proposals for Latin/digit routing. For every
+line that contains Latin letters or digits, Latin/digit proposals create
+EngCut masks, isolated punctuation becomes an explicit PP-OCR observation,
+and every remaining horizontal region is dispatched to LineCut.
 """
 from __future__ import annotations
 
@@ -268,7 +267,7 @@ def _text_other_segments(
         return [RoutingSegment(kind="text_other", bbox=bbox)]
 
     clusters_with_candidates: list[
-        tuple[list[tuple[int, int, int, int, int]], str]
+        tuple[list[tuple[int, int, int, int, int]], str, str]
     ] = []
     expected_glyph_count = 0
     for owner in sorted(
@@ -283,26 +282,34 @@ def _text_other_segments(
         if not owned:
             continue
         glyphs = [char for char in str(token.text or "") if not char.isspace()]
+        route_texts = _symbol_route_texts(str(token.text or ""))
         glyph_count = max(1, len(glyphs))
         expected_glyph_count += glyph_count
         split_clusters = _split_components_by_largest_gaps(owned, glyph_count)
         if len(split_clusters) != len(glyphs):
             return [RoutingSegment(kind="text_other", bbox=bbox)]
-        clusters_with_candidates.extend(zip(split_clusters, glyphs))
+        clusters_with_candidates.extend(zip(split_clusters, glyphs, route_texts))
     clusters_with_candidates.sort(key=lambda item: (
         min(component[0] for component in item[0]),
         min(component[1] for component in item[0]),
     ))
-    clusters = [cluster for cluster, _candidate in clusters_with_candidates]
-    candidates = [candidate for _cluster, candidate in clusters_with_candidates]
+    clusters = [cluster for cluster, _candidate, _route_text in clusters_with_candidates]
+    candidates = [candidate for _cluster, candidate, _route_text in clusters_with_candidates]
+    route_texts = [route_text for _cluster, _candidate, route_text in clusters_with_candidates]
+    punctuation_candidates = [_punctuation_candidate(candidate) for candidate in candidates]
+    if any(not candidate for candidate in punctuation_candidates):
+        return [RoutingSegment(kind="text_other", bbox=bbox)]
     if len(clusters) != expected_glyph_count:
         return [RoutingSegment(kind="text_other", bbox=bbox)]
     if len(clusters) == 1:
+        content_bbox = _union([component[:4] for component in clusters[0]])
         return [RoutingSegment(
-            kind="text_other",
+            kind="text_symbol",
             bbox=bbox,
+            text=route_texts[0],
+            content_bbox=content_bbox,
             component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
-            ppocr_punctuation_candidate=_punctuation_candidate(candidates[0]),
+            ppocr_punctuation_candidate=punctuation_candidates[0],
         )]
 
     cluster_boxes = [_union([component[:4] for component in cluster]) for cluster in clusters]
@@ -314,10 +321,12 @@ def _text_other_segments(
     edges = [bbox[0], *boundaries, bbox[2]]
     return [
         RoutingSegment(
-            kind="text_other",
+            kind="text_symbol",
             bbox=(edges[index], bbox[1], edges[index + 1], bbox[3]),
+            text=route_texts[index],
+            content_bbox=cluster_boxes[index],
             component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
-            ppocr_punctuation_candidate=_punctuation_candidate(candidates[index]),
+            ppocr_punctuation_candidate=punctuation_candidates[index],
         )
         for index in range(len(edges) - 1)
         if edges[index + 1] > edges[index]
@@ -354,6 +363,22 @@ def _split_components_by_largest_gaps(
 
 def _punctuation_candidate(value: str) -> str:
     return value if len(value) == 1 and category(value).startswith("P") else ""
+
+
+def _symbol_route_texts(value: str) -> list[str]:
+    """Attach PP-observed whitespace to the preceding punctuation glyph."""
+    output: list[str] = []
+    leading = ""
+    for char in value:
+        if char.isspace():
+            if output:
+                output[-1] += char
+            else:
+                leading += char
+            continue
+        output.append(f"{leading}{char}")
+        leading = ""
+    return output
 
 
 def _latin_mask_bbox(
@@ -449,6 +474,11 @@ def _component_owner_token_indices(
         if centered:
             owners[component] = min(centered)[3]
 
+    # Sideways symbol recovery must be evaluated against the immutable PP-OCR
+    # ownership facts above.  Reusing later reclaimed owners lets a symbol walk
+    # through a neighboring word one component at a time.
+    initial_owners = dict(owners)
+
     for token in tokens:
         if _token_branch(token.text) != "symbol":
             continue
@@ -528,47 +558,48 @@ def _component_owner_token_indices(
                 anchors.append(component)
                 remaining.remove(component)
 
-        # Compare a side-by-side component with both owners.  This recovers a
-        # shifted two-part quote while keeping a full-height Latin body with
-        # its word token; ownership is decided by measured component geometry,
-        # not by punctuation identity.
-        while True:
-            reclaimed: list[tuple[int, int, int, int, int]] = []
-            for component in remaining:
-                owner = owners[component]
-                symbol_score = min(_component_neighbor_score(component, anchor) for anchor in anchors)
-                if owner is None:
-                    latin_anchors = [
-                        peer
-                        for peer in eligible_components
-                        if token_branches.get(owners[peer]) == "latin"
-                    ]
-                    if (
-                        latin_anchors
-                        and symbol_score[0] < 0.0
-                        and symbol_score < min(
-                            _component_neighbor_score(component, peer)
-                            for peer in latin_anchors
-                        )
-                    ):
-                        reclaimed.append(component)
-                    continue
-                latin_peers = [
+        # Compare each side-by-side component once with the original PP token
+        # ownership.  This recovers a shifted two-part quote, but a reclaimed
+        # component never becomes a stepping stone into an adjacent word.
+        reclaimed: list[tuple[int, int, int, int, int]] = []
+        stable_symbol_anchors = tuple(anchors)
+        for component in remaining:
+            owner = initial_owners[component]
+            symbol_score = min(
+                _component_neighbor_score(component, anchor)
+                for anchor in stable_symbol_anchors
+            )
+            if owner is None:
+                latin_anchors = [
                     peer
                     for peer in eligible_components
-                    if peer is not component and owners[peer] == owner
+                    if token_branches.get(initial_owners[peer]) == "latin"
                 ]
-                if not latin_peers:
-                    continue
-                latin_score = min(_component_neighbor_score(component, peer) for peer in latin_peers)
-                if symbol_score < latin_score:
+                if (
+                    latin_anchors
+                    and symbol_score[0] < 0.0
+                    and symbol_score < min(
+                        _component_neighbor_score(component, peer)
+                        for peer in latin_anchors
+                    )
+                ):
                     reclaimed.append(component)
-            if not reclaimed:
-                break
-            for component in reclaimed:
-                owners[component] = token.token_index
-                anchors.append(component)
-                remaining.remove(component)
+                continue
+            latin_peers = [
+                peer
+                for peer in eligible_components
+                if peer is not component and initial_owners[peer] == owner
+            ]
+            if not latin_peers:
+                continue
+            latin_score = min(
+                _component_neighbor_score(component, peer)
+                for peer in latin_peers
+            )
+            if symbol_score < latin_score:
+                reclaimed.append(component)
+        for component in reclaimed:
+            owners[component] = token.token_index
 
     for component in eligible_components:
         if owners[component] is not None:

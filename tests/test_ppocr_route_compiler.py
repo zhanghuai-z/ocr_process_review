@@ -340,9 +340,9 @@ def test_compiler_partitions_quotes_out_of_pure_latin_row():
 
     assert plan.is_dispatchable is True
     assert [(segment.kind, segment.bbox) for segment in plan.for_block("text-1").lines[0].segments] == [
-        ("text_other", (0, 0, 30, 40)),
+        ("text_symbol", (0, 0, 30, 40)),
         ("text_latin", (30, 8, 40, 30)),
-        ("text_other", (40, 0, 70, 40)),
+        ("text_symbol", (40, 0, 70, 40)),
     ]
 
 

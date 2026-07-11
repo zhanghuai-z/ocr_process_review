@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 import app.engines.hanwang.micro_recblock as micro_module
+from app.models.charocr_routing import RoutingLine, RoutingSegment
 from tests.charocr_native_route_fixture import run_micro_recblock_with_explicit_routes
 
 
@@ -197,7 +198,7 @@ def test_text_latin_route_uses_engcut_without_linecut():
         micro_module.native_bridge.run_eng20_recogline = original_eng20
 
     assert linecut_called is False
-    assert stats.latin_engcut_route_calls == 1
+    assert stats.engcut_route_calls == 1
     assert len(rows) == 1
     assert rows[0].lines[0].text == "Urban Crisis"
     assert rows[0].lines[0].source == "hanwang:EngCut:latin_route"
@@ -228,7 +229,7 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     image[8:30, 33:35] = 0
     image[8:30, 42:68] = 0
     image[8:30, 112:138] = 0
-    route = micro_module._LatinMaskedLineRoute(
+    route = micro_module._EngCutMaskedLineRoute(
         block_idx=2,
         line_idx=4,
         bbox=(0, 0, 160, 36),
@@ -244,7 +245,7 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
         captured.append(crop.copy()) or _eng20_grouped_payload_at([(42, "AB"), (112, "CD")])
     )
     try:
-        results = micro_module._recognize_latin_masked_line_with_engcut(
+        results = micro_module._recognize_engcut_masked_line(
             image,
             route,
             stats,
@@ -253,7 +254,7 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     finally:
         micro_module.native_bridge.run_eng20_recogline = original_eng20
 
-    assert stats.latin_engcut_route_calls == 1
+    assert stats.engcut_route_calls == 1
     assert len(captured) == 1
     assert np.all(captured[0][10, 12] == 255)
     assert np.all(captured[0][10, 34] == 255)
@@ -266,9 +267,54 @@ def test_masked_latin_line_keeps_only_latin_pixels_and_rebinds_groups():
     assert all(result.bbox_source == "text_latin_masked_line_engcut" for result in results.values())
 
 
+def test_ppocr_symbol_route_materializes_exact_text_and_component_geometry():
+    route = micro_module._TextRoute(
+        0,
+        0,
+        1,
+        (80, 0, 120, 55),
+        kind="text_symbol",
+        component_grouping="single_glyph",
+        ppocr_punctuation_candidate="?",
+        content_bbox=(86, 8, 104, 48),
+    )
+
+    result = micro_module._ppocr_symbol_route_observation(route)
+
+    assert result.text == "?"
+    assert result.bbox_source == "ppocrv6_component_group"
+    assert [(char.text, char.bbox, char.source) for char in result.chars] == [
+        ("?", (86, 8, 104, 48), "ppocrv6:single_glyph_punctuation"),
+    ]
+
+
+def test_engcut_masked_routes_exclude_explicit_ppocr_symbol_observations():
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 36),
+        segments=(
+            RoutingSegment(kind="text_latin", bbox=(30, 0, 54, 36), text="AB"),
+            RoutingSegment(
+                kind="text_symbol",
+                bbox=(54, 0, 70, 36),
+                content_bbox=(55, 2, 63, 22),
+                component_grouping="single_glyph",
+                ppocr_punctuation_candidate=".",
+            ),
+        ),
+    )
+
+    routes = micro_module._engcut_masked_line_routes_from_lines(0, (line,))
+
+    assert len(routes) == 1
+    assert [(segment.kind, segment.bbox) for segment in routes[0].segments] == [
+        ("text_latin", (30, 0, 54, 36)),
+    ]
+
+
 def test_masked_latin_line_uses_pp_text_only_when_one_segment_has_zero_native_output():
     image = np.full((40, 180, 3), 255, dtype=np.uint8)
-    route = micro_module._LatinMaskedLineRoute(
+    route = micro_module._EngCutMaskedLineRoute(
         block_idx=2,
         line_idx=4,
         bbox=(0, 0, 160, 36),
@@ -289,7 +335,7 @@ def test_masked_latin_line_uses_pp_text_only_when_one_segment_has_zero_native_ou
         lambda _crop, *, timeout=0: _eng20_grouped_payload_at([(42, "AB")])
     )
     try:
-        results = micro_module._recognize_latin_masked_line_with_engcut(
+        results = micro_module._recognize_engcut_masked_line(
             image,
             route,
             stats,
@@ -310,7 +356,7 @@ def test_masked_latin_line_uses_pp_text_only_when_one_segment_has_zero_native_ou
 
 def test_masked_latin_line_rejects_unbound_native_group():
     image = np.full((40, 120, 3), 255, dtype=np.uint8)
-    route = micro_module._LatinMaskedLineRoute(
+    route = micro_module._EngCutMaskedLineRoute(
         block_idx=0,
         line_idx=0,
         bbox=(0, 0, 100, 36),
@@ -324,7 +370,7 @@ def test_masked_latin_line_rejects_unbound_native_group():
     )
     try:
         with pytest.raises(RuntimeError, match="cannot be uniquely rebound"):
-            micro_module._recognize_latin_masked_line_with_engcut(
+            micro_module._recognize_engcut_masked_line(
                 image,
                 route,
                 micro_module.RunStats(),
@@ -334,18 +380,16 @@ def test_masked_latin_line_rejects_unbound_native_group():
         micro_module.native_bridge.run_eng20_recogline = original_eng20
 
 
-def test_masked_latin_line_rejects_group_spanning_multiple_segments():
+def test_masked_engcut_group_assigns_each_character_to_its_latin_route():
     segments = (
         micro_module._TextRoute(0, 0, 0, (20, 0, 50, 36), kind="text_latin"),
         micro_module._TextRoute(0, 0, 2, (50, 0, 80, 36), kind="text_latin"),
     )
-    group = [
-        micro_module.EngcutChar("A", bbox=(25, 4, 33, 24)),
-        micro_module.EngcutChar("B", bbox=(60, 4, 68, 24)),
-    ]
+    left = micro_module.EngcutChar("A", bbox=(25, 4, 33, 24))
+    right = micro_module.EngcutChar("B", bbox=(60, 4, 68, 24))
 
-    with pytest.raises(RuntimeError, match="spans multiple Latin routes"):
-        micro_module._latin_segment_for_engcut_group(group, segments)
+    assert micro_module._engcut_segment_for_char(left, segments) is segments[0]
+    assert micro_module._engcut_segment_for_char(right, segments) is segments[1]
 
 
 def test_masked_latin_lines_use_bounded_parallel_native_calls():
@@ -354,7 +398,7 @@ def test_masked_latin_lines_use_bounded_parallel_native_calls():
 
     image = np.full((40, 120, 3), 255, dtype=np.uint8)
     routes = [
-        micro_module._LatinMaskedLineRoute(
+        micro_module._EngCutMaskedLineRoute(
             block_idx=0,
             line_idx=line_idx,
             bbox=(0, 0, 100, 36),
@@ -388,7 +432,7 @@ def test_masked_latin_lines_use_bounded_parallel_native_calls():
     original_eng20 = micro_module.native_bridge.run_eng20_recogline
     micro_module.native_bridge.run_eng20_recogline = fake_eng20
     try:
-        results = micro_module._recognize_latin_masked_lines_with_engcut(
+        results = micro_module._recognize_engcut_masked_lines(
             image,
             routes,
             stats,
@@ -399,13 +443,13 @@ def test_masked_latin_lines_use_bounded_parallel_native_calls():
 
     assert max_active > 1
     assert max_active <= micro_module._MAX_ENGCUT_LINES_PER_PAGE
-    assert stats.latin_engcut_route_calls == 4
+    assert stats.engcut_route_calls == 4
     assert [route.line_idx for route, _route_results in results] == [0, 1, 2, 3]
 
 
 def test_masked_latin_line_hook_writes_actual_engcut_input(tmp_path, monkeypatch):
     monkeypatch.setenv("HANWANG_MICRO_RECBLOCK_HOOK_DIR", str(tmp_path))
-    route = micro_module._LatinMaskedLineRoute(
+    route = micro_module._EngCutMaskedLineRoute(
         block_idx=1,
         line_idx=2,
         bbox=(10, 20, 70, 50),
@@ -414,7 +458,7 @@ def test_masked_latin_line_hook_writes_actual_engcut_input(tmp_path, monkeypatch
         ),
     )
     crop = np.full((30, 60, 3), 255, dtype=np.uint8)
-    micro_module._write_masked_latin_line_hook(crop, route, offset_x=10, offset_y=20)
+    micro_module._write_masked_engcut_line_hook(crop, route, offset_x=10, offset_y=20)
 
     output_dir = tmp_path / "engcut_masked_inputs"
     images = list(output_dir.glob("*.png"))
@@ -423,4 +467,4 @@ def test_masked_latin_line_hook_writes_actual_engcut_input(tmp_path, monkeypatch
     assert len(metadata) == 1
     payload = json.loads(metadata[0].read_text(encoding="utf-8"))
     assert payload["crop_bbox"] == [10, 20, 70, 50]
-    assert payload["latin_segments"] == [{"route_key": [1, 2, 1], "bbox": [25, 20, 50, 50]}]
+    assert payload["engcut_segments"] == [{"route_key": [1, 2, 1], "bbox": [25, 20, 50, 50]}]

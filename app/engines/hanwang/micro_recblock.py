@@ -27,6 +27,8 @@ from app.core.inline_formula_edit_state import filter_handled_inline_formula_sub
 from app.models.charocr_routing import (
     COMPONENT_GROUPING_SINGLE_GLYPH,
     PageRoutingPlan,
+    ROUTE_SEGMENT_TEXT_LATIN,
+    ROUTE_SEGMENT_TEXT_SYMBOL,
     RoutingLine,
     is_text_route_segment_kind,
 )
@@ -111,6 +113,7 @@ def _replace_line_result_char_span(line: "LineResult", start: int, end: int, cha
 ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
 ROUTE_ROW_LAYOUT_BLOCK_UID_KEY = "_layout_block_uid"
+ROUTE_ROW_OCR_POLICY_KEY = "_layout_block_ocr_policy"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
@@ -118,6 +121,7 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
+PPOCR_SYMBOL_ROUTE_SOURCE = "ppocrv6:single_glyph_punctuation"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
@@ -244,13 +248,13 @@ class RunStats:
     recog_max_batch_crop_width: int = 0
     recog_max_batch_crop_height: int = 0
     recog_max_batch_crop_pixels: int = 0
-    latin_engcut_route_calls: int = 0
+    engcut_route_calls: int = 0
+    ppocr_symbol_routes: int = 0
     overlap_merge_probe_calls: int = 0
     overlap_merge_probe_failures: int = 0
     overlap_merge_clusters: int = 0
     overlap_merge_replacements: int = 0
     latin_empty_native_fallbacks: int = 0
-    single_glyph_route_context_recogs: int = 0
 
 
 @dataclass
@@ -271,6 +275,8 @@ class _TextRoute:
     component_grouping: str = ""
     ppocr_punctuation_candidate: str = ""
     ppocr_latin_fallback_text: str = ""
+    ppocr_symbol_text: str = ""
+    content_bbox: tuple[int, int, int, int] | None = None
 
     @property
     def key(self) -> tuple[int, int, int]:
@@ -278,12 +284,13 @@ class _TextRoute:
 
 
 @dataclass(frozen=True)
-class _LatinMaskedLineRoute:
-    """One physical routing line materialized as a white EngCut canvas.
+class _EngCutMaskedLineRoute:
+    """One physical routing line materialized as a Latin-only EngCut canvas.
 
     The routing plan remains segment-oriented.  This is only the native-input
     representation needed by EngCut: it keeps the PP-OCR line geometry while
-    exposing pixels from Latin/digit segments and whitening every other region.
+    exposing pixels from Latin/digit segments while whitening every other
+    region.
     """
 
     block_idx: int
@@ -292,8 +299,8 @@ class _LatinMaskedLineRoute:
     segments: tuple[_TextRoute, ...]
 
 
-def _is_latin_text_route(route: _TextRoute) -> bool:
-    return route.kind == "text_latin"
+def _is_engcut_text_route(route: _TextRoute) -> bool:
+    return route.kind == ROUTE_SEGMENT_TEXT_LATIN
 
 
 @dataclass(frozen=True)
@@ -325,6 +332,20 @@ def _is_unknown_hanwang_label(label: str) -> bool:
     if normalized in TEXT_LABELS or normalized in SKIP_LABELS:
         return False
     return not _is_skip_label(label)
+
+
+def _row_ocr_policy(block: dict[str, Any]) -> OcrPolicy:
+    raw = str(block.get(ROUTE_ROW_OCR_POLICY_KEY) or "").strip()
+    if not raw:
+        raise RuntimeError("CharOCR native input row is missing its explicit OCR policy")
+    try:
+        return OcrPolicy(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"CharOCR native input row has invalid OCR policy: {raw!r}") from exc
+
+
+def _row_dispatches_to_text_ocr(block: dict[str, Any]) -> bool:
+    return _row_ocr_policy(block) == OcrPolicy.TEXT_OCR
 
 
 def _block_text(block: dict[str, Any]) -> str:
@@ -368,7 +389,9 @@ def _text_route_bboxes_from_lines(
             kind=segment.kind,
             component_grouping=segment.component_grouping,
             ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
-            ppocr_latin_fallback_text=(segment.text if segment.kind == "text_latin" else ""),
+            ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
+            ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
+            content_bbox=segment.content_bbox,
         )
         for line_idx, line in enumerate(lines)
         for segment_idx, segment in enumerate(line.segments)
@@ -376,17 +399,17 @@ def _text_route_bboxes_from_lines(
     ]
 
 
-def _latin_masked_line_routes_from_lines(
+def _engcut_masked_line_routes_from_lines(
     block_idx: int,
     lines: tuple[RoutingLine, ...],
-) -> list[_LatinMaskedLineRoute]:
-    """Group typed Latin routes by their physical PP-OCR line.
+) -> list[_EngCutMaskedLineRoute]:
+    """Group typed EngCut routes by their physical PP-OCR line.
 
     This is deliberately derived from ``RoutingLine`` rather than from raw
     Paddle payloads.  The selected segments remain the only places whose
     pixels may appear in the EngCut input canvas.
     """
-    grouped: list[_LatinMaskedLineRoute] = []
+    grouped: list[_EngCutMaskedLineRoute] = []
     for line_idx, line in enumerate(lines):
         segments = tuple(
             _TextRoute(
@@ -398,14 +421,16 @@ def _latin_masked_line_routes_from_lines(
                 kind=segment.kind,
                 component_grouping=segment.component_grouping,
                 ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
-                ppocr_latin_fallback_text=(segment.text if segment.kind == "text_latin" else ""),
+                ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
+                ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
+                content_bbox=segment.content_bbox,
             )
             for segment_idx, segment in enumerate(line.segments)
-            if segment.kind == "text_latin"
+            if segment.kind == ROUTE_SEGMENT_TEXT_LATIN
         )
         if segments:
             grouped.append(
-                _LatinMaskedLineRoute(
+                _EngCutMaskedLineRoute(
                     block_idx=block_idx,
                     line_idx=line_idx,
                     bbox=line.bbox,
@@ -436,69 +461,37 @@ def _merge_physical_routing_line(lines: list[LineResult]) -> list[LineResult]:
     )]
 
 
-def _apply_single_glyph_route_contract(
-    route: _TextRoute,
-    lines: list[LineResult],
-    segimg_group_audits: list[dict[str, Any]],
-) -> None:
-    """Apply geometry and candidate constraints for one routed symbol glyph.
-
-    PP-OCR supplies neither final text nor a synthetic character.  Its symbol
-    hint may only select a value already returned by the native candidate list.
-    If native returns zero or multiple characters, the observation is untouched.
-    """
+def _ppocr_symbol_route_observation(route: _TextRoute) -> LineResult:
+    """Materialize one explicit PP-OCR punctuation fact and recovered geometry."""
+    if route.kind != ROUTE_SEGMENT_TEXT_SYMBOL:
+        raise RuntimeError("PP-OCR symbol observation requires a text_symbol route")
     if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
-        return
-    char_locations = [
-        (line_index, char_index)
-        for line_index, line in enumerate(lines)
-        for char_index, char in enumerate(line.chars)
-        if char.text
-    ]
-    if len(char_locations) != 1:
-        return
-    component_boxes = [
-        tuple(int(value) for value in item["segimg_group_bbox"])
-        for item in segimg_group_audits
-        if isinstance(item.get("segimg_group_bbox"), (list, tuple))
-        and len(item["segimg_group_bbox"]) == 4
-    ]
-    line_index, char_index = char_locations[0]
-    line = lines[line_index]
-    char = line.chars[char_index]
-    chars = list(line.chars)
-    next_char = char
-    changed = False
-    if (
-        route.ppocr_punctuation_candidate
-        and route.ppocr_punctuation_candidate != char.text
-        and route.ppocr_punctuation_candidate in char.candidates
-    ):
-        next_char = replace(
-            next_char,
-            text=route.ppocr_punctuation_candidate,
-            token_text=route.ppocr_punctuation_candidate,
-            source=f"{next_char.source}:native_candidate_selected_by_ppocr_punctuation",
+        raise RuntimeError("PP-OCR symbol route requires single-glyph component grouping")
+    if route.content_bbox is None or not route.ppocr_punctuation_candidate:
+        raise RuntimeError("PP-OCR symbol route is missing text or canonical component geometry")
+    candidate = route.ppocr_punctuation_candidate
+    text = route.ppocr_symbol_text or candidate
+    if text.strip() != candidate:
+        raise RuntimeError("PP-OCR symbol route text disagrees with its punctuation observation")
+    chars = [
+        CharResult(
+            text=char,
+            confidence=0.0,
+            bbox=(route.content_bbox if char == candidate else None),
+            candidates=([candidate] if char == candidate else [char]),
+            source=PPOCR_SYMBOL_ROUTE_SOURCE,
+            bbox_granularity=("char" if char == candidate else "space"),
+            token_text=char,
         )
-        changed = True
-    component_bbox = None
-    if len(component_boxes) > 1:
-        component_bbox = union_xyxy(component_boxes)
-        next_char = replace(
-            next_char,
-            bbox=component_bbox,
-            source=f"{next_char.source}:native_component_union",
-            bbox_granularity=next_char.bbox_granularity or "char",
-        )
-        changed = True
-    if not changed:
-        return
-    chars[char_index] = next_char
-    lines[line_index] = replace(
-        line,
-        text="".join(item.text for item in chars),
-        bbox=(union_xyxy([line.bbox, component_bbox]) if component_bbox is not None else line.bbox),
+        for char in text
+    ]
+    return LineResult(
+        text=text,
+        bbox=route.content_bbox,
+        confidence=0.0,
         chars=chars,
+        source=PPOCR_SYMBOL_ROUTE_SOURCE,
+        bbox_source="ppocrv6_component_group",
     )
 
 
@@ -1438,6 +1431,8 @@ OVERLAP_MERGE_PAD_Y = 3
 
 def _engcut_route_line_text_and_chars(
     chars: list[EngcutChar],
+    *,
+    source: str = LATIN_ENGCUT_ROUTE_SOURCE,
 ) -> tuple[str, list[CharResult]]:
     text_parts: list[str] = []
     results: list[CharResult] = []
@@ -1454,7 +1449,7 @@ def _engcut_route_line_text_and_chars(
                     confidence=0.0,
                     bbox=None,
                     candidates=[" "],
-                    source=LATIN_ENGCUT_ROUTE_SOURCE,
+                    source=source,
                     bbox_granularity="space",
                     token_text=" ",
                 )
@@ -1470,7 +1465,7 @@ def _engcut_route_line_text_and_chars(
                     confidence=0.0,
                     bbox=union_xyxy(boxes),
                     candidates=[group_text],
-                    source=f"{LATIN_ENGCUT_ROUTE_SOURCE}:overlap_word",
+                    source=f"{source}:overlap_word",
                     bbox_granularity="word",
                     token_text=group_text,
                 )
@@ -1482,7 +1477,7 @@ def _engcut_route_line_text_and_chars(
                 confidence=0.0,
                 bbox=char.bbox,
                 candidates=[str(char.text or "")],
-                source=LATIN_ENGCUT_ROUTE_SOURCE,
+                source=source,
                 bbox_granularity="char",
                 token_text=str(char.text or ""),
             )
@@ -1499,16 +1494,15 @@ def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
     return any(right[0] < left[2] for left, right in zip(ordered, ordered[1:]))
 
 
-def _materialize_latin_masked_line_crop(
+def _materialize_engcut_masked_line_crop(
     image_bgr: np.ndarray,
-    route: _LatinMaskedLineRoute,
+    route: _EngCutMaskedLineRoute,
 ) -> tuple[np.ndarray, int, int]:
-    """Return a full-line EngCut canvas containing only approved Latin pixels.
+    """Return a full-line canvas containing only approved Latin/digit pixels.
 
     EngCut sees one physical line with a small outer context margin.  Approved
-    segment pixels are copied without expansion; CJK, punctuation, formulas,
-    and structural regions stay white and cannot leak back across a route
-    boundary.
+    segment pixels are copied without expansion; CJK, formulas, and structural
+    regions stay white and cannot leak back across a route boundary.
     """
     height, width = image_bgr.shape[:2]
     x1, y1, x2, y2 = _expand_xyxy(
@@ -1536,9 +1530,9 @@ def _materialize_latin_masked_line_crop(
     return canvas, x1, y1
 
 
-def _write_masked_latin_line_hook(
+def _write_masked_engcut_line_hook(
     crop: np.ndarray,
-    route: _LatinMaskedLineRoute,
+    route: _EngCutMaskedLineRoute,
     *,
     offset_x: int,
     offset_y: int,
@@ -1569,16 +1563,21 @@ def _write_masked_latin_line_hook(
         (out_dir / f"{stem}.json").write_text(
             json.dumps(
                 {
-                    "schema": "hanwang_engcut_masked_input.v1",
+                    "schema": "hanwang_engcut_masked_input.v2",
                     "line_bbox": list(route.bbox),
                     "crop_bbox": crop_bbox,
-                    "latin_segments": [
+                    "engcut_segments": [
                         {
                             "route_key": list(segment.key),
                             "bbox": list(segment.bbox),
                             **(
                                 {"ppocr_latin_fallback_text": segment.ppocr_latin_fallback_text}
                                 if segment.ppocr_latin_fallback_text
+                                else {}
+                            ),
+                            **(
+                                {"content_bbox": list(segment.content_bbox)}
+                                if segment.content_bbox is not None
                                 else {}
                             ),
                         }
@@ -1607,63 +1606,49 @@ def _engcut_groups(chars: list[EngcutChar]) -> list[list[EngcutChar]]:
     return [groups[key] for key in order if groups[key]]
 
 
-def _latin_segment_for_engcut_group(
-    group: list[EngcutChar],
+def _engcut_segment_for_char(
+    char: EngcutChar,
     segments: tuple[_TextRoute, ...],
 ) -> _TextRoute:
-    boxes = [char.bbox for char in group if char.bbox is not None]
-    if len(boxes) != len(group):
-        raise RuntimeError("EngCut masked-line group has a character without page geometry")
-    group_bbox = union_xyxy(boxes)
-    owners: dict[tuple[int, int, int], _TextRoute] = {}
-    for char in group:
-        assert char.bbox is not None
-        center_x, center_y = _bbox_center(char.bbox)
-        matches = [
-            segment
-            for segment in segments
-            if segment.bbox[0] <= center_x < segment.bbox[2]
-            and segment.bbox[1] <= center_y < segment.bbox[3]
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(
-                "EngCut masked-line character cannot be uniquely rebound to a Latin route: "
-                f"char_bbox={char.bbox} group_bbox={group_bbox} "
-                f"owners={[item.bbox for item in matches]}"
-            )
-        owners[matches[0].key] = matches[0]
-    if len(owners) != 1:
+    if char.bbox is None:
+        raise RuntimeError("EngCut masked-line character has no page geometry")
+    center_x, center_y = _bbox_center(char.bbox)
+    matches = [
+        segment
+        for segment in segments
+        if segment.bbox[0] <= center_x < segment.bbox[2]
+        and segment.bbox[1] <= center_y < segment.bbox[3]
+    ]
+    if len(matches) != 1:
         raise RuntimeError(
-            "EngCut masked-line group spans multiple Latin routes: "
-            f"group_bbox={group_bbox} owners={[item.bbox for item in owners.values()]}"
+            "EngCut masked-line character cannot be uniquely rebound to one route: "
+            f"char_bbox={char.bbox} owners={[item.bbox for item in matches]}"
         )
-    return next(iter(owners.values()))
+    return matches[0]
 
 
-def _recognize_latin_masked_line_with_engcut(
+def _recognize_engcut_masked_line(
     image_bgr: np.ndarray,
-    route: _LatinMaskedLineRoute,
+    route: _EngCutMaskedLineRoute,
     stats: RunStats,
     *,
     timeout: float,
 ) -> dict[tuple[int, int, int], LineResult]:
-    """Recognize a white-masked physical line and strictly rebind native groups.
+    """Recognize a Latin-only physical line and rebind each native character.
 
-    A group that cannot be attributed to exactly one routing segment still
-    fails the page.  The only fallback is an explicit zero-output observation:
-    when one approved Latin segment receives no native group, its PP token text
-    and mask bbox become one reviewable word carrier.
+    Every character must belong to exactly one Latin segment. An empty segment
+    may use its explicit PP token fallback as a reviewable word carrier.
     """
-    crop, offset_x, offset_y = _materialize_latin_masked_line_crop(image_bgr, route)
+    crop, offset_x, offset_y = _materialize_engcut_masked_line_crop(image_bgr, route)
     if crop.size == 0:
         raise RuntimeError(f"empty masked EngCut line crop: {route.bbox}")
-    _write_masked_latin_line_hook(
+    _write_masked_engcut_line_hook(
         crop,
         route,
         offset_x=offset_x,
         offset_y=offset_y,
     )
-    stats.latin_engcut_route_calls += 1
+    stats.engcut_route_calls += 1
     raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
     page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=offset_x, dy=offset_y)
     groups = _engcut_groups(page_chars)
@@ -1671,13 +1656,17 @@ def _recognize_latin_masked_line_with_engcut(
         segment.key: [] for segment in route.segments
     }
     for group in groups:
-        owner = _latin_segment_for_engcut_group(group, route.segments)
-        grouped_by_route[owner.key].extend(group)
+        for char in group:
+            owner = _engcut_segment_for_char(char, route.segments)
+            grouped_by_route[owner.key].append(char)
 
     results: dict[tuple[int, int, int], LineResult] = {}
     for segment in route.segments:
+        if segment.kind != ROUTE_SEGMENT_TEXT_LATIN:
+            raise RuntimeError(f"EngCut received a non-Latin route: {segment.kind!r}")
         chars = grouped_by_route[segment.key]
-        text, char_results = _engcut_route_line_text_and_chars(chars)
+        source = LATIN_ENGCUT_ROUTE_SOURCE
+        text, char_results = _engcut_route_line_text_and_chars(chars, source=source)
         if not text or not any(char.text.strip() for char in char_results):
             fallback_text = str(segment.ppocr_latin_fallback_text or "").strip()
             if not fallback_text:
@@ -1711,31 +1700,31 @@ def _recognize_latin_masked_line_with_engcut(
             bbox=union_xyxy(boxes) if boxes else segment.bbox,
             confidence=0.0,
             chars=char_results,
-            source=LATIN_ENGCUT_ROUTE_SOURCE,
+            source=source,
             bbox_source="text_latin_masked_line_engcut",
             review_flags=[],
         )
     return results
 
 
-def _recognize_latin_masked_lines_with_engcut(
+def _recognize_engcut_masked_lines(
     image_bgr: np.ndarray,
-    routes: list[_LatinMaskedLineRoute],
+    routes: list[_EngCutMaskedLineRoute],
     stats: RunStats,
     *,
     timeout: float,
-) -> list[tuple[_LatinMaskedLineRoute, dict[tuple[int, int, int], LineResult]]]:
+) -> list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], LineResult]]]:
     """Recognize independent physical lines with bounded native concurrency.
 
     The process-wide executor caps total EngCut subprocess pressure while the
     per-page chunks keep one page from occupying every worker when page OCR is
     already concurrent.
     """
-    results: list[tuple[_LatinMaskedLineRoute, dict[tuple[int, int, int], LineResult]]] = []
+    results: list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], LineResult]]] = []
 
-    def recognize(route: _LatinMaskedLineRoute):
+    def recognize(route: _EngCutMaskedLineRoute):
         local_stats = RunStats()
-        route_results = _recognize_latin_masked_line_with_engcut(
+        route_results = _recognize_engcut_masked_line(
             image_bgr,
             route,
             local_stats,
@@ -1747,14 +1736,14 @@ def _recognize_latin_masked_lines_with_engcut(
         chunk = routes[start:start + _MAX_ENGCUT_LINES_PER_PAGE]
         if len(chunk) == 1:
             route_results, local_stats = recognize(chunk[0])
-            stats.latin_engcut_route_calls += local_stats.latin_engcut_route_calls
+            stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             results.append((chunk[0], route_results))
             continue
         futures = [_ENGCUT_NATIVE_EXECUTOR.submit(recognize, route) for route in chunk]
         for route, future in zip(chunk, futures):
             route_results, local_stats = future.result()
-            stats.latin_engcut_route_calls += local_stats.latin_engcut_route_calls
+            stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
             results.append((route, route_results))
     return results
@@ -1936,7 +1925,7 @@ def _compile_native_route_map(
     missing_text_rows = [
         index
         for index, row in enumerate(ppvl_blocks)
-        if _is_text_label(_effective_label_for_block(row))
+        if _row_dispatches_to_text_ocr(row)
         and index not in routes_by_block_index
     ]
     if missing_text_rows:
@@ -1971,16 +1960,16 @@ def run_micro_recblock(
         label = _effective_label_for_block(block)
         if _is_unknown_hanwang_label(label):
             stats.n_unknown_paddle_labels += 1
-        if _is_skip_label(label):
-            skip_indices.append(idx)
-        elif _is_text_label(label):
+        if _row_dispatches_to_text_ocr(block):
             text_indices.append(idx)
+        else:
+            skip_indices.append(idx)
 
     stats.n_blocks_hanwang = len(text_indices)
     stats.n_blocks_ppvl = len(skip_indices)
     rows: list[BlockResult | None] = [None] * len(ppvl_blocks)
     text_routes: list[_TextRoute] = []
-    latin_masked_line_routes: list[_LatinMaskedLineRoute] = []
+    engcut_masked_line_routes: list[_EngCutMaskedLineRoute] = []
     block_text_routes: dict[int, list[_TextRoute]] = {}
     recog_group_bboxes_by_route: dict[tuple[int, int, int], list[tuple[int, int, int, int]]] = {}
     segimg_group_audits_by_route: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
@@ -1991,8 +1980,8 @@ def run_micro_recblock(
         )
         block_text_routes[block_idx] = routes
         text_routes.extend(routes)
-        latin_masked_line_routes.extend(
-            _latin_masked_line_routes_from_lines(
+        engcut_masked_line_routes.extend(
+            _engcut_masked_line_routes_from_lines(
                 block_idx,
                 native_routes_by_block_index.get(block_idx, ()),
             )
@@ -2000,7 +1989,12 @@ def run_micro_recblock(
         for route in routes:
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
-    linecut_text_routes = [route for route in text_routes if not _is_latin_text_route(route)]
+    linecut_text_routes = [
+        route for route in text_routes if route.kind not in {
+            ROUTE_SEGMENT_TEXT_LATIN,
+            ROUTE_SEGMENT_TEXT_SYMBOL,
+        }
+    ]
     text_route_recblocks = [route.bbox for route in linecut_text_routes]
 
     for idx in skip_indices:
@@ -2062,13 +2056,17 @@ def run_micro_recblock(
             route.key: []
             for route in text_routes
         }
-        for _masked_line_route, latin_results in _recognize_latin_masked_lines_with_engcut(
+        for route in text_routes:
+            if route.kind == ROUTE_SEGMENT_TEXT_SYMBOL:
+                grouped_lines[route.key].append(_ppocr_symbol_route_observation(route))
+                stats.ppocr_symbol_routes += 1
+        for _masked_line_route, engcut_results in _recognize_engcut_masked_lines(
             image_bgr,
-            latin_masked_line_routes,
+            engcut_masked_line_routes,
             stats,
             timeout=min(30.0, max(1.0, float(recog_timeout))),
         ):
-            for route_key, result in latin_results.items():
+            for route_key, result in engcut_results.items():
                 grouped_lines[route_key].append(result)
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []
@@ -2113,35 +2111,6 @@ def run_micro_recblock(
             group_area_indices.append(group["_area_idx"])
             group_core_bboxes[(group["_area_idx"], recog_bbox)] = bbox
             recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
-
-        for area_idx, route in enumerate(linecut_text_routes):
-            if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
-                continue
-            if recog_group_bboxes_by_route.get(route.key):
-                continue
-            recog_bbox = _expand_xyxy(
-                route.bbox,
-                width,
-                height,
-                pad_x=RECOG_GROUP_CROP_PAD_X,
-                pad_y=RECOG_GROUP_CROP_PAD_Y,
-            )
-            group_bboxes.append(recog_bbox)
-            group_area_indices.append(area_idx)
-            group_core_bboxes[(area_idx, recog_bbox)] = route.bbox
-            recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
-            segimg_group_audits_by_route.setdefault(route.key, []).append({
-                "route_text_slice_bbox": list(route.bbox),
-                "segimg_group_bbox": None,
-                "recog_group_bbox": list(recog_bbox),
-                "recog_group_bbox_before_padding": list(route.bbox),
-                "recog_group_bbox_padded": recog_bbox != route.bbox,
-                "clipped": False,
-                "dropped": False,
-                "segimg_group_missing": True,
-                "recog_strategy": "routing_segment_context",
-            })
-            stats.single_glyph_route_context_recogs += 1
 
         total_groups = max(1, len(group_bboxes))
         if progress_callback:
@@ -2417,12 +2386,6 @@ def run_micro_recblock(
                     total_groups,
                     f"Hanwang OCR 已完成 {completed_groups}/{total_groups}",
                 )
-        for route in linecut_text_routes:
-            _apply_single_glyph_route_contract(
-                route,
-                grouped_lines.get(route.key, []),
-                segimg_group_audits_by_route.get(route.key, []),
-            )
         stats.recog_seconds = time.time() - started
 
         for block_idx in text_indices:
@@ -2666,7 +2629,7 @@ def _layout_row_from_block(
         "source_label": source_label,
         ROUTE_ROW_LAYOUT_BLOCK_UID_KEY: view.uid if view is not None else block.uid,
         "_layout_block_source": block_source_value(block),
-        "_layout_block_ocr_policy": ocr_policy.value,
+        ROUTE_ROW_OCR_POLICY_KEY: ocr_policy.value,
     }
     if binding:
         row[ROUTE_ROW_PADDLE_BINDING_KEY] = dict(binding)
@@ -3291,7 +3254,7 @@ class HanwangMicroRecBlockEngine:
             "batch_failures=%d batch_disabled=%s "
             "seg=%.2fs recog=%.2fs "
             "max_batch_crop=%dx%d probe_calls=%d recog_pixels=%d/%d "
-            "latin_engcut_route_calls=%d "
+            "engcut_route_calls=%d "
             "overlap_merge_clusters=%d overlap_merge_calls=%d overlap_merge_failures=%d "
             "overlap_merge_replacements=%d",
             page.page_number,
@@ -3313,7 +3276,7 @@ class HanwangMicroRecBlockEngine:
             stats.recog_probe_calls,
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
-            stats.latin_engcut_route_calls,
+            stats.engcut_route_calls,
             stats.overlap_merge_clusters,
             stats.overlap_merge_probe_calls,
             stats.overlap_merge_probe_failures,

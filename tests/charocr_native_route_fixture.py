@@ -23,6 +23,7 @@ from app.models.charocr_routing import (
 from app.core.ocr_ir import is_cjk_char
 from app.engines.hanwang import micro_recblock
 from app.models import Page
+from app.models import OcrPolicy
 
 
 XYXY = tuple[int, int, int, int]
@@ -70,6 +71,16 @@ def build_explicit_native_route_fixture(
     height, width = image_bgr.shape[:2]
     page = Page(image_path="", width=width, height=height)
     rows = [dict(deepcopy(row)) for row in ppvl_blocks]
+    for row in rows:
+        label = micro_recblock._effective_label_for_block(row)
+        row.setdefault(
+            micro_recblock.ROUTE_ROW_OCR_POLICY_KEY,
+            (
+                OcrPolicy.TEXT_OCR.value
+                if micro_recblock._is_text_label(label)
+                else OcrPolicy.SKIP.value
+            ),
+        )
     plans: list[BlockRoutingPlan] = []
     hints = tuple(_line_hint(value) for value in (page_ocr_lines or ()))
 

@@ -134,7 +134,7 @@ def test_punctuation_fragment_before_latin_mask_cannot_pull_cjk_into_engcut():
     ]
 
 
-def test_punctuation_between_latin_masks_is_not_absorbed_by_either_engcut_crop():
+def test_punctuation_between_latin_masks_keeps_its_own_ppocr_observation_route():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A
     _ink(image, (37, 20, 42, 28))      # detached quote fragment
@@ -155,7 +155,7 @@ def test_punctuation_between_latin_masks_is_not_absorbed_by_either_engcut_crop()
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
         ("text_latin", (20, 10, 25, 30), "A"),
-        ("text_other", (25, 0, 64, 40), ""),
+        ("text_symbol", (25, 0, 64, 40), "”"),
         ("text_latin", (64, 10, 69, 30), "B"),
     ]
 
@@ -207,7 +207,7 @@ def test_short_quote_fragment_cannot_be_reclaimed_as_a_latin_body():
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
         ("text_latin", (20, 10, 25, 30), "AA"),
-        ("text_other", (25, 0, 64, 40), ""),
+        ("text_symbol", (25, 0, 64, 40), "”"),
         ("text_latin", (64, 10, 69, 30), "B"),
     ]
 
@@ -444,14 +444,14 @@ def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
     assert result.issues == ()
     assert [(segment.kind, segment.bbox) for segment in result.segments] == [
         ("text_latin", (10, 10, 15, 30)),
-        ("text_other", (15, 0, 54, 40)),
-        ("text_other", (54, 0, 92, 40)),
+        ("text_symbol", (15, 0, 54, 40)),
+        ("text_symbol", (54, 0, 92, 40)),
         ("text_latin", (92, 10, 97, 30)),
     ]
     assert [
         (segment.component_grouping, segment.ppocr_punctuation_candidate)
         for segment in result.segments
-        if segment.kind == "text_other"
+        if segment.kind == "text_symbol"
     ] == [
         (COMPONENT_GROUPING_SINGLE_GLYPH, "”"),
         (COMPONENT_GROUPING_SINGLE_GLYPH, "“"),
@@ -483,10 +483,45 @@ def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot()
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
     assert result.issues == ()
+    assert result.segments[1].text == "? "
     assert [
         (segment.kind, segment.bbox, segment.component_grouping, segment.ppocr_punctuation_candidate)
         for segment in result.segments
     ] == [
         ("text_latin", (20, 9, 89, 48), "", ""),
-        ("text_other", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH, "?"),
+        ("text_symbol", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH, "?"),
+    ]
+
+
+def test_question_mark_reclaim_does_not_walk_through_neighboring_latin_word():
+    image = np.full((121, 1200, 3), 255, dtype=np.uint8)
+    for bbox in (
+        (683, 23, 730, 89),    # preceding n
+        (735, 50, 754, 88),    # preceding i body
+        (740, 26, 750, 36),    # preceding i dot
+        (855, 50, 893, 89),    # China final a
+        (902, 32, 934, 79),    # question body
+        (912, 90, 922, 100),   # question dot
+        (984, 25, 1009, 88),   # following I
+        (1015, 50, 1043, 89),  # following s
+    ):
+        _ink(image, bbox)
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="China? Is",
+        bbox=(0, 0, 1200, 121),
+        words=(
+            PpOcrV6WordBox(0, 0, "China", (705, 0, 886, 121)),
+            PpOcrV6WordBox(0, 1, "? ", (906, 0, 966, 121)),
+            PpOcrV6WordBox(0, 2, "Is", (984, 0, 1080, 121)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox) for segment in result.segments] == [
+        ("text_latin", (683, 23, 893, 89)),
+        ("text_symbol", (893, 0, 984, 121)),
+        ("text_latin", (984, 25, 1043, 89)),
     ]

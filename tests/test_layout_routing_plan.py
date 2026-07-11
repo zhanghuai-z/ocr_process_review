@@ -72,7 +72,7 @@ def test_routing_plan_preserves_ppocr_runtime_route_source():
 
 
 def test_routing_contract_rejects_retired_and_catch_all_segment_kinds():
-    for kind in ("text", "text_zh", "text_symbol", "text_mixed", "unknown"):
+    for kind in ("text", "text_zh", "text_mixed", "unknown"):
         with pytest.raises(ValueError):
             routing_segment_from_record({"kind": kind, "bbox": [0, 0, 10, 10]})
 
@@ -168,10 +168,11 @@ def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
     assert restored.content_bbox == (70, 10, 110, 82)
 
 
-def test_punctuation_candidate_round_trips_only_on_single_glyph_other_route():
+def test_punctuation_candidate_round_trips_only_on_single_glyph_symbol_route():
     segment = RoutingSegment(
-        kind="text_other",
+        kind="text_symbol",
         bbox=(20, 10, 40, 50),
+        content_bbox=(24, 18, 32, 42),
         component_grouping="single_glyph",
         ppocr_punctuation_candidate="’",
     )
@@ -181,14 +182,16 @@ def test_punctuation_candidate_round_trips_only_on_single_glyph_other_route():
     restored = routing_segment_from_record(record["segments"][0])
 
     assert record["segments"][0]["ppocr_punctuation_candidate"] == "’"
+    assert record["segments"][0]["content_bbox"] == [24, 18, 32, 42]
     assert restored.ppocr_punctuation_candidate == "’"
 
 
 def test_punctuation_candidate_rejects_math_symbols_and_unscoped_routes():
     with pytest.raises(ValueError, match="punctuation candidate"):
         RoutingSegment(
-            kind="text_other",
+            kind="text_symbol",
             bbox=(0, 0, 20, 20),
+            content_bbox=(4, 4, 16, 16),
             component_grouping="single_glyph",
             ppocr_punctuation_candidate="+",
         )
@@ -256,8 +259,9 @@ def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line()
         segments=(
             RoutingSegment(kind="text_latin", bbox=(0, 0, 100, 45), text="China"),
             RoutingSegment(
-                kind="text_other",
+                kind="text_symbol",
                 bbox=(100, 0, 120, 45),
+                content_bbox=(104, 12, 114, 36),
                 component_grouping="single_glyph",
                 ppocr_punctuation_candidate="’",
             ),
