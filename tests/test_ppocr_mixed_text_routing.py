@@ -160,6 +160,32 @@ def test_punctuation_between_latin_masks_is_not_absorbed_by_either_engcut_crop()
     ]
 
 
+def test_shifted_two_part_quote_is_owned_wholly_by_symbol_route():
+    image = _image()
+    _ink(image, (20, 10, 25, 30))      # final Latin body
+    _ink(image, (34, 4, 40, 12))       # left half of closing quote
+    _ink(image, (45, 4, 51, 12))       # right half inside quote proposal
+    _ink(image, (70, 10, 88, 30))      # following CJK
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text='A”甲',
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "A", (18, 8, 30, 32)),
+            PpOcrV6WordBox(0, 1, "”", (43, 2, 53, 16)),
+            PpOcrV6WordBox(0, 2, "甲", (68, 8, 90, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_latin", (20, 10, 25, 30), "A"),
+        ("text_other", (25, 0, 100, 40), ""),
+    ]
+
+
 def test_short_quote_fragment_cannot_be_reclaimed_as_a_latin_body():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A body

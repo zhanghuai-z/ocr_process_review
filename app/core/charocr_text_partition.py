@@ -528,15 +528,10 @@ def _component_owner_token_indices(
                 anchors.append(component)
                 remaining.remove(component)
 
-        # A single punctuation glyph may have vertically detached ink (for
-        # example the dot in ``?`` or ``!``), which the projection pass above
-        # already closes.  Crossing a horizontal gap is only valid when the
-        # PP token itself contains multiple symbol glyphs, such as ``” “``.
-        # Otherwise a shifted punctuation proposal can consume the final
-        # Latin glyph before it.
-        if _nonspace_glyph_count(token.text) <= 1:
-            continue
-
+        # Compare a side-by-side component with both owners.  This recovers a
+        # shifted two-part quote while keeping a full-height Latin body with
+        # its word token; ownership is decided by measured component geometry,
+        # not by punctuation identity.
         while True:
             reclaimed: list[tuple[int, int, int, int, int]] = []
             for component in remaining:
