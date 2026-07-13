@@ -44,13 +44,13 @@ class PpOcrLatinTokenObservation:
 
 @dataclass(frozen=True)
 class RoutingSegment:
-    """One page-routing segment.
+    """One typed two-dimensional region on a physical routing line.
 
-    ``bbox`` is the line-local routing mask used to subtract structural areas
-    from CharOCR crops. ``content_bbox`` is canonical content geometry for a
-    formula or a grouped symbol. The two differ when a PP-OCR line intersects
-    only part of a taller formula, or when a wide symbol route contains one
-    compact multi-component glyph.
+    Regions are not an ordered one-dimensional partition. A structural mask
+    may overlap a text candidate rectangle; native-input materialization gives
+    the structural region explicit masking precedence. ``content_bbox`` is
+    canonical content geometry for a formula or grouped symbol and may extend
+    beyond this physical line's exact intersection in ``bbox``.
     """
 
     kind: str

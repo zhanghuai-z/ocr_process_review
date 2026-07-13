@@ -1,7 +1,7 @@
 """Compile page-local CharOCR routes from adopted layout and PP-OCRv6 facts."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -90,7 +90,7 @@ def compile_page_routing_plan(
         if structural_owner is not None and (
             target is None
             or _overlap_score(line_bbox, structural_owner.bbox)
-            > _overlap_score(line_bbox, target.bbox)
+            >= _overlap_score(line_bbox, target.bbox)
         ):
             continue
         if target is None:
@@ -116,8 +116,8 @@ def compile_page_routing_plan(
                 bbox=line_bbox,
             ))
             continue
-        structural_cuts = _structural_cuts_for_line(clipped_line, structural_blocks)
-        formula_overlap = _overlapping_formula_mask(structural_cuts)
+        structural_masks = _structural_masks_for_line(clipped_line, structural_blocks)
+        formula_overlap = _overlapping_formula_mask(structural_masks)
         if formula_overlap is not None:
             issues.append(RouteValidationIssue(
                 code="overlapping_formula_masks",
@@ -129,7 +129,7 @@ def compile_page_routing_plan(
         segments, partition_issues = _segments_for_line(
             prepass_line,
             clipped_line,
-            structural_cuts,
+            structural_masks,
             page_image_bgr=page_image_bgr,
         )
         issues.extend(
@@ -254,16 +254,16 @@ def _overlap_score(line_bbox: XYXY, candidate_bbox: XYXY) -> float:
     return _area(overlap) / max(1, _area(line_bbox)) if overlap is not None else 0.0
 
 
-def _structural_cuts_for_line(
+def _structural_masks_for_line(
     line_bbox: XYXY,
     candidates: list[_BlockCandidate],
 ) -> list[tuple[LayoutBlockSnapshot, XYXY, XYXY]]:
-    cuts: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]] = []
+    masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]] = []
     for candidate in candidates:
         overlap = _intersect(line_bbox, candidate.bbox)
         if overlap is not None:
-            cuts.append((candidate.block, overlap, candidate.bbox))
-    return sorted(cuts, key=lambda item: (item[1][0], item[1][1], item[0].order))
+            masks.append((candidate.block, overlap, candidate.bbox))
+    return sorted(masks, key=lambda item: (item[1][0], item[1][1], item[0].order))
 
 
 def _overlapping_formula_mask(
@@ -281,64 +281,61 @@ def _overlapping_formula_mask(
 def _segments_for_line(
     prepass_line: PpOcrV6LineHint,
     line_bbox: XYXY,
-    structural_cuts: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+    structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
     *,
     page_image_bgr: np.ndarray | None,
 ) -> tuple[list[RoutingSegment], tuple]:
-    lx1, ly1, lx2, ly2 = line_bbox
-    cuts_by_x = _non_overlapping_cuts(structural_cuts, line_bbox)
     text_kind = _whole_line_text_kind(prepass_line.text)
-    segments: list[RoutingSegment] = []
-    cursor = lx1
-    for block, cut, content_bbox in cuts_by_x:
-        cx1, _cy1, cx2, _cy2 = cut
-        if cursor < cx1:
-            segments.append(RoutingSegment(kind=text_kind, bbox=(cursor, ly1, cx1, ly2)))
-        kind = "formula" if block.block_type == BlockType.EQUATION else "skip"
-        segments.append(RoutingSegment(
-            kind=kind,
-            label=block.source_label,
-            bbox=cut,
-            content_bbox=content_bbox if kind == "formula" else None,
-        ))
-        cursor = max(cursor, cx2)
-    if cursor < lx2:
-        segments.append(RoutingSegment(kind=text_kind, bbox=(cursor, ly1, lx2, ly2)))
-    if not cuts_by_x:
-        segments = [RoutingSegment(kind=text_kind, bbox=line_bbox)]
+    partition_image = _masked_partition_image(page_image_bgr, structural_masks)
+    partition_line = _prepass_line_without_structural_tokens(prepass_line, structural_masks)
+    if _line_requires_text_partition(prepass_line.text):
+        partition = partition_charocr_text_region(partition_image, partition_line, line_bbox)
+        text_segments = list(partition.segments)
+        issues = list(partition.issues)
     else:
-        segments = [segment for segment in segments if _is_nonempty(segment.bbox)]
+        text_segments = [RoutingSegment(kind=text_kind, bbox=line_bbox)]
+        issues = []
 
-    output: list[RoutingSegment] = []
-    issues = []
-    for segment in segments:
-        if segment.kind != "text_other" and segment.kind != "text_latin":
-            output.append(segment)
-            continue
-        if not _line_requires_text_partition(prepass_line.text):
-            output.append(segment)
-            continue
-        partition = partition_charocr_text_region(page_image_bgr, prepass_line, segment.bbox)
-        output.extend(partition.segments)
-        issues.extend(partition.issues)
-    return output, tuple(issues)
+    # Structural regions are exact two-dimensional masks.  They deliberately
+    # do not split the physical PP row into left/right crops: the native input
+    # layer subtracts these rectangles from one full-line canvas.
+    structure_segments = [
+        RoutingSegment(
+            kind="formula" if block.block_type == BlockType.EQUATION else "skip",
+            label=block.source_label,
+            bbox=mask,
+            content_bbox=content_bbox if block.block_type == BlockType.EQUATION else None,
+        )
+        for block, mask, content_bbox in structural_masks
+    ]
+    return [*text_segments, *structure_segments], tuple(issues)
 
 
-def _non_overlapping_cuts(
-    cuts: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
-    line_bbox: XYXY,
-) -> list[tuple[LayoutBlockSnapshot, XYXY, XYXY]]:
-    """Choose a deterministic non-overlapping structural cover on one row."""
-    selected: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]] = []
-    cursor = line_bbox[0]
-    for block, bbox, content_bbox in cuts:
-        x1, y1, x2, y2 = bbox
-        x1 = max(x1, cursor)
-        if x2 <= x1:
-            continue
-        selected.append((block, (x1, y1, x2, y2), content_bbox))
-        cursor = x2
-    return selected
+def _masked_partition_image(
+    page_image_bgr: np.ndarray | None,
+    structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+) -> np.ndarray | None:
+    if page_image_bgr is None or not structural_masks:
+        return page_image_bgr
+    masked = page_image_bgr.copy()
+    for _block, (x1, y1, x2, y2), _content_bbox in structural_masks:
+        masked[y1:y2, x1:x2] = 255
+    return masked
+
+
+def _prepass_line_without_structural_tokens(
+    line: PpOcrV6LineHint,
+    structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+) -> PpOcrV6LineHint:
+    if not structural_masks or not line.words:
+        return line
+    mask_boxes = [mask for _block, mask, _content_bbox in structural_masks]
+    words = tuple(
+        word
+        for word in line.words
+        if all(_intersect(word.bbox, mask) is None for mask in mask_boxes)
+    )
+    return line if words == line.words else replace(line, words=words)
 
 
 def _whole_line_text_kind(text: str) -> str:

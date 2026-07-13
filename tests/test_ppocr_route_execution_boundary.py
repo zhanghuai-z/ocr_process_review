@@ -11,10 +11,44 @@ from app.engines.hanwang.micro_recblock import (
     HanwangMicroRecBlockEngine,
     LineResult,
     RunStats,
+    _LineCutMaskedLineRoute,
     _TextRoute,
     _compile_native_route_map,
+    _materialize_linecut_masked_page,
     _ppocr_symbol_route_observation,
 )
+
+
+def test_linecut_canvas_whitens_only_exact_formula_intersection():
+    text = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(0, 40, 100, 80),
+        kind="text_other",
+    )
+    formula = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=1,
+        bbox=(20, 40, 50, 48),
+        kind="formula",
+        content_bbox=(20, 10, 50, 48),
+    )
+    route = _LineCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(0, 40, 100, 80),
+        linecut_segments=(text,),
+        excluded_segments=(formula,),
+    )
+    image = np.zeros((100, 120, 3), dtype=np.uint8)
+
+    canvas = _materialize_linecut_masked_page(image, [route])
+
+    assert np.all(canvas[44, 25] == 255)
+    assert np.all(canvas[60, 25] == 0)
+    assert np.all(canvas[60, 75] == 0)
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH

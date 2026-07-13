@@ -163,29 +163,19 @@ def _routing_line(
     line_bbox: XYXY,
     subblocks: list[tuple[str, XYXY, str]],
 ) -> RoutingLine:
-    lx1, ly1, lx2, ly2 = line_bbox
-    cuts = [
+    masks = [
         (kind, overlap, bbox, formula_text)
         for kind, bbox, formula_text in subblocks
         if (overlap := _intersect(line_bbox, bbox)) is not None
     ]
-    segments: list[RoutingSegment] = []
-    cursor = lx1
-    for kind, cut, content_bbox, formula_text in cuts:
-        cx1, _cy1, cx2, _cy2 = cut
-        if cursor < cx1:
-            segments.append(RoutingSegment(kind=_text_kind(text), bbox=(cursor, ly1, cx1, ly2)))
+    segments = [RoutingSegment(kind=_text_kind(text), bbox=line_bbox)]
+    for kind, mask, content_bbox, formula_text in masks:
         segments.append(RoutingSegment(
             kind=kind,
-            bbox=cut,
+            bbox=mask,
             text=formula_text,
             content_bbox=content_bbox if kind == "formula" else None,
         ))
-        cursor = max(cursor, cx2)
-    if cursor < lx2:
-        segments.append(RoutingSegment(kind=_text_kind(text), bbox=(cursor, ly1, lx2, ly2)))
-    if not segments:
-        segments.append(RoutingSegment(kind=_text_kind(text), bbox=line_bbox))
     return RoutingLine(index=index, bbox=line_bbox, segments=tuple(segments), source="test-explicit")
 
 

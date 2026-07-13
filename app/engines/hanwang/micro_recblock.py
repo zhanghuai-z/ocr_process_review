@@ -304,6 +304,17 @@ class _EngCutMaskedLineRoute:
     segments: tuple[_TextRoute, ...]
 
 
+@dataclass(frozen=True)
+class _LineCutMaskedLineRoute:
+    """One physical PP row with only LineCut-owned pixels exposed."""
+
+    block_idx: int
+    line_idx: int
+    bbox: tuple[int, int, int, int]
+    linecut_segments: tuple[_TextRoute, ...]
+    excluded_segments: tuple[_TextRoute, ...]
+
+
 def _is_engcut_text_route(route: _TextRoute) -> bool:
     return route.kind == ROUTE_SEGMENT_TEXT_LATIN
 
@@ -447,6 +458,66 @@ def _engcut_masked_line_routes_from_lines(
     return grouped
 
 
+def _linecut_masked_line_routes_from_lines(
+    block_idx: int,
+    lines: tuple[RoutingLine, ...],
+) -> list[_LineCutMaskedLineRoute]:
+    routes: list[_LineCutMaskedLineRoute] = []
+    for line_idx, line in enumerate(lines):
+        typed = tuple(
+            _TextRoute(
+                block_idx=block_idx,
+                line_idx=line_idx,
+                segment_idx=segment_idx,
+                bbox=segment.bbox,
+                carved=len(line.segments) > 1,
+                kind=segment.kind,
+                component_grouping=segment.component_grouping,
+                ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
+                ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
+                ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
+                ppocr_latin_tokens=segment.ppocr_latin_tokens,
+                content_bbox=segment.content_bbox,
+            )
+            for segment_idx, segment in enumerate(line.segments)
+        )
+        linecut = tuple(
+            segment for segment in typed
+            if is_text_route_segment_kind(segment.kind)
+            and segment.kind not in {ROUTE_SEGMENT_TEXT_LATIN, ROUTE_SEGMENT_TEXT_SYMBOL}
+        )
+        if linecut:
+            routes.append(_LineCutMaskedLineRoute(
+                block_idx=block_idx,
+                line_idx=line_idx,
+                bbox=line.bbox,
+                linecut_segments=linecut,
+                excluded_segments=tuple(segment for segment in typed if segment not in linecut),
+            ))
+    return routes
+
+
+def _materialize_linecut_masked_page(
+    image_bgr: np.ndarray,
+    routes: list[_LineCutMaskedLineRoute],
+) -> np.ndarray:
+    """Expose exact LineCut-owned rectangles on a page-sized white canvas."""
+    canvas = np.full_like(image_bgr, 255)
+    height, width = image_bgr.shape[:2]
+    for route in routes:
+        for segment in route.linecut_segments:
+            x1, y1, x2, y2 = _clamp_xyxy(segment.bbox, width, height)
+            canvas[y1:y2, x1:x2] = image_bgr[y1:y2, x1:x2]
+    # Exclusions have explicit precedence.  Most importantly, an inline
+    # formula whites only its true two-dimensional intersection; its x-range
+    # is never projected through the full height of a neighboring row.
+    for route in routes:
+        for segment in route.excluded_segments:
+            x1, y1, x2, y2 = _clamp_xyxy(segment.bbox, width, height)
+            canvas[y1:y2, x1:x2] = 255
+    return canvas
+
+
 def _merge_physical_routing_line(lines: list[LineResult]) -> list[LineResult]:
     """Materialize one authoritative PP physical row from all of its slices."""
     if not lines:
@@ -466,6 +537,72 @@ def _merge_physical_routing_line(lines: list[LineResult]) -> list[LineResult]:
         bbox_source="ppocrv6_physical_routing_line",
         review_flags=flags,
     )]
+
+
+def _distribute_linecut_results(
+    lines: list[LineResult],
+    route: _LineCutMaskedLineRoute,
+) -> dict[tuple[int, int, int], list[LineResult]]:
+    """Return native observations to their explicit route regions.
+
+    Character centers must have exactly one LineCut owner.  Ambiguous or
+    unowned native geometry is invalid page state rather than a reason to
+    guess from text or proximity.
+    """
+    distributed = {segment.key: [] for segment in route.linecut_segments}
+    for line in lines:
+        if not line.text and not line.chars:
+            continue
+        if line.chars:
+            buckets: dict[tuple[int, int, int], list[CharResult]] = {
+                segment.key: [] for segment in route.linecut_segments
+            }
+            for char in line.chars:
+                if char.bbox is None:
+                    raise RuntimeError(
+                        "LineCut returned a character without geometry for a typed route: "
+                        f"line={route.bbox} text={char.text!r}"
+                    )
+                center_x, center_y = _bbox_center(char.bbox)
+                owners = [
+                    segment for segment in route.linecut_segments
+                    if segment.bbox[0] <= center_x < segment.bbox[2]
+                    and segment.bbox[1] <= center_y < segment.bbox[3]
+                ]
+                if len(owners) != 1:
+                    raise RuntimeError(
+                        "LineCut character has no unique typed route owner: "
+                        f"char={char.text!r} bbox={char.bbox} owners={len(owners)}"
+                    )
+                buckets[owners[0].key].append(char)
+            for segment in route.linecut_segments:
+                chars = buckets[segment.key]
+                if not chars:
+                    continue
+                boxes = [char.bbox for char in chars if char.bbox is not None]
+                observed_bbox = _intersect_xyxy(line.bbox, segment.bbox)
+                distributed[segment.key].append(LineResult(
+                    text="".join(char.text for char in chars),
+                    bbox=observed_bbox or union_xyxy(boxes),
+                    confidence=line.confidence,
+                    chars=chars,
+                    source=line.source,
+                    bbox_source=line.bbox_source,
+                    review_flags=list(line.review_flags),
+                ))
+            continue
+
+        owners = [
+            segment for segment in route.linecut_segments
+            if _intersect_xyxy(line.bbox, segment.bbox) is not None
+        ]
+        if len(owners) != 1:
+            raise RuntimeError(
+                "LineCut line without character geometry has no unique typed route owner: "
+                f"bbox={line.bbox} owners={len(owners)}"
+            )
+        distributed[owners[0].key].append(line)
+    return distributed
 
 
 def _ppocr_symbol_route_observation(route: _TextRoute) -> LineResult:
@@ -708,12 +845,16 @@ def _assemble_layout_route_line(
     assembled: list[LineResult] = []
     for cluster in clusters:
         cluster_bbox = union_xyxy([line.bbox for line in cluster])
-        text_parts: list[str] = []
-        chars: list[CharResult] = []
-        char_bounds: list[tuple[int, int, int, int] | None] = []
-        component_boxes: list[tuple[int, int, int, int]] = []
-        confidence_values: list[float] = []
-        flags: set[str] = set()
+        components: list[
+            tuple[
+                tuple[int, int, int, int],
+                str,
+                list[CharResult],
+                list[tuple[int, int, int, int] | None],
+                float,
+                set[str],
+            ]
+        ] = []
         for segment_idx, segment in enumerate(segments):
             segment_bbox = segment.bbox
             kind = segment.kind
@@ -725,38 +866,53 @@ def _assemble_layout_route_line(
                 ]
                 if not segment_lines and len(clusters) == 1:
                     segment_lines = slice_lines_by_segment.get(segment_idx, [])
-                if not segment_lines:
-                    continue
-                text_parts.append("".join(line.text for line in segment_lines if line.text))
                 for line in segment_lines:
-                    chars.extend(line.chars)
-                    char_bounds.extend([segment_bbox] * len(line.chars))
-                    component_boxes.append(line.bbox)
-                    flags.update(line.review_flags)
-                    if line.confidence > 0:
-                        confidence_values.append(line.confidence)
+                    components.append((
+                        line.bbox,
+                        line.text,
+                        list(line.chars),
+                        [segment_bbox] * len(line.chars),
+                        line.confidence,
+                        set(line.review_flags),
+                    ))
             elif kind == "formula":
-                if len(clusters) > 1 and vertical_overlap_ratio(segment_bbox, cluster_bbox) < 0.5:
-                    continue
                 formula_text = segment.text
                 if not formula_text:
                     continue
                 content_bbox = segment.content_bbox or segment_bbox
-                text_parts.append(formula_text)
-                component_boxes.append(content_bbox)
-                chars.append(
-                    CharResult(
-                        text=formula_text,
-                        confidence=0.0,
-                        bbox=content_bbox,
-                        candidates=[formula_text],
-                        source="paddle_inline_formula",
-                        bbox_granularity="word",
-                        token_text=formula_text,
-                    )
+                formula_char = CharResult(
+                    text=formula_text,
+                    confidence=0.0,
+                    bbox=content_bbox,
+                    candidates=[formula_text],
+                    source="paddle_inline_formula",
+                    bbox_granularity="word",
+                    token_text=formula_text,
                 )
-                char_bounds.append(content_bbox)
-                flags.add(ROUTE_INLINE_FORMULA_FLAG)
+                components.append((
+                    content_bbox,
+                    formula_text,
+                    [formula_char],
+                    [content_bbox],
+                    0.0,
+                    {ROUTE_INLINE_FORMULA_FLAG},
+                ))
+
+        components.sort(key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3]))
+        text_parts: list[str] = []
+        chars: list[CharResult] = []
+        char_bounds: list[tuple[int, int, int, int] | None] = []
+        component_boxes: list[tuple[int, int, int, int]] = []
+        confidence_values: list[float] = []
+        flags: set[str] = set()
+        for bbox, text, component_chars, bounds, confidence, component_flags in components:
+            text_parts.append(text)
+            chars.extend(component_chars)
+            char_bounds.extend(bounds)
+            component_boxes.append(bbox)
+            flags.update(component_flags)
+            if confidence > 0:
+                confidence_values.append(confidence)
         merged_text = "".join(text_parts)
         if not merged_text:
             continue
@@ -1961,18 +2117,20 @@ def _routing_line_for_native_runner(
         text = segment.text
         if segment.kind == "formula" and not text:
             content_bbox = segment.content_bbox or segment.bbox
-            text = formula_texts_by_bbox.get(content_bbox, "")
-            if not text:
-                containing = [
-                    candidate_text
-                    for bbox, candidate_text in formula_texts_by_bbox.items()
-                    if bbox[0] <= content_bbox[0]
-                    and bbox[1] <= content_bbox[1]
-                    and bbox[2] >= content_bbox[2]
-                    and bbox[3] >= content_bbox[3]
-                ]
-                if len(containing) == 1:
-                    text = containing[0]
+            _center_x, center_y = _bbox_center(content_bbox)
+            if line.bbox[1] <= center_y < line.bbox[3]:
+                text = formula_texts_by_bbox.get(content_bbox, "")
+                if not text:
+                    containing = [
+                        candidate_text
+                        for bbox, candidate_text in formula_texts_by_bbox.items()
+                        if bbox[0] <= content_bbox[0]
+                        and bbox[1] <= content_bbox[1]
+                        and bbox[2] >= content_bbox[2]
+                        and bbox[3] >= content_bbox[3]
+                    ]
+                    if len(containing) == 1:
+                        text = containing[0]
         segments.append(replace(segment, text=text))
     return replace(line, segments=tuple(segments))
 
@@ -2057,6 +2215,7 @@ def run_micro_recblock(
     rows: list[BlockResult | None] = [None] * len(ppvl_blocks)
     text_routes: list[_TextRoute] = []
     engcut_masked_line_routes: list[_EngCutMaskedLineRoute] = []
+    linecut_masked_line_routes: list[_LineCutMaskedLineRoute] = []
     block_text_routes: dict[int, list[_TextRoute]] = {}
     recog_group_bboxes_by_route: dict[tuple[int, int, int], list[tuple[int, int, int, int]]] = {}
     segimg_group_audits_by_route: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
@@ -2073,16 +2232,20 @@ def run_micro_recblock(
                 native_routes_by_block_index.get(block_idx, ()),
             )
         )
+        linecut_masked_line_routes.extend(
+            _linecut_masked_line_routes_from_lines(
+                block_idx,
+                native_routes_by_block_index.get(block_idx, ()),
+            )
+        )
         for route in routes:
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
-    linecut_text_routes = [
-        route for route in text_routes if route.kind not in {
-            ROUTE_SEGMENT_TEXT_LATIN,
-            ROUTE_SEGMENT_TEXT_SYMBOL,
-        }
-    ]
-    text_route_recblocks = [route.bbox for route in linecut_text_routes]
+    text_route_recblocks = [route.bbox for route in linecut_masked_line_routes]
+    linecut_input_image = _materialize_linecut_masked_page(
+        image_bgr,
+        linecut_masked_line_routes,
+    )
 
     for idx in skip_indices:
         block = ppvl_blocks[idx]
@@ -2114,16 +2277,16 @@ def run_micro_recblock(
 
     if text_routes:
         recblocks = text_route_recblocks
-        if progress_callback and linecut_text_routes:
+        if progress_callback and linecut_masked_line_routes:
             progress_callback(
                 0,
-                max(1, len(linecut_text_routes)),
+                max(1, len(linecut_masked_line_routes)),
                 "Hanwang micro-recblock SegImg 分块中…",
             )
-        if linecut_text_routes:
+        if linecut_masked_line_routes:
             started = time.time()
             seg = native_bridge.run_linecut_segimg(
-                image_bgr,
+                linecut_input_image,
                 recblocks_xyxy=recblocks,
                 timeout=seg_timeout,
             )
@@ -2163,7 +2326,7 @@ def run_micro_recblock(
         ] = {}
         for group in groups:
             recblock = recblocks[group["_area_idx"]]
-            route = linecut_text_routes[group["_area_idx"]]
+            route = linecut_masked_line_routes[group["_area_idx"]]
             raw_group_bbox = _clamp_xyxy(
                 _bbox_tuple(group.get("bbox"), recblock),
                 width,
@@ -2181,15 +2344,16 @@ def run_micro_recblock(
                 if bbox is not None
                 else None
             )
-            segimg_group_audits_by_route.setdefault(route.key, []).append({
-                "route_text_slice_bbox": list(recblock),
-                "segimg_group_bbox": list(raw_group_bbox),
-                "recog_group_bbox": list(recog_bbox) if recog_bbox is not None else None,
-                "recog_group_bbox_before_padding": list(bbox) if bbox is not None else None,
-                "recog_group_bbox_padded": recog_bbox is not None and recog_bbox != bbox,
-                "clipped": bbox is not None and bbox != raw_group_bbox,
-                "dropped": bbox is None,
-            })
+            for segment in route.linecut_segments:
+                segimg_group_audits_by_route.setdefault(segment.key, []).append({
+                    "route_text_slice_bbox": list(recblock),
+                    "segimg_group_bbox": list(raw_group_bbox),
+                    "recog_group_bbox": list(recog_bbox) if recog_bbox is not None else None,
+                    "recog_group_bbox_before_padding": list(bbox) if bbox is not None else None,
+                    "recog_group_bbox_padded": recog_bbox is not None and recog_bbox != bbox,
+                    "clipped": bbox is not None and bbox != raw_group_bbox,
+                    "dropped": bbox is None,
+                })
             if recog_bbox is None:
                 continue
             if recog_bbox[2] <= recog_bbox[0] or recog_bbox[3] <= recog_bbox[1]:
@@ -2197,7 +2361,7 @@ def run_micro_recblock(
             group_bboxes.append(recog_bbox)
             group_area_indices.append(group["_area_idx"])
             group_core_bboxes[(group["_area_idx"], recog_bbox)] = bbox
-            recog_group_bboxes_by_route.setdefault(route.key, []).append(recog_bbox)
+            recog_group_bboxes_by_route.setdefault(route.linecut_segments[0].key, []).append(recog_bbox)
 
         total_groups = max(1, len(group_bboxes))
         if progress_callback:
@@ -2208,13 +2372,18 @@ def run_micro_recblock(
             )
 
         def update_recog_group_audit(placement: _GroupPlacement, values: dict[str, Any]) -> None:
-            route = linecut_text_routes[placement.area_idx]
-            audits = segimg_group_audits_by_route.setdefault(route.key, [])
+            route = linecut_masked_line_routes[placement.area_idx]
+            audits = [
+                item
+                for segment in route.linecut_segments
+                for item in segimg_group_audits_by_route.setdefault(segment.key, [])
+            ]
             for item in audits:
                 if item.get("recog_group_bbox") == list(placement.page_bbox):
                     item.update(values)
                     return
-            audits.append({
+            target = route.linecut_segments[0]
+            segimg_group_audits_by_route.setdefault(target.key, []).append({
                 "route_text_slice_bbox": list(route.bbox),
                 "segimg_group_bbox": list(placement.page_bbox),
                 "recog_group_bbox": list(placement.page_bbox),
@@ -2266,7 +2435,7 @@ def run_micro_recblock(
         def retry_bbox_from_routing_segment(
             placement: _GroupPlacement,
         ) -> tuple[int, int, int, int] | None:
-            route = linecut_text_routes[placement.area_idx]
+            route = linecut_masked_line_routes[placement.area_idx]
             bbox = _expand_xyxy(
                 route.bbox,
                 width,
@@ -2279,7 +2448,7 @@ def run_micro_recblock(
         def recognize_individually(placements: list[_GroupPlacement]) -> None:
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
-                crop = image_bgr[top:bottom, left:right].copy()
+                crop = linecut_input_image[top:bottom, left:right].copy()
                 crop_h, crop_w = crop.shape[:2]
                 offset_left = left
                 offset_top = top
@@ -2297,7 +2466,7 @@ def run_micro_recblock(
                     retry_bbox = retry_bbox_from_routing_segment(placement)
                     if retry_bbox is not None:
                         retry_left, retry_top, retry_right, retry_bottom = retry_bbox
-                        retry_crop = image_bgr[retry_top:retry_bottom, retry_left:retry_right].copy()
+                        retry_crop = linecut_input_image[retry_top:retry_bottom, retry_left:retry_right].copy()
                         try:
                             stats.recog_group_retry_attempts += 1
                             stats.recog_probe_calls += 1
@@ -2355,22 +2524,25 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                route = linecut_text_routes[placement.area_idx]
+                route = linecut_masked_line_routes[placement.area_idx]
                 offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
                 if used_route_context_retry:
                     offset_lines = _filter_line_results_to_route_bbox(
                         offset_lines,
                         placement.group_bbox,
                     )
-                grouped_lines[route.key].extend(
-                    _filter_line_results_to_route_bbox(offset_lines, route.bbox)
+                routed = _distribute_linecut_results(
+                    _filter_line_results_to_route_bbox(offset_lines, route.bbox),
+                    route,
                 )
+                for route_key, results in routed.items():
+                    grouped_lines[route_key].extend(results)
 
         def recognize_batch_list(placements: list[_GroupPlacement]) -> None:
             crops: list[np.ndarray] = []
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
-                crops.append(image_bgr[top:bottom, left:right].copy())
+                crops.append(linecut_input_image[top:bottom, left:right].copy())
             stats.recog_probe_calls += 1
             raws = native_bridge.run_linecut_recog_batch_list(
                 crops,
@@ -2393,15 +2565,18 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
-                route = linecut_text_routes[placement.area_idx]
+                route = linecut_masked_line_routes[placement.area_idx]
                 offset_lines = _offset_line_results(
                     local_lines,
                     dx=placement.page_bbox[0],
                     dy=placement.page_bbox[1],
                 )
-                grouped_lines[route.key].extend(
-                    _filter_line_results_to_route_bbox(offset_lines, route.bbox)
+                routed = _distribute_linecut_results(
+                    _filter_line_results_to_route_bbox(offset_lines, route.bbox),
+                    route,
                 )
+                for route_key, results in routed.items():
+                    grouped_lines[route_key].extend(results)
 
         batch_enabled = not _BATCH_DISABLED_FOR_SESSION
         stats.recog_batch_disabled = _BATCH_DISABLED_FOR_SESSION

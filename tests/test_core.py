@@ -10098,13 +10098,17 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
 
     def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
         seen_recblocks.extend(recblocks_xyxy or [])
+        groups_by_row = {
+            (0, 0, 210, 30): [(0, 0, 70, 30), (110, 0, 210, 30)],
+            (0, 40, 210, 70): [(0, 40, 40, 70), (90, 40, 140, 70), (180, 40, 210, 70)],
+        }
         return {
             "lines": [
                 {
-                    "groups": (
-                        [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]
-                        if y2 - y1 >= 20 else []
-                    )
+                    "groups": [
+                        {"bbox": {"left": gx1, "top": gy1, "right": gx2, "bottom": gy2}}
+                        for gx1, gy1, gx2, gy2 in groups_by_row[(x1, y1, x2, y2)]
+                    ]
                 }
                 for x1, y1, x2, y2 in (recblocks_xyxy or [])
             ]
@@ -10199,13 +10203,7 @@ def test_hanwang_inline_formula_text_slices_keep_chars():
             ],
         )
 
-        assert seen_recblocks == [
-            (0, 0, 70, 30),
-            (110, 0, 210, 30),
-            (0, 40, 40, 70),
-            (90, 40, 140, 70),
-            (180, 40, 210, 70),
-        ]
+        assert seen_recblocks == [(0, 0, 210, 30), (0, 40, 210, 70)]
         assert len(rows) == len(blocks)
         assert [row.source for row in rows] == ["hanwang"]
         assert rows[0].block_label == "text"
@@ -10493,7 +10491,7 @@ def test_proof_fallback_warning_scans_existing_chars():
     print("test_proof_fallback_warning_scans_existing_chars PASSED")
 
 
-def test_hanwang_pre_page_ocr_lines_split_before_recog():
+def test_hanwang_pre_page_ocr_lines_use_exact_formula_masked_canvases():
     import numpy as np
     import app.engines.hanwang.micro_recblock as micro_module
 
@@ -10504,9 +10502,16 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
 
     def fake_segimg(image_bgr, *, recblocks_xyxy=None, timeout=0):
         seen_recblocks.extend(recblocks_xyxy or [])
+        groups_by_row = {
+            (0, 10, 180, 30): [(0, 10, 60, 30), (90, 10, 180, 30)],
+            (0, 50, 180, 70): [(0, 50, 80, 70), (110, 50, 180, 70)],
+        }
         return {
             "lines": [
-                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                {"groups": [
+                    {"bbox": {"left": gx1, "top": gy1, "right": gx2, "bottom": gy2}}
+                    for gx1, gy1, gx2, gy2 in groups_by_row[(x1, y1, x2, y2)]
+                ]}
                 for x1, y1, x2, y2 in (recblocks_xyxy or [])
             ]
         }
@@ -10568,12 +10573,7 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
             ],
         )
 
-        assert seen_recblocks == [
-            (0, 10, 60, 30),
-            (90, 10, 180, 30),
-            (0, 50, 80, 70),
-            (110, 50, 180, 70),
-        ]
+        assert seen_recblocks == [(0, 10, 180, 30), (0, 50, 180, 70)]
         assert [line.text for line in rows[0].lines] == ["甲$ A $乙", "丙$ B $丁"]
         assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "$ A $", "乙", "丙", "$ B $", "丁"]
         assert [
@@ -10591,7 +10591,7 @@ def test_hanwang_pre_page_ocr_lines_split_before_recog():
         micro_module.native_bridge.run_linecut_recog = original_recog
         micro_module._BATCH_DISABLED_FOR_SESSION = original_batch_disabled
 
-    print("test_hanwang_pre_page_ocr_lines_split_before_recog PASSED")
+    print("test_hanwang_pre_page_ocr_lines_use_exact_formula_masked_canvases PASSED")
 
 
 def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
@@ -10722,7 +10722,10 @@ def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hi
         seen_recblocks.extend(recblocks_xyxy or [])
         return {
             "lines": [
-                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                {"groups": [
+                    {"bbox": {"left": 0, "top": 0, "right": 40, "bottom": 40}},
+                    {"bbox": {"left": 70, "top": 0, "right": 130, "bottom": 40}},
+                ]}
                 for x1, y1, x2, y2 in (recblocks_xyxy or [])
             ]
         }
@@ -10776,7 +10779,7 @@ def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hi
             page_ocr_lines=[],
         )
 
-        assert seen_recblocks == [(0, 0, 40, 40), (70, 0, 130, 40)]
+        assert seen_recblocks == [(0, 0, 130, 40)]
         assert rows[0].text == "甲$ A $乙"
         assert [char.text for line in rows[0].lines for char in line.chars] == ["甲", "$ A $", "乙"]
     finally:
@@ -10914,14 +10917,8 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
             "lines": [
                 {
                     "groups": [
-                        {
-                            "bbox": {
-                                "left": x1 - 2,
-                                "top": y1 + 2,
-                                "right": x2 + 2,
-                                "bottom": y2 - 2,
-                            }
-                        }
+                        {"bbox": {"left": -2, "top": 2, "right": 42, "bottom": 38}},
+                        {"bbox": {"left": 68, "top": 2, "right": 122, "bottom": 38}},
                     ]
                 }
                 for x1, y1, x2, y2 in (recblocks_xyxy or [])
@@ -10937,13 +10934,9 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         timeout=0,
     ):
         h, w = image_bgr.shape[:2]
-        chars_by_crop = {
-            (48, 48): [("甲", (8, 0, 38, 40))],
-            (66, 48): [("乙", (12, 0, 52, 40))],
-        }
-        specs = chars_by_crop.get((w, h), [])
-        if not specs:
-            return {"lines": []}
+        specs = [("甲", (8, 0, min(38, w), min(40, h)))] if w < 60 else [
+            ("乙", (12, 0, min(52, w), min(40, h)))
+        ]
         return {
             "lines": [
                 {
@@ -10987,28 +10980,28 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
             include_chars=True,
         )
 
-        assert seen_recblocks == [(0, 0, 40, 40), (70, 0, 120, 40)]
+        assert seen_recblocks == [(0, 0, 120, 40)]
         assert stats.n_blocks_hanwang == 1
         assert rows[0].text == "甲$ A $乙"
         assert rows[0].layout_bbox == (0, 0, 120, 40)
         assert rows[0].block_bbox_source == "page_routing_plan_union"
-        assert rows[0].route_text_slice_bboxes == [(0, 0, 40, 40), (70, 0, 120, 40)]
-        assert rows[0].recog_group_bboxes == [(0, 0, 48, 48), (62, 0, 128, 48)]
+        assert rows[0].route_text_slice_bboxes == [(0, 0, 120, 40)]
+        assert rows[0].recog_group_bboxes == [(0, 0, 50, 48), (60, 0, 128, 48)]
         assert rows[0].segimg_group_audits == [
             {
-                "route_text_slice_bbox": [0, 0, 40, 40],
+                "route_text_slice_bbox": [0, 0, 120, 40],
                 "segimg_group_bbox": [0, 2, 42, 38],
-                "recog_group_bbox": [0, 0, 48, 48],
-                "recog_group_bbox_before_padding": [0, 2, 40, 38],
+                "recog_group_bbox": [0, 0, 50, 48],
+                "recog_group_bbox_before_padding": [0, 2, 42, 38],
                 "recog_group_bbox_padded": True,
-                "clipped": True,
+                "clipped": False,
                 "dropped": False,
             },
             {
-                "route_text_slice_bbox": [70, 0, 120, 40],
+                "route_text_slice_bbox": [0, 0, 120, 40],
                 "segimg_group_bbox": [68, 2, 122, 38],
-                "recog_group_bbox": [62, 0, 128, 48],
-                "recog_group_bbox_before_padding": [70, 2, 120, 38],
+                "recog_group_bbox": [60, 0, 128, 48],
+                "recog_group_bbox_before_padding": [68, 2, 120, 38],
                 "recog_group_bbox_padded": True,
                 "clipped": True,
                 "dropped": False,
@@ -11021,11 +11014,11 @@ def test_hanwang_bbox_audit_distinguishes_layout_route_and_recog_boxes():
         assert audit["effective_block_bbox"] == [0, 0, 120, 40]
         assert audit["effective_block_bbox_source"] == "page_routing_plan_union"
         assert audit["routing_line_bboxes"] == [[0, 0, 120, 40]]
-        assert audit["route_text_slice_bboxes"] == [[0, 0, 40, 40], [70, 0, 120, 40]]
-        assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 48, 48], [62, 0, 128, 48]]
-        assert audit["hanwang_segimg_group_clipped_count"] == 2
+        assert audit["route_text_slice_bboxes"] == [[0, 0, 120, 40]]
+        assert audit["hanwang_recog_group_bboxes"] == [[0, 0, 50, 48], [60, 0, 128, 48]]
+        assert audit["hanwang_segimg_group_clipped_count"] == 1
         assert audit["hanwang_segimg_group_dropped_count"] == 0
-        assert audit["route_text_slice_count"] == 2
+        assert audit["route_text_slice_count"] == 1
         assert audit["hanwang_recog_group_count"] == 2
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
@@ -11205,14 +11198,8 @@ def test_hanwang_micro_recblock_keeps_explicit_formula_route_bands_without_ink_r
             ],
         )
 
-        assert seen_recblocks == [
-            (0, 0, 100, 80),
-            (150, 0, 300, 80),
-        ]
-        assert rows[0].route_text_slice_bboxes == [
-            (0, 0, 100, 80),
-            (150, 0, 300, 80),
-        ]
+        assert seen_recblocks == [(0, 0, 300, 80)]
+        assert rows[0].route_text_slice_bboxes == [(0, 0, 300, 80)]
     finally:
         micro_module.native_bridge.run_linecut_segimg = original_segimg
 
@@ -11396,7 +11383,10 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         seen_recblocks.extend(recblocks_xyxy or [])
         return {
             "lines": [
-                {"groups": [{"bbox": {"left": x1, "top": y1, "right": x2, "bottom": y2}}]}
+                {"groups": [
+                    {"bbox": {"left": 0, "top": 10, "right": 60, "bottom": 30}},
+                    {"bbox": {"left": 90, "top": 10, "right": 180, "bottom": 30}},
+                ]}
                 for x1, y1, x2, y2 in (recblocks_xyxy or [])
             ]
         }
@@ -11480,7 +11470,7 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
             hybrid_prepass_engine=FakePrepassEngine(),
         ).process_project(OcrProject(name="hybrid-prepass", pages=[page]))
 
-        assert seen_recblocks == [(0, 10, 60, 30), (90, 10, 180, 30)]
+        assert seen_recblocks == [(0, 10, 180, 30)]
         line = _block_ocr_observations(result.pages[0].blocks[0])[0]
         assert line.text == "甲$ A $乙"
         chars = line_ocr_chars_by_uid(line.uid)
@@ -12528,7 +12518,7 @@ def test_hanwang_group_chunk_cannot_readmit_skipped_subregions():
         assert len(rows) == len(blocks)
         assert [row.source for row in rows] == ["hanwang"]
         assert rows[0].block_bbox == (0, 0, 100, 20)
-        assert stats.n_groups == 4
+        assert stats.n_groups == 2
         assert stats.recog_probe_calls == 2
         assert stats.recog_batch_disabled is True
         assert all(
@@ -21311,7 +21301,7 @@ if __name__ == "__main__":
     test_hanwang_inline_formula_text_slices_keep_chars()
     test_hanwang_recog_filters_empty_decoded_char_boxes()
     test_hanwang_inline_formula_carrier_survives_model_and_proof_helpers()
-    test_hanwang_pre_page_ocr_lines_split_before_recog()
+    test_hanwang_pre_page_ocr_lines_use_exact_formula_masked_canvases()
     test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula()
     test_hanwang_micro_recblock_sends_inter_formula_punctuation_gap_to_segimg()
     test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints()

@@ -69,11 +69,9 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
     assert plan.for_block("figure-1") is None
     route = plan.for_block("text-1").lines[0]
     assert [(segment.kind, segment.bbox) for segment in route.segments] == [
-        ("text_other", (0, 0, 100, 40)),
+        ("text_other", (0, 0, 300, 40)),
         ("skip", (100, 0, 180, 40)),
-        ("text_other", (180, 0, 200, 40)),
         ("formula", (200, 0, 220, 40)),
-        ("text_other", (220, 0, 300, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
 
@@ -149,6 +147,32 @@ def test_compiler_keeps_formula_content_geometry_when_line_mask_is_clipped():
     formula = next(segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "formula")
     assert formula.bbox == (90, 30, 150, 60)
     assert formula.content_bbox == (90, 10, 150, 80)
+
+
+def test_compiler_keeps_full_text_row_when_formula_only_touches_its_edge():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 240, 140), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block(
+            "formula-1",
+            BlockType.EQUATION,
+            (20, 10, 90, 48),
+            policy=OcrPolicy.PRESERVE_AS_FORMULA,
+            order=1,
+            label="inline_formula",
+        ),
+    )
+    plan = compile_page_routing_plan(
+        snapshot,
+        _prepass(PpOcrV6LineHint(index=1, text="生产率", bbox=(0, 40, 220, 100), words=())),
+        page_width=240,
+        page_height=140,
+    )
+
+    route = plan.for_block("text-1").lines[0]
+    assert [(segment.kind, segment.bbox) for segment in route.segments] == [
+        ("text_other", (0, 40, 220, 100)),
+        ("formula", (20, 40, 90, 48)),
+    ]
 
 
 def test_compiler_blocks_page_when_formula_masks_overlap_in_one_text_line():
@@ -346,7 +370,7 @@ def test_compiler_partitions_quotes_out_of_pure_latin_row():
     ]
 
 
-def test_compiler_drops_blank_text_sliver_left_by_formula_carving():
+def test_compiler_preserves_full_text_route_and_adds_exact_formula_mask():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),
         _block(
@@ -361,17 +385,7 @@ def test_compiler_drops_blank_text_sliver_left_by_formula_carving():
     image = np.full((50, 180, 3), 255, dtype=np.uint8)
     image[10:30, 20:40] = 0
     image[10:30, 85:125] = 0
-    prepass = _prepass(PpOcrV6LineHint(
-        index=0,
-        text="甲D_t",
-        bbox=(0, 0, 160, 50),
-        words=(
-            PpOcrV6WordBox(0, 0, "甲", (18, 8, 42, 32)),
-            PpOcrV6WordBox(0, 1, "D", (74, 8, 84, 32)),
-            PpOcrV6WordBox(0, 2, "_", (84, 8, 92, 32)),
-            PpOcrV6WordBox(0, 3, "t", (110, 8, 120, 32)),
-        ),
-    ))
+    prepass = _prepass(PpOcrV6LineHint(index=0, text="甲", bbox=(0, 0, 160, 50), words=()))
 
     plan = compile_page_routing_plan(
         snapshot,
@@ -384,7 +398,7 @@ def test_compiler_drops_blank_text_sliver_left_by_formula_carving():
     assert plan.is_dispatchable is True
     route = plan.for_block("text-1").lines[0]
     assert [(segment.kind, segment.bbox) for segment in route.segments] == [
-        ("text_other", (0, 0, 80, 50)),
+        ("text_other", (0, 0, 160, 50)),
         ("formula", (80, 5, 140, 45)),
     ]
 
