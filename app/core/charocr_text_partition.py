@@ -41,14 +41,30 @@ def partition_charocr_text_region(
 ) -> RoutePartition:
     """Partition one non-structural PP-OCR row region into native OCR crops.
 
-    CJK-only rows remain one LineCut route.  On a Latin/digit row, PP-OCR
-    Latin word boxes define EngCut masks.  Component closure may repair a
+    CJK-only rows remain one LineCut route. Pure Latin/digit rows keep their
+    complete physical row and go directly to EngCut. Mixed rows use PP-OCR
+    Latin word boxes as EngCut mask proposals. Component closure may repair a
     word-box edge, but ink anchored by any other PP-OCR token cannot enter a
-    Latin mask.  Everything outside those masks remains a LineCut region.
+    Latin mask. Everything outside those masks remains a LineCut region.
     """
     text = str(prepass_line.text or "")
     if not _has_latin_or_digit(text):
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox, text=text),))
+    if not any(is_cjk_char(char) for char in text):
+        return RoutePartition((RoutingSegment(
+            kind="text_latin",
+            bbox=region_bbox,
+            text=text,
+            ppocr_latin_tokens=tuple(
+                PpOcrLatinTokenObservation(
+                    text=token.text,
+                    bbox=_clip(token.bbox, region_bbox),
+                )
+                for token in sorted(prepass_line.words, key=lambda item: item.token_index)
+                if _token_branch(token.text) == "latin"
+                and _is_nonempty(_clip(token.bbox, region_bbox))
+            ),
+        ),))
     if not prepass_line.words:
         return RoutePartition((), (
             RoutePartitionIssue(
