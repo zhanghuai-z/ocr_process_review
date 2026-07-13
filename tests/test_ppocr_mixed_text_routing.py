@@ -186,6 +186,32 @@ def test_shifted_two_part_quote_is_owned_wholly_by_symbol_route():
     ]
 
 
+def test_multi_glyph_symbol_reclaims_glyph_left_of_its_raw_box_from_latin_mask():
+    image = _image()
+    _ink(image, (10, 10, 30, 30))      # Latin body
+    _ink(image, (34, 8, 39, 31))       # right parenthesis, left of symbol proposal
+    _ink(image, (45, 22, 50, 29))      # enumeration comma inside symbol proposal
+    _ink(image, (62, 10, 82, 30))      # following CJK
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="A）、甲",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "A", (8, 8, 33, 32)),
+            PpOcrV6WordBox(0, 1, "）、", (40, 8, 52, 32)),
+            PpOcrV6WordBox(0, 2, "甲", (60, 8, 84, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
+        ("text_latin", (10, 10, 30, 30), "A"),
+        ("text_other", (30, 0, 100, 40), ""),
+    ]
+
+
 def test_short_quote_fragment_cannot_be_reclaimed_as_a_latin_body():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A body

@@ -610,6 +610,14 @@ def _component_owner_token_indices(
         for component in reclaimed:
             owners[component] = token.token_index
 
+        _reclaim_ordered_missing_symbol_components(
+            token,
+            tokens,
+            eligible_components,
+            owners,
+            region_bbox,
+        )
+
     for component in eligible_components:
         if owners[component] is not None:
             continue
@@ -635,6 +643,56 @@ def _component_owner_token_indices(
         if candidates:
             owners[component] = min(candidates)[2]
     return owners
+
+
+def _reclaim_ordered_missing_symbol_components(
+    token: PpOcrV6WordBox,
+    tokens: tuple[PpOcrV6WordBox, ...],
+    components: list[tuple[int, int, int, int, int]],
+    owners: dict[tuple[int, int, int, int, int], int | None],
+    region_bbox: XYXY,
+) -> None:
+    """Recover punctuation glyphs displaced across their PP proposal edge.
+
+    PP may return a multi-glyph punctuation token such as ``）、`` while its
+    left glyph lies just outside the token rectangle.  Token order and the
+    observed glyph count provide a deterministic ownership interval: ink
+    between the preceding and following token proposals belongs to the
+    incomplete punctuation token before unowned ink is offered to Latin.
+    """
+    glyph_count = _nonspace_glyph_count(token.text)
+    owned = [component for component in components if owners[component] == token.token_index]
+    if glyph_count <= 1 or len(owned) >= glyph_count:
+        return
+
+    ordered = sorted(tokens, key=lambda item: item.token_index)
+    position = next(
+        (index for index, item in enumerate(ordered) if item.token_index == token.token_index),
+        None,
+    )
+    if position is None:
+        return
+    left = region_bbox[0] if position == 0 else _clip(ordered[position - 1].bbox, region_bbox)[2]
+    right = region_bbox[2] if position + 1 == len(ordered) else _clip(ordered[position + 1].bbox, region_bbox)[0]
+    if right <= left:
+        return
+
+    candidates = [
+        component
+        for component in components
+        if owners[component] is None
+        and left <= (component[0] + component[2]) / 2.0 <= right
+    ]
+    if not candidates:
+        return
+    token_center = sum(_clip(token.bbox, region_bbox)[::2]) / 2.0
+    candidates.sort(key=lambda component: (
+        abs((component[0] + component[2]) / 2.0 - token_center),
+        component[0],
+        component[1],
+    ))
+    for component in candidates[:glyph_count - len(owned)]:
+        owners[component] = token.token_index
 
 
 def _symbol_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
