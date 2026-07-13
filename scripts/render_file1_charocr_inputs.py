@@ -30,7 +30,6 @@ from app.models.charocr_routing import (
     ROUTE_SEGMENT_FORMULA,
     ROUTE_SEGMENT_TEXT_LATIN,
     ROUTE_SEGMENT_TEXT_OTHER,
-    ROUTE_SEGMENT_TEXT_SYMBOL,
 )
 from app.models.layout_block_view import current_layout_snapshot
 
@@ -40,7 +39,6 @@ COLORS = {
     "pp_line": (0, 190, 255),
     ROUTE_SEGMENT_TEXT_OTHER: (45, 175, 55),
     ROUTE_SEGMENT_TEXT_LATIN: (0, 140, 255),
-    ROUTE_SEGMENT_TEXT_SYMBOL: (255, 190, 0),
     ROUTE_SEGMENT_FORMULA: (220, 40, 220),
     "skip": (130, 130, 130),
 }

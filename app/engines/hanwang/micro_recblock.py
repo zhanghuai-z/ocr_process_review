@@ -25,11 +25,9 @@ from app.models.ocr_observation import block_ocr_line_observations_by_uid, repla
 from app.core.block_attributes import route_source_label
 from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.models.charocr_routing import (
-    COMPONENT_GROUPING_SINGLE_GLYPH,
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
     ROUTE_SEGMENT_TEXT_LATIN,
-    ROUTE_SEGMENT_TEXT_SYMBOL,
     RoutingLine,
     is_text_route_segment_kind,
 )
@@ -122,7 +120,6 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
-PPOCR_SYMBOL_ROUTE_SOURCE = "ppocrv6:single_glyph_punctuation"
 PPOCR_LATIN_TOKEN_FALLBACK_SOURCE = "ppocrv6:latin_token_geometry_fallback"
 PPOCR_LATIN_TOKEN_FALLBACK_FLAG = "latin_token_geometry_fallback"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
@@ -252,7 +249,6 @@ class RunStats:
     recog_max_batch_crop_height: int = 0
     recog_max_batch_crop_pixels: int = 0
     engcut_route_calls: int = 0
-    ppocr_symbol_routes: int = 0
     overlap_merge_probe_calls: int = 0
     overlap_merge_probe_failures: int = 0
     overlap_merge_clusters: int = 0
@@ -276,10 +272,7 @@ class _TextRoute:
     bbox: tuple[int, int, int, int]
     carved: bool = False
     kind: str = "text"
-    component_grouping: str = ""
-    ppocr_punctuation_candidate: str = ""
     ppocr_latin_fallback_text: str = ""
-    ppocr_symbol_text: str = ""
     ppocr_latin_tokens: tuple[PpOcrLatinTokenObservation, ...] = ()
     content_bbox: tuple[int, int, int, int] | None = None
 
@@ -403,10 +396,7 @@ def _text_route_bboxes_from_lines(
             bbox=segment.bbox,
             carved=len(line.segments) > 1,
             kind=segment.kind,
-            component_grouping=segment.component_grouping,
-            ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
             ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
-            ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
             ppocr_latin_tokens=segment.ppocr_latin_tokens,
             content_bbox=segment.content_bbox,
         )
@@ -436,10 +426,7 @@ def _engcut_masked_line_routes_from_lines(
                 bbox=segment.bbox,
                 carved=len(line.segments) > 1,
                 kind=segment.kind,
-                component_grouping=segment.component_grouping,
-                ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
                 ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
-                ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
                 ppocr_latin_tokens=segment.ppocr_latin_tokens,
                 content_bbox=segment.content_bbox,
             )
@@ -472,10 +459,7 @@ def _linecut_masked_line_routes_from_lines(
                 bbox=segment.bbox,
                 carved=len(line.segments) > 1,
                 kind=segment.kind,
-                component_grouping=segment.component_grouping,
-                ppocr_punctuation_candidate=segment.ppocr_punctuation_candidate,
                 ppocr_latin_fallback_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_LATIN else ""),
-                ppocr_symbol_text=(segment.text if segment.kind == ROUTE_SEGMENT_TEXT_SYMBOL else ""),
                 ppocr_latin_tokens=segment.ppocr_latin_tokens,
                 content_bbox=segment.content_bbox,
             )
@@ -484,7 +468,7 @@ def _linecut_masked_line_routes_from_lines(
         linecut = tuple(
             segment for segment in typed
             if is_text_route_segment_kind(segment.kind)
-            and segment.kind not in {ROUTE_SEGMENT_TEXT_LATIN, ROUTE_SEGMENT_TEXT_SYMBOL}
+            and segment.kind != ROUTE_SEGMENT_TEXT_LATIN
         )
         if linecut:
             routes.append(_LineCutMaskedLineRoute(
@@ -603,40 +587,6 @@ def _distribute_linecut_results(
             )
         distributed[owners[0].key].append(line)
     return distributed
-
-
-def _ppocr_symbol_route_observation(route: _TextRoute) -> LineResult:
-    """Materialize one explicit PP-OCR punctuation fact and recovered geometry."""
-    if route.kind != ROUTE_SEGMENT_TEXT_SYMBOL:
-        raise RuntimeError("PP-OCR symbol observation requires a text_symbol route")
-    if route.component_grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
-        raise RuntimeError("PP-OCR symbol route requires single-glyph component grouping")
-    if route.content_bbox is None or not route.ppocr_punctuation_candidate:
-        raise RuntimeError("PP-OCR symbol route is missing text or canonical component geometry")
-    candidate = route.ppocr_punctuation_candidate
-    text = route.ppocr_symbol_text or candidate
-    if text.strip() != candidate:
-        raise RuntimeError("PP-OCR symbol route text disagrees with its punctuation observation")
-    chars = [
-        CharResult(
-            text=char,
-            confidence=0.0,
-            bbox=(route.content_bbox if char == candidate else None),
-            candidates=([candidate] if char == candidate else [char]),
-            source=PPOCR_SYMBOL_ROUTE_SOURCE,
-            bbox_granularity=("char" if char == candidate else "space"),
-            token_text=char,
-        )
-        for char in text
-    ]
-    return LineResult(
-        text=text,
-        bbox=route.content_bbox,
-        confidence=0.0,
-        chars=chars,
-        source=PPOCR_SYMBOL_ROUTE_SOURCE,
-        bbox_source="ppocrv6_component_group",
-    )
 
 
 def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
@@ -2306,10 +2256,6 @@ def run_micro_recblock(
             route.key: []
             for route in text_routes
         }
-        for route in text_routes:
-            if route.kind == ROUTE_SEGMENT_TEXT_SYMBOL:
-                grouped_lines[route.key].append(_ppocr_symbol_route_observation(route))
-                stats.ppocr_symbol_routes += 1
         for _masked_line_route, engcut_results in _recognize_engcut_masked_lines(
             image_bgr,
             engcut_masked_line_routes,

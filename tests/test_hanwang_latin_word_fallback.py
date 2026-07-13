@@ -359,40 +359,13 @@ def test_masked_latin_line_audits_ppocr_word_geometry_fallback():
     assert stats.latin_token_geometry_fallbacks == 1
 
 
-def test_ppocr_symbol_route_materializes_exact_text_and_component_geometry():
-    route = micro_module._TextRoute(
-        0,
-        0,
-        1,
-        (80, 0, 120, 55),
-        kind="text_symbol",
-        component_grouping="single_glyph",
-        ppocr_punctuation_candidate="?",
-        content_bbox=(86, 8, 104, 48),
-    )
-
-    result = micro_module._ppocr_symbol_route_observation(route)
-
-    assert result.text == "?"
-    assert result.bbox_source == "ppocrv6_component_group"
-    assert [(char.text, char.bbox, char.source) for char in result.chars] == [
-        ("?", (86, 8, 104, 48), "ppocrv6:single_glyph_punctuation"),
-    ]
-
-
-def test_engcut_masked_routes_exclude_explicit_ppocr_symbol_observations():
+def test_engcut_masked_routes_exclude_linecut_owned_punctuation():
     line = RoutingLine(
         index=0,
         bbox=(0, 0, 100, 36),
         segments=(
             RoutingSegment(kind="text_latin", bbox=(30, 0, 54, 36), text="AB"),
-            RoutingSegment(
-                kind="text_symbol",
-                bbox=(54, 0, 70, 36),
-                content_bbox=(55, 2, 63, 22),
-                component_grouping="single_glyph",
-                ppocr_punctuation_candidate=".",
-            ),
+            RoutingSegment(kind="text_other", bbox=(54, 0, 70, 36)),
         ),
     )
 

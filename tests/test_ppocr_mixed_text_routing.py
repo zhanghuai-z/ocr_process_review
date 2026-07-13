@@ -4,7 +4,6 @@ import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
 from app.core.charocr_text_partition import partition_charocr_text_region
-from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH
 
 
 def _image() -> np.ndarray:
@@ -46,7 +45,7 @@ def test_mixed_partition_routes_latin_mask_and_keeps_punctuation_with_other_rout
     ]
 
 
-def test_punctuation_capacity_cannot_claim_leading_i_after_its_comma_is_owned():
+def test_ambiguous_leading_i_stays_in_linecut_instead_of_crossing_comma_boundary():
     image = _image()
     _ink(image, (2, 10, 18, 30))       # 甲
     _ink(image, (22, 24, 26, 30))      # comma
@@ -70,7 +69,11 @@ def test_punctuation_capacity_cannot_claim_leading_i_after_its_comma_is_owned():
 
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
-    assert [(segment.bbox, segment.text) for segment in latin] == [((30, 4, 43, 30), "in")]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((38, 10, 43, 30), "in")]
+    assert any(
+        segment.kind == "text_other" and segment.bbox[0] <= 30 < segment.bbox[2]
+        for segment in result.segments
+    )
 
 
 def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
@@ -134,7 +137,7 @@ def test_punctuation_fragment_before_latin_mask_cannot_pull_cjk_into_engcut():
     ]
 
 
-def test_punctuation_between_latin_masks_keeps_its_own_ppocr_observation_route():
+def test_punctuation_between_latin_masks_stays_in_linecut_route():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A
     _ink(image, (37, 20, 42, 28))      # detached quote fragment
@@ -155,7 +158,7 @@ def test_punctuation_between_latin_masks_keeps_its_own_ppocr_observation_route()
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
         ("text_latin", (20, 10, 25, 30), "A"),
-        ("text_symbol", (25, 0, 64, 40), "”"),
+        ("text_other", (25, 0, 64, 40), ""),
         ("text_latin", (64, 10, 69, 30), "B"),
     ]
 
@@ -233,7 +236,7 @@ def test_short_quote_fragment_cannot_be_reclaimed_as_a_latin_body():
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
         ("text_latin", (20, 10, 25, 30), "AA"),
-        ("text_symbol", (25, 0, 64, 40), "”"),
+        ("text_other", (25, 0, 64, 40), ""),
         ("text_latin", (64, 10, 69, 30), "B"),
     ]
 
@@ -446,7 +449,7 @@ def test_displaced_side_by_side_quote_component_is_reclaimed_from_latin_word():
     assert [(segment.bbox, segment.text) for segment in latin] == [((20, 10, 35, 30), "AB")]
 
 
-def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
+def test_symbol_only_gap_remains_one_linecut_region_between_latin_masks():
     image = _image()
     _ink(image, (10, 10, 15, 30))
     _ink(image, (30, 10, 34, 20))
@@ -470,21 +473,12 @@ def test_symbol_only_gap_splits_multiple_quote_glyphs_at_natural_whitespace():
     assert result.issues == ()
     assert [(segment.kind, segment.bbox) for segment in result.segments] == [
         ("text_latin", (10, 10, 15, 30)),
-        ("text_symbol", (15, 0, 54, 40)),
-        ("text_symbol", (54, 0, 92, 40)),
+        ("text_other", (15, 0, 92, 40)),
         ("text_latin", (92, 10, 97, 30)),
     ]
-    assert [
-        (segment.component_grouping, segment.ppocr_punctuation_candidate)
-        for segment in result.segments
-        if segment.kind == "text_symbol"
-    ] == [
-        (COMPONENT_GROUPING_SINGLE_GLYPH, "”"),
-        (COMPONENT_GROUPING_SINGLE_GLYPH, "“"),
-    ]
 
 
-def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot():
+def test_shifted_single_question_mark_keeps_final_latin_glyph_in_linecut_gap():
     image = np.full((60, 220, 3), 255, dtype=np.uint8)
     for bbox in (
         (20, 16, 24, 48),
@@ -509,17 +503,17 @@ def test_shifted_single_question_mark_keeps_final_latin_glyph_and_owns_its_dot()
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
     assert result.issues == ()
-    assert result.segments[1].text == "? "
+    assert result.segments[1].kind == "text_other"
     assert [
         (token.text, token.bbox)
         for token in result.segments[0].ppocr_latin_tokens
     ] == [("China", (20, 9, 89, 48))]
     assert [
-        (segment.kind, segment.bbox, segment.component_grouping, segment.ppocr_punctuation_candidate)
+        (segment.kind, segment.bbox)
         for segment in result.segments
     ] == [
-        ("text_latin", (20, 9, 89, 48), "", ""),
-        ("text_symbol", (89, 0, 200, 55), COMPONENT_GROUPING_SINGLE_GLYPH, "?"),
+        ("text_latin", (20, 9, 89, 48)),
+        ("text_other", (89, 0, 200, 55)),
     ]
 
 
@@ -552,6 +546,6 @@ def test_question_mark_reclaim_does_not_walk_through_neighboring_latin_word():
     assert result.issues == ()
     assert [(segment.kind, segment.bbox) for segment in result.segments] == [
         ("text_latin", (683, 23, 893, 89)),
-        ("text_symbol", (893, 0, 984, 121)),
+        ("text_other", (893, 0, 984, 121)),
         ("text_latin", (984, 25, 1043, 89)),
     ]

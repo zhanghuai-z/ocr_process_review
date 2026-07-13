@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from unicodedata import category
 
 
 XYXY = tuple[int, int, int, int]
@@ -11,15 +10,11 @@ ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
 ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT = "layout_vertical_text"
 ROUTE_SEGMENT_TEXT_OTHER = "text_other"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
-ROUTE_SEGMENT_TEXT_SYMBOL = "text_symbol"
 ROUTE_SEGMENT_FORMULA = "formula"
 ROUTE_SEGMENT_SKIP = "skip"
-COMPONENT_GROUPING_SINGLE_GLYPH = "single_glyph"
-VALID_COMPONENT_GROUPINGS = frozenset({"", COMPONENT_GROUPING_SINGLE_GLYPH})
 TEXT_ROUTE_SEGMENT_KINDS = frozenset({
     ROUTE_SEGMENT_TEXT_OTHER,
     ROUTE_SEGMENT_TEXT_LATIN,
-    ROUTE_SEGMENT_TEXT_SYMBOL,
 })
 VALID_ROUTE_SEGMENT_KINDS = frozenset({
     *TEXT_ROUTE_SEGMENT_KINDS,
@@ -58,35 +53,10 @@ class RoutingSegment:
     label: str = ""
     text: str = ""
     content_bbox: XYXY | None = None
-    component_grouping: str = ""
-    ppocr_punctuation_candidate: str = ""
     ppocr_latin_tokens: tuple[PpOcrLatinTokenObservation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
-        grouping = str(self.component_grouping or "")
-        if grouping not in VALID_COMPONENT_GROUPINGS:
-            raise ValueError(f"unsupported route component grouping: {grouping!r}")
-        if grouping and self.kind != ROUTE_SEGMENT_TEXT_SYMBOL:
-            raise ValueError("component grouping is only valid for text_symbol routes")
-        if grouping and self.content_bbox is None:
-            raise ValueError("component grouping requires canonical content geometry")
-        object.__setattr__(self, "component_grouping", grouping)
-        candidate = str(self.ppocr_punctuation_candidate or "")
-        if grouping and not candidate:
-            raise ValueError("single-glyph component grouping requires a punctuation observation")
-        if candidate:
-            if grouping != COMPONENT_GROUPING_SINGLE_GLYPH:
-                raise ValueError("PP-OCR punctuation candidate requires single-glyph component grouping")
-            if (
-                len(candidate) != 1
-                or candidate.isspace()
-                or not category(candidate).startswith("P")
-            ):
-                raise ValueError(f"invalid PP-OCR punctuation candidate: {candidate!r}")
-            if self.text and self.text.strip() != candidate:
-                raise ValueError("single-glyph symbol text may only add surrounding whitespace")
-        object.__setattr__(self, "ppocr_punctuation_candidate", candidate)
         latin_tokens = tuple(self.ppocr_latin_tokens or ())
         if latin_tokens and self.kind != ROUTE_SEGMENT_TEXT_LATIN:
             raise ValueError("PP-OCR Latin token observations require a text_latin route")
@@ -219,8 +189,6 @@ def routing_segment_from_record(segment: dict[str, Any]) -> RoutingSegment:
         bbox=xyxy(segment.get("bbox")),
         text=str(segment.get("text") or ""),
         content_bbox=xyxy(content_bbox) if content_bbox is not None else None,
-        component_grouping=str(segment.get("component_grouping") or ""),
-        ppocr_punctuation_candidate=str(segment.get("ppocr_punctuation_candidate") or ""),
         ppocr_latin_tokens=tuple(
             PpOcrLatinTokenObservation(
                 text=str(item.get("text") or ""),
@@ -246,12 +214,6 @@ def routing_line_to_record(
                 "bbox": list(segment.bbox),
                 "text": segment.text,
                 **({"content_bbox": list(segment.content_bbox)} if segment.content_bbox else {}),
-                **({"component_grouping": segment.component_grouping} if segment.component_grouping else {}),
-                **(
-                    {"ppocr_punctuation_candidate": segment.ppocr_punctuation_candidate}
-                    if segment.ppocr_punctuation_candidate
-                    else {}
-                ),
                 **(
                     {
                         "ppocr_latin_tokens": [
@@ -310,7 +272,6 @@ def int_or_default(value: object, default: int) -> int:
 
 __all__ = [
     "BlockRoutingPlan",
-    "COMPONENT_GROUPING_SINGLE_GLYPH",
     "PageRoutingPlan",
     "PpOcrLatinTokenObservation",
     "RouteValidationIssue",
@@ -323,11 +284,9 @@ __all__ = [
     "ROUTE_SEGMENT_SKIP",
     "ROUTE_SEGMENT_TEXT_LATIN",
     "ROUTE_SEGMENT_TEXT_OTHER",
-    "ROUTE_SEGMENT_TEXT_SYMBOL",
     "TEXT_ROUTE_SEGMENT_KINDS",
     "TextSliceRoute",
     "VALID_ROUTE_SEGMENT_KINDS",
-    "VALID_COMPONENT_GROUPINGS",
     "is_text_route_segment_kind",
     "normalize_route_segment_kind",
     "routing_line_from_record",

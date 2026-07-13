@@ -151,7 +151,6 @@ def _segment_record(segment: RoutingSegment) -> dict[str, Any]:
         "label": segment.label,
         "text_hint": segment.text,
         "content_bbox": list(segment.content_bbox) if segment.content_bbox else None,
-        "component_grouping": segment.component_grouping,
     }
 
 

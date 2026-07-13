@@ -15,7 +15,6 @@ from app.engines.hanwang.micro_recblock import (
     _TextRoute,
     _compile_native_route_map,
     _materialize_linecut_masked_page,
-    _ppocr_symbol_route_observation,
 )
 
 
@@ -51,7 +50,6 @@ def test_linecut_canvas_whitens_only_exact_formula_intersection():
     assert np.all(canvas[60, 75] == 0)
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
-from app.models.charocr_routing import COMPONENT_GROUPING_SINGLE_GLYPH
 from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
@@ -60,40 +58,6 @@ from app.models.charocr_routing import (
     RoutingSegment,
     TextSliceRoute,
 )
-
-
-def test_single_glyph_route_uses_explicit_ppocr_text_and_component_geometry():
-    route = _TextRoute(
-        block_idx=0,
-        line_idx=0,
-        segment_idx=0,
-        bbox=(100, 20, 150, 90),
-        kind="text_symbol",
-        content_bbox=(108, 28, 132, 79),
-        component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
-        ppocr_punctuation_candidate="?",
-    )
-
-    line = _ppocr_symbol_route_observation(route)
-
-    assert line.text == "?"
-    assert line.bbox == (108, 28, 132, 79)
-    assert line.chars[0].bbox == (108, 28, 132, 79)
-    assert line.chars[0].source == "ppocrv6:single_glyph_punctuation"
-
-
-def test_single_glyph_route_rejects_missing_canonical_geometry():
-    route = _TextRoute(
-        block_idx=0,
-        line_idx=0,
-        segment_idx=0,
-        bbox=(100, 20, 150, 90),
-        kind="text_symbol",
-        component_grouping=COMPONENT_GROUPING_SINGLE_GLYPH,
-        ppocr_punctuation_candidate="’",
-    )
-    with pytest.raises(RuntimeError, match="missing text or canonical"):
-        _ppocr_symbol_route_observation(route)
 
 
 def test_native_runner_honors_explicit_skip_policy_for_unknown_label():

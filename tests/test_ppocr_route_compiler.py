@@ -335,7 +335,7 @@ def test_compiler_rejects_pure_latin_row_without_word_masks():
     ]
 
 
-def test_compiler_partitions_quotes_out_of_pure_latin_row():
+def test_compiler_keeps_quotes_in_linecut_around_pure_latin_row():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 100, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -364,9 +364,9 @@ def test_compiler_partitions_quotes_out_of_pure_latin_row():
 
     assert plan.is_dispatchable is True
     assert [(segment.kind, segment.bbox) for segment in plan.for_block("text-1").lines[0].segments] == [
-        ("text_symbol", (0, 0, 30, 40)),
+        ("text_other", (0, 0, 30, 40)),
         ("text_latin", (30, 8, 40, 30)),
-        ("text_symbol", (40, 0, 70, 40)),
+        ("text_other", (40, 0, 70, 40)),
     ]
 
 
@@ -438,7 +438,7 @@ def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
     assert latin[0].text == "onetwo"
 
 
-def test_compiler_reclaims_displaced_narrow_latin_glyph_from_punctuation_seam():
+def test_compiler_blocks_ambiguous_latin_glyph_at_punctuation_seam():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 120, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -467,10 +467,10 @@ def test_compiler_reclaims_displaced_narrow_latin_glyph_from_punctuation_seam():
         page_image_bgr=image,
     )
 
-    assert plan.is_dispatchable is True
-    latin = [segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "text_latin"]
-    assert latin[0].bbox[0] == 42
-    assert latin[0].text.startswith("I")
+    assert plan.is_dispatchable is False
+    assert [(issue.code, issue.line_index, issue.bbox) for issue in plan.validation_issues] == [
+        ("missing_latin_token_ink", 0, (49, 8, 55, 32)),
+    ]
 
 
 def test_compiler_blocks_latin_containing_line_without_ppocr_word_boxes():
