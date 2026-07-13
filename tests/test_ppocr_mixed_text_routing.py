@@ -286,6 +286,29 @@ def test_light_text_on_dark_background_uses_the_same_mixed_route_contract():
     assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 73, 30), "2024")]
 
 
+def test_narrow_digit_wordbox_owns_its_nearest_complete_component():
+    image = _image()
+    _ink(image, (10, 8, 30, 32))
+    _ink(image, (36, 10, 58, 30))
+    _ink(image, (64, 8, 84, 32))
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="第4期",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "第", (8, 6, 42, 34)),
+            PpOcrV6WordBox(0, 1, "4", (55, 6, 62, 34)),
+            PpOcrV6WordBox(0, 2, "期", (62, 6, 88, 34)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 58, 30), "4")]
+
+
 def test_horizontal_table_rule_cannot_widen_or_overlap_latin_masks():
     image = _image()
     _ink(image, (4, 8, 20, 28))

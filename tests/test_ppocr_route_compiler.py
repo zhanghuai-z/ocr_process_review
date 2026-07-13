@@ -76,6 +76,95 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
     assert len(plan.for_block("text-1").lines) == 1
 
 
+def test_text_block_limits_row_width_without_clipping_ppocr_vertical_extent():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (10, 10, 90, 30), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(index=0, text="城市", bbox=(0, 0, 100, 40), words=()),
+    )
+
+    plan = compile_page_routing_plan(snapshot, prepass, page_width=100, page_height=40)
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text-1").lines[0]
+    assert route.bbox == (10, 0, 90, 40)
+    assert route.segments[0].bbox == (10, 0, 90, 40)
+
+
+def test_structural_edge_contact_does_not_steal_text_token_ownership():
+    snapshot = _snapshot(
+        _block("caption", BlockType.FIGURE_CAPTION, (0, 10, 100, 30), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block("table", BlockType.TABLE, (0, 30, 100, 60), policy=OcrPolicy.PRESERVE_AS_TABLE, order=1),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(
+            index=0,
+            text="表3",
+            bbox=(0, 0, 100, 40),
+            words=(
+                PpOcrV6WordBox(0, 0, "表", (10, 0, 55, 40)),
+                PpOcrV6WordBox(0, 1, "3", (60, 0, 75, 40)),
+            ),
+        ),
+    )
+    image = np.full((60, 100, 3), 255, dtype=np.uint8)
+    image[12:28, 12:50] = 0
+    image[12:28, 61:74] = 0
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=60,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("caption").lines[0]
+    assert route.bbox == (0, 0, 100, 40)
+    assert any(segment.kind == "text_latin" for segment in route.segments)
+    assert any(segment.kind == "skip" and segment.bbox == (0, 30, 100, 40) for segment in route.segments)
+
+
+def test_formula_mask_owns_edge_token_when_no_text_ink_remains():
+    snapshot = _snapshot(
+        _block("text", BlockType.TEXT, (0, 0, 120, 40), policy=OcrPolicy.TEXT_OCR, order=0),
+        _block("formula", BlockType.EQUATION, (52, 0, 80, 40), policy=OcrPolicy.PRESERVE_AS_FORMULA, order=1),
+    )
+    prepass = _prepass(
+        PpOcrV6LineHint(
+            index=0,
+            text="甲D_t乙",
+            bbox=(0, 0, 120, 40),
+            words=(
+                PpOcrV6WordBox(0, 0, "甲", (5, 0, 30, 40)),
+                PpOcrV6WordBox(0, 1, "D", (45, 0, 55, 40)),
+                PpOcrV6WordBox(0, 2, "_", (55, 0, 60, 40)),
+                PpOcrV6WordBox(0, 3, "t", (60, 0, 70, 40)),
+                PpOcrV6WordBox(0, 4, "乙", (85, 0, 110, 40)),
+            ),
+        ),
+    )
+    image = np.full((40, 120, 3), 255, dtype=np.uint8)
+    image[10:30, 8:28] = 0
+    image[10:30, 52:68] = 0
+    image[10:30, 88:108] = 0
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=120,
+        page_height=40,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text").lines[0]
+    assert all(segment.kind != "text_latin" for segment in route.segments)
+    assert any(segment.kind == "formula" and segment.bbox == (52, 0, 80, 40) for segment in route.segments)
+
+
 def test_compiler_routes_vertical_text_from_layout_without_ppocr_line():
     snapshot = _snapshot(
         _block(

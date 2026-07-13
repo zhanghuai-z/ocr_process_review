@@ -94,3 +94,24 @@ def test_vertically_touching_neighbor_rows_do_not_merge():
     )
 
     assert result == {3: upper, 4: lower}
+
+
+def test_structural_ink_is_not_recovered_as_unclaimed_prefix():
+    image = np.full((50, 120, 3), 255, dtype=np.uint8)
+    image[10:30, 30:55] = 0
+    image[2:38, 5:20] = 0
+    body = _line(3, "text", (25, 8, 95, 32))
+
+    result = derive_complete_text_rows(
+        (
+            TextBlockLineGroup(
+                "block-1",
+                (0, 0, 100, 40),
+                (body,),
+                excluded_bboxes=((0, 0, 22, 40),),
+            ),
+        ),
+        image,
+    )
+
+    assert result[3].bbox == body.bbox

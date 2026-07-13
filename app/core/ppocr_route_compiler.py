@@ -121,7 +121,7 @@ def compile_page_routing_plan(
             # duplicate the explicit vertical route.
             continue
 
-        clipped_line = _intersect(line_bbox, target.bbox)
+        clipped_line = _clip_line_to_text_block_width(line_bbox, target.bbox)
         if clipped_line is None:
             issues.append(RouteValidationIssue(
                 code="text_container_clip_empty",
@@ -230,6 +230,11 @@ def _derive_text_rows(
                 block_uid=block_uid,
                 block_bbox=target.bbox,
                 lines=tuple(block_lines),
+                excluded_bboxes=tuple(
+                    candidate.bbox
+                    for candidate in structural_blocks
+                    if _intersect(candidate.bbox, target.bbox) is not None
+                ),
             )
             for block_uid, (target, block_lines) in grouped.items()
         ),
@@ -338,7 +343,12 @@ def _segments_for_line(
     partition_image = _masked_partition_image(page_image_bgr, structural_masks)
     partition_line = _prepass_line_without_structural_tokens(prepass_line, structural_masks)
     if _line_requires_text_partition(prepass_line.text):
-        partition = partition_charocr_text_region(partition_image, partition_line, line_bbox)
+        partition = partition_charocr_text_region(
+            partition_image,
+            partition_line,
+            line_bbox,
+            excluded_bboxes=tuple(mask for _block, mask, _content_bbox in structural_masks),
+        )
         text_segments = list(partition.segments)
         issues = list(partition.issues)
     else:
@@ -382,9 +392,15 @@ def _prepass_line_without_structural_tokens(
     words = tuple(
         word
         for word in line.words
-        if all(_intersect(word.bbox, mask) is None for mask in mask_boxes)
+        if all(not _bbox_center_inside(word.bbox, mask) for mask in mask_boxes)
     )
     return line if words == line.words else replace(line, words=words)
+
+
+def _bbox_center_inside(inner: XYXY, outer: XYXY) -> bool:
+    center_x = (inner[0] + inner[2]) / 2.0
+    center_y = (inner[1] + inner[3]) / 2.0
+    return outer[0] <= center_x <= outer[2] and outer[1] <= center_y <= outer[3]
 
 
 def _whole_line_text_kind(text: str) -> str:
@@ -422,6 +438,18 @@ def _intersect(left: XYXY, right: XYXY) -> XYXY | None:
     x2 = min(left[2], right[2])
     y2 = min(left[3], right[3])
     return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
+
+
+def _clip_line_to_text_block_width(line_bbox: XYXY, block_bbox: XYXY) -> XYXY | None:
+    """Keep block ownership horizontal without clipping complete glyph ink.
+
+    PP word observations own the row's vertical glyph extent. Layout geometry
+    selects the text container and limits cross-column spill, but a tight VL
+    block must not cut the top or bottom from an otherwise owned glyph.
+    """
+    x1 = max(line_bbox[0], block_bbox[0])
+    x2 = min(line_bbox[2], block_bbox[2])
+    return (x1, line_bbox[1], x2, line_bbox[3]) if x2 > x1 else None
 
 
 def _merged_horizontal_coverage(intervals: list[tuple[int, int]]) -> int:

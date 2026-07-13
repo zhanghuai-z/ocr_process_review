@@ -38,6 +38,8 @@ def partition_charocr_text_region(
     image_bgr: np.ndarray | None,
     prepass_line: PpOcrV6LineHint,
     region_bbox: XYXY,
+    *,
+    excluded_bboxes: tuple[XYXY, ...] = (),
 ) -> RoutePartition:
     """Partition one non-structural PP-OCR row region into native OCR crops.
 
@@ -90,6 +92,12 @@ def partition_charocr_text_region(
         token
         for token in prepass_line.words
         if str(token.text or "").strip() and _intersect(token.bbox, region_bbox) is not None
+        and not _token_has_only_excluded_ink(
+            token,
+            components,
+            region_bbox,
+            excluded_bboxes,
+        )
     )
     if not tokens:
         return RoutePartition((), (
@@ -151,6 +159,21 @@ def partition_charocr_text_region(
         components,
         tokens=tokens,
         component_owners=component_owners,
+    )
+
+
+def _token_has_only_excluded_ink(
+    token: PpOcrV6WordBox,
+    components: list[tuple[int, int, int, int, int]],
+    region_bbox: XYXY,
+    excluded_bboxes: tuple[XYXY, ...],
+) -> bool:
+    token_bbox = _clip(token.bbox, region_bbox)
+    if not any(_intersect(token_bbox, bbox) is not None for bbox in excluded_bboxes):
+        return False
+    return not any(
+        _intersect(component[:4], token_bbox) is not None
+        for component in components
     )
 
 
@@ -347,6 +370,7 @@ def _component_owner_token_indices(
     # in the comparison only as a blocker, so it can never become EngCut text.
     token_by_index = {token.token_index: token for token in tokens}
     for component in eligible_components:
+        center_x = (component[0] + component[2]) / 2.0
         overlapping = [
             token
             for token in tokens
@@ -361,13 +385,35 @@ def _component_owner_token_indices(
             token.token_index,
         ))
         best_branch = _token_branch(best.text)
-        best_overlap = _overlap_ratio(_clip(best.bbox, region_bbox), component[:4])
         current = owners[component]
+        branch_candidates = [
+            token for token in overlapping
+            if _token_branch(token.text) in {"other", "latin"}
+        ]
+        if {_token_branch(token.text) for token in branch_candidates} == {"other", "latin"}:
+            best = min(
+                branch_candidates,
+                key=lambda token: (
+                    abs(
+                        center_x
+                        - (
+                            _clip(token.bbox, region_bbox)[0]
+                            + _clip(token.bbox, region_bbox)[2]
+                        ) / 2.0
+                    ),
+                    token.token_index,
+                ),
+            )
+            owners[component] = best.token_index
+            continue
+        best_branch = _token_branch(best.text)
+        best_overlap = _overlap_ratio(_clip(best.bbox, region_bbox), component[:4])
         current_overlap = (
             _overlap_ratio(_clip(token_by_index[current].bbox, region_bbox), component[:4])
             if current is not None else 0.0
         )
-        if best_overlap > current_overlap or best_branch == "symbol":
+        best_contains_center = _center_inside(component[:4], _clip(best.bbox, region_bbox))
+        if best_overlap > current_overlap or (best_branch == "symbol" and best_contains_center):
             owners[component] = best.token_index
 
     # Multi-component symbols have vertically separated ink (for example the

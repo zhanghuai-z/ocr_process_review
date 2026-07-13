@@ -19,6 +19,7 @@ class TextBlockLineGroup:
     block_uid: str
     block_bbox: XYXY
     lines: tuple[PpOcrV6LineHint, ...]
+    excluded_bboxes: tuple[XYXY, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ def derive_complete_text_rows(
                 tuple(item.line for item in rows),
                 group.block_bbox,
                 components,
+                group.excluded_bboxes,
             )
             for source_index in row.source_indices:
                 if source_index != row.line.index:
@@ -118,6 +120,7 @@ def _recover_unclaimed_prefix(
     block_rows: tuple[PpOcrV6LineHint, ...],
     block_bbox: XYXY,
     components: tuple[XYXY, ...],
+    excluded_bboxes: tuple[XYXY, ...],
 ) -> PpOcrV6LineHint:
     bx1, _by1, _bx2, _by2 = block_bbox
     lx1, ly1, lx2, ly2 = line.bbox
@@ -128,6 +131,8 @@ def _recover_unclaimed_prefix(
         center_x = (component[0] + component[2]) / 2.0
         center_y = (component[1] + component[3]) / 2.0
         if not (bx1 <= center_x < lx1 and ly1 <= center_y <= ly2):
+            continue
+        if any(_contains_point(bbox, center_x, center_y) for bbox in excluded_bboxes):
             continue
         if any(
             other is not line and _contains_point(other.bbox, center_x, center_y)
