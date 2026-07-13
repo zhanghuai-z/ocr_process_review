@@ -19,6 +19,7 @@ from app.models.charocr_routing import (
 )
 from app.core.ocr_ir import is_cjk_char
 from app.core.charocr_text_partition import partition_charocr_text_region
+from app.core.ppocr_line_geometry import TextBlockLineGroup, derive_complete_text_rows
 from app.models.enums import BlockType, OcrPolicy
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 
@@ -73,8 +74,21 @@ def compile_page_routing_plan(
     for candidate in text_blocks:
         if _is_vertical_text_block(candidate.block):
             routes_by_block_uid[candidate.block.uid].append(_vertical_text_route(candidate))
+    derived_lines = _derive_text_rows(
+        prepass.lines,
+        text_blocks,
+        structural_blocks,
+        page_width=page_width,
+        page_height=page_height,
+        page_image_bgr=page_image_bgr,
+    )
     issues: list[RouteValidationIssue] = []
-    for prepass_line in prepass.lines:
+    for raw_prepass_line in prepass.lines:
+        if raw_prepass_line.index in derived_lines and derived_lines[raw_prepass_line.index] is None:
+            continue
+        prepass_line = derived_lines.get(raw_prepass_line.index, raw_prepass_line)
+        if prepass_line is None:
+            continue
         line_bbox = _clamp(prepass_line.bbox, page_width, page_height)
         if not _is_nonempty(line_bbox):
             issues.append(RouteValidationIssue(
@@ -185,6 +199,41 @@ def compile_page_routing_plan(
         prepass_run_id=prepass.run_id,
         blocks=tuple(block_routes),
         validation_issues=tuple(issues),
+    )
+
+
+def _derive_text_rows(
+    lines: tuple[PpOcrV6LineHint, ...],
+    text_blocks: list[_BlockCandidate],
+    structural_blocks: list[_BlockCandidate],
+    *,
+    page_width: int,
+    page_height: int,
+    page_image_bgr: np.ndarray | None,
+) -> dict[int, PpOcrV6LineHint | None]:
+    grouped: dict[str, tuple[_BlockCandidate, list[PpOcrV6LineHint]]] = {}
+    for line in lines:
+        line_bbox = _clamp(line.bbox, page_width, page_height)
+        target = _select_text_container(line_bbox, text_blocks)
+        structural_owner = _select_structural_owner(line_bbox, structural_blocks)
+        if target is None or _is_vertical_text_block(target.block):
+            continue
+        if structural_owner is not None and _overlap_score(
+            line_bbox, structural_owner.bbox
+        ) >= _overlap_score(line_bbox, target.bbox):
+            continue
+        entry = grouped.setdefault(target.block.uid, (target, []))
+        entry[1].append(replace(line, bbox=line_bbox))
+    return derive_complete_text_rows(
+        tuple(
+            TextBlockLineGroup(
+                block_uid=block_uid,
+                block_bbox=target.bbox,
+                lines=tuple(block_lines),
+            )
+            for block_uid, (target, block_lines) in grouped.items()
+        ),
+        page_image_bgr,
     )
 
 
