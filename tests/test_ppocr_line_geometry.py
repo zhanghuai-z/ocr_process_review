@@ -42,7 +42,7 @@ def test_co_baseline_fragments_in_one_layout_block_become_one_row():
 
 def test_unclaimed_prefix_ink_extends_row_inside_its_layout_block():
     image = np.full((50, 120, 3), 255, dtype=np.uint8)
-    image[12:28, 6:15] = 0
+    image[4:36, 6:15] = 0
     image[10:30, 30:90] = 0
     body = _line(3, "Austin", (25, 8, 95, 32))
 
@@ -52,7 +52,7 @@ def test_unclaimed_prefix_ink_extends_row_inside_its_layout_block():
     )
 
     assert result[3] is not None
-    assert result[3].bbox == (6, 8, 95, 32)
+    assert result[3].bbox == (6, 4, 95, 36)
     assert result[3].text == "Austin"
 
 
@@ -66,7 +66,21 @@ def test_blank_layout_margin_does_not_expand_row():
         image,
     )
 
-    assert result[3] == body
+    assert result[3].bbox == (25, 10, 95, 30)
+
+
+def test_row_height_follows_word_owned_ink_including_detached_dot():
+    image = np.full((50, 120, 3), 255, dtype=np.uint8)
+    image[12:30, 30:38] = 0
+    image[5:9, 32:36] = 0
+    body = _line(3, "i", (25, 0, 45, 40))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 100, 40), (body,)),),
+        image,
+    )
+
+    assert result[3].bbox == (25, 5, 45, 30)
 
 
 def test_co_baseline_fragments_in_different_layout_blocks_do_not_merge():
@@ -114,4 +128,4 @@ def test_structural_ink_is_not_recovered_as_unclaimed_prefix():
         image,
     )
 
-    assert result[3].bbox == body.bbox
+    assert result[3].bbox == (25, 10, 95, 30)

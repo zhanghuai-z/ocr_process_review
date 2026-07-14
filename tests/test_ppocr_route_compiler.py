@@ -122,9 +122,9 @@ def test_structural_edge_contact_does_not_steal_text_token_ownership():
 
     assert plan.is_dispatchable is True
     route = plan.for_block("caption").lines[0]
-    assert route.bbox == (0, 0, 100, 40)
+    assert route.bbox == (0, 12, 100, 28)
     assert any(segment.kind == "text_latin" for segment in route.segments)
-    assert any(segment.kind == "skip" and segment.bbox == (0, 30, 100, 40) for segment in route.segments)
+    assert all(segment.kind != "skip" for segment in route.segments)
 
 
 def test_formula_mask_owns_edge_token_when_no_text_ink_remains():
@@ -162,7 +162,9 @@ def test_formula_mask_owns_edge_token_when_no_text_ink_remains():
     assert plan.is_dispatchable is True
     route = plan.for_block("text").lines[0]
     assert all(segment.kind != "text_latin" for segment in route.segments)
-    assert any(segment.kind == "formula" and segment.bbox == (52, 0, 80, 40) for segment in route.segments)
+    formula = next(segment for segment in route.segments if segment.kind == "formula")
+    assert formula.bbox == (52, 10, 80, 30)
+    assert formula.content_bbox == (52, 0, 80, 40)
 
 
 def test_compiler_routes_vertical_text_from_layout_without_ppocr_line():
@@ -459,7 +461,7 @@ def test_compiler_routes_quoted_pure_latin_row_as_one_engcut_crop():
         (segment.kind, segment.bbox, segment.text)
         for segment in plan.for_block("text-1").lines[0].segments
     ] == [
-        ("text_latin", (0, 0, 70, 40), "“A”"),
+        ("text_latin", (0, 8, 70, 30), "“A”"),
     ]
 
 

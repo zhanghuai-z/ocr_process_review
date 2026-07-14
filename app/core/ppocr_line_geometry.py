@@ -38,17 +38,24 @@ def derive_complete_text_rows(
     adopted text block when their vertical spans describe the same physical
     baseline and their horizontal spans are disjoint. If PP omitted a prefix,
     unclaimed foreground inside the block/row intersection extends the derived
-    row to the first real ink component.
+    row to the first real ink component. The derived row height follows the
+    complete foreground components owned by its PP word observations instead
+    of retaining PP's oversized vertical proposal.
     """
     components = _ink_components(page_image_bgr) if page_image_bgr is not None else ()
     derived: dict[int, PpOcrV6LineHint | None] = {}
     for group in groups:
         rows = _merge_co_baseline_fragments(group.lines)
         for row in rows:
-            derived[row.line.index] = _recover_unclaimed_prefix(
+            completed = _recover_unclaimed_prefix(
                 row.line,
                 tuple(item.line for item in rows),
                 group.block_bbox,
+                components,
+                group.excluded_bboxes,
+            )
+            derived[row.line.index] = _fit_vertical_extent_to_owned_ink(
+                completed,
                 components,
                 group.excluded_bboxes,
             )
@@ -145,8 +152,50 @@ def _recover_unclaimed_prefix(
     return replace(line, bbox=(min(component[0] for component in prefix_components), ly1, lx2, ly2))
 
 
+def _fit_vertical_extent_to_owned_ink(
+    line: PpOcrV6LineHint,
+    components: tuple[XYXY, ...],
+    excluded_bboxes: tuple[XYXY, ...],
+) -> PpOcrV6LineHint:
+    if not components or not line.words:
+        return line
+    first_word_x = min(word.bbox[0] for word in line.words)
+    owned = []
+    for component in components:
+        center_x = (component[0] + component[2]) / 2.0
+        center_y = (component[1] + component[3]) / 2.0
+        word_owned = any(
+            _strictly_contains_point(word.bbox, center_x, center_y)
+            for word in line.words
+        )
+        recovered_prefix = (
+            line.bbox[0] <= center_x < first_word_x
+            and line.bbox[1] <= center_y <= line.bbox[3]
+        )
+        if not word_owned and not recovered_prefix:
+            continue
+        if any(_contains_point(bbox, center_x, center_y) for bbox in excluded_bboxes):
+            continue
+        owned.append(component)
+    if not owned:
+        return line
+    return replace(
+        line,
+        bbox=(
+            line.bbox[0],
+            min(component[1] for component in owned),
+            line.bbox[2],
+            max(component[3] for component in owned),
+        ),
+    )
+
+
 def _contains_point(bbox: XYXY, x: float, y: float) -> bool:
     return bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]
+
+
+def _strictly_contains_point(bbox: XYXY, x: float, y: float) -> bool:
+    return bbox[0] < x < bbox[2] and bbox[1] < y < bbox[3]
 
 
 def _ink_components(image_bgr: np.ndarray) -> tuple[XYXY, ...]:

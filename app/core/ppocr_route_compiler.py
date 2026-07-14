@@ -443,9 +443,9 @@ def _intersect(left: XYXY, right: XYXY) -> XYXY | None:
 def _clip_line_to_text_block_width(line_bbox: XYXY, block_bbox: XYXY) -> XYXY | None:
     """Keep block ownership horizontal without clipping complete glyph ink.
 
-    PP word observations own the row's vertical glyph extent. Layout geometry
-    selects the text container and limits cross-column spill, but a tight VL
-    block must not cut the top or bottom from an otherwise owned glyph.
+    Derived foreground geometry owns the row's vertical glyph extent. Layout
+    geometry selects the text container and limits cross-column spill, but a
+    tight VL block must not cut an otherwise owned glyph.
     """
     x1 = max(line_bbox[0], block_bbox[0])
     x2 = min(line_bbox[2], block_bbox[2])
