@@ -9,16 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-import cv2
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
+from app.core.ppocr_foreground import ForegroundComponent, analyze_foreground_components
 from app.models.charocr_routing import PpOcrLatinTokenObservation, RoutingSegment
 from app.core.ocr_ir import is_cjk_char
 
 
 XYXY = tuple[int, int, int, int]
-_MIN_COMPONENT_AREA = 3
 
 
 @dataclass(frozen=True)
@@ -84,7 +83,9 @@ def partition_charocr_text_region(
             ),
         ))
 
-    components = _ink_components(image_bgr, region_bbox)
+    components = list(
+        analyze_foreground_components(image_bgr, region_bbox).components
+    )
     if not components:
         return RoutePartition(())
 
@@ -165,7 +166,7 @@ def partition_charocr_text_region(
 
 def _token_has_only_excluded_ink(
     token: PpOcrV6WordBox,
-    components: list[tuple[int, int, int, int, int]],
+    components: list[ForegroundComponent],
     region_bbox: XYXY,
     excluded_bboxes: tuple[XYXY, ...],
 ) -> bool:
@@ -173,7 +174,7 @@ def _token_has_only_excluded_ink(
     if not any(_intersect(token_bbox, bbox) is not None for bbox in excluded_bboxes):
         return False
     return not any(
-        _intersect(component[:4], token_bbox) is not None
+        _intersect(component.bbox, token_bbox) is not None
         for component in components
     )
 
@@ -181,10 +182,10 @@ def _token_has_only_excluded_ink(
 def _segments_from_latin_masks(
     region_bbox: XYXY,
     masks: list[tuple[PpOcrV6WordBox, XYXY]],
-    components: list[tuple[int, int, int, int, int]],
+    components: list[ForegroundComponent],
     *,
     tokens: tuple[PpOcrV6WordBox, ...],
-    component_owners: dict[tuple[int, int, int, int, int], int | None],
+    component_owners: dict[ForegroundComponent, int | None],
 ) -> RoutePartition:
     groups: list[tuple[list[tuple[PpOcrV6WordBox, XYXY]], XYXY]] = []
     current_tokens: list[tuple[PpOcrV6WordBox, XYXY]] = []
@@ -277,18 +278,18 @@ def _has_explicit_boundary_token(
 
 
 def _latin_mask_bbox(
-    components: list[tuple[int, int, int, int, int]],
+    components: list[ForegroundComponent],
     token: PpOcrV6WordBox,
-    component_owners: dict[tuple[int, int, int, int, int], int | None],
+    component_owners: dict[ForegroundComponent, int | None],
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
 ) -> XYXY | None:
     seed_bbox = _latin_seed_bbox(token, region_bbox)
     owned_boxes = [
-        component[:4]
+        component.bbox
         for component in components
         if component_owners.get(component) == token.token_index
-        and _intersect(component[:4], seed_bbox) is not None
+        and _intersect(component.bbox, seed_bbox) is not None
     ]
     token_by_index = {candidate.token_index: candidate for candidate in tokens}
 
@@ -311,7 +312,7 @@ def _latin_mask_bbox(
             if owner is None or _token_branch(owner.text) != "symbol":
                 continue
             fragment = _adjacent_symbol_boundary_fragment(
-                component[:4],
+                component.bbox,
                 token,
                 owner,
                 tokens,
@@ -409,10 +410,10 @@ def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
 
 
 def _component_owner_token_indices(
-    components: list[tuple[int, int, int, int, int]],
+    components: list[ForegroundComponent],
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
-) -> dict[tuple[int, int, int, int, int], int | None]:
+) -> dict[ForegroundComponent, int | None]:
     """Assign every ink component to at most one PP-OCR token.
 
     Word boxes are approximate and commonly meet on the wrong side of a narrow
@@ -420,7 +421,7 @@ def _component_owner_token_indices(
     exclusion boundary. Remaining ink is offered to the nearest PP token; it
     enters EngCut only when that token is Latin/digit.
     """
-    owners: dict[tuple[int, int, int, int, int], int | None] = {
+    owners: dict[ForegroundComponent, int | None] = {
         component: None for component in components
     }
     eligible_components = [
@@ -434,16 +435,16 @@ def _component_owner_token_indices(
     # in component ownership.
     for component in eligible_components:
         centered: list[tuple[float, int, float, int]] = []
-        center_x = (component[0] + component[2]) / 2.0
+        center_x = (component.bbox[0] + component.bbox[2]) / 2.0
         for token in tokens:
             if _token_branch(token.text) == "symbol":
                 continue
             token_bbox = _clip(token.bbox, region_bbox)
-            if not _is_nonempty(token_bbox) or not _center_inside(component[:4], token_bbox):
+            if not _is_nonempty(token_bbox) or not _center_inside(component.bbox, token_bbox):
                 continue
             token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
             centered.append((
-                -_intersection_over_union(token_bbox, component[:4]),
+                -_intersection_over_union(token_bbox, component.bbox),
                 token_bbox[2] - token_bbox[0],
                 abs(center_x - token_center_x),
                 token.token_index,
@@ -459,24 +460,24 @@ def _component_owner_token_indices(
         overlapping = [
             token
             for token in tokens
-            if _intersect(component[:4], _clip(token.bbox, region_bbox)) is not None
+            if _intersect(component.bbox, _clip(token.bbox, region_bbox)) is not None
         ]
         if not overlapping:
             continue
         best = min(overlapping, key=lambda token: (
-            -_intersection_over_union(_clip(token.bbox, region_bbox), component[:4]),
-            0 if _center_inside(component[:4], _clip(token.bbox, region_bbox)) else 1,
+            -_intersection_over_union(_clip(token.bbox, region_bbox), component.bbox),
+            0 if _center_inside(component.bbox, _clip(token.bbox, region_bbox)) else 1,
             0 if _token_branch(token.text) == "symbol" else 1,
             token.token_index,
         ))
         best_branch = _token_branch(best.text)
         current = owners[component]
-        best_overlap = _intersection_over_union(_clip(best.bbox, region_bbox), component[:4])
+        best_overlap = _intersection_over_union(_clip(best.bbox, region_bbox), component.bbox)
         current_overlap = (
-            _intersection_over_union(_clip(token_by_index[current].bbox, region_bbox), component[:4])
+            _intersection_over_union(_clip(token_by_index[current].bbox, region_bbox), component.bbox)
             if current is not None else 0.0
         )
-        best_contains_center = _center_inside(component[:4], _clip(best.bbox, region_bbox))
+        best_contains_center = _center_inside(component.bbox, _clip(best.bbox, region_bbox))
         if best_overlap > current_overlap or (best_branch == "symbol" and best_contains_center):
             owners[component] = best.token_index
 
@@ -499,7 +500,7 @@ def _component_owner_token_indices(
                 for component in eligible_components
                 if owners[component] != token.token_index
                 and any(
-                    min(component[2], anchor[2]) > max(component[0], anchor[0])
+                    min(component.bbox[2], anchor.bbox[2]) > max(component.bbox[0], anchor.bbox[0])
                     for anchor in anchors
                 )
             ]
@@ -513,13 +514,13 @@ def _component_owner_token_indices(
         if owners[component] is not None:
             continue
         candidates: list[tuple[int, float, int, int, str]] = []
-        center_x = (component[0] + component[2]) / 2.0
+        center_x = (component.bbox[0] + component.bbox[2]) / 2.0
         for token in tokens:
             branch = _token_branch(token.text)
             token_bbox = _clip(token.bbox, region_bbox)
             token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
             candidates.append((
-                _horizontal_gap(component[:4], token_bbox),
+                _horizontal_gap(component.bbox, token_bbox),
                 abs(center_x - token_center_x),
                 0 if branch == "symbol" else 1,
                 token.token_index,
@@ -533,7 +534,7 @@ def _component_owner_token_indices(
                 if branch == "latin"
                 else _clip(token.bbox, region_bbox)
             )
-            if branch != "symbol" and _intersect(component[:4], ownership_window) is not None:
+            if branch != "symbol" and _intersect(component.bbox, ownership_window) is not None:
                 owners[component] = token_index
     return owners
 
@@ -545,41 +546,14 @@ def _latin_glyph_advance(token: PpOcrV6WordBox, region_bbox: XYXY) -> int:
 
 
 def _has_visible_ink(
-    components: list[tuple[int, int, int, int, int]],
+    components: list[ForegroundComponent],
     bbox: XYXY,
 ) -> bool:
-    return any(_intersect(component[:4], bbox) is not None for component in components)
-
-
-def _ink_components(image_bgr: np.ndarray, bbox: XYXY) -> list[tuple[int, int, int, int, int]]:
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY) if image_bgr.ndim == 3 else image_bgr
-    page_height, page_width = gray.shape[:2]
-    x1, y1, x2, y2 = _clip(bbox, (0, 0, page_width, page_height))
-    if x2 <= x1 or y2 <= y1:
-        return []
-    binary = _foreground_mask(gray[y1:y2, x1:x2])
-    count, _labels, stats, _centers = cv2.connectedComponentsWithStats(binary, 8)
-    return [
-        (x1 + left, y1 + top, x1 + left + width, y1 + top + height, area)
-        for left, top, width, height, area in (tuple(int(value) for value in stats[index]) for index in range(1, count))
-        if area >= _MIN_COMPONENT_AREA
-    ]
-
-
-def _foreground_mask(crop: np.ndarray) -> np.ndarray:
-    """Return line foreground for either dark-on-light or light-on-dark text."""
-    if crop.size == 0:
-        return np.zeros(crop.shape, dtype=np.uint8)
-    threshold, _unused = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    border = np.concatenate((crop[0], crop[-1], crop[:, 0], crop[:, -1]))
-    background = float(np.median(border))
-    if background <= threshold:
-        return (crop > threshold).astype(np.uint8)
-    return (crop <= threshold).astype(np.uint8)
+    return any(_intersect(component.bbox, bbox) is not None for component in components)
 
 
 def _is_rule_like_component(
-    component: tuple[int, int, int, int, int],
+    component: ForegroundComponent,
     region_bbox: XYXY,
 ) -> bool:
     """Keep long horizontal rules out of Latin ownership.
@@ -588,8 +562,8 @@ def _is_rule_like_component(
     LineCut region.  It is only forbidden from widening an EngCut mask across
     neighboring tokens.
     """
-    width = component[2] - component[0]
-    height = component[3] - component[1]
+    width = component.bbox[2] - component.bbox[0]
+    height = component.bbox[3] - component.bbox[1]
     region_width = max(1, region_bbox[2] - region_bbox[0])
     region_height = max(1, region_bbox[3] - region_bbox[1])
     return (

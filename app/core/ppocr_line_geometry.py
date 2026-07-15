@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-import cv2
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
+from app.core.ppocr_foreground import analyze_foreground_components
 
 
 XYXY = tuple[int, int, int, int]
@@ -23,15 +23,61 @@ class TextBlockLineGroup:
 
 
 @dataclass(frozen=True)
-class _DerivedRow:
+class PhysicalTextRow:
+    """One normalized physical row and the PP-OCR observations it replaces."""
+
     line: PpOcrV6LineHint
     source_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class PhysicalLineNormalization:
+    """Typed result of physical-line normalization.
+
+    A source index can be the retained representative of a row or a merged
+    member.  The distinction is explicit instead of using a nullable mapping
+    as a hidden ownership signal.
+    """
+
+    rows: tuple[PhysicalTextRow, ...]
+
+    def row_for_source_index(self, source_index: int) -> PhysicalTextRow | None:
+        for row in self.rows:
+            if source_index in row.source_indices:
+                return row
+        return None
+
+    def line_for_source_index(self, source_index: int) -> PpOcrV6LineHint | None:
+        row = self.row_for_source_index(source_index)
+        if row is None or row.line.index != source_index:
+            return None
+        return row.line
 
 
 def derive_complete_text_rows(
     groups: tuple[TextBlockLineGroup, ...],
     page_image_bgr: np.ndarray | None,
 ) -> dict[int, PpOcrV6LineHint | None]:
+    """Compatibility projection of :func:`normalize_physical_text_rows`.
+
+    The route compiler uses the typed result.  This mapping remains at the
+    focused geometry boundary for callers that still inspect merged source
+    indexes; ``None`` is not used as an internal routing decision anymore.
+    """
+    normalization = normalize_physical_text_rows(groups, page_image_bgr)
+    result: dict[int, PpOcrV6LineHint | None] = {}
+    for row in normalization.rows:
+        result[row.line.index] = row.line
+        for source_index in row.source_indices:
+            if source_index != row.line.index:
+                result[source_index] = None
+    return result
+
+
+def normalize_physical_text_rows(
+    groups: tuple[TextBlockLineGroup, ...],
+    page_image_bgr: np.ndarray | None,
+) -> PhysicalLineNormalization:
     """Return derived rows keyed by original index; merged members map to None.
 
     Raw PP observations remain unchanged. Rows are merged only inside one
@@ -42,13 +88,13 @@ def derive_complete_text_rows(
     closure of foreground components uniquely owned by that physical row
     instead of retaining PP's oversized or clipped vertical proposal.
     """
-    components = _ink_components(page_image_bgr) if page_image_bgr is not None else ()
+    components = _foreground_bboxes(page_image_bgr)
     page_bbox = (
         (0, 0, int(page_image_bgr.shape[1]), int(page_image_bgr.shape[0]))
         if page_image_bgr is not None
         else (0, 0, 0, 0)
     )
-    derived: dict[int, PpOcrV6LineHint | None] = {}
+    rows_by_source: list[PhysicalTextRow] = []
     for group in groups:
         rows = _merge_co_baseline_fragments(group.lines)
         for row in rows:
@@ -59,24 +105,27 @@ def derive_complete_text_rows(
                 components,
                 group.excluded_bboxes,
             )
-            derived[row.line.index] = _fit_vertical_extent_to_owned_ink(
+            normalized_line = _fit_vertical_extent_to_owned_ink(
                 completed,
                 components,
                 group.excluded_bboxes,
                 page_bbox,
                 tuple(item.line for item in rows),
             )
-            for source_index in row.source_indices:
-                if source_index != row.line.index:
-                    derived[source_index] = None
-    return derived
+            rows_by_source.append(
+                PhysicalTextRow(
+                    line=normalized_line,
+                    source_indices=row.source_indices,
+                )
+            )
+    return PhysicalLineNormalization(tuple(rows_by_source))
 
 
 def _merge_co_baseline_fragments(
     lines: tuple[PpOcrV6LineHint, ...],
-) -> tuple[_DerivedRow, ...]:
+) -> tuple[PhysicalTextRow, ...]:
     pending = list(sorted(lines, key=lambda hint: (hint.bbox[1], hint.bbox[0], hint.index)))
-    rows: list[_DerivedRow] = []
+    rows: list[PhysicalTextRow] = []
     while pending:
         seed = pending.pop(0)
         members = [seed]
@@ -101,17 +150,17 @@ def _same_physical_row(left: XYXY, right: XYXY) -> bool:
     )
 
 
-def _merge_line_hints(lines: list[PpOcrV6LineHint]) -> _DerivedRow:
+def _merge_line_hints(lines: list[PpOcrV6LineHint]) -> PhysicalTextRow:
     ordered = sorted(lines, key=lambda hint: (hint.bbox[0], hint.index))
     if len(ordered) == 1:
-        return _DerivedRow(ordered[0], (ordered[0].index,))
+        return PhysicalTextRow(ordered[0], (ordered[0].index,))
     line_index = min(hint.index for hint in ordered)
     words = [word for hint in ordered for word in sorted(hint.words, key=lambda item: item.token_index)]
     merged_words = tuple(
         replace(word, line_index=line_index, token_index=token_index)
         for token_index, word in enumerate(words)
     )
-    return _DerivedRow(
+    return PhysicalTextRow(
         PpOcrV6LineHint(
             index=line_index,
             text="".join(hint.text for hint in ordered),
@@ -247,11 +296,22 @@ def _intersect(left: XYXY, right: XYXY) -> XYXY | None:
     return (x1, y1, x2, y2) if x2 > x1 and y2 > y1 else None
 
 
-def _ink_components(image_bgr: np.ndarray) -> tuple[XYXY, ...]:
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    _threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
-    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, 8)
+def _foreground_bboxes(image_bgr: np.ndarray | None) -> tuple[XYXY, ...]:
+    if image_bgr is None:
+        return ()
     return tuple(
-        (int(x), int(y), int(x + width), int(y + height))
-        for x, y, width, height, _area in stats[1:count]
+        component.bbox
+        for component in analyze_foreground_components(
+            image_bgr,
+            detect_polarity=False,
+        ).components
     )
+
+
+__all__ = [
+    "PhysicalTextRow",
+    "PhysicalLineNormalization",
+    "TextBlockLineGroup",
+    "derive_complete_text_rows",
+    "normalize_physical_text_rows",
+]

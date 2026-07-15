@@ -3,7 +3,12 @@ from __future__ import annotations
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.core.ppocr_line_geometry import TextBlockLineGroup, derive_complete_text_rows
+from app.core.ppocr_foreground import analyze_foreground_components
+from app.core.ppocr_line_geometry import (
+    TextBlockLineGroup,
+    derive_complete_text_rows,
+    normalize_physical_text_rows,
+)
 
 
 def _line(
@@ -38,6 +43,36 @@ def test_co_baseline_fragments_in_one_layout_block_become_one_row():
         ),
     )
     assert result[4] is None
+
+
+def test_typed_physical_normalization_exposes_merged_members_without_null_sentinel():
+    prefix = _line(4, "12", (5, 10, 15, 30))
+    body = _line(3, "Austin", (25, 8, 90, 32))
+
+    result = normalize_physical_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 100, 40), (body, prefix)),),
+        None,
+    )
+
+    assert len(result.rows) == 1
+    assert result.rows[0].source_indices == (4, 3)
+    assert result.line_for_source_index(3) is not None
+    assert result.line_for_source_index(4) is None
+    assert result.row_for_source_index(4) is result.rows[0]
+
+
+def test_foreground_analysis_is_page_coordinate_evidence():
+    image = np.full((30, 50, 3), 255, dtype=np.uint8)
+    image[5:10, 7:12] = 0
+    image[15:22, 30:38] = 0
+
+    result = analyze_foreground_components(image, (5, 3, 45, 26))
+
+    assert result.region_bbox == (5, 3, 45, 26)
+    assert [component.bbox for component in result.components] == [
+        (7, 5, 12, 10),
+        (30, 15, 38, 22),
+    ]
 
 
 def test_overlapping_co_baseline_fragments_in_one_layout_block_become_one_row():
