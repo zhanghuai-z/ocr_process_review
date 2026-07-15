@@ -284,8 +284,11 @@ __all__ = [
     "PpOcrV6LineHint",
     "PpOcrV6PrepassArtifact",
     "PpOcrV6PrepassClient",
+    "PpOcrV6RoutingRequestProfile",
     "PpOcrV6WordBox",
+    "build_ppocr_v6_routing_request_profile",
     "build_ppocr_v6_prepass_options",
+    "normalize_ppocr_v6_prepass_result",
     "parse_ppocr_v6_prepass_jsonl",
     "parse_ppocr_v6_prepass_result",
 ]
