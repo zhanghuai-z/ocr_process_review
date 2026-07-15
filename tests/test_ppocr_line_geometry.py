@@ -125,6 +125,44 @@ def test_unclaimed_prefix_ink_extends_row_inside_its_layout_block():
     assert _line_for_source_index(result, 3).text == "Austin"
 
 
+def test_unclaimed_suffix_ink_extends_row_without_clipping_last_glyph():
+    image = np.full((50, 120, 3), 255, dtype=np.uint8)
+    image[10:30, 30:90] = 0
+    image[8:34, 96:104] = 0
+    body = _line(3, "Austin", (25, 8, 95, 32))
+
+    result = normalize_physical_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 110, 40), (body,)),),
+        image,
+    )
+
+    assert _line_for_source_index(result, 3).bbox == (25, 8, 104, 34)
+
+
+def test_rotated_row_recovers_reading_axis_ends_and_cross_axis_ink():
+    image = np.full((130, 70, 3), 255, dtype=np.uint8)
+    image[20:100, 24:44] = 0
+    image[104:116, 20:48] = 0
+    body = PpOcrV6LineHint(
+        index=3,
+        text="单位人",
+        bbox=(25, 25, 45, 103),
+        words=(PpOcrV6WordBox(3, 0, "单位人", (25, 25, 45, 103)),),
+        text_axis="vertical",
+        orientation_angle=180,
+    )
+
+    result = normalize_physical_text_rows(
+        (TextBlockLineGroup("block-1", (10, 10, 60, 120), (body,)),),
+        image,
+    )
+
+    line = _line_for_source_index(result, 3)
+    assert line.bbox == (20, 20, 48, 116)
+    assert line.text_axis == "vertical"
+    assert line.orientation_angle == 180
+
+
 def test_blank_layout_margin_does_not_expand_row():
     image = np.full((50, 120, 3), 255, dtype=np.uint8)
     image[10:30, 30:90] = 0

@@ -6,7 +6,7 @@ normalization domains. It does not classify text or create CharOCR routes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
 from app.core.ppocr_line_geometry import TextBlockLineGroup
@@ -224,12 +224,7 @@ def _overlap_score(line_bbox: XYXY, candidate_bbox: XYXY) -> float:
 def _replace_bbox(hint: PpOcrV6LineHint, bbox: XYXY) -> PpOcrV6LineHint:
     if hint.bbox == bbox:
         return hint
-    return PpOcrV6LineHint(
-        index=hint.index,
-        text=hint.text,
-        bbox=bbox,
-        words=hint.words,
-    )
+    return replace(hint, bbox=bbox)
 
 
 def _clamp(bbox: XYXY, width: int, height: int) -> XYXY:

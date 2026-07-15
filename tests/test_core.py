@@ -11338,7 +11338,8 @@ def test_hanwang_recog_group_failure_retries_with_routing_segment_context():
 
         assert calls == [(50, 86), (60, 108)]
         assert rows[0].text == "补"
-        assert rows[0].lines[0].bbox == (0, 0, 30, 20)
+        assert rows[0].lines[0].bbox == (0, 0, 100, 50)
+        assert rows[0].lines[0].bbox_source == "ppocrv6_physical_routing_line"
         assert rows[0].lines[0].chars[0].bbox == (2, 3, 22, 19)
         assert stats.recog_probe_calls == 2
         assert stats.recog_group_failures == 0

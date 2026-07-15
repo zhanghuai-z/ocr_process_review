@@ -28,6 +28,7 @@ from app.core.ppocr_layout_ownership import (
 from app.core.ppocr_line_geometry import normalize_physical_text_rows
 from app.core.ppocr_route_validation import (
     invalid_prepass_line_bbox_issue,
+    missing_rotated_line_orientation_issue,
     overlapping_formula_masks_issue,
     partition_issues_to_route_issues,
     text_container_clip_empty_issue,
@@ -95,7 +96,6 @@ def compile_page_routing_plan(
         if not _is_nonempty(line_bbox):
             issues.append(invalid_prepass_line_bbox_issue(prepass_line.index, line_bbox))
             continue
-
         if line_ownership.is_structural_exclusion:
             continue
         target = line_ownership.text_block
@@ -107,8 +107,17 @@ def compile_page_routing_plan(
             # horizontal fragment for this region; neither should replace or
             # duplicate the explicit vertical route.
             continue
+        if prepass_line.text_axis == "vertical" and prepass_line.orientation_angle == -1:
+            issues.append(
+                missing_rotated_line_orientation_issue(prepass_line.index, line_bbox)
+            )
+            continue
 
-        clipped_line = _clip_line_to_text_block_width(line_bbox, target.bbox)
+        clipped_line = _clip_line_to_text_block_primary_axis(
+            line_bbox,
+            target.bbox,
+            text_axis=prepass_line.text_axis,
+        )
         if clipped_line is None:
             issues.append(text_container_clip_empty_issue(prepass_line.index, line_bbox))
             continue
@@ -142,6 +151,8 @@ def compile_page_routing_plan(
             bbox=clipped_line,
             segments=tuple(segments),
             source=ROUTING_SOURCE_PPOCR_V6_PREPASS,
+            text_axis=prepass_line.text_axis,
+            orientation_angle=prepass_line.orientation_angle,
         )
         routes_by_block_uid[target.block.uid].append(route)
 
@@ -211,7 +222,10 @@ def _segments_for_line(
     text_kind = _whole_line_text_kind(prepass_line.text)
     partition_image = _masked_partition_image(page_image_bgr, structural_masks)
     partition_line = _prepass_line_without_structural_tokens(prepass_line, structural_masks)
-    if _line_requires_text_partition(prepass_line.text):
+    if (
+        prepass_line.text_axis == "horizontal"
+        and _line_requires_text_partition(prepass_line.text)
+    ):
         partition = partition_charocr_text_region(
             partition_image,
             partition_line,
@@ -291,13 +305,24 @@ def _line_requires_text_partition(text: str) -> bool:
     return any(char.isascii() and char.isalnum() for char in str(text or ""))
 
 
-def _clip_line_to_text_block_width(line_bbox: XYXY, block_bbox: XYXY) -> XYXY | None:
-    """Keep block ownership horizontal without clipping complete glyph ink.
+def _clip_line_to_text_block_primary_axis(
+    line_bbox: XYXY,
+    block_bbox: XYXY,
+    *,
+    text_axis: str,
+) -> XYXY | None:
+    """Limit a physical row to its layout owner along the reading axis.
 
-    Derived foreground geometry owns the row's vertical glyph extent. Layout
-    geometry selects the text container and limits cross-column spill, but a
-    tight VL block must not cut an otherwise owned glyph.
+    Derived foreground geometry owns the complete glyph extent. Layout geometry
+    selects the text container and limits cross-column or cross-block spill
+    along x for a horizontal row and y for a rotated row. The glyph cross-axis
+    extent remains owned by PP/foreground evidence so a tight layout box cannot
+    cut the top/bottom (or left/right after rotation) of a glyph.
     """
+    if text_axis == "vertical":
+        y1 = max(line_bbox[1], block_bbox[1])
+        y2 = min(line_bbox[3], block_bbox[3])
+        return (line_bbox[0], y1, line_bbox[2], y2) if y2 > y1 else None
     x1 = max(line_bbox[0], block_bbox[0])
     x2 = min(line_bbox[2], block_bbox[2])
     return (x1, line_bbox[1], x2, line_bbox[3]) if x2 > x1 else None

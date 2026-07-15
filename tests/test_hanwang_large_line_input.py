@@ -64,6 +64,8 @@ def test_large_horizontal_native_group_uses_one_normalized_physical_line(monkeyp
     assert stats.n_groups == 1
     assert stats.recog_probe_calls == 1
     assert rows[0].text == "标题"
+    assert rows[0].lines[0].bbox == (10, 10, 190, 90)
+    assert rows[0].lines[0].bbox_source == "ppocrv6_physical_routing_line"
     assert rows[0].recog_group_bboxes == [(2, 0, 198, 100)]
     assert [char.bbox for char in rows[0].lines[0].chars] == [
         (16, 20, 74, 80),
@@ -125,3 +127,7 @@ def test_large_horizontal_native_groups_keep_normalization_in_batch(monkeypatch)
     assert stats.recog_batch_chunks == 1
     assert stats.recog_batch_failures == 0
     assert [row.text for row in rows] == ["甲", "乙"]
+    assert [row.lines[0].bbox for row in rows] == [
+        (10, 10, 190, 90),
+        (10, 130, 190, 210),
+    ]

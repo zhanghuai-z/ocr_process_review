@@ -7,7 +7,11 @@ from typing import Mapping
 
 import numpy as np
 
-from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
+from app.adapters.paddle.ppocr_v6_prepass import (
+    PpOcrV6LineHint,
+    TEXT_AXIS_HORIZONTAL,
+    TEXT_AXIS_VERTICAL,
+)
 from app.geometry.foreground import analyze_foreground_components
 
 
@@ -83,12 +87,11 @@ def normalize_physical_text_rows(
     """Return immutable derived rows with an O(1) source-index lookup.
 
     Raw PP observations remain unchanged. Rows are merged only inside one
-    adopted text block when their vertical spans describe the same physical
-    baseline and their horizontal spans are disjoint. If PP omitted a prefix,
-    unclaimed foreground inside the block/row intersection extends the derived
-    row to the first real ink component. The derived row height follows the
-    closure of foreground components uniquely owned by that physical row
-    instead of retaining PP's oversized or clipped vertical proposal.
+    adopted text block when their cross-axis spans describe the same physical
+    row and their reading-axis spans are disjoint. Unclaimed foreground inside
+    the block/row intersection closes either row end. The derived cross-axis
+    extent follows foreground components uniquely owned by that physical row
+    instead of retaining an oversized or clipped PP proposal.
     """
     components = _foreground_bboxes(page_image_bgr)
     page_bbox = (
@@ -100,14 +103,14 @@ def normalize_physical_text_rows(
     for group in groups:
         rows = _merge_co_baseline_fragments(group.lines)
         for row in rows:
-            completed = _recover_unclaimed_prefix(
+            completed = _recover_unclaimed_line_ends(
                 row.line,
                 tuple(item.line for item in rows),
                 group.block_bbox,
                 components,
                 group.excluded_bboxes,
             )
-            normalized_line = _fit_vertical_extent_to_owned_ink(
+            normalized_line = _fit_cross_extent_to_owned_ink(
                 completed,
                 components,
                 group.excluded_bboxes,
@@ -126,7 +129,7 @@ def normalize_physical_text_rows(
 def _merge_co_baseline_fragments(
     lines: tuple[PpOcrV6LineHint, ...],
 ) -> tuple[PhysicalTextRow, ...]:
-    pending = list(sorted(lines, key=lambda hint: (hint.bbox[1], hint.bbox[0], hint.index)))
+    pending = list(sorted(lines, key=_row_sort_key))
     rows: list[PhysicalTextRow] = []
     while pending:
         seed = pending.pop(0)
@@ -135,7 +138,7 @@ def _merge_co_baseline_fragments(
         while changed:
             changed = False
             for candidate in pending[:]:
-                if any(_same_physical_row(candidate.bbox, member.bbox) for member in members):
+                if any(_same_physical_row(candidate, member) for member in members):
                     members.append(candidate)
                     pending.remove(candidate)
                     changed = True
@@ -143,17 +146,24 @@ def _merge_co_baseline_fragments(
     return tuple(rows)
 
 
-def _same_physical_row(left: XYXY, right: XYXY) -> bool:
-    left_center_y = (left[1] + left[3]) / 2.0
-    right_center_y = (right[1] + right[3]) / 2.0
+def _same_physical_row(left: PpOcrV6LineHint, right: PpOcrV6LineHint) -> bool:
+    if (
+        left.text_axis != right.text_axis
+        or left.orientation_angle != right.orientation_angle
+    ):
+        return False
+    left_cross = _cross_span(left.bbox, left.text_axis)
+    right_cross = _cross_span(right.bbox, right.text_axis)
+    left_center = sum(left_cross) / 2.0
+    right_center = sum(right_cross) / 2.0
     return (
-        right[1] <= left_center_y <= right[3]
-        and left[1] <= right_center_y <= left[3]
+        right_cross[0] <= left_center <= right_cross[1]
+        and left_cross[0] <= right_center <= left_cross[1]
     )
 
 
 def _merge_line_hints(lines: list[PpOcrV6LineHint]) -> PhysicalTextRow:
-    ordered = sorted(lines, key=lambda hint: (hint.bbox[0], hint.index))
+    ordered = sorted(lines, key=_primary_sort_key)
     if len(ordered) == 1:
         return PhysicalTextRow(ordered[0], (ordered[0].index,))
     line_index = min(hint.index for hint in ordered)
@@ -173,27 +183,34 @@ def _merge_line_hints(lines: list[PpOcrV6LineHint]) -> PhysicalTextRow:
                 max(hint.bbox[3] for hint in ordered),
             ),
             words=merged_words,
+            text_axis=ordered[0].text_axis,
+            orientation_angle=ordered[0].orientation_angle,
         ),
         tuple(hint.index for hint in ordered),
     )
 
 
-def _recover_unclaimed_prefix(
+def _recover_unclaimed_line_ends(
     hint: PpOcrV6LineHint,
     block_rows: tuple[PpOcrV6LineHint, ...],
     block_bbox: XYXY,
     components: tuple[XYXY, ...],
     excluded_bboxes: tuple[XYXY, ...],
 ) -> PpOcrV6LineHint:
-    bx1, _by1, _bx2, _by2 = block_bbox
-    lx1, ly1, lx2, ly2 = hint.bbox
-    if not components or lx1 <= bx1:
+    if not components:
         return hint
-    prefix_components = []
+    line_primary = _primary_span(hint.bbox, hint.text_axis)
+    block_primary = _primary_span(block_bbox, hint.text_axis)
+    line_cross = _cross_span(hint.bbox, hint.text_axis)
+    recovered: list[XYXY] = []
     for component in components:
         center_x = (component[0] + component[2]) / 2.0
         center_y = (component[1] + component[3]) / 2.0
-        if not (bx1 <= center_x < lx1 and ly1 <= center_y <= ly2):
+        primary = center_x if hint.text_axis == TEXT_AXIS_HORIZONTAL else center_y
+        cross = center_y if hint.text_axis == TEXT_AXIS_HORIZONTAL else center_x
+        if not (block_primary[0] <= primary <= block_primary[1]):
+            continue
+        if not (line_cross[0] <= cross <= line_cross[1]):
             continue
         if any(_contains_point(bbox, center_x, center_y) for bbox in excluded_bboxes):
             continue
@@ -202,13 +219,25 @@ def _recover_unclaimed_prefix(
             for other in block_rows
         ):
             continue
-        prefix_components.append(component)
-    if not prefix_components:
+        recovered.append(component)
+    if not recovered:
         return hint
-    return replace(hint, bbox=(min(component[0] for component in prefix_components), ly1, lx2, ly2))
+    if hint.text_axis == TEXT_AXIS_HORIZONTAL:
+        return replace(hint, bbox=(
+            min(hint.bbox[0], *(component[0] for component in recovered)),
+            hint.bbox[1],
+            max(hint.bbox[2], *(component[2] for component in recovered)),
+            hint.bbox[3],
+        ))
+    return replace(hint, bbox=(
+        hint.bbox[0],
+        min(hint.bbox[1], *(component[1] for component in recovered)),
+        hint.bbox[2],
+        max(hint.bbox[3], *(component[3] for component in recovered)),
+    ))
 
 
-def _fit_vertical_extent_to_owned_ink(
+def _fit_cross_extent_to_owned_ink(
     hint: PpOcrV6LineHint,
     components: tuple[XYXY, ...],
     excluded_bboxes: tuple[XYXY, ...],
@@ -254,23 +283,63 @@ def _fit_vertical_extent_to_owned_ink(
             accepted.add(component_index)
             owned.append(accepted_component)
             active_bbox = (
-                hint.bbox[0],
-                min(active_bbox[1], accepted_component[1]),
-                hint.bbox[2],
-                max(active_bbox[3], accepted_component[3]),
+                min(active_bbox[0], accepted_component[0])
+                if hint.text_axis == TEXT_AXIS_VERTICAL
+                else hint.bbox[0],
+                min(active_bbox[1], accepted_component[1])
+                if hint.text_axis == TEXT_AXIS_HORIZONTAL
+                else hint.bbox[1],
+                max(active_bbox[2], accepted_component[2])
+                if hint.text_axis == TEXT_AXIS_VERTICAL
+                else hint.bbox[2],
+                max(active_bbox[3], accepted_component[3])
+                if hint.text_axis == TEXT_AXIS_HORIZONTAL
+                else hint.bbox[3],
             )
             changed = True
     if not owned:
         return hint
-    return replace(
-        hint,
-        bbox=(
+    if hint.text_axis == TEXT_AXIS_HORIZONTAL:
+        bbox = (
             hint.bbox[0],
             min(component[1] for component in owned),
             hint.bbox[2],
             max(component[3] for component in owned),
-        ),
+        )
+    else:
+        bbox = (
+            min(component[0] for component in owned),
+            hint.bbox[1],
+            max(component[2] for component in owned),
+            hint.bbox[3],
+        )
+    return replace(hint, bbox=bbox)
+
+
+def _row_sort_key(hint: PpOcrV6LineHint) -> tuple[int, int, int, int]:
+    cross = _cross_span(hint.bbox, hint.text_axis)
+    primary = _primary_span(hint.bbox, hint.text_axis)
+    return (
+        0 if hint.text_axis == TEXT_AXIS_HORIZONTAL else 1,
+        cross[0],
+        primary[0],
+        hint.index,
     )
+
+
+def _primary_sort_key(hint: PpOcrV6LineHint) -> tuple[int, int]:
+    start = _primary_span(hint.bbox, hint.text_axis)[0]
+    if hint.orientation_angle == 180:
+        start = -start
+    return start, hint.index
+
+
+def _primary_span(bbox: XYXY, axis: str) -> tuple[int, int]:
+    return (bbox[0], bbox[2]) if axis == TEXT_AXIS_HORIZONTAL else (bbox[1], bbox[3])
+
+
+def _cross_span(bbox: XYXY, axis: str) -> tuple[int, int]:
+    return (bbox[1], bbox[3]) if axis == TEXT_AXIS_HORIZONTAL else (bbox[0], bbox[2])
 
 
 def _contains_point(bbox: XYXY, x: float, y: float) -> bool:

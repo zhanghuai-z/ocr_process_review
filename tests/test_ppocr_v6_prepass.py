@@ -33,7 +33,7 @@ def test_ppocr_v6_routing_profile_keeps_features_without_geometry_overrides():
     assert options == {
         "useDocOrientationClassify": False,
         "useDocUnwarping": False,
-        "useTextlineOrientation": False,
+        "useTextlineOrientation": True,
         "returnWordBox": True,
         "textDetBoxThresh": 0.4,
         "textRecScoreThresh": 0.0,
@@ -66,6 +66,33 @@ def test_parse_ppocr_v6_prepass_keeps_lines_and_word_boxes_outside_proof_model()
         ("Urban", (10, 20, 100, 60)),
         ("2026", (120, 20, 210, 60)),
     ]
+
+
+def test_prepass_preserves_rotated_line_geometry_and_orientation_result():
+    result = _result()
+    result["prunedResult"]["rec_texts"] = ["单位：人"]
+    result["prunedResult"]["rec_boxes"] = [[20, 10, 60, 180]]
+    result["prunedResult"]["rec_polys"] = [
+        [[20, 10], [60, 10], [60, 180], [20, 180]]
+    ]
+    result["prunedResult"]["textline_orientation_angles"] = [180]
+    result["prunedResult"]["text_word"] = [["单位：人"]]
+    result["prunedResult"]["text_word_boxes"] = [[[20, 10, 60, 180]]]
+
+    artifact = normalize_ppocr_v6_prepass_result(result, page_uid="page-rotated")
+
+    line = artifact.lines[0]
+    assert line.polygon == ((20, 10), (60, 10), (60, 180), (20, 180))
+    assert line.text_axis == "vertical"
+    assert line.orientation_angle == 180
+
+
+def test_prepass_rejects_unsupported_orientation_angle():
+    result = _result()
+    result["prunedResult"]["textline_orientation_angles"] = [90]
+
+    with pytest.raises(ValueError, match="unsupported PP-OCRv6 textline orientation"):
+        normalize_ppocr_v6_prepass_result(result, page_uid="page-1")
 
 
 def test_external_observation_normalizer_is_the_parse_result_boundary():

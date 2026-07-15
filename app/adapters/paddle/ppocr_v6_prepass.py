@@ -10,10 +10,15 @@ import numpy as np
 from app.core.api_image_codec import encode_image_bytes_for_paddle
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.paddle_v16_client import PaddleV16LayoutClient
-from app.models.charocr_routing import xyxy
+from app.models.charocr_routing import (
+    TEXT_AXIS_HORIZONTAL,
+    TEXT_AXIS_VERTICAL,
+    xyxy,
+)
 
 
 PPOCR_V6_MODEL = "PP-OCRv6"
+VALID_TEXT_AXES = frozenset({TEXT_AXIS_HORIZONTAL, TEXT_AXIS_VERTICAL})
 
 
 @dataclass(frozen=True)
@@ -40,7 +45,7 @@ def build_ppocr_v6_routing_request_profile() -> PpOcrV6RoutingRequestProfile:
         options=(
             ("useDocOrientationClassify", False),
             ("useDocUnwarping", False),
-            ("useTextlineOrientation", False),
+            ("useTextlineOrientation", True),
             ("returnWordBox", True),
             ("textDetBoxThresh", 0.4),
             ("textRecScoreThresh", 0.0),
@@ -71,10 +76,26 @@ class PpOcrV6LineHint:
     text: str
     bbox: tuple[int, int, int, int]
     words: tuple[PpOcrV6WordBox, ...]
+    polygon: tuple[tuple[int, int], ...] = ()
+    text_axis: str = TEXT_AXIS_HORIZONTAL
+    orientation_angle: int = -1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
         object.__setattr__(self, "words", tuple(self.words))
+        object.__setattr__(
+            self,
+            "polygon",
+            tuple((int(point[0]), int(point[1])) for point in self.polygon),
+        )
+        axis = str(self.text_axis or TEXT_AXIS_HORIZONTAL).strip().lower()
+        if axis not in VALID_TEXT_AXES:
+            raise ValueError(f"unsupported PP-OCRv6 text axis: {axis!r}")
+        object.__setattr__(self, "text_axis", axis)
+        angle = int(self.orientation_angle)
+        if angle not in {-1, 0, 180}:
+            raise ValueError(f"unsupported PP-OCRv6 textline orientation angle: {angle}")
+        object.__setattr__(self, "orientation_angle", angle)
         if any(not isinstance(word, PpOcrV6WordBox) for word in self.words):
             raise TypeError("PP-OCRv6 line word boxes require typed observations")
         if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
@@ -205,6 +226,8 @@ def normalize_ppocr_v6_prepass_result(
         raise ValueError("PP-OCRv6 result prunedResult must be an object")
     texts = pruned.get("rec_texts", [])
     boxes = pruned.get("rec_boxes", [])
+    polygons = pruned.get("rec_polys", [])
+    orientation_angles = pruned.get("textline_orientation_angles", [])
     words_by_line = pruned.get("text_word", [])
     word_boxes_by_line = pruned.get("text_word_boxes", [])
     if not isinstance(texts, list) or not isinstance(boxes, list):
@@ -214,6 +237,10 @@ def normalize_ppocr_v6_prepass_result(
             "PP-OCRv6 result has mismatched rec_texts/rec_boxes lengths: "
             f"{len(texts)} != {len(boxes)}"
         )
+    if polygons is not None and not isinstance(polygons, list):
+        raise ValueError("PP-OCRv6 result rec_polys must be a list")
+    if orientation_angles is not None and not isinstance(orientation_angles, list):
+        raise ValueError("PP-OCRv6 result textline_orientation_angles must be a list")
     if words_by_line is not None and not isinstance(words_by_line, list):
         raise ValueError("PP-OCRv6 result text_word must be a list")
     if word_boxes_by_line is not None and not isinstance(word_boxes_by_line, list):
@@ -252,11 +279,24 @@ def normalize_ppocr_v6_prepass_result(
                 text=str(raw_word or ""),
                 bbox=word_bbox,
             ))
+        polygon = _parse_polygon(
+            polygons[line_index] if line_index < len(polygons) else None,
+            width=width,
+            height=height,
+        )
+        orientation_angle = _parse_orientation_angle(
+            orientation_angles[line_index]
+            if line_index < len(orientation_angles)
+            else -1
+        )
         lines.append(PpOcrV6LineHint(
             index=line_index,
             text=str(raw_text or ""),
             bbox=line_bbox,
             words=tuple(words),
+            polygon=polygon,
+            text_axis=_text_axis_from_polygon_or_bbox(polygon, line_bbox),
+            orientation_angle=orientation_angle,
         ))
     return PpOcrV6PrepassArtifact(page_uid=page_uid, run_id=run_id, lines=tuple(lines))
 
@@ -268,12 +308,80 @@ def _parse_bbox(value: object, *, width: int | None, height: int | None) -> tupl
     return bbox.to_xyxy()
 
 
+def _parse_polygon(
+    value: object,
+    *,
+    width: int | None,
+    height: int | None,
+) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, (list, tuple)) or len(value) < 4:
+        return ()
+    points: list[tuple[int, int]] = []
+    for raw_point in value[:4]:
+        if not isinstance(raw_point, (list, tuple)) or len(raw_point) < 2:
+            return ()
+        x = int(round(float(raw_point[0])))
+        y = int(round(float(raw_point[1])))
+        if width is not None:
+            x = min(max(0, x), int(width))
+        if height is not None:
+            y = min(max(0, y), int(height))
+        points.append((x, y))
+    return tuple(points)
+
+
+def _text_axis_from_polygon_or_bbox(
+    polygon: tuple[tuple[int, int], ...],
+    bbox: tuple[int, int, int, int],
+) -> str:
+    if len(polygon) == 4:
+        horizontal_edge = max(
+            _squared_distance(polygon[0], polygon[1]),
+            _squared_distance(polygon[2], polygon[3]),
+        )
+        vertical_edge = max(
+            _squared_distance(polygon[1], polygon[2]),
+            _squared_distance(polygon[3], polygon[0]),
+        )
+        if horizontal_edge != vertical_edge:
+            return (
+                TEXT_AXIS_HORIZONTAL
+                if horizontal_edge > vertical_edge
+                else TEXT_AXIS_VERTICAL
+            )
+    return (
+        TEXT_AXIS_HORIZONTAL
+        if bbox[2] - bbox[0] >= bbox[3] - bbox[1]
+        else TEXT_AXIS_VERTICAL
+    )
+
+
+def _squared_distance(left: tuple[int, int], right: tuple[int, int]) -> int:
+    return (left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2
+
+
+def _parse_orientation_angle(value: object) -> int:
+    if value is None:
+        return -1
+    try:
+        angle = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid PP-OCRv6 textline orientation angle: {value!r}"
+        ) from exc
+    if angle not in {-1, 0, 180}:
+        raise ValueError(f"unsupported PP-OCRv6 textline orientation angle: {angle}")
+    return angle
+
+
 def _normalize_text_stream(value: object) -> str:
     return "".join(str(value or "").split())
 
 
 __all__ = [
     "PPOCR_V6_MODEL",
+    "TEXT_AXIS_HORIZONTAL",
+    "TEXT_AXIS_VERTICAL",
     "PpOcrV6LineHint",
     "PpOcrV6PrepassArtifact",
     "PpOcrV6PrepassClient",

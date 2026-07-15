@@ -9,6 +9,8 @@ from typing import Any
 XYXY = tuple[int, int, int, int]
 ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
 ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT = "layout_vertical_text"
+TEXT_AXIS_HORIZONTAL = "horizontal"
+TEXT_AXIS_VERTICAL = "vertical"
 ROUTE_SEGMENT_TEXT_OTHER = "text_other"
 ROUTE_SEGMENT_TEXT_LATIN = "text_latin"
 ROUTE_SEGMENT_FORMULA = "formula"
@@ -77,12 +79,20 @@ class RoutingLine:
     bbox: XYXY
     segments: tuple[RoutingSegment, ...]
     source: str = ""
+    text_axis: str = TEXT_AXIS_HORIZONTAL
+    orientation_angle: int = -1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
         object.__setattr__(self, "segments", tuple(self.segments))
         if any(not isinstance(segment, RoutingSegment) for segment in self.segments):
             raise TypeError("routing line segments require typed values")
+        if self.text_axis not in {TEXT_AXIS_HORIZONTAL, TEXT_AXIS_VERTICAL}:
+            raise ValueError(f"unsupported routing text axis: {self.text_axis!r}")
+        if self.orientation_angle not in {-1, 0, 180}:
+            raise ValueError(
+                f"unsupported routing textline orientation angle: {self.orientation_angle}"
+            )
 
     @property
     def has_formula(self) -> bool:
@@ -210,6 +220,8 @@ def routing_line_from_record(
             if isinstance(segment, dict)
         ),
         source=str(route.get(source_field) or ""),
+        text_axis=str(route.get("text_axis") or TEXT_AXIS_HORIZONTAL),
+        orientation_angle=int_or_default(route.get("orientation_angle"), -1),
     )
 
 
@@ -262,6 +274,10 @@ def routing_line_to_record(
     }
     if line.source:
         record[source_field] = line.source
+    if line.text_axis != TEXT_AXIS_HORIZONTAL:
+        record["text_axis"] = line.text_axis
+    if line.orientation_angle != -1:
+        record["orientation_angle"] = line.orientation_angle
     return record
 
 

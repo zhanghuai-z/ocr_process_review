@@ -92,6 +92,110 @@ def test_text_block_limits_row_width_without_clipping_ppocr_vertical_extent():
     assert route.segments[0].bbox == (10, 0, 90, 40)
 
 
+def test_compiler_preserves_rotated_ppocr_axis_and_clips_along_reading_axis():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (20, 40, 80, 180), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="人口数",
+        bbox=(10, 20, 90, 200),
+        words=(),
+        text_axis="vertical",
+        orientation_angle=0,
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=220,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text-1").lines[0]
+    assert route.bbox == (10, 40, 90, 180)
+    assert route.text_axis == "vertical"
+    assert route.orientation_angle == 0
+
+
+def test_page_boundary_clipping_preserves_rotated_line_orientation_facts():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 20, 90, 200), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="人口数",
+        bbox=(-10, 20, 90, 200),
+        words=(),
+        text_axis="vertical",
+        orientation_angle=0,
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=220,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text-1").lines[0]
+    assert route.bbox == (0, 20, 90, 200)
+    assert route.text_axis == "vertical"
+    assert route.orientation_angle == 0
+
+
+def test_compiler_blocks_only_text_page_with_unoriented_rotated_ppocr_row():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (20, 20, 80, 200), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="人口数",
+        bbox=(20, 20, 80, 200),
+        words=(),
+        text_axis="vertical",
+        orientation_angle=-1,
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=220,
+    )
+
+    assert plan.is_dispatchable is False
+    assert [issue.code for issue in plan.validation_issues] == [
+        "missing_rotated_line_orientation"
+    ]
+
+
+def test_unoriented_rotated_table_row_does_not_block_text_routing_page():
+    snapshot = _snapshot(
+        _block("table-1", BlockType.TABLE, (20, 20, 80, 200), policy=OcrPolicy.PRESERVE_AS_TABLE, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="人口数",
+        bbox=(20, 20, 80, 200),
+        words=(),
+        text_axis="vertical",
+        orientation_angle=-1,
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=100,
+        page_height=220,
+    )
+
+    assert plan.is_dispatchable is True
+    assert plan.for_block("table-1") is None
+
+
 def test_structural_edge_contact_does_not_steal_text_token_ownership():
     snapshot = _snapshot(
         _block("caption", BlockType.FIGURE_CAPTION, (0, 10, 100, 30), policy=OcrPolicy.TEXT_OCR, order=0),

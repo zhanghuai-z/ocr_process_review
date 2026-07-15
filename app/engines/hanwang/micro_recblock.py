@@ -29,6 +29,8 @@ from app.models.charocr_routing import (
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
     ROUTE_SEGMENT_TEXT_LATIN,
+    TEXT_AXIS_HORIZONTAL,
+    TEXT_AXIS_VERTICAL,
     RoutingLine,
     is_text_route_segment_kind,
 )
@@ -273,6 +275,43 @@ class _PreparedRecogCrop:
         return self.scale_x != 1.0 or self.scale_y != 1.0
 
 
+@dataclass(frozen=True)
+class _OrientedNativeCrop:
+    image: np.ndarray
+    rotation_quarters_clockwise: int = 0
+    source_width: int = 0
+    source_height: int = 0
+
+    def bbox_to_source(
+        self,
+        bbox: tuple[int, int, int, int],
+    ) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = bbox
+        turns = self.rotation_quarters_clockwise % 4
+        if turns == 0:
+            return bbox
+        if turns == 1:
+            return (
+                y1,
+                self.source_height - x2,
+                y2,
+                self.source_height - x1,
+            )
+        if turns == 2:
+            return (
+                self.source_width - x2,
+                self.source_height - y2,
+                self.source_width - x1,
+                self.source_height - y1,
+            )
+        return (
+            self.source_width - y2,
+            x1,
+            self.source_width - y1,
+            x2,
+        )
+
+
 @dataclass
 class _TextRoute:
     block_idx: int
@@ -304,6 +343,8 @@ class _EngCutMaskedLineRoute:
     line_idx: int
     bbox: tuple[int, int, int, int]
     segments: tuple[_TextRoute, ...]
+    text_axis: str = TEXT_AXIS_HORIZONTAL
+    orientation_angle: int = -1
 
 
 @dataclass(frozen=True)
@@ -315,6 +356,8 @@ class _LineCutMaskedLineRoute:
     bbox: tuple[int, int, int, int]
     linecut_segments: tuple[_TextRoute, ...]
     excluded_segments: tuple[_TextRoute, ...]
+    text_axis: str = TEXT_AXIS_HORIZONTAL
+    orientation_angle: int = -1
 
 
 def _is_engcut_text_route(route: _TextRoute) -> bool:
@@ -449,6 +492,8 @@ def _engcut_masked_line_routes_from_lines(
                     line_idx=line_idx,
                     bbox=line.bbox,
                     segments=segments,
+                    text_axis=line.text_axis,
+                    orientation_angle=line.orientation_angle,
                 )
             )
     return grouped
@@ -486,6 +531,8 @@ def _linecut_masked_line_routes_from_lines(
                 bbox=line.bbox,
                 linecut_segments=linecut,
                 excluded_segments=tuple(segment for segment in typed if segment not in linecut),
+                text_axis=line.text_axis,
+                orientation_angle=line.orientation_angle,
             ))
     return routes
 
@@ -511,19 +558,53 @@ def _materialize_linecut_masked_page(
     return canvas
 
 
-def _merge_physical_routing_line(lines: list[LineResult]) -> list[LineResult]:
-    """Materialize one authoritative PP physical row from all of its slices."""
+def _materialize_linecut_masked_line_crop(
+    image_bgr: np.ndarray,
+    route: _LineCutMaskedLineRoute,
+) -> tuple[np.ndarray, int, int]:
+    height, width = image_bgr.shape[:2]
+    x1, y1, x2, y2 = _clamp_xyxy(route.bbox, width, height)
+    if x2 <= x1 or y2 <= y1:
+        raise RuntimeError(f"invalid masked LineCut line bbox: {route.bbox}")
+    canvas = np.full_like(image_bgr[y1:y2, x1:x2], 255)
+    for segment in route.linecut_segments:
+        sx1, sy1, sx2, sy2 = _intersect_xyxy(segment.bbox, route.bbox) or (0, 0, 0, 0)
+        if sx2 <= sx1 or sy2 <= sy1:
+            raise RuntimeError(
+                "masked LineCut segment does not intersect its physical line: "
+                f"line={route.bbox} segment={segment.bbox}"
+            )
+        canvas[sy1 - y1:sy2 - y1, sx1 - x1:sx2 - x1] = image_bgr[sy1:sy2, sx1:sx2]
+    for segment in route.excluded_segments:
+        overlap = _intersect_xyxy(segment.bbox, route.bbox)
+        if overlap is None:
+            continue
+        sx1, sy1, sx2, sy2 = overlap
+        canvas[sy1 - y1:sy2 - y1, sx1 - x1:sx2 - x1] = 255
+    return canvas, x1, y1
+
+
+def _merge_physical_routing_line(
+    lines: list[LineResult],
+    *,
+    route_bbox: tuple[int, int, int, int],
+) -> list[LineResult]:
+    """Materialize one PP physical row without promoting native group geometry."""
     if not lines:
         return []
     if len(lines) == 1:
-        return [lines[0]]
+        return [replace(
+            lines[0],
+            bbox=route_bbox,
+            bbox_source="ppocrv6_physical_routing_line",
+        )]
     ordered = sorted(lines, key=lambda item: (item.bbox[0], item.bbox[1]))
     chars = [char for line in ordered for char in line.chars]
     confidence_values = [line.confidence for line in ordered if line.confidence > 0]
     flags = sorted({flag for line in ordered for flag in line.review_flags})
     return [LineResult(
         text="".join(line.text for line in ordered if line.text),
-        bbox=union_xyxy([line.bbox for line in ordered]),
+        bbox=route_bbox,
         confidence=sum(confidence_values) / len(confidence_values) if confidence_values else 0.0,
         chars=chars,
         source="hanwang+ppocrv6_routing_line",
@@ -596,6 +677,52 @@ def _distribute_linecut_results(
             )
         distributed[owners[0].key].append(line)
     return distributed
+
+
+def _recognize_oriented_linecut_route(
+    image_bgr: np.ndarray,
+    route: _LineCutMaskedLineRoute,
+    stats: RunStats,
+    *,
+    timeout: float,
+    include_chars: bool,
+) -> dict[tuple[int, int, int], list[LineResult]]:
+    """Recognize one non-horizontal physical line through a reversible crop."""
+    crop, offset_x, offset_y = _materialize_linecut_masked_line_crop(image_bgr, route)
+    oriented = _orient_crop_for_native(
+        crop,
+        text_axis=route.text_axis,
+        orientation_angle=route.orientation_angle,
+    )
+    prepared = _prepare_full_line_recog_crop(oriented.image)
+    stats.recog_probe_calls += 1
+    raw = native_bridge.run_linecut_recog(
+        prepared.image,
+        recblock_xyxy=None,
+        with_charrcg=True,
+        timeout=timeout,
+    )
+    native_height, native_width = prepared.image.shape[:2]
+    local_lines = _line_results_from_recog(
+        raw,
+        fallback_bbox=(0, 0, native_width, native_height),
+        include_chars=include_chars,
+    )
+    local_lines = _rescale_line_results(
+        local_lines,
+        scale_x=prepared.scale_x,
+        scale_y=prepared.scale_y,
+        target_width=oriented.image.shape[1],
+        target_height=oriented.image.shape[0],
+    )
+    if include_chars:
+        _reconcile_native_char_geometry(oriented.image, local_lines, stats)
+    source_lines = _line_results_from_oriented_crop(local_lines, oriented)
+    page_lines = _offset_line_results(source_lines, dx=offset_x, dy=offset_y)
+    return _distribute_linecut_results(
+        _filter_line_results_to_route_bbox(page_lines, route.bbox),
+        route,
+    )
 
 
 def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
@@ -795,7 +922,10 @@ def _assemble_layout_route_line(
         merged_text_lines: list[LineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _merge_physical_routing_line(merged_text_lines)
+        return _merge_physical_routing_line(
+            merged_text_lines,
+            route_bbox=route.bbox,
+        )
 
     clusters = _cluster_lines_by_shape(all_text_lines)
     if not clusters:
@@ -879,7 +1009,7 @@ def _assemble_layout_route_line(
             _recover_degenerate_punctuation_bboxes(
                 LineResult(
                     text=merged_text,
-                    bbox=union_xyxy(component_boxes) if component_boxes else route.bbox,
+                    bbox=route.bbox,
                     confidence=(
                         sum(confidence_values) / len(confidence_values)
                         if confidence_values
@@ -1505,6 +1635,100 @@ def _prepare_recog_crop(
     )
 
 
+def _prepare_full_line_recog_crop(crop: np.ndarray) -> _PreparedRecogCrop:
+    crop_height, crop_width = crop.shape[:2]
+    if (
+        crop_height <= NATIVE_RECOG_MAX_CORE_HEIGHT
+        or crop_width <= crop_height
+    ):
+        return _PreparedRecogCrop(crop)
+    scale = float(NATIVE_RECOG_TARGET_CORE_HEIGHT) / float(crop_height)
+    import cv2
+
+    resized_width = max(1, int(round(crop_width * scale)))
+    resized = cv2.resize(
+        crop,
+        (resized_width, NATIVE_RECOG_TARGET_CORE_HEIGHT),
+        interpolation=cv2.INTER_AREA,
+    )
+    return _PreparedRecogCrop(
+        resized,
+        scale_x=float(resized_width) / float(crop_width),
+        scale_y=float(NATIVE_RECOG_TARGET_CORE_HEIGHT) / float(crop_height),
+    )
+
+
+def _orient_crop_for_native(
+    crop: np.ndarray,
+    *,
+    text_axis: str,
+    orientation_angle: int,
+) -> _OrientedNativeCrop:
+    source_height, source_width = crop.shape[:2]
+    if text_axis == TEXT_AXIS_VERTICAL:
+        if orientation_angle == -1:
+            raise RuntimeError(
+                "rotated PP-OCRv6 line is missing textline orientation evidence"
+            )
+        # Paddle canonicalizes a tall detector crop with a counter-clockwise
+        # quarter turn, then reports whether that crop still needs 180 degrees.
+        turns = 3 if orientation_angle == 0 else 1
+    else:
+        turns = 2 if orientation_angle == 180 else 0
+    return _OrientedNativeCrop(
+        image=np.rot90(crop, k=-turns).copy() if turns else crop,
+        rotation_quarters_clockwise=turns,
+        source_width=source_width,
+        source_height=source_height,
+    )
+
+
+def _line_results_from_oriented_crop(
+    lines: list[LineResult],
+    oriented: _OrientedNativeCrop,
+) -> list[LineResult]:
+    if oriented.rotation_quarters_clockwise % 4 == 0:
+        return lines
+    transformed: list[LineResult] = []
+    for line in lines:
+        chars = [
+            replace(
+                char,
+                bbox=(
+                    oriented.bbox_to_source(char.bbox)
+                    if char.bbox is not None
+                    else None
+                ),
+            )
+            for char in line.chars
+        ]
+        transformed.append(replace(
+            line,
+            bbox=oriented.bbox_to_source(line.bbox),
+            chars=chars,
+        ))
+    return transformed
+
+
+def _engcut_chars_from_oriented_crop(
+    chars: list[EngcutChar],
+    oriented: _OrientedNativeCrop,
+) -> list[EngcutChar]:
+    if oriented.rotation_quarters_clockwise % 4 == 0:
+        return chars
+    return [
+        replace(
+            char,
+            bbox=(
+                oriented.bbox_to_source(char.bbox)
+                if char.bbox is not None
+                else None
+            ),
+        )
+        for char in chars
+    ]
+
+
 def _engcut_route_line_text_and_chars(
     chars: list[EngcutChar],
     *,
@@ -1663,6 +1887,8 @@ def _write_masked_engcut_line_hook(
     *,
     offset_x: int,
     offset_y: int,
+    source_shape: tuple[int, int] | None = None,
+    rotation_quarters_clockwise: int = 0,
 ) -> None:
     """Write the actual EngCut input only when the native debug hook is enabled."""
     hook_dir = os.environ.get("HANWANG_MICRO_RECBLOCK_HOOK_DIR", "").strip()
@@ -1681,11 +1907,12 @@ def _write_masked_engcut_line_hook(
         image_path = out_dir / f"{stem}.png"
         if not cv2.imwrite(str(image_path), crop):
             raise RuntimeError(f"cannot write {image_path.name}")
+        source_height, source_width = source_shape or crop.shape[:2]
         crop_bbox = [
             offset_x,
             offset_y,
-            offset_x + int(crop.shape[1]),
-            offset_y + int(crop.shape[0]),
+            offset_x + int(source_width),
+            offset_y + int(source_height),
         ]
         (out_dir / f"{stem}.json").write_text(
             json.dumps(
@@ -1693,6 +1920,7 @@ def _write_masked_engcut_line_hook(
                     "schema": "hanwang_engcut_masked_input.v3",
                     "line_bbox": list(route.bbox),
                     "crop_bbox": crop_bbox,
+                    "native_rotation_quarters_clockwise": rotation_quarters_clockwise,
                     "engcut_segments": [
                         {
                             "route_key": list(segment.key),
@@ -1779,15 +2007,26 @@ def _recognize_engcut_masked_line(
     crop, offset_x, offset_y = _materialize_engcut_masked_line_crop(image_bgr, route)
     if crop.size == 0:
         raise RuntimeError(f"empty masked EngCut line crop: {route.bbox}")
-    _write_masked_engcut_line_hook(
+    oriented = _orient_crop_for_native(
         crop,
+        text_axis=route.text_axis,
+        orientation_angle=route.orientation_angle,
+    )
+    _write_masked_engcut_line_hook(
+        oriented.image,
         route,
         offset_x=offset_x,
         offset_y=offset_y,
+        source_shape=crop.shape[:2],
+        rotation_quarters_clockwise=oriented.rotation_quarters_clockwise,
     )
     stats.engcut_route_calls += 1
-    raw_eng20 = native_bridge.run_eng20_recogline(crop, timeout=timeout)
-    page_chars = offset_engcut_chars(engcut_chars_from_payload(raw_eng20), dx=offset_x, dy=offset_y)
+    raw_eng20 = native_bridge.run_eng20_recogline(oriented.image, timeout=timeout)
+    local_chars = _engcut_chars_from_oriented_crop(
+        engcut_chars_from_payload(raw_eng20),
+        oriented,
+    )
+    page_chars = offset_engcut_chars(local_chars, dx=offset_x, dy=offset_y)
     groups = _engcut_groups(page_chars)
     grouped_by_route: dict[tuple[int, int, int], list[EngcutChar]] = {
         segment.key: [] for segment in route.segments
@@ -2154,6 +2393,15 @@ def run_micro_recblock(
         for route in routes:
             recog_group_bboxes_by_route[route.key] = []
             segimg_group_audits_by_route[route.key] = []
+    oriented_linecut_routes = [
+        route
+        for route in linecut_masked_line_routes
+        if route.text_axis == TEXT_AXIS_VERTICAL or route.orientation_angle == 180
+    ]
+    linecut_masked_line_routes = [
+        route for route in linecut_masked_line_routes
+        if route not in oriented_linecut_routes
+    ]
     text_route_recblocks = [route.bbox for route in linecut_masked_line_routes]
     linecut_input_image = _materialize_linecut_masked_page(
         image_bgr,
@@ -2225,6 +2473,27 @@ def run_micro_recblock(
         ):
             for route_key, result in engcut_results.items():
                 grouped_lines[route_key].append(result)
+        for route in oriented_linecut_routes:
+            oriented_results = _recognize_oriented_linecut_route(
+                image_bgr,
+                route,
+                stats,
+                timeout=recog_timeout,
+                include_chars=include_chars,
+            )
+            for route_key, results in oriented_results.items():
+                grouped_lines[route_key].extend(results)
+            for segment in route.linecut_segments:
+                segimg_group_audits_by_route.setdefault(segment.key, []).append({
+                    "route_text_slice_bbox": list(route.bbox),
+                    "segimg_group_bbox": None,
+                    "recog_group_bbox": list(route.bbox),
+                    "clipped": False,
+                    "dropped": False,
+                    "native_input_mode": "oriented_physical_line",
+                    "text_axis": route.text_axis,
+                    "orientation_angle": route.orientation_angle,
+                })
         group_bboxes: list[tuple[int, int, int, int]] = []
         group_area_indices: list[int] = []
         group_core_bboxes: dict[

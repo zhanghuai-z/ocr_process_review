@@ -9,6 +9,7 @@ from app.models.charocr_routing import (
     RouteValidationIssue,
     RoutingPlan,
     TextSliceRoute,
+    routing_line_from_record,
     routing_segment_from_record,
 )
 from app.services.layout_routing_plan import (
@@ -211,6 +212,28 @@ def test_routing_line_to_record_serializes_runtime_cache_shape():
     }
 
 
+def test_rotated_routing_line_round_trips_axis_and_orientation():
+    line = RoutingLine(
+        index=0,
+        bbox=(20, 10, 60, 180),
+        segments=(RoutingSegment(kind="text_other", bbox=(20, 10, 60, 180)),),
+        source=LAYOUT_ROUTE_SOURCE_PPOCR_LINE_HINTS,
+        text_axis="vertical",
+        orientation_angle=180,
+    )
+
+    record = routing_line_to_record(line)
+    restored = routing_line_from_record(
+        0,
+        record,
+        source_field=LAYOUT_ROUTE_SOURCE_FIELD,
+    )
+
+    assert record["text_axis"] == "vertical"
+    assert record["orientation_angle"] == 180
+    assert restored == line
+
+
 def test_formula_segment_round_trips_distinct_mask_and_content_geometry():
     line = RoutingLine(
         index=0,
@@ -344,7 +367,45 @@ def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line()
     assert len(lines) == 1
     assert lines[0].text == "China’s"
     assert [char.text for char in lines[0].chars] == ["China", "’", "s"]
+    assert lines[0].bbox == route.bbox
     assert lines[0].bbox_source == "ppocrv6_physical_routing_line"
+
+
+def test_hanwang_keeps_ppocr_physical_row_when_native_group_is_partial():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(100, 200, 700, 290),
+        segments=(RoutingSegment(kind="text_other", bbox=(100, 200, 700, 290)),),
+    )
+    grouped = {
+        (0, 0, 0): [micro_module.LineResult(
+            text="第二章",
+            bbox=(108, 205, 350, 250),
+            chars=[
+                micro_module.CharResult(text="第", bbox=(108, 205, 170, 250)),
+                micro_module.CharResult(text="二", bbox=(180, 220, 250, 235)),
+                micro_module.CharResult(text="章", bbox=(270, 205, 350, 250)),
+            ],
+        )],
+    }
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].bbox == route.bbox
+    assert lines[0].bbox_source == "ppocrv6_physical_routing_line"
+    assert [char.bbox for char in lines[0].chars] == [
+        (108, 205, 170, 250),
+        (180, 220, 250, 235),
+        (270, 205, 350, 250),
+    ]
 
 
 def test_paddle_routing_producer_builds_typed_plan_before_legacy_records():

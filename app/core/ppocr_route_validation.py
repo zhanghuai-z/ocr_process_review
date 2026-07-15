@@ -50,6 +50,18 @@ def text_container_clip_empty_issue(
     )
 
 
+def missing_rotated_line_orientation_issue(
+    line_index: int,
+    bbox: XYXY,
+) -> RouteValidationIssue:
+    return RouteValidationIssue(
+        code="missing_rotated_line_orientation",
+        message="rotated PP-OCRv6 line has no textline orientation result",
+        line_index=line_index,
+        bbox=bbox,
+    )
+
+
 def overlapping_formula_masks_issue(
     line_index: int,
     bbox: XYXY,
