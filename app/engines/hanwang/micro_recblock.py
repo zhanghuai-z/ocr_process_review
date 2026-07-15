@@ -262,6 +262,18 @@ class _GroupPlacement:
     area_idx: int
     page_bbox: tuple[int, int, int, int]
     group_bbox: tuple[int, int, int, int]
+    native_core_height_target: int | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedRecogCrop:
+    image: np.ndarray
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+
+    @property
+    def normalized(self) -> bool:
+        return self.scale_x != 1.0 or self.scale_y != 1.0
 
 
 @dataclass
@@ -1202,6 +1214,53 @@ def _offset_line_results(
     return shifted
 
 
+def _rescale_line_results(
+    lines: list[LineResult],
+    *,
+    scale_x: float,
+    scale_y: float,
+    target_width: int,
+    target_height: int,
+) -> list[LineResult]:
+    if scale_x == 1.0 and scale_y == 1.0:
+        return lines
+
+    def rescale_bbox(bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = bbox
+        mapped = (
+            int(round(x1 / scale_x)),
+            int(round(y1 / scale_y)),
+            int(round(x2 / scale_x)),
+            int(round(y2 / scale_y)),
+        )
+        return _clamp_xyxy(mapped, target_width, target_height)
+
+    scaled: list[LineResult] = []
+    for line in lines:
+        chars = [
+            CharResult(
+                text=char.text,
+                confidence=char.confidence,
+                bbox=rescale_bbox(char.bbox) if char.bbox is not None else None,
+                candidates=list(char.candidates),
+                source=char.source,
+                bbox_granularity=char.bbox_granularity,
+                token_text=char.token_text,
+            )
+            for char in line.chars
+        ]
+        scaled.append(LineResult(
+            text=line.text,
+            bbox=rescale_bbox(line.bbox),
+            confidence=line.confidence,
+            chars=chars,
+            source=line.source,
+            bbox_source=line.bbox_source,
+            review_flags=list(line.review_flags),
+        ))
+    return scaled
+
+
 def _char_center(box: tuple[int, int, int, int]) -> tuple[float, float]:
     return (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
 
@@ -1532,6 +1591,11 @@ def _refine_overlap_fragments_with_recrop(
 
 RECOG_GROUP_CROP_PAD_X = 8
 RECOG_GROUP_CROP_PAD_Y = 10
+# The native Recog model becomes unstable when a horizontal glyph row is
+# materially taller than its 60px model family.  PP-OCR remains authoritative
+# for page geometry; only the transient native input is normalized.
+NATIVE_RECOG_MAX_CORE_HEIGHT = 60
+NATIVE_RECOG_TARGET_CORE_HEIGHT = 56
 ENGCUT_LINE_CONTEXT_PAD_X = 2
 ENGCUT_LINE_CONTEXT_PAD_Y = 2
 OVERLAP_MERGE_LOW_CONFIDENCE = 0.35
@@ -1540,6 +1604,45 @@ OVERLAP_MERGE_VERTICAL_THRESHOLD = 0.55
 OVERLAP_MERGE_MAX_CLUSTER_CHARS = 5
 OVERLAP_MERGE_PAD_X = 3
 OVERLAP_MERGE_PAD_Y = 3
+
+
+def _requires_native_line_height_normalization(
+    route: _LineCutMaskedLineRoute,
+    group_bbox: tuple[int, int, int, int] | None,
+) -> bool:
+    if group_bbox is None:
+        return False
+    return (
+        _box_width(route.bbox) > _box_height(route.bbox)
+        and _box_height(group_bbox) > NATIVE_RECOG_MAX_CORE_HEIGHT
+    )
+
+
+def _prepare_recog_crop(
+    crop: np.ndarray,
+    placement: _GroupPlacement,
+) -> _PreparedRecogCrop:
+    target = placement.native_core_height_target
+    if target is None:
+        return _PreparedRecogCrop(crop)
+    core_height = _box_height(placement.group_bbox)
+    if core_height <= 0:
+        raise RuntimeError(f"invalid native recognition core bbox: {placement.group_bbox}")
+    scale = float(target) / float(core_height)
+    if scale >= 1.0:
+        return _PreparedRecogCrop(crop)
+
+    import cv2
+
+    crop_height, crop_width = crop.shape[:2]
+    resized_width = max(1, int(round(crop_width * scale)))
+    resized_height = max(1, int(round(crop_height * scale)))
+    resized = cv2.resize(crop, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    return _PreparedRecogCrop(
+        resized,
+        scale_x=float(resized_width) / float(crop_width),
+        scale_y=float(resized_height) / float(crop_height),
+    )
 
 
 def _engcut_route_line_text_and_chars(
@@ -2249,8 +2352,6 @@ def run_micro_recblock(
             for group in area.get("groups", []) or []:
                 group["_area_idx"] = area_idx
                 groups.append(group)
-        stats.n_groups = len(groups)
-
         started = time.time()
         grouped_lines: dict[tuple[int, int, int], list[LineResult]] = {
             route.key: []
@@ -2270,6 +2371,14 @@ def run_micro_recblock(
             tuple[int, tuple[int, int, int, int]],
             tuple[int, int, int, int],
         ] = {}
+        group_geometries: list[tuple[
+            dict[str, Any],
+            tuple[int, int, int, int],
+            _LineCutMaskedLineRoute,
+            tuple[int, int, int, int],
+            tuple[int, int, int, int] | None,
+            tuple[int, int, int, int] | None,
+        ]] = []
         for group in groups:
             recblock = recblocks[group["_area_idx"]]
             route = linecut_masked_line_routes[group["_area_idx"]]
@@ -2290,6 +2399,14 @@ def run_micro_recblock(
                 if bbox is not None
                 else None
             )
+            group_geometries.append((group, recblock, route, raw_group_bbox, bbox, recog_bbox))
+
+        normalized_area_indices = {
+            group["_area_idx"]
+            for group, _recblock, route, _raw_group_bbox, bbox, _recog_bbox in group_geometries
+            if _requires_native_line_height_normalization(route, bbox)
+        }
+        for group, recblock, route, raw_group_bbox, bbox, recog_bbox in group_geometries:
             for segment in route.linecut_segments:
                 segimg_group_audits_by_route.setdefault(segment.key, []).append({
                     "route_text_slice_bbox": list(recblock),
@@ -2299,7 +2416,14 @@ def run_micro_recblock(
                     "recog_group_bbox_padded": recog_bbox is not None and recog_bbox != bbox,
                     "clipped": bbox is not None and bbox != raw_group_bbox,
                     "dropped": bbox is None,
+                    **(
+                        {"native_recog_superseded_by": "normalized_physical_line"}
+                        if group["_area_idx"] in normalized_area_indices
+                        else {}
+                    ),
                 })
+            if group["_area_idx"] in normalized_area_indices:
+                continue
             if recog_bbox is None:
                 continue
             if recog_bbox[2] <= recog_bbox[0] or recog_bbox[3] <= recog_bbox[1]:
@@ -2308,6 +2432,35 @@ def run_micro_recblock(
             group_area_indices.append(group["_area_idx"])
             group_core_bboxes[(group["_area_idx"], recog_bbox)] = bbox
             recog_group_bboxes_by_route.setdefault(route.linecut_segments[0].key, []).append(recog_bbox)
+
+        for area_idx in sorted(normalized_area_indices):
+            route = linecut_masked_line_routes[area_idx]
+            recog_bbox = _expand_xyxy(
+                route.bbox,
+                width,
+                height,
+                pad_x=RECOG_GROUP_CROP_PAD_X,
+                pad_y=RECOG_GROUP_CROP_PAD_Y,
+            )
+            group_bboxes.append(recog_bbox)
+            group_area_indices.append(area_idx)
+            group_core_bboxes[(area_idx, recog_bbox)] = route.bbox
+            recog_group_bboxes_by_route.setdefault(route.linecut_segments[0].key, []).append(recog_bbox)
+            target = route.linecut_segments[0]
+            segimg_group_audits_by_route.setdefault(target.key, []).append({
+                "route_text_slice_bbox": list(route.bbox),
+                "segimg_group_bbox": None,
+                "recog_group_bbox": list(recog_bbox),
+                "recog_group_bbox_before_padding": list(route.bbox),
+                "recog_group_bbox_padded": recog_bbox != route.bbox,
+                "clipped": False,
+                "dropped": False,
+                "native_input_mode": "normalized_physical_line",
+                "native_input_core_height": _box_height(route.bbox),
+                "native_input_core_height_target": NATIVE_RECOG_TARGET_CORE_HEIGHT,
+            })
+
+        stats.n_groups = len(group_bboxes)
 
         total_groups = max(1, len(group_bboxes))
         if progress_callback:
@@ -2324,6 +2477,14 @@ def run_micro_recblock(
                 for segment in route.linecut_segments
                 for item in segimg_group_audits_by_route.setdefault(segment.key, [])
             ]
+            if placement.native_core_height_target is not None:
+                for item in audits:
+                    if (
+                        item.get("native_input_mode") == "normalized_physical_line"
+                        and item.get("recog_group_bbox") == list(placement.page_bbox)
+                    ):
+                        item.update(values)
+                        return
             for item in audits:
                 if item.get("recog_group_bbox") == list(placement.page_bbox):
                     item.update(values)
@@ -2395,15 +2556,24 @@ def run_micro_recblock(
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
                 crop = linecut_input_image[top:bottom, left:right].copy()
-                crop_h, crop_w = crop.shape[:2]
+                prepared = _prepare_recog_crop(crop, placement)
+                crop_h, crop_w = prepared.image.shape[:2]
                 offset_left = left
                 offset_top = top
-                active_crop = crop
+                active_crop = prepared.image
+                active_prepared = prepared
                 used_route_context_retry = False
+                if prepared.normalized:
+                    update_recog_group_audit(placement, {
+                        "native_input_original_shape": list(crop.shape[:2]),
+                        "native_input_shape": list(prepared.image.shape[:2]),
+                        "native_input_scale_x": prepared.scale_x,
+                        "native_input_scale_y": prepared.scale_y,
+                    })
                 try:
                     stats.recog_probe_calls += 1
                     raw = native_bridge.run_linecut_recog(
-                        crop,
+                        prepared.image,
                         recblock_xyxy=None,
                         with_charrcg=True,
                         timeout=recog_timeout,
@@ -2452,6 +2622,7 @@ def run_micro_recblock(
                             )
                             offset_left, offset_top = retry_left, retry_top
                             active_crop = retry_crop
+                            active_prepared = _PreparedRecogCrop(retry_crop)
                             used_route_context_retry = True
                             crop_h, crop_w = retry_crop.shape[:2]
                     else:
@@ -2470,6 +2641,13 @@ def run_micro_recblock(
                         stats,
                         timeout=recog_timeout,
                     )
+                local_lines = _rescale_line_results(
+                    local_lines,
+                    scale_x=active_prepared.scale_x,
+                    scale_y=active_prepared.scale_y,
+                    target_width=(right - left if not used_route_context_retry else active_crop.shape[1]),
+                    target_height=(bottom - top if not used_route_context_retry else active_crop.shape[0]),
+                )
                 route = linecut_masked_line_routes[placement.area_idx]
                 offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
                 if used_route_context_retry:
@@ -2486,19 +2664,30 @@ def run_micro_recblock(
 
         def recognize_batch_list(placements: list[_GroupPlacement]) -> None:
             crops: list[np.ndarray] = []
+            prepared_crops: list[_PreparedRecogCrop] = []
             for placement in placements:
                 left, top, right, bottom = placement.page_bbox
-                crops.append(linecut_input_image[top:bottom, left:right].copy())
+                crop = linecut_input_image[top:bottom, left:right].copy()
+                prepared = _prepare_recog_crop(crop, placement)
+                crops.append(crop)
+                prepared_crops.append(prepared)
+                if prepared.normalized:
+                    update_recog_group_audit(placement, {
+                        "native_input_original_shape": list(crop.shape[:2]),
+                        "native_input_shape": list(prepared.image.shape[:2]),
+                        "native_input_scale_x": prepared.scale_x,
+                        "native_input_scale_y": prepared.scale_y,
+                    })
             stats.recog_probe_calls += 1
             raws = native_bridge.run_linecut_recog_batch_list(
-                crops,
+                [prepared.image for prepared in prepared_crops],
                 with_charrcg=True,
                 timeout=recog_timeout,
             )
             if len(raws) != len(placements):
                 raise RuntimeError(f"batch-list result count mismatch: {len(raws)}/{len(placements)}")
-            for placement, crop, raw in zip(placements, crops, raws):
-                crop_h, crop_w = crop.shape[:2]
+            for placement, crop, prepared, raw in zip(placements, crops, prepared_crops, raws):
+                crop_h, crop_w = prepared.image.shape[:2]
                 local_lines = _line_results_from_recog(
                     raw,
                     fallback_bbox=(0, 0, crop_w, crop_h),
@@ -2506,11 +2695,18 @@ def run_micro_recblock(
                 )
                 if include_chars:
                     _refine_overlap_fragments_with_recrop(
-                        crop,
+                        prepared.image,
                         local_lines,
                         stats,
                         timeout=recog_timeout,
                     )
+                local_lines = _rescale_line_results(
+                    local_lines,
+                    scale_x=prepared.scale_x,
+                    scale_y=prepared.scale_y,
+                    target_width=crop.shape[1],
+                    target_height=crop.shape[0],
+                )
                 route = linecut_masked_line_routes[placement.area_idx]
                 offset_lines = _offset_line_results(
                     local_lines,
@@ -2541,6 +2737,11 @@ def run_micro_recblock(
                         area_idx=area_idx,
                         page_bbox=page_bbox,
                         group_bbox=group_core_bboxes[(area_idx, page_bbox)],
+                        native_core_height_target=(
+                            NATIVE_RECOG_TARGET_CORE_HEIGHT
+                            if area_idx in normalized_area_indices
+                            else None
+                        ),
                     )
                 )
             if not placements:

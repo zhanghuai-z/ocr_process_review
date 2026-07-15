@@ -89,7 +89,7 @@ def _sort_key(char: str) -> Tuple[int, str, str]:
     if kind == _KIND_FORMULA:
         return kind, char.strip().lower(), char
     if kind == _KIND_LETTER:
-        if _HAS_PYPINYIN and ord(char) > 0x2E80:
+        if len(char) == 1 and _HAS_PYPINYIN and ord(char) > 0x2E80:
             py = lazy_pinyin(char, style=Style.NORMAL)
             label = py[0] if py else char.lower()
         else:
