@@ -1,8 +1,8 @@
-"""Foreground geometry observations used by PP-OCR routing stages.
+"""Foreground geometry observations shared by OCR routing stages.
 
 Foreground components are evidence about pixels in the page image.  They are
 never layout blocks, OCR text, or routing decisions.  Keeping extraction in a
-single stage prevents line normalization and mixed-text partitioning from
+    single stage prevents line normalization and character reconciliation from
 quietly developing different pixel ownership rules.
 """
 from __future__ import annotations

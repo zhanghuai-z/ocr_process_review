@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.core.ppocr_foreground import analyze_foreground_components
+from app.geometry.foreground import analyze_foreground_components
 from app.core.ppocr_line_geometry import (
     PhysicalLineNormalization,
     PhysicalTextRow,

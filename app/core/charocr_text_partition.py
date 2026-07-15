@@ -12,7 +12,7 @@ from math import ceil
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
-from app.core.ppocr_foreground import ForegroundComponent, analyze_foreground_components
+from app.geometry.foreground import ForegroundComponent, analyze_foreground_components
 from app.models.charocr_routing import PpOcrLatinTokenObservation, RoutingSegment
 from app.core.ocr_ir import is_cjk_char
 

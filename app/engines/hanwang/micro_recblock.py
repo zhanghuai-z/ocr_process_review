@@ -14,6 +14,7 @@ import numpy as np
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
+from app.geometry.char_reconciler import reconcile_char_geometry
 from app.models.block_state import (
     clear_ocr_text_invalidation,
     is_ocr_text_invalidated,
@@ -31,6 +32,7 @@ from app.models.charocr_routing import (
     RoutingLine,
     is_text_route_segment_kind,
 )
+from app.models.char_geometry import NativeGeometryProposal
 from app.core.logging import get_logger
 from .engcut_payload import (
     EngcutChar,
@@ -105,9 +107,6 @@ from . import native_bridge
 
 logger = get_logger(__name__)
 
-
-def _replace_line_result_char_span(line: "LineResult", start: int, end: int, chars: list["CharResult"]) -> None:
-    line.chars[start:end] = chars
 
 ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
@@ -249,10 +248,8 @@ class RunStats:
     recog_max_batch_crop_height: int = 0
     recog_max_batch_crop_pixels: int = 0
     engcut_route_calls: int = 0
-    overlap_merge_probe_calls: int = 0
-    overlap_merge_probe_failures: int = 0
-    overlap_merge_clusters: int = 0
-    overlap_merge_replacements: int = 0
+    geometry_conflict_groups: int = 0
+    geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
     latin_token_geometry_fallbacks: int = 0
 
@@ -966,6 +963,26 @@ def _bbox_tuple(raw: object, fallback: tuple[int, int, int, int]) -> tuple[int, 
     return left, top, right, bottom
 
 
+def _optional_bbox_tuple(raw: object) -> tuple[int, int, int, int] | None:
+    """Parse native character geometry without inventing a line-sized box."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        left = int(raw.get("left", raw.get("x")))
+        top = int(raw.get("top", raw.get("y")))
+        if "right" in raw and "bottom" in raw:
+            right = int(raw["right"])
+            bottom = int(raw["bottom"])
+        else:
+            right = left + int(raw["width"])
+            bottom = top + int(raw["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
 def _clamp_xyxy(
     bbox: tuple[int, int, int, int],
     width: int,
@@ -1091,7 +1108,7 @@ def _raw_block_with_bbox_audit(
     return value
 
 
-def _char_result(raw: dict, fallback_bbox: tuple[int, int, int, int]) -> CharResult:
+def _char_result(raw: dict) -> CharResult:
     codes = raw.get("codes") or []
     scores = raw.get("scores") or []
     candidates: list[str] = []
@@ -1107,7 +1124,7 @@ def _char_result(raw: dict, fallback_bbox: tuple[int, int, int, int]) -> CharRes
     return CharResult(
         text=text,
         confidence=confidence,
-        bbox=_bbox_tuple(raw.get("bbox"), fallback_bbox),
+        bbox=_optional_bbox_tuple(raw.get("bbox")),
         candidates=candidates,
     )
 
@@ -1150,7 +1167,7 @@ def _line_results_from_recog(
             raw_chars = group.get("chars") or []
             chars = [
                 char
-                for char in (_char_result(char, line_bbox) for char in raw_chars)
+                for char in (_char_result(char) for char in raw_chars)
                 if char.text
             ]
             text = "".join(char.text for char in chars).strip()
@@ -1160,6 +1177,11 @@ def _line_results_from_recog(
                 sum(char.confidence for char in chars) / len(chars)
                 if chars else 0.0
             )
+            review_flags = (
+                ["hanwang_missing_char_geometry"]
+                if any(char.bbox is None for char in chars)
+                else []
+            )
             lines.append(
                 LineResult(
                     text=text,
@@ -1167,6 +1189,7 @@ def _line_results_from_recog(
                     confidence=confidence,
                     chars=chars if include_chars else [],
                     bbox_source="hanwang_recog_group",
+                    review_flags=review_flags,
                 )
             )
     if not lines and fallback_empty:
@@ -1320,121 +1343,6 @@ def _filter_line_results_to_route_bbox(
     return filtered
 
 
-def _bbox_area(box: tuple[int, int, int, int] | None) -> int:
-    if box is None:
-        return 0
-    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
-
-
-def _axis_overlap_fraction(a1: int, a2: int, b1: int, b2: int) -> float:
-    overlap = max(0, min(a2, b2) - max(a1, b1))
-    smaller = min(max(0, a2 - a1), max(0, b2 - b1))
-    if smaller <= 0:
-        return 0.0
-    return overlap / smaller
-
-
-def _union_bbox(boxes: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
-    return (
-        min(box[0] for box in boxes),
-        min(box[1] for box in boxes),
-        max(box[2] for box in boxes),
-        max(box[3] for box in boxes),
-    )
-
-
-def _overlap_merge_pair(left: CharResult, right: CharResult) -> bool:
-    if left.bbox is None or right.bbox is None:
-        return False
-    if max(left.confidence, right.confidence) > OVERLAP_MERGE_LOW_CONFIDENCE:
-        return False
-    left_area = _bbox_area(left.bbox)
-    right_area = _bbox_area(right.bbox)
-    if left_area <= 0 or right_area <= 0:
-        return False
-    ioa = _intersection_area(left.bbox, right.bbox) / max(1, min(left_area, right_area))
-    vertical = _axis_overlap_fraction(left.bbox[1], left.bbox[3], right.bbox[1], right.bbox[3])
-    if ioa < OVERLAP_MERGE_IOA_THRESHOLD or vertical < OVERLAP_MERGE_VERTICAL_THRESHOLD:
-        return False
-    left_cx, _ = _bbox_center(left.bbox)
-    right_cx, _ = _bbox_center(right.bbox)
-    max_height = max(left.bbox[3] - left.bbox[1], right.bbox[3] - right.bbox[1])
-    return abs(right_cx - left_cx) <= max(8.0, max_height * 0.85)
-
-
-def _looks_percent_fragment(text: str) -> bool:
-    compact = "".join(ch for ch in text if not ch.isspace())
-    if len(compact) < 2 or len(compact) > 5:
-        return False
-    if "%" in compact or "％" in compact:
-        return False
-    zero_like = set("0Oo°")
-    slash_like = set("/\\")
-    percent_curve_like = set("Pp")
-    has_zero = any(ch in zero_like for ch in compact)
-    has_slash = any(ch in slash_like for ch in compact)
-    has_curve = any(ch in percent_curve_like for ch in compact)
-    if has_zero and (has_slash or has_curve):
-        return True
-    if has_slash and (has_zero or has_curve):
-        return True
-    return False
-
-
-def _overlap_merge_cluster_actionable(chars: list[CharResult]) -> bool:
-    if len(chars) < 2 or len(chars) > OVERLAP_MERGE_MAX_CLUSTER_CHARS:
-        return False
-    boxes = [char.bbox for char in chars if char.bbox is not None]
-    if len(boxes) != len(chars):
-        return False
-    text = "".join(char.text for char in chars)
-    if _looks_percent_fragment(text):
-        return True
-    union = _union_bbox(boxes)
-    height = max(1, union[3] - union[1])
-    width = max(1, union[2] - union[0])
-    low_conf = sum(1 for char in chars if char.confidence <= OVERLAP_MERGE_LOW_CONFIDENCE)
-    return low_conf == len(chars) and width <= height * 1.35
-
-
-def _find_overlap_merge_clusters(line: LineResult) -> list[tuple[int, int]]:
-    clusters: list[tuple[int, int]] = []
-    chars = line.chars
-    idx = 0
-    while idx < len(chars) - 1:
-        if not _overlap_merge_pair(chars[idx], chars[idx + 1]):
-            idx += 1
-            continue
-        start = idx
-        end = idx + 2
-        while (
-            end < len(chars)
-            and end - start < OVERLAP_MERGE_MAX_CLUSTER_CHARS
-            and _overlap_merge_pair(chars[end - 1], chars[end])
-        ):
-            end += 1
-        if _overlap_merge_cluster_actionable(chars[start:end]):
-            clusters.append((start, end))
-        idx = end
-    return clusters
-
-
-def _offset_char_result(char: CharResult, *, dx: int, dy: int, source: str) -> CharResult:
-    bbox = None
-    if char.bbox is not None:
-        x1, y1, x2, y2 = char.bbox
-        bbox = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
-    return CharResult(
-        text=char.text,
-        confidence=char.confidence,
-        bbox=bbox,
-        candidates=list(char.candidates),
-        source=source,
-        bbox_granularity=char.bbox_granularity or ("char" if bbox is not None else "fallback"),
-        token_text=char.token_text or char.text,
-    )
-
-
 def _line_chars_text(chars: list[CharResult]) -> str:
     return "".join(char.text for char in chars)
 
@@ -1489,104 +1397,62 @@ def _adjacent_visible_text(chars: list[CharResult], index: int, *, step: int) ->
     return ""
 
 
-def _replacement_chars_from_recrop(
-    crop_bgr: np.ndarray,
-    cluster_bbox: tuple[int, int, int, int],
-    *,
-    stats: RunStats,
-    timeout: float,
-) -> list[CharResult]:
-    x1, y1, x2, y2 = cluster_bbox
-    retry_crop = crop_bgr[y1:y2, x1:x2].copy()
-    if retry_crop.size == 0:
-        return []
-    try:
-        stats.overlap_merge_probe_calls += 1
-        raw = native_bridge.run_linecut_recog(
-            retry_crop,
-            recblock_xyxy=None,
-            with_charrcg=True,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        stats.overlap_merge_probe_failures += 1
-        logger.debug("Hanwang overlap-merge recrop failed bbox=%s: %s", cluster_bbox, exc)
-        return []
-    local_lines = _line_results_from_recog(
-        raw,
-        fallback_bbox=(0, 0, max(0, x2 - x1), max(0, y2 - y1)),
-        include_chars=True,
-        fallback_empty=False,
-    )
-    replacement: list[CharResult] = []
-    for local_line in local_lines:
-        for char in local_line.chars:
-            if char.text:
-                replacement.append(_offset_char_result(char, dx=x1, dy=y1, source="hanwang:overlap_merge_recrop"))
-    return replacement
-
-
-def _cluster_replacement_accepted(
-    old_chars: list[CharResult],
-    replacement: list[CharResult],
-) -> bool:
-    if not replacement:
-        return False
-    old_text = _line_chars_text(old_chars)
-    new_text = _line_chars_text(replacement)
-    if not new_text or new_text == old_text:
-        return False
-    if new_text in {"%", "％"}:
-        return _looks_percent_fragment(old_text)
-    old_conf = sum(char.confidence for char in old_chars) / max(1, len(old_chars))
-    new_conf = sum(char.confidence for char in replacement) / max(1, len(replacement))
-    return len(replacement) < len(old_chars) and new_conf >= old_conf
-
-
-def _refine_overlap_fragments_with_recrop(
+def _reconcile_native_char_geometry(
     crop_bgr: np.ndarray,
     lines: list[LineResult],
     stats: RunStats,
-    *,
-    timeout: float,
 ) -> None:
     if crop_bgr.size == 0:
         return
-    crop_h, crop_w = crop_bgr.shape[:2]
     for line in lines:
         if not line.chars:
             continue
-        clusters = _find_overlap_merge_clusters(line)
-        if not clusters:
+        proposals = tuple(
+            NativeGeometryProposal(index, char.bbox, char.confidence)
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+        )
+        if len(proposals) < 2:
             continue
-        for start, end in reversed(clusters):
-            old_chars = line.chars[start:end]
-            boxes = [char.bbox for char in old_chars if char.bbox is not None]
-            if len(boxes) != len(old_chars):
+        result = reconcile_char_geometry(
+            crop_bgr,
+            proposals,
+            region_bbox=line.bbox,
+        )
+        atoms_by_start = {min(atom.proposal_indices): atom for atom in result.atoms}
+        rebuilt: list[CharResult] = []
+        consumed: set[int] = set()
+        for index, char in enumerate(line.chars):
+            if index in consumed:
                 continue
-            union = _union_bbox(boxes)
-            cluster_bbox = _expand_xyxy(
-                union,
-                crop_w,
-                crop_h,
-                pad_x=OVERLAP_MERGE_PAD_X,
-                pad_y=OVERLAP_MERGE_PAD_Y,
-            )
-            stats.overlap_merge_clusters += 1
-            replacement = _replacement_chars_from_recrop(
-                crop_bgr,
-                cluster_bbox,
-                stats=stats,
-                timeout=timeout,
-            )
-            if _cluster_replacement_accepted(old_chars, replacement):
-                _replace_line_result_char_span(line, start, end, replacement)
-                stats.overlap_merge_replacements += 1
-            else:
+            atom = atoms_by_start.get(index)
+            if atom is None:
+                rebuilt.append(char)
                 continue
-            line.text = "".join(char.text for char in line.chars).strip()
-            if line.chars:
-                line.confidence = sum(char.confidence for char in line.chars) / len(line.chars)
+            members = [line.chars[item] for item in atom.proposal_indices]
+            consumed.update(atom.proposal_indices)
+            if len(members) == 1:
+                rebuilt.append(char)
+                continue
+            text = _line_chars_text(members)
+            rebuilt.append(CharResult(
+                text=text,
+                confidence=sum(member.confidence for member in members) / len(members),
+                bbox=atom.bbox,
+                candidates=[text] if text else [],
+                source="hanwang:geometry_reconciled",
+                bbox_granularity="word",
+                token_text=text,
+            ))
+            stats.geometry_conflict_groups += 1
+            stats.geometry_token_atoms += 1
+        if len(rebuilt) == len(line.chars):
+            continue
+        line.chars[:] = rebuilt
+        line.text = _line_chars_text(rebuilt).strip()
+        line.confidence = sum(char.confidence for char in rebuilt) / len(rebuilt)
+        if "hanwang_geometry_reconciled" not in line.review_flags:
+            line.review_flags.append("hanwang_geometry_reconciled")
 
 
 RECOG_GROUP_CROP_PAD_X = 8
@@ -1598,12 +1464,6 @@ NATIVE_RECOG_MAX_CORE_HEIGHT = 60
 NATIVE_RECOG_TARGET_CORE_HEIGHT = 56
 ENGCUT_LINE_CONTEXT_PAD_X = 2
 ENGCUT_LINE_CONTEXT_PAD_Y = 2
-OVERLAP_MERGE_LOW_CONFIDENCE = 0.35
-OVERLAP_MERGE_IOA_THRESHOLD = 0.45
-OVERLAP_MERGE_VERTICAL_THRESHOLD = 0.55
-OVERLAP_MERGE_MAX_CLUSTER_CHARS = 5
-OVERLAP_MERGE_PAD_X = 3
-OVERLAP_MERGE_PAD_Y = 3
 
 
 def _requires_native_line_height_normalization(
@@ -2635,11 +2495,10 @@ def run_micro_recblock(
                     include_chars=include_chars,
                 )
                 if include_chars:
-                    _refine_overlap_fragments_with_recrop(
+                    _reconcile_native_char_geometry(
                         active_crop,
                         local_lines,
                         stats,
-                        timeout=recog_timeout,
                     )
                 local_lines = _rescale_line_results(
                     local_lines,
@@ -2694,11 +2553,10 @@ def run_micro_recblock(
                     include_chars=include_chars,
                 )
                 if include_chars:
-                    _refine_overlap_fragments_with_recrop(
+                    _reconcile_native_char_geometry(
                         prepared.image,
                         local_lines,
                         stats,
-                        timeout=recog_timeout,
                     )
                 local_lines = _rescale_line_results(
                     local_lines,
@@ -3664,8 +3522,7 @@ class HanwangMicroRecBlockEngine:
             "seg=%.2fs recog=%.2fs "
             "max_batch_crop=%dx%d probe_calls=%d recog_pixels=%d/%d "
             "engcut_route_calls=%d "
-            "overlap_merge_clusters=%d overlap_merge_calls=%d overlap_merge_failures=%d "
-            "overlap_merge_replacements=%d",
+            "geometry_conflicts=%d geometry_token_atoms=%d",
             page.page_number,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
@@ -3686,10 +3543,8 @@ class HanwangMicroRecBlockEngine:
             stats.recog_crop_pixels,
             stats.recog_full_page_pixels,
             stats.engcut_route_calls,
-            stats.overlap_merge_clusters,
-            stats.overlap_merge_probe_calls,
-            stats.overlap_merge_probe_failures,
-            stats.overlap_merge_replacements,
+            stats.geometry_conflict_groups,
+            stats.geometry_token_atoms,
         )
         return stats
 

@@ -8,7 +8,7 @@ from typing import Mapping
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
-from app.core.ppocr_foreground import analyze_foreground_components
+from app.geometry.foreground import analyze_foreground_components
 
 
 XYXY = tuple[int, int, int, int]

@@ -52,121 +52,49 @@ def _eng20_grouped_payload_at(groups: list[tuple[int, str]]) -> dict:
     return {"lines": [{"groups": payload_groups}]}
 
 
-def _linecut_payload(text: str) -> dict:
-    chars = []
-    for idx, char in enumerate(text):
-        chars.append({
-            "codes": [ord(char)],
-            "scores": [20],
-            "bbox": {
-                "left": idx * 8 + 2,
-                "top": 3,
-                "right": idx * 8 + 12,
-                "bottom": 27,
-            },
-        })
-    return {"lines": [{"groups": [{"bbox": {"left": 0, "top": 0, "right": 50, "bottom": 30}, "chars": chars}]}]}
+def test_geometry_reconciler_replaces_conflicting_native_boxes_with_token_atom():
+    image = np.full((60, 120, 3), 255, dtype=np.uint8)
+    image[10:50, 20:60] = 0
+    line = micro_module.LineResult(
+        text="JJ甲",
+        bbox=(0, 0, 120, 60),
+        chars=[
+            micro_module.CharResult("J", confidence=0.19, bbox=(20, 12, 50, 48)),
+            micro_module.CharResult("J", confidence=0.19, bbox=(42, 10, 61, 50)),
+            micro_module.CharResult("甲", confidence=0.95, bbox=(75, 10, 110, 52)),
+        ],
+    )
+    stats = micro_module.RunStats()
+
+    micro_module._reconcile_native_char_geometry(image, [line], stats)
+
+    assert line.text == "JJ甲"
+    assert [char.text for char in line.chars] == ["JJ", "甲"]
+    assert line.chars[0].bbox == (20, 10, 60, 50)
+    assert line.chars[0].source == "hanwang:geometry_reconciled"
+    assert line.chars[0].bbox_granularity == "word"
+    assert stats.geometry_conflict_groups == 1
+    assert stats.geometry_token_atoms == 1
 
 
-def _percent_fragment_line() -> micro_module.LineResult:
-    chars = [
-        micro_module.CharResult("约", confidence=0.90, bbox=(0, 0, 18, 30)),
-        micro_module.CharResult("2", confidence=0.80, bbox=(22, 0, 34, 28)),
-        micro_module.CharResult("0", confidence=0.80, bbox=(36, 0, 48, 28)),
-        micro_module.CharResult("0", confidence=0.19, bbox=(50, 0, 72, 30), candidates=["0", "叼"]),
-        micro_module.CharResult("/", confidence=0.19, bbox=(56, 0, 80, 31), candidates=["/", "驼"]),
-        micro_module.CharResult("0", confidence=0.19, bbox=(66, 3, 86, 30), candidates=["0", "勿"]),
-    ]
-    return micro_module.LineResult(
-        text="约200/0",
-        bbox=(0, 0, 100, 40),
-        confidence=0.5,
-        chars=chars,
+def test_native_character_without_bbox_is_not_given_the_line_bbox():
+    raw = {
+        "lines": [{
+            "groups": [{
+                "bbox": {"left": 0, "top": 0, "right": 80, "bottom": 30},
+                "chars": [{"codes": [ord("A")], "scores": [20]}],
+            }],
+        }],
+    }
+
+    lines = micro_module._line_results_from_recog(
+        raw,
+        fallback_bbox=(0, 0, 80, 30),
+        include_chars=True,
     )
 
-
-def _overlapped_digit_line(text: str = "01") -> micro_module.LineResult:
-    chars = [
-        micro_module.CharResult(text[0], confidence=0.19, bbox=(0, 0, 20, 30), candidates=[text[0]]),
-        micro_module.CharResult(text[1], confidence=0.19, bbox=(8, 0, 28, 30), candidates=[text[1]]),
-    ]
-    return micro_module.LineResult(
-        text=text,
-        bbox=(0, 0, 40, 36),
-        confidence=0.19,
-        chars=chars,
-    )
-
-
-def test_overlap_merge_recrop_replaces_percent_fragment():
-    line = _percent_fragment_line()
-    stats = micro_module.RunStats()
-
-    original_recog = micro_module.native_bridge.run_linecut_recog
-    micro_module.native_bridge.run_linecut_recog = lambda image_bgr, **_kwargs: _linecut_payload("%")
-    try:
-        micro_module._refine_overlap_fragments_with_recrop(
-            np.zeros((60, 120, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-        )
-    finally:
-        micro_module.native_bridge.run_linecut_recog = original_recog
-
-    assert line.text == "约20%"
-    assert [char.text for char in line.chars] == ["约", "2", "0", "%"]
-    assert line.chars[-1].source == "hanwang:overlap_merge_recrop"
-    assert line.chars[-1].bbox_granularity == "char"
-    assert stats.overlap_merge_clusters == 1
-    assert stats.overlap_merge_probe_calls == 1
-    assert stats.overlap_merge_replacements == 1
-
-
-def test_overlap_merge_does_not_force_percent_when_recrop_keeps_fragment():
-    line = _percent_fragment_line()
-    stats = micro_module.RunStats()
-
-    original_recog = micro_module.native_bridge.run_linecut_recog
-    micro_module.native_bridge.run_linecut_recog = lambda image_bgr, **_kwargs: _linecut_payload("0/0")
-    try:
-        micro_module._refine_overlap_fragments_with_recrop(
-            np.zeros((60, 120, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-        )
-    finally:
-        micro_module.native_bridge.run_linecut_recog = original_recog
-
-    assert line.text == "约200/0"
-    assert [char.text for char in line.chars] == ["约", "2", "0", "0", "/", "0"]
-    assert stats.overlap_merge_clusters == 1
-    assert stats.overlap_merge_probe_calls == 1
-    assert stats.overlap_merge_replacements == 0
-
-
-def test_overlap_merge_does_not_rewrite_low_conf_digit_string_as_percent():
-    line = _overlapped_digit_line("01")
-    stats = micro_module.RunStats()
-
-    original_recog = micro_module.native_bridge.run_linecut_recog
-    micro_module.native_bridge.run_linecut_recog = lambda image_bgr, **_kwargs: _linecut_payload("%")
-    try:
-        micro_module._refine_overlap_fragments_with_recrop(
-            np.zeros((60, 120, 3), dtype=np.uint8),
-            [line],
-            stats,
-            timeout=1.0,
-        )
-    finally:
-        micro_module.native_bridge.run_linecut_recog = original_recog
-
-    assert line.text == "01"
-    assert [char.text for char in line.chars] == ["0", "1"]
-    assert stats.overlap_merge_clusters == 1
-    assert stats.overlap_merge_probe_calls == 1
-    assert stats.overlap_merge_replacements == 0
+    assert lines[0].chars[0].bbox is None
+    assert lines[0].review_flags == ["hanwang_missing_char_geometry"]
 
 
 def test_text_latin_route_uses_engcut_without_linecut():
