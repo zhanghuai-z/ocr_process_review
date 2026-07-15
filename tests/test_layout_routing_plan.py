@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from app.models.charocr_routing import (
+    BlockRoutingPlan,
+    PageRoutingPlan,
     PpOcrLatinTokenObservation,
+    RoutingPlan,
     TextSliceRoute,
     routing_segment_from_record,
 )
@@ -52,6 +55,28 @@ def test_routing_plan_exposes_lines_segments_and_text_slices():
     ]
     assert any(route.carved for route in plan.text_slices)
     assert all(len(route.bbox) == 4 for route in plan.text_slices)
+
+
+def test_page_routing_plan_freezes_nested_route_collections():
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 0, 20, 20),
+        segments=[RoutingSegment(kind="text_other", bbox=(0, 0, 20, 20))],
+    )
+    plan = PageRoutingPlan(
+        page_uid="page-1",
+        prepass_run_id="run-1",
+        blocks=[
+            BlockRoutingPlan(
+                block_uid="text-1",
+                plan=RoutingPlan(lines=[line], text_slices=[], has_layout_routes=True),
+            ),
+        ],
+    )
+
+    assert isinstance(plan.blocks, tuple)
+    assert isinstance(plan.blocks[0].plan.lines, tuple)
+    assert isinstance(plan.blocks[0].plan.lines[0].segments, tuple)
 
 
 def test_routing_plan_preserves_ppocr_runtime_route_source():

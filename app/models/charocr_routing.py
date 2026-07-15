@@ -72,6 +72,11 @@ class RoutingLine:
     segments: tuple[RoutingSegment, ...]
     source: str = ""
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "segments", tuple(self.segments))
+        if any(not isinstance(segment, RoutingSegment) for segment in self.segments):
+            raise TypeError("routing line segments require typed values")
+
     @property
     def has_formula(self) -> bool:
         return any(segment.kind == ROUTE_SEGMENT_FORMULA for segment in self.segments)
@@ -109,6 +114,14 @@ class RoutingPlan:
     text_slices: tuple[TextSliceRoute, ...]
     has_layout_routes: bool
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "lines", tuple(self.lines))
+        object.__setattr__(self, "text_slices", tuple(self.text_slices))
+        if any(not isinstance(line, RoutingLine) for line in self.lines):
+            raise TypeError("routing plan lines require typed values")
+        if any(not isinstance(route, TextSliceRoute) for route in self.text_slices):
+            raise TypeError("routing plan text slices require typed values")
+
 
 @dataclass(frozen=True)
 class BlockRoutingPlan:
@@ -120,6 +133,8 @@ class BlockRoutingPlan:
     def __post_init__(self) -> None:
         if not self.block_uid:
             raise ValueError("block routing plan requires block_uid")
+        if not isinstance(self.plan, RoutingPlan):
+            raise TypeError("block routing plan requires a typed routing plan")
 
 
 @dataclass(frozen=True)
@@ -148,6 +163,12 @@ class PageRoutingPlan:
     def __post_init__(self) -> None:
         if not self.page_uid:
             raise ValueError("page routing plan requires page_uid")
+        object.__setattr__(self, "blocks", tuple(self.blocks))
+        object.__setattr__(self, "validation_issues", tuple(self.validation_issues))
+        if any(not isinstance(block, BlockRoutingPlan) for block in self.blocks):
+            raise TypeError("page routing plan blocks require typed values")
+        if any(not isinstance(issue, RouteValidationIssue) for issue in self.validation_issues):
+            raise TypeError("page routing plan validation issues require typed values")
         block_uids = [block.block_uid for block in self.blocks]
         if len(set(block_uids)) != len(block_uids):
             raise ValueError("page routing plan contains duplicate block routes")
