@@ -15,22 +15,41 @@ from app.core.paddle_v16_client import PaddleV16LayoutClient
 PPOCR_V6_MODEL = "PP-OCRv6"
 
 
-def build_ppocr_v6_prepass_options() -> dict[str, object]:
-    """Return the PP-OCRv6 feature contract for CharOCR routing.
+@dataclass(frozen=True)
+class PpOcrV6RoutingRequestProfile:
+    """Explicit vendor request contract for the routing prepass."""
+
+    model: str
+    options: tuple[tuple[str, object], ...]
+
+    def optional_payload(self) -> dict[str, object]:
+        return dict(self.options)
+
+
+def build_ppocr_v6_routing_request_profile() -> PpOcrV6RoutingRequestProfile:
+    """Return the PP-OCRv6 request profile for CharOCR routing.
 
     Detection geometry stays owned by the deployed PP-OCRv6 model.  The only
     detector override is the box acceptance threshold validated across the
     routing stress corpus; side-length, pixel, and unclip settings remain at
     the model defaults.
     """
-    return {
-        "useDocOrientationClassify": False,
-        "useDocUnwarping": False,
-        "useTextlineOrientation": False,
-        "returnWordBox": True,
-        "textDetBoxThresh": 0.4,
-        "textRecScoreThresh": 0.0,
-    }
+    return PpOcrV6RoutingRequestProfile(
+        model=PPOCR_V6_MODEL,
+        options=(
+            ("useDocOrientationClassify", False),
+            ("useDocUnwarping", False),
+            ("useTextlineOrientation", False),
+            ("returnWordBox", True),
+            ("textDetBoxThresh", 0.4),
+            ("textRecScoreThresh", 0.0),
+        ),
+    )
+
+
+def build_ppocr_v6_prepass_options() -> dict[str, object]:
+    """Compatibility projection of the typed request profile."""
+    return build_ppocr_v6_routing_request_profile().optional_payload()
 
 
 @dataclass(frozen=True)
@@ -68,6 +87,9 @@ class PpOcrV6PrepassArtifact:
     def __post_init__(self) -> None:
         if not self.page_uid:
             raise ValueError("PP-OCRv6 prepass artifact requires page_uid")
+        object.__setattr__(self, "lines", tuple(self.lines))
+        if any(not isinstance(line, PpOcrV6LineHint) for line in self.lines):
+            raise TypeError("PP-OCRv6 prepass artifact lines require typed observations")
 
 
 class PpOcrV6PrepassClient:
@@ -75,6 +97,7 @@ class PpOcrV6PrepassClient:
 
     def __init__(self, transport: PaddleV16LayoutClient) -> None:
         self._transport = transport
+        self._request_profile = build_ppocr_v6_routing_request_profile()
 
     def analyze_page(
         self,
@@ -104,8 +127,8 @@ class PpOcrV6PrepassClient:
     ) -> PpOcrV6PrepassArtifact:
         job_id = self._transport.submit_image_bytes(
             image_bytes,
-            model=PPOCR_V6_MODEL,
-            optional_payload=build_ppocr_v6_prepass_options(),
+            model=self._request_profile.model,
+            optional_payload=self._request_profile.optional_payload(),
             batch_id=batch_id,
             filename=filename,
         )
@@ -148,7 +171,7 @@ def parse_ppocr_v6_prepass_jsonl(
         raise ValueError("PP-OCRv6 result contains no ocrResults")
     if len(result_items) != 1:
         raise ValueError(f"PP-OCRv6 prepass expected one page result, got {len(result_items)}")
-    return parse_ppocr_v6_prepass_result(
+    return normalize_ppocr_v6_prepass_result(
         result_items[0],
         page_uid=page_uid,
         run_id=run_id,
@@ -158,6 +181,24 @@ def parse_ppocr_v6_prepass_jsonl(
 
 
 def parse_ppocr_v6_prepass_result(
+    result: dict[str, Any],
+    *,
+    page_uid: str,
+    run_id: str = "",
+    width: int | None = None,
+    height: int | None = None,
+) -> PpOcrV6PrepassArtifact:
+    """Compatibility entry point for external observation normalization."""
+    return normalize_ppocr_v6_prepass_result(
+        result,
+        page_uid=page_uid,
+        run_id=run_id,
+        width=width,
+        height=height,
+    )
+
+
+def normalize_ppocr_v6_prepass_result(
     result: dict[str, Any],
     *,
     page_uid: str,

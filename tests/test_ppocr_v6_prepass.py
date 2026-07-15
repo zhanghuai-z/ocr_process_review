@@ -7,7 +7,10 @@ import pytest
 from app.adapters.paddle.ppocr_v6_prepass import (
     PPOCR_V6_MODEL,
     PpOcrV6PrepassClient,
+    PpOcrV6RoutingRequestProfile,
+    build_ppocr_v6_routing_request_profile,
     build_ppocr_v6_prepass_options,
+    normalize_ppocr_v6_prepass_result,
     parse_ppocr_v6_prepass_jsonl,
     parse_ppocr_v6_prepass_result,
 )
@@ -37,6 +40,14 @@ def test_ppocr_v6_prepass_options_keep_features_without_geometry_overrides():
     }
 
 
+def test_ppocr_v6_request_profile_owns_model_and_optional_payload():
+    profile = build_ppocr_v6_routing_request_profile()
+
+    assert isinstance(profile, PpOcrV6RoutingRequestProfile)
+    assert profile.model == PPOCR_V6_MODEL
+    assert profile.optional_payload() == build_ppocr_v6_prepass_options()
+
+
 def test_parse_ppocr_v6_prepass_keeps_lines_and_word_boxes_outside_proof_model():
     artifact = parse_ppocr_v6_prepass_result(
         _result(),
@@ -55,6 +66,19 @@ def test_parse_ppocr_v6_prepass_keeps_lines_and_word_boxes_outside_proof_model()
         ("Urban", (10, 20, 100, 60)),
         ("2026", (120, 20, 210, 60)),
     ]
+
+
+def test_external_observation_normalizer_is_the_parse_result_boundary():
+    parsed = normalize_ppocr_v6_prepass_result(
+        _result(),
+        page_uid="page-1",
+        run_id="job-1",
+        width=300,
+        height=100,
+    )
+
+    assert isinstance(parsed.lines, tuple)
+    assert parsed.lines[0].words[0].line_index == parsed.lines[0].index
 
 
 def test_parse_ppocr_v6_prepass_rejects_word_count_mismatch():
