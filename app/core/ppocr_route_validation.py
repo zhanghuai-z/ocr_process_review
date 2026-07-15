@@ -100,15 +100,15 @@ def validate_compiled_page_routing_plan(
     """Validate route geometry after compilation without changing the plan."""
     issues: list[RouteValidationIssue] = []
     for block_route in routing_plan.blocks:
-        for line in block_route.plan.lines:
-            if not _is_nonempty(line.bbox):
+        for routing_line in block_route.plan.lines:
+            if not _is_nonempty(routing_line.bbox):
                 issues.append(RouteValidationIssue(
                     code="compiled_line_empty_bbox",
                     message="compiled routing line has empty geometry",
-                    line_index=line.index,
-                    bbox=line.bbox,
+                    line_index=routing_line.index,
+                    bbox=routing_line.bbox,
                 ))
-            for segment in line.segments:
+            for segment in routing_line.segments:
                 if not _is_nonempty(segment.bbox):
                     issues.append(RouteValidationIssue(
                         code="compiled_segment_empty_bbox",
@@ -116,14 +116,14 @@ def validate_compiled_page_routing_plan(
                             "compiled routing segment has empty geometry: "
                             f"kind={segment.kind!r}"
                         ),
-                        line_index=line.index,
+                        line_index=routing_line.index,
                         bbox=segment.bbox,
                     ))
                 if segment.content_bbox is not None and not _is_nonempty(segment.content_bbox):
                     issues.append(RouteValidationIssue(
                         code="compiled_content_bbox_empty",
                         message="compiled structural route has empty content geometry",
-                        line_index=line.index,
+                        line_index=routing_line.index,
                         bbox=segment.content_bbox,
                     ))
     return tuple(issues)

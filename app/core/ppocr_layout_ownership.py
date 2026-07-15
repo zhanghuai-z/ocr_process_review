@@ -67,11 +67,11 @@ class LayoutOwnership:
     page_width: int
     page_height: int
 
-    def ownership_for(self, line: PpOcrV6LineHint) -> LayoutLineOwnership:
+    def ownership_for(self, hint: PpOcrV6LineHint) -> LayoutLineOwnership:
         """Re-evaluate ownership after physical-row geometry is normalized."""
         bounded_line = _replace_bbox(
-            line,
-            _clamp(line.bbox, self.page_width, self.page_height),
+            hint,
+            _clamp(hint.bbox, self.page_width, self.page_height),
         )
         return _decide_line(
             bounded_line,
@@ -131,11 +131,11 @@ def build_layout_ownership(
     typed_structural_blocks = tuple(structural_blocks)
     decisions = tuple(
         _decide_line(
-            _replace_bbox(line, _clamp(line.bbox, page_width, page_height)),
+            _replace_bbox(hint, _clamp(hint.bbox, page_width, page_height)),
             typed_text_blocks,
             typed_structural_blocks,
         )
-        for line in lines
+        for hint in lines
     )
     return LayoutOwnership(
         text_blocks=typed_text_blocks,
@@ -160,15 +160,15 @@ def structural_masks_for_line(
 
 
 def _decide_line(
-    line: PpOcrV6LineHint,
+    hint: PpOcrV6LineHint,
     text_blocks: tuple[LayoutBlockCandidate, ...],
     structural_blocks: tuple[LayoutBlockCandidate, ...],
 ) -> LayoutLineOwnership:
-    line_bbox = line.bbox
+    line_bbox = hint.bbox
     text_block = _select_text_container(line_bbox, text_blocks)
     structural_block = _select_structural_owner(line_bbox, structural_blocks)
     return LayoutLineOwnership(
-        line=line,
+        line=hint,
         line_bbox=line_bbox,
         text_block=text_block,
         structural_block=structural_block,
@@ -221,14 +221,14 @@ def _overlap_score(line_bbox: XYXY, candidate_bbox: XYXY) -> float:
     return _area(overlap) / max(1, _area(line_bbox)) if overlap is not None else 0.0
 
 
-def _replace_bbox(line: PpOcrV6LineHint, bbox: XYXY) -> PpOcrV6LineHint:
-    if line.bbox == bbox:
-        return line
+def _replace_bbox(hint: PpOcrV6LineHint, bbox: XYXY) -> PpOcrV6LineHint:
+    if hint.bbox == bbox:
+        return hint
     return PpOcrV6LineHint(
-        index=line.index,
-        text=line.text,
+        index=hint.index,
+        text=hint.text,
         bbox=bbox,
-        words=line.words,
+        words=hint.words,
     )
 
 
