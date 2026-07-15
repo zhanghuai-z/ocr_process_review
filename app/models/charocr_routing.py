@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 
@@ -31,6 +32,7 @@ class PpOcrLatinTokenObservation:
     bbox: XYXY
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
         if not self.text or not any(char.isascii() and char.isalnum() for char in self.text):
             raise ValueError("PP-OCR Latin token observation requires Latin/digit text")
         if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
@@ -43,9 +45,10 @@ class RoutingSegment:
 
     Regions are not an ordered one-dimensional partition. A structural mask
     may overlap a text candidate rectangle; native-input materialization gives
-    the structural region explicit masking precedence. ``content_bbox`` is
-    canonical content geometry for a formula or grouped symbol and may extend
-    beyond this physical line's exact intersection in ``bbox``.
+    the structural region explicit masking precedence. Only a formula may set
+    ``content_bbox``. It is page-bounded canonical formula geometry, must
+    contain the segment mask, and may extend beyond this line's exact
+    intersection in ``bbox``.
     """
 
     kind: str
@@ -57,6 +60,9 @@ class RoutingSegment:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", normalize_route_segment_kind(self.kind))
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+        if self.content_bbox is not None:
+            object.__setattr__(self, "content_bbox", xyxy(self.content_bbox))
         latin_tokens = tuple(self.ppocr_latin_tokens or ())
         if latin_tokens and self.kind != ROUTE_SEGMENT_TEXT_LATIN:
             raise ValueError("PP-OCR Latin token observations require a text_latin route")
@@ -73,6 +79,7 @@ class RoutingLine:
     source: str = ""
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
         object.__setattr__(self, "segments", tuple(self.segments))
         if any(not isinstance(segment, RoutingSegment) for segment in self.segments):
             raise TypeError("routing line segments require typed values")
@@ -102,6 +109,7 @@ class TextSliceRoute:
     kind: str = ROUTE_SEGMENT_TEXT_OTHER
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
         normalized = normalize_route_segment_kind(self.kind)
         if not is_text_route_segment_kind(normalized):
             raise ValueError(f"text slice route cannot use non-text kind: {normalized!r}")
@@ -145,6 +153,9 @@ class RouteValidationIssue:
     message: str
     line_index: int
     bbox: XYXY
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
 
 
 @dataclass(frozen=True)
@@ -275,13 +286,12 @@ def text_slice_to_record(route: TextSliceRoute) -> dict[str, Any]:
 
 
 def xyxy(value: object) -> XYXY:
+    """Normalize a serialized bbox without hiding malformed geometry."""
     if not isinstance(value, (list, tuple)) or len(value) != 4:
-        return (0, 0, 0, 0)
-    try:
-        x1, y1, x2, y2 = (int(item) for item in value)
-    except (TypeError, ValueError):
-        return (0, 0, 0, 0)
-    return (x1, y1, x2, y2)
+        raise ValueError(f"bbox must contain exactly four integers: {value!r}")
+    if any(isinstance(item, bool) or not isinstance(item, Integral) for item in value):
+        raise TypeError(f"bbox coordinates must be integers: {value!r}")
+    return tuple(int(item) for item in value)  # type: ignore[return-value]
 
 
 def int_or_default(value: object, default: int) -> int:

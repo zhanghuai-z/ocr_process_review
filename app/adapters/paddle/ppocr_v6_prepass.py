@@ -1,4 +1,4 @@
-"""Typed PP-OCRv6 prepass adapter used only by the CharOCR routing boundary."""
+"""Typed PP-OCRv6 vendor observation boundary for routing and export projections."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,7 @@ import numpy as np
 from app.core.api_image_codec import encode_image_bytes_for_paddle
 from app.core.bbox_extraction import bbox_from_variant
 from app.core.paddle_v16_client import PaddleV16LayoutClient
+from app.models.charocr_routing import xyxy
 
 
 PPOCR_V6_MODEL = "PP-OCRv6"
@@ -47,11 +48,6 @@ def build_ppocr_v6_routing_request_profile() -> PpOcrV6RoutingRequestProfile:
     )
 
 
-def build_ppocr_v6_prepass_options() -> dict[str, object]:
-    """Compatibility projection of the typed request profile."""
-    return build_ppocr_v6_routing_request_profile().optional_payload()
-
-
 @dataclass(frozen=True)
 class PpOcrV6WordBox:
     """One PP-OCRv6 word/digit/punctuation proposal inside a physical line."""
@@ -60,6 +56,11 @@ class PpOcrV6WordBox:
     token_index: int
     text: str
     bbox: tuple[int, int, int, int]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("PP-OCRv6 word box requires non-empty geometry")
 
 
 @dataclass(frozen=True)
@@ -71,13 +72,23 @@ class PpOcrV6LineHint:
     bbox: tuple[int, int, int, int]
     words: tuple[PpOcrV6WordBox, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+        object.__setattr__(self, "words", tuple(self.words))
+        if any(not isinstance(word, PpOcrV6WordBox) for word in self.words):
+            raise TypeError("PP-OCRv6 line word boxes require typed observations")
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("PP-OCRv6 line hint requires non-empty geometry")
+
 
 @dataclass(frozen=True)
 class PpOcrV6PrepassArtifact:
     """External PP-OCRv6 observation for one page and one request run.
 
-    It is transient routing input.  It must not be projected to proof lines,
-    blocks, or characters.
+    It is read-only vendor observation, not a source of truth for layout or
+    proof. The routing compiler may derive CharOCR routes from it, and the
+    export-owned table text-layer projection may derive hidden cell geometry
+    from the same observation without mutating the observation itself.
     """
 
     page_uid: str
@@ -180,24 +191,6 @@ def parse_ppocr_v6_prepass_jsonl(
     )
 
 
-def parse_ppocr_v6_prepass_result(
-    result: dict[str, Any],
-    *,
-    page_uid: str,
-    run_id: str = "",
-    width: int | None = None,
-    height: int | None = None,
-) -> PpOcrV6PrepassArtifact:
-    """Compatibility entry point for external observation normalization."""
-    return normalize_ppocr_v6_prepass_result(
-        result,
-        page_uid=page_uid,
-        run_id=run_id,
-        width=width,
-        height=height,
-    )
-
-
 def normalize_ppocr_v6_prepass_result(
     result: dict[str, Any],
     *,
@@ -287,8 +280,6 @@ __all__ = [
     "PpOcrV6RoutingRequestProfile",
     "PpOcrV6WordBox",
     "build_ppocr_v6_routing_request_profile",
-    "build_ppocr_v6_prepass_options",
     "normalize_ppocr_v6_prepass_result",
     "parse_ppocr_v6_prepass_jsonl",
-    "parse_ppocr_v6_prepass_result",
 ]

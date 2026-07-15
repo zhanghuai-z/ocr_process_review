@@ -16,6 +16,7 @@ from app.models.charocr_routing import (
     RoutingPlan,
     RoutingSegment,
     TextSliceRoute,
+    is_text_route_segment_kind,
 )
 from app.core.ocr_ir import is_cjk_char
 from app.core.charocr_text_partition import partition_charocr_text_region
@@ -131,7 +132,7 @@ def compile_page_routing_plan(
         ))
         if partition_issues:
             continue
-        text_slices = [segment for segment in segments if segment.kind.startswith("text")]
+        text_slices = [segment for segment in segments if is_text_route_segment_kind(segment.kind)]
         if not text_slices:
             # The line is completely contained in a structure nested in a text
             # block (for example a table within a manually drawn text parent).
@@ -157,7 +158,7 @@ def compile_page_routing_plan(
             )
             for line in routes
             for segment_index, segment in enumerate(line.segments)
-            if segment.kind.startswith("text")
+            if is_text_route_segment_kind(segment.kind)
         )
         block_routes.append(BlockRoutingPlan(
             block_uid=candidate.block.uid,
@@ -178,7 +179,11 @@ def compile_page_routing_plan(
         plan,
         validation_issues=(
             *plan.validation_issues,
-            *validate_compiled_page_routing_plan(plan),
+            *validate_compiled_page_routing_plan(
+                plan,
+                page_width=page_width,
+                page_height=page_height,
+            ),
         ),
     )
 
@@ -296,20 +301,6 @@ def _clip_line_to_text_block_width(line_bbox: XYXY, block_bbox: XYXY) -> XYXY | 
     x1 = max(line_bbox[0], block_bbox[0])
     x2 = min(line_bbox[2], block_bbox[2])
     return (x1, line_bbox[1], x2, line_bbox[3]) if x2 > x1 else None
-
-
-def _merged_horizontal_coverage(intervals: list[tuple[int, int]]) -> int:
-    if not intervals:
-        return 0
-    total = 0
-    start, end = sorted(intervals)[0]
-    for next_start, next_end in sorted(intervals)[1:]:
-        if next_start > end:
-            total += end - start
-            start, end = next_start, next_end
-        else:
-            end = max(end, next_end)
-    return total + end - start
 
 
 def _is_nonempty(bbox: XYXY) -> bool:

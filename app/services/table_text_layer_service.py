@@ -11,7 +11,12 @@ from app.models.ocr_observation import block_ocr_line_observations_by_uid
 
 
 class TableTextLayerService:
-    """Attach export-only table cell geometry to table blocks."""
+    """Attach export-only table cell geometry to table blocks.
+
+    PP-OCRv6 input is a read-only vendor observation. This service is an
+    export projection consumer alongside the routing compiler; it never makes
+    the observation authoritative for layout or proof text.
+    """
 
     def enrich_page(
         self,

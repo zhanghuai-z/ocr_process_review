@@ -1,7 +1,9 @@
-"""Derive complete physical rows from PP-OCRv6 line observations."""
+"""Normalize PP-OCRv6 observations into physical text rows."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
+from typing import Mapping
 
 import numpy as np
 
@@ -29,6 +31,11 @@ class PhysicalTextRow:
     line: PpOcrV6LineHint
     source_indices: tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_indices", tuple(self.source_indices))
+        if not self.source_indices:
+            raise ValueError("physical text row requires at least one source index")
+
 
 @dataclass(frozen=True)
 class PhysicalLineNormalization:
@@ -40,12 +47,27 @@ class PhysicalLineNormalization:
     """
 
     rows: tuple[PhysicalTextRow, ...]
+    _rows_by_source_index: Mapping[int, PhysicalTextRow] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        rows = tuple(self.rows)
+        object.__setattr__(self, "rows", rows)
+        if any(not isinstance(row, PhysicalTextRow) for row in rows):
+            raise TypeError("physical line normalization rows require typed values")
+        by_source_index: dict[int, PhysicalTextRow] = {}
+        for row in rows:
+            for source_index in row.source_indices:
+                if source_index in by_source_index:
+                    raise ValueError(f"duplicate physical source index: {source_index}")
+                by_source_index[source_index] = row
+        object.__setattr__(self, "_rows_by_source_index", MappingProxyType(by_source_index))
 
     def row_for_source_index(self, source_index: int) -> PhysicalTextRow | None:
-        for row in self.rows:
-            if source_index in row.source_indices:
-                return row
-        return None
+        return self._rows_by_source_index.get(source_index)
 
     def line_for_source_index(self, source_index: int) -> PpOcrV6LineHint | None:
         row = self.row_for_source_index(source_index)
@@ -54,31 +76,11 @@ class PhysicalLineNormalization:
         return row.line
 
 
-def derive_complete_text_rows(
-    groups: tuple[TextBlockLineGroup, ...],
-    page_image_bgr: np.ndarray | None,
-) -> dict[int, PpOcrV6LineHint | None]:
-    """Compatibility projection of :func:`normalize_physical_text_rows`.
-
-    The route compiler uses the typed result.  This mapping remains at the
-    focused geometry boundary for callers that still inspect merged source
-    indexes; ``None`` is not used as an internal routing decision anymore.
-    """
-    normalization = normalize_physical_text_rows(groups, page_image_bgr)
-    result: dict[int, PpOcrV6LineHint | None] = {}
-    for row in normalization.rows:
-        result[row.line.index] = row.line
-        for source_index in row.source_indices:
-            if source_index != row.line.index:
-                result[source_index] = None
-    return result
-
-
 def normalize_physical_text_rows(
     groups: tuple[TextBlockLineGroup, ...],
     page_image_bgr: np.ndarray | None,
 ) -> PhysicalLineNormalization:
-    """Return derived rows keyed by original index; merged members map to None.
+    """Return immutable derived rows with an O(1) source-index lookup.
 
     Raw PP observations remain unchanged. Rows are merged only inside one
     adopted text block when their vertical spans describe the same physical
@@ -312,6 +314,5 @@ __all__ = [
     "PhysicalTextRow",
     "PhysicalLineNormalization",
     "TextBlockLineGroup",
-    "derive_complete_text_rows",
     "normalize_physical_text_rows",
 ]

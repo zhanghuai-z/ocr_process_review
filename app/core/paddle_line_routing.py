@@ -1113,7 +1113,7 @@ def build_layout_routing_plan(
         width,
         height,
         routes,
-        has_layout_routes=bool(route_subblocks_for_block(block, width, height)),
+        has_layout_routes=bool(routes),
     )
 
 
@@ -1270,7 +1270,7 @@ def layout_routing_plan_for_block(
         width,
         height,
         routes,
-        has_layout_routes=bool(route_subblocks_for_block(block, width, height)),
+        has_layout_routes=bool(routes),
     )
 
 

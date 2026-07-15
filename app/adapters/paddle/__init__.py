@@ -6,10 +6,11 @@ from .ppocr_v6_prepass import (
     PpOcrV6LineHint,
     PpOcrV6PrepassArtifact,
     PpOcrV6PrepassClient,
+    PpOcrV6RoutingRequestProfile,
     PpOcrV6WordBox,
-    build_ppocr_v6_prepass_options,
+    build_ppocr_v6_routing_request_profile,
+    normalize_ppocr_v6_prepass_result,
     parse_ppocr_v6_prepass_jsonl,
-    parse_ppocr_v6_prepass_result,
 )
 
 __all__ = [
@@ -17,9 +18,10 @@ __all__ = [
     "PpOcrV6LineHint",
     "PpOcrV6PrepassArtifact",
     "PpOcrV6PrepassClient",
+    "PpOcrV6RoutingRequestProfile",
     "PpOcrV6WordBox",
-    "build_ppocr_v6_prepass_options",
+    "build_ppocr_v6_routing_request_profile",
     "map_paddle_label_to_block_type",
+    "normalize_ppocr_v6_prepass_result",
     "parse_ppocr_v6_prepass_jsonl",
-    "parse_ppocr_v6_prepass_result",
 ]

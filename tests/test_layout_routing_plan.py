@@ -6,6 +6,7 @@ from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
+    RouteValidationIssue,
     RoutingPlan,
     TextSliceRoute,
     routing_segment_from_record,
@@ -77,6 +78,43 @@ def test_page_routing_plan_freezes_nested_route_collections():
     assert isinstance(plan.blocks, tuple)
     assert isinstance(plan.blocks[0].plan.lines, tuple)
     assert isinstance(plan.blocks[0].plan.lines[0].segments, tuple)
+
+
+def test_routing_dto_bboxes_copy_external_lists_to_immutable_tuples():
+    token_bbox = [12, 10, 30, 28]
+    segment_bbox = [10, 8, 40, 32]
+    content_bbox = [10, 4, 40, 36]
+    line_bbox = [0, 0, 50, 40]
+    slice_bbox = [10, 8, 40, 32]
+    issue_bbox = [50, 50, 60, 60]
+    token = PpOcrLatinTokenObservation("AB", token_bbox)
+    segment = RoutingSegment(
+        kind="text_latin",
+        bbox=segment_bbox,
+        ppocr_latin_tokens=(token,),
+    )
+    formula = RoutingSegment(kind="formula", bbox=segment_bbox, content_bbox=content_bbox)
+    line = RoutingLine(index=0, bbox=line_bbox, segments=[segment])
+    text_slice = TextSliceRoute(0, 0, slice_bbox, True, kind="text_latin")
+    issue = RouteValidationIssue("test", "test", 0, issue_bbox)
+
+    token_bbox[0] = 99
+    segment_bbox[0] = 99
+    content_bbox[0] = 99
+    line_bbox[0] = 99
+    slice_bbox[0] = 99
+    issue_bbox[0] = 99
+
+    assert token.bbox == (12, 10, 30, 28)
+    assert segment.bbox == (10, 8, 40, 32)
+    assert formula.content_bbox == (10, 4, 40, 36)
+    assert line.bbox == (0, 0, 50, 40)
+    assert text_slice.bbox == (10, 8, 40, 32)
+    assert issue.bbox == (50, 50, 60, 60)
+    assert all(isinstance(value, int) for value in (*token.bbox, *segment.bbox, *line.bbox))
+
+    with pytest.raises((TypeError, ValueError)):
+        RoutingSegment(kind="text_other", bbox=(0, 0, 10))
 
 
 def test_routing_plan_preserves_ppocr_runtime_route_source():

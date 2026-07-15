@@ -4,15 +4,15 @@ import json
 
 import pytest
 
-from app.adapters.paddle.ppocr_v6_prepass import (
+from app.adapters.paddle import (
     PPOCR_V6_MODEL,
+    PpOcrV6LineHint,
     PpOcrV6PrepassClient,
     PpOcrV6RoutingRequestProfile,
+    PpOcrV6WordBox,
     build_ppocr_v6_routing_request_profile,
-    build_ppocr_v6_prepass_options,
     normalize_ppocr_v6_prepass_result,
     parse_ppocr_v6_prepass_jsonl,
-    parse_ppocr_v6_prepass_result,
 )
 
 
@@ -27,8 +27,8 @@ def _result(*, words: list[str] | None = None, word_boxes: list[list[int]] | Non
     }
 
 
-def test_ppocr_v6_prepass_options_keep_features_without_geometry_overrides():
-    options = build_ppocr_v6_prepass_options()
+def test_ppocr_v6_routing_profile_keeps_features_without_geometry_overrides():
+    options = build_ppocr_v6_routing_request_profile().optional_payload()
 
     assert options == {
         "useDocOrientationClassify": False,
@@ -45,11 +45,11 @@ def test_ppocr_v6_request_profile_owns_model_and_optional_payload():
 
     assert isinstance(profile, PpOcrV6RoutingRequestProfile)
     assert profile.model == PPOCR_V6_MODEL
-    assert profile.optional_payload() == build_ppocr_v6_prepass_options()
+    assert profile.optional_payload()["returnWordBox"] is True
 
 
 def test_parse_ppocr_v6_prepass_keeps_lines_and_word_boxes_outside_proof_model():
-    artifact = parse_ppocr_v6_prepass_result(
+    artifact = normalize_ppocr_v6_prepass_result(
         _result(),
         page_uid="page-1",
         run_id="job-1",
@@ -81,9 +81,23 @@ def test_external_observation_normalizer_is_the_parse_result_boundary():
     assert parsed.lines[0].words[0].line_index == parsed.lines[0].index
 
 
+def test_ppocr_observation_bboxes_copy_external_lists():
+    line_bbox = [10, 20, 210, 60]
+    word_bbox = [10, 20, 100, 60]
+    word = PpOcrV6WordBox(0, 0, "Urban", word_bbox)
+    line = PpOcrV6LineHint(0, "Urban", line_bbox, [word])
+
+    line_bbox[0] = 99
+    word_bbox[0] = 99
+
+    assert line.bbox == (10, 20, 210, 60)
+    assert line.words == (word,)
+    assert word.bbox == (10, 20, 100, 60)
+
+
 def test_parse_ppocr_v6_prepass_rejects_word_count_mismatch():
     with pytest.raises(ValueError, match="mismatched text_word/text_word_boxes"):
-        parse_ppocr_v6_prepass_result(
+        normalize_ppocr_v6_prepass_result(
             _result(words=["Urban", "2026"], word_boxes=[[10, 20, 100, 60]]),
             page_uid="page-1",
         )
@@ -91,7 +105,7 @@ def test_parse_ppocr_v6_prepass_rejects_word_count_mismatch():
 
 def test_parse_ppocr_v6_prepass_rejects_word_text_stream_mismatch():
     with pytest.raises(ValueError, match="word tokens do not reproduce"):
-        parse_ppocr_v6_prepass_result(
+        normalize_ppocr_v6_prepass_result(
             _result(words=["Urban", "2025"]),
             page_uid="page-1",
         )
