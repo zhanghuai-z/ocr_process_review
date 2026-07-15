@@ -70,6 +70,39 @@ def test_route_artifact_emits_only_text_route_crops(tmp_path):
     assert "不是\n对 native 调用的逐像素复刻" in readme
 
 
+def test_route_artifact_can_skip_crop_visualizations(tmp_path):
+    plan = PageRoutingPlan(
+        page_uid="page-test",
+        prepass_run_id="prepass-test",
+        blocks=(BlockRoutingPlan(
+            block_uid="block-test",
+            plan=RoutingPlan(
+                lines=(RoutingLine(
+                    index=0,
+                    bbox=(5, 5, 25, 25),
+                    segments=(RoutingSegment(kind="text_other", bbox=(5, 5, 25, 25)),),
+                ),),
+                text_slices=(TextSliceRoute(0, 0, (5, 5, 25, 25), True, kind="text_other"),),
+                has_layout_routes=True,
+            ),
+        ),),
+    )
+
+    output = write_charocr_route_artifacts(
+        image_bgr=np.full((40, 40, 3), 255, dtype=np.uint8),
+        source_image_path="page.png",
+        routing_plan=plan,
+        output_root=tmp_path,
+        write_crops=False,
+    )
+
+    assert output is not None
+    assert not (output / "crops").exists()
+    payload = json.loads((output / "route-plan.json").read_text(encoding="utf-8"))
+    assert payload["routes"][0]["segments"][0]["native_branch"] == "linecut"
+    assert payload["routes"][0]["segments"][0].get("crop_file") is None
+
+
 def test_hybrid_pipeline_writes_current_route_plan_before_native_dispatch(tmp_path, monkeypatch):
     image_path = tmp_path / "page.png"
     assert cv2.imwrite(str(image_path), np.full((40, 90, 3), 255, dtype=np.uint8))

@@ -47,3 +47,19 @@ Do not synthesize layout blocks from unmatched OCR output.
 LayoutSnapshot is layout truth. OCR routing, masks, EngCut/LineCut output, and
 debug overlays are observations or plans. They may read layout truth but must not
 rewrite it.
+
+## Native Punctuation Capability
+
+- EngCut and LineCut punctuation support is not equivalent. EngCut's exposed
+  character contract is ASCII-only; it can preserve common punctuation inside
+  an English line, but cannot represent Chinese full-width punctuation.
+- LineCut can return GBK Chinese punctuation and some ASCII punctuation, but it
+  is not a reliable substitute for EngCut on a pure English line.
+- A pure English line should therefore remain intact, including punctuation,
+  when dispatched to EngCut. Mixed-line punctuation still needs contextual
+  ownership: Chinese punctuation and symbols that EngCut does not reproduce
+  reliably, notably the percent sign in current native evidence, remain with
+  LineCut.
+- These conclusions come from same-crop native raw outputs under
+  `debug/mixed_line_mask_fusion_batch_v1`; selected post-processing text is not
+  evidence of native capability.

@@ -24,13 +24,17 @@ def _result(*, words: list[str] | None = None, word_boxes: list[list[int]] | Non
     }
 
 
-def test_ppocr_v6_prepass_options_keep_word_boxes_and_fixed_geometry_flags():
+def test_ppocr_v6_prepass_options_keep_features_without_geometry_overrides():
     options = build_ppocr_v6_prepass_options()
 
-    assert options["returnWordBox"] is True
-    assert options["useDocOrientationClassify"] is False
-    assert options["useDocUnwarping"] is False
-    assert options["useTextlineOrientation"] is False
+    assert options == {
+        "useDocOrientationClassify": False,
+        "useDocUnwarping": False,
+        "useTextlineOrientation": False,
+        "returnWordBox": True,
+        "textDetBoxThresh": 0.4,
+        "textRecScoreThresh": 0.0,
+    }
 
 
 def test_parse_ppocr_v6_prepass_keeps_lines_and_word_boxes_outside_proof_model():

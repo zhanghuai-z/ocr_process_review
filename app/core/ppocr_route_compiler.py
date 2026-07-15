@@ -212,8 +212,8 @@ def _derive_text_rows(
     page_image_bgr: np.ndarray | None,
 ) -> dict[int, PpOcrV6LineHint | None]:
     grouped: dict[str, tuple[_BlockCandidate, list[PpOcrV6LineHint]]] = {}
-    for line in lines:
-        line_bbox = _clamp(line.bbox, page_width, page_height)
+    for hint in lines:
+        line_bbox = _clamp(hint.bbox, page_width, page_height)
         target = _select_text_container(line_bbox, text_blocks)
         structural_owner = _select_structural_owner(line_bbox, structural_blocks)
         if target is None or _is_vertical_text_block(target.block):
@@ -223,7 +223,7 @@ def _derive_text_rows(
         ) >= _overlap_score(line_bbox, target.bbox):
             continue
         entry = grouped.setdefault(target.block.uid, (target, []))
-        entry[1].append(replace(line, bbox=line_bbox))
+        entry[1].append(replace(hint, bbox=line_bbox))
     return derive_complete_text_rows(
         tuple(
             TextBlockLineGroup(

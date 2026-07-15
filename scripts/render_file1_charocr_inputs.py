@@ -110,6 +110,49 @@ def _formula_canvas(image: np.ndarray, segments: list) -> np.ndarray:
     return canvas
 
 
+def _draw_disjoint_route_overlay(image: np.ndarray, lines: list) -> np.ndarray:
+    """Draw final route ownership after native-input exclusion precedence."""
+    height, width = image.shape[:2]
+    owner = np.zeros((height, width), dtype=np.uint8)
+    owner_ids = {
+        ROUTE_SEGMENT_TEXT_OTHER: 1,
+        ROUTE_SEGMENT_TEXT_LATIN: 2,
+        ROUTE_SEGMENT_FORMULA: 3,
+        "skip": 4,
+    }
+    # The first pass establishes the LineCut carrier. The second pass mirrors
+    # production masking: Latin, formula, and skip regions replace it.
+    for line in lines:
+        for segment in line.segments:
+            if segment.kind != ROUTE_SEGMENT_TEXT_OTHER:
+                continue
+            x1, y1, x2, y2 = segment.bbox
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+            if x2 > x1 and y2 > y1:
+                owner[y1:y2, x1:x2] = owner_ids[ROUTE_SEGMENT_TEXT_OTHER]
+    for line in lines:
+        for segment in line.segments:
+            if segment.kind == ROUTE_SEGMENT_TEXT_OTHER:
+                continue
+            owner_id = owner_ids.get(segment.kind, owner_ids["skip"])
+            box = (
+                segment.content_bbox
+                if segment.kind == ROUTE_SEGMENT_FORMULA and segment.content_bbox
+                else segment.bbox
+            )
+            x1, y1, x2, y2 = box
+            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
+            if x2 > x1 and y2 > y1:
+                owner[y1:y2, x1:x2] = owner_id
+
+    overlay = image.copy()
+    for kind, owner_id in owner_ids.items():
+        mask = np.where(owner == owner_id, 255, 0).astype(np.uint8)
+        contours, _hierarchy = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay, contours, -1, COLORS.get(kind, COLORS["skip"]), 2)
+    return overlay
+
+
 def _panel(crop: np.ndarray, title: str) -> np.ndarray:
     panel = cv2.copyMakeBorder(crop, 30, 1, 1, 1, cv2.BORDER_CONSTANT, value=(245, 245, 245))
     _draw_label(panel, title, 8, 20, (25, 25, 25))
@@ -195,6 +238,12 @@ def main() -> int:
         type=Path,
         default=REPO_ROOT / "debug/file1_charocr_input_audit_20260713",
     )
+    parser.add_argument(
+        "--page",
+        action="append",
+        default=[],
+        help="Render only the named image stem; repeat for multiple pages.",
+    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -218,6 +267,8 @@ def main() -> int:
     totals: Counter[str] = Counter()
     for page in project.pages:
         name = Path(page.source_path).name
+        if args.page and Path(name).stem not in set(args.page):
+            continue
         image_path = images.get(name)
         if image_path is None:
             raise RuntimeError(f"project page has no file/1 image: {name}")
@@ -252,12 +303,7 @@ def main() -> int:
 
         all_lines = [line for block in plan.blocks for line in block.plan.lines]
         segments = [segment for line in all_lines for segment in line.segments]
-        route_overlay = image.copy()
-        for line in all_lines:
-            cv2.rectangle(route_overlay, line.bbox[:2], line.bbox[2:], (70, 70, 70), 1)
-            for segment in line.segments:
-                color = COLORS.get(segment.kind, COLORS["skip"])
-                cv2.rectangle(route_overlay, segment.bbox[:2], segment.bbox[2:], color, 2)
+        route_overlay = _draw_disjoint_route_overlay(image, all_lines)
         cv2.imwrite(str(page_dir / "02_final_typed_routes.png"), route_overlay)
 
         issue_rows = [

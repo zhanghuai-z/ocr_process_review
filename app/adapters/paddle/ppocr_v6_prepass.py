@@ -16,17 +16,19 @@ PPOCR_V6_MODEL = "PP-OCRv6"
 
 
 def build_ppocr_v6_prepass_options() -> dict[str, object]:
-    """Return the fixed PP-OCRv6 request contract for CharOCR routing."""
+    """Return the PP-OCRv6 feature contract for CharOCR routing.
+
+    Detection geometry stays owned by the deployed PP-OCRv6 model.  The only
+    detector override is the box acceptance threshold validated across the
+    routing stress corpus; side-length, pixel, and unclip settings remain at
+    the model defaults.
+    """
     return {
         "useDocOrientationClassify": False,
         "useDocUnwarping": False,
         "useTextlineOrientation": False,
         "returnWordBox": True,
-        "textDetLimitSideLen": 1536,
-        "textDetLimitType": "max",
-        "textDetThresh": 0.3,
-        "textDetBoxThresh": 0.6,
-        "textDetUnclipRatio": 2.0,
+        "textDetBoxThresh": 0.4,
         "textRecScoreThresh": 0.0,
     }
 

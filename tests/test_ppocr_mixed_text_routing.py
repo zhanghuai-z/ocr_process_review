@@ -309,6 +309,30 @@ def test_narrow_digit_wordbox_owns_its_nearest_complete_component():
     assert [(segment.bbox, segment.text) for segment in latin] == [((36, 10, 58, 30), "4")]
 
 
+def test_latin_leading_glyph_follows_material_overlap_not_neighbor_token_center():
+    image = _image()
+    _ink(image, (8, 8, 30, 32))        # preceding CJK token
+    _ink(image, (40, 10, 70, 30))      # leading A: one-pixel CJK overlap
+    _ink(image, (74, 10, 82, 30))      # remaining Latin token ink
+    _ink(image, (94, 8, 116, 32))      # following CJK token
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="据Ab等",
+        bbox=(0, 0, 125, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "据", (8, 6, 41, 34)),
+            PpOcrV6WordBox(0, 1, "Ab", (40, 6, 86, 34)),
+            PpOcrV6WordBox(0, 2, "等", (92, 6, 118, 34)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [((40, 10, 82, 30), "Ab")]
+
+
 def test_horizontal_table_rule_cannot_widen_or_overlap_latin_masks():
     image = _image()
     _ink(image, (4, 8, 20, 28))
@@ -364,6 +388,37 @@ def test_latin_token_recovers_only_its_fragment_from_fused_punctuation_component
     assert result.issues == ()
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [((42, 10, 50, 30), "h")]
+
+
+def test_latin_token_recovers_trailing_glyph_fragment_fused_to_symbol():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))       # preceding CJK
+    _ink(image, (30, 10, 38, 30))      # P
+    _ink(image, (40, 10, 48, 30))      # E
+    _ink(image, (52, 10, 72, 30))      # fused slash + V
+    _ink(image, (74, 10, 82, 30))      # C
+    _ink(image, (94, 10, 110, 30))     # following CJK
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲PE/VC乙",
+        bbox=(0, 0, 120, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "PE", (28, 8, 50, 32)),
+            PpOcrV6WordBox(0, 2, "/", (50, 8, 62, 32)),
+            PpOcrV6WordBox(0, 3, "VC", (62, 8, 84, 32)),
+            PpOcrV6WordBox(0, 4, "乙", (92, 8, 112, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((30, 10, 48, 30), "PE"),
+        ((62, 10, 82, 30), "VC"),
+    ]
 
 
 def test_shifted_comma_reclaims_its_mark_without_taking_following_latin_body():

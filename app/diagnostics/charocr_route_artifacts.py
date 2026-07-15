@@ -54,6 +54,7 @@ def write_charocr_route_artifacts(
     source_image_path: str | Path,
     routing_plan: PageRoutingPlan,
     output_root: Path,
+    write_crops: bool = True,
 ) -> Path | None:
     """Render the immutable dispatch plan and route-boundary visualizations.
 
@@ -63,9 +64,16 @@ def write_charocr_route_artifacts(
     try:
         output_dir = output_root / _run_name(routing_plan)
         crops_dir = output_dir / "crops"
-        crops_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if write_crops:
+            crops_dir.mkdir(parents=True, exist_ok=True)
         canvas = _as_bgr(image_bgr)
-        records = _route_records(routing_plan, image_bgr, crops_dir)
+        records = _route_records(
+            routing_plan,
+            image_bgr,
+            crops_dir,
+            write_crops=write_crops,
+        )
         _draw_overlay(canvas, routing_plan)
         _write_png(output_dir / "route-overlay.png", canvas)
         payload = {
@@ -112,6 +120,8 @@ def _route_records(
     routing_plan: PageRoutingPlan,
     image_bgr: np.ndarray,
     crops_dir: Path,
+    *,
+    write_crops: bool,
 ) -> list[dict[str, Any]]:
     height, width = image_bgr.shape[:2]
     records: list[dict[str, Any]] = []
@@ -121,16 +131,17 @@ def _route_records(
             for segment_index, segment in enumerate(routing_line.segments):
                 record = _segment_record(segment)
                 if segment.kind in _TEXT_KINDS:
-                    crop = _crop(image_bgr, segment.bbox)
-                    crop_name = (
-                        f"line_{routing_line.index:04d}_segment_{segment_index:02d}_"
-                        f"{segment.kind}_{_bbox_name(segment.bbox)}.png"
-                    )
-                    _write_png(crops_dir / crop_name, crop)
                     record["native_branch"] = "engcut" if segment.kind == "text_latin" else "linecut"
-                    record["crop_file"] = f"crops/{crop_name}"
-                    record["crop_shape"] = list(crop.shape)
-                    record["crop_role"] = "route_segment_visualization"
+                    if write_crops:
+                        crop = _crop(image_bgr, segment.bbox)
+                        crop_name = (
+                            f"line_{routing_line.index:04d}_segment_{segment_index:02d}_"
+                            f"{segment.kind}_{_bbox_name(segment.bbox)}.png"
+                        )
+                        _write_png(crops_dir / crop_name, crop)
+                        record["crop_file"] = f"crops/{crop_name}"
+                        record["crop_shape"] = list(crop.shape)
+                        record["crop_role"] = "route_segment_visualization"
                 else:
                     record["native_branch"] = "excluded"
                 segments.append(record)

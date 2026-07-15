@@ -40,6 +40,21 @@ def test_co_baseline_fragments_in_one_layout_block_become_one_row():
     assert result[4] is None
 
 
+def test_overlapping_co_baseline_fragments_in_one_layout_block_become_one_row():
+    left = _line(3, "第三节", (5, 8, 45, 32))
+    right = _line(4, "民居", (40, 8, 95, 32))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 100, 40), (left, right)),),
+        None,
+    )
+
+    assert result[3] is not None
+    assert result[3].text == "第三节民居"
+    assert result[3].bbox == (5, 8, 95, 32)
+    assert result[4] is None
+
+
 def test_unclaimed_prefix_ink_extends_row_inside_its_layout_block():
     image = np.full((50, 120, 3), 255, dtype=np.uint8)
     image[4:36, 6:15] = 0
@@ -81,6 +96,59 @@ def test_row_height_follows_word_owned_ink_including_detached_dot():
     )
 
     assert result[3].bbox == (25, 5, 45, 30)
+
+
+def test_row_height_recovers_complete_owned_glyph_beyond_ppocr_box():
+    image = np.full((60, 120, 3), 255, dtype=np.uint8)
+    image[8:34, 30:38] = 0
+    body = _line(3, "I", (25, 12, 45, 30))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 100, 50), (body,)),),
+        image,
+    )
+
+    assert result[3].bbox == (25, 8, 45, 34)
+
+
+def test_row_height_may_recover_owned_glyph_beyond_layout_block():
+    image = np.full((60, 120, 3), 255, dtype=np.uint8)
+    image[8:34, 30:38] = 0
+    body = _line(3, "I", (25, 12, 45, 30))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (20, 10, 50, 31), (body,)),),
+        image,
+    )
+
+    assert result[3].bbox == (25, 8, 45, 34)
+
+
+def test_row_height_recovers_connected_component_closure():
+    image = np.full((70, 120, 3), 255, dtype=np.uint8)
+    image[12:38, 30:38] = 0
+    image[32:42, 40:48] = 0
+    body = _line(3, "ab", (25, 12, 55, 30))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (20, 8, 60, 45), (body,)),),
+        image,
+    )
+
+    assert result[3].bbox == (25, 12, 55, 42)
+
+
+def test_row_height_never_expands_from_page_spanning_component():
+    image = np.full((60, 120, 3), 255, dtype=np.uint8)
+    image[0:55, 34:37] = 0
+    body = _line(3, "I", (25, 15, 45, 35))
+
+    result = derive_complete_text_rows(
+        (TextBlockLineGroup("block-1", (0, 0, 100, 60), (body,)),),
+        image,
+    )
+
+    assert result[3].bbox == (25, 15, 45, 35)
 
 
 def test_co_baseline_fragments_in_different_layout_blocks_do_not_merge():

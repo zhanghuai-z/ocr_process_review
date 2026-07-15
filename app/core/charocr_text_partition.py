@@ -135,6 +135,7 @@ def partition_charocr_text_region(
             components,
             token,
             component_owners,
+            tokens,
             region_bbox,
         )
         if mask_bbox is None:
@@ -279,31 +280,116 @@ def _latin_mask_bbox(
     components: list[tuple[int, int, int, int, int]],
     token: PpOcrV6WordBox,
     component_owners: dict[tuple[int, int, int, int, int], int | None],
+    tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
 ) -> XYXY | None:
     seed_bbox = _latin_seed_bbox(token, region_bbox)
-    owned = [
-        component
+    owned_boxes = [
+        component[:4]
         for component in components
         if component_owners.get(component) == token.token_index
         and _intersect(component[:4], seed_bbox) is not None
     ]
-    if owned:
-        return _union([component[:4] for component in owned])
+    token_by_index = {candidate.token_index: candidate for candidate in tokens}
 
     # A low-resolution glyph can be physically connected to adjacent
-    # punctuation, for example ``(h)``.  Whole-component ownership must remain
-    # unique, but the Latin proposal can still recover its own intersecting
-    # pixels without taking the punctuation owner's full component.
-    core_bbox = _clip(token.bbox, region_bbox)
-    fragments = [
-        overlap
-        for component in components
-        if not _is_rule_like_component(component, region_bbox)
-        for overlap in [_intersect(component[:4], core_bbox)]
-        if overlap is not None
-    ]
-    return _union(fragments) if fragments else None
+    # punctuation, for example ``/V`` or ``(h``. Whole-component ownership
+    # remains unique, while the Latin token recovers only the fragment on its
+    # side of the observed token boundary. This is a geometric split, not text
+    # guessing.
+    symbol_fragments: list[XYXY] = []
+    expected_glyphs = sum(1 for char in str(token.text or "") if char.isascii() and char.isalnum())
+    occupied_slots = _occupied_token_slots(_clip(token.bbox, region_bbox), expected_glyphs, owned_boxes)
+    if len(occupied_slots) < expected_glyphs:
+        for component in components:
+            if _is_rule_like_component(component, region_bbox):
+                continue
+            owner_index = component_owners.get(component)
+            if owner_index == token.token_index:
+                continue
+            owner = token_by_index.get(owner_index) if owner_index is not None else None
+            if owner is None or _token_branch(owner.text) != "symbol":
+                continue
+            fragment = _adjacent_symbol_boundary_fragment(
+                component[:4],
+                token,
+                owner,
+                tokens,
+                region_bbox,
+            )
+            if fragment is not None:
+                slot = _token_slot_for_box(
+                    _clip(token.bbox, region_bbox),
+                    expected_glyphs,
+                    fragment,
+                )
+                if slot is not None and slot not in occupied_slots:
+                    symbol_fragments.append(fragment)
+                    occupied_slots.add(slot)
+    boxes = [*owned_boxes, *symbol_fragments]
+    if boxes:
+        return _union(boxes)
+
+    return None
+
+
+def _occupied_token_slots(token_bbox: XYXY, slot_count: int, boxes: list[XYXY]) -> set[int]:
+    occupied: set[int] = set()
+    if slot_count <= 0 or not _is_nonempty(token_bbox):
+        return occupied
+    token_width = token_bbox[2] - token_bbox[0]
+    for slot in range(slot_count):
+        center_x = token_bbox[0] + token_width * (slot + 0.5) / slot_count
+        if any(box[0] <= center_x <= box[2] for box in boxes):
+            occupied.add(slot)
+    for box in boxes:
+        center_x = (box[0] + box[2]) / 2.0
+        relative = (center_x - token_bbox[0]) / token_width
+        occupied.add(max(0, min(slot_count - 1, int(relative * slot_count))))
+    return occupied
+
+
+def _token_slot_for_box(token_bbox: XYXY, slot_count: int, box: XYXY) -> int | None:
+    overlap = _intersect(token_bbox, box)
+    if slot_count <= 0 or overlap is None:
+        return None
+    center_x = (overlap[0] + overlap[2]) / 2.0
+    relative = (center_x - token_bbox[0]) / max(1, token_bbox[2] - token_bbox[0])
+    return max(0, min(slot_count - 1, int(relative * slot_count)))
+
+
+def _adjacent_symbol_boundary_fragment(
+    component: XYXY,
+    token: PpOcrV6WordBox,
+    symbol: PpOcrV6WordBox,
+    tokens: tuple[PpOcrV6WordBox, ...],
+    region_bbox: XYXY,
+) -> XYXY | None:
+    if any(char.isspace() for char in str(symbol.text or "")):
+        return None
+    ordered = [candidate for candidate in tokens if str(candidate.text or "").strip()]
+    positions = {candidate.token_index: index for index, candidate in enumerate(ordered)}
+    token_position = positions.get(token.token_index)
+    symbol_position = positions.get(symbol.token_index)
+    if token_position is None or symbol_position is None or abs(token_position - symbol_position) != 1:
+        return None
+    token_bbox = _clip(token.bbox, region_bbox)
+    symbol_bbox = _clip(symbol.bbox, region_bbox)
+    if symbol_position < token_position:
+        candidate = (
+            max(component[0], symbol_bbox[2]),
+            component[1],
+            min(component[2], token_bbox[2]),
+            component[3],
+        )
+    else:
+        candidate = (
+            max(component[0], token_bbox[0]),
+            component[1],
+            min(component[2], symbol_bbox[0]),
+            component[3],
+        )
+    return candidate if _is_nonempty(candidate) else None
 
 
 def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
@@ -357,7 +443,7 @@ def _component_owner_token_indices(
                 continue
             token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
             centered.append((
-                -_overlap_ratio(token_bbox, component[:4]),
+                -_intersection_over_union(token_bbox, component[:4]),
                 token_bbox[2] - token_bbox[0],
                 abs(center_x - token_center_x),
                 token.token_index,
@@ -370,7 +456,6 @@ def _component_owner_token_indices(
     # in the comparison only as a blocker, so it can never become EngCut text.
     token_by_index = {token.token_index: token for token in tokens}
     for component in eligible_components:
-        center_x = (component[0] + component[2]) / 2.0
         overlapping = [
             token
             for token in tokens
@@ -379,37 +464,16 @@ def _component_owner_token_indices(
         if not overlapping:
             continue
         best = min(overlapping, key=lambda token: (
-            -_overlap_ratio(_clip(token.bbox, region_bbox), component[:4]),
+            -_intersection_over_union(_clip(token.bbox, region_bbox), component[:4]),
             0 if _center_inside(component[:4], _clip(token.bbox, region_bbox)) else 1,
             0 if _token_branch(token.text) == "symbol" else 1,
             token.token_index,
         ))
         best_branch = _token_branch(best.text)
         current = owners[component]
-        branch_candidates = [
-            token for token in overlapping
-            if _token_branch(token.text) in {"other", "latin"}
-        ]
-        if {_token_branch(token.text) for token in branch_candidates} == {"other", "latin"}:
-            best = min(
-                branch_candidates,
-                key=lambda token: (
-                    abs(
-                        center_x
-                        - (
-                            _clip(token.bbox, region_bbox)[0]
-                            + _clip(token.bbox, region_bbox)[2]
-                        ) / 2.0
-                    ),
-                    token.token_index,
-                ),
-            )
-            owners[component] = best.token_index
-            continue
-        best_branch = _token_branch(best.text)
-        best_overlap = _overlap_ratio(_clip(best.bbox, region_bbox), component[:4])
+        best_overlap = _intersection_over_union(_clip(best.bbox, region_bbox), component[:4])
         current_overlap = (
-            _overlap_ratio(_clip(token_by_index[current].bbox, region_bbox), component[:4])
+            _intersection_over_union(_clip(token_by_index[current].bbox, region_bbox), component[:4])
             if current is not None else 0.0
         )
         best_contains_center = _center_inside(component[:4], _clip(best.bbox, region_bbox))
@@ -581,12 +645,14 @@ def _center_inside(component: XYXY, bbox: XYXY) -> bool:
     return bbox[0] <= center_x <= bbox[2] and bbox[1] <= center_y <= bbox[3]
 
 
-def _overlap_ratio(owner: XYXY, component: XYXY) -> float:
-    overlap = _intersect(owner, component)
+def _intersection_over_union(left: XYXY, right: XYXY) -> float:
+    overlap = _intersect(left, right)
     if overlap is None:
         return 0.0
-    area = max(1, (component[2] - component[0]) * (component[3] - component[1]))
-    return ((overlap[2] - overlap[0]) * (overlap[3] - overlap[1])) / area
+    overlap_area = (overlap[2] - overlap[0]) * (overlap[3] - overlap[1])
+    left_area = max(1, (left[2] - left[0]) * (left[3] - left[1]))
+    right_area = max(1, (right[2] - right[0]) * (right[3] - right[1]))
+    return overlap_area / max(1, left_area + right_area - overlap_area)
 
 
 def _horizontal_gap(left: XYXY, right: XYXY) -> int:
