@@ -19,6 +19,11 @@ from app.models.charocr_routing import (
 
 PPOCR_V6_MODEL = "PP-OCRv6"
 VALID_TEXT_AXES = frozenset({TEXT_AXIS_HORIZONTAL, TEXT_AXIS_VERTICAL})
+TEXTLINE_ORIENTATION_CLASS_TO_DEGREES = {
+    -1: -1,
+    0: 0,
+    1: 180,
+}
 
 
 @dataclass(frozen=True)
@@ -284,7 +289,7 @@ def normalize_ppocr_v6_prepass_result(
             width=width,
             height=height,
         )
-        orientation_angle = _parse_orientation_angle(
+        orientation_angle = _parse_orientation_class_id(
             orientation_angles[line_index]
             if line_index < len(orientation_angles)
             else -1
@@ -360,18 +365,27 @@ def _squared_distance(left: tuple[int, int], right: tuple[int, int]) -> int:
     return (left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2
 
 
-def _parse_orientation_angle(value: object) -> int:
+def _parse_orientation_class_id(value: object) -> int:
+    """Translate PaddleX text-line class IDs into routing degrees.
+
+    PaddleX serializes the orientation classifier's class ID here: ``0`` is
+    an upright detector crop and ``1`` requires a 180-degree correction.
+    ``-1`` means the classifier was disabled or produced no observation.
+    """
     if value is None:
         return -1
     try:
-        angle = int(value)
+        class_id = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"invalid PP-OCRv6 textline orientation angle: {value!r}"
+            f"invalid PP-OCRv6 textline orientation class id: {value!r}"
         ) from exc
-    if angle not in {-1, 0, 180}:
-        raise ValueError(f"unsupported PP-OCRv6 textline orientation angle: {angle}")
-    return angle
+    try:
+        return TEXTLINE_ORIENTATION_CLASS_TO_DEGREES[class_id]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported PP-OCRv6 textline orientation class id: {class_id}"
+        ) from exc
 
 
 def _normalize_text_stream(value: object) -> str:

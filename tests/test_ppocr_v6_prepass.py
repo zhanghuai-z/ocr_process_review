@@ -75,7 +75,7 @@ def test_prepass_preserves_rotated_line_geometry_and_orientation_result():
     result["prunedResult"]["rec_polys"] = [
         [[20, 10], [60, 10], [60, 180], [20, 180]]
     ]
-    result["prunedResult"]["textline_orientation_angles"] = [180]
+    result["prunedResult"]["textline_orientation_angles"] = [1]
     result["prunedResult"]["text_word"] = [["单位：人"]]
     result["prunedResult"]["text_word_boxes"] = [[[20, 10, 60, 180]]]
 
@@ -87,11 +87,11 @@ def test_prepass_preserves_rotated_line_geometry_and_orientation_result():
     assert line.orientation_angle == 180
 
 
-def test_prepass_rejects_unsupported_orientation_angle():
+def test_prepass_rejects_unsupported_orientation_class_id():
     result = _result()
     result["prunedResult"]["textline_orientation_angles"] = [90]
 
-    with pytest.raises(ValueError, match="unsupported PP-OCRv6 textline orientation"):
+    with pytest.raises(ValueError, match="unsupported PP-OCRv6 textline orientation class id"):
         normalize_ppocr_v6_prepass_result(result, page_uid="page-1")
 
 
