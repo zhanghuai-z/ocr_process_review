@@ -61,3 +61,55 @@ def test_block_frame_occlusions_do_not_depend_on_visible_char_boxes():
     assert viewer._char_items == []
     assert viewer._block_items[0][0]._stroke_occlusions
     viewer.close()
+
+
+def test_block_frame_precomputes_only_edge_occlusions():
+    QApplication.instance() or QApplication([])
+    item = BBoxItem(
+        QRectF(0, 0, 100, 80),
+        QColor("#ff0000"),
+        stroke_outside=True,
+    )
+    item.setPos(10, 10)
+
+    item.set_stroke_occlusions([
+        QRectF(25, 8, 10, 12),   # crosses the top frame
+        QRectF(40, 40, 10, 10),  # wholly inside the block
+        QRectF(200, 200, 10, 10),
+    ])
+
+    assert len(item._stroke_occlusions) == 1
+    assert item._stroke_clip_path is not None
+
+    cached_path = item._stroke_clip_path
+    image = QImage(130, 110, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    painter.translate(item.pos())
+    item.paint(painter, QStyleOptionGraphicsItem())
+    item.paint(painter, QStyleOptionGraphicsItem())
+    painter.end()
+
+    assert item._stroke_clip_path is cached_path
+
+
+def test_block_frame_rebuilds_occlusions_after_geometry_edit():
+    QApplication.instance() or QApplication([])
+    item = BBoxItem(
+        QRectF(0, 0, 100, 80),
+        QColor("#ff0000"),
+        stroke_outside=True,
+    )
+    item.setPos(10, 10)
+    item.set_stroke_occlusions([QRectF(25, 8, 10, 12)])
+    original_path = item._stroke_clip_path
+
+    item._begin_geometry_edit()
+    item.setPos(12, 12)
+    item.setRect(QRectF(0, 0, 120, 90))
+    assert item._stroke_clip_path is None
+
+    item._end_geometry_edit()
+    assert item._stroke_clip_path is not None
+    assert item._stroke_clip_path is not original_path
+    assert len(item._stroke_occlusions) == 1

@@ -126,6 +126,7 @@ class _ResizeHandle(QGraphicsRectItem):
             # 记录父 item 在场景中的原始矩形
             bi = self._bbox_item
             bi._emit_edit_started_once()
+            bi._begin_geometry_edit()
             sp = bi.scenePos()
             r  = bi.rect()
             self._orig_scene_rect = QRectF(
@@ -166,6 +167,7 @@ class _ResizeHandle(QGraphicsRectItem):
     def mouseReleaseEvent(self, event) -> None:
         self._drag_start = None
         self._orig_scene_rect = None
+        self._bbox_item._end_geometry_edit()
         self._bbox_item._edit_started_for_drag = False
         event.accept()
 
@@ -208,7 +210,9 @@ class BBoxItem(QGraphicsRectItem):
         self._editable = True
         self._selectable = True
         self._stroke_outside = stroke_outside
+        self._stroke_occlusion_scene_rects: tuple[QRectF, ...] = ()
         self._stroke_occlusions: tuple[QRectF, ...] = ()
+        self._stroke_clip_path: Optional[QPainterPath] = None
         self._edit_started_for_drag = False
         self._suppress_geometry_emit = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -242,17 +246,68 @@ class BBoxItem(QGraphicsRectItem):
         return self._editable
 
     def set_stroke_occlusions(self, scene_rects: List[QRectF]) -> None:
+        self._stroke_occlusion_scene_rects = tuple(QRectF(rect) for rect in scene_rects)
+        self._rebuild_stroke_clip_path()
+        self.update()
+
+    def _rebuild_stroke_clip_path(self) -> None:
         origin = self.scenePos()
-        self._stroke_occlusions = tuple(
+        local_rects = (
             QRectF(
                 rect.x() - origin.x() - 1.0,
                 rect.y() - origin.y() - 1.0,
                 rect.width() + 2.0,
                 rect.height() + 2.0,
             )
-            for rect in scene_rects
+            for rect in self._stroke_occlusion_scene_rects
         )
-        self.update()
+        edge_width = max(4.0, self.pen().widthF() + 2.0)
+        frame = self.rect()
+        edge_regions = (
+            QRectF(
+                frame.left() - edge_width,
+                frame.top() - edge_width,
+                frame.width() + edge_width * 2,
+                edge_width * 2,
+            ),
+            QRectF(
+                frame.left() - edge_width,
+                frame.bottom() - edge_width,
+                frame.width() + edge_width * 2,
+                edge_width * 2,
+            ),
+            QRectF(
+                frame.left() - edge_width,
+                frame.top() - edge_width,
+                edge_width * 2,
+                frame.height() + edge_width * 2,
+            ),
+            QRectF(
+                frame.right() - edge_width,
+                frame.top() - edge_width,
+                edge_width * 2,
+                frame.height() + edge_width * 2,
+            ),
+        )
+        self._stroke_occlusions = tuple(
+            rect for rect in local_rects
+            if any(edge.intersects(rect) for edge in edge_regions)
+        )
+        visible = QPainterPath()
+        visible.addRect(self.boundingRect())
+        for rect in self._stroke_occlusions:
+            occlusion = QPainterPath()
+            occlusion.addRect(rect)
+            visible = visible.subtracted(occlusion)
+        self._stroke_clip_path = visible if self._stroke_occlusions else None
+
+    def _begin_geometry_edit(self) -> None:
+        self._stroke_clip_path = None
+
+    def _end_geometry_edit(self) -> None:
+        if self._stroke_occlusion_scene_rects:
+            self._rebuild_stroke_clip_path()
+            self.update()
 
     def set_selectable(self, selectable: bool) -> None:
         self._selectable = selectable
@@ -289,9 +344,12 @@ class BBoxItem(QGraphicsRectItem):
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._editable:
+            self._begin_geometry_edit()
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        self._end_geometry_edit()
         self._edit_started_for_drag = False
         super().mouseReleaseEvent(event)
 
@@ -348,14 +406,8 @@ class BBoxItem(QGraphicsRectItem):
             fill.setAlpha(60)
             painter.fillRect(self.rect(), fill)
         painter.save()
-        if self._stroke_occlusions:
-            visible = QPainterPath()
-            visible.addRect(self.boundingRect())
-            for rect in self._stroke_occlusions:
-                occlusion = QPainterPath()
-                occlusion.addRect(rect)
-                visible = visible.subtracted(occlusion)
-            painter.setClipPath(visible)
+        if self._stroke_clip_path is not None:
+            painter.setClipPath(self._stroke_clip_path)
         painter.setPen(self.pen())
         painter.setBrush(Qt.BrushStyle.NoBrush)
         frame_rect = self.rect()
