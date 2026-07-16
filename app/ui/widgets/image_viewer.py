@@ -206,6 +206,7 @@ class BBoxItem(QGraphicsRectItem):
         self._handles: List[_ResizeHandle] = []
         self._editable = True
         self._selectable = True
+        self._stroke_occlusions: tuple[QRectF, ...] = ()
         self._edit_started_for_drag = False
         self._suppress_geometry_emit = False
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -237,6 +238,20 @@ class BBoxItem(QGraphicsRectItem):
 
     def is_editable(self) -> bool:
         return self._editable
+
+    def set_stroke_occlusions(self, scene_rects: List[QRectF]) -> None:
+        """Keep the frame visible while avoiding glyph boxes at its edge."""
+        origin = self.scenePos()
+        self._stroke_occlusions = tuple(
+            QRectF(
+                rect.x() - origin.x() - 1.0,
+                rect.y() - origin.y() - 1.0,
+                rect.width() + 2.0,
+                rect.height() + 2.0,
+            )
+            for rect in scene_rects
+        )
+        self.update()
 
     def set_selectable(self, selectable: bool) -> None:
         self._selectable = selectable
@@ -322,7 +337,19 @@ class BBoxItem(QGraphicsRectItem):
             fill = QColor(self._color)
             fill.setAlpha(60)
             painter.fillRect(self.rect(), fill)
-        super().paint(painter, option, widget)
+        painter.save()
+        if self._stroke_occlusions:
+            visible = QPainterPath()
+            visible.addRect(self.boundingRect())
+            for rect in self._stroke_occlusions:
+                occlusion = QPainterPath()
+                occlusion.addRect(rect)
+                visible = visible.subtracted(occlusion)
+            painter.setClipPath(visible)
+        painter.setPen(self.pen())
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect())
+        painter.restore()
 
 
 class ImageViewer(QGraphicsView):
@@ -473,10 +500,12 @@ class ImageViewer(QGraphicsView):
             if item.scene() is self._scene:
                 self._scene.removeItem(item)
         self._char_items.clear()
+        char_rects: list[QRectF] = []
         for char in chars:
             if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
                 continue
             bb = char.bbox
+            char_rects.append(QRectF(bb.x, bb.y, bb.w, bb.h))
             is_formula_carrier = char.bbox_source == "paddle_inline_formula"
             color = _FORMULA_CHAR_BOX_COLOR if is_formula_carrier else _CHAR_BOX_COLOR
             label = "[formula-token]" if is_formula_carrier else "[char]"
@@ -494,6 +523,8 @@ class ImageViewer(QGraphicsView):
             item.signals.moved.connect(self.char_bbox_moved.emit)
             self._scene.addItem(item)
             self._char_items.append((item, char))
+        for block_item, _block in self._block_items:
+            block_item.set_stroke_occlusions(char_rects)
 
     def delete_selected(self) -> None:
         """删除所有选中的 BBoxItem，并 emit block_deleted_uid 信号。"""

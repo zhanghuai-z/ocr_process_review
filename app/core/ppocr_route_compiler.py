@@ -27,6 +27,12 @@ from app.core.ppocr_layout_ownership import (
     structural_masks_for_line,
 )
 from app.geometry.physical_line import resolve_physical_lines
+from app.geometry.text_decoration import (
+    DecorationLine,
+    DecorationToken,
+    TextDecoration,
+    detect_page_text_decorations,
+)
 from app.models.physical_line_geometry import ResolvedPhysicalLine
 from app.core.ppocr_route_validation import (
     invalid_prepass_line_bbox_issue,
@@ -82,6 +88,17 @@ def compile_page_routing_plan(
         ownership.line_geometry_contexts(),
         page_image_bgr,
     )
+    page_decorations = detect_page_text_decorations(
+        page_image_bgr,
+        tuple(
+            DecorationLine(
+                line.bbox,
+                tuple(DecorationToken(word.text, word.bbox) for word in line.words),
+            )
+            for line in prepass.lines
+            if line.text_axis == "horizontal"
+        ),
+    )
     issues: list[RouteValidationIssue] = []
     for raw_prepass_line in prepass.lines:
         normalized_row = physical_rows.row_for_source_index(raw_prepass_line.index)
@@ -133,6 +150,7 @@ def compile_page_routing_plan(
             prepass_line,
             line_bbox,
             structural_masks,
+            page_decorations,
             page_image_bgr=page_image_bgr,
         )
         issues.extend(partition_issues_to_route_issues(
@@ -216,12 +234,22 @@ def _segments_for_line(
     prepass_line: PpOcrV6LineHint,
     line_bbox: XYXY,
     structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+    page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
 ) -> tuple[list[RoutingSegment], tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
-    partition_image = _masked_partition_image(page_image_bgr, structural_masks)
-    partition_line = _prepass_line_without_structural_tokens(prepass_line, structural_masks)
+    decorations = tuple(
+        TextDecoration(decoration.kind, overlap)
+        for decoration in page_decorations
+        if (overlap := _intersect_bbox(decoration.bbox, line_bbox)) is not None
+    )
+    exclusion_bboxes = (
+        *(mask for _block, mask, _content_bbox in structural_masks),
+        *(decoration.bbox for decoration in decorations),
+    )
+    partition_image = _masked_partition_image(page_image_bgr, exclusion_bboxes)
+    partition_line = _prepass_line_without_excluded_tokens(prepass_line, exclusion_bboxes)
     if (
         prepass_line.text_axis == "horizontal"
         and _line_requires_text_partition(prepass_line.text)
@@ -230,7 +258,7 @@ def _segments_for_line(
             partition_image,
             partition_line,
             line_bbox,
-            excluded_bboxes=tuple(mask for _block, mask, _content_bbox in structural_masks),
+            excluded_bboxes=exclusion_bboxes,
         )
         text_segments = list(partition.segments)
         issues = list(partition.issues)
@@ -250,32 +278,35 @@ def _segments_for_line(
         )
         for block, mask, content_bbox in structural_masks
     ]
-    return [*text_segments, *structure_segments], tuple(issues)
+    decoration_segments = [
+        RoutingSegment(kind="decoration", label=decoration.kind, bbox=decoration.bbox)
+        for decoration in decorations
+    ]
+    return [*text_segments, *structure_segments, *decoration_segments], tuple(issues)
 
 
 def _masked_partition_image(
     page_image_bgr: np.ndarray | None,
-    structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+    excluded_bboxes: tuple[XYXY, ...],
 ) -> np.ndarray | None:
-    if page_image_bgr is None or not structural_masks:
+    if page_image_bgr is None or not excluded_bboxes:
         return page_image_bgr
     masked = page_image_bgr.copy()
-    for _block, (x1, y1, x2, y2), _content_bbox in structural_masks:
+    for x1, y1, x2, y2 in excluded_bboxes:
         masked[y1:y2, x1:x2] = 255
     return masked
 
 
-def _prepass_line_without_structural_tokens(
+def _prepass_line_without_excluded_tokens(
     line: PpOcrV6LineHint,
-    structural_masks: list[tuple[LayoutBlockSnapshot, XYXY, XYXY]],
+    excluded_bboxes: tuple[XYXY, ...],
 ) -> PpOcrV6LineHint:
-    if not structural_masks or not line.words:
+    if not excluded_bboxes or not line.words:
         return line
-    mask_boxes = [mask for _block, mask, _content_bbox in structural_masks]
     words = tuple(
         word
         for word in line.words
-        if all(not _bbox_center_inside(word.bbox, mask) for mask in mask_boxes)
+        if all(not _bbox_center_inside(word.bbox, mask) for mask in excluded_bboxes)
     )
     return line if words == line.words else replace(line, words=words)
 
@@ -284,6 +315,16 @@ def _bbox_center_inside(inner: XYXY, outer: XYXY) -> bool:
     center_x = (inner[0] + inner[2]) / 2.0
     center_y = (inner[1] + inner[3]) / 2.0
     return outer[0] <= center_x <= outer[2] and outer[1] <= center_y <= outer[3]
+
+
+def _intersect_bbox(left: XYXY, right: XYXY) -> XYXY | None:
+    bbox = (
+        max(left[0], right[0]),
+        max(left[1], right[1]),
+        min(left[2], right[2]),
+        min(left[3], right[3]),
+    )
+    return bbox if _is_nonempty(bbox) else None
 
 
 def _whole_line_text_kind(text: str) -> str:

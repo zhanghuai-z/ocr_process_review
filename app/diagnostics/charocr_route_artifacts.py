@@ -27,6 +27,7 @@ _COLORS: dict[str, tuple[int, int, int]] = {
     "text_other": (0, 165, 255),
     "text_latin": (255, 0, 255),
     "formula": (0, 190, 0),
+    "decoration": (180, 100, 20),
     "skip": (120, 120, 120),
 }
 
@@ -98,6 +99,7 @@ def write_charocr_route_artifacts(
                 "orange": "text_other -> LineCut",
                 "magenta": "text_latin -> EngCut",
                 "green": "formula -> excluded from Hanwang",
+                "brown": "decoration -> excluded from Hanwang",
                 "gray": "skip -> excluded from Hanwang",
             },
         }
@@ -264,6 +266,7 @@ def _readme_text(routing_plan: PageRoutingPlan, records: list[dict[str, Any]]) -
         "- 橙色：送 LineCut；",
         "- 紫红色：送 EngCut；",
         "- 绿色：公式，明确不送 Hanwang；",
+        "- 棕色：目录引导线等装饰，明确不送 Hanwang；",
         "- 灰色：表格/图片等跳过区域。",
         "",
         "`crops/` 内每张图只是 `PageRoutingPlan` 的原始矩形路由段回显，不是",

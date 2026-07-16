@@ -48,6 +48,37 @@ def test_linecut_canvas_whitens_only_exact_formula_intersection():
     assert np.all(canvas[44, 25] == 255)
     assert np.all(canvas[60, 25] == 0)
     assert np.all(canvas[60, 75] == 0)
+
+
+def test_linecut_canvas_whitens_directory_decoration_without_masking_text():
+    text = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=0,
+        bbox=(0, 20, 100, 60),
+        kind="text_other",
+    )
+    decoration = _TextRoute(
+        block_idx=0,
+        line_idx=0,
+        segment_idx=1,
+        bbox=(30, 38, 80, 43),
+        kind="decoration",
+    )
+    route = _LineCutMaskedLineRoute(
+        block_idx=0,
+        line_idx=0,
+        bbox=(0, 20, 100, 60),
+        linecut_segments=(text,),
+        excluded_segments=(decoration,),
+    )
+    image = np.zeros((80, 120, 3), dtype=np.uint8)
+
+    canvas = _materialize_linecut_masked_page(image, [route])
+
+    assert np.all(canvas[40, 50] == 255)
+    assert np.all(canvas[30, 50] == 0)
+    assert np.all(canvas[40, 90] == 0)
 from app.models import BBox, Block, BlockType, OcrPolicy, Page
 from app.models.layout_snapshot_projection import sync_page_layout_snapshot_from_projection
 from app.models.charocr_routing import (

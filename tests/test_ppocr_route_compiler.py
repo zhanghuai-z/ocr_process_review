@@ -92,6 +92,45 @@ def test_text_block_owns_row_without_clipping_ppocr_geometry():
     assert route.segments[0].bbox == (0, 0, 100, 40)
 
 
+def test_compiler_routes_directory_leader_as_non_text_decoration():
+    image = np.full((80, 600, 3), 255, dtype=np.uint8)
+    image[20:65, 20:100] = 0
+    for index in range(20):
+        x = 140 + index * 18
+        image[42:47, x:x + 5] = 0
+    image[18:66, 520:530] = 0
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 600, 80), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="目录……(1)",
+        bbox=(10, 10, 590, 70),
+        words=(
+            PpOcrV6WordBox(0, 0, "目录", (20, 10, 100, 70)),
+            PpOcrV6WordBox(0, 1, "……(", (120, 10, 540, 70)),
+            PpOcrV6WordBox(0, 2, "1", (545, 10, 560, 70)),
+            PpOcrV6WordBox(0, 3, ")", (565, 10, 580, 70)),
+        ),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=600,
+        page_height=80,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("text-1").lines[0]
+    decorations = [segment for segment in route.segments if segment.kind == "decoration"]
+    assert [(segment.label, segment.bbox) for segment in decorations] == [
+        ("dot_leader", (140, 42, 487, 47)),
+    ]
+    assert all(slice_.segment_index != route.segments.index(decorations[0]) for slice_ in plan.for_block("text-1").text_slices)
+
+
 def test_compiler_preserves_rotated_ppocr_axis_and_geometry_beyond_layout_edge():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (20, 40, 80, 180), policy=OcrPolicy.TEXT_OCR, order=0),
