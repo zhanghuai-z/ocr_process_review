@@ -1624,8 +1624,10 @@ class LayoutPanel(QWidget):
     def _show_page_layers(self, page: Page) -> None:
         self._viewer.show_layout_block_views(list(iter_page_layout_block_views(page)))
         self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
+        chars = self._collect_page_chars(page)
+        self._viewer.set_block_frame_occlusions(chars)
         if self._btn_char_boxes.isChecked():
-            self._viewer.show_char_boxes(self._collect_page_chars(page), editable=False)
+            self._viewer.show_char_boxes(chars, editable=False)
 
     def _select_block_uid_for_edit(self, block_uid: str) -> None:
         self._viewer.select_block_uid(block_uid)

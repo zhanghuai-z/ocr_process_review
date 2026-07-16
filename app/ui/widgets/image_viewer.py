@@ -183,7 +183,7 @@ class BBoxItem(QGraphicsRectItem):
     """可选中、可拖动、可缩放的包围盒矩形。
 
     坐标方案：item.rect() 始终为 QRectF(0,0,w,h)，位置由 item.setPos(x,y) 决定。
-    sceneBoundingRect() 返回的就是 block.bbox 在场景中的真实位置。
+    业务几何由 rect() + pos() 表示；版面框可在该几何外侧绘制描边。
     """
 
     def __init__(
@@ -194,6 +194,7 @@ class BBoxItem(QGraphicsRectItem):
         parent=None,
         *,
         pen_width: float = 2.0,
+        stroke_outside: bool = False,
     ):
         super().__init__(rect, parent)
         pen = QPen(color)
@@ -206,6 +207,7 @@ class BBoxItem(QGraphicsRectItem):
         self._handles: List[_ResizeHandle] = []
         self._editable = True
         self._selectable = True
+        self._stroke_outside = stroke_outside
         self._stroke_occlusions: tuple[QRectF, ...] = ()
         self._edit_started_for_drag = False
         self._suppress_geometry_emit = False
@@ -240,7 +242,6 @@ class BBoxItem(QGraphicsRectItem):
         return self._editable
 
     def set_stroke_occlusions(self, scene_rects: List[QRectF]) -> None:
-        """Keep the frame visible while avoiding glyph boxes at its edge."""
         origin = self.scenePos()
         self._stroke_occlusions = tuple(
             QRectF(
@@ -265,7 +266,7 @@ class BBoxItem(QGraphicsRectItem):
         self.setAcceptedMouseButtons(buttons)
 
     def _update_tooltip(self) -> None:
-        r = self.sceneBoundingRect()
+        r = self.scene_content_rect()
         coord = f"x={int(r.x())} y={int(r.y())} w={int(r.width())} h={int(r.height())}"
         if self._label:
             self.setToolTip(f"{self._label}\n{coord}")
@@ -311,6 +312,15 @@ class BBoxItem(QGraphicsRectItem):
             int(rect.height()),
         )
 
+    def scene_content_rect(self) -> QRectF:
+        return self.mapRectToScene(self.rect())
+
+    def boundingRect(self) -> QRectF:
+        if not getattr(self, "_stroke_outside", False):
+            return super().boundingRect()
+        outset = self.pen().widthF() + 1.0
+        return self.rect().adjusted(-outset, -outset, outset, outset)
+
     def _emit_geometry_changed(self, bbox: BBox) -> None:
         if self._block is None or not hasattr(self._block, "bbox"):
             return
@@ -348,7 +358,11 @@ class BBoxItem(QGraphicsRectItem):
             painter.setClipPath(visible)
         painter.setPen(self.pen())
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(self.rect())
+        frame_rect = self.rect()
+        if self._stroke_outside:
+            offset = self.pen().widthF() / 2.0 + 1.0
+            frame_rect = frame_rect.adjusted(-offset, -offset, offset, offset)
+        painter.drawRect(frame_rect)
         painter.restore()
 
 
@@ -460,7 +474,7 @@ class ImageViewer(QGraphicsView):
         label: str,
     ) -> None:
         rect = QRectF(0, 0, bbox.w, bbox.h)
-        item = BBoxItem(rect, color, label)
+        item = BBoxItem(rect, color, label, stroke_outside=True)
         item.setPos(bbox.x, bbox.y)
         item.set_block(block)
         item.set_selectable(True)
@@ -494,18 +508,25 @@ class ImageViewer(QGraphicsView):
             self._scene.addItem(rect)
             self._readonly_overlay_items.append(rect)
 
+    def set_block_frame_occlusions(self, chars: List[Char]) -> None:
+        char_rects = [
+            QRectF(char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
+            for char in chars
+            if char.bbox is not None and char.bbox.w > 0 and char.bbox.h > 0
+        ]
+        for block_item, _block in self._block_items:
+            block_item.set_stroke_occlusions(char_rects)
+
     def show_char_boxes(self, chars: List[Char], *, editable: bool = True) -> None:
         """Overlay editable OCR char/token boxes on top of layout blocks."""
         for item, _ in self._char_items:
             if item.scene() is self._scene:
                 self._scene.removeItem(item)
         self._char_items.clear()
-        char_rects: list[QRectF] = []
         for char in chars:
             if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
                 continue
             bb = char.bbox
-            char_rects.append(QRectF(bb.x, bb.y, bb.w, bb.h))
             is_formula_carrier = char.bbox_source == "paddle_inline_formula"
             color = _FORMULA_CHAR_BOX_COLOR if is_formula_carrier else _CHAR_BOX_COLOR
             label = "[formula-token]" if is_formula_carrier else "[char]"
@@ -523,8 +544,6 @@ class ImageViewer(QGraphicsView):
             item.signals.moved.connect(self.char_bbox_moved.emit)
             self._scene.addItem(item)
             self._char_items.append((item, char))
-        for block_item, _block in self._block_items:
-            block_item.set_stroke_occlusions(char_rects)
 
     def delete_selected(self) -> None:
         """删除所有选中的 BBoxItem，并 emit block_deleted_uid 信号。"""
@@ -769,7 +788,7 @@ class ImageViewer(QGraphicsView):
 
     @staticmethod
     def _selection_rect_hits_frame(selection: QRectF, item: BBoxItem) -> bool:
-        outer = item.sceneBoundingRect()
+        outer = item.scene_content_rect()
         if not selection.intersects(outer):
             return False
         tol = max(_FRAME_HIT_TOLERANCE, item.pen().widthF() * 2)
