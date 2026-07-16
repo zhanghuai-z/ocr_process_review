@@ -2417,15 +2417,7 @@ def run_micro_recblock(
         for area_idx, route in enumerate(linecut_masked_line_routes)
         if _requires_typed_segment_recognition(route)
     }
-    segimg_route_indices = [
-        area_idx
-        for area_idx in range(len(linecut_masked_line_routes))
-        if area_idx not in typed_segment_area_indices
-    ]
-    text_route_recblocks = [
-        linecut_masked_line_routes[area_idx].bbox
-        for area_idx in segimg_route_indices
-    ]
+    text_route_recblocks = [route.bbox for route in linecut_masked_line_routes]
     linecut_input_image = _materialize_linecut_masked_page(
         image_bgr,
         linecut_masked_line_routes,
@@ -2479,8 +2471,7 @@ def run_micro_recblock(
             seg = {"lines": []}
 
         groups: list[dict] = []
-        for segimg_area_idx, area in enumerate(seg.get("lines", []) or []):
-            area_idx = segimg_route_indices[segimg_area_idx]
+        for area_idx, area in enumerate(seg.get("lines", []) or []):
             for group in area.get("groups", []) or []:
                 group["_area_idx"] = area_idx
                 groups.append(group)
@@ -2559,6 +2550,7 @@ def run_micro_recblock(
             for group, _recblock, route, _raw_group_bbox, bbox, _recog_bbox in group_geometries
             if _requires_native_line_height_normalization(route, bbox)
         }
+        normalized_area_indices -= typed_segment_area_indices
         for group, recblock, route, raw_group_bbox, bbox, recog_bbox in group_geometries:
             for segment in route.linecut_segments:
                 segimg_group_audits_by_route.setdefault(segment.key, []).append({
@@ -2572,10 +2564,17 @@ def run_micro_recblock(
                     **(
                         {"native_recog_superseded_by": "normalized_physical_line"}
                         if group["_area_idx"] in normalized_area_indices
-                        else {}
+                        else (
+                            {"native_recog_superseded_by": "typed_linecut_segments"}
+                            if group["_area_idx"] in typed_segment_area_indices
+                            else {}
+                        )
                     ),
                 })
-            if group["_area_idx"] in normalized_area_indices:
+            if (
+                group["_area_idx"] in normalized_area_indices
+                or group["_area_idx"] in typed_segment_area_indices
+            ):
                 continue
             if recog_bbox is None:
                 continue

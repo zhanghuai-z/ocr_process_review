@@ -144,12 +144,13 @@ def test_mixed_line_recognition_uses_typed_linecut_segments_not_broad_segimg_gro
         ),),
     )
     seen_crops: list[tuple[int, int]] = []
-    segimg_called = False
+    segimg_recblocks: list[tuple[int, int, int, int]] = []
 
     def fake_segimg(_image_bgr, *, recblocks_xyxy=None, timeout=0):
-        nonlocal segimg_called
-        segimg_called = True
-        raise AssertionError("typed mixed lines must not depend on SegImg grouping")
+        segimg_recblocks.extend(recblocks_xyxy or [])
+        return {"lines": [{"groups": [{
+            "bbox": {"left": 0, "top": 20, "right": 280, "bottom": 60},
+        }]}]}
 
     def fake_recog(crop, **_kwargs):
         seen_crops.append(tuple(crop.shape[:2]))
@@ -178,7 +179,7 @@ def test_mixed_line_recognition_uses_typed_linecut_segments_not_broad_segimg_gro
     )
 
     assert seen_crops == [(60, 48), (60, 56)]
-    assert not segimg_called
+    assert segimg_recblocks == [(0, 20, 280, 60)]
     assert stats.n_groups == 2
     assert [char.text for line_result in result_rows[0].lines for char in line_result.chars] == ["中", "文"]
     direct_audits = [
