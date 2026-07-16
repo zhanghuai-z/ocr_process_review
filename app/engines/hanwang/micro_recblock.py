@@ -262,6 +262,8 @@ class _GroupPlacement:
     page_bbox: tuple[int, int, int, int]
     group_bbox: tuple[int, int, int, int]
     native_core_height_target: int | None = None
+    owner_key: tuple[int, int, int] | None = None
+    owner_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -1608,6 +1610,14 @@ def _requires_native_line_height_normalization(
     )
 
 
+def _requires_typed_segment_recognition(route: _LineCutMaskedLineRoute) -> bool:
+    """Keep native grouping from crossing explicit route ownership borders."""
+    return (
+        len(route.linecut_segments) > 1
+        or any(segment.kind == ROUTE_SEGMENT_TEXT_LATIN for segment in route.excluded_segments)
+    )
+
+
 def _prepare_recog_crop(
     crop: np.ndarray,
     placement: _GroupPlacement,
@@ -2402,7 +2412,20 @@ def run_micro_recblock(
         route for route in linecut_masked_line_routes
         if route not in oriented_linecut_routes
     ]
-    text_route_recblocks = [route.bbox for route in linecut_masked_line_routes]
+    typed_segment_area_indices = {
+        area_idx
+        for area_idx, route in enumerate(linecut_masked_line_routes)
+        if _requires_typed_segment_recognition(route)
+    }
+    segimg_route_indices = [
+        area_idx
+        for area_idx in range(len(linecut_masked_line_routes))
+        if area_idx not in typed_segment_area_indices
+    ]
+    text_route_recblocks = [
+        linecut_masked_line_routes[area_idx].bbox
+        for area_idx in segimg_route_indices
+    ]
     linecut_input_image = _materialize_linecut_masked_page(
         image_bgr,
         linecut_masked_line_routes,
@@ -2438,13 +2461,13 @@ def run_micro_recblock(
 
     if text_routes:
         recblocks = text_route_recblocks
-        if progress_callback and linecut_masked_line_routes:
+        if progress_callback and text_route_recblocks:
             progress_callback(
                 0,
-                max(1, len(linecut_masked_line_routes)),
+                max(1, len(text_route_recblocks)),
                 "Hanwang micro-recblock SegImg 分块中…",
             )
-        if linecut_masked_line_routes:
+        if text_route_recblocks:
             started = time.time()
             seg = native_bridge.run_linecut_segimg(
                 linecut_input_image,
@@ -2456,7 +2479,8 @@ def run_micro_recblock(
             seg = {"lines": []}
 
         groups: list[dict] = []
-        for area_idx, area in enumerate(seg.get("lines", []) or []):
+        for segimg_area_idx, area in enumerate(seg.get("lines", []) or []):
+            area_idx = segimg_route_indices[segimg_area_idx]
             for group in area.get("groups", []) or []:
                 group["_area_idx"] = area_idx
                 groups.append(group)
@@ -2589,6 +2613,47 @@ def run_micro_recblock(
                 "native_input_core_height_target": NATIVE_RECOG_TARGET_CORE_HEIGHT,
             })
 
+        direct_segment_owners: dict[
+            tuple[int, tuple[int, int, int, int]],
+            tuple[tuple[int, int, int], tuple[int, int, int, int]],
+        ] = {}
+        for area_idx in sorted(typed_segment_area_indices):
+            route = linecut_masked_line_routes[area_idx]
+            for segment in route.linecut_segments:
+                recog_bbox = _expand_xyxy(
+                    segment.bbox,
+                    width,
+                    height,
+                    pad_x=RECOG_GROUP_CROP_PAD_X,
+                    pad_y=RECOG_GROUP_CROP_PAD_Y,
+                )
+                group_bboxes.append(recog_bbox)
+                group_area_indices.append(area_idx)
+                group_core_bboxes[(area_idx, recog_bbox)] = segment.bbox
+                direct_segment_owners[(area_idx, recog_bbox)] = (segment.key, segment.bbox)
+                recog_group_bboxes_by_route.setdefault(segment.key, []).append(recog_bbox)
+                target_height = (
+                    NATIVE_RECOG_TARGET_CORE_HEIGHT
+                    if _requires_native_line_height_normalization(route, segment.bbox)
+                    else None
+                )
+                segimg_group_audits_by_route.setdefault(segment.key, []).append({
+                    "route_text_slice_bbox": list(route.bbox),
+                    "segimg_group_bbox": None,
+                    "recog_group_bbox": list(recog_bbox),
+                    "recog_group_bbox_before_padding": list(segment.bbox),
+                    "recog_group_bbox_padded": recog_bbox != segment.bbox,
+                    "clipped": False,
+                    "dropped": False,
+                    "native_input_mode": "typed_linecut_segment",
+                    "native_input_core_height": _box_height(segment.bbox),
+                    **(
+                        {"native_input_core_height_target": target_height}
+                        if target_height is not None
+                        else {}
+                    ),
+                })
+
         stats.n_groups = len(group_bboxes)
 
         total_groups = max(1, len(group_bboxes))
@@ -2601,9 +2666,14 @@ def run_micro_recblock(
 
         def update_recog_group_audit(placement: _GroupPlacement, values: dict[str, Any]) -> None:
             route = linecut_masked_line_routes[placement.area_idx]
+            target_segments = (
+                [segment for segment in route.linecut_segments if segment.key == placement.owner_key]
+                if placement.owner_key is not None
+                else list(route.linecut_segments)
+            )
             audits = [
                 item
-                for segment in route.linecut_segments
+                for segment in target_segments
                 for item in segimg_group_audits_by_route.setdefault(segment.key, [])
             ]
             if placement.native_core_height_target is not None:
@@ -2672,8 +2742,9 @@ def run_micro_recblock(
             placement: _GroupPlacement,
         ) -> tuple[int, int, int, int] | None:
             route = linecut_masked_line_routes[placement.area_idx]
+            core_bbox = placement.owner_bbox or route.bbox
             bbox = _expand_xyxy(
-                route.bbox,
+                core_bbox,
                 width,
                 height,
                 pad_x=RECOG_GROUP_CROP_PAD_X,
@@ -2778,13 +2849,14 @@ def run_micro_recblock(
                 )
                 route = linecut_masked_line_routes[placement.area_idx]
                 offset_lines = _offset_line_results(local_lines, dx=offset_left, dy=offset_top)
+                ownership_bbox = placement.owner_bbox or route.bbox
                 if used_route_context_retry:
                     offset_lines = _filter_line_results_to_route_bbox(
                         offset_lines,
-                        placement.group_bbox,
+                        ownership_bbox,
                     )
                 routed = _distribute_linecut_results(
-                    _filter_line_results_to_route_bbox(offset_lines, route.bbox),
+                    _filter_line_results_to_route_bbox(offset_lines, ownership_bbox),
                     route,
                 )
                 for route_key, results in routed.items():
@@ -2840,8 +2912,9 @@ def run_micro_recblock(
                     dx=placement.page_bbox[0],
                     dy=placement.page_bbox[1],
                 )
+                ownership_bbox = placement.owner_bbox or route.bbox
                 routed = _distribute_linecut_results(
-                    _filter_line_results_to_route_bbox(offset_lines, route.bbox),
+                    _filter_line_results_to_route_bbox(offset_lines, ownership_bbox),
                     route,
                 )
                 for route_key, results in routed.items():
@@ -2859,6 +2932,7 @@ def run_micro_recblock(
             placements: list[_GroupPlacement] = []
             for page_bbox, area_idx in zip(chunk_bboxes, chunk_area_indices):
                 left, top, right, bottom = page_bbox
+                owner = direct_segment_owners.get((area_idx, page_bbox))
                 placements.append(
                     _GroupPlacement(
                         area_idx=area_idx,
@@ -2866,9 +2940,20 @@ def run_micro_recblock(
                         group_bbox=group_core_bboxes[(area_idx, page_bbox)],
                         native_core_height_target=(
                             NATIVE_RECOG_TARGET_CORE_HEIGHT
-                            if area_idx in normalized_area_indices
+                            if (
+                                area_idx in normalized_area_indices
+                                or (
+                                    owner is not None
+                                    and _requires_native_line_height_normalization(
+                                        linecut_masked_line_routes[area_idx],
+                                        owner[1],
+                                    )
+                                )
+                            )
                             else None
                         ),
+                        owner_key=owner[0] if owner is not None else None,
+                        owner_bbox=owner[1] if owner is not None else None,
                     )
                 )
             if not placements:

@@ -89,6 +89,103 @@ from app.models.charocr_routing import (
     RoutingSegment,
     TextSliceRoute,
 )
+from tests.charocr_native_route_fixture import build_explicit_native_route_fixture
+
+
+def _gbk_code(char: str) -> int:
+    return int.from_bytes(char.encode("gbk"), "little")
+
+
+def test_mixed_line_recognition_uses_typed_linecut_segments_not_broad_segimg_groups(
+    monkeypatch,
+):
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    image = np.zeros((100, 300, 3), dtype=np.uint8)
+    rows, _fixture_plan, page = build_explicit_native_route_fixture(
+        image,
+        [{
+            "block_label": "text",
+            "block_bbox": [0, 20, 280, 60],
+            "block_content": "中English文",
+        }],
+    )
+    block_uid = rows[0][micro_module.ROUTE_ROW_LAYOUT_BLOCK_UID_KEY]
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 20, 280, 60),
+        segments=(
+            RoutingSegment(kind="text_other", bbox=(0, 20, 40, 60)),
+            RoutingSegment(kind="text_latin", bbox=(40, 20, 240, 60), text="English"),
+            RoutingSegment(kind="text_other", bbox=(240, 20, 280, 60)),
+        ),
+        source="test-explicit",
+    )
+    plan = PageRoutingPlan(
+        page_uid=page.uid,
+        prepass_run_id="test-mixed-line-owned-crops",
+        blocks=(BlockRoutingPlan(
+            block_uid=block_uid,
+            plan=RoutingPlan(
+                lines=(line,),
+                text_slices=tuple(
+                    TextSliceRoute(
+                        line_index=0,
+                        segment_index=index,
+                        bbox=segment.bbox,
+                        carved=True,
+                        kind=segment.kind,
+                    )
+                    for index, segment in enumerate(line.segments)
+                    if segment.kind.startswith("text_")
+                ),
+                has_layout_routes=True,
+            ),
+        ),),
+    )
+    seen_crops: list[tuple[int, int]] = []
+    segimg_called = False
+
+    def fake_segimg(_image_bgr, *, recblocks_xyxy=None, timeout=0):
+        nonlocal segimg_called
+        segimg_called = True
+        raise AssertionError("typed mixed lines must not depend on SegImg grouping")
+
+    def fake_recog(crop, **_kwargs):
+        seen_crops.append(tuple(crop.shape[:2]))
+        char = "中" if len(seen_crops) == 1 else "文"
+        return {"lines": [{"groups": [{
+            "bbox": {"left": 0, "top": 0, "right": crop.shape[1], "bottom": crop.shape[0]},
+            "chars": [{
+                "codes": [_gbk_code(char)],
+                "scores": [8],
+                "bbox": {"left": 12, "top": 12, "right": 32, "bottom": 48},
+            }],
+        }]}]}
+
+    monkeypatch.setattr(micro_module.native_bridge, "run_linecut_segimg", fake_segimg)
+    monkeypatch.setattr(micro_module.native_bridge, "run_linecut_recog", fake_recog)
+    monkeypatch.setattr(micro_module, "_recognize_engcut_masked_lines", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(micro_module, "_reconcile_native_char_geometry", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(micro_module, "_BATCH_DISABLED_FOR_SESSION", True)
+
+    result_rows, stats = micro_module.run_micro_recblock(
+        image,
+        rows,
+        routing_plan=plan,
+        page=page,
+        include_chars=True,
+    )
+
+    assert seen_crops == [(60, 48), (60, 56)]
+    assert not segimg_called
+    assert stats.n_groups == 2
+    assert [char.text for line_result in result_rows[0].lines for char in line_result.chars] == ["中", "文"]
+    direct_audits = [
+        item for item in result_rows[0].segimg_group_audits
+        if item.get("native_input_mode") == "typed_linecut_segment"
+    ]
+    assert len(direct_audits) == 2
 
 
 def test_native_runner_honors_explicit_skip_policy_for_unknown_label():
