@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
-from app.core.ppocr_line_geometry import TextBlockLineGroup
 from app.models.enums import BlockType, OcrPolicy
+from app.models.physical_line_geometry import LineGeometryContext, LineGeometrySeed
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 
 
@@ -79,8 +79,8 @@ class LayoutOwnership:
             self.structural_blocks,
         )
 
-    def text_line_groups(self) -> tuple[TextBlockLineGroup, ...]:
-        """Return raw PP rows grouped only within their text block owner."""
+    def line_geometry_contexts(self) -> tuple[LineGeometryContext, ...]:
+        """Return geometry-only PP seeds grouped by their text block owner."""
         grouped: dict[str, tuple[LayoutBlockCandidate, list[PpOcrV6LineHint]]] = {}
         for decision in self.decisions:
             if (
@@ -94,10 +94,19 @@ class LayoutOwnership:
                 _replace_bbox(decision.line, decision.line_bbox)
             )
         return tuple(
-            TextBlockLineGroup(
+            LineGeometryContext(
                 block_uid=block_uid,
                 block_bbox=target.bbox,
-                lines=tuple(lines),
+                seeds=tuple(
+                    LineGeometrySeed(
+                        source_index=line.index,
+                        bbox=line.bbox,
+                        text_axis=line.text_axis,
+                        orientation_angle=line.orientation_angle,
+                        has_word_geometry=bool(line.words),
+                    )
+                    for line in lines
+                ),
                 excluded_bboxes=tuple(
                     candidate.bbox
                     for candidate in self.structural_blocks

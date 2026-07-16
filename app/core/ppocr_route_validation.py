@@ -38,18 +38,6 @@ def unmatched_prepass_line_issue(
     )
 
 
-def text_container_clip_empty_issue(
-    line_index: int,
-    bbox: XYXY,
-) -> RouteValidationIssue:
-    return RouteValidationIssue(
-        code="text_container_clip_empty",
-        message="text layout block does not overlap its selected PP-OCRv6 line",
-        line_index=line_index,
-        bbox=bbox,
-    )
-
-
 def missing_rotated_line_orientation_issue(
     line_index: int,
     bbox: XYXY,
@@ -428,7 +416,6 @@ __all__ = [
     "invalid_prepass_line_bbox_issue",
     "overlapping_formula_masks_issue",
     "partition_issues_to_route_issues",
-    "text_container_clip_empty_issue",
     "unmatched_prepass_line_issue",
     "validate_compiled_page_routing_plan",
     "validate_formula_masks",

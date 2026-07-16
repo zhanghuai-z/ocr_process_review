@@ -22,16 +22,17 @@ from app.core.ocr_ir import is_cjk_char
 from app.core.charocr_text_partition import partition_charocr_text_region
 from app.core.ppocr_layout_ownership import (
     LayoutBlockCandidate,
+    LayoutOwnership,
     build_layout_ownership,
     structural_masks_for_line,
 )
-from app.core.ppocr_line_geometry import normalize_physical_text_rows
+from app.geometry.physical_line import resolve_physical_lines
+from app.models.physical_line_geometry import ResolvedPhysicalLine
 from app.core.ppocr_route_validation import (
     invalid_prepass_line_bbox_issue,
     missing_rotated_line_orientation_issue,
     overlapping_formula_masks_issue,
     partition_issues_to_route_issues,
-    text_container_clip_empty_issue,
     unmatched_prepass_line_issue,
     validate_compiled_page_routing_plan,
     validate_formula_masks,
@@ -77,28 +78,35 @@ def compile_page_routing_plan(
     for candidate in ownership.text_blocks:
         if _is_vertical_text_block(candidate.block):
             routes_by_block_uid[candidate.block.uid].append(_vertical_text_route(candidate))
-    physical_rows = normalize_physical_text_rows(
-        ownership.text_line_groups(),
+    physical_rows = resolve_physical_lines(
+        ownership.line_geometry_contexts(),
         page_image_bgr,
     )
     issues: list[RouteValidationIssue] = []
     for raw_prepass_line in prepass.lines:
         normalized_row = physical_rows.row_for_source_index(raw_prepass_line.index)
-        if normalized_row is not None and normalized_row.line.index != raw_prepass_line.index:
+        if (
+            normalized_row is not None
+            and normalized_row.representative_index != raw_prepass_line.index
+        ):
             continue
         prepass_line = (
-            normalized_row.line
+            _materialize_resolved_prepass_line(normalized_row, ownership)
             if normalized_row is not None
             else ownership.ownership_for(raw_prepass_line).line
         )
         line_ownership = ownership.ownership_for(prepass_line)
-        line_bbox = line_ownership.line_bbox
+        line_bbox = prepass_line.bbox
         if not _is_nonempty(line_bbox):
             issues.append(invalid_prepass_line_bbox_issue(prepass_line.index, line_bbox))
             continue
         if line_ownership.is_structural_exclusion:
             continue
-        target = line_ownership.text_block
+        target = (
+            _text_block_by_uid(ownership, normalized_row.owner_block_uid)
+            if normalized_row is not None
+            else line_ownership.text_block
+        )
         if target is None:
             issues.append(unmatched_prepass_line_issue(prepass_line.index, line_bbox))
             continue
@@ -113,16 +121,8 @@ def compile_page_routing_plan(
             )
             continue
 
-        clipped_line = _clip_line_to_text_block_primary_axis(
-            line_bbox,
-            target.bbox,
-            text_axis=prepass_line.text_axis,
-        )
-        if clipped_line is None:
-            issues.append(text_container_clip_empty_issue(prepass_line.index, line_bbox))
-            continue
         structural_masks = structural_masks_for_line(
-            clipped_line,
+            line_bbox,
             ownership.structural_blocks,
         )
         formula_overlap = validate_formula_masks(structural_masks)
@@ -131,7 +131,7 @@ def compile_page_routing_plan(
             continue
         segments, partition_issues = _segments_for_line(
             prepass_line,
-            clipped_line,
+            line_bbox,
             structural_masks,
             page_image_bgr=page_image_bgr,
         )
@@ -148,7 +148,7 @@ def compile_page_routing_plan(
             continue
         route = RoutingLine(
             index=prepass_line.index,
-            bbox=clipped_line,
+            bbox=line_bbox,
             segments=tuple(segments),
             source=ROUTING_SOURCE_PPOCR_V6_PREPASS,
             text_axis=prepass_line.text_axis,
@@ -305,27 +305,42 @@ def _line_requires_text_partition(text: str) -> bool:
     return any(char.isascii() and char.isalnum() for char in str(text or ""))
 
 
-def _clip_line_to_text_block_primary_axis(
-    line_bbox: XYXY,
-    block_bbox: XYXY,
-    *,
-    text_axis: str,
-) -> XYXY | None:
-    """Limit a physical row to its layout owner along the reading axis.
+def _materialize_resolved_prepass_line(
+    row: ResolvedPhysicalLine,
+    ownership: LayoutOwnership,
+) -> PpOcrV6LineHint:
+    """Reattach immutable PP text metadata after geometry resolution."""
+    source_lines = {
+        decision.line.index: decision.line
+        for decision in ownership.decisions
+    }
+    ordered = [source_lines[index] for index in row.source_indices]
+    words = [
+        word
+        for line in ordered
+        for word in sorted(line.words, key=lambda item: item.token_index)
+    ]
+    return PpOcrV6LineHint(
+        index=row.representative_index,
+        text="".join(line.text for line in ordered),
+        bbox=row.bbox,
+        words=tuple(
+            replace(word, line_index=row.representative_index, token_index=index)
+            for index, word in enumerate(words)
+        ),
+        text_axis=row.text_axis,
+        orientation_angle=row.orientation_angle,
+    )
 
-    Derived foreground geometry owns the complete glyph extent. Layout geometry
-    selects the text container and limits cross-column or cross-block spill
-    along x for a horizontal row and y for a rotated row. The glyph cross-axis
-    extent remains owned by PP/foreground evidence so a tight layout box cannot
-    cut the top/bottom (or left/right after rotation) of a glyph.
-    """
-    if text_axis == "vertical":
-        y1 = max(line_bbox[1], block_bbox[1])
-        y2 = min(line_bbox[3], block_bbox[3])
-        return (line_bbox[0], y1, line_bbox[2], y2) if y2 > y1 else None
-    x1 = max(line_bbox[0], block_bbox[0])
-    x2 = min(line_bbox[2], block_bbox[2])
-    return (x1, line_bbox[1], x2, line_bbox[3]) if x2 > x1 else None
+
+def _text_block_by_uid(
+    ownership: LayoutOwnership,
+    block_uid: str,
+) -> LayoutBlockCandidate | None:
+    return next(
+        (candidate for candidate in ownership.text_blocks if candidate.block.uid == block_uid),
+        None,
+    )
 
 
 def _is_nonempty(bbox: XYXY) -> bool:

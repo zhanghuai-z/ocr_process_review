@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OCR Process 抽象生产链</title>
+  <style>
+    :root {
+      --bg: #f3f4f1;
+      --panel: #ffffff;
+      --ink: #202522;
+      --muted: #68706b;
+      --line: #d9ded9;
+      --green: #2e654c;
+      --green-soft: #e7f1eb;
+      --blue: #315f86;
+      --blue-soft: #e8f0f7;
+      --amber: #8b5d1a;
+      --amber-soft: #faf0df;
+      --red: #963e38;
+      --red-soft: #f8e8e6;
+      --shadow: 0 12px 36px rgba(31, 43, 36, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+      letter-spacing: 0;
+    }
+    header {
+      padding: 24px 32px 20px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.9);
+    }
+    h1 { margin: 0 0 6px; font-size: 24px; }
+    header p, .intro { margin: 0; color: var(--muted); line-height: 1.7; }
+    main { padding: 26px 32px 44px; }
+
+    .chain-wrap {
+      overflow-x: auto;
+      padding: 4px 4px 22px;
+    }
+    .chain {
+      display: flex;
+      align-items: stretch;
+      min-width: 1220px;
+    }
+    .module-button {
+      width: 158px;
+      min-height: 116px;
+      padding: 15px 13px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      cursor: pointer;
+      text-align: left;
+      font: inherit;
+      box-shadow: var(--shadow);
+    }
+    .module-button:hover, .module-button.active {
+      border-color: var(--green);
+      background: var(--green-soft);
+    }
+    .module-index { display: block; color: var(--muted); font-size: 11px; }
+    .module-button strong { display: block; margin: 8px 0 7px; font-size: 16px; }
+    .module-button small { display: block; color: var(--muted); line-height: 1.5; }
+    .connector {
+      position: relative;
+      flex: 0 0 34px;
+    }
+    .connector::before {
+      content: "";
+      position: absolute;
+      left: 4px;
+      right: 7px;
+      top: 57px;
+      border-top: 1px solid #8f9892;
+    }
+    .connector::after {
+      content: "";
+      position: absolute;
+      right: 4px;
+      top: 53px;
+      width: 7px;
+      height: 7px;
+      border-top: 1px solid #8f9892;
+      border-right: 1px solid #8f9892;
+      transform: rotate(45deg);
+    }
+
+    .packet-strip {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(140px, 1fr));
+      min-width: 1220px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .packet-strip span { padding: 7px 10px; border-top: 1px dashed var(--line); }
+    code { font: 12px "JetBrains Mono", Consolas, monospace; }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 310px;
+      min-height: 510px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .module-detail { display: none; padding: 28px; }
+    .module-detail.active { display: block; }
+    .module-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 24px;
+    }
+    .module-head h2 { margin: 0 0 7px; font-size: 21px; }
+    .module-head p { margin: 0; max-width: 760px; color: var(--muted); line-height: 1.7; }
+    .tag {
+      display: inline-flex;
+      padding: 3px 8px;
+      border: 1px solid currentColor;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .truth { color: var(--red); background: var(--red-soft); }
+    .derived { color: var(--green); background: var(--green-soft); }
+    .planned { color: var(--blue); background: var(--blue-soft); }
+    .boundary { color: var(--amber); background: var(--amber-soft); }
+
+    .layers {
+      display: grid;
+      gap: 12px;
+    }
+    .layer {
+      display: grid;
+      grid-template-columns: 52px minmax(180px, 240px) minmax(260px, 1fr) auto;
+      gap: 14px;
+      align-items: center;
+      min-height: 74px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-left: 4px solid var(--green);
+    }
+    .layer.new { border-left-color: var(--blue); background: #fbfdff; }
+    .layer.boundary-layer { border-left-color: var(--amber); }
+    .layer-number {
+      color: var(--muted);
+      font: 12px "JetBrains Mono", Consolas, monospace;
+    }
+    .layer strong { display: block; margin-bottom: 4px; }
+    .layer-name small { color: var(--muted); }
+    .layer p { margin: 0; color: var(--muted); line-height: 1.65; }
+
+    aside {
+      padding: 26px 22px;
+      border-left: 1px solid var(--line);
+      background: #fafbf9;
+    }
+    aside h3 { margin: 0 0 18px; font-size: 15px; }
+    .contract { margin-bottom: 20px; }
+    .contract dt { margin-top: 13px; color: var(--muted); font-size: 11px; }
+    .contract dd { margin: 4px 0 0; line-height: 1.6; }
+    .rule {
+      margin-top: 16px;
+      padding: 12px;
+      border-left: 3px solid var(--red);
+      background: var(--red-soft);
+      line-height: 1.65;
+    }
+
+    @media (max-width: 920px) {
+      header, main { padding-left: 16px; padding-right: 16px; }
+      .workspace { grid-template-columns: 1fr; }
+      aside { border-left: 0; border-top: 1px solid var(--line); }
+      .layer { grid-template-columns: 38px 1fr; }
+      .layer p, .layer .tag { grid-column: 2; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>OCR Process 抽象生产链</h1>
+    <p>顶层只表示生产模块；选择模块后，下方展开其职责层。这里不表示代码目录，也不是时序图。</p>
+  </header>
+
+  <main>
+    <div class="chain-wrap">
+      <div class="chain" aria-label="顶层生产链">
+        <button class="module-button active" data-module="import"><span class="module-index">MODULE 01</span><strong>输入与项目</strong><small>建立页面和项目身份</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="layout"><span class="module-index">MODULE 02</span><strong>版面理解</strong><small>形成可人工修正的版面真值</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="routing"><span class="module-index">MODULE 03</span><strong>CharOCR 前路由</strong><small>把页面编译成合格 OCR 输入</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="charocr"><span class="module-index">MODULE 04</span><strong>字符 OCR</strong><small>执行 LineCut / EngCut</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="observation"><span class="module-index">MODULE 05</span><strong>识别观察</strong><small>保存文本与字符几何证据</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="proof"><span class="module-index">MODULE 06</span><strong>人工校对</strong><small>横校、纵校共享人工终稿</small></button>
+        <span class="connector"></span>
+        <button class="module-button" data-module="export"><span class="module-index">MODULE 07</span><strong>导出与归档</strong><small>生成统一 IR 和目标文件</small></button>
+      </div>
+      <div class="packet-strip" aria-label="模块间数据包">
+        <span><code>PageSource</code></span>
+        <span><code>LayoutSnapshot</code></span>
+        <span><code>PageRoutingPlan</code></span>
+        <span><code>NativeOcrResult</code></span>
+        <span><code>OcrObservation</code></span>
+        <span><code>ProofState</code></span>
+        <span><code>ExportIR</code></span>
+      </div>
+    </div>
+
+    <section class="workspace">
+      <div>
+        <article class="module-detail active" id="module-import">
+          <div class="module-head"><div><h2>输入与项目模块</h2><p>把用户文件变成具有稳定身份的页面集合。只处理来源、页面图像和项目生命周期，不解释版面或 OCR 内容。</p></div><span class="tag truth">页面来源真值</span></div>
+          <div class="layers">
+            <div class="layer"><span class="layer-number">01</span><div class="layer-name"><strong>Source Intake</strong><small>文件接收层</small></div><p>接收图片或 PDF，记录原始来源；不会把临时目录当作业务身份。</p><span class="tag derived">输入</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Page Materialization</strong><small>页面实体化层</small></div><p>生成稳定页面图像、尺寸、页码和页面 UID。</p><span class="tag truth">Page</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Project Session</strong><small>项目会话层</small></div><p>管理当前项目绑定路径、保存、另存为和关闭，不引入用户不可见的项目真值。</p><span class="tag boundary">持久化边界</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-layout">
+          <div class="module-head"><div><h2>版面理解模块</h2><p>将 Paddle VL 的自动观察转成当前版面事实，并允许人工对框、类型和顺序进行修正。</p></div><span class="tag truth">LayoutSnapshot</span></div>
+          <div class="layers">
+            <div class="layer boundary-layer"><span class="layer-number">01</span><div class="layer-name"><strong>Vendor Observation</strong><small>供应商观察层</small></div><p>保留 VL1.6 原始块、标签、文本和坐标，作为不可变证据。</p><span class="tag boundary">Raw Artifact</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Layout Normalization</strong><small>版面标准化层</small></div><p>把供应商字段转换为统一块类型、坐标和来源信息，不加入业务 fallback。</p><span class="tag derived">Normalized</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Layout Truth</strong><small>版面真值层</small></div><p>形成当前页面的块身份、属性、bbox、顺序和 OCR policy。</p><span class="tag truth">唯一可写事实</span></div>
+            <div class="layer"><span class="layer-number">04</span><div class="layer-name"><strong>Manual Layout Edit</strong><small>人工编辑层</small></div><p>新增、删除、移动、改类型和合并框；所有修改只通过统一编辑命令进入版面真值。</p><span class="tag derived">Command</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-routing">
+          <div class="module-head"><div><h2>CharOCR 前路由模块</h2><p>读取版面事实、PP-OCRv6 行观察和页面像素，生成 CharOCR 唯一可消费的页面执行计划。</p></div><span class="tag derived">PageRoutingPlan</span></div>
+          <div class="layers">
+            <div class="layer boundary-layer"><span class="layer-number">01</span><div class="layer-name"><strong>Prepass Observation</strong><small>PP 行观察层</small></div><p>提供原始行种子、文本提示、方向、角度与 mask；原始观察保持只读。</p><span class="tag boundary">PP-OCRv6</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Layout Ownership</strong><small>版面归属层</small></div><p>确定每条 PP 行属于哪个文本块，并标出公式、表格和图像等排除区域。版面框只决定归属，不裁文字。</p><span class="tag derived">Ownership</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Structural Exclusion</strong><small>结构排除层</small></div><p>公式、表格、图片只声明自身区域不可送入文本 OCR，不反向改变物理行几何。</p><span class="tag derived">Masks</span></div>
+            <div class="layer new"><span class="layer-number">04</span><div class="layer-name"><strong>PhysicalLineGeometryResolver</strong><small>物理行几何层</small></div><p>合并同一物理行的 PP 碎框，为前景组件建立唯一行归属，并一次性确定最终四边；阅读轴保留 PP 行包络并允许补全，横截面按真实墨迹收紧。</p><span class="tag planned">新增/替换</span></div>
+            <div class="layer"><span class="layer-number">05</span><div class="layer-name"><strong>Text Script Partition</strong><small>文字分流层</small></div><p>在物理行稳定后，将可识别区域分为 Latin/Digit 与 Other，决定 EngCut 和 LineCut 输入。</p><span class="tag derived">Segments</span></div>
+            <div class="layer"><span class="layer-number">06</span><div class="layer-name"><strong>Plan Compiler</strong><small>计划封装层</small></div><p>把块、物理行和分段封装成不可变执行计划，不再重新推测几何或版面属性。</p><span class="tag derived">Routing Plan</span></div>
+            <div class="layer"><span class="layer-number">07</span><div class="layer-name"><strong>Route Validation</strong><small>路由门禁层</small></div><p>发现未归属、重复归属或非法重叠时只阻断对应页，并给出明确问题，不静默 fallback。</p><span class="tag boundary">Page Gate</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-charocr">
+          <div class="module-head"><div><h2>字符 OCR 模块</h2><p>只执行已经通过门禁的 OCR 输入，不重新解释版面，不自行寻找公式或修改路由。</p></div><span class="tag boundary">Native Boundary</span></div>
+          <div class="layers">
+            <div class="layer"><span class="layer-number">01</span><div class="layer-name"><strong>Dispatch</strong><small>执行分派层</small></div><p>按照计划把 Latin/Digit 送往 EngCut，把 Other 送往 LineCut。</p><span class="tag derived">Deterministic</span></div>
+            <div class="layer boundary-layer"><span class="layer-number">02</span><div class="layer-name"><strong>Native Adapter</strong><small>原生桥接层</small></div><p>管理 DLL/进程调用、输入图像、并发和 native cache，不泄露到业务模型。</p><span class="tag boundary">External Engine</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Result Translation</strong><small>结果翻译层</small></div><p>把原生返回转为统一文本、字符候选、置信度和 bbox 观察。</p><span class="tag derived">NativeOcrResult</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-observation">
+          <div class="module-head"><div><h2>识别观察模块</h2><p>把 OCR 引擎结果整理成可审计的识别事实。它是机器观察，不是人工终稿。</p></div><span class="tag derived">OcrObservation</span></div>
+          <div class="layers">
+            <div class="layer"><span class="layer-number">01</span><div class="layer-name"><strong>Line Observation</strong><small>行观察层</small></div><p>保存行级文本、bbox、来源和置信度，并关联版面块与路由来源。</p><span class="tag derived">Line</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Character Observation</strong><small>字符观察层</small></div><p>保存字符文本、字符框、token 来源和识别分支。</p><span class="tag derived">Char</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Geometry Reconciliation</strong><small>字符几何协调层</small></div><p>用像素证据处理大字、重叠框和碎框；优先保证字符几何正确，不篡改版面真值。</p><span class="tag derived">Geometry</span></div>
+            <div class="layer"><span class="layer-number">04</span><div class="layer-name"><strong>Observation Persistence</strong><small>观察持久化层</small></div><p>将机器观察与来源证据一起保存，支持重新 OCR 和审计。</p><span class="tag boundary">Persist</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-proof">
+          <div class="module-head"><div><h2>人工校对模块</h2><p>横校和纵校是同一份人工校对事实的两个视图。页面、字符集合和裁图都是引用上下文，不是独立文本分支。</p></div><span class="tag truth">ProofState</span></div>
+          <div class="layers">
+            <div class="layer"><span class="layer-number">01</span><div class="layer-name"><strong>Proof Index</strong><small>校对索引层</small></div><p>根据 OCR 观察建立页面行索引、字符索引和相同字集合，不复制人工文本。</p><span class="tag derived">Projection</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Horizontal View</strong><small>横校视图层</small></div><p>按行对照原稿与文本，提交对共享终稿的编辑命令。</p><span class="tag derived">View</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Vertical View</strong><small>纵校视图层</small></div><p>按字符集合检查同字差异，读取同一上下文并提交同一种编辑命令。</p><span class="tag derived">View</span></div>
+            <div class="layer"><span class="layer-number">04</span><div class="layer-name"><strong>Proof Commit</strong><small>校对提交层</small></div><p>统一处理文本、状态、probe、撤销和冲突，只有提交点可以修改人工终稿。</p><span class="tag truth">Commit</span></div>
+            <div class="layer"><span class="layer-number">05</span><div class="layer-name"><strong>Proof Persistence</strong><small>校对持久化层</small></div><p>按作用域事务保存终稿与关联状态，不重写未变更行。</p><span class="tag boundary">Transaction</span></div>
+          </div>
+        </article>
+
+        <article class="module-detail" id="module-export">
+          <div class="module-head"><div><h2>导出与归档模块</h2><p>只消费已确定的版面、OCR 观察和人工终稿，生成格式中立 IR，再输出具体文件。</p></div><span class="tag derived">ExportIR</span></div>
+          <div class="layers">
+            <div class="layer"><span class="layer-number">01</span><div class="layer-name"><strong>Export Projection</strong><small>导出投影层</small></div><p>选择最终文本、结构元素、页面顺序和来源引用，不修改项目事实。</p><span class="tag derived">Projection</span></div>
+            <div class="layer"><span class="layer-number">02</span><div class="layer-name"><strong>Export IR</strong><small>格式中立层</small></div><p>统一表达段落、标题、公式、表格、图片、字符几何和溯源。</p><span class="tag derived">IR</span></div>
+            <div class="layer"><span class="layer-number">03</span><div class="layer-name"><strong>Format Renderer</strong><small>格式渲染层</small></div><p>分别生成双层 PDF、Markdown、DOCX、HTML、XML 等文件。</p><span class="tag boundary">Output</span></div>
+            <div class="layer"><span class="layer-number">04</span><div class="layer-name"><strong>Archive</strong><small>归档层</small></div><p>保存项目、原始证据和导出成果，保证后续能够重开与追溯。</p><span class="tag boundary">Archive</span></div>
+          </div>
+        </article>
+      </div>
+
+      <aside>
+        <h3>当前模块契约</h3>
+        <dl class="contract" id="contract"></dl>
+        <div class="rule" id="rule"></div>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const contracts = {
+      import: {input: "用户图片 / PDF", output: "PageSource + 页面图像", write: "页面身份、项目绑定", rule: "不得把临时缓存路径当成页面或项目身份。"},
+      layout: {input: "PageSource + Paddle VL 原始观察", output: "LayoutSnapshot", write: "版面块、类型、bbox、顺序", rule: "版面真值决定区域归属，但不是最后一个字符像素的硬边界。"},
+      routing: {input: "LayoutSnapshot + PP-OCRv6 Artifact + 页面像素", output: "PageRoutingPlan", write: "不写业务真值，只生成派生计划", rule: "所有送入 CharOCR 的 crop 必须在本模块内完成归属、几何、分流和验证。"},
+      charocr: {input: "PageRoutingPlan", output: "NativeOcrResult", write: "只写原生运行缓存", rule: "引擎只识别已批准区域，不得反向修改版面或重编路由。"},
+      observation: {input: "NativeOcrResult + Routing source refs", output: "OcrObservation", write: "机器识别观察", rule: "机器观察和人工终稿必须保持可区分、可追溯。"},
+      proof: {input: "OcrObservation + Page image", output: "ProofState", write: "人工终稿、校对状态、probe", rule: "横校和纵校只能修改同一份校对事实，不能维护两套文本。"},
+      export: {input: "LayoutSnapshot + OcrObservation + ProofState", output: "ExportIR + 目标文件", write: "导出文件和归档包", rule: "导出修复只能改变导出投影，不能反写业务真值。"}
+    };
+
+    function showModule(name) {
+      document.querySelectorAll('.module-button').forEach(button => {
+        button.classList.toggle('active', button.dataset.module === name);
+      });
+      document.querySelectorAll('.module-detail').forEach(detail => {
+        detail.classList.toggle('active', detail.id === `module-${name}`);
+      });
+      const item = contracts[name];
+      document.getElementById('contract').innerHTML = `
+        <dt>输入数据包</dt><dd><code>${item.input}</code></dd>
+        <dt>输出数据包</dt><dd><code>${item.output}</code></dd>
+        <dt>允许写入</dt><dd>${item.write}</dd>`;
+      document.getElementById('rule').textContent = item.rule;
+    }
+
+    document.querySelectorAll('.module-button').forEach(button => {
+      button.addEventListener('click', () => showModule(button.dataset.module));
+    });
+    showModule('import');
+  </script>
+</body>
+</html>

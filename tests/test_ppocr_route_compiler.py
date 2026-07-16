@@ -76,7 +76,7 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
     assert len(plan.for_block("text-1").lines) == 1
 
 
-def test_text_block_limits_row_width_without_clipping_ppocr_vertical_extent():
+def test_text_block_owns_row_without_clipping_ppocr_geometry():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (10, 10, 90, 30), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -88,11 +88,11 @@ def test_text_block_limits_row_width_without_clipping_ppocr_vertical_extent():
 
     assert plan.is_dispatchable is True
     route = plan.for_block("text-1").lines[0]
-    assert route.bbox == (10, 0, 90, 40)
-    assert route.segments[0].bbox == (10, 0, 90, 40)
+    assert route.bbox == (0, 0, 100, 40)
+    assert route.segments[0].bbox == (0, 0, 100, 40)
 
 
-def test_compiler_preserves_rotated_ppocr_axis_and_clips_along_reading_axis():
+def test_compiler_preserves_rotated_ppocr_axis_and_geometry_beyond_layout_edge():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (20, 40, 80, 180), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -114,7 +114,7 @@ def test_compiler_preserves_rotated_ppocr_axis_and_clips_along_reading_axis():
 
     assert plan.is_dispatchable is True
     route = plan.for_block("text-1").lines[0]
-    assert route.bbox == (10, 40, 90, 180)
+    assert route.bbox == (10, 20, 90, 200)
     assert route.text_axis == "vertical"
     assert route.orientation_angle == 0
 

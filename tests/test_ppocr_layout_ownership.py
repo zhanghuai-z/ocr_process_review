@@ -55,7 +55,7 @@ def test_layout_ownership_uses_snapshot_blocks_and_structural_exclusion():
     assert ownership.decisions[0].is_structural_exclusion is False
     assert ownership.decisions[1].structural_block.block.uid == "table"
     assert ownership.decisions[1].is_structural_exclusion is True
-    assert [group.block_uid for group in ownership.text_line_groups()] == ["text"]
+    assert [group.block_uid for group in ownership.line_geometry_contexts()] == ["text"]
 
 
 def test_layout_ownership_does_not_create_a_physical_group_for_vertical_text():
@@ -83,4 +83,4 @@ def test_layout_ownership_does_not_create_a_physical_group_for_vertical_text():
     )
 
     assert ownership.decisions[0].is_vertical_text is True
-    assert ownership.text_line_groups() == ()
+    assert ownership.line_geometry_contexts() == ()
