@@ -23,6 +23,7 @@ class BlockVlObservationStatus(str, Enum):
 
 
 class BlockAlignmentStatus(str, Enum):
+    NOT_REQUIRED = "not_required"
     EXACT = "exact"
     MATCHED = "matched"
     EMPTY = "empty"

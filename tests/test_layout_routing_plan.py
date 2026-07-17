@@ -7,6 +7,7 @@ from app.models.charocr_routing import (
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
     PpOcrSymbolObservation,
+    VlSemanticMarkerObservation,
     RouteValidationIssue,
     RoutingPlan,
     TextSliceRoute,
@@ -311,6 +312,70 @@ def test_symbol_observations_round_trip_on_physical_routing_line():
         "trailing_space": True,
     }]
     assert restored.ppocr_symbol_observations == (observation,)
+
+
+def test_vl_marker_observations_round_trip_on_physical_routing_line():
+    observation = VlSemanticMarkerObservation(
+        text="⑫",
+        bbox=(8, 12, 24, 30),
+        proposal_bbox=(4, 8, 38, 34),
+    )
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
+        vl_marker_observations=(observation,),
+    )
+
+    record = routing_line_to_record(line)
+    restored = routing_line_from_record(
+        0,
+        record,
+        source_field=LAYOUT_ROUTE_SOURCE_FIELD,
+    )
+
+    assert record["vl_marker_observations"] == [{
+        "text": "⑫",
+        "bbox": [8, 12, 24, 30],
+        "proposal_bbox": [4, 8, 38, 34],
+    }]
+    assert restored.vl_marker_observations == (observation,)
+
+
+def test_hanwang_reconciles_explicit_vl_marker_with_linecut_geometry():
+    import app.engines.hanwang.micro_recblock as micro_module
+
+    route = RoutingLine(
+        index=0,
+        bbox=(0, 0, 130, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 130, 40)),),
+        vl_marker_observations=(VlSemanticMarkerObservation(
+            text="⑫",
+            bbox=(8, 10, 24, 32),
+            proposal_bbox=(4, 6, 38, 36),
+        ),),
+    )
+    grouped = {(0, 0, 0): [micro_module.LineResult(
+        text="12Barry",
+        bbox=(6, 8, 120, 34),
+        chars=[
+            micro_module.CharResult(text="1", bbox=(8, 10, 14, 32)),
+            micro_module.CharResult(text="2", bbox=(15, 10, 24, 32)),
+            micro_module.CharResult(text="Barry", bbox=(42, 8, 110, 34)),
+        ],
+    )]}
+
+    lines = micro_module._assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped,
+    )
+
+    assert lines[0].text == "⑫Barry"
+    assert [char.text for char in lines[0].chars] == ["⑫", "Barry"]
+    assert lines[0].chars[0].bbox == (8, 10, 24, 32)
+    assert lines[0].chars[0].source == "paddlevl:semantic_marker"
 
 
 def test_hanwang_assembles_explicit_text_segment_kinds():

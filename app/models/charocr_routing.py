@@ -74,6 +74,25 @@ class PpOcrSymbolObservation:
 
 
 @dataclass(frozen=True)
+class VlSemanticMarkerObservation:
+    """One explicit VL marker bound to foreground-measured page geometry."""
+
+    text: str
+    bbox: XYXY
+    proposal_bbox: XYXY
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+        object.__setattr__(self, "proposal_bbox", xyxy(self.proposal_bbox))
+        if not self.text or any(char.isspace() for char in self.text):
+            raise ValueError("VL semantic marker observation requires non-space text")
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("VL semantic marker observation requires non-empty foreground geometry")
+        if self.proposal_bbox[2] <= self.proposal_bbox[0] or self.proposal_bbox[3] <= self.proposal_bbox[1]:
+            raise ValueError("VL semantic marker proposal requires non-empty geometry")
+
+
+@dataclass(frozen=True)
 class RoutingSegment:
     """One typed two-dimensional region on a physical routing line.
 
@@ -114,11 +133,13 @@ class RoutingLine:
     text_axis: str = TEXT_AXIS_HORIZONTAL
     orientation_angle: int = -1
     ppocr_symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
+    vl_marker_observations: tuple[VlSemanticMarkerObservation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
         object.__setattr__(self, "segments", tuple(self.segments))
         object.__setattr__(self, "ppocr_symbol_observations", tuple(self.ppocr_symbol_observations))
+        object.__setattr__(self, "vl_marker_observations", tuple(self.vl_marker_observations))
         if any(not isinstance(segment, RoutingSegment) for segment in self.segments):
             raise TypeError("routing line segments require typed values")
         if self.text_axis not in {TEXT_AXIS_HORIZONTAL, TEXT_AXIS_VERTICAL}:
@@ -132,6 +153,11 @@ class RoutingLine:
             for observation in self.ppocr_symbol_observations
         ):
             raise TypeError("routing line symbol observations require typed values")
+        if any(
+            not isinstance(observation, VlSemanticMarkerObservation)
+            for observation in self.vl_marker_observations
+        ):
+            raise TypeError("routing line VL marker observations require typed values")
 
     @property
     def has_formula(self) -> bool:
@@ -297,6 +323,15 @@ def routing_line_from_record(
             for item in route.get("ppocr_symbol_observations", [])
             if isinstance(item, dict)
         ),
+        vl_marker_observations=tuple(
+            VlSemanticMarkerObservation(
+                text=str(item.get("text") or ""),
+                bbox=xyxy(item.get("bbox")),
+                proposal_bbox=xyxy(item.get("proposal_bbox")),
+            )
+            for item in route.get("vl_marker_observations", [])
+            if isinstance(item, dict)
+        ),
     )
 
 
@@ -364,6 +399,15 @@ def routing_line_to_record(
             }
             for observation in line.ppocr_symbol_observations
         ]
+    if line.vl_marker_observations:
+        record["vl_marker_observations"] = [
+            {
+                "text": observation.text,
+                "bbox": list(observation.bbox),
+                "proposal_bbox": list(observation.proposal_bbox),
+            }
+            for observation in line.vl_marker_observations
+        ]
     return record
 
 
@@ -408,6 +452,7 @@ __all__ = [
     "PageRoutingPlan",
     "PpOcrLatinTokenObservation",
     "PpOcrSymbolObservation",
+    "VlSemanticMarkerObservation",
     "RouteDiagnostic",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",

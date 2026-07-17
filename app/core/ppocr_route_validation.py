@@ -304,6 +304,29 @@ def validate_compiled_page_routing_plan(
                         (segment.bbox, segment.kind),
                     )
 
+            for observation in routing_line.vl_marker_observations:
+                if not _is_in_page(observation.bbox, page_width, page_height):
+                    issues.append(RouteValidationIssue(
+                        code="compiled_vl_marker_out_of_page",
+                        message="VL semantic marker foreground is outside page bounds",
+                        line_index=routing_line.index,
+                        bbox=observation.bbox,
+                    ))
+                elif not _contains_bbox(routing_line.bbox, observation.bbox):
+                    issues.append(RouteValidationIssue(
+                        code="compiled_vl_marker_outside_line",
+                        message="VL semantic marker foreground is outside its routing line",
+                        line_index=routing_line.index,
+                        bbox=observation.bbox,
+                    ))
+                if not _contains_bbox(observation.proposal_bbox, observation.bbox):
+                    issues.append(RouteValidationIssue(
+                        code="compiled_vl_marker_outside_proposal",
+                        message="VL semantic marker foreground is outside its aligned proposal",
+                        line_index=routing_line.index,
+                        bbox=observation.bbox,
+                    ))
+
         seen_slice_identities: set[tuple[int, int]] = set()
         for text_slice in block_plan.text_slices:
             identity = (text_slice.line_index, text_slice.segment_index)

@@ -89,7 +89,7 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
     assert len(plan.for_block("text-1").lines) == 1
 
 
-def test_compiler_requires_exact_block_local_vl_pp_text_alignment():
+def test_compiler_does_not_align_ordinary_vl_and_pp_text_streams():
     from app.core.layout_scope import layout_snapshot_fingerprint
     from app.models.ocr_routing_observation import (
         BlockVlObservation,
@@ -113,14 +113,14 @@ def test_compiler_requires_exact_block_local_vl_pp_text_alignment():
             regions=(BlockVlTextRegion(0, "text", text, (0, 0, 120, 40)),),
         )
 
-    exact = compile_page_routing_plan(
+    matching_text = compile_page_routing_plan(
         snapshot,
         prepass,
         page_width=120,
         page_height=40,
         block_vl_observations=(observation("甲乙"),),
     )
-    mismatch = compile_page_routing_plan(
+    differing_text = compile_page_routing_plan(
         snapshot,
         prepass,
         page_width=120,
@@ -128,12 +128,11 @@ def test_compiler_requires_exact_block_local_vl_pp_text_alignment():
         block_vl_observations=(observation("甲丙"),),
     )
 
-    assert exact.is_dispatchable is True
-    assert exact.alignments[0].status.value == "exact"
-    assert mismatch.is_dispatchable is False
-    assert [issue.code for issue in mismatch.validation_issues] == [
-        "ambiguous_block_text_alignment",
-    ]
+    assert matching_text.is_dispatchable is True
+    assert differing_text.is_dispatchable is True
+    assert matching_text.alignments[0].status.value == "not_required"
+    assert differing_text.alignments[0].status.value == "not_required"
+    assert differing_text.alignments[0].pp_source_indices == ()
 
 
 def test_text_block_owns_row_without_clipping_ppocr_geometry():
@@ -676,6 +675,10 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
     assert [(item.code, item.bbox) for item in plan.diagnostics] == [
         ("vl_marker_owned_by_linecut", (4, 10, 38, 30)),
     ]
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in route.vl_marker_observations
+    ] == [("⑧", (8, 10, 22, 30), (4, 10, 38, 30))]
 
 
 def test_compiler_keeps_vl_marker_ink_on_linecut_when_ppocr_omits_marker():
@@ -729,6 +732,49 @@ def test_compiler_keeps_vl_marker_ink_on_linecut_when_ppocr_omits_marker():
     assert [segment.kind for segment in route.segments] == ["text_other", "text_latin"]
     assert route.segments[0].bbox[2] <= route.segments[1].bbox[0]
     assert route.segments[1].text == "Barry"
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in route.vl_marker_observations
+    ] == [("⑫", (8, 10, 22, 30), (8, 10, 38, 30))]
+
+
+def test_compiler_accepts_preserved_marker_with_local_body_punctuation_differences():
+    from app.core.layout_scope import layout_snapshot_fingerprint
+    from app.models.ocr_routing_observation import (
+        BlockVlObservation,
+        BlockVlObservationStatus,
+        BlockVlTextRegion,
+    )
+
+    snapshot = _snapshot(
+        _block("footnote-1", BlockType.TEXT, (0, 0, 180, 40), policy=OcrPolicy.TEXT_OCR, order=0, label="footnote"),
+    )
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="⑤⑦侯迎忠，玉昌林",
+        bbox=(0, 0, 180, 40),
+        words=(),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=180,
+        page_height=40,
+        block_vl_observations=(BlockVlObservation(
+            page_uid="page-1",
+            block_uid="footnote-1",
+            block_bbox=(0, 0, 180, 40),
+            image_hash="image-hash-test",
+            layout_fingerprint=layout_snapshot_fingerprint(snapshot),
+            status=BlockVlObservationStatus.OBSERVED,
+            regions=(BlockVlTextRegion(0, "footnote", "⑤⑦ 侯迎忠、玉昌林。", (0, 0, 180, 40)),),
+        ),),
+    )
+
+    assert plan.is_dispatchable is True
+    assert plan.alignments[0].status.value == "matched"
+    assert plan.for_block("footnote-1").lines[0].vl_marker_observations == ()
 
 
 def test_compiler_blocks_vl_marker_alignment_below_sixty_percent():

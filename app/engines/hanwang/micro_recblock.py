@@ -29,6 +29,7 @@ from app.models.charocr_routing import (
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
     PpOcrSymbolObservation,
+    VlSemanticMarkerObservation,
     ROUTE_SEGMENT_TEXT_LATIN,
     TEXT_AXIS_HORIZONTAL,
     TEXT_AXIS_VERTICAL,
@@ -128,6 +129,7 @@ PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG = "latin_token_text_disagreement"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
 PPOCR_SYMBOL_FOREGROUND_SOURCE = "ppocrv6:symbol_foreground_observation"
+VL_SEMANTIC_MARKER_SOURCE = "paddlevl:semantic_marker"
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
 _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
@@ -629,6 +631,31 @@ def _reconcile_ppocr_symbol_observations(
     foreground. This also handles a fully omitted native symbol without
     guessing from neighboring text.
     """
+    return _reconcile_owned_text_observations(
+        lines,
+        observations,
+        source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+    )
+
+
+def _reconcile_vl_marker_observations(
+    lines: list[LineResult],
+    observations: tuple[VlSemanticMarkerObservation, ...],
+) -> list[LineResult]:
+    """Bind explicit VL marker identity to its measured LineCut geometry."""
+    return _reconcile_owned_text_observations(
+        lines,
+        observations,
+        source=VL_SEMANTIC_MARKER_SOURCE,
+    )
+
+
+def _reconcile_owned_text_observations(
+    lines: list[LineResult],
+    observations: tuple[PpOcrSymbolObservation | VlSemanticMarkerObservation, ...],
+    *,
+    source: str,
+) -> list[LineResult]:
     if not lines or not observations:
         return lines
     resolved = list(lines)
@@ -651,13 +678,13 @@ def _reconcile_ppocr_symbol_observations(
             and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
         ]
-        symbol = CharResult(
+        observed_char = CharResult(
             text=observation.text,
             confidence=0.0,
             bbox=observation.bbox,
             candidates=[observation.text],
-            source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
-            bbox_granularity="char",
+            source=source,
+            bbox_granularity="char" if len(observation.text) == 1 else "word",
             token_text=observation.text,
         )
         if claimed:
@@ -675,12 +702,14 @@ def _reconcile_ppocr_symbol_observations(
                     break
 
         additions: list[CharResult] = []
-        if observation.leading_space and (
+        leading_space = isinstance(observation, PpOcrSymbolObservation) and observation.leading_space
+        trailing_space = isinstance(observation, PpOcrSymbolObservation) and observation.trailing_space
+        if leading_space and (
             insertion == 0 or chars[insertion - 1].text != " "
         ):
             additions.append(_ppocr_symbol_space())
-        additions.append(symbol)
-        if observation.trailing_space and (
+        additions.append(observed_char)
+        if trailing_space and (
             insertion >= len(chars) or chars[insertion].text != " "
         ):
             additions.append(_ppocr_symbol_space())
@@ -691,6 +720,16 @@ def _reconcile_ppocr_symbol_observations(
             chars=chars,
         )
     return resolved
+
+
+def _reconcile_route_observations(
+    lines: list[LineResult],
+    route: RoutingLine,
+) -> list[LineResult]:
+    return _reconcile_vl_marker_observations(
+        _reconcile_ppocr_symbol_observations(lines, route.ppocr_symbol_observations),
+        route.vl_marker_observations,
+    )
 
 
 def _ppocr_symbol_space() -> CharResult:
@@ -886,12 +925,12 @@ def _assemble_layout_route_line(
         merged_text_lines: list[LineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _reconcile_ppocr_symbol_observations(
+        return _reconcile_route_observations(
             _merge_physical_routing_line(
                 merged_text_lines,
                 route_bbox=route.bbox,
             ),
-            route.ppocr_symbol_observations,
+            route,
         )
 
     clusters = _cluster_lines_by_shape(all_text_lines)
@@ -980,10 +1019,7 @@ def _assemble_layout_route_line(
                 review_flags=sorted(flags),
             )
         )
-    return _reconcile_ppocr_symbol_observations(
-        assembled,
-        route.ppocr_symbol_observations,
-    )
+    return _reconcile_route_observations(assembled, route)
 
 
 def _assemble_routing_lines(

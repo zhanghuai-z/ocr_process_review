@@ -23,6 +23,7 @@ from app.models.charocr_routing import (
     RoutingPlan,
     RoutingSegment,
     TextSliceRoute,
+    VlSemanticMarkerObservation,
     is_text_route_segment_kind,
 )
 from app.core.ocr_ir import is_cjk_char
@@ -34,6 +35,7 @@ from app.core.ppocr_layout_ownership import (
     structural_masks_for_line,
 )
 from app.geometry.physical_line import resolve_physical_lines
+from app.geometry.foreground import analyze_foreground_components
 from app.geometry.text_decoration import (
     DecorationLine,
     DecorationToken,
@@ -54,6 +56,7 @@ from app.models.enums import BlockType
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.ocr_routing_observation import (
     BlockAlignmentStatus,
+    LineCutOwnershipDirective,
     RoutingObservationBundle,
 )
 
@@ -210,6 +213,11 @@ def compile_page_routing_plan(
                 for directive in directives_by_line.get(prepass_line.index, ())
             ),
         )
+        marker_observations, marker_issues = _vl_marker_observations_for_line(
+            directives_by_line.get(prepass_line.index, ()),
+            page_image_bgr,
+        )
+        issues.extend(marker_issues)
         issues.extend(partition_issues_to_route_issues(
             tuple(partition_issues),
             line_index=prepass_line.index,
@@ -232,7 +240,7 @@ def compile_page_routing_plan(
             )
             for directive in directives_by_line.get(prepass_line.index, ())
         )
-        if partition_issues:
+        if partition_issues or marker_issues:
             continue
         text_slices = [segment for segment in segments if is_text_route_segment_kind(segment.kind)]
         if not text_slices:
@@ -247,6 +255,7 @@ def compile_page_routing_plan(
             text_axis=prepass_line.text_axis,
             orientation_angle=prepass_line.orientation_angle,
             ppocr_symbol_observations=tuple(partition_symbol_observations),
+            vl_marker_observations=marker_observations,
         )
         routes_by_block_uid[target.block.uid].append(route)
 
@@ -374,6 +383,38 @@ def _segments_for_line(
         tuple(symbol_observations),
         tuple(diagnostics),
     )
+
+
+def _vl_marker_observations_for_line(
+    directives: tuple[LineCutOwnershipDirective, ...],
+    page_image_bgr: np.ndarray | None,
+) -> tuple[tuple[VlSemanticMarkerObservation, ...], tuple[RouteValidationIssue, ...]]:
+    observations: list[VlSemanticMarkerObservation] = []
+    issues: list[RouteValidationIssue] = []
+    for directive in directives:
+        components = analyze_foreground_components(
+            page_image_bgr,
+            directive.bbox,
+        ).components
+        if not components:
+            issues.append(RouteValidationIssue(
+                code="missing_vl_marker_foreground",
+                message="explicit VL marker has no foreground geometry in its aligned prefix",
+                line_index=directive.line_index,
+                bbox=directive.bbox,
+            ))
+            continue
+        observations.append(VlSemanticMarkerObservation(
+            text=directive.vl_text,
+            bbox=(
+                min(component.bbox[0] for component in components),
+                min(component.bbox[1] for component in components),
+                max(component.bbox[2] for component in components),
+                max(component.bbox[3] for component in components),
+            ),
+            proposal_bbox=directive.bbox,
+        ))
+    return tuple(observations), tuple(issues)
 
 
 def _masked_partition_image(

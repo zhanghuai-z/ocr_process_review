@@ -55,51 +55,54 @@ def _align_one_block(
         )
     marker, body = _leading_semantic_number_marker(observation.text)
     if not marker:
-        vl_text = _normalize_alignment_text(observation.text)
-        pp_text, source_indices = _normalized_block_pp_text(rows, source_lines)
-        if vl_text == pp_text:
-            return BlockObservationAlignment(
-                block_uid=observation.block_uid,
-                status=BlockAlignmentStatus.EXACT,
-                vl_observation_uid=observation.uid,
-                pp_source_indices=source_indices,
-                detail="VL block text exactly matches the monotonic PP row stream",
-            )
         return BlockObservationAlignment(
             block_uid=observation.block_uid,
-            status=BlockAlignmentStatus.AMBIGUOUS,
+            status=BlockAlignmentStatus.NOT_REQUIRED,
             vl_observation_uid=observation.uid,
-            pp_source_indices=source_indices,
-            detail=(
-                "VL block text does not exactly match the monotonic PP row stream: "
-                f"vl={vl_text!r} pp={pp_text!r}"
-            ),
+            detail="ordinary VL block text does not require cross-engine text alignment",
         )
 
-    full_normalized = _normalize_alignment_text(observation.text)
     body_normalized = _normalize_alignment_text(body)
     ordered_rows = sorted(rows, key=lambda row: (row.bbox[1], row.bbox[0], row.representative_index))
-    for row in ordered_rows:
-        row_sources = _row_sources(row, source_lines)
-        if any(
-            _normalize_alignment_text(source.text).startswith(_normalize_alignment_text(marker))
-            and full_normalized.startswith(_normalize_alignment_text(source.text))
-            for source in row_sources
-            if _normalize_alignment_text(source.text)
-        ):
-            return BlockObservationAlignment(
-                block_uid=observation.block_uid,
-                status=BlockAlignmentStatus.EXACT,
-                vl_observation_uid=observation.uid,
-                pp_source_indices=row.source_indices,
-                detail="PP row already preserves the explicit VL marker",
-            )
-
-    ordered_sources = tuple(
-        source
+    ordered_source_rows = tuple(
+        (candidate_row, source)
         for candidate_row in ordered_rows
         for source in _row_sources(candidate_row, source_lines)
     )
+    ordered_sources = tuple(source for _row, source in ordered_source_rows)
+    preserved_candidates: list[tuple[ResolvedPhysicalLine, float]] = []
+    for source_position, (row, source) in enumerate(ordered_source_rows):
+        source_marker, source_body = _leading_semantic_number_marker(source.text)
+        if source_marker != marker:
+            continue
+        pp_body_text = _normalize_alignment_text(source_body) + "".join(
+            _normalize_alignment_text(item.text)
+            for item in ordered_sources[source_position + 1:]
+        )
+        body_match_ratio = (
+            _text_match_ratio(body_normalized, pp_body_text)
+            if body_normalized
+            else 1.0
+        )
+        if body_match_ratio >= _MARKER_BODY_MATCH_THRESHOLD:
+            preserved_candidates.append((row, body_match_ratio))
+    if len(preserved_candidates) == 1:
+        row, body_match_ratio = preserved_candidates[0]
+        return BlockObservationAlignment(
+            block_uid=observation.block_uid,
+            status=(
+                BlockAlignmentStatus.EXACT
+                if body_match_ratio == 1.0
+                else BlockAlignmentStatus.MATCHED
+            ),
+            vl_observation_uid=observation.uid,
+            pp_source_indices=row.source_indices,
+            detail=(
+                "PP row preserves the explicit VL marker and its local body matches: "
+                f"body_match_ratio={body_match_ratio:.3f}"
+            ),
+        )
+
     marker_number = _semantic_marker_number(marker)
     candidates: list[
         tuple[ResolvedPhysicalLine, PpOcrV6LineHint, float]
@@ -183,22 +186,6 @@ def _row_sources(
         (source_lines[index] for index in row.source_indices if index in source_lines),
         key=lambda source: (source.bbox[0], source.index),
     ))
-
-
-def _normalized_block_pp_text(
-    rows: tuple[ResolvedPhysicalLine, ...],
-    source_lines: dict[int, PpOcrV6LineHint],
-) -> tuple[str, tuple[int, ...]]:
-    ordered_rows = sorted(rows, key=lambda row: (row.bbox[1], row.bbox[0], row.representative_index))
-    sources = tuple(
-        source
-        for row in ordered_rows
-        for source in _row_sources(row, source_lines)
-    )
-    return (
-        "".join(_normalize_alignment_text(source.text) for source in sources),
-        tuple(source.index for source in sources),
-    )
 
 
 def _leading_semantic_number_marker(text: str) -> tuple[str, str]:
