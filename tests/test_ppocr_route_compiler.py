@@ -550,6 +550,93 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     ]
 
 
+def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
+    snapshot = _snapshot(
+        _block(
+            "footnote-1",
+            BlockType.TEXT,
+            (0, 0, 140, 50),
+            policy=OcrPolicy.TEXT_OCR,
+            order=0,
+            label="footnote",
+        ),
+    )
+    image = np.full((50, 140, 3), 255, dtype=np.uint8)
+    image[10:30, 8:22] = 0
+    image[10:30, 45:95] = 0
+    prepass = _prepass(
+        PpOcrV6LineHint(
+            index=0,
+            text="Barry",
+            bbox=(38, 5, 110, 38),
+            words=(PpOcrV6WordBox(0, 0, "Barry", (42, 8, 100, 34)),),
+        ),
+        PpOcrV6LineHint(
+            index=1,
+            text="8",
+            bbox=(4, 5, 28, 38),
+            words=(PpOcrV6WordBox(1, 0, "8", (8, 8, 22, 34)),),
+        ),
+    )
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=140,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("footnote-1").lines[0]
+    assert [segment.kind for segment in route.segments] == ["text_other", "text_latin"]
+    assert [
+        token.text
+        for segment in route.segments
+        for token in segment.ppocr_latin_tokens
+    ] == ["Barry"]
+    assert [(item.code, item.bbox) for item in plan.diagnostics] == [
+        ("footnote_marker_routed_to_linecut", (4, 5, 28, 38)),
+    ]
+
+
+def test_compiler_does_not_reclassify_numeric_prefix_outside_footnote():
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    image = np.full((50, 140, 3), 255, dtype=np.uint8)
+    image[10:30, 8:22] = 0
+    image[10:30, 45:95] = 0
+    prepass = _prepass(
+        PpOcrV6LineHint(
+            index=0,
+            text="Barry",
+            bbox=(38, 5, 110, 38),
+            words=(PpOcrV6WordBox(0, 0, "Barry", (42, 8, 100, 34)),),
+        ),
+        PpOcrV6LineHint(
+            index=1,
+            text="8",
+            bbox=(4, 5, 28, 38),
+            words=(PpOcrV6WordBox(1, 0, "8", (8, 8, 22, 34)),),
+        ),
+    )
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=140,
+        page_height=50,
+        page_image_bgr=image,
+    )
+
+    assert plan.is_dispatchable is True
+    assert [segment.kind for segment in plan.for_block("text-1").lines[0].segments] == [
+        "text_latin",
+    ]
+    assert plan.diagnostics == ()
+
+
 def test_compiler_blocks_pure_latin_row_without_word_masks():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),

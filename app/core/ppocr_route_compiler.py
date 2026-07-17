@@ -5,7 +5,11 @@ from dataclasses import replace
 
 import numpy as np
 
-from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6PrepassArtifact
+from app.adapters.paddle.ppocr_v6_prepass import (
+    PpOcrV6LineHint,
+    PpOcrV6PrepassArtifact,
+    PpOcrV6WordBox,
+)
 from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
@@ -109,11 +113,25 @@ def compile_page_routing_plan(
             and normalized_row.representative_index != raw_prepass_line.index
         ):
             continue
-        prepass_line = (
-            _materialize_resolved_prepass_line(normalized_row, ownership)
+        target = (
+            _text_block_by_uid(ownership, normalized_row.owner_block_uid)
             if normalized_row is not None
-            else ownership.ownership_for(raw_prepass_line).line
+            else ownership.ownership_for(raw_prepass_line).text_block
         )
+        linecut_marker_sources = (
+            _footnote_marker_source_indices(normalized_row, ownership, target)
+            if normalized_row is not None
+            else frozenset()
+        )
+        if normalized_row is not None:
+            prepass_line, linecut_token_indices = _materialize_resolved_prepass_line(
+                normalized_row,
+                ownership,
+                linecut_source_indices=linecut_marker_sources,
+            )
+        else:
+            prepass_line = ownership.ownership_for(raw_prepass_line).line
+            linecut_token_indices = frozenset()
         line_ownership = ownership.ownership_for(prepass_line)
         line_bbox = prepass_line.bbox
         if not _is_nonempty(line_bbox):
@@ -121,11 +139,6 @@ def compile_page_routing_plan(
             continue
         if line_ownership.is_structural_exclusion:
             continue
-        target = (
-            _text_block_by_uid(ownership, normalized_row.owner_block_uid)
-            if normalized_row is not None
-            else line_ownership.text_block
-        )
         if target is None:
             issues.append(unmatched_prepass_line_issue(prepass_line.index, line_bbox))
             continue
@@ -159,6 +172,7 @@ def compile_page_routing_plan(
             structural_masks,
             page_decorations,
             page_image_bgr=page_image_bgr,
+            linecut_token_indices=linecut_token_indices,
         )
         issues.extend(partition_issues_to_route_issues(
             tuple(partition_issues),
@@ -172,6 +186,16 @@ def compile_page_routing_plan(
                 bbox=item.bbox,
             )
             for item in partition_diagnostics
+        )
+        diagnostics.extend(
+            RouteDiagnostic(
+                code="footnote_marker_routed_to_linecut",
+                message="isolated footnote marker is owned by the LineCut route",
+                line_index=prepass_line.index,
+                bbox=decision.line.bbox,
+            )
+            for decision in ownership.decisions
+            if decision.line.index in linecut_marker_sources
         )
         if partition_issues:
             continue
@@ -255,6 +279,7 @@ def _segments_for_line(
     page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
+    linecut_token_indices: frozenset[int] = frozenset(),
 ) -> tuple[list[RoutingSegment], tuple, tuple, tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
     decorations = tuple(
@@ -277,6 +302,7 @@ def _segments_for_line(
             partition_line,
             line_bbox,
             excluded_bboxes=exclusion_bboxes,
+            linecut_token_indices=linecut_token_indices,
         )
         text_segments = list(partition.segments)
         issues = list(partition.issues)
@@ -376,29 +402,73 @@ def _line_requires_text_partition(text: str) -> bool:
 def _materialize_resolved_prepass_line(
     row: ResolvedPhysicalLine,
     ownership: LayoutOwnership,
-) -> PpOcrV6LineHint:
+    *,
+    linecut_source_indices: frozenset[int] = frozenset(),
+) -> tuple[PpOcrV6LineHint, frozenset[int]]:
     """Reattach immutable PP text metadata after geometry resolution."""
     source_lines = {
         decision.line.index: decision.line
         for decision in ownership.decisions
     }
     ordered = [source_lines[index] for index in row.source_indices]
-    words = [
-        word
+    words: list[tuple[PpOcrV6LineHint, PpOcrV6WordBox]] = [
+        (line, word)
         for line in ordered
         for word in sorted(line.words, key=lambda item: item.token_index)
     ]
-    return PpOcrV6LineHint(
+    linecut_token_indices = frozenset(
+        index
+        for index, (line, _word) in enumerate(words)
+        if line.index in linecut_source_indices
+    )
+    line = PpOcrV6LineHint(
         index=row.representative_index,
         text="".join(line.text for line in ordered),
         bbox=row.bbox,
         words=tuple(
             replace(word, line_index=row.representative_index, token_index=index)
-            for index, word in enumerate(words)
+            for index, (_source_line, word) in enumerate(words)
         ),
         text_axis=row.text_axis,
         orientation_angle=row.orientation_angle,
     )
+    return line, linecut_token_indices
+
+
+def _footnote_marker_source_indices(
+    row: ResolvedPhysicalLine,
+    ownership: LayoutOwnership,
+    target: LayoutBlockCandidate | None,
+) -> frozenset[int]:
+    """Identify isolated numeric prefixes inside an adopted footnote row.
+
+    PP-OCR sometimes reads a visual circled footnote marker as a plain ASCII
+    number. The layout label and the separate co-baseline source proposal are
+    retained facts; the OCR spelling of the glyph is not used as proof that it
+    belongs to EngCut.
+    """
+    if (
+        target is None
+        or str(target.block.source_label or "").strip().lower() != "footnote"
+        or row.text_axis != "horizontal"
+        or len(row.source_indices) < 2
+    ):
+        return frozenset()
+    source_lines = {
+        decision.line.index: decision.line
+        for decision in ownership.decisions
+        if decision.line.index in row.source_indices
+    }
+    ordered = sorted(source_lines.values(), key=lambda line: (line.bbox[0], line.index))
+    if len(ordered) < 2:
+        return frozenset()
+    leading = ordered[0]
+    value = str(leading.text or "").strip()
+    if not (value and value.isascii() and value.isdigit()):
+        return frozenset()
+    if leading.bbox[2] > ordered[1].bbox[0]:
+        return frozenset()
+    return frozenset({leading.index})
 
 
 def _text_block_by_uid(
