@@ -17,7 +17,7 @@ from typing import Any, List, Optional
 from app.models import (
     BBox, Block, BlockOrigin, BlockSource, BlockType, Char, LayoutEditEvent, Line,
     OcrPolicy, OcrProject, PaddleBinding, Page, PageStatus, ProofLineState, ProofStatus,
-    RawOcrArtifact,
+    RawOcrArtifact, OcrRoutingRunAudit,
 )
 from app.models.entity_id import ensure_entity_uid, new_entity_uid
 from app.models.layout_projection import page_layout_blocks, replace_page_layout_blocks
@@ -216,6 +216,24 @@ CREATE TABLE IF NOT EXISTS layout_snapshot (
 
 CREATE INDEX IF NOT EXISTS idx_layout_snapshot_project_page
     ON layout_snapshot(project_id, page_uid);
+
+CREATE TABLE IF NOT EXISTS ocr_routing_run_audit (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_uid         TEXT    NOT NULL,
+    project_id      INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+    page_uid        TEXT    NOT NULL,
+    image_hash      TEXT    NOT NULL,
+    layout_fingerprint TEXT NOT NULL,
+    pp_run_id       TEXT    NOT NULL,
+    block_vl_observations_json TEXT NOT NULL DEFAULT '[]',
+    alignment_statuses_json TEXT NOT NULL DEFAULT '[]',
+    route_summary_json TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL    NOT NULL,
+    UNIQUE(project_id, run_uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ocr_routing_run_audit_project_page_created
+    ON ocr_routing_run_audit(project_id, page_uid, created_at, id);
 
 CREATE TABLE IF NOT EXISTS line (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -439,6 +457,23 @@ MIGRATIONS: dict[int, list[str]] = {
         "UNIQUE(project_id, page_uid));",
         "CREATE INDEX IF NOT EXISTS idx_layout_snapshot_project_page "
         "ON layout_snapshot(project_id, page_uid);",
+    ],
+    25: [
+        "CREATE TABLE IF NOT EXISTS ocr_routing_run_audit ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "run_uid TEXT NOT NULL, "
+        "project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE, "
+        "page_uid TEXT NOT NULL, "
+        "image_hash TEXT NOT NULL, "
+        "layout_fingerprint TEXT NOT NULL, "
+        "pp_run_id TEXT NOT NULL, "
+        "block_vl_observations_json TEXT NOT NULL DEFAULT '[]', "
+        "alignment_statuses_json TEXT NOT NULL DEFAULT '[]', "
+        "route_summary_json TEXT NOT NULL DEFAULT '{}', "
+        "created_at REAL NOT NULL, "
+        "UNIQUE(project_id, run_uid));",
+        "CREATE INDEX IF NOT EXISTS idx_ocr_routing_run_audit_project_page_created "
+        "ON ocr_routing_run_audit(project_id, page_uid, created_at, id);",
     ],
 }
 
@@ -762,7 +797,7 @@ class ProjectStore:
                 stmts = MIGRATIONS[ver]
                 logger.info("Running schema migration v%d -> v%d", ver - 1, ver)
                 try:
-                    if ver in (23, 24):
+                    if ver in (23, 24, 25):
                         self._migrate_v23_drop_retired_block_payload_columns()
                     for stmt in stmts:
                         try:
@@ -2253,6 +2288,111 @@ class ProjectStore:
             "SELECT id, name, created_at, updated_at FROM project ORDER BY updated_at DESC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # ---------------------------------------------------- OCR routing run audit
+
+    def save_ocr_routing_run_audit(self, audit: OcrRoutingRunAudit) -> None:
+        """Append one derived routing audit package without changing project truth."""
+        if not isinstance(audit, OcrRoutingRunAudit):
+            raise TypeError("audit must be OcrRoutingRunAudit")
+        page_row = self.conn.execute(
+            "SELECT 1 FROM page WHERE project_id=? AND uid=?",
+            (audit.project_id, audit.page_uid),
+        ).fetchone()
+        if page_row is None:
+            raise ProjectDataError(
+                f"routing audit page {audit.page_uid!r} does not belong to project {audit.project_id}"
+            )
+        try:
+            self.conn.execute(
+                "INSERT INTO ocr_routing_run_audit ("
+                "run_uid, project_id, page_uid, image_hash, layout_fingerprint, "
+                "pp_run_id, block_vl_observations_json, alignment_statuses_json, "
+                "route_summary_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    audit.run_uid,
+                    audit.project_id,
+                    audit.page_uid,
+                    audit.image_hash,
+                    audit.layout_fingerprint,
+                    audit.pp_run_id,
+                    json.dumps(
+                        [item.to_dict() for item in audit.block_vl_observations],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(
+                        [item.to_dict() for item in audit.alignment_statuses],
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(audit.route_summary.to_dict(), ensure_ascii=False),
+                    audit.created_at,
+                ),
+            )
+            self.conn.commit()
+        except sqlite3.IntegrityError as exc:
+            self.conn.rollback()
+            raise ProjectDataError(
+                f"routing audit run_uid already exists in project: {audit.run_uid!r}"
+            ) from exc
+
+    def load_ocr_routing_run_audit(
+        self,
+        project_id: int,
+        run_uid: str,
+    ) -> OcrRoutingRunAudit | None:
+        row = self.conn.execute(
+            "SELECT * FROM ocr_routing_run_audit WHERE project_id=? AND run_uid=?",
+            (project_id, run_uid),
+        ).fetchone()
+        return self._ocr_routing_run_audit_from_row(row) if row is not None else None
+
+    def list_ocr_routing_run_audits(
+        self,
+        project_id: int,
+        *,
+        page_uid: str | None = None,
+    ) -> list[OcrRoutingRunAudit]:
+        if page_uid is None:
+            rows = self.conn.execute(
+                "SELECT * FROM ocr_routing_run_audit WHERE project_id=? "
+                "ORDER BY created_at, id",
+                (project_id,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM ocr_routing_run_audit WHERE project_id=? AND page_uid=? "
+                "ORDER BY created_at, id",
+                (project_id, page_uid),
+            ).fetchall()
+        return [self._ocr_routing_run_audit_from_row(row) for row in rows]
+
+    @staticmethod
+    def _ocr_routing_run_audit_from_row(row: sqlite3.Row) -> OcrRoutingRunAudit:
+        try:
+            return OcrRoutingRunAudit.from_dict({
+                "run_uid": row["run_uid"],
+                "project_id": row["project_id"],
+                "page_uid": row["page_uid"],
+                "image_hash": row["image_hash"],
+                "layout_fingerprint": row["layout_fingerprint"],
+                "pp_run_id": row["pp_run_id"],
+                "block_vl_observations": _json_to_list(
+                    row["block_vl_observations_json"],
+                    field="ocr_routing_run_audit.block_vl_observations_json",
+                ),
+                "alignment_statuses": _json_to_list(
+                    row["alignment_statuses_json"],
+                    field="ocr_routing_run_audit.alignment_statuses_json",
+                ),
+                "route_summary": _json_to_dict(
+                    row["route_summary_json"],
+                    field="ocr_routing_run_audit.route_summary_json",
+                ),
+                "created_at": row["created_at"],
+            })
+        except (TypeError, ValueError) as exc:
+            raise ProjectDataError(f"invalid OCR routing run audit: {exc}") from exc
 
     # ------------------------------------------------------------------ settings
 

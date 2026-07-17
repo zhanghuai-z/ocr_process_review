@@ -52,7 +52,7 @@ def partition_charocr_text_region(
     region_bbox: XYXY,
     *,
     excluded_bboxes: tuple[XYXY, ...] = (),
-    linecut_token_indices: frozenset[int] = frozenset(),
+    linecut_owned_bboxes: tuple[XYXY, ...] = (),
 ) -> RoutePartition:
     """Partition one non-structural PP-OCR row region into native OCR crops.
 
@@ -87,6 +87,16 @@ def partition_charocr_text_region(
     )
     if not components:
         return RoutePartition(())
+
+    crossing = _component_crossing_owned_boundary(components, linecut_owned_bboxes)
+    if crossing is not None:
+        return RoutePartition((), (
+            RoutePartitionIssue(
+                code="linecut_ownership_boundary_crosses_glyph",
+                message="explicit LineCut ownership boundary crosses one foreground component",
+                bbox=crossing,
+            ),
+        ))
 
     tokens = tuple(
         token
@@ -126,7 +136,7 @@ def partition_charocr_text_region(
     latin_tokens = tuple(
         token
         for token in tokens
-        if _token_route_branch(token, linecut_token_indices) == "latin"
+        if _token_route_branch(token, linecut_owned_bboxes) == "latin"
     )
     if not latin_tokens:
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox),))
@@ -135,7 +145,7 @@ def partition_charocr_text_region(
         components,
         tokens,
         region_bbox,
-        linecut_token_indices=linecut_token_indices,
+        linecut_owned_bboxes=linecut_owned_bboxes,
     )
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
     diagnostics: list[RoutePartitionDiagnostic] = []
@@ -168,7 +178,7 @@ def partition_charocr_text_region(
         masks,
         components,
         tokens=tokens,
-        linecut_token_indices=linecut_token_indices,
+        linecut_owned_bboxes=linecut_owned_bboxes,
     )
     return RoutePartition(
         segments=routed.segments,
@@ -275,7 +285,7 @@ def _segments_from_latin_masks(
     components: list[ForegroundComponent],
     *,
     tokens: tuple[PpOcrV6WordBox, ...],
-    linecut_token_indices: frozenset[int],
+    linecut_owned_bboxes: tuple[XYXY, ...],
 ) -> RoutePartition:
     groups: list[tuple[list[tuple[PpOcrV6WordBox, XYXY]], XYXY]] = []
     current_tokens: list[tuple[PpOcrV6WordBox, XYXY]] = []
@@ -299,7 +309,7 @@ def _segments_from_latin_masks(
             current_tokens[-1][0],
             token,
             tokens,
-            linecut_token_indices=linecut_token_indices,
+            linecut_owned_bboxes=linecut_owned_bboxes,
         ):
             groups.append((current_tokens, current_bbox))
             current_tokens = [(token, bbox)]
@@ -364,13 +374,13 @@ def _has_explicit_boundary_token(
     right: PpOcrV6WordBox,
     tokens: tuple[PpOcrV6WordBox, ...],
     *,
-    linecut_token_indices: frozenset[int],
+    linecut_owned_bboxes: tuple[XYXY, ...],
 ) -> bool:
     """Keep EngCut groups separated across an observed non-space boundary."""
     return any(
         left.token_index < token.token_index < right.token_index
         and bool(str(token.text or "").strip())
-        and _token_route_branch(token, linecut_token_indices) != "latin"
+        and _token_route_branch(token, linecut_owned_bboxes) != "latin"
         for token in tokens
     )
 
@@ -394,7 +404,7 @@ def _component_owner_token_indices(
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
     *,
-    linecut_token_indices: frozenset[int],
+    linecut_owned_bboxes: tuple[XYXY, ...],
 ) -> dict[ForegroundComponent, int | None]:
     """Assign components once by ordered PP token ownership cells.
 
@@ -477,7 +487,7 @@ def _component_owner_token_indices(
     # proposal itself and shares horizontal projection with an already owned
     # part. There is no recursive walk beyond the observed proposal.
     for token in ordered:
-        if _token_route_branch(token, linecut_token_indices) != "symbol":
+        if _token_route_branch(token, linecut_owned_bboxes) != "symbol":
             continue
         proposal_bbox = _clip(token.bbox, region_bbox)
         anchors = [
@@ -503,7 +513,7 @@ def _component_owner_token_indices(
     # PP observation is the only additional ownership fact available. Multiple
     # candidates remain unresolved instead of being ranked by proximity.
     for token in ordered:
-        if _token_route_branch(token, linecut_token_indices) == "symbol":
+        if _token_route_branch(token, linecut_owned_bboxes) == "symbol":
             continue
         if any(owner == token.token_index for owner in owners.values()):
             continue
@@ -517,7 +527,7 @@ def _component_owner_token_indices(
                 owners[component] is None
                 or _token_route_branch(
                     token_by_index[owners[component]],
-                    linecut_token_indices,
+                    linecut_owned_bboxes,
                 ) != "symbol"
             )
         ]
@@ -544,11 +554,39 @@ def _token_branch(text: str) -> str:
 
 def _token_route_branch(
     token: PpOcrV6WordBox,
-    linecut_token_indices: frozenset[int],
+    linecut_owned_bboxes: tuple[XYXY, ...],
 ) -> str:
-    if token.token_index in linecut_token_indices:
+    if _token_center_in_any_bbox(token, linecut_owned_bboxes):
         return "other"
     return _token_branch(token.text)
+
+
+def _token_center_in_any_bbox(
+    token: PpOcrV6WordBox,
+    bboxes: tuple[XYXY, ...],
+) -> bool:
+    center_x = (token.bbox[0] + token.bbox[2]) / 2.0
+    center_y = (token.bbox[1] + token.bbox[3]) / 2.0
+    return any(
+        bbox[0] <= center_x < bbox[2] and bbox[1] <= center_y < bbox[3]
+        for bbox in bboxes
+    )
+
+
+def _component_crossing_owned_boundary(
+    components: list[ForegroundComponent],
+    bboxes: tuple[XYXY, ...],
+) -> XYXY | None:
+    for bbox in bboxes:
+        boundary_x = bbox[2]
+        for component in components:
+            if (
+                bbox[1] < component.bbox[3]
+                and component.bbox[1] < bbox[3]
+                and component.bbox[0] < boundary_x < component.bbox[2]
+            ):
+                return component.bbox
+    return None
 
 
 def _has_latin_or_digit(text: str) -> bool:

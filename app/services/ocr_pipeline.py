@@ -21,6 +21,7 @@ import numpy as np
 from app.core.coordinate_seam import CropCoordinateSeam
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6PrepassArtifact, PpOcrV6PrepassClient
 from app.core.ppocr_route_compiler import compile_page_routing_plan
+from app.core.paddle_v16_client import PaddleV16LayoutClient
 from app.diagnostics.charocr_route_artifacts import (
     route_debug_output_root,
     write_charocr_route_artifacts,
@@ -36,6 +37,7 @@ from app.engines.fake_ocr_engine import FakeOcrEngine
 from app.models import (
     Block, BlockType, BBox, Line, OcrProject, Page,
 )
+from app.models.ocr_routing_run_audit import OcrRoutingRunAuditDraft
 from app.models.layout_block_view import current_layout_snapshot
 from app.models.layout_block_state import append_layout_block_note_once
 from app.models.ocr_character_observation import line_ocr_chars_by_uid, set_ocr_char_bbox
@@ -57,10 +59,25 @@ from app.services.ocr_run_result import (
     OcrRunResult,
     PageOcrRunResult,
 )
+from app.services.ocr_routing_audit_service import build_ocr_routing_run_audit_draft
+from app.services.ocr_routing_observation_service import acquire_routing_observation_bundle
 from app.utils.image_io import read_cv_image
 
 logger = get_logger(__name__)
 OCR_PAGE_CONCURRENCY_CAP = 20
+
+
+class PageRoutingPlanRejected(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        prepass: PpOcrV6PrepassArtifact,
+        audit: OcrRoutingRunAuditDraft,
+    ) -> None:
+        super().__init__(message)
+        self.prepass = prepass
+        self.audit = audit
 
 
 class OcrPipeline:
@@ -70,6 +87,7 @@ class OcrPipeline:
         self,
         engine: Optional[object] = None,
         hybrid_prepass_engine: Optional[object] = None,
+        block_vl_client: Optional[PaddleV16LayoutClient] = None,
         *,
         page_concurrency: int = 1,
     ):
@@ -80,6 +98,7 @@ class OcrPipeline:
         """
         self._engine = engine or FakeOcrEngine()
         self._hybrid_prepass_engine = hybrid_prepass_engine
+        self._block_vl_client = block_vl_client
         self._proof_crop_service = ProofCropService()
         self._table_text_layer_service = TableTextLayerService()
         try:
@@ -152,13 +171,17 @@ class OcrPipeline:
                                 message=message,
                             ))
                     try:
-                        table_prepass = self._process_page_with_hybrid_blocks(
+                        table_prepass, routing_audit = self._process_page_with_hybrid_blocks(
                             img,
                             page,
                             page_idx=page_idx,
                             progress_callback=emit_hybrid_progress,
                         )
+                        result.routing_audits.append(routing_audit)
                     except Exception as e:
+                        if isinstance(e, PageRoutingPlanRejected):
+                            table_prepass = e.prepass
+                            result.routing_audits.append(e.audit)
                         logger.error(
                             "Page hybrid OCR failed: page=%d: %s",
                             page_idx, e,
@@ -332,6 +355,7 @@ class OcrPipeline:
 
                 result.pages[work.page_idx] = work.page
                 result.failed_blocks.extend(work.failed_blocks)
+                result.routing_audits.extend(work.routing_audits)
                 with completed_lock:
                     completed_pages += 1
                     done = completed_pages
@@ -398,13 +422,16 @@ class OcrPipeline:
         failed: list[tuple[int, int, str]] = []
         table_prepass = None
         try:
-            table_prepass = self._process_page_with_hybrid_blocks(
+            table_prepass, routing_audit = self._process_page_with_hybrid_blocks(
                 img,
                 page,
                 page_idx=page_idx,
                 progress_callback=emit_hybrid_progress,
             )
         except Exception as exc:
+            routing_audit = exc.audit if isinstance(exc, PageRoutingPlanRejected) else None
+            if isinstance(exc, PageRoutingPlanRejected):
+                table_prepass = exc.prepass
             logger.error("Page hybrid OCR failed: page=%d: %s", page_idx, exc)
             mark_page_ocr_failed(page, f"OCR 失败：{exc}")
             failed.append((page_idx, -1, str(exc)))
@@ -437,6 +464,7 @@ class OcrPipeline:
             total_blocks=total_blocks,
             failed_blocks=failed,
             completion_message=completion,
+            routing_audits=([routing_audit] if routing_audit is not None else []),
         )
 
     def _enrich_table_text_layer(
@@ -556,13 +584,45 @@ class OcrPipeline:
             network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
         ))
 
+    def _hybrid_block_vl_observation_client(
+        self,
+        progress_callback: Optional[Callable[[int, int, str], None]],
+    ) -> PaddleV16LayoutClient:
+        if self._block_vl_client is not None:
+            return self._block_vl_client
+        from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
+        from app.core.app_config import get_config
+        from app.core.paddle_v16_client import is_paddle_v16_endpoint
+
+        cfg = get_config()
+        jobs_url = resolve_api_endpoint_for_role(
+            cfg.get("api_url", ""),
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
+        )
+        if not jobs_url or not is_paddle_v16_endpoint(jobs_url):
+            raise RuntimeError("CharOCR routing requires a Paddle VL1.6 jobs endpoint")
+        configured_timeout = max(1, int(cfg.get("api_timeout", 180)))
+        return PaddleV16LayoutClient(
+            jobs_url=jobs_url,
+            token=str(cfg.get("api_token", "") or ""),
+            request_timeout=min(max(10, configured_timeout), 30),
+            poll_timeout=max(configured_timeout, 180),
+            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
+            status_callback=(
+                (lambda message: progress_callback(0, 1, f"VL 块观察：{message}"))
+                if progress_callback
+                else None
+            ),
+        )
+
     def _process_page_with_hybrid_blocks(
         self,
         img: np.ndarray,
         page: Page,
         page_idx: int = 0,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    ) -> PpOcrV6PrepassArtifact:
+    ) -> tuple[PpOcrV6PrepassArtifact, OcrRoutingRunAuditDraft]:
         dispatch_plan = build_text_ocr_dispatch_plan(page)
         total_text_blocks = max(1, dispatch_plan.total_text_blocks)
         prepass_engine = self._hybrid_page_ocr_prepass_engine()
@@ -574,13 +634,20 @@ class OcrPipeline:
         prepass = analyze_page(img, page_uid=page.uid)
         if not isinstance(prepass, PpOcrV6PrepassArtifact):
             raise RuntimeError("PP-OCRv6 prepass client returned an invalid routing artifact")
+        observations = acquire_routing_observation_bundle(
+            page=page,
+            snapshot=current_layout_snapshot(page),
+            image_bgr=img,
+            prepass=prepass,
+            vl_client=self._hybrid_block_vl_observation_client(progress_callback),
+        )
         routing_plan = compile_page_routing_plan(
-            current_layout_snapshot(page),
-            prepass,
+            observations,
             page_width=page.width,
             page_height=page.height,
             page_image_bgr=img,
         )
+        routing_audit = build_ocr_routing_run_audit_draft(observations, routing_plan)
         from app.core.app_config import get_config
 
         debug_root = route_debug_output_root(
@@ -599,7 +666,11 @@ class OcrPipeline:
                 f"{issue.code}({issue.message})@line={issue.line_index} bbox={issue.bbox}"
                 for issue in routing_plan.validation_issues[:5]
             )
-            raise RuntimeError(f"PP-OCRv6 路由无法归属到当前版面框：{details}")
+            raise PageRoutingPlanRejected(
+                f"PP-OCRv6 路由无法归属到当前版面框：{details}",
+                prepass=prepass,
+                audit=routing_audit,
+            )
         if progress_callback:
             route_count = sum(len(item.plan.text_slices) for item in routing_plan.blocks)
             progress_callback(0, total_text_blocks, f"PP-OCRv6 路由预处理完成：{len(prepass.lines)} 行，{route_count} 个文字切片")
@@ -611,7 +682,7 @@ class OcrPipeline:
             progress_callback=progress_callback,
             routing_plan=routing_plan,
         )
-        return prepass
+        return prepass, routing_audit
 
     def _normalize_engine_lines(
         self,

@@ -69,7 +69,7 @@ def detect_page_text_decorations(
         return ()
     decorations: list[TextDecoration] = []
     for group in _co_baseline_groups(lines):
-        line_height = max(1, max(line.bbox[3] - line.bbox[1] for line in group))
+        line_height = max(1, max(source.bbox[3] - source.bbox[1] for source in group))
         for candidate_bbox in _candidate_envelopes(group, line_height):
             analysis = analyze_foreground_components(image_bgr, candidate_bbox)
             components = tuple(
@@ -93,11 +93,11 @@ def _candidate_envelopes(
 ) -> tuple[XYXY, ...]:
     candidates = [
         token.bbox
-        for line in group
-        for token in line.tokens
+        for source in group
+        for token in source.tokens
         if _is_punctuation_token(token.text)
     ]
-    ordered_lines = sorted(group, key=lambda line: line.bbox[0])
+    ordered_lines = sorted(group, key=lambda source: source.bbox[0])
     for left, right in zip(ordered_lines, ordered_lines[1:]):
         if left.bbox[2] < right.bbox[0]:
             candidates.append((
@@ -117,19 +117,19 @@ def _candidate_envelopes(
 
 
 def _boundary_punctuation_token(
-    line: DecorationLine,
+    source: DecorationLine,
     *,
     at_end: bool,
     tolerance: int,
 ) -> DecorationToken | None:
-    tokens = [token for token in line.tokens if _is_punctuation_token(token.text)]
+    tokens = [token for token in source.tokens if _is_punctuation_token(token.text)]
     if not tokens:
         return None
     token = max(tokens, key=lambda item: item.bbox[2]) if at_end else min(
         tokens,
         key=lambda item: item.bbox[0],
     )
-    distance = line.bbox[2] - token.bbox[2] if at_end else token.bbox[0] - line.bbox[0]
+    distance = source.bbox[2] - token.bbox[2] if at_end else token.bbox[0] - source.bbox[0]
     return token if distance <= tolerance else None
 
 
@@ -161,7 +161,7 @@ def _is_small_repeated_mark(component: ForegroundComponent, line_height: int) ->
 
 
 def _co_baseline_groups(lines: tuple[DecorationLine, ...]) -> tuple[tuple[DecorationLine, ...], ...]:
-    pending = sorted(lines, key=lambda line: (line.bbox[1], line.bbox[0]))
+    pending = sorted(lines, key=lambda source: (source.bbox[1], source.bbox[0]))
     groups: list[tuple[DecorationLine, ...]] = []
     while pending:
         members = [pending.pop(0)]

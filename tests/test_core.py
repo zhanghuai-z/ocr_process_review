@@ -74,11 +74,19 @@ def _ppocr_v6_prepass_artifact(page_uid, *line_specs):
     )
 
 
+class _TestBlockVlClient:
+    """Return a successful empty block observation without network access."""
+
+    def analyze_image(self, _image, **_kwargs):
+        return {"result": {"layoutParsingResults": []}, "paddle_v16": {"jobId": "test-vl"}}
+
+
 def _page_routing_plan_for_test(page):
     """Build the same explicit route contract required by production CharOCR."""
     from app.core.ppocr_route_compiler import compile_page_routing_plan
     from app.models import BlockType
     from app.models.layout_snapshot_store import layout_snapshot_for_page
+    from tests.charocr_routing_observation_fixture import routing_observation_bundle
 
     snapshot = layout_snapshot_for_page(page)
     if snapshot is None:
@@ -92,8 +100,10 @@ def _page_routing_plan_for_test(page):
         and block.block_type not in {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE, BlockType.UNKNOWN}
     ]
     return compile_page_routing_plan(
-        snapshot,
-        _ppocr_v6_prepass_artifact(page.uid, *line_specs),
+        routing_observation_bundle(
+            snapshot,
+            _ppocr_v6_prepass_artifact(page.uid, *line_specs),
+        ),
         page_width=page.width,
         page_height=page.height,
     )
@@ -11542,6 +11552,7 @@ def test_ocr_pipeline_hybrid_prepass_lines_feed_hanwang_splitter():
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(),
             hybrid_prepass_engine=FakePrepassEngine(),
+            block_vl_client=_TestBlockVlClient(),
         ).process_project(OcrProject(name="hybrid-prepass", pages=[page]))
 
         assert seen_recblocks == [(0, 10, 180, 30)]
@@ -13068,6 +13079,7 @@ def test_ocr_pipeline_runs_hanwang_micro_recblock_page_path():
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
             hybrid_prepass_engine=FakePrepassEngine(),
+            block_vl_client=_TestBlockVlClient(),
         ).process_project(
             OcrProject(name="hybrid", pages=[page]),
             progress_callback=progress_events.append,
@@ -13203,6 +13215,7 @@ def test_ocr_pipeline_runs_hanwang_prepass_when_only_layout_routes_exist():
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
             hybrid_prepass_engine=FakePrepassEngine(),
+            block_vl_client=_TestBlockVlClient(),
         ).process_project(
             OcrProject(name="hybrid-skip-prepass", pages=[page]),
             progress_callback=progress_events.append,
@@ -13280,6 +13293,7 @@ def test_ocr_pipeline_does_not_reuse_hanwang_lines_as_ppocr_hints():
         result = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
             hybrid_prepass_engine=PrepassEngine(),
+            block_vl_client=_TestBlockVlClient(),
         ).process_project(
             OcrProject(name="hybrid-no-stale-line-hints", pages=[page]),
             progress_callback=progress_events.append,
@@ -13388,6 +13402,7 @@ def test_ocr_pipeline_parallelizes_hanwang_page_hybrid_with_prepass():
 
         pipeline = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
+            block_vl_client=_TestBlockVlClient(),
             page_concurrency=2,
         )
         pipeline._hybrid_page_ocr_prepass_engine = lambda: FakePrepassEngine()
@@ -13481,6 +13496,7 @@ def test_ocr_pipeline_parallel_hanwang_page_failure_does_not_stop_other_pages():
         pipeline = OcrPipeline(
             engine=HanwangMicroRecBlockEngine(runner=fake_runner),
             page_concurrency=2,
+            block_vl_client=_TestBlockVlClient(),
         )
         pipeline._hybrid_page_ocr_prepass_engine = lambda: FakePrepassEngine()
         result = pipeline.process_project(OcrProject(name="parallel-hanwang-failure", pages=pages))
@@ -13965,6 +13981,7 @@ def test_workflow_controller_start_ocr_transitions_failed_page_into_retry_run():
     class PendingWorker:
         def __init__(self, pipeline, pages, parent=None):
             self.progress_update = DummySignal()
+            self.routing_audits_ready = DummySignal()
             self.progress_state = DummySignal()
             self.all_done = DummySignal()
             self.error = DummySignal()
@@ -14020,6 +14037,7 @@ def test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_
         def __init__(self, pipeline, pages):
             self.progress_state = DummySignal()
             self.progress_update = DummySignal()
+            self.routing_audits_ready = DummySignal()
             self.all_done = DummySignal()
             self.error = DummySignal()
             self.finished = DummySignal()
@@ -14225,6 +14243,7 @@ def test_workflow_controller_starts_parallel_proof_ocr_with_layout():
     class FakeProofWorker:
         def __init__(self, pipeline, pages, parent=None):
             self.progress_update = DummySignal()
+            self.routing_audits_ready = DummySignal()
             self.progress_state = DummySignal()
             self.all_done = DummySignal()
             self.error = DummySignal()
@@ -14314,6 +14333,7 @@ def test_workflow_controller_parallel_proof_skips_missing_page_without_misalignm
     class FakeProofWorker:
         def __init__(self, pipeline, pages, parent=None):
             self.progress_update = DummySignal()
+            self.routing_audits_ready = DummySignal()
             self.progress_state = DummySignal()
             self.all_done = DummySignal()
             self.error = DummySignal()
@@ -14467,6 +14487,7 @@ def test_workflow_controller_emits_ocr_progress_and_navigation():
     class FakeWorker:
         def __init__(self, pipeline, pages, parent=None):
             self.progress_update = DummySignal()
+            self.routing_audits_ready = DummySignal()
             self.progress_state = DummySignal()
             self.all_done = DummySignal()
             self.error = DummySignal()

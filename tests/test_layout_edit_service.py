@@ -14,7 +14,10 @@ from app.models import (
     Page,
 )
 from app.models.layout_snapshot_store import layout_snapshot_for_page, set_layout_snapshot_for_page
-from app.models.ocr_observation import block_ocr_line_observations_by_uid
+from app.models.ocr_observation import (
+    block_ocr_line_observations_by_uid,
+    replace_block_ocr_line_observations,
+)
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditService
 
 
@@ -505,6 +508,30 @@ def test_layout_edit_service_geometry_update_preserves_existing_manual_binding_r
     assert bound.paddle_binding.manual_bbox == [12, 10, 42, 30]
     assert bound.source == BlockSource.USER_EDITED
     assert bound.ocr_invalidated_reason == "block_geometry_changed"
+
+
+def test_text_block_geometry_change_invalidates_old_ocr_observation():
+    block = Block(
+        block_type=BlockType.TEXT,
+        bbox=BBox.from_xyxy(10, 10, 100, 40),
+        source_label="text",
+    )
+    page = Page(image_path="", width=200, height=100, blocks=[block])
+    _seed_layout_snapshot(page)
+    replace_block_ocr_line_observations(
+        block.uid,
+        [Line(text="旧观察", bbox=BBox.from_xyxy(10, 10, 100, 40), confidence=0.9)],
+    )
+
+    LayoutEditService().apply(LayoutEditCommand.update_geometry(
+        page,
+        block.uid,
+        bbox=BBox.from_xyxy(12, 12, 110, 44),
+    ))
+
+    assert block.source == BlockSource.USER_EDITED
+    assert block.ocr_invalidated_reason == "block_geometry_changed"
+    assert block_ocr_line_observations_by_uid(block.uid) == []
 
 
 def test_layout_edit_service_geometry_update_uses_command_bbox_when_projection_drifts():

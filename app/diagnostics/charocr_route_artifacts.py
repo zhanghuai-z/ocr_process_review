@@ -80,6 +80,8 @@ def write_charocr_route_artifacts(
         payload = {
             "schema": "charocr-pre-dispatch-route.v1",
             "page_uid": routing_plan.page_uid,
+            "routing_run_uid": routing_plan.routing_run_uid,
+            "layout_fingerprint": routing_plan.layout_fingerprint,
             "prepass_run_id": routing_plan.prepass_run_id,
             "source_image_path": str(source_image_path),
             "image_shape": list(image_bgr.shape),

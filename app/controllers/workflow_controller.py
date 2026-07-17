@@ -51,6 +51,7 @@ from app.models.layout_snapshot_projection import (
     replace_page_layout_projection_from_snapshot,
 )
 from app.models.layout_snapshot_store import set_layout_snapshot_for_page
+from app.models.ocr_routing_run_audit import OcrRoutingRunAuditDraft
 from app.models.ocr_observation import (
     iter_page_ocr_line_observation_occurrences,
     line_ocr_bbox,
@@ -141,6 +142,7 @@ class WorkflowController(QObject):
         self._proof_loaded_line_count: int = 0
         self._proof_loaded_signature: tuple = ()
         self._last_ocr_progress_completed_pages: int = 0
+        self._pending_routing_audits: list[OcrRoutingRunAuditDraft] = []
         self._hproof_panel = None
         self._vproof_panel = None
         # view-state ownership: 哪个 step 激活、哪个 page_number 激活、版面按钮可用性
@@ -501,6 +503,7 @@ class WorkflowController(QObject):
         try:
             self._project_file_service.materialize_bound_assets(self._project)
             self._store.save_project(self._project)
+            self._persist_pending_routing_audits()
             self._save_quality_probe_sidecar()
             self._dirty = False
             return True
@@ -517,6 +520,7 @@ class WorkflowController(QObject):
     ) -> None:
         self._store = bound.store
         self._project = bound.project
+        self._persist_pending_routing_audits()
         self._dirty = False
         self._sync_native_cache_dir()
         proof_stats = self._proof_crop_service.normalize_project(self._project)
@@ -619,6 +623,7 @@ class WorkflowController(QObject):
         self._dirty = False
         self._pending_layout_pages = None
         self._pending_proof_pages = None
+        self._pending_routing_audits = []
         self._discard_parallel_proof_result = False
         self._ocr_target_page_numbers = None
         self._auto_start_ocr_after_layout = True
@@ -1028,6 +1033,34 @@ class WorkflowController(QObject):
 
         self._mark_project_dirty()
         self._save_if_bound()
+
+    def _on_routing_audits_ready(self, audits: list[object]) -> None:
+        for audit in audits:
+            if not isinstance(audit, OcrRoutingRunAuditDraft):
+                logger.error("Ignoring invalid OCR routing audit draft: %r", type(audit))
+                continue
+            self._pending_routing_audits.append(audit)
+        self._persist_pending_routing_audits()
+
+    def _persist_pending_routing_audits(self) -> None:
+        if (
+            not self._pending_routing_audits
+            or self._store is None
+            or self._project is None
+            or self._project.id is None
+        ):
+            return
+        pending = self._pending_routing_audits
+        self._pending_routing_audits = []
+        for index, draft in enumerate(pending):
+            try:
+                self._store.save_ocr_routing_run_audit(
+                    draft.bind_to_project(self._project.id)
+                )
+            except Exception:
+                self._pending_routing_audits.extend(pending[index:])
+                logger.exception("Failed to persist OCR routing run audit: %s", draft.run_uid)
+                break
         if self.is_hanwang_mode():
             self.refresh_page_gate_states()
 
@@ -1135,6 +1168,7 @@ class WorkflowController(QObject):
         self._ocr_worker = OcrPipelineWorker(pipeline, pages)
         self._connect_worker_cleanup("_ocr_worker", self._ocr_worker)
         self._ocr_worker.progress_state.connect(self._on_ocr_progress)
+        self._ocr_worker.routing_audits_ready.connect(self._on_routing_audits_ready)
         if notify_page_callback:
             self._ocr_worker.progress_update.connect(notify_page_callback)
         self._ocr_worker.all_done.connect(self.on_ocr_done)
@@ -1164,6 +1198,7 @@ class WorkflowController(QObject):
         self._proof_ocr_worker = OcrPipelineWorker(pipeline, proof_pages)
         self._connect_worker_cleanup("_proof_ocr_worker", self._proof_ocr_worker)
         self._proof_ocr_worker.progress_state.connect(self._on_ocr_progress)
+        self._proof_ocr_worker.routing_audits_ready.connect(self._on_routing_audits_ready)
         self._proof_ocr_worker.all_done.connect(self._on_parallel_proof_done)
         self._proof_ocr_worker.error.connect(self._on_worker_error)
         self._proof_ocr_worker.start()
@@ -1380,6 +1415,7 @@ class OcrPipelineWorker(QThread):
     all_done  = Signal(list)         # List[Page]
     progress_update = Signal(int, int)
     progress_state = Signal(object)  # OcrProgress
+    routing_audits_ready = Signal(list)
     error     = Signal(str)
 
     def __init__(self, pipeline: OcrPipeline, pages: List[Page], parent=None):
@@ -1433,6 +1469,8 @@ class OcrPipelineWorker(QThread):
 
             result = self._pipeline.process_project(project, progress_callback=on_progress)
 
+            if result.routing_audits:
+                self.routing_audits_ready.emit(result.routing_audits)
             self.all_done.emit(result.pages)
         except Exception as e:
             logger.error("OCR worker failed: %s", e)

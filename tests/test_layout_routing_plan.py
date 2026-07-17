@@ -68,6 +68,8 @@ def test_page_routing_plan_freezes_nested_route_collections():
     )
     plan = PageRoutingPlan(
         page_uid="page-1",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="run-1",
         blocks=[
             BlockRoutingPlan(

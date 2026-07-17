@@ -24,6 +24,8 @@ from app.services.ocr_pipeline import OcrPipeline
 def test_route_artifact_emits_only_text_route_crops(tmp_path):
     plan = PageRoutingPlan(
         page_uid="page-test",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="prepass-test",
         blocks=(BlockRoutingPlan(
             block_uid="block-test",
@@ -86,6 +88,8 @@ def test_route_artifact_emits_only_text_route_crops(tmp_path):
 def test_route_artifact_can_skip_crop_visualizations(tmp_path):
     plan = PageRoutingPlan(
         page_uid="page-test",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="prepass-test",
         blocks=(BlockRoutingPlan(
             block_uid="block-test",
@@ -145,10 +149,21 @@ def test_hybrid_pipeline_writes_current_route_plan_before_native_dispatch(tmp_pa
         def recognize_page_blocks(self, _image, _page, **kwargs):
             self.plan = kwargs["routing_plan"]
 
+    class FakeVlClient:
+        def analyze_image(self, _image, **_kwargs):
+            return {
+                "result": {"layoutParsingResults": []},
+                "paddle_v16": {"jobId": "vl-test"},
+            }
+
     hook_root = tmp_path / "hook"
     monkeypatch.setenv("CHAROCR_ROUTE_HOOK_DIR", str(hook_root))
     engine = FakeNativeEngine()
-    pipeline = OcrPipeline(engine=engine, hybrid_prepass_engine=FakePrepass())
+    pipeline = OcrPipeline(
+        engine=engine,
+        hybrid_prepass_engine=FakePrepass(),
+        block_vl_client=FakeVlClient(),
+    )
 
     pipeline._process_page_with_hybrid_blocks(
         np.full((40, 90, 3), 255, dtype=np.uint8),

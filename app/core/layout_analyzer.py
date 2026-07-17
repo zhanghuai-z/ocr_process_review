@@ -15,7 +15,7 @@ VL1.6 响应在这里采用固定抽取路径：
       block_label / block_bbox / block_content
     markdown.text:                             # 供下游导出 Markdown / LaTeX
 
-PP-OCRv5 仍然负责 line/word/char bbox，VL 只接管版面块。
+PP-OCRv6 负责 OCR 路由所需的 line/word 观察，VL 负责版面块。
 """
 from __future__ import annotations
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait

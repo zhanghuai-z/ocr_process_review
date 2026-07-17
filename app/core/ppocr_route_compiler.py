@@ -10,6 +10,8 @@ from app.adapters.paddle.ppocr_v6_prepass import (
     PpOcrV6PrepassArtifact,
     PpOcrV6WordBox,
 )
+from app.core.block_observation_alignment import align_block_observations
+from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
@@ -50,14 +52,17 @@ from app.core.ppocr_route_validation import (
 )
 from app.models.enums import BlockType
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
+from app.models.ocr_routing_observation import (
+    BlockAlignmentStatus,
+    RoutingObservationBundle,
+)
 
 
 XYXY = tuple[int, int, int, int]
 
 
 def compile_page_routing_plan(
-    snapshot: LayoutSnapshot,
-    prepass: PpOcrV6PrepassArtifact,
+    observations: RoutingObservationBundle[PpOcrV6PrepassArtifact],
     *,
     page_width: int,
     page_height: int,
@@ -70,11 +75,17 @@ def compile_page_routing_plan(
     snapshot, line/text geometry comes from the prepass and page image, and
     only the returned ``PageRoutingPlan`` crosses the native boundary.
     """
+    snapshot = observations.snapshot
+    prepass = observations.prepass
+    if not isinstance(prepass, PpOcrV6PrepassArtifact):
+        raise TypeError("routing observation bundle requires a PP-OCRv6 prepass")
     if snapshot.page_uid != prepass.page_uid:
         raise ValueError(
             "routing snapshot and PP-OCRv6 prepass belong to different pages: "
             f"{snapshot.page_uid!r} != {prepass.page_uid!r}"
         )
+    if layout_snapshot_fingerprint(snapshot) != observations.layout_fingerprint:
+        raise ValueError("routing observation bundle layout fingerprint is stale")
 
     ownership = build_layout_ownership(
         snapshot,
@@ -93,19 +104,48 @@ def compile_page_routing_plan(
         ownership.line_geometry_contexts(),
         page_image_bgr,
     )
+    alignments = align_block_observations(
+        observations.block_vl_observations,
+        physical_rows,
+        ownership,
+    )
+    directives_by_line: dict[int, tuple] = {}
+    for alignment in alignments:
+        for directive in alignment.directives:
+            directives_by_line[directive.line_index] = (
+                *directives_by_line.get(directive.line_index, ()),
+                directive,
+            )
     page_decorations = detect_page_text_decorations(
         page_image_bgr,
         tuple(
             DecorationLine(
-                line.bbox,
-                tuple(DecorationToken(word.text, word.bbox) for word in line.words),
+                source.bbox,
+                tuple(DecorationToken(word.text, word.bbox) for word in source.words),
             )
-            for line in prepass.lines
-            if line.text_axis == "horizontal"
+            for source in prepass.lines
+            if source.text_axis == "horizontal"
         ),
     )
     issues: list[RouteValidationIssue] = []
     diagnostics: list[RouteDiagnostic] = []
+    for alignment in alignments:
+        target = _text_block_by_uid(ownership, alignment.block_uid)
+        target_bbox = target.bbox if target is not None else (0, 0, 0, 0)
+        if alignment.status == BlockAlignmentStatus.AMBIGUOUS:
+            issues.append(RouteValidationIssue(
+                code="ambiguous_block_text_alignment",
+                message=alignment.detail,
+                line_index=-1,
+                bbox=target_bbox,
+            ))
+        elif alignment.status == BlockAlignmentStatus.EMPTY:
+            diagnostics.append(RouteDiagnostic(
+                code="empty_vl_block_observation",
+                message=alignment.detail,
+                line_index=-1,
+                bbox=target_bbox,
+            ))
     for raw_prepass_line in prepass.lines:
         normalized_row = physical_rows.row_for_source_index(raw_prepass_line.index)
         if (
@@ -118,20 +158,13 @@ def compile_page_routing_plan(
             if normalized_row is not None
             else ownership.ownership_for(raw_prepass_line).text_block
         )
-        linecut_marker_sources = (
-            _footnote_marker_source_indices(normalized_row, ownership, target)
-            if normalized_row is not None
-            else frozenset()
-        )
         if normalized_row is not None:
-            prepass_line, linecut_token_indices = _materialize_resolved_prepass_line(
+            prepass_line = _materialize_resolved_prepass_line(
                 normalized_row,
                 ownership,
-                linecut_source_indices=linecut_marker_sources,
             )
         else:
             prepass_line = ownership.ownership_for(raw_prepass_line).line
-            linecut_token_indices = frozenset()
         line_ownership = ownership.ownership_for(prepass_line)
         line_bbox = prepass_line.bbox
         if not _is_nonempty(line_bbox):
@@ -172,7 +205,10 @@ def compile_page_routing_plan(
             structural_masks,
             page_decorations,
             page_image_bgr=page_image_bgr,
-            linecut_token_indices=linecut_token_indices,
+            linecut_owned_bboxes=tuple(
+                directive.bbox
+                for directive in directives_by_line.get(prepass_line.index, ())
+            ),
         )
         issues.extend(partition_issues_to_route_issues(
             tuple(partition_issues),
@@ -189,13 +225,12 @@ def compile_page_routing_plan(
         )
         diagnostics.extend(
             RouteDiagnostic(
-                code="footnote_marker_routed_to_linecut",
-                message="isolated footnote marker is owned by the LineCut route",
+                code="vl_marker_owned_by_linecut",
+                message="explicit VL marker geometry is owned by the LineCut route",
                 line_index=prepass_line.index,
-                bbox=decision.line.bbox,
+                bbox=directive.bbox,
             )
-            for decision in ownership.decisions
-            if decision.line.index in linecut_marker_sources
+            for directive in directives_by_line.get(prepass_line.index, ())
         )
         if partition_issues:
             continue
@@ -241,10 +276,13 @@ def compile_page_routing_plan(
 
     plan = PageRoutingPlan(
         page_uid=snapshot.page_uid,
+        routing_run_uid=observations.run_uid,
+        layout_fingerprint=observations.layout_fingerprint,
         prepass_run_id=prepass.run_id,
         blocks=tuple(block_routes),
         validation_issues=tuple(issues),
         diagnostics=tuple(diagnostics),
+        alignments=alignments,
     )
     return replace(
         plan,
@@ -279,7 +317,7 @@ def _segments_for_line(
     page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
-    linecut_token_indices: frozenset[int] = frozenset(),
+    linecut_owned_bboxes: tuple[XYXY, ...] = (),
 ) -> tuple[list[RoutingSegment], tuple, tuple, tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
     decorations = tuple(
@@ -302,7 +340,7 @@ def _segments_for_line(
             partition_line,
             line_bbox,
             excluded_bboxes=exclusion_bboxes,
-            linecut_token_indices=linecut_token_indices,
+            linecut_owned_bboxes=linecut_owned_bboxes,
         )
         text_segments = list(partition.segments)
         issues = list(partition.issues)
@@ -402,9 +440,7 @@ def _line_requires_text_partition(text: str) -> bool:
 def _materialize_resolved_prepass_line(
     row: ResolvedPhysicalLine,
     ownership: LayoutOwnership,
-    *,
-    linecut_source_indices: frozenset[int] = frozenset(),
-) -> tuple[PpOcrV6LineHint, frozenset[int]]:
+) -> PpOcrV6LineHint:
     """Reattach immutable PP text metadata after geometry resolution."""
     source_lines = {
         decision.line.index: decision.line
@@ -412,18 +448,13 @@ def _materialize_resolved_prepass_line(
     }
     ordered = [source_lines[index] for index in row.source_indices]
     words: list[tuple[PpOcrV6LineHint, PpOcrV6WordBox]] = [
-        (line, word)
-        for line in ordered
-        for word in sorted(line.words, key=lambda item: item.token_index)
+        (source, word)
+        for source in ordered
+        for word in sorted(source.words, key=lambda item: item.token_index)
     ]
-    linecut_token_indices = frozenset(
-        index
-        for index, (line, _word) in enumerate(words)
-        if line.index in linecut_source_indices
-    )
-    line = PpOcrV6LineHint(
+    materialized = PpOcrV6LineHint(
         index=row.representative_index,
-        text="".join(line.text for line in ordered),
+        text="".join(source.text for source in ordered),
         bbox=row.bbox,
         words=tuple(
             replace(word, line_index=row.representative_index, token_index=index)
@@ -432,43 +463,7 @@ def _materialize_resolved_prepass_line(
         text_axis=row.text_axis,
         orientation_angle=row.orientation_angle,
     )
-    return line, linecut_token_indices
-
-
-def _footnote_marker_source_indices(
-    row: ResolvedPhysicalLine,
-    ownership: LayoutOwnership,
-    target: LayoutBlockCandidate | None,
-) -> frozenset[int]:
-    """Identify isolated numeric prefixes inside an adopted footnote row.
-
-    PP-OCR sometimes reads a visual circled footnote marker as a plain ASCII
-    number. The layout label and the separate co-baseline source proposal are
-    retained facts; the OCR spelling of the glyph is not used as proof that it
-    belongs to EngCut.
-    """
-    if (
-        target is None
-        or str(target.block.source_label or "").strip().lower() != "footnote"
-        or row.text_axis != "horizontal"
-        or len(row.source_indices) < 2
-    ):
-        return frozenset()
-    source_lines = {
-        decision.line.index: decision.line
-        for decision in ownership.decisions
-        if decision.line.index in row.source_indices
-    }
-    ordered = sorted(source_lines.values(), key=lambda line: (line.bbox[0], line.index))
-    if len(ordered) < 2:
-        return frozenset()
-    leading = ordered[0]
-    value = str(leading.text or "").strip()
-    if not (value and value.isascii() and value.isdigit()):
-        return frozenset()
-    if leading.bbox[2] > ordered[1].bbox[0]:
-        return frozenset()
-    return frozenset({leading.index})
+    return materialized
 
 
 def _text_block_by_uid(

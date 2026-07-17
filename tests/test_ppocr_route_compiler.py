@@ -12,8 +12,21 @@ from app.models.charocr_routing import (
     ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT,
     TextSliceRoute,
 )
-from app.core.ppocr_route_compiler import compile_page_routing_plan
+from app.core.ppocr_route_compiler import compile_page_routing_plan as _compile_page_routing_plan
 from app.models import BBox, BlockOrigin, BlockType, LayoutBlockSnapshot, LayoutSnapshot, OcrPolicy
+from tests.charocr_routing_observation_fixture import routing_observation_bundle
+
+
+def compile_page_routing_plan(snapshot, prepass, **kwargs):
+    block_vl_observations = kwargs.pop("block_vl_observations", ())
+    return _compile_page_routing_plan(
+        routing_observation_bundle(
+            snapshot,
+            prepass,
+            block_vl_observations=block_vl_observations,
+        ),
+        **kwargs,
+    )
 
 
 def _block(
@@ -74,6 +87,53 @@ def test_compiler_excludes_table_figure_and_formula_from_charocr_routes():
         ("formula", (200, 0, 220, 40)),
     ]
     assert len(plan.for_block("text-1").lines) == 1
+
+
+def test_compiler_requires_exact_block_local_vl_pp_text_alignment():
+    from app.core.layout_scope import layout_snapshot_fingerprint
+    from app.models.ocr_routing_observation import (
+        BlockVlObservation,
+        BlockVlObservationStatus,
+        BlockVlTextRegion,
+    )
+
+    snapshot = _snapshot(
+        _block("text-1", BlockType.TEXT, (0, 0, 120, 40), policy=OcrPolicy.TEXT_OCR, order=0),
+    )
+    prepass = _prepass(PpOcrV6LineHint(0, "甲 乙", (0, 0, 120, 40), ()))
+
+    def observation(text):
+        return BlockVlObservation(
+            page_uid="page-1",
+            block_uid="text-1",
+            block_bbox=(0, 0, 120, 40),
+            image_hash="image-hash-test",
+            layout_fingerprint=layout_snapshot_fingerprint(snapshot),
+            status=BlockVlObservationStatus.OBSERVED,
+            regions=(BlockVlTextRegion(0, "text", text, (0, 0, 120, 40)),),
+        )
+
+    exact = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=120,
+        page_height=40,
+        block_vl_observations=(observation("甲乙"),),
+    )
+    mismatch = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=120,
+        page_height=40,
+        block_vl_observations=(observation("甲丙"),),
+    )
+
+    assert exact.is_dispatchable is True
+    assert exact.alignments[0].status.value == "exact"
+    assert mismatch.is_dispatchable is False
+    assert [issue.code for issue in mismatch.validation_issues] == [
+        "ambiguous_block_text_alignment",
+    ]
 
 
 def test_text_block_owns_row_without_clipping_ppocr_geometry():
@@ -551,6 +611,13 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
 
 
 def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
+    from app.core.layout_scope import layout_snapshot_fingerprint
+    from app.models.ocr_routing_observation import (
+        BlockVlObservation,
+        BlockVlObservationStatus,
+        BlockVlTextRegion,
+    )
+
     snapshot = _snapshot(
         _block(
             "footnote-1",
@@ -563,7 +630,8 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
     )
     image = np.full((50, 140, 3), 255, dtype=np.uint8)
     image[10:30, 8:22] = 0
-    image[10:30, 45:95] = 0
+    for x in (45, 55, 65, 75, 85):
+        image[10:30, x:x + 4] = 0
     prepass = _prepass(
         PpOcrV6LineHint(
             index=0,
@@ -585,6 +653,15 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
         page_width=140,
         page_height=50,
         page_image_bgr=image,
+        block_vl_observations=(BlockVlObservation(
+            page_uid="page-1",
+            block_uid="footnote-1",
+            block_bbox=(0, 0, 140, 50),
+            image_hash="image-hash-test",
+            layout_fingerprint=layout_snapshot_fingerprint(snapshot),
+            status=BlockVlObservationStatus.OBSERVED,
+            regions=(BlockVlTextRegion(0, "footnote", "⑧ Barry", (0, 0, 140, 50)),),
+        ),),
     )
 
     assert plan.is_dispatchable is True
@@ -596,7 +673,7 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
         for token in segment.ppocr_latin_tokens
     ] == ["Barry"]
     assert [(item.code, item.bbox) for item in plan.diagnostics] == [
-        ("footnote_marker_routed_to_linecut", (4, 5, 28, 38)),
+        ("vl_marker_owned_by_linecut", (4, 10, 38, 30)),
     ]
 
 

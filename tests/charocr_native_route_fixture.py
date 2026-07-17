@@ -123,6 +123,8 @@ def build_explicit_native_route_fixture(
 
     return rows, PageRoutingPlan(
         page_uid=page.uid,
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="test-explicit-native-routes",
         blocks=tuple(plans),
     ), page

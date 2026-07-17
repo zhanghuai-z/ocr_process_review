@@ -7,6 +7,11 @@ from .project import (
 )
 from .layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from .proof_line_state import ProofLineState
+from .ocr_routing_run_audit import (
+    BlockAlignmentAuditSummary, BlockVlObservationSummary, OcrRoutingRunAudit,
+    OcrRoutingRunAuditDraft,
+    RouteAuditSummary, RoutingAuditMessage,
+)
 from .entity_id import ensure_entity_uid, new_entity_uid, new_ulid
 
 __all__ = [
@@ -16,5 +21,8 @@ __all__ = [
     "Page", "OcrProject", "RawOcrArtifact",
     "LayoutBlockSnapshot", "LayoutSnapshot",
     "ProofLineState",
+    "BlockAlignmentAuditSummary", "BlockVlObservationSummary", "OcrRoutingRunAudit",
+    "OcrRoutingRunAuditDraft",
+    "RouteAuditSummary", "RoutingAuditMessage",
     "ensure_entity_uid", "new_entity_uid", "new_ulid",
 ]

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from numbers import Integral
 from typing import Any
 
+from app.models.ocr_routing_observation import BlockObservationAlignment
+
 
 XYXY = tuple[int, int, int, int]
 ROUTING_SOURCE_PPOCR_V6_PREPASS = "ppocrv6_prepass"
@@ -227,23 +229,31 @@ class PageRoutingPlan:
     """
 
     page_uid: str
+    routing_run_uid: str
+    layout_fingerprint: str
     prepass_run_id: str
     blocks: tuple[BlockRoutingPlan, ...]
     validation_issues: tuple[RouteValidationIssue, ...] = ()
     diagnostics: tuple[RouteDiagnostic, ...] = ()
+    alignments: tuple[BlockObservationAlignment, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.page_uid:
             raise ValueError("page routing plan requires page_uid")
+        if not self.routing_run_uid or not self.layout_fingerprint:
+            raise ValueError("page routing plan requires routing run identity")
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "validation_issues", tuple(self.validation_issues))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "alignments", tuple(self.alignments))
         if any(not isinstance(block, BlockRoutingPlan) for block in self.blocks):
             raise TypeError("page routing plan blocks require typed values")
         if any(not isinstance(issue, RouteValidationIssue) for issue in self.validation_issues):
             raise TypeError("page routing plan validation issues require typed values")
         if any(not isinstance(item, RouteDiagnostic) for item in self.diagnostics):
             raise TypeError("page routing plan diagnostics require typed values")
+        if any(not isinstance(item, BlockObservationAlignment) for item in self.alignments):
+            raise TypeError("page routing plan alignments require typed values")
         block_uids = [block.block_uid for block in self.blocks]
         if len(set(block_uids)) != len(block_uids):
             raise ValueError("page routing plan contains duplicate block routes")

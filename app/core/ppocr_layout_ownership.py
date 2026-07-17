@@ -99,13 +99,13 @@ class LayoutOwnership:
                 block_bbox=target.bbox,
                 seeds=tuple(
                     LineGeometrySeed(
-                        source_index=line.index,
-                        bbox=line.bbox,
-                        text_axis=line.text_axis,
-                        orientation_angle=line.orientation_angle,
-                        has_word_geometry=bool(line.words),
+                        source_index=source.index,
+                        bbox=source.bbox,
+                        text_axis=source.text_axis,
+                        orientation_angle=source.orientation_angle,
+                        has_word_geometry=bool(source.words),
                     )
-                    for line in lines
+                    for source in lines
                 ),
                 excluded_bboxes=tuple(
                     candidate.bbox

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6PrepassArtifact
-from app.core.ppocr_route_compiler import compile_page_routing_plan
+from app.core.ppocr_route_compiler import compile_page_routing_plan as _compile_page_routing_plan
 from app.engines.hanwang.micro_recblock import (
     BlockResult,
     CharResult,
@@ -90,6 +90,14 @@ from app.models.charocr_routing import (
     TextSliceRoute,
 )
 from tests.charocr_native_route_fixture import build_explicit_native_route_fixture
+from tests.charocr_routing_observation_fixture import routing_observation_bundle
+
+
+def compile_page_routing_plan(snapshot, prepass, **kwargs):
+    return _compile_page_routing_plan(
+        routing_observation_bundle(snapshot, prepass),
+        **kwargs,
+    )
 
 
 def _gbk_code(char: str) -> int:
@@ -123,6 +131,8 @@ def test_mixed_line_recognition_uses_typed_linecut_segments_not_broad_segimg_gro
     )
     plan = PageRoutingPlan(
         page_uid=page.uid,
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="test-mixed-line-owned-crops",
         blocks=(BlockRoutingPlan(
             block_uid=block_uid,
@@ -202,6 +212,8 @@ def test_native_runner_honors_explicit_skip_policy_for_unknown_label():
     sync_page_layout_snapshot_from_projection(page, source_engine="test")
     plan = PageRoutingPlan(
         page_uid=page.uid,
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="test-skip-policy",
         blocks=(),
     )

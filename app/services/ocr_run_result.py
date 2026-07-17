@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from app.models import Page
+from app.models.ocr_routing_run_audit import OcrRoutingRunAuditDraft
 
 
 @dataclass
@@ -24,6 +25,7 @@ class OcrRunResult:
 
     pages: list[Page] = field(default_factory=list)
     failed_blocks: list[tuple[int, int, str]] = field(default_factory=list)
+    routing_audits: list[OcrRoutingRunAuditDraft] = field(default_factory=list)
 
 
 @dataclass
@@ -35,6 +37,7 @@ class PageOcrRunResult:
     total_blocks: int = 0
     failed_blocks: list[tuple[int, int, str]] = field(default_factory=list)
     completion_message: str = ""
+    routing_audits: list[OcrRoutingRunAuditDraft] = field(default_factory=list)
 
 
 __all__ = [

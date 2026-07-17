@@ -7,7 +7,7 @@ import time
 
 _CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _ALLOWED_KINDS = frozenset({
-    "page", "block", "line", "char", "rawocr", "layoutedit", "ocrrun",
+    "page", "block", "line", "char", "rawocr", "layoutedit", "ocrrun", "vlobs",
 })
 
 

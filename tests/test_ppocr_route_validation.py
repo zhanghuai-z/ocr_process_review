@@ -16,6 +16,8 @@ from app.models.charocr_routing import (
 def test_compiled_plan_validation_reports_page_local_geometry_issues():
     plan = PageRoutingPlan(
         page_uid="page-1",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="run-1",
         blocks=(
             BlockRoutingPlan(
@@ -55,6 +57,8 @@ def test_compiled_plan_validation_reports_page_local_geometry_issues():
 def test_compiled_plan_validation_is_bidirectional_for_text_slices_and_segments():
     plan = PageRoutingPlan(
         page_uid="page-1",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="run-1",
         blocks=(
             BlockRoutingPlan(
@@ -101,6 +105,8 @@ def test_compiled_plan_validation_rejects_out_of_page_and_duplicate_line_identit
     )
     plan = PageRoutingPlan(
         page_uid="page-1",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="run-1",
         blocks=(
             BlockRoutingPlan(
@@ -135,6 +141,8 @@ def test_compiled_plan_validation_rejects_out_of_page_and_duplicate_line_identit
 def test_formula_content_bbox_may_extend_beyond_line_but_stays_page_bounded():
     plan = PageRoutingPlan(
         page_uid="page-1",
+        routing_run_uid="routingrun-test",
+        layout_fingerprint="layout-fingerprint-test",
         prepass_run_id="run-1",
         blocks=(
             BlockRoutingPlan(

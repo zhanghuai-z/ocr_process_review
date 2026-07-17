@@ -274,12 +274,13 @@ class LayoutEditService:
         return event
 
     def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:
-        if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
-            return {}
         mark_layout_block_user_edited(block)
         mark_ocr_text_invalidated(block, "block_geometry_changed")
+        clear_block_ocr_line_observations(block.uid)
+        discard_block_ocr_line_projection(block)
+        if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
+            return {}
         if not self._update_existing_manual_binding_bbox(block):
-            clear_block_ocr_line_observations(block.uid)
             binding = self.bind_manual_block_to_paddle(page, block)
         else:
             binding = paddle_binding_dict(block)
@@ -299,6 +300,8 @@ class LayoutEditService:
         snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
         before = before or self.snapshot_block_state(snapshot_block)
         block = self._runtime_block_by_uid(page, block_uid)
+        previous_ocr_policy = block.ocr_policy
+        previous_ocr_policy = block.ocr_policy
         provisional = self._replace_snapshot_block(snapshot, snapshot_index, bbox=bbox)
         apply_layout_snapshot_block_to_projection(block, provisional)
         binding = self._persist_user_block_geometry(page, block)
@@ -385,7 +388,11 @@ class LayoutEditService:
         snapshot = current_layout_snapshot(page)
         snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
         block = self._runtime_block_by_uid(page, block_uid)
+        previous_ocr_policy = block.ocr_policy
+        previous_ocr_policy = block.ocr_policy
         before = {"block": self.snapshot_block_state(snapshot_block)}
+        clear_block_ocr_line_observations(block_uid)
+        discard_block_ocr_line_projection(block)
         self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
         event = self.record_snapshot_edit(
             page,
@@ -449,6 +456,7 @@ class LayoutEditService:
         snapshot = current_layout_snapshot(page)
         snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
         block = self._runtime_block_by_uid(page, block_uid)
+        previous_ocr_policy = block.ocr_policy
         before = {"block": self.snapshot_block_state(snapshot_block)}
         provisional = self._replace_snapshot_block(
             snapshot,
@@ -460,7 +468,12 @@ class LayoutEditService:
         set_layout_block_type(block, block_type)
         set_layout_block_source_label(block, source_label)
         mark_layout_block_user_edited(block)
-        set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
+        mark_ocr_text_invalidated(block, "block_kind_changed")
+        next_ocr_policy = default_ocr_policy_for_block(block)
+        set_layout_block_ocr_policy(block, next_ocr_policy)
+        if next_ocr_policy != previous_ocr_policy:
+            clear_block_ocr_line_observations(block.uid)
+            discard_block_ocr_line_projection(block)
         binding = self.bind_manual_block_to_paddle(page, block)
         final_snapshot_block = self._replace_snapshot_block(
             snapshot,
