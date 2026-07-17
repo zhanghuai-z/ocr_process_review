@@ -30,7 +30,7 @@ VALID_ROUTE_SEGMENT_KINDS = frozenset({
 
 @dataclass(frozen=True)
 class PpOcrLatinTokenObservation:
-    """One PP-OCR Latin/digit token retained as a route-side observation.
+    """One PP-OCR Latin/ASCII-digit token retained as a route observation.
 
     The bbox is PP-OCR's observed token geometry. It may extend beyond the
     foreground-safe EngCut segment mask, but must intersect that segment.
@@ -42,10 +42,10 @@ class PpOcrLatinTokenObservation:
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
         if not self.text or not any(
-            (char.isascii() and char.isalpha()) or char.isdigit()
+            char.isascii() and (char.isalpha() or char.isdigit())
             for char in self.text
         ):
-            raise ValueError("PP-OCR Latin token observation requires Latin/digit text")
+            raise ValueError("PP-OCR Latin token observation requires Latin/ASCII-digit text")
         if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
             raise ValueError("PP-OCR Latin token observation requires non-empty geometry")
 

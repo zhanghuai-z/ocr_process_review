@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.adapters.paddle.ppocr_v6_prepass import parse_ppocr_v6_prepass_result
+from app.adapters.paddle.ppocr_v6_prepass import normalize_ppocr_v6_prepass_result
 from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.core.project_store import ProjectStore
 from app.engines.hanwang.micro_recblock import (
@@ -277,7 +277,7 @@ def main() -> int:
         if image is None:
             raise RuntimeError(f"cannot read image: {image_path}")
         height, width = image.shape[:2]
-        prepass = parse_ppocr_v6_prepass_result(
+        prepass = normalize_ppocr_v6_prepass_result(
             _load_raw_result(raw_path),
             page_uid=page.uid,
             run_id=f"cached-audit:{image_path.stem}",

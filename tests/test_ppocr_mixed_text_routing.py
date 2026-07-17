@@ -749,3 +749,42 @@ def test_pure_latin_row_partitions_question_mark_with_typed_geometry_and_space()
         (item.text, item.bbox, item.leading_space, item.trailing_space)
         for item in result.symbol_observations
     ] == [("?", (902, 32, 934, 100), False, True)]
+
+
+def test_circled_marker_and_quote_token_stay_on_linecut_route():
+    image = np.full((60, 240, 3), 255, dtype=np.uint8)
+    for bbox in (
+        (10, 10, 28, 42),      # CJK body
+        (38, 10, 43, 21),      # closing quote, left component
+        (47, 10, 52, 21),      # closing quote, right component
+        (57, 35, 62, 41),      # full stop
+        (70, 8, 96, 44),       # circled marker
+        (150, 10, 166, 42),    # Y
+        (170, 18, 184, 42),    # o
+        (188, 18, 202, 42),    # u
+        (206, 28, 218, 31),    # hyphen
+    ):
+        _ink(image, bbox)
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="应”。⑦因此 You-",
+        bbox=(0, 0, 230, 55),
+        words=(
+            PpOcrV6WordBox(0, 0, "应", (8, 4, 30, 48)),
+            PpOcrV6WordBox(0, 1, "”。⑦", (34, 4, 104, 48)),
+            PpOcrV6WordBox(0, 2, "因", (108, 4, 130, 48)),
+            PpOcrV6WordBox(0, 3, "此", (130, 4, 148, 48)),
+            PpOcrV6WordBox(0, 4, " ", (148, 4, 150, 48)),
+            PpOcrV6WordBox(0, 5, "You-", (150, 4, 220, 48)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.text, segment.bbox) for segment in latin] == [
+        ("You-", (150, 10, 218, 42)),
+    ]
+    linecut = [segment for segment in result.segments if segment.kind == "text_other"]
+    assert any(segment.bbox[0] <= 38 and segment.bbox[2] >= 96 for segment in linecut)

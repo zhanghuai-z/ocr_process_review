@@ -522,7 +522,7 @@ def _token_branch(text: str) -> str:
 
 def _has_latin_or_digit(text: str) -> bool:
     return any(
-        (char.isascii() and char.isalpha()) or char.isdigit()
+        char.isascii() and (char.isalpha() or char.isdigit())
         for char in str(text or "")
     )
 
