@@ -676,7 +676,7 @@ def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
     assert latin[0].text == "onetwo"
 
 
-def test_compiler_blocks_ambiguous_latin_glyph_at_punctuation_seam():
+def test_compiler_keeps_ambiguous_latin_glyph_on_linecut_with_diagnostic():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 120, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -705,10 +705,13 @@ def test_compiler_blocks_ambiguous_latin_glyph_at_punctuation_seam():
         page_image_bgr=image,
     )
 
-    assert plan.is_dispatchable is False
-    assert [(issue.code, issue.line_index, issue.bbox) for issue in plan.validation_issues] == [
+    assert plan.is_dispatchable is True
+    assert plan.validation_issues == ()
+    assert [(item.code, item.line_index, item.bbox) for item in plan.diagnostics] == [
         ("missing_latin_token_ink", 0, (49, 8, 55, 32)),
     ]
+    line = plan.for_block("text-1").lines[0]
+    assert [segment.kind for segment in line.segments] == ["text_other", "text_latin", "text_other"]
 
 
 def test_compiler_blocks_latin_containing_line_without_ppocr_word_boxes():

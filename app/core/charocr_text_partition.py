@@ -32,10 +32,18 @@ class RoutePartitionIssue:
 
 
 @dataclass(frozen=True)
+class RoutePartitionDiagnostic:
+    code: str
+    message: str
+    bbox: XYXY
+
+
+@dataclass(frozen=True)
 class RoutePartition:
     segments: tuple[RoutingSegment, ...]
     issues: tuple[RoutePartitionIssue, ...] = ()
     symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
+    diagnostics: tuple[RoutePartitionDiagnostic, ...] = ()
 
 
 def partition_charocr_text_region(
@@ -135,7 +143,7 @@ def partition_charocr_text_region(
 
     component_owners = _component_owner_token_indices(components, tokens, region_bbox)
     masks: list[tuple[PpOcrV6WordBox, XYXY]] = []
-    issues: list[RoutePartitionIssue] = []
+    diagnostics: list[RoutePartitionDiagnostic] = []
     for token in latin_tokens:
         mask_bbox = _latin_mask_bbox(
             components,
@@ -149,16 +157,17 @@ def partition_charocr_text_region(
                 # text-side fragment has no ink, it must not become an EngCut
                 # requirement at the formula/table boundary.
                 continue
-            issues.append(RoutePartitionIssue(
+            diagnostics.append(RoutePartitionDiagnostic(
                 code="missing_latin_token_ink",
-                message=f"PP-OCRv6 Latin/digit token has no unambiguous ink: {token.text!r}",
+                message=(
+                    "PP-OCRv6 Latin/digit token has no unambiguous ink; "
+                    f"remaining foreground stays on the LineCut route: {token.text!r}"
+                ),
                 bbox=_clip(token.bbox, region_bbox),
             ))
             continue
         masks.append((token, mask_bbox))
 
-    if issues:
-        return RoutePartition((), tuple(issues))
     routed = _segments_from_latin_masks(
         region_bbox,
         masks,
@@ -166,14 +175,15 @@ def partition_charocr_text_region(
         tokens=tokens,
     )
     return RoutePartition(
-        routed.segments,
-        routed.issues,
-        _single_symbol_observations(
+        segments=routed.segments,
+        issues=routed.issues,
+        symbol_observations=_single_symbol_observations(
             components,
             tokens,
             component_owners,
             region_bbox,
         ),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -554,4 +564,9 @@ def _union(boxes: list[XYXY]) -> XYXY:
     )
 
 
-__all__ = ["RoutePartition", "RoutePartitionIssue", "partition_charocr_text_region"]
+__all__ = [
+    "RoutePartition",
+    "RoutePartitionDiagnostic",
+    "RoutePartitionIssue",
+    "partition_charocr_text_region",
+]

@@ -11,6 +11,7 @@ from app.models import BBox, Block, BlockType, Page
 from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
+    RouteDiagnostic,
     RoutingLine,
     RoutingPlan,
     RoutingSegment,
@@ -44,6 +45,12 @@ def test_route_artifact_emits_only_text_route_crops(tmp_path):
                 has_layout_routes=True,
             ),
         ),),
+        diagnostics=(RouteDiagnostic(
+            code="missing_latin_token_ink",
+            message="foreground remains on LineCut",
+            line_index=7,
+            bbox=(25, 5, 35, 25),
+        ),),
     )
 
     output = write_charocr_route_artifacts(
@@ -66,6 +73,12 @@ def test_route_artifact_emits_only_text_route_crops(tmp_path):
     assert segments[0]["crop_role"] == "route_segment_visualization"
     assert segments[2]["crop_role"] == "route_segment_visualization"
     assert segments[1].get("crop_file") is None
+    assert payload["diagnostics"] == [{
+        "code": "missing_latin_token_ink",
+        "message": "foreground remains on LineCut",
+        "line_index": 7,
+        "bbox": [25, 5, 35, 25],
+    }]
     readme = (output / "README.md").read_text(encoding="utf-8")
     assert "不是\n对 native 调用的逐像素复刻" in readme
 

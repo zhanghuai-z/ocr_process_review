@@ -201,6 +201,19 @@ class RouteValidationIssue:
 
 
 @dataclass(frozen=True)
+class RouteDiagnostic:
+    """A non-blocking page-local routing fact retained for audit."""
+
+    code: str
+    message: str
+    line_index: int
+    bbox: XYXY
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+
+
+@dataclass(frozen=True)
 class PageRoutingPlan:
     """Immutable CharOCR dispatch input compiled from layout and PP-OCR facts.
 
@@ -212,16 +225,20 @@ class PageRoutingPlan:
     prepass_run_id: str
     blocks: tuple[BlockRoutingPlan, ...]
     validation_issues: tuple[RouteValidationIssue, ...] = ()
+    diagnostics: tuple[RouteDiagnostic, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.page_uid:
             raise ValueError("page routing plan requires page_uid")
         object.__setattr__(self, "blocks", tuple(self.blocks))
         object.__setattr__(self, "validation_issues", tuple(self.validation_issues))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
         if any(not isinstance(block, BlockRoutingPlan) for block in self.blocks):
             raise TypeError("page routing plan blocks require typed values")
         if any(not isinstance(issue, RouteValidationIssue) for issue in self.validation_issues):
             raise TypeError("page routing plan validation issues require typed values")
+        if any(not isinstance(item, RouteDiagnostic) for item in self.diagnostics):
+            raise TypeError("page routing plan diagnostics require typed values")
         block_uids = [block.block_uid for block in self.blocks]
         if len(set(block_uids)) != len(block_uids):
             raise ValueError("page routing plan contains duplicate block routes")
@@ -372,6 +389,7 @@ __all__ = [
     "PageRoutingPlan",
     "PpOcrLatinTokenObservation",
     "PpOcrSymbolObservation",
+    "RouteDiagnostic",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",
     "ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT",

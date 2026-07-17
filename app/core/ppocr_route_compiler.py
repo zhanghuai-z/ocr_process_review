@@ -9,6 +9,7 @@ from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6Prepass
 from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
+    RouteDiagnostic,
     RouteValidationIssue,
     ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT,
     ROUTING_SOURCE_PPOCR_V6_PREPASS,
@@ -100,6 +101,7 @@ def compile_page_routing_plan(
         ),
     )
     issues: list[RouteValidationIssue] = []
+    diagnostics: list[RouteDiagnostic] = []
     for raw_prepass_line in prepass.lines:
         normalized_row = physical_rows.row_for_source_index(raw_prepass_line.index)
         if (
@@ -146,7 +148,12 @@ def compile_page_routing_plan(
         if formula_overlap is not None:
             issues.append(overlapping_formula_masks_issue(prepass_line.index, formula_overlap))
             continue
-        segments, partition_issues, partition_symbol_observations = _segments_for_line(
+        (
+            segments,
+            partition_issues,
+            partition_symbol_observations,
+            partition_diagnostics,
+        ) = _segments_for_line(
             prepass_line,
             line_bbox,
             structural_masks,
@@ -157,6 +164,15 @@ def compile_page_routing_plan(
             tuple(partition_issues),
             line_index=prepass_line.index,
         ))
+        diagnostics.extend(
+            RouteDiagnostic(
+                code=item.code,
+                message=item.message,
+                line_index=prepass_line.index,
+                bbox=item.bbox,
+            )
+            for item in partition_diagnostics
+        )
         if partition_issues:
             continue
         text_slices = [segment for segment in segments if is_text_route_segment_kind(segment.kind)]
@@ -204,6 +220,7 @@ def compile_page_routing_plan(
         prepass_run_id=prepass.run_id,
         blocks=tuple(block_routes),
         validation_issues=tuple(issues),
+        diagnostics=tuple(diagnostics),
     )
     return replace(
         plan,
@@ -238,7 +255,7 @@ def _segments_for_line(
     page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
-) -> tuple[list[RoutingSegment], tuple, tuple]:
+) -> tuple[list[RoutingSegment], tuple, tuple, tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
     decorations = tuple(
         TextDecoration(decoration.kind, overlap)
@@ -264,10 +281,12 @@ def _segments_for_line(
         text_segments = list(partition.segments)
         issues = list(partition.issues)
         symbol_observations = partition.symbol_observations
+        diagnostics = partition.diagnostics
     else:
         text_segments = [RoutingSegment(kind=text_kind, bbox=line_bbox)]
         issues = []
         symbol_observations = ()
+        diagnostics = ()
 
     # Structural regions are exact two-dimensional masks.  They deliberately
     # do not split the physical PP row into left/right crops: the native input
@@ -289,6 +308,7 @@ def _segments_for_line(
         [*text_segments, *structure_segments, *decoration_segments],
         tuple(issues),
         tuple(symbol_observations),
+        tuple(diagnostics),
     )
 
 

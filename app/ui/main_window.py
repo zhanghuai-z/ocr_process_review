@@ -765,6 +765,7 @@ class MainWindow(QMainWindow):
         if self._controller.has_pages:
             pages = self._controller.pages
             self._layout_panel.set_pages(pages)
+            self._controller.refresh_page_gate_states()
             self._controller.set_layout_run_enabled(True)
             if self._controller.is_fully_analyzed:
                 self._layout_panel.show_analysis_result(pages)

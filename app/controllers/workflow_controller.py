@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 from app.models.block_state import mark_ocr_text_invalidated
 from app.core.logging import get_logger
 from app.core.app_config import get_config
+from app.core.page_errors import is_ocr_error_message
 from app.core.proof_line_utils import iter_unique_page_text_line_views
 from app.core.proof_occurrence import line_signature
 from app.core.project_store import ProjectStore
@@ -67,6 +68,7 @@ from app.models.page_state import (
     mark_page_ocr_done,
     mark_page_ocr_failed,
     page_has_error,
+    page_error_message,
     page_is_layout_analyzed,
     page_is_ocr_done,
     reconcile_page_ocr_done_from_result,
@@ -1116,6 +1118,17 @@ class WorkflowController(QObject):
         engine = create_engine()
         page_concurrency = self._effective_ocr_page_concurrency(pages, engine)
         pipeline = OcrPipeline(engine=engine, page_concurrency=page_concurrency)
+
+        retry_pages = [
+            page for page in pages
+            if is_ocr_error_message(page_error_message(page))
+        ]
+        for page in retry_pages:
+            mark_page_layout_done(page)
+        if retry_pages:
+            self._mark_project_dirty()
+            self._save_if_bound()
+            self.refresh_page_gate_states()
 
         self._ocr_target_page_numbers = target_page_numbers
         self._last_ocr_progress_completed_pages = 0

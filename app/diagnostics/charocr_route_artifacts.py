@@ -93,6 +93,15 @@ def write_charocr_route_artifacts(
                 }
                 for issue in routing_plan.validation_issues
             ],
+            "diagnostics": [
+                {
+                    "code": item.code,
+                    "message": item.message,
+                    "line_index": item.line_index,
+                    "bbox": list(item.bbox),
+                }
+                for item in routing_plan.diagnostics
+            ],
             "routes": records,
             "legend": {
                 "blue": "PP-OCRv6 line geometry",
@@ -260,6 +269,7 @@ def _readme_text(routing_plan: PageRoutingPlan, records: list[dict[str, Any]]) -
         f"- PP-OCRv6 run: `{routing_plan.prepass_run_id}`",
         f"- 可分派: `{routing_plan.is_dispatchable}`",
         f"- 文字路由段数: `{text_count}`",
+        f"- 非阻断诊断数: `{len(routing_plan.diagnostics)}`",
         "",
         "`route-overlay.png` 是当前内存中的 `PageRoutingPlan`：",
         "- 蓝色：PP-OCRv6 行几何；",

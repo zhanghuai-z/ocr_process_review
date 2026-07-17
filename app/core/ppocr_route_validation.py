@@ -291,10 +291,10 @@ def validate_compiled_page_routing_plan(
                             line_index=routing_line.index,
                             bbox=token.bbox,
                         ))
-                    elif not _contains_bbox(segment.bbox, token.bbox):
+                    elif _intersect(segment.bbox, token.bbox) is None:
                         issues.append(RouteValidationIssue(
-                            code="compiled_token_outside_segment",
-                            message="PP-OCR Latin token is not contained by its segment",
+                            code="compiled_token_disjoint_segment",
+                            message="PP-OCR Latin token does not intersect its segment mask",
                             line_index=routing_line.index,
                             bbox=token.bbox,
                         ))

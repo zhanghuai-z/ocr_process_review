@@ -474,7 +474,7 @@ def test_horizontal_table_rule_cannot_widen_or_overlap_latin_masks():
     ]
 
 
-def test_latin_token_without_owned_ink_fails_without_borrowing_punctuation():
+def test_latin_token_without_owned_ink_stays_on_linecut_without_borrowing_punctuation():
     image = _image()
     _ink(image, (4, 10, 20, 30))
     _ink(image, (30, 10, 50, 30))       # fused left parenthesis + h
@@ -495,8 +495,11 @@ def test_latin_token_without_owned_ink_fails_without_borrowing_punctuation():
 
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
 
-    assert result.segments == ()
-    assert [issue.code for issue in result.issues] == ["missing_latin_token_ink"]
+    assert result.issues == ()
+    assert [(segment.kind, segment.bbox) for segment in result.segments] == [
+        ("text_other", (0, 0, 100, 40)),
+    ]
+    assert [item.code for item in result.diagnostics] == ["missing_latin_token_ink"]
 
 
 def test_latin_token_keeps_raw_observation_bbox_when_mask_loses_fused_glyph():
