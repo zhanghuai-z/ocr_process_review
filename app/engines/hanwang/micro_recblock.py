@@ -617,20 +617,22 @@ def _merge_physical_routing_line(
     )]
 
 
-def _apply_missing_symbol_observations(
+def _reconcile_ppocr_symbol_observations(
     lines: list[LineResult],
     observations: tuple[PpOcrSymbolObservation, ...],
 ) -> list[LineResult]:
-    """Add only symbol geometry that both native branches omitted.
+    """Apply typed PP symbol ownership to native output for the same ink.
 
-    Existing native characters are never merged or resized here. A missing
-    symbol is materialized only from a single-glyph PP token whose bbox was
-    independently measured from foreground components during route compile.
+    PP supplies the symbol identity and token cell; foreground analysis
+    supplies its exact geometry. Native characters are replaced only when
+    their center is inside that cell and their geometry intersects the owned
+    foreground. This also handles a fully omitted native symbol without
+    guessing from neighboring text.
     """
     if not lines or not observations:
         return lines
     resolved = list(lines)
-    for observation in observations:
+    for observation in sorted(observations, key=lambda item: (item.bbox[0], item.bbox[1])):
         center_x, center_y = _bbox_center(observation.bbox)
         owners = [
             index
@@ -642,12 +644,13 @@ def _apply_missing_symbol_observations(
             continue
         line_index = owners[0]
         line = resolved[line_index]
-        if any(
-            char.bbox is not None
+        claimed = [
+            index
+            for index, char in enumerate(line.chars)
+            if char.bbox is not None
+            and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
-            for char in line.chars
-        ):
-            continue
+        ]
         symbol = CharResult(
             text=observation.text,
             confidence=0.0,
@@ -657,20 +660,49 @@ def _apply_missing_symbol_observations(
             bbox_granularity="char",
             token_text=observation.text,
         )
-        insertion = len(line.chars)
-        for index, char in enumerate(line.chars):
-            if char.bbox is None:
-                continue
-            if _bbox_center(char.bbox)[0] > center_x:
-                insertion = index
-                break
-        chars = [*line.chars[:insertion], symbol, *line.chars[insertion:]]
+        if claimed:
+            insertion = claimed[0]
+            claimed_set = set(claimed)
+            chars = [char for index, char in enumerate(line.chars) if index not in claimed_set]
+        else:
+            insertion = len(line.chars)
+            chars = list(line.chars)
+            for index, char in enumerate(chars):
+                if char.bbox is None:
+                    continue
+                if _bbox_center(char.bbox)[0] > center_x:
+                    insertion = index
+                    break
+
+        additions: list[CharResult] = []
+        if observation.leading_space and (
+            insertion == 0 or chars[insertion - 1].text != " "
+        ):
+            additions.append(_ppocr_symbol_space())
+        additions.append(symbol)
+        if observation.trailing_space and (
+            insertion >= len(chars) or chars[insertion].text != " "
+        ):
+            additions.append(_ppocr_symbol_space())
+        chars[insertion:insertion] = additions
         resolved[line_index] = replace(
             line,
             text="".join(char.text for char in chars),
             chars=chars,
         )
     return resolved
+
+
+def _ppocr_symbol_space() -> CharResult:
+    return CharResult(
+        text=" ",
+        confidence=0.0,
+        bbox=None,
+        candidates=[" "],
+        source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+        bbox_granularity="space",
+        token_text=" ",
+    )
 
 
 def _distribute_linecut_results(
@@ -854,7 +886,7 @@ def _assemble_layout_route_line(
         merged_text_lines: list[LineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _apply_missing_symbol_observations(
+        return _reconcile_ppocr_symbol_observations(
             _merge_physical_routing_line(
                 merged_text_lines,
                 route_bbox=route.bbox,
@@ -948,7 +980,7 @@ def _assemble_layout_route_line(
                 review_flags=sorted(flags),
             )
         )
-    return _apply_missing_symbol_observations(
+    return _reconcile_ppocr_symbol_observations(
         assembled,
         route.ppocr_symbol_observations,
     )

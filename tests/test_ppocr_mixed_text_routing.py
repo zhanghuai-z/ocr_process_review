@@ -141,7 +141,7 @@ def test_punctuation_fragment_before_latin_mask_cannot_pull_cjk_into_engcut():
     ]
 
 
-def test_pure_latin_row_keeps_punctuation_in_full_engcut_context():
+def test_pure_latin_row_routes_punctuation_outside_engcut_context():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A
     _ink(image, (37, 20, 42, 28))      # detached quote fragment
@@ -160,8 +160,10 @@ def test_pure_latin_row_keeps_punctuation_in_full_engcut_context():
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 90, 40), "A”B"),
+    assert [(segment.kind, segment.text) for segment in result.segments] == [
+        ("text_latin", "A"),
+        ("text_other", ""),
+        ("text_latin", "B"),
     ]
 
 
@@ -323,7 +325,7 @@ def test_symbol_recovery_cannot_override_unique_latin_center_owner():
     ] == [((44, 10, 57, 30), "i")]
 
 
-def test_pure_latin_row_does_not_depend_on_quote_component_ownership():
+def test_pure_latin_row_keeps_uncertain_quote_region_out_of_engcut():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A body
     _ink(image, (39, 17, 44, 29))      # quote fragment, inside the measured seed only
@@ -342,12 +344,14 @@ def test_pure_latin_row_does_not_depend_on_quote_component_ownership():
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 90, 40), "AA”B"),
+    assert [(segment.kind, segment.text) for segment in result.segments] == [
+        ("text_latin", "AA"),
+        ("text_other", ""),
+        ("text_latin", "B"),
     ]
 
 
-def test_pure_latin_row_preserves_spaces_in_full_engcut_context():
+def test_pure_latin_row_keeps_token_bindings_when_latin_masks_merge():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A
     _ink(image, (50, 10, 55, 30))      # B
@@ -366,8 +370,13 @@ def test_pure_latin_row_preserves_spaces_in_full_engcut_context():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 80, 40), "A B"),
+        ("text_latin", (20, 10, 55, 30), "AB"),
     ]
+    assert [
+        token.text
+        for segment in result.segments
+        for token in segment.ppocr_latin_tokens
+    ] == ["A", "B"]
 
 
 def test_light_text_on_dark_background_uses_the_same_mixed_route_contract():
@@ -594,7 +603,7 @@ def test_shifted_multi_part_symbol_reclaims_component_from_adjacent_latin_token(
     assert [(segment.bbox, segment.text) for segment in latin] == [((30, 10, 35, 30), "1")]
 
 
-def test_pure_latin_row_keeps_superscript_in_full_engcut_context():
+def test_fused_latin_superscript_ink_stays_out_of_engcut_without_unique_ownership():
     image = _image()
     _ink(image, (20, 10, 42, 30))       # fused x + superscript 2
     _ink(image, (44, 10, 50, 30))       # following digit 2
@@ -613,11 +622,12 @@ def test_pure_latin_row_keeps_superscript_in_full_engcut_context():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 70, 40), "x²2"),
+        ("text_other", (0, 0, 44, 40), ""),
+        ("text_latin", (44, 10, 50, 30), "2"),
     ]
 
 
-def test_pure_latin_row_ignores_displaced_quote_word_boxes():
+def test_pure_latin_row_keeps_displaced_quote_region_out_of_engcut():
     image = _image()
     _ink(image, (20, 10, 25, 30))       # first Latin glyph
     _ink(image, (30, 10, 35, 30))       # final Latin glyph
@@ -637,12 +647,13 @@ def test_pure_latin_row_ignores_displaced_quote_word_boxes():
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 90, 40))
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 90, 40), "AB” “"),
+    assert [(segment.kind, segment.text) for segment in result.segments] == [
+        ("text_latin", "AB"),
+        ("text_other", ""),
     ]
 
 
-def test_pure_latin_row_does_not_split_symbol_only_gap():
+def test_pure_latin_row_splits_symbol_only_gap_from_engcut():
     image = _image()
     _ink(image, (10, 10, 15, 30))
     _ink(image, (30, 10, 34, 20))
@@ -664,12 +675,14 @@ def test_pure_latin_row_does_not_split_symbol_only_gap():
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 110, 40))
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 110, 40), "A” “B"),
+    assert [(segment.kind, segment.text) for segment in result.segments] == [
+        ("text_latin", "A"),
+        ("text_other", ""),
+        ("text_latin", "B"),
     ]
 
 
-def test_pure_latin_row_keeps_shifted_question_mark_in_engcut_context():
+def test_pure_latin_row_routes_shifted_question_mark_out_of_engcut():
     image = np.full((60, 220, 3), 255, dtype=np.uint8)
     for bbox in (
         (20, 16, 24, 48),
@@ -694,12 +707,13 @@ def test_pure_latin_row_keeps_shifted_question_mark_in_engcut_context():
     result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
 
     assert result.issues == ()
-    assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 200, 55), "China? "),
+    assert [(segment.kind, segment.text) for segment in result.segments] == [
+        ("text_latin", "China"),
+        ("text_other", ""),
     ]
 
 
-def test_pure_latin_row_does_not_partition_around_question_mark():
+def test_pure_latin_row_partitions_question_mark_with_typed_geometry_and_space():
     image = np.full((121, 1200, 3), 255, dtype=np.uint8)
     for bbox in (
         (683, 23, 730, 89),    # preceding n
@@ -727,5 +741,11 @@ def test_pure_latin_row_does_not_partition_around_question_mark():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (0, 0, 1200, 121), "China? Is"),
+        ("text_latin", (683, 23, 893, 89), "China"),
+        ("text_other", (893, 0, 984, 121), ""),
+        ("text_latin", (984, 25, 1043, 89), "Is"),
     ]
+    assert [
+        (item.text, item.bbox, item.leading_space, item.trailing_space)
+        for item in result.symbol_observations
+    ] == [("?", (902, 32, 934, 100), False, True)]

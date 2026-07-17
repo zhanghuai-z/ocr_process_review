@@ -550,7 +550,7 @@ def test_compiler_partitions_mixed_line_from_word_box_proposals_and_ink():
     ]
 
 
-def test_compiler_routes_pure_latin_row_without_word_masks():
+def test_compiler_blocks_pure_latin_row_without_word_masks():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 180, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -563,16 +563,13 @@ def test_compiler_routes_pure_latin_row_without_word_masks():
 
     plan = compile_page_routing_plan(snapshot, prepass, page_width=180, page_height=50)
 
-    assert plan.is_dispatchable is True
-    assert [
-        (segment.kind, segment.bbox, segment.text)
-        for segment in plan.for_block("text-1").lines[0].segments
-    ] == [
-        ("text_latin", (10, 5, 170, 40), "vol. 26, no. 2, 1998."),
+    assert plan.is_dispatchable is False
+    assert [issue.code for issue in plan.validation_issues] == [
+        "latin_line_missing_word_boxes",
     ]
 
 
-def test_compiler_routes_quoted_pure_latin_row_as_one_engcut_crop():
+def test_compiler_routes_quoted_pure_latin_row_by_typed_ink_ownership():
     snapshot = _snapshot(
         _block("text-1", BlockType.TEXT, (0, 0, 100, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
@@ -604,7 +601,9 @@ def test_compiler_routes_quoted_pure_latin_row_as_one_engcut_crop():
         (segment.kind, segment.bbox, segment.text)
         for segment in plan.for_block("text-1").lines[0].segments
     ] == [
-        ("text_latin", (0, 8, 70, 30), "“A”"),
+        ("text_other", (0, 8, 30, 30), ""),
+        ("text_latin", (30, 8, 40, 30), "A"),
+        ("text_other", (40, 8, 70, 30), ""),
     ]
 
 

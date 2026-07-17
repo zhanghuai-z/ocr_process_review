@@ -41,7 +41,10 @@ class PpOcrLatinTokenObservation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
-        if not self.text or not any(char.isascii() and char.isalnum() for char in self.text):
+        if not self.text or not any(
+            (char.isascii() and char.isalpha()) or char.isdigit()
+            for char in self.text
+        ):
             raise ValueError("PP-OCR Latin token observation requires Latin/digit text")
         if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
             raise ValueError("PP-OCR Latin token observation requires non-empty geometry")
@@ -54,6 +57,8 @@ class PpOcrSymbolObservation:
     text: str
     bbox: XYXY
     proposal_bbox: XYXY
+    leading_space: bool = False
+    trailing_space: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
@@ -276,6 +281,8 @@ def routing_line_from_record(
                 text=str(item.get("text") or ""),
                 bbox=xyxy(item.get("bbox")),
                 proposal_bbox=xyxy(item.get("proposal_bbox")),
+                leading_space=bool(item.get("leading_space", False)),
+                trailing_space=bool(item.get("trailing_space", False)),
             )
             for item in route.get("ppocr_symbol_observations", [])
             if isinstance(item, dict)
@@ -342,6 +349,8 @@ def routing_line_to_record(
                 "text": observation.text,
                 "bbox": list(observation.bbox),
                 "proposal_bbox": list(observation.proposal_bbox),
+                **({"leading_space": True} if observation.leading_space else {}),
+                **({"trailing_space": True} if observation.trailing_space else {}),
             }
             for observation in line.ppocr_symbol_observations
         ]

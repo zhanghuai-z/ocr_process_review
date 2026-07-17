@@ -55,30 +55,15 @@ def partition_charocr_text_region(
 ) -> RoutePartition:
     """Partition one non-structural PP-OCR row region into native OCR crops.
 
-    CJK-only rows remain one LineCut route. Pure Latin/digit rows keep their
-    complete physical row and go directly to EngCut. Mixed rows use PP-OCR
-    Latin word boxes as EngCut mask proposals. Component closure may repair a
-    word-box edge, but ink anchored by any other PP-OCR token cannot enter a
-    Latin mask. Everything outside those masks remains a LineCut region.
+    CJK-only rows remain one LineCut route. Rows containing Latin or digits use
+    PP-OCR word boxes as EngCut mask proposals, including otherwise pure Latin
+    rows. Component closure may repair a word-box edge, but ink anchored by any
+    other PP-OCR token cannot enter a Latin mask. Everything outside those
+    masks remains a LineCut region.
     """
     text = str(prepass_line.text or "")
     if not _has_latin_or_digit(text):
         return RoutePartition((RoutingSegment(kind="text_other", bbox=region_bbox, text=text),))
-    if not any(is_cjk_char(char) for char in text):
-        return RoutePartition((RoutingSegment(
-            kind="text_latin",
-            bbox=region_bbox,
-            text=text,
-            ppocr_latin_tokens=tuple(
-                PpOcrLatinTokenObservation(
-                    text=token.text,
-                    bbox=_clip(token.bbox, region_bbox),
-                )
-                for token in sorted(prepass_line.words, key=lambda item: item.token_index)
-                if _token_branch(token.text) == "latin"
-                and _is_nonempty(_clip(token.bbox, region_bbox))
-            ),
-        ),))
     if not prepass_line.words:
         return RoutePartition((), (
             RoutePartitionIssue(
@@ -236,6 +221,8 @@ def _single_symbol_observations(
                 text=glyph,
                 bbox=_union(boxes),
                 proposal_bbox=glyph_cells[index],
+                leading_space=index == 0 and text[:1].isspace(),
+                trailing_space=index == len(glyphs) - 1 and text[-1:].isspace(),
             )
             for index, (glyph, boxes) in enumerate(zip(glyphs, glyph_components))
         )
@@ -534,7 +521,10 @@ def _token_branch(text: str) -> str:
 
 
 def _has_latin_or_digit(text: str) -> bool:
-    return any(char.isascii() and char.isalnum() for char in str(text or ""))
+    return any(
+        (char.isascii() and char.isalpha()) or char.isdigit()
+        for char in str(text or "")
+    )
 
 
 def _clip(bbox: XYXY, bounds: XYXY) -> XYXY:

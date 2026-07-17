@@ -10655,6 +10655,72 @@ def test_hanwang_route_assembly_materializes_explicit_missing_symbol_observation
     print("test_hanwang_route_assembly_materializes_explicit_missing_symbol_observation PASSED")
 
 
+def test_hanwang_route_assembly_reconciles_wrong_native_question_mark_and_space():
+    from app.engines.hanwang.micro_recblock import (
+        CharResult,
+        LineResult,
+        _assemble_layout_route_line,
+    )
+    from app.services.layout_routing_plan import RoutingLine, RoutingSegment
+    from app.models.charocr_routing import PpOcrSymbolObservation
+
+    route = RoutingLine(
+        index=0,
+        bbox=(680, 0, 1050, 121),
+        segments=(
+            RoutingSegment(kind="text_latin", bbox=(683, 23, 893, 89)),
+            RoutingSegment(kind="text_other", bbox=(893, 0, 984, 121)),
+            RoutingSegment(kind="text_latin", bbox=(984, 25, 1043, 89)),
+        ),
+        ppocr_symbol_observations=(
+            PpOcrSymbolObservation(
+                text="?",
+                bbox=(902, 32, 934, 100),
+                proposal_bbox=(906, 0, 966, 121),
+                trailing_space=True,
+            ),
+        ),
+    )
+    grouped_lines = {
+        (0, 0, 0): [LineResult(
+            text="China",
+            bbox=(683, 23, 893, 89),
+            chars=[CharResult(text="a", bbox=(855, 50, 893, 89))],
+        )],
+        (0, 0, 1): [LineResult(
+            text="9",
+            bbox=(893, 0, 984, 121),
+            chars=[CharResult(text="9", bbox=(902, 32, 934, 79))],
+        )],
+        (0, 0, 2): [LineResult(
+            text="Is",
+            bbox=(984, 25, 1043, 89),
+            chars=[CharResult(text="I", bbox=(984, 25, 1009, 88))],
+        )],
+    }
+
+    lines = _assemble_layout_route_line(
+        block_idx=0,
+        line_idx=0,
+        route=route,
+        grouped_lines=grouped_lines,
+    )
+
+    assert len(lines) == 1
+    assert lines[0].text == "a? I"
+    assert [
+        (char.text, char.bbox, char.source)
+        for char in lines[0].chars
+    ] == [
+        ("a", (855, 50, 893, 89), "hanwang:micro_recblock"),
+        ("?", (902, 32, 934, 100), "ppocrv6:symbol_foreground_observation"),
+        (" ", None, "ppocrv6:symbol_foreground_observation"),
+        ("I", (984, 25, 1009, 88), "hanwang:micro_recblock"),
+    ]
+
+    print("test_hanwang_route_assembly_reconciles_wrong_native_question_mark_and_space PASSED")
+
+
 def test_hanwang_route_assembly_never_rewrites_existing_native_punctuation_geometry():
     from app.engines.hanwang.micro_recblock import (
         CharResult,

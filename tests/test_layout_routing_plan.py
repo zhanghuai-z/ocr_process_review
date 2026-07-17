@@ -286,6 +286,7 @@ def test_symbol_observations_round_trip_on_physical_routing_line():
         text="“",
         bbox=(24, 12, 32, 28),
         proposal_bbox=(27, 8, 35, 32),
+        trailing_space=True,
     )
     line = RoutingLine(
         index=0,
@@ -305,6 +306,7 @@ def test_symbol_observations_round_trip_on_physical_routing_line():
         "text": "“",
         "bbox": [24, 12, 32, 28],
         "proposal_bbox": [27, 8, 35, 32],
+        "trailing_space": True,
     }]
     assert restored.ppocr_symbol_observations == (observation,)
 
