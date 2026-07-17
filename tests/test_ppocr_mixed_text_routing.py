@@ -219,7 +219,108 @@ def test_multi_glyph_symbol_reclaims_glyph_left_of_its_raw_box_from_latin_mask()
         ("text_latin", (10, 10, 30, 30), "A"),
         ("text_other", (30, 0, 100, 40), ""),
     ]
-    assert result.symbol_observations == ()
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in result.symbol_observations
+    ] == [
+        ("）", (34, 8, 39, 31), (40, 8, 46, 32)),
+        ("、", (45, 22, 50, 29), (46, 8, 52, 32)),
+    ]
+
+
+def test_multi_glyph_quote_token_emits_two_independent_observations():
+    image = _image()
+    _ink(image, (10, 10, 28, 30))      # 甲
+    _ink(image, (40, 8, 45, 15))       # closing quote part 1
+    _ink(image, (48, 8, 53, 15))       # closing quote part 2
+    _ink(image, (68, 8, 73, 15))       # opening quote part 1
+    _ink(image, (76, 8, 81, 15))       # opening quote part 2
+    _ink(image, (96, 10, 114, 30))     # 乙
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲”“乙A",
+        bbox=(0, 0, 150, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (8, 8, 30, 32)),
+            PpOcrV6WordBox(0, 1, "”“", (36, 4, 84, 20)),
+            PpOcrV6WordBox(0, 2, "乙", (94, 8, 116, 32)),
+            PpOcrV6WordBox(0, 3, "A", (126, 8, 140, 32)),
+        ),
+    )
+    _ink(image, (130, 10, 136, 30))
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 150, 40))
+
+    assert result.issues == ()
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in result.symbol_observations
+    ] == [
+        ("”", (40, 8, 53, 15), (36, 4, 60, 20)),
+        ("“", (68, 8, 81, 15), (60, 4, 84, 20)),
+    ]
+
+
+def test_shifted_symbol_center_does_not_steal_owned_following_digit():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))       # 甲
+    _ink(image, (30, 10, 35, 30))      # 1
+    _ink(image, (38, 10, 43, 30))      # slash
+    _ink(image, (44, 10, 57, 30))      # 2; contains slash and digit centers
+    _ink(image, (72, 10, 88, 30))      # 乙
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲1/2乙",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "1", (28, 8, 38, 32)),
+            PpOcrV6WordBox(0, 2, "/", (39, 8, 50, 32)),
+            PpOcrV6WordBox(0, 3, "2", (48, 8, 58, 32)),
+            PpOcrV6WordBox(0, 4, "乙", (70, 8, 90, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    assert [
+        (segment.bbox, segment.text)
+        for segment in result.segments
+        if segment.kind == "text_latin"
+    ] == [
+        ((30, 10, 35, 30), "1"),
+        ((44, 10, 57, 30), "2"),
+    ]
+
+
+def test_symbol_recovery_cannot_override_unique_latin_center_owner():
+    image = _image()
+    _ink(image, (4, 10, 20, 30))       # 甲
+    _ink(image, (30, 10, 40, 20))      # symbol body
+    _ink(image, (44, 20, 48, 24))      # detached symbol body
+    _ink(image, (47, 10, 57, 30))      # i; overlaps the symbol proposal
+    _ink(image, (72, 10, 88, 30))      # 乙
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text="甲=ω_i乙",
+        bbox=(0, 0, 100, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, "甲", (2, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "=ω_", (28, 8, 50, 32)),
+            PpOcrV6WordBox(0, 2, "i", (50, 8, 60, 32)),
+            PpOcrV6WordBox(0, 3, "乙", (70, 8, 90, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
+
+    assert result.issues == ()
+    assert [
+        (segment.bbox, segment.text)
+        for segment in result.segments
+        if segment.kind == "text_latin"
+    ] == [((44, 10, 57, 30), "i")]
 
 
 def test_pure_latin_row_does_not_depend_on_quote_component_ownership():

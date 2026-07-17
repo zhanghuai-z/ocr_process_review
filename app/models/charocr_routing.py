@@ -49,7 +49,7 @@ class PpOcrLatinTokenObservation:
 
 @dataclass(frozen=True)
 class PpOcrSymbolObservation:
-    """One single-glyph PP token with foreground-measured geometry."""
+    """One PP-observed symbol glyph with foreground-measured geometry."""
 
     text: str
     bbox: XYXY

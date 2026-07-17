@@ -3,13 +3,12 @@
 PP-OCR word boxes are geometry proposals for Latin/digit routing. For every
 line that contains Latin letters or digits, Latin/digit proposals create
 EngCut masks and every remaining horizontal region is dispatched to LineCut.
-Single-glyph symbol tokens may also carry a foreground-measured observation;
-they never resize or merge native character geometry.
+Symbol glyphs may also carry foreground-measured observations; they never
+resize or merge native character geometry.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
@@ -165,58 +164,86 @@ def partition_charocr_text_region(
         masks,
         components,
         tokens=tokens,
-        component_owners=component_owners,
     )
     return RoutePartition(
         routed.segments,
         routed.issues,
-        _single_symbol_observations(components, tokens, region_bbox),
+        _single_symbol_observations(
+            components,
+            tokens,
+            component_owners,
+            region_bbox,
+        ),
     )
 
 
 def _single_symbol_observations(
     components: list[ForegroundComponent],
     tokens: tuple[PpOcrV6WordBox, ...],
+    component_owners: dict[ForegroundComponent, int | None],
     region_bbox: XYXY,
 ) -> tuple[PpOcrSymbolObservation, ...]:
-    """Measure one-glyph symbol geometry in ordered PP token ownership cells."""
-    ordered = tuple(
-        token for token in sorted(tokens, key=lambda item: item.token_index)
-        if str(token.text or "").strip()
-    )
+    """Measure symbol glyphs from the same ownership used by routing.
+
+    PP-OCR may place several punctuation glyphs in one token.  The token text
+    supplies their count and order; its proposal bbox supplies their ordered
+    horizontal cells.  Every cell must own foreground before any observation
+    from that token is emitted, so incomplete topology is never guessed.
+    """
     observations: list[PpOcrSymbolObservation] = []
-    usable_components = [
-        component for component in components
-        if not _is_rule_like_component(component, region_bbox)
-    ]
-    for position, token in enumerate(ordered):
+    for token in sorted(tokens, key=lambda item: item.token_index):
         text = str(token.text or "")
-        if len(text) != 1 or text.isspace() or text.isalnum():
+        glyphs = tuple(char for char in text if not char.isspace())
+        if not glyphs or any(char.isalnum() for char in glyphs):
             continue
-        left = (
-            region_bbox[0]
-            if position == 0
-            else (ordered[position - 1].bbox[2] + token.bbox[0]) // 2
-        )
-        right = (
-            region_bbox[2]
-            if position + 1 == len(ordered)
-            else (token.bbox[2] + ordered[position + 1].bbox[0] + 1) // 2
-        )
         owned = [
-            component.bbox
-            for component in usable_components
-            if left <= (component.bbox[0] + component.bbox[2]) / 2.0 < right
+            component
+            for component in components
+            if component_owners.get(component) == token.token_index
         ]
         proposal_bbox = _clip(token.bbox, region_bbox)
-        if not owned or not any(_intersect(box, proposal_bbox) is not None for box in owned):
+        if not owned or not any(
+            _intersect(component.bbox, proposal_bbox) is not None
+            for component in owned
+        ):
             continue
-        observations.append(PpOcrSymbolObservation(
-            text=text,
-            bbox=_union(owned),
-            proposal_bbox=proposal_bbox,
-        ))
+        if proposal_bbox[2] - proposal_bbox[0] < len(glyphs):
+            continue
+        glyph_cells = _ordered_glyph_cells(proposal_bbox, len(glyphs))
+        glyph_components: list[list[XYXY]] = [[] for _glyph in glyphs]
+        for component in owned:
+            center_x = (component.bbox[0] + component.bbox[2]) / 2.0
+            cell_index = next((
+                index
+                for index, cell in enumerate(glyph_cells)
+                if cell[0] <= center_x < cell[2]
+            ), 0 if center_x < glyph_cells[0][0] else len(glyph_cells) - 1)
+            glyph_components[cell_index].append(component.bbox)
+        if any(not boxes for boxes in glyph_components):
+            continue
+        observations.extend(
+            PpOcrSymbolObservation(
+                text=glyph,
+                bbox=_union(boxes),
+                proposal_bbox=glyph_cells[index],
+            )
+            for index, (glyph, boxes) in enumerate(zip(glyphs, glyph_components))
+        )
     return tuple(observations)
+
+
+def _ordered_glyph_cells(proposal_bbox: XYXY, glyph_count: int) -> tuple[XYXY, ...]:
+    """Project one ordered PP token bbox into non-overlapping glyph cells."""
+    x1, y1, x2, y2 = proposal_bbox
+    return tuple(
+        (
+            round(x1 + (x2 - x1) * index / glyph_count),
+            y1,
+            round(x1 + (x2 - x1) * (index + 1) / glyph_count),
+            y2,
+        )
+        for index in range(glyph_count)
+    )
 
 
 def _token_has_only_excluded_ink(
@@ -240,7 +267,6 @@ def _segments_from_latin_masks(
     components: list[ForegroundComponent],
     *,
     tokens: tuple[PpOcrV6WordBox, ...],
-    component_owners: dict[ForegroundComponent, int | None],
 ) -> RoutePartition:
     groups: list[tuple[list[tuple[PpOcrV6WordBox, XYXY]], XYXY]] = []
     current_tokens: list[tuple[PpOcrV6WordBox, XYXY]] = []
@@ -341,30 +367,12 @@ def _latin_mask_bbox(
     component_owners: dict[ForegroundComponent, int | None],
     region_bbox: XYXY,
 ) -> XYXY | None:
-    seed_bbox = _latin_seed_bbox(token, region_bbox)
     owned_boxes = [
         component.bbox
         for component in components
         if component_owners.get(component) == token.token_index
-        and _intersect(component.bbox, seed_bbox) is not None
     ]
     return _union(owned_boxes) if owned_boxes else None
-
-
-def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:
-    """Expand a Latin proposal by one measured glyph advance in its own row."""
-    core = _clip(token.bbox, region_bbox)
-    glyph_advance = _latin_glyph_advance(token, region_bbox)
-    vertical_margin = max(1, ceil((core[3] - core[1]) / 5))
-    return _clip(
-        (
-            core[0] - glyph_advance,
-            core[1] - vertical_margin,
-            core[2] + glyph_advance,
-            core[3] + vertical_margin,
-        ),
-        region_bbox,
-    )
 
 
 def _component_owner_token_indices(
@@ -372,135 +380,131 @@ def _component_owner_token_indices(
     tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
 ) -> dict[ForegroundComponent, int | None]:
-    """Assign every ink component to at most one PP-OCR token.
+    """Assign components once by ordered PP token ownership cells.
 
-    Word boxes are approximate and commonly meet on the wrong side of a narrow
-    glyph. A component can be owned by CJK or Latin, while punctuation is an
-    exclusion boundary. Remaining ink is offered to the nearest PP token; it
-    enters EngCut only when that token is Latin/digit.
+    Cell boundaries are observations derived from adjacent PP boxes. A
+    component crossing multiple token centers remains ambiguous unless the
+    surrounding ownership produces one forced token/component match.
     """
-    owners: dict[ForegroundComponent, int | None] = {
-        component: None for component in components
+    ordered = tuple(
+        token
+        for token in sorted(tokens, key=lambda item: item.token_index)
+        if str(token.text or "").strip()
+    )
+    if not ordered:
+        return {component: None for component in components}
+    boundaries = [region_bbox[0]]
+    for left, right in zip(ordered, ordered[1:]):
+        boundaries.append((left.bbox[2] + right.bbox[0]) / 2.0)
+    boundaries.append(region_bbox[2])
+    token_centers = {
+        token.token_index: (token.bbox[0] + token.bbox[2]) / 2.0
+        for token in ordered
     }
-    eligible_components = [
-        component
-        for component in components
-        if not _is_rule_like_component(component, region_bbox)
-    ]
 
-    # Symbols and whitespace do not own native OCR ink. They remain in the
-    # LineCut region; only Latin/digit and CJK token observations participate
-    # in component ownership.
-    for component in eligible_components:
-        centered: list[tuple[float, int, float, int]] = []
-        center_x = (component.bbox[0] + component.bbox[2]) / 2.0
-        for token in tokens:
-            if _token_branch(token.text) == "symbol":
-                continue
-            token_bbox = _clip(token.bbox, region_bbox)
-            if not _is_nonempty(token_bbox) or not _center_inside(component.bbox, token_bbox):
-                continue
-            token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
-            centered.append((
-                -_intersection_over_union(token_bbox, component.bbox),
-                token_bbox[2] - token_bbox[0],
-                abs(center_x - token_center_x),
-                token.token_index,
-            ))
-        if centered:
-            owners[component] = min(centered)[3]
-
-    # PP word boxes are approximate, but measured overlap is stronger evidence
-    # than a neighboring token merely being closer. Punctuation participates
-    # in the comparison only as a blocker, so it can never become EngCut text.
-    token_by_index = {token.token_index: token for token in tokens}
-    for component in eligible_components:
-        overlapping = [
-            token
-            for token in tokens
-            if _intersect(component.bbox, _clip(token.bbox, region_bbox)) is not None
+    owners: dict[ForegroundComponent, int | None] = {}
+    ambiguous_components: set[ForegroundComponent] = set()
+    crossed_tokens_by_component: dict[ForegroundComponent, tuple[int, ...]] = {}
+    center_owned_components: set[ForegroundComponent] = set()
+    for component in components:
+        crossed_centers = [
+            token_index
+            for token_index, center_x in token_centers.items()
+            if component.bbox[0] <= center_x < component.bbox[2]
         ]
-        if not overlapping:
+        if len(crossed_centers) > 1:
+            owners[component] = None
+            ambiguous_components.add(component)
+            crossed_tokens_by_component[component] = tuple(crossed_centers)
             continue
-        best = min(overlapping, key=lambda token: (
-            -_intersection_over_union(_clip(token.bbox, region_bbox), component.bbox),
-            0 if _center_inside(component.bbox, _clip(token.bbox, region_bbox)) else 1,
-            0 if _token_branch(token.text) == "symbol" else 1,
-            token.token_index,
-        ))
-        best_branch = _token_branch(best.text)
-        current = owners[component]
-        best_overlap = _intersection_over_union(_clip(best.bbox, region_bbox), component.bbox)
-        current_overlap = (
-            _intersection_over_union(_clip(token_by_index[current].bbox, region_bbox), component.bbox)
-            if current is not None else 0.0
-        )
-        best_contains_center = _center_inside(component.bbox, _clip(best.bbox, region_bbox))
-        if best_overlap > current_overlap or (best_branch == "symbol" and best_contains_center):
-            owners[component] = best.token_index
+        if len(crossed_centers) == 1:
+            owners[component] = crossed_centers[0]
+            center_owned_components.add(component)
+            continue
+        center_x = (component.bbox[0] + component.bbox[2]) / 2.0
+        owner = next((
+            token.token_index
+            for position, token in enumerate(ordered)
+            if boundaries[position] <= center_x < boundaries[position + 1]
+        ), None)
+        owners[component] = owner
 
-    # Multi-component symbols have vertically separated ink (for example the
-    # dots and slash of `%`). They may reclaim only components sharing a
-    # horizontal projection with an already owned symbol component. Horizontal
-    # walking is forbidden because it previously stole adjacent K/L/h glyphs.
-    for token in tokens:
+    token_by_index = {token.token_index: token for token in ordered}
+
+    # Resolve only forced token/component matches. If an ambiguous component
+    # crosses several token centers, it belongs to the sole token that still
+    # has no other component, provided no second ambiguous component competes
+    # for that token. This preserves an unresolved fused glyph when both sides
+    # are missing instead of choosing by distance.
+    while ambiguous_components:
+        owned_token_indices = {
+            owner for owner in owners.values() if owner is not None
+        }
+        forced_by_token: dict[int, list[ForegroundComponent]] = {}
+        for component in ambiguous_components:
+            crossed = crossed_tokens_by_component[component]
+            missing = [index for index in crossed if index not in owned_token_indices]
+            if len(missing) == 1 and len(missing) < len(crossed):
+                forced_by_token.setdefault(missing[0], []).append(component)
+        resolved = {
+            candidates[0]: token_index
+            for token_index, candidates in forced_by_token.items()
+            if len(candidates) == 1
+        }
+        if not resolved:
+            break
+        for component, token_index in resolved.items():
+            owners[component] = token_index
+            ambiguous_components.remove(component)
+
+    # A detached symbol part may be recovered only when it intersects the PP
+    # proposal itself and shares horizontal projection with an already owned
+    # part. There is no recursive walk beyond the observed proposal.
+    for token in ordered:
         if _token_branch(token.text) != "symbol":
             continue
+        proposal_bbox = _clip(token.bbox, region_bbox)
         anchors = [
-            component for component in eligible_components
+            component
+            for component in components
             if owners[component] == token.token_index
         ]
-        if not anchors:
-            continue
-        while True:
-            reclaimed = [
-                component
-                for component in eligible_components
-                if owners[component] != token.token_index
-                and any(
-                    min(component.bbox[2], anchor.bbox[2]) > max(component.bbox[0], anchor.bbox[0])
-                    for anchor in anchors
-                )
-            ]
-            if not reclaimed:
-                break
-            for component in reclaimed:
+        for component in components:
+            if owners[component] == token.token_index:
+                continue
+            if component in center_owned_components:
+                continue
+            if _intersect(component.bbox, proposal_bbox) is None:
+                continue
+            if any(
+                max(component.bbox[0], anchor.bbox[0])
+                < min(component.bbox[2], anchor.bbox[2])
+                for anchor in anchors
+            ):
                 owners[component] = token.token_index
-                anchors.append(component)
 
-    for component in eligible_components:
-        if owners[component] is not None:
+    # If a non-symbol token is empty, a unique component intersecting its raw
+    # PP observation is the only additional ownership fact available. Multiple
+    # candidates remain unresolved instead of being ranked by proximity.
+    for token in ordered:
+        if _token_branch(token.text) == "symbol":
             continue
-        candidates: list[tuple[int, float, int, int, str]] = []
-        center_x = (component.bbox[0] + component.bbox[2]) / 2.0
-        for token in tokens:
-            branch = _token_branch(token.text)
-            token_bbox = _clip(token.bbox, region_bbox)
-            token_center_x = (token_bbox[0] + token_bbox[2]) / 2.0
-            candidates.append((
-                _horizontal_gap(component.bbox, token_bbox),
-                abs(center_x - token_center_x),
-                0 if branch == "symbol" else 1,
-                token.token_index,
-                branch,
-            ))
-        if candidates:
-            _gap, _center_delta, _branch_priority, token_index, branch = min(candidates)
-            token = token_by_index[token_index]
-            ownership_window = (
-                _latin_seed_bbox(token, region_bbox)
-                if branch == "latin"
-                else _clip(token.bbox, region_bbox)
+        if any(owner == token.token_index for owner in owners.values()):
+            continue
+        token_bbox = _clip(token.bbox, region_bbox)
+        candidates = [
+            component
+            for component in components
+            if _intersect(component.bbox, token_bbox) is not None
+            and component not in ambiguous_components
+            and (
+                owners[component] is None
+                or _token_branch(token_by_index[owners[component]].text) != "symbol"
             )
-            if branch != "symbol" and _intersect(component.bbox, ownership_window) is not None:
-                owners[component] = token_index
+        ]
+        if len(candidates) == 1:
+            owners[candidates[0]] = token.token_index
     return owners
-
-
-def _latin_glyph_advance(token: PpOcrV6WordBox, region_bbox: XYXY) -> int:
-    core = _clip(token.bbox, region_bbox)
-    glyph_count = max(1, sum(1 for char in str(token.text or "") if char.isascii() and char.isalnum()))
-    return max(1, ceil((core[2] - core[0]) / glyph_count))
 
 
 def _has_visible_ink(
@@ -508,27 +512,6 @@ def _has_visible_ink(
     bbox: XYXY,
 ) -> bool:
     return any(_intersect(component.bbox, bbox) is not None for component in components)
-
-
-def _is_rule_like_component(
-    component: ForegroundComponent,
-    region_bbox: XYXY,
-) -> bool:
-    """Keep long horizontal rules out of Latin ownership.
-
-    The component remains in the line's visible-ink set, so it can still form a
-    LineCut region.  It is only forbidden from widening an EngCut mask across
-    neighboring tokens.
-    """
-    width = component.bbox[2] - component.bbox[0]
-    height = component.bbox[3] - component.bbox[1]
-    region_width = max(1, region_bbox[2] - region_bbox[0])
-    region_height = max(1, region_bbox[3] - region_bbox[1])
-    return (
-        width >= max(8, ceil(region_width * 0.20))
-        and width >= max(12, height * 12)
-        and height <= max(4, ceil(region_height * 0.12))
-    )
 
 
 def _token_branch(text: str) -> str:
@@ -569,30 +552,6 @@ def _union(boxes: list[XYXY]) -> XYXY:
         max(box[2] for box in boxes),
         max(box[3] for box in boxes),
     )
-
-
-def _center_inside(component: XYXY, bbox: XYXY) -> bool:
-    center_x = (component[0] + component[2]) / 2
-    center_y = (component[1] + component[3]) / 2
-    return bbox[0] <= center_x <= bbox[2] and bbox[1] <= center_y <= bbox[3]
-
-
-def _intersection_over_union(left: XYXY, right: XYXY) -> float:
-    overlap = _intersect(left, right)
-    if overlap is None:
-        return 0.0
-    overlap_area = (overlap[2] - overlap[0]) * (overlap[3] - overlap[1])
-    left_area = max(1, (left[2] - left[0]) * (left[3] - left[1]))
-    right_area = max(1, (right[2] - right[0]) * (right[3] - right[1]))
-    return overlap_area / max(1, left_area + right_area - overlap_area)
-
-
-def _horizontal_gap(left: XYXY, right: XYXY) -> int:
-    if left[2] < right[0]:
-        return right[0] - left[2]
-    if right[2] < left[0]:
-        return left[0] - right[2]
-    return 0
 
 
 __all__ = ["RoutePartition", "RoutePartitionIssue", "partition_charocr_text_region"]
