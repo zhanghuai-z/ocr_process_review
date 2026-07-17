@@ -367,7 +367,12 @@ def _component_owner_token_indices(
     ambiguous_components: set[ForegroundComponent] = set()
     crossed_tokens_by_component: dict[ForegroundComponent, tuple[int, ...]] = {}
     center_owned_components: set[ForegroundComponent] = set()
+    linecut_owned_components: set[ForegroundComponent] = set()
     for component in components:
+        if _component_center_in_any_bbox(component, linecut_owned_bboxes):
+            owners[component] = None
+            linecut_owned_components.add(component)
+            continue
         crossed_centers = [
             token_index
             for token_index, center_x in token_centers.items()
@@ -433,6 +438,8 @@ def _component_owner_token_indices(
         for component in components:
             if owners[component] == token.token_index:
                 continue
+            if component in linecut_owned_components:
+                continue
             if component in center_owned_components:
                 continue
             if _intersect(component.bbox, proposal_bbox) is None:
@@ -458,6 +465,7 @@ def _component_owner_token_indices(
             for component in components
             if _intersect(component.bbox, token_bbox) is not None
             and component not in ambiguous_components
+            and component not in linecut_owned_components
             and (
                 owners[component] is None
                 or _token_route_branch(
@@ -502,6 +510,18 @@ def _token_center_in_any_bbox(
 ) -> bool:
     center_x = (token.bbox[0] + token.bbox[2]) / 2.0
     center_y = (token.bbox[1] + token.bbox[3]) / 2.0
+    return any(
+        bbox[0] <= center_x < bbox[2] and bbox[1] <= center_y < bbox[3]
+        for bbox in bboxes
+    )
+
+
+def _component_center_in_any_bbox(
+    component: ForegroundComponent,
+    bboxes: tuple[XYXY, ...],
+) -> bool:
+    center_x = (component.bbox[0] + component.bbox[2]) / 2.0
+    center_y = (component.bbox[1] + component.bbox[3]) / 2.0
     return any(
         bbox[0] <= center_x < bbox[2] and bbox[1] <= center_y < bbox[3]
         for bbox in bboxes

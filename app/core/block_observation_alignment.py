@@ -1,6 +1,7 @@
-"""Exact, block-local alignment between VL text and PP physical rows."""
+"""Block-local alignment between VL text and PP physical rows."""
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import unicodedata
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint
@@ -13,6 +14,9 @@ from app.models.ocr_routing_observation import (
     LineCutOwnershipDirective,
 )
 from app.models.physical_line_geometry import PhysicalLineResolution, ResolvedPhysicalLine
+
+
+_MARKER_BODY_MATCH_THRESHOLD = 0.60
 
 
 def align_block_observations(
@@ -91,14 +95,40 @@ def _align_one_block(
                 detail="PP row already preserves the explicit VL marker",
             )
 
-    candidates: list[tuple[ResolvedPhysicalLine, PpOcrV6LineHint]] = []
+    ordered_sources = tuple(
+        source
+        for candidate_row in ordered_rows
+        for source in _row_sources(candidate_row, source_lines)
+    )
+    marker_number = _semantic_marker_number(marker)
+    candidates: list[
+        tuple[ResolvedPhysicalLine, PpOcrV6LineHint, float]
+    ] = []
     if body_normalized:
         for row in ordered_rows:
-            for source in _row_sources(row, source_lines):
-                source_text = _normalize_alignment_text(source.text)
-                if source_text and body_normalized.startswith(source_text):
-                    candidates.append((row, source))
-                    break
+            row_sources = _row_sources(row, source_lines)
+            if not row_sources:
+                continue
+            body_source_index = 0
+            if (
+                marker_number
+                and _normalize_alignment_text(row_sources[0].text) == marker_number
+            ):
+                body_source_index = 1
+            if body_source_index >= len(row_sources):
+                continue
+            body_source = row_sources[body_source_index]
+            boundary_x = int(body_source.bbox[0])
+            if boundary_x <= row.bbox[0] or boundary_x >= row.bbox[2]:
+                continue
+            body_position = ordered_sources.index(body_source)
+            pp_body_text = "".join(
+                _normalize_alignment_text(source.text)
+                for source in ordered_sources[body_position:]
+            )
+            body_match_ratio = _text_match_ratio(body_normalized, pp_body_text)
+            if body_match_ratio >= _MARKER_BODY_MATCH_THRESHOLD:
+                candidates.append((row, body_source, body_match_ratio))
     if len(candidates) != 1:
         return BlockObservationAlignment(
             block_uid=observation.block_uid,
@@ -106,32 +136,12 @@ def _align_one_block(
             vl_observation_uid=observation.uid,
             detail=(
                 "explicit VL marker cannot be aligned to one unique PP body source: "
-                f"marker={marker!r} candidates={len(candidates)}"
+                f"marker={marker!r} threshold={_MARKER_BODY_MATCH_THRESHOLD:.3f} "
+                f"candidates={len(candidates)}"
             ),
         )
 
-    row, body_source = candidates[0]
-    ordered_sources = tuple(
-        source
-        for candidate_row in ordered_rows
-        for source in _row_sources(candidate_row, source_lines)
-    )
-    body_position = ordered_sources.index(body_source)
-    pp_body_text = "".join(
-        _normalize_alignment_text(source.text)
-        for source in ordered_sources[body_position:]
-    )
-    if pp_body_text != body_normalized:
-        return BlockObservationAlignment(
-            block_uid=observation.block_uid,
-            status=BlockAlignmentStatus.AMBIGUOUS,
-            vl_observation_uid=observation.uid,
-            pp_source_indices=row.source_indices,
-            detail=(
-                "explicit VL marker body does not exactly match the monotonic PP stream: "
-                f"vl={body_normalized!r} pp={pp_body_text!r}"
-            ),
-        )
+    row, body_source, body_match_ratio = candidates[0]
     boundary_x = int(body_source.bbox[0])
     if boundary_x <= row.bbox[0] or boundary_x >= row.bbox[2]:
         return BlockObservationAlignment(
@@ -150,11 +160,18 @@ def _align_one_block(
     )
     return BlockObservationAlignment(
         block_uid=observation.block_uid,
-        status=BlockAlignmentStatus.EXACT,
+        status=(
+            BlockAlignmentStatus.EXACT
+            if body_match_ratio == 1.0
+            else BlockAlignmentStatus.MATCHED
+        ),
         vl_observation_uid=observation.uid,
         pp_source_indices=row.source_indices,
         directives=(directive,),
-        detail="explicit VL marker aligned to the unique PP body prefix",
+        detail=(
+            "explicit VL marker aligned to the unique PP body prefix: "
+            f"body_match_ratio={body_match_ratio:.3f}"
+        ),
     )
 
 
@@ -205,9 +222,28 @@ def _is_semantic_number_marker(char: str) -> bool:
     )
 
 
+def _semantic_marker_number(marker: str) -> str:
+    values: list[str] = []
+    for char in marker:
+        try:
+            number = unicodedata.numeric(char)
+        except (TypeError, ValueError):
+            return ""
+        if not float(number).is_integer():
+            return ""
+        values.append(str(int(number)))
+    return "".join(values)
+
+
 def _normalize_alignment_text(text: str) -> str:
     # Preserve Unicode semantic identity: NFKC would turn ⑪ into plain digits.
     return "".join(char for char in str(text or "") if not char.isspace())
+
+
+def _text_match_ratio(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
 __all__ = ["align_block_observations"]

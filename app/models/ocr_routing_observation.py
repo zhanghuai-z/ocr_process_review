@@ -24,6 +24,7 @@ class BlockVlObservationStatus(str, Enum):
 
 class BlockAlignmentStatus(str, Enum):
     EXACT = "exact"
+    MATCHED = "matched"
     EMPTY = "empty"
     AMBIGUOUS = "ambiguous"
 

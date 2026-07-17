@@ -660,11 +660,12 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
             image_hash="image-hash-test",
             layout_fingerprint=layout_snapshot_fingerprint(snapshot),
             status=BlockVlObservationStatus.OBSERVED,
-            regions=(BlockVlTextRegion(0, "footnote", "⑧ Barry", (0, 0, 140, 50)),),
+            regions=(BlockVlTextRegion(0, "footnote", "⑧ Barry!", (0, 0, 140, 50)),),
         ),),
     )
 
     assert plan.is_dispatchable is True
+    assert plan.alignments[0].status.value == "matched"
     route = plan.for_block("footnote-1").lines[0]
     assert [segment.kind for segment in route.segments] == ["text_other", "text_latin"]
     assert [
@@ -674,6 +675,103 @@ def test_compiler_keeps_isolated_numeric_footnote_marker_on_linecut():
     ] == ["Barry"]
     assert [(item.code, item.bbox) for item in plan.diagnostics] == [
         ("vl_marker_owned_by_linecut", (4, 10, 38, 30)),
+    ]
+
+
+def test_compiler_keeps_vl_marker_ink_on_linecut_when_ppocr_omits_marker():
+    from app.core.layout_scope import layout_snapshot_fingerprint
+    from app.models.ocr_routing_observation import (
+        BlockVlObservation,
+        BlockVlObservationStatus,
+        BlockVlTextRegion,
+    )
+
+    snapshot = _snapshot(
+        _block(
+            "footnote-1",
+            BlockType.TEXT,
+            (0, 0, 140, 50),
+            policy=OcrPolicy.TEXT_OCR,
+            order=0,
+            label="footnote",
+        ),
+    )
+    image = np.full((50, 140, 3), 255, dtype=np.uint8)
+    image[10:30, 8:22] = 0
+    for x in (45, 55, 65, 75, 85):
+        image[10:30, x:x + 4] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="Barry",
+        bbox=(38, 5, 110, 38),
+        words=(PpOcrV6WordBox(0, 0, "Barry", (42, 8, 100, 34)),),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=140,
+        page_height=50,
+        page_image_bgr=image,
+        block_vl_observations=(BlockVlObservation(
+            page_uid="page-1",
+            block_uid="footnote-1",
+            block_bbox=(0, 0, 140, 50),
+            image_hash="image-hash-test",
+            layout_fingerprint=layout_snapshot_fingerprint(snapshot),
+            status=BlockVlObservationStatus.OBSERVED,
+            regions=(BlockVlTextRegion(0, "footnote", "⑫ Barry", (0, 0, 140, 50)),),
+        ),),
+    )
+
+    assert plan.is_dispatchable is True
+    route = plan.for_block("footnote-1").lines[0]
+    assert [segment.kind for segment in route.segments] == ["text_other", "text_latin"]
+    assert route.segments[0].bbox[2] <= route.segments[1].bbox[0]
+    assert route.segments[1].text == "Barry"
+
+
+def test_compiler_blocks_vl_marker_alignment_below_sixty_percent():
+    from app.core.layout_scope import layout_snapshot_fingerprint
+    from app.models.ocr_routing_observation import (
+        BlockVlObservation,
+        BlockVlObservationStatus,
+        BlockVlTextRegion,
+    )
+
+    snapshot = _snapshot(
+        _block("footnote-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0, label="footnote"),
+    )
+    image = np.full((50, 140, 3), 255, dtype=np.uint8)
+    for x in (45, 55, 65, 75, 85):
+        image[10:30, x:x + 4] = 0
+    prepass = _prepass(PpOcrV6LineHint(
+        index=0,
+        text="Barry",
+        bbox=(38, 5, 110, 38),
+        words=(PpOcrV6WordBox(0, 0, "Barry", (42, 8, 100, 34)),),
+    ))
+
+    plan = compile_page_routing_plan(
+        snapshot,
+        prepass,
+        page_width=140,
+        page_height=50,
+        page_image_bgr=image,
+        block_vl_observations=(BlockVlObservation(
+            page_uid="page-1",
+            block_uid="footnote-1",
+            block_bbox=(0, 0, 140, 50),
+            image_hash="image-hash-test",
+            layout_fingerprint=layout_snapshot_fingerprint(snapshot),
+            status=BlockVlObservationStatus.OBSERVED,
+            regions=(BlockVlTextRegion(0, "footnote", "⑫ unrelated", (0, 0, 140, 50)),),
+        ),),
+    )
+
+    assert plan.is_dispatchable is False
+    assert [issue.code for issue in plan.validation_issues] == [
+        "ambiguous_block_text_alignment",
     ]
 
 
