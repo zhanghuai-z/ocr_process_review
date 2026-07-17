@@ -30,7 +30,11 @@ VALID_ROUTE_SEGMENT_KINDS = frozenset({
 
 @dataclass(frozen=True)
 class PpOcrLatinTokenObservation:
-    """One PP-OCR Latin/digit token retained as a route-side observation."""
+    """One PP-OCR Latin/digit token retained as a route-side observation.
+
+    The bbox is PP-OCR's observed token geometry. It may extend beyond the
+    foreground-safe EngCut segment mask, but must intersect that segment.
+    """
 
     text: str
     bbox: XYXY
@@ -41,6 +45,25 @@ class PpOcrLatinTokenObservation:
             raise ValueError("PP-OCR Latin token observation requires Latin/digit text")
         if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
             raise ValueError("PP-OCR Latin token observation requires non-empty geometry")
+
+
+@dataclass(frozen=True)
+class PpOcrSymbolObservation:
+    """One single-glyph PP token with foreground-measured geometry."""
+
+    text: str
+    bbox: XYXY
+    proposal_bbox: XYXY
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "bbox", xyxy(self.bbox))
+        object.__setattr__(self, "proposal_bbox", xyxy(self.proposal_bbox))
+        if len(self.text) != 1 or self.text.isspace() or self.text.isalnum():
+            raise ValueError("PP-OCR symbol observation requires one non-alphanumeric glyph")
+        if self.bbox[2] <= self.bbox[0] or self.bbox[3] <= self.bbox[1]:
+            raise ValueError("PP-OCR symbol observation requires non-empty foreground geometry")
+        if self.proposal_bbox[2] <= self.proposal_bbox[0] or self.proposal_bbox[3] <= self.proposal_bbox[1]:
+            raise ValueError("PP-OCR symbol proposal requires non-empty geometry")
 
 
 @dataclass(frozen=True)
@@ -83,10 +106,12 @@ class RoutingLine:
     source: str = ""
     text_axis: str = TEXT_AXIS_HORIZONTAL
     orientation_angle: int = -1
+    ppocr_symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bbox", xyxy(self.bbox))
         object.__setattr__(self, "segments", tuple(self.segments))
+        object.__setattr__(self, "ppocr_symbol_observations", tuple(self.ppocr_symbol_observations))
         if any(not isinstance(segment, RoutingSegment) for segment in self.segments):
             raise TypeError("routing line segments require typed values")
         if self.text_axis not in {TEXT_AXIS_HORIZONTAL, TEXT_AXIS_VERTICAL}:
@@ -95,6 +120,11 @@ class RoutingLine:
             raise ValueError(
                 f"unsupported routing textline orientation angle: {self.orientation_angle}"
             )
+        if any(
+            not isinstance(observation, PpOcrSymbolObservation)
+            for observation in self.ppocr_symbol_observations
+        ):
+            raise TypeError("routing line symbol observations require typed values")
 
     @property
     def has_formula(self) -> bool:
@@ -224,6 +254,15 @@ def routing_line_from_record(
         source=str(route.get(source_field) or ""),
         text_axis=str(route.get("text_axis") or TEXT_AXIS_HORIZONTAL),
         orientation_angle=int_or_default(route.get("orientation_angle"), -1),
+        ppocr_symbol_observations=tuple(
+            PpOcrSymbolObservation(
+                text=str(item.get("text") or ""),
+                bbox=xyxy(item.get("bbox")),
+                proposal_bbox=xyxy(item.get("proposal_bbox")),
+            )
+            for item in route.get("ppocr_symbol_observations", [])
+            if isinstance(item, dict)
+        ),
     )
 
 
@@ -280,6 +319,15 @@ def routing_line_to_record(
         record["text_axis"] = line.text_axis
     if line.orientation_angle != -1:
         record["orientation_angle"] = line.orientation_angle
+    if line.ppocr_symbol_observations:
+        record["ppocr_symbol_observations"] = [
+            {
+                "text": observation.text,
+                "bbox": list(observation.bbox),
+                "proposal_bbox": list(observation.proposal_bbox),
+            }
+            for observation in line.ppocr_symbol_observations
+        ]
     return record
 
 
@@ -323,6 +371,7 @@ __all__ = [
     "BlockRoutingPlan",
     "PageRoutingPlan",
     "PpOcrLatinTokenObservation",
+    "PpOcrSymbolObservation",
     "RouteValidationIssue",
     "ROUTING_SOURCE_PPOCR_V6_PREPASS",
     "ROUTING_SOURCE_LAYOUT_VERTICAL_TEXT",

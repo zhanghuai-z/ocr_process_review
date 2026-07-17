@@ -10594,13 +10594,14 @@ def test_hanwang_pre_page_ocr_lines_use_exact_formula_masked_canvases():
     print("test_hanwang_pre_page_ocr_lines_use_exact_formula_masked_canvases PASSED")
 
 
-def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
+def test_hanwang_route_assembly_materializes_explicit_missing_symbol_observation():
     from app.engines.hanwang.micro_recblock import (
         CharResult,
         LineResult,
         _assemble_layout_route_line,
     )
     from app.services.layout_routing_plan import RoutingLine, RoutingSegment
+    from app.models.charocr_routing import PpOcrSymbolObservation
 
     route = RoutingLine(
         index=0,
@@ -10609,6 +10610,13 @@ def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
             RoutingSegment(kind="text_other", bbox=(0, 0, 40, 50)),
             RoutingSegment(kind="formula", bbox=(40, 0, 80, 50), text="$ A $"),
             RoutingSegment(kind="text_other", bbox=(80, 0, 130, 50)),
+        ),
+        ppocr_symbol_observations=(
+            PpOcrSymbolObservation(
+                text="，",
+                bbox=(82, 22, 89, 31),
+                proposal_bbox=(80, 15, 92, 38),
+            ),
         ),
     )
     grouped_lines = {
@@ -10621,10 +10629,9 @@ def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
         ],
         (0, 0, 2): [
             LineResult(
-                text="，乙",
+                text="乙",
                 bbox=(78, 10, 120, 40),
                 chars=[
-                    CharResult(text="，", confidence=0.8, bbox=(78, 18, 79, 21)),
                     CharResult(text="乙", confidence=0.9, bbox=(92, 10, 120, 40)),
                 ],
             )
@@ -10642,13 +10649,13 @@ def test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula():
     assert lines[0].text == "甲$ A $，乙"
     comma = lines[0].chars[2]
     assert comma.text == "，"
-    assert comma.bbox == (80, 10, 92, 40)
-    assert comma.source.endswith(":punct_bbox_recovered")
+    assert comma.bbox == (82, 22, 89, 31)
+    assert comma.source == "ppocrv6:symbol_foreground_observation"
 
-    print("test_hanwang_route_assembly_recovers_tiny_punctuation_after_formula PASSED")
+    print("test_hanwang_route_assembly_materializes_explicit_missing_symbol_observation PASSED")
 
 
-def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
+def test_hanwang_route_assembly_never_rewrites_existing_native_punctuation_geometry():
     from app.engines.hanwang.micro_recblock import (
         CharResult,
         LineResult,
@@ -10700,12 +10707,12 @@ def test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise():
     assert len(lines) == 1
     boundary_comma = lines[0].chars[3]
     assert boundary_comma.text == "，"
-    assert boundary_comma.bbox is None
-    assert boundary_comma.source.endswith(":punct_bbox_dropped_at_route_boundary")
+    assert boundary_comma.bbox == (875, 563, 876, 566)
+    assert boundary_comma.source == "hanwang:micro_recblock"
     assert lines[0].chars[4].text == "均"
     assert lines[0].chars[4].bbox == (896, 563, 940, 609)
 
-    print("test_hanwang_route_assembly_drops_formula_boundary_punctuation_noise PASSED")
+    print("test_hanwang_route_assembly_never_rewrites_existing_native_punctuation_geometry PASSED")
 
 
 def test_hanwang_micro_recblock_drops_stale_cached_layout_routes_without_page_hints():
@@ -13879,6 +13886,50 @@ def test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page():
         workflow_module.get_config = original_get_config
 
     print("test_workflow_controller_hanwang_layout_submit_retries_ocr_error_page PASSED")
+
+
+def test_workflow_controller_start_ocr_transitions_failed_page_into_retry_run():
+    import app.controllers.workflow_controller as workflow_module
+    from app.models import BBox, Block, BlockType, OcrProject, Page, PageStatus
+
+    class DummySignal:
+        def connect(self, _callback):
+            return None
+
+    class PendingWorker:
+        def __init__(self, pipeline, pages, parent=None):
+            self.progress_update = DummySignal()
+            self.progress_state = DummySignal()
+            self.all_done = DummySignal()
+            self.error = DummySignal()
+
+        def isRunning(self):
+            return False
+
+        def start(self):
+            return None
+
+    original_worker = workflow_module.OcrPipelineWorker
+    original_create_engine = workflow_module.create_engine
+    workflow_module.OcrPipelineWorker = PendingWorker
+    workflow_module.create_engine = lambda: object()
+    try:
+        page = Page(image_path="/tmp/retry-error.png", width=100, height=100, page_number=1)
+        page.status = PageStatus.ERROR
+        page.error_message = "OCR 失败：上一轮路由失败"
+        page.blocks = [Block(block_type=BlockType.TEXT, bbox=BBox(0, 0, 50, 20))]
+        _sync_page_layout_snapshot_from_blocks(page, source_engine="test_seed")
+        controller = workflow_module.WorkflowController()
+        controller._project = OcrProject(name="Retry", pages=[page])
+
+        assert controller.start_ocr([page], target_page_numbers={1}) is True
+
+        assert page.status == PageStatus.LAYOUT_DONE
+        assert page.error_message == ""
+        assert workflow_module.page_gate_info(page).page_state == "ocr_ready"
+    finally:
+        workflow_module.OcrPipelineWorker = original_worker
+        workflow_module.create_engine = original_create_engine
 
 
 def test_workflow_controller_hanwang_layout_submit_processes_pending_pages_from_target():

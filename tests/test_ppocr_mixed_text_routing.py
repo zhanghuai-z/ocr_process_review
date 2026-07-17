@@ -43,6 +43,10 @@ def test_mixed_partition_routes_latin_mask_and_keeps_punctuation_with_other_rout
         ("text_latin", (43, 10, 66, 30), "ABC"),
         ("text_other", (66, 0, 140, 40), ""),
     ]
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in result.symbol_observations
+    ] == [(",", (83, 24, 87, 30), (80, 8, 90, 32))]
 
 
 def test_ambiguous_leading_i_stays_in_linecut_instead_of_crossing_comma_boundary():
@@ -185,6 +189,10 @@ def test_shifted_two_part_quote_is_owned_wholly_by_symbol_route():
         ("text_latin", (20, 10, 25, 30), "A"),
         ("text_other", (25, 0, 100, 40), ""),
     ]
+    assert [
+        (item.text, item.bbox, item.proposal_bbox)
+        for item in result.symbol_observations
+    ] == [("”", (34, 4, 51, 12), (43, 2, 53, 16))]
 
 
 def test_multi_glyph_symbol_reclaims_glyph_left_of_its_raw_box_from_latin_mask():
@@ -211,6 +219,7 @@ def test_multi_glyph_symbol_reclaims_glyph_left_of_its_raw_box_from_latin_mask()
         ("text_latin", (10, 10, 30, 30), "A"),
         ("text_other", (30, 0, 100, 40), ""),
     ]
+    assert result.symbol_observations == ()
 
 
 def test_pure_latin_row_does_not_depend_on_quote_component_ownership():
@@ -364,7 +373,7 @@ def test_horizontal_table_rule_cannot_widen_or_overlap_latin_masks():
     ]
 
 
-def test_latin_token_recovers_only_its_fragment_from_fused_punctuation_component():
+def test_latin_token_without_owned_ink_fails_without_borrowing_punctuation():
     image = _image()
     _ink(image, (4, 10, 20, 30))
     _ink(image, (30, 10, 50, 30))       # fused left parenthesis + h
@@ -385,12 +394,11 @@ def test_latin_token_recovers_only_its_fragment_from_fused_punctuation_component
 
     result = partition_charocr_text_region(image, prepass_line, (0, 0, 100, 40))
 
-    assert result.issues == ()
-    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
-    assert [(segment.bbox, segment.text) for segment in latin] == [((42, 10, 50, 30), "h")]
+    assert result.segments == ()
+    assert [issue.code for issue in result.issues] == ["missing_latin_token_ink"]
 
 
-def test_latin_token_recovers_trailing_glyph_fragment_fused_to_symbol():
+def test_latin_token_keeps_raw_observation_bbox_when_mask_loses_fused_glyph():
     image = _image()
     _ink(image, (4, 10, 20, 30))       # preceding CJK
     _ink(image, (30, 10, 38, 30))      # P
@@ -417,7 +425,15 @@ def test_latin_token_recovers_trailing_glyph_fragment_fused_to_symbol():
     latin = [segment for segment in result.segments if segment.kind == "text_latin"]
     assert [(segment.bbox, segment.text) for segment in latin] == [
         ((30, 10, 48, 30), "PE"),
-        ((62, 10, 82, 30), "VC"),
+        ((74, 10, 82, 30), "VC"),
+    ]
+    assert [
+        (token.text, token.bbox)
+        for segment in latin
+        for token in segment.ppocr_latin_tokens
+    ] == [
+        ("PE", (28, 8, 50, 32)),
+        ("VC", (62, 8, 84, 32)),
     ]
 
 

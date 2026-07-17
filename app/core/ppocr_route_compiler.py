@@ -146,7 +146,7 @@ def compile_page_routing_plan(
         if formula_overlap is not None:
             issues.append(overlapping_formula_masks_issue(prepass_line.index, formula_overlap))
             continue
-        segments, partition_issues = _segments_for_line(
+        segments, partition_issues, partition_symbol_observations = _segments_for_line(
             prepass_line,
             line_bbox,
             structural_masks,
@@ -171,6 +171,7 @@ def compile_page_routing_plan(
             source=ROUTING_SOURCE_PPOCR_V6_PREPASS,
             text_axis=prepass_line.text_axis,
             orientation_angle=prepass_line.orientation_angle,
+            ppocr_symbol_observations=tuple(partition_symbol_observations),
         )
         routes_by_block_uid[target.block.uid].append(route)
 
@@ -237,7 +238,7 @@ def _segments_for_line(
     page_decorations: tuple[TextDecoration, ...],
     *,
     page_image_bgr: np.ndarray | None,
-) -> tuple[list[RoutingSegment], tuple]:
+) -> tuple[list[RoutingSegment], tuple, tuple]:
     text_kind = _whole_line_text_kind(prepass_line.text)
     decorations = tuple(
         TextDecoration(decoration.kind, overlap)
@@ -262,9 +263,11 @@ def _segments_for_line(
         )
         text_segments = list(partition.segments)
         issues = list(partition.issues)
+        symbol_observations = partition.symbol_observations
     else:
         text_segments = [RoutingSegment(kind=text_kind, bbox=line_bbox)]
         issues = []
+        symbol_observations = ()
 
     # Structural regions are exact two-dimensional masks.  They deliberately
     # do not split the physical PP row into left/right crops: the native input
@@ -282,7 +285,11 @@ def _segments_for_line(
         RoutingSegment(kind="decoration", label=decoration.kind, bbox=decoration.bbox)
         for decoration in decorations
     ]
-    return [*text_segments, *structure_segments, *decoration_segments], tuple(issues)
+    return (
+        [*text_segments, *structure_segments, *decoration_segments],
+        tuple(issues),
+        tuple(symbol_observations),
+    )
 
 
 def _masked_partition_image(

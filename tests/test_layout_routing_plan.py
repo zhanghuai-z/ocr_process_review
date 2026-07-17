@@ -6,6 +6,7 @@ from app.models.charocr_routing import (
     BlockRoutingPlan,
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
+    PpOcrSymbolObservation,
     RouteValidationIssue,
     RoutingPlan,
     TextSliceRoute,
@@ -278,6 +279,34 @@ def test_latin_token_observations_round_trip_only_on_latin_routes():
         {"text": "Crisis", "bbox": [58, 10, 90, 50]},
     ]
     assert restored.ppocr_latin_tokens == segment.ppocr_latin_tokens
+
+
+def test_symbol_observations_round_trip_on_physical_routing_line():
+    observation = PpOcrSymbolObservation(
+        text="“",
+        bbox=(24, 12, 32, 28),
+        proposal_bbox=(27, 8, 35, 32),
+    )
+    line = RoutingLine(
+        index=0,
+        bbox=(0, 0, 100, 40),
+        segments=(RoutingSegment(kind="text_other", bbox=(0, 0, 100, 40)),),
+        ppocr_symbol_observations=(observation,),
+    )
+
+    record = routing_line_to_record(line)
+    restored = routing_line_from_record(
+        0,
+        record,
+        source_field=LAYOUT_ROUTE_SOURCE_FIELD,
+    )
+
+    assert record["ppocr_symbol_observations"] == [{
+        "text": "“",
+        "bbox": [24, 12, 32, 28],
+        "proposal_bbox": [27, 8, 35, 32],
+    }]
+    assert restored.ppocr_symbol_observations == (observation,)
 
 
 def test_hanwang_assembles_explicit_text_segment_kinds():

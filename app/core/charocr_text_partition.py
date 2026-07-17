@@ -3,7 +3,8 @@
 PP-OCR word boxes are geometry proposals for Latin/digit routing. For every
 line that contains Latin letters or digits, Latin/digit proposals create
 EngCut masks and every remaining horizontal region is dispatched to LineCut.
-Punctuation proposals are ownership boundaries, never OCR observations.
+Single-glyph symbol tokens may also carry a foreground-measured observation;
+they never resize or merge native character geometry.
 """
 from __future__ import annotations
 
@@ -13,7 +14,11 @@ import numpy as np
 
 from app.adapters.paddle.ppocr_v6_prepass import PpOcrV6LineHint, PpOcrV6WordBox
 from app.geometry.foreground import ForegroundComponent, analyze_foreground_components
-from app.models.charocr_routing import PpOcrLatinTokenObservation, RoutingSegment
+from app.models.charocr_routing import (
+    PpOcrLatinTokenObservation,
+    PpOcrSymbolObservation,
+    RoutingSegment,
+)
 from app.core.ocr_ir import is_cjk_char
 
 
@@ -31,6 +36,7 @@ class RoutePartitionIssue:
 class RoutePartition:
     segments: tuple[RoutingSegment, ...]
     issues: tuple[RoutePartitionIssue, ...] = ()
+    symbol_observations: tuple[PpOcrSymbolObservation, ...] = ()
 
 
 def partition_charocr_text_region(
@@ -136,7 +142,6 @@ def partition_charocr_text_region(
             components,
             token,
             component_owners,
-            tokens,
             region_bbox,
         )
         if mask_bbox is None:
@@ -155,13 +160,63 @@ def partition_charocr_text_region(
 
     if issues:
         return RoutePartition((), tuple(issues))
-    return _segments_from_latin_masks(
+    routed = _segments_from_latin_masks(
         region_bbox,
         masks,
         components,
         tokens=tokens,
         component_owners=component_owners,
     )
+    return RoutePartition(
+        routed.segments,
+        routed.issues,
+        _single_symbol_observations(components, tokens, region_bbox),
+    )
+
+
+def _single_symbol_observations(
+    components: list[ForegroundComponent],
+    tokens: tuple[PpOcrV6WordBox, ...],
+    region_bbox: XYXY,
+) -> tuple[PpOcrSymbolObservation, ...]:
+    """Measure one-glyph symbol geometry in ordered PP token ownership cells."""
+    ordered = tuple(
+        token for token in sorted(tokens, key=lambda item: item.token_index)
+        if str(token.text or "").strip()
+    )
+    observations: list[PpOcrSymbolObservation] = []
+    usable_components = [
+        component for component in components
+        if not _is_rule_like_component(component, region_bbox)
+    ]
+    for position, token in enumerate(ordered):
+        text = str(token.text or "")
+        if len(text) != 1 or text.isspace() or text.isalnum():
+            continue
+        left = (
+            region_bbox[0]
+            if position == 0
+            else (ordered[position - 1].bbox[2] + token.bbox[0]) // 2
+        )
+        right = (
+            region_bbox[2]
+            if position + 1 == len(ordered)
+            else (token.bbox[2] + ordered[position + 1].bbox[0] + 1) // 2
+        )
+        owned = [
+            component.bbox
+            for component in usable_components
+            if left <= (component.bbox[0] + component.bbox[2]) / 2.0 < right
+        ]
+        proposal_bbox = _clip(token.bbox, region_bbox)
+        if not owned or not any(_intersect(box, proposal_bbox) is not None for box in owned):
+            continue
+        observations.append(PpOcrSymbolObservation(
+            text=text,
+            bbox=_union(owned),
+            proposal_bbox=proposal_bbox,
+        ))
+    return tuple(observations)
 
 
 def _token_has_only_excluded_ink(
@@ -230,8 +285,11 @@ def _segments_from_latin_masks(
             bbox=bbox,
             text=_latin_group_fallback_text(group_tokens, tokens),
             ppocr_latin_tokens=tuple(
-                PpOcrLatinTokenObservation(text=token.text, bbox=token_bbox)
-                for token, token_bbox in group_items
+                PpOcrLatinTokenObservation(
+                    text=token.text,
+                    bbox=_clip(token.bbox, region_bbox),
+                )
+                for token, _mask_bbox in group_items
             ),
         ))
         cursor = x2
@@ -281,7 +339,6 @@ def _latin_mask_bbox(
     components: list[ForegroundComponent],
     token: PpOcrV6WordBox,
     component_owners: dict[ForegroundComponent, int | None],
-    tokens: tuple[PpOcrV6WordBox, ...],
     region_bbox: XYXY,
 ) -> XYXY | None:
     seed_bbox = _latin_seed_bbox(token, region_bbox)
@@ -291,106 +348,7 @@ def _latin_mask_bbox(
         if component_owners.get(component) == token.token_index
         and _intersect(component.bbox, seed_bbox) is not None
     ]
-    token_by_index = {candidate.token_index: candidate for candidate in tokens}
-
-    # A low-resolution glyph can be physically connected to adjacent
-    # punctuation, for example ``/V`` or ``(h``. Whole-component ownership
-    # remains unique, while the Latin token recovers only the fragment on its
-    # side of the observed token boundary. This is a geometric split, not text
-    # guessing.
-    symbol_fragments: list[XYXY] = []
-    expected_glyphs = sum(1 for char in str(token.text or "") if char.isascii() and char.isalnum())
-    occupied_slots = _occupied_token_slots(_clip(token.bbox, region_bbox), expected_glyphs, owned_boxes)
-    if len(occupied_slots) < expected_glyphs:
-        for component in components:
-            if _is_rule_like_component(component, region_bbox):
-                continue
-            owner_index = component_owners.get(component)
-            if owner_index == token.token_index:
-                continue
-            owner = token_by_index.get(owner_index) if owner_index is not None else None
-            if owner is None or _token_branch(owner.text) != "symbol":
-                continue
-            fragment = _adjacent_symbol_boundary_fragment(
-                component.bbox,
-                token,
-                owner,
-                tokens,
-                region_bbox,
-            )
-            if fragment is not None:
-                slot = _token_slot_for_box(
-                    _clip(token.bbox, region_bbox),
-                    expected_glyphs,
-                    fragment,
-                )
-                if slot is not None and slot not in occupied_slots:
-                    symbol_fragments.append(fragment)
-                    occupied_slots.add(slot)
-    boxes = [*owned_boxes, *symbol_fragments]
-    if boxes:
-        return _union(boxes)
-
-    return None
-
-
-def _occupied_token_slots(token_bbox: XYXY, slot_count: int, boxes: list[XYXY]) -> set[int]:
-    occupied: set[int] = set()
-    if slot_count <= 0 or not _is_nonempty(token_bbox):
-        return occupied
-    token_width = token_bbox[2] - token_bbox[0]
-    for slot in range(slot_count):
-        center_x = token_bbox[0] + token_width * (slot + 0.5) / slot_count
-        if any(box[0] <= center_x <= box[2] for box in boxes):
-            occupied.add(slot)
-    for box in boxes:
-        center_x = (box[0] + box[2]) / 2.0
-        relative = (center_x - token_bbox[0]) / token_width
-        occupied.add(max(0, min(slot_count - 1, int(relative * slot_count))))
-    return occupied
-
-
-def _token_slot_for_box(token_bbox: XYXY, slot_count: int, box: XYXY) -> int | None:
-    overlap = _intersect(token_bbox, box)
-    if slot_count <= 0 or overlap is None:
-        return None
-    center_x = (overlap[0] + overlap[2]) / 2.0
-    relative = (center_x - token_bbox[0]) / max(1, token_bbox[2] - token_bbox[0])
-    return max(0, min(slot_count - 1, int(relative * slot_count)))
-
-
-def _adjacent_symbol_boundary_fragment(
-    component: XYXY,
-    token: PpOcrV6WordBox,
-    symbol: PpOcrV6WordBox,
-    tokens: tuple[PpOcrV6WordBox, ...],
-    region_bbox: XYXY,
-) -> XYXY | None:
-    if any(char.isspace() for char in str(symbol.text or "")):
-        return None
-    ordered = [candidate for candidate in tokens if str(candidate.text or "").strip()]
-    positions = {candidate.token_index: index for index, candidate in enumerate(ordered)}
-    token_position = positions.get(token.token_index)
-    symbol_position = positions.get(symbol.token_index)
-    if token_position is None or symbol_position is None or abs(token_position - symbol_position) != 1:
-        return None
-    token_bbox = _clip(token.bbox, region_bbox)
-    symbol_bbox = _clip(symbol.bbox, region_bbox)
-    if symbol_position < token_position:
-        candidate = (
-            max(component[0], symbol_bbox[2]),
-            component[1],
-            min(component[2], token_bbox[2]),
-            component[3],
-        )
-    else:
-        candidate = (
-            max(component[0], token_bbox[0]),
-            component[1],
-            min(component[2], symbol_bbox[0]),
-            component[3],
-        )
-    return candidate if _is_nonempty(candidate) else None
+    return _union(owned_boxes) if owned_boxes else None
 
 
 def _latin_seed_bbox(token: PpOcrV6WordBox, region_bbox: XYXY) -> XYXY:

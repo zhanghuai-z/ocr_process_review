@@ -28,6 +28,7 @@ from app.core.inline_formula_edit_state import filter_handled_inline_formula_sub
 from app.models.charocr_routing import (
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
+    PpOcrSymbolObservation,
     ROUTE_SEGMENT_TEXT_LATIN,
     TEXT_AXIS_HORIZONTAL,
     TEXT_AXIS_VERTICAL,
@@ -121,11 +122,12 @@ DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
 FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
 FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
-PPOCR_LATIN_TOKEN_FALLBACK_SOURCE = "ppocrv6:latin_token_geometry_fallback"
-PPOCR_LATIN_TOKEN_FALLBACK_FLAG = "latin_token_geometry_fallback"
+PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE = "ppocrv6:latin_token_text_alignment"
+PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX = ":ppocr_text_disagreement"
+PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG = "latin_token_text_disagreement"
 LATIN_EMPTY_NATIVE_FALLBACK_SOURCE = "ppocrv6:latin_route_empty_native"
 LATIN_EMPTY_NATIVE_FALLBACK_FLAG = "latin_route_empty_native_ppocr_fallback"
-CHINESE_PUNCT = set("，。、；：？！“”‘’（）《》〈〉【】［］〔〕—…·．")
+PPOCR_SYMBOL_FOREGROUND_SOURCE = "ppocrv6:symbol_foreground_observation"
 _DIGITLIKE_ZERO_CHARS = {"o", "O"}
 _DIGITLIKE_ONE_CHARS = {"l", "I"}
 _DIGITLIKE_NUMERIC_CONTEXT_FOLLOWERS = {"", "，", ",", "。", ".", "；", ";", "、", ")", "）"}
@@ -253,7 +255,7 @@ class RunStats:
     geometry_conflict_groups: int = 0
     geometry_token_atoms: int = 0
     latin_empty_native_fallbacks: int = 0
-    latin_token_geometry_fallbacks: int = 0
+    latin_token_text_disagreements: int = 0
 
 
 @dataclass
@@ -615,6 +617,62 @@ def _merge_physical_routing_line(
     )]
 
 
+def _apply_missing_symbol_observations(
+    lines: list[LineResult],
+    observations: tuple[PpOcrSymbolObservation, ...],
+) -> list[LineResult]:
+    """Add only symbol geometry that both native branches omitted.
+
+    Existing native characters are never merged or resized here. A missing
+    symbol is materialized only from a single-glyph PP token whose bbox was
+    independently measured from foreground components during route compile.
+    """
+    if not lines or not observations:
+        return lines
+    resolved = list(lines)
+    for observation in observations:
+        center_x, center_y = _bbox_center(observation.bbox)
+        owners = [
+            index
+            for index, line in enumerate(resolved)
+            if line.bbox[0] <= center_x < line.bbox[2]
+            and line.bbox[1] <= center_y < line.bbox[3]
+        ]
+        if len(owners) != 1:
+            continue
+        line_index = owners[0]
+        line = resolved[line_index]
+        if any(
+            char.bbox is not None
+            and _intersect_xyxy(char.bbox, observation.bbox) is not None
+            for char in line.chars
+        ):
+            continue
+        symbol = CharResult(
+            text=observation.text,
+            confidence=0.0,
+            bbox=observation.bbox,
+            candidates=[observation.text],
+            source=PPOCR_SYMBOL_FOREGROUND_SOURCE,
+            bbox_granularity="char",
+            token_text=observation.text,
+        )
+        insertion = len(line.chars)
+        for index, char in enumerate(line.chars):
+            if char.bbox is None:
+                continue
+            if _bbox_center(char.bbox)[0] > center_x:
+                insertion = index
+                break
+        chars = [*line.chars[:insertion], symbol, *line.chars[insertion:]]
+        resolved[line_index] = replace(
+            line,
+            text="".join(char.text for char in chars),
+            chars=chars,
+        )
+    return resolved
+
+
 def _distribute_linecut_results(
     lines: list[LineResult],
     route: _LineCutMaskedLineRoute,
@@ -747,134 +805,6 @@ def _box_height(box: tuple[int, int, int, int]) -> int:
     return max(0, box[3] - box[1])
 
 
-def _is_usable_text_char_box(char: CharResult) -> bool:
-    if char.bbox is None or char.source == "paddle_inline_formula":
-        return False
-    if char.text in CHINESE_PUNCT:
-        return False
-    return _box_width(char.bbox) >= 8 and _box_height(char.bbox) >= 12
-
-
-def _nearest_char_box(
-    chars: list[CharResult],
-    index: int,
-    *,
-    step: int,
-    text_only: bool = False,
-) -> tuple[int, int, int, int] | None:
-    pos = index + step
-    while 0 <= pos < len(chars):
-        char = chars[pos]
-        if char.bbox is not None and (not text_only or _is_usable_text_char_box(char)):
-            return char.bbox
-        pos += step
-    return None
-
-
-def _recover_degenerate_punctuation_bboxes(
-    line: LineResult,
-    char_bounds: list[tuple[int, int, int, int] | None] | None = None,
-) -> LineResult:
-    if not line.chars:
-        return line
-    recovered: list[CharResult] = []
-    changed = False
-    for index, char in enumerate(line.chars):
-        if char.bbox is None or char.text not in CHINESE_PUNCT:
-            recovered.append(char)
-            continue
-        width = _box_width(char.bbox)
-        height = _box_height(char.bbox)
-        if width >= 4 and height >= 8:
-            recovered.append(char)
-            continue
-
-        prev_box = _nearest_char_box(line.chars, index, step=-1)
-        next_box = _nearest_char_box(line.chars, index, step=1)
-        ref_box = (
-            _nearest_char_box(line.chars, index, step=1, text_only=True)
-            or _nearest_char_box(line.chars, index, step=-1, text_only=True)
-        )
-        if ref_box is None:
-            recovered.append(char)
-            continue
-
-        target_width = max(8, min(18, round(_box_width(ref_box) * 0.35)))
-        left: int
-        right: int
-        if prev_box is not None and next_box is not None and prev_box[2] <= next_box[0]:
-            gap_width = next_box[0] - prev_box[2]
-            if 4 <= gap_width <= target_width * 2:
-                left, right = prev_box[2], next_box[0]
-            else:
-                center = (char.bbox[0] + char.bbox[2]) // 2
-                left = center - target_width // 2
-                right = left + target_width
-        elif next_box is not None:
-            right = next_box[0]
-            left = right - target_width
-        elif prev_box is not None:
-            left = prev_box[2]
-            right = left + target_width
-        else:
-            recovered.append(char)
-            continue
-
-        bound = (
-            char_bounds[index]
-            if char_bounds is not None and index < len(char_bounds) and char_bounds[index] is not None
-            else line.bbox
-        )
-        line_x1, line_y1, line_x2, line_y2 = bound
-        left = max(line_x1, left)
-        right = min(line_x2, right)
-        if right - left < 8:
-            recovered.append(
-                CharResult(
-                    text=char.text,
-                    confidence=char.confidence,
-                    bbox=None,
-                    candidates=list(char.candidates),
-                    source=f"{char.source}:punct_bbox_dropped_at_route_boundary",
-                    bbox_granularity=char.bbox_granularity or "char",
-                    token_text=char.token_text,
-                )
-            )
-            changed = True
-            continue
-        if right - left < 4:
-            recovered.append(char)
-            continue
-        top = max(line_y1, ref_box[1])
-        bottom = min(line_y2, ref_box[3])
-        if bottom - top < 8:
-            top, bottom = line_y1, line_y2
-        recovered.append(
-            CharResult(
-                text=char.text,
-                confidence=char.confidence,
-                bbox=(left, top, right, bottom),
-                candidates=list(char.candidates),
-                source=f"{char.source}:punct_bbox_recovered",
-                bbox_granularity=char.bbox_granularity or "char",
-                token_text=char.token_text,
-            )
-        )
-        changed = True
-
-    if not changed:
-        return line
-    return LineResult(
-        text=line.text,
-        bbox=line.bbox,
-        confidence=line.confidence,
-        chars=recovered,
-        source=line.source,
-        bbox_source=line.bbox_source,
-        review_flags=list(line.review_flags),
-    )
-
-
 def _assemble_layout_route_line(
     *,
     block_idx: int,
@@ -924,9 +854,12 @@ def _assemble_layout_route_line(
         merged_text_lines: list[LineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
-        return _merge_physical_routing_line(
-            merged_text_lines,
-            route_bbox=route.bbox,
+        return _apply_missing_symbol_observations(
+            _merge_physical_routing_line(
+                merged_text_lines,
+                route_bbox=route.bbox,
+            ),
+            route.ppocr_symbol_observations,
         )
 
     clusters = _cluster_lines_by_shape(all_text_lines)
@@ -941,7 +874,6 @@ def _assemble_layout_route_line(
                 tuple[int, int, int, int],
                 str,
                 list[CharResult],
-                list[tuple[int, int, int, int] | None],
                 float,
                 set[str],
             ]
@@ -962,7 +894,6 @@ def _assemble_layout_route_line(
                         line.bbox,
                         line.text,
                         list(line.chars),
-                        [segment_bbox] * len(line.chars),
                         line.confidence,
                         set(line.review_flags),
                     ))
@@ -984,7 +915,6 @@ def _assemble_layout_route_line(
                     content_bbox,
                     formula_text,
                     [formula_char],
-                    [content_bbox],
                     0.0,
                     {ROUTE_INLINE_FORMULA_FLAG},
                 ))
@@ -992,15 +922,11 @@ def _assemble_layout_route_line(
         components.sort(key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3]))
         text_parts: list[str] = []
         chars: list[CharResult] = []
-        char_bounds: list[tuple[int, int, int, int] | None] = []
-        component_boxes: list[tuple[int, int, int, int]] = []
         confidence_values: list[float] = []
         flags: set[str] = set()
-        for bbox, text, component_chars, bounds, confidence, component_flags in components:
+        for _bbox, text, component_chars, confidence, component_flags in components:
             text_parts.append(text)
             chars.extend(component_chars)
-            char_bounds.extend(bounds)
-            component_boxes.append(bbox)
             flags.update(component_flags)
             if confidence > 0:
                 confidence_values.append(confidence)
@@ -1008,24 +934,24 @@ def _assemble_layout_route_line(
         if not merged_text:
             continue
         assembled.append(
-            _recover_degenerate_punctuation_bboxes(
-                LineResult(
-                    text=merged_text,
-                    bbox=route.bbox,
-                    confidence=(
-                        sum(confidence_values) / len(confidence_values)
-                        if confidence_values
-                        else 0.0
-                    ),
-                    chars=chars,
-                    source="layout_route+hanwang",
-                    bbox_source="layout_route_assembled",
-                    review_flags=sorted(flags),
+            LineResult(
+                text=merged_text,
+                bbox=route.bbox,
+                confidence=(
+                    sum(confidence_values) / len(confidence_values)
+                    if confidence_values
+                    else 0.0
                 ),
-                char_bounds=char_bounds,
+                chars=chars,
+                source="layout_route+hanwang",
+                bbox_source="layout_route_assembled",
+                review_flags=sorted(flags),
             )
         )
-    return assembled
+    return _apply_missing_symbol_observations(
+        assembled,
+        route.ppocr_symbol_observations,
+    )
 
 
 def _assemble_routing_lines(
@@ -1778,50 +1704,47 @@ def _engcut_route_line_text_and_chars(
             )
         group_text = "".join(str(char.text or "") for char in visible)
         has_output_group = True
-        boxes = [char.bbox for char in visible if char.bbox is not None]
-        geometry_unreliable = _engcut_group_has_overlapping_char_bboxes(visible)
-        use_ppocr_token = (
+        can_align_ppocr_text = (
             token is not None
             and token_binding_counts.get(token) == 1
-            and (geometry_unreliable or group_text != token.text)
+            and group_text != token.text
+            and len(visible) == len(token.text)
+            and all(len(str(char.text or "")) == 1 for char in visible)
         )
-        if use_ppocr_token:
+        if can_align_ppocr_text:
             assert token is not None
-            token_bbox = union_xyxy([*boxes, token.bbox]) if boxes else token.bbox
             text_parts.append(token.text)
-            results.append(
+            results.extend(
                 CharResult(
-                    text=token.text,
+                    text=aligned_text,
                     confidence=0.0,
-                    bbox=token_bbox,
-                    candidates=list(dict.fromkeys([group_text, token.text])),
-                    source=PPOCR_LATIN_TOKEN_FALLBACK_SOURCE,
-                    bbox_granularity="word",
-                    token_text=token.text,
+                    bbox=native_char.bbox,
+                    candidates=list(dict.fromkeys([
+                        str(native_char.text or ""),
+                        aligned_text,
+                    ])),
+                    source=PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE,
+                    bbox_granularity="char",
+                    token_text=aligned_text,
                 )
+                for native_char, aligned_text in zip(visible, token.text)
             )
             continue
         text_parts.append(group_text)
-        if geometry_unreliable:
-            results.append(
-                CharResult(
-                    text=group_text,
-                    confidence=0.0,
-                    bbox=union_xyxy(boxes),
-                    candidates=[group_text],
-                    source=f"{source}:overlap_word",
-                    bbox_granularity="word",
-                    token_text=group_text,
-                )
-            )
-            continue
+        result_source = source
+        if (
+            token is not None
+            and token_binding_counts.get(token) == 1
+            and group_text != token.text
+        ):
+            result_source = f"{source}{PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX}"
         results.extend(
             CharResult(
                 text=str(char.text or ""),
                 confidence=0.0,
                 bbox=char.bbox,
                 candidates=[str(char.text or "")],
-                source=source,
+                source=result_source,
                 bbox_granularity="char",
                 token_text=str(char.text or ""),
             )
@@ -1845,14 +1768,6 @@ def _ppocr_token_for_engcut_group(
         and token.bbox[1] <= center_y < token.bbox[3]
     ]
     return matches[0] if len(matches) == 1 else None
-
-
-def _engcut_group_has_overlapping_char_bboxes(chars: list[EngcutChar]) -> bool:
-    boxes = [char.bbox for char in chars]
-    if any(box is None for box in boxes):
-        return False
-    ordered = sorted((box for box in boxes if box is not None), key=lambda box: (box[0], box[1]))
-    return any(right[0] < left[2] for left, right in zip(ordered, ordered[1:]))
 
 
 def _materialize_engcut_masked_line_crop(
@@ -2085,25 +2000,22 @@ def _recognize_engcut_masked_line(
             )
             continue
         boxes = [char.bbox for char in char_results if char.bbox is not None]
-        token_fallback_count = sum(
-            char.source == PPOCR_LATIN_TOKEN_FALLBACK_SOURCE
+        token_disagreement_count = sum(
+            char.source.endswith(PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX)
             for char in char_results
         )
-        stats.latin_token_geometry_fallbacks += token_fallback_count
+        if token_disagreement_count:
+            stats.latin_token_text_disagreements += 1
         results[segment.key] = LineResult(
             text=text,
             bbox=union_xyxy(boxes) if boxes else segment.bbox,
             confidence=0.0,
             chars=char_results,
-            source=(
-                f"{source}+ppocrv6_token"
-                if token_fallback_count
-                else source
-            ),
+            source=source,
             bbox_source="text_latin_masked_line_engcut",
             review_flags=(
-                [PPOCR_LATIN_TOKEN_FALLBACK_FLAG]
-                if token_fallback_count
+                [PPOCR_LATIN_TOKEN_DISAGREEMENT_FLAG]
+                if token_disagreement_count
                 else []
             ),
         )
@@ -2141,7 +2053,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = recognize(chunk[0])
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
-            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
+            stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((chunk[0], route_results))
             continue
         futures = [_ENGCUT_NATIVE_EXECUTOR.submit(recognize, route) for route in chunk]
@@ -2149,7 +2061,7 @@ def _recognize_engcut_masked_lines(
             route_results, local_stats = future.result()
             stats.engcut_route_calls += local_stats.engcut_route_calls
             stats.latin_empty_native_fallbacks += local_stats.latin_empty_native_fallbacks
-            stats.latin_token_geometry_fallbacks += local_stats.latin_token_geometry_fallbacks
+            stats.latin_token_text_disagreements += local_stats.latin_token_text_disagreements
             results.append((route, route_results))
     return results
 
