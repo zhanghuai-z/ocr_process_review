@@ -351,7 +351,7 @@ def test_pure_latin_row_keeps_uncertain_quote_region_out_of_engcut():
     ]
 
 
-def test_pure_latin_row_keeps_token_bindings_when_latin_masks_merge():
+def test_pure_latin_row_keeps_each_word_token_as_one_engcut_segment():
     image = _image()
     _ink(image, (20, 10, 25, 30))      # A
     _ink(image, (50, 10, 55, 30))      # B
@@ -370,7 +370,8 @@ def test_pure_latin_row_keeps_token_bindings_when_latin_masks_merge():
 
     assert result.issues == ()
     assert [(segment.kind, segment.bbox, segment.text) for segment in result.segments] == [
-        ("text_latin", (20, 10, 55, 30), "AB"),
+        ("text_latin", (20, 10, 25, 30), "A"),
+        ("text_latin", (50, 10, 55, 30), "B"),
     ]
     assert [
         token.text

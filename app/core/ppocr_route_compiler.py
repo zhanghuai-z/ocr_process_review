@@ -446,7 +446,10 @@ def _materialize_resolved_prepass_line(
         decision.line.index: decision.line
         for decision in ownership.decisions
     }
-    ordered = [source_lines[index] for index in row.source_indices]
+    ordered = sorted(
+        (source_lines[index] for index in row.source_indices),
+        key=lambda source: (source.bbox[0], source.index),
+    )
     words: list[tuple[PpOcrV6LineHint, PpOcrV6WordBox]] = [
         (source, word)
         for source in ordered

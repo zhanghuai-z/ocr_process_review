@@ -177,8 +177,6 @@ def partition_charocr_text_region(
         region_bbox,
         masks,
         components,
-        tokens=tokens,
-        linecut_owned_bboxes=linecut_owned_bboxes,
     )
     return RoutePartition(
         segments=routed.segments,
@@ -283,47 +281,25 @@ def _segments_from_latin_masks(
     region_bbox: XYXY,
     masks: list[tuple[PpOcrV6WordBox, XYXY]],
     components: list[ForegroundComponent],
-    *,
-    tokens: tuple[PpOcrV6WordBox, ...],
-    linecut_owned_bboxes: tuple[XYXY, ...],
 ) -> RoutePartition:
-    groups: list[tuple[list[tuple[PpOcrV6WordBox, XYXY]], XYXY]] = []
-    current_tokens: list[tuple[PpOcrV6WordBox, XYXY]] = []
-    current_bbox: XYXY | None = None
+    ordered_masks = sorted(masks, key=lambda item: (item[1][0], item[0].token_index))
     rx1, ry1, rx2, ry2 = region_bbox
-    for token, bbox in sorted(masks, key=lambda item: (item[1][0], item[0].token_index)):
-        if current_bbox is None:
-            current_tokens = [(token, bbox)]
-            current_bbox = bbox
-            continue
-        if bbox[0] < current_bbox[2]:
+    for (_left_token, left_bbox), (_right_token, right_bbox) in zip(
+        ordered_masks,
+        ordered_masks[1:],
+    ):
+        if right_bbox[0] < left_bbox[2]:
             return RoutePartition((), (
                 RoutePartitionIssue(
                     code="overlapping_latin_masks",
                     message="PP-OCRv6 Latin/digit masks overlap after component closure",
-                    bbox=(bbox[0], ry1, current_bbox[2], ry2),
+                    bbox=(right_bbox[0], ry1, left_bbox[2], ry2),
                 ),
             ))
-        gap = (current_bbox[2], ry1, bbox[0], ry2)
-        if _has_visible_ink(components, gap) or _has_explicit_boundary_token(
-            current_tokens[-1][0],
-            token,
-            tokens,
-            linecut_owned_bboxes=linecut_owned_bboxes,
-        ):
-            groups.append((current_tokens, current_bbox))
-            current_tokens = [(token, bbox)]
-            current_bbox = bbox
-            continue
-        current_tokens.append((token, bbox))
-        current_bbox = _union([current_bbox, bbox])
-    if current_bbox is not None:
-        groups.append((current_tokens, current_bbox))
 
     segments: list[RoutingSegment] = []
     cursor = rx1
-    for group_items, bbox in groups:
-        group_tokens = [token for token, _token_bbox in group_items]
+    for token, bbox in ordered_masks:
         x1, _y1, x2, _y2 = bbox
         before = (cursor, ry1, x1, ry2)
         if _is_nonempty(before) and _has_visible_ink(components, before):
@@ -331,58 +307,17 @@ def _segments_from_latin_masks(
         segments.append(RoutingSegment(
             kind="text_latin",
             bbox=bbox,
-            text=_latin_group_fallback_text(group_tokens, tokens),
-            ppocr_latin_tokens=tuple(
-                PpOcrLatinTokenObservation(
-                    text=token.text,
-                    bbox=_clip(token.bbox, region_bbox),
-                )
-                for token, _mask_bbox in group_items
-            ),
+            text=str(token.text or ""),
+            ppocr_latin_tokens=(PpOcrLatinTokenObservation(
+                text=token.text,
+                bbox=_clip(token.bbox, region_bbox),
+            ),),
         ))
         cursor = x2
     after = (cursor, ry1, rx2, ry2)
     if _is_nonempty(after) and _has_visible_ink(components, after):
         segments.append(RoutingSegment(kind="text_other", bbox=after))
     return RoutePartition(tuple(segments))
-
-
-def _latin_group_fallback_text(
-    group_tokens: list[PpOcrV6WordBox],
-    all_tokens: tuple[PpOcrV6WordBox, ...],
-) -> str:
-    """Preserve explicit PP whitespace for an empty-native Latin fallback."""
-    ordered = sorted(group_tokens, key=lambda token: token.token_index)
-    by_index = {token.token_index: token for token in all_tokens}
-    parts: list[str] = []
-    for index, token in enumerate(ordered):
-        if index:
-            previous = ordered[index - 1]
-            between = [
-                by_index[token_index]
-                for token_index in range(previous.token_index + 1, token.token_index)
-                if token_index in by_index
-            ]
-            if any(str(item.text or "").isspace() for item in between):
-                parts.append(" ")
-        parts.append(str(token.text or ""))
-    return "".join(parts)
-
-
-def _has_explicit_boundary_token(
-    left: PpOcrV6WordBox,
-    right: PpOcrV6WordBox,
-    tokens: tuple[PpOcrV6WordBox, ...],
-    *,
-    linecut_owned_bboxes: tuple[XYXY, ...],
-) -> bool:
-    """Keep EngCut groups separated across an observed non-space boundary."""
-    return any(
-        left.token_index < token.token_index < right.token_index
-        and bool(str(token.text or "").strip())
-        and _token_route_branch(token, linecut_owned_bboxes) != "latin"
-        for token in tokens
-    )
 
 
 def _latin_mask_bbox(
@@ -414,7 +349,7 @@ def _component_owner_token_indices(
     """
     ordered = tuple(
         token
-        for token in sorted(tokens, key=lambda item: item.token_index)
+        for token in sorted(tokens, key=lambda item: (item.bbox[0], item.token_index))
         if str(token.text or "").strip()
     )
     if not ordered:

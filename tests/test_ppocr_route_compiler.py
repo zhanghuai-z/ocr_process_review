@@ -682,8 +682,10 @@ def test_compiler_does_not_reclassify_numeric_prefix_outside_footnote():
         _block("text-1", BlockType.TEXT, (0, 0, 140, 50), policy=OcrPolicy.TEXT_OCR, order=0),
     )
     image = np.full((50, 140, 3), 255, dtype=np.uint8)
-    image[10:30, 8:22] = 0
-    image[10:30, 45:95] = 0
+    for x in (8, 14, 20):
+        image[12:28, x:x + 2] = 0
+    for x in (45, 55, 65, 75, 85):
+        image[12:28, x:x + 3] = 0
     prepass = _prepass(
         PpOcrV6LineHint(
             index=0,
@@ -708,8 +710,12 @@ def test_compiler_does_not_reclassify_numeric_prefix_outside_footnote():
     )
 
     assert plan.is_dispatchable is True
-    assert [segment.kind for segment in plan.for_block("text-1").lines[0].segments] == [
-        "text_latin",
+    assert [
+        (segment.kind, segment.text)
+        for segment in plan.for_block("text-1").lines[0].segments
+    ] == [
+        ("text_latin", "8"),
+        ("text_latin", "Barry"),
     ]
     assert plan.diagnostics == ()
 
@@ -835,8 +841,7 @@ def test_compiler_assigns_boundary_glyph_to_only_one_latin_token():
 
     assert plan.is_dispatchable is True
     latin = [segment for segment in plan.for_block("text-1").lines[0].segments if segment.kind == "text_latin"]
-    assert len(latin) == 1
-    assert latin[0].text == "onetwo"
+    assert [segment.text for segment in latin] == ["one", "two"]
 
 
 def test_compiler_keeps_ambiguous_latin_glyph_on_linecut_with_diagnostic():
