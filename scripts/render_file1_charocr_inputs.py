@@ -32,6 +32,7 @@ from app.models.charocr_routing import (
     ROUTE_SEGMENT_TEXT_OTHER,
 )
 from app.models.layout_block_view import current_layout_snapshot
+from app.services.ocr_routing_observation_service import acquire_routing_observation_bundle
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
@@ -42,6 +43,13 @@ COLORS = {
     ROUTE_SEGMENT_FORMULA: (220, 40, 220),
     "skip": (130, 130, 130),
 }
+
+
+class _NoNetworkVlClient:
+    def analyze_image(self, *_args, **_kwargs):
+        raise RuntimeError(
+            "route echo requires a fresh VL observation; rerun layout analysis before rendering"
+        )
 
 
 def _load_raw_result(path: Path) -> dict:
@@ -284,9 +292,16 @@ def main() -> int:
             width=width,
             height=height,
         )
+        snapshot = current_layout_snapshot(page)
+        observations = acquire_routing_observation_bundle(
+            page=page,
+            snapshot=snapshot,
+            image_bgr=image,
+            prepass=prepass,
+            vl_client=_NoNetworkVlClient(),
+        )
         plan = compile_page_routing_plan(
-            current_layout_snapshot(page),
-            prepass,
+            observations,
             page_width=width,
             page_height=height,
             page_image_bgr=image,
