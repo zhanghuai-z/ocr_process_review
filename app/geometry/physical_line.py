@@ -134,6 +134,8 @@ def _resolve_row_components(
                 for peer in peer_rows
             ):
                 continue
+            if _crosses_another_row_center(component, row, peer_rows):
+                continue
             if _spans_page(component.bbox, page_bbox):
                 continue
             accepted.append(component_index)
@@ -216,6 +218,22 @@ def _spans_page(inner: XYXY, outer: XYXY) -> bool:
     return (
         (inner[0] <= outer[0] and inner[2] >= outer[2])
         or (inner[1] <= outer[1] and inner[3] >= outer[3])
+    )
+
+
+def _crosses_another_row_center(
+    component: ForegroundComponent,
+    row: ResolvedPhysicalLine,
+    peer_rows: tuple[ResolvedPhysicalLine, ...],
+) -> bool:
+    component_cross = _cross_span(component.bbox, row.text_axis)
+    return any(
+        peer.representative_index != row.representative_index
+        and component_cross[0]
+        <= sum(_cross_span(peer.bbox, peer.text_axis)) / 2.0
+        <= component_cross[1]
+        for peer in peer_rows
+        if peer.text_axis == row.text_axis
     )
 
 

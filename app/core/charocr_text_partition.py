@@ -451,6 +451,13 @@ def _component_owner_token_indices(
             ):
                 owners[component] = token.token_index
 
+    _reclaim_latin_glyph_parts(
+        components,
+        ordered,
+        owners,
+        linecut_owned_components=linecut_owned_components,
+    )
+
     # If a non-symbol token is empty, a unique component intersecting its raw
     # PP observation is the only additional ownership fact available. Multiple
     # candidates remain unresolved instead of being ranked by proximity.
@@ -477,6 +484,62 @@ def _component_owner_token_indices(
         if len(candidates) == 1:
             owners[candidates[0]] = token.token_index
     return owners
+
+
+def _reclaim_latin_glyph_parts(
+    components: list[ForegroundComponent],
+    tokens: tuple[PpOcrV6WordBox, ...],
+    owners: dict[ForegroundComponent, int | None],
+    *,
+    linecut_owned_components: set[ForegroundComponent],
+) -> None:
+    """Keep one Latin glyph intact across a neighboring symbol cell.
+
+    PP symbol boxes often include trailing whitespace. Their midpoint boundary
+    can therefore capture a detached stem or descender from the next Latin
+    token. A complete foreground component is reassigned only when it shares
+    horizontal ink projection with an already-owned Latin component. CJK and
+    explicit LineCut ownership are never eligible, and competing Latin claims
+    remain unresolved.
+    """
+    token_by_index = {token.token_index: token for token in tokens}
+    latin_indices = {
+        token.token_index
+        for token in tokens
+        if _token_branch(token.text) == "latin"
+    }
+    anchors = {
+        token_index: tuple(
+            component
+            for component in components
+            if owners.get(component) == token_index
+        )
+        for token_index in latin_indices
+    }
+    claims: dict[ForegroundComponent, set[int]] = {}
+    for component in components:
+        if component in linecut_owned_components:
+            continue
+        current_owner = owners.get(component)
+        if current_owner in latin_indices:
+            continue
+        if current_owner is not None:
+            owner_token = token_by_index.get(current_owner)
+            if owner_token is None or _token_branch(owner_token.text) != "symbol":
+                continue
+        for token_index, token_anchors in anchors.items():
+            if any(_shares_horizontal_ink(component, anchor) for anchor in token_anchors):
+                claims.setdefault(component, set()).add(token_index)
+    for component, token_indices in claims.items():
+        if len(token_indices) == 1:
+            owners[component] = next(iter(token_indices))
+
+
+def _shares_horizontal_ink(
+    left: ForegroundComponent,
+    right: ForegroundComponent,
+) -> bool:
+    return max(left.bbox[0], right.bbox[0]) < min(left.bbox[2], right.bbox[2])
 
 
 def _has_visible_ink(

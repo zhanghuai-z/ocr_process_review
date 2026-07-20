@@ -263,6 +263,23 @@ def test_row_height_never_expands_from_page_spanning_component():
     assert _line_for_source_index(result, 3).bbox == (25, 15, 45, 35)
 
 
+def test_row_never_claims_partial_page_rule_crossing_another_row_center():
+    image = np.full((100, 120, 3), 255, dtype=np.uint8)
+    image[10:90, 5:8] = 0              # page-edge rule, not full page height
+    image[15:30, 30:70] = 0
+    image[65:80, 30:70] = 0
+    upper = _line(3, "upper", (25, 12, 75, 34))
+    lower = _line(4, "lower", (25, 62, 75, 84))
+
+    result = resolve_physical_lines(
+        (_context("block-1", (0, 0, 100, 100), (upper, lower)),),
+        image,
+    )
+
+    assert _line_for_source_index(result, 3).bbox == (25, 15, 75, 30)
+    assert _line_for_source_index(result, 4).bbox == (25, 65, 75, 80)
+
+
 def test_co_baseline_fragments_in_different_layout_blocks_do_not_merge():
     left = _line(3, "left", (5, 8, 45, 32))
     right = _line(4, "right", (55, 8, 95, 32))

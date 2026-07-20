@@ -110,6 +110,56 @@ def test_shifted_punctuation_proposal_does_not_block_when_cjk_owns_its_ink():
     ]
 
 
+def test_latin_descender_is_not_split_by_trailing_space_in_symbol_token():
+    image = _image()
+    _ink(image, (8, 24, 14, 30))       # comma
+    _ink(image, (20, 10, 26, 30))      # j stem/descender
+    _ink(image, (24, 4, 26, 8))        # j dot, initially owned by Latin
+    _ink(image, (32, 10, 40, 30))      # remaining Latin ink
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text=", just",
+        bbox=(0, 0, 60, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, ", ", (6, 8, 21, 32)),
+            PpOcrV6WordBox(0, 1, "just", (27, 8, 48, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((20, 4, 40, 30), "just"),
+    ]
+
+
+def test_latin_stem_is_not_split_by_preceding_period_space_token():
+    image = _image()
+    _ink(image, (8, 24, 14, 30))       # period
+    _ink(image, (20, 8, 24, 30))       # K stem
+    _ink(image, (23, 8, 32, 30))       # K diagonals, initially owned by Latin
+    _ink(image, (36, 10, 44, 30))      # remaining Latin ink
+    prepass_line = PpOcrV6LineHint(
+        index=0,
+        text=". Keep",
+        bbox=(0, 0, 60, 40),
+        words=(
+            PpOcrV6WordBox(0, 0, ". ", (6, 8, 22, 32)),
+            PpOcrV6WordBox(0, 1, "Keep", (26, 8, 50, 32)),
+        ),
+    )
+
+    result = partition_charocr_text_region(image, prepass_line, prepass_line.bbox)
+
+    assert result.issues == ()
+    latin = [segment for segment in result.segments if segment.kind == "text_latin"]
+    assert [(segment.bbox, segment.text) for segment in latin] == [
+        ((20, 8, 44, 30), "Keep"),
+    ]
+
+
 def test_punctuation_fragment_before_latin_mask_cannot_pull_cjk_into_engcut():
     image = _image()
     _ink(image, (10, 10, 28, 30))      # 甲

@@ -119,30 +119,11 @@ def _formula_canvas(image: np.ndarray, segments: list) -> np.ndarray:
 
 
 def _draw_disjoint_route_overlay(image: np.ndarray, lines: list) -> np.ndarray:
-    """Draw final route ownership after native-input exclusion precedence."""
+    """Draw each final route segment without merging adjacent physical rows."""
     height, width = image.shape[:2]
-    owner = np.zeros((height, width), dtype=np.uint8)
-    owner_ids = {
-        ROUTE_SEGMENT_TEXT_OTHER: 1,
-        ROUTE_SEGMENT_TEXT_LATIN: 2,
-        ROUTE_SEGMENT_FORMULA: 3,
-        "skip": 4,
-    }
-    # The first pass establishes the LineCut carrier. The second pass mirrors
-    # production masking: Latin, formula, and skip regions replace it.
+    overlay = image.copy()
     for line in lines:
         for segment in line.segments:
-            if segment.kind != ROUTE_SEGMENT_TEXT_OTHER:
-                continue
-            x1, y1, x2, y2 = segment.bbox
-            x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
-            if x2 > x1 and y2 > y1:
-                owner[y1:y2, x1:x2] = owner_ids[ROUTE_SEGMENT_TEXT_OTHER]
-    for line in lines:
-        for segment in line.segments:
-            if segment.kind == ROUTE_SEGMENT_TEXT_OTHER:
-                continue
-            owner_id = owner_ids.get(segment.kind, owner_ids["skip"])
             box = (
                 segment.content_bbox
                 if segment.kind == ROUTE_SEGMENT_FORMULA and segment.content_bbox
@@ -151,13 +132,13 @@ def _draw_disjoint_route_overlay(image: np.ndarray, lines: list) -> np.ndarray:
             x1, y1, x2, y2 = box
             x1, y1, x2, y2 = max(0, x1), max(0, y1), min(width, x2), min(height, y2)
             if x2 > x1 and y2 > y1:
-                owner[y1:y2, x1:x2] = owner_id
-
-    overlay = image.copy()
-    for kind, owner_id in owner_ids.items():
-        mask = np.where(owner == owner_id, 255, 0).astype(np.uint8)
-        contours, _hierarchy = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, COLORS.get(kind, COLORS["skip"]), 2)
+                cv2.rectangle(
+                    overlay,
+                    (x1, y1),
+                    (x2, y2),
+                    COLORS.get(segment.kind, COLORS["skip"]),
+                    2,
+                )
     return overlay
 
 
