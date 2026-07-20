@@ -161,13 +161,8 @@ class MainWindow(QMainWindow):
         self._controller.status_message.connect(self._set_status_message)
         self._controller.step_requested.connect(self._go_to_step)
         self._controller.view_state_changed.connect(self._on_view_state_changed)
-        self._controller.focus_page.connect(self._layout_panel.set_current_page_uid)
-        self._controller.focus_page.connect(self._ocr_panel.set_current_page_uid)
         self._controller.page_gate_state.connect(self._layout_panel.set_page_gate_state)
         self._controller.primary_action.connect(self._layout_panel.set_primary_action)
-        self._controller.current_page_uid_changed.connect(
-            self._ocr_panel.set_current_page_uid
-        )
 
     def _build_menu(self) -> None:
         self.menuBar().hide()

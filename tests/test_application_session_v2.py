@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 
 from PIL import Image
+from PySide6.QtWidgets import QApplication
 
 from app.controllers.workflow_controller import WorkflowController
 from app.core.workflow_state import (
@@ -15,6 +16,7 @@ from app.core.workflow_state import (
 )
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
+from app.ui.main_window import MainWindow
 
 
 def _page(session: ProjectSession) -> PageRecord:
@@ -99,6 +101,49 @@ def test_controller_import_emits_immutable_records_and_captures_snapshot(tmp_pat
     assert snapshot.project.project_uid == controller.project_uid
     assert snapshot.pages[0].page == page
     controller.close()
+
+
+def test_import_publishes_pages_before_current_page_and_completion(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (24, 16), "white").save(source)
+    controller = WorkflowController()
+    events: list[tuple[str, object]] = []
+    controller.page_records_changed.connect(
+        lambda records: events.append(("pages", tuple(page.uid for page in records)))
+    )
+    controller.view_state_changed.connect(
+        lambda state: events.append(("view", state.current_page_uid))
+    )
+    controller.import_finished.connect(
+        lambda result: events.append(("finished", result.pages[0].uid))
+    )
+
+    result = controller.import_paths([source])
+
+    page_uid = result.pages[0].uid
+    assert events[-3:] == [
+        ("pages", (page_uid,)),
+        ("view", page_uid),
+        ("finished", page_uid),
+    ]
+    controller.close()
+
+
+def test_main_window_binds_ocr_pages_before_selecting_imported_uid(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "page.png"
+    Image.new("RGB", (24, 16), "white").save(source)
+    controller = WorkflowController()
+    window = MainWindow(controller)
+
+    result = controller.import_paths([source])
+
+    page_uid = result.pages[0].uid
+    assert window._ocr_panel._pages_by_uid == {page_uid: result.pages[0]}
+    assert window._ocr_panel._current_page_uid == page_uid
+    controller.close()
+    window.deleteLater()
+    app.processEvents()
 
 
 def test_controller_save_and_open_rebinds_only_the_session(tmp_path: Path) -> None:

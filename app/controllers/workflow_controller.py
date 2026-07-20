@@ -514,10 +514,9 @@ class WorkflowController(QObject):
             self._dirty = True
             if not self._current_page_uid:
                 self._current_page_uid = result.pages[0].uid
-                self.current_page_uid_changed.emit(self._current_page_uid)
             self._set_layout_run_enabled(True)
-        self.import_finished.emit(result)
         self._emit_session_state()
+        self.import_finished.emit(result)
 
     def _on_import_failed(self, message: str) -> None:
         self.worker_error.emit(message)
