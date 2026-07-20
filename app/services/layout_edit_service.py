@@ -156,7 +156,6 @@ class LayoutEditResult:
     before: dict | None = None
     after: dict | None = None
     binding_status: str = ""
-    binding_text: str = ""
 
     @property
     def binding_empty_review(self) -> bool:
@@ -335,7 +334,6 @@ class LayoutEditService:
             before=before,
             after=after,
             binding_status=str(binding.get("status") or ""),
-            binding_text=str(binding.get("text") or ""),
         )
 
     def _create_block(
@@ -381,7 +379,6 @@ class LayoutEditService:
             before={},
             after=after,
             binding_status=str(binding.get("status") or ""),
-            binding_text=str(binding.get("text") or ""),
         )
 
     def _delete_block(self, page: Page, block_uid: str) -> LayoutEditResult:
@@ -506,7 +503,6 @@ class LayoutEditService:
             before=before,
             after=after,
             binding_status=str(binding.get("status") or ""),
-            binding_text=str(binding.get("text") or ""),
         )
 
     @staticmethod
@@ -731,7 +727,6 @@ class LayoutEditService:
             before=before,
             after=after,
             binding_status=str(binding.get("status") or ""),
-            binding_text=str(binding.get("text") or ""),
         )
 
     def bind_manual_block_to_paddle(self, page: Page, block: Block) -> dict:

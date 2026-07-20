@@ -1638,7 +1638,7 @@ class LayoutPanel(QWidget):
             self._set_status_text("已创建校验框")
         elif result.binding_ambiguous:
             self._set_status_text("已创建校验框，需确认")
-        elif result.binding_text:
+        elif result.binding_status:
             self._set_status_text("已绑定识别结果")
 
     def _push_undo_snapshot(self) -> None:

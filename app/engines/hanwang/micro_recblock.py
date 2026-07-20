@@ -3339,8 +3339,8 @@ def _manual_binding_route_subblock(entry: _LayoutOcrEntry, binding: dict[str, An
     block = entry.block
     manual_bbox = _manual_bbox_from_entry(entry)
     label = str(binding.get("source_label") or _route_source_label_from_view(block, entry.view))
-    text_is_stale = _manual_binding_text_is_stale(manual_bbox, binding)
-    text = "" if text_is_stale else str(binding.get("text") or proof_block_text(block) or "")
+    text_is_stale = _manual_formula_observation_is_stale(manual_bbox, binding)
+    text = "" if text_is_stale else proof_block_text(block)
     payload = {
         "block_label": label,
         "block_bbox": list(manual_bbox),
@@ -3350,11 +3350,11 @@ def _manual_binding_route_subblock(entry: _LayoutOcrEntry, binding: dict[str, An
         "_layout_manual_route_subblock": True,
     }
     if text_is_stale:
-        payload["_layout_manual_binding_text_stale"] = True
+        payload["_layout_manual_formula_observation_stale"] = True
     return payload
 
 
-def _manual_binding_text_is_stale(
+def _manual_formula_observation_is_stale(
     manual_bbox: tuple[int, int, int, int],
     binding: dict[str, Any],
 ) -> bool:
@@ -3515,8 +3515,9 @@ def _apply_manual_parent_binding(
 
     manual_bbox = list(_manual_bbox_from_entry(entry))
     parent_row["block_bbox"] = manual_bbox
-    if binding.get("text"):
-        parent_row["block_content"] = str(binding.get("text") or "")
+    observation_text = proof_block_text(block)
+    if observation_text:
+        parent_row["block_content"] = observation_text
     parent_row["_layout_parent_replaced_by_manual_binding"] = True
 
 
@@ -3644,7 +3645,6 @@ def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
         "source": "paddle_formula_crop_ocr",
         "block_type": BlockType.EQUATION.value,
         "source_label": "inline_formula",
-        "text": text,
         "parent_index": parent_index,
         "candidate_index": -1,
         "score": 1.0,
@@ -3675,7 +3675,6 @@ def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
             "source": "paddle_formula_crop_ocr_empty",
             "block_type": BlockType.EQUATION.value,
             "source_label": "inline_formula",
-            "text": "",
             "parent_index": parent_index,
             "candidate_index": -1,
             "score": 0.0,

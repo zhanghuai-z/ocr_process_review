@@ -155,14 +155,13 @@ def _equation_with_number(
 
 
 def _equation_body(element: ExportElement, settings: MarkdownExportSettings) -> str:
-    latex = _one_line(str(element.payload.get("latex") or ""))
     payload_lines = element.payload.get("lines") or []
     line_texts: list[str] = []
     for item in payload_lines:
         text = _one_line(str(item.get("text") or ""))
         if text:
             line_texts.append(text)
-    body = latex or " ".join(line_texts)
+    body = " ".join(line_texts)
     if settings.unwrap_math_delimiters:
         body = _strip_math_delimiters(body)
     return body.strip()

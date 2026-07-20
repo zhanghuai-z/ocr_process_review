@@ -927,9 +927,9 @@ def test_block_state_helpers_use_typed_state_only():
         bbox=BBox(0, 0, 10, 10),
     )
 
-    set_paddle_binding(block, {"status": "paddle_geometry_hit", "text": "$ A $"})
+    set_paddle_binding(block, {"status": "paddle_geometry_hit"})
     assert isinstance(block.paddle_binding, PaddleBinding)
-    assert block.paddle_binding.text == "$ A $"
+    assert block.paddle_binding.status == "paddle_geometry_hit"
 
     mark_ocr_text_invalidated(block, "block_moved")
     assert is_ocr_text_invalidated(block) is True
@@ -1422,7 +1422,6 @@ def test_project_store_persists_typed_paddle_binding():
             "source": "paddle_geometry",
             "block_type": "equation",
             "source_label": "inline_formula",
-            "text": "$ A $",
             "parent_index": 3,
             "candidate_index": 1,
             "score": 0.75,
@@ -1447,7 +1446,7 @@ def test_project_store_persists_typed_paddle_binding():
 
         loaded_block = loaded.pages[0].blocks[0]
         assert loaded_block.paddle_binding is not None
-        assert loaded_block.paddle_binding.to_dict()["text"] == "$ A $"
+        assert "text" not in loaded_block.paddle_binding.to_dict()
         assert loaded_block.paddle_binding.parent_index == 3
 
         print("test_project_store_persists_typed_paddle_binding PASSED")
@@ -1465,7 +1464,6 @@ def test_paddle_binding_rejects_malformed_typed_fields():
         "source",
         "block_type",
         "source_label",
-        "text",
         "parent_index",
         "candidate_index",
         "score",
@@ -1486,6 +1484,8 @@ def test_paddle_binding_rejects_malformed_typed_fields():
 
     with pytest.raises(ValueError, match="unknown PaddleBinding field"):
         PaddleBinding.from_dict({"status": "hit", "next_app_payload": True})
+    with pytest.raises(ValueError, match="unknown PaddleBinding field"):
+        PaddleBinding.from_dict({"status": "hit", "text": "$ A $"})
 
     print("test_paddle_binding_rejects_malformed_typed_fields PASSED")
 
@@ -3454,6 +3454,26 @@ def test_export_markdown_structure():
         assert "Unknown &lt;block&gt;" in content
         assert content.index("# 章节标题") < content.index("1\\. 这不是列表") < content.index("1\\) Ref not list")
         print("test_export_markdown_structure PASSED")
+
+
+def test_markdown_equation_uses_export_observation_lines_only():
+    from app.export.ir import ExportElement, ExportSource
+    from app.export.markdown import MarkdownExportSettings, _equation_body
+
+    equation = ExportElement(
+        id="equation-1",
+        kind="equation",
+        page=1,
+        order=0,
+        source=ExportSource(page_number=1, block_ids=["block-1"], origin="ocr"),
+        payload={
+            "latex": "$ stale_binding_text $",
+            "text": "$ current_observation $",
+            "lines": [{"text": "$ current_observation $"}],
+        },
+    )
+
+    assert _equation_body(equation, MarkdownExportSettings()) == "current_observation"
 
 
 def test_markdown_fallback_assets_are_cropped_regions():
@@ -9448,12 +9468,12 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
                 bbox=BBox.from_xyxy(110, 0, 140, 30),
                 source=BlockSource.MANUAL_DRAW,
                 source_label="inline_formula",
+                lines=[Line(text="$ B $", confidence=0.0, bbox=BBox.from_xyxy(110, 0, 140, 30))],
                 paddle_binding=PaddleBinding.from_dict(
                     {
                         "status": BINDING_PARENT_FORMULA_INFERRED,
                         "block_type": "equation",
                         "source_label": "inline_formula",
-                        "text": "$ B $",
                         "parent_index": 0,
                         "manual_bbox": [110, 0, 140, 30],
                     }
@@ -9461,6 +9481,7 @@ def test_hanwang_layout_injects_manual_formula_binding_into_parent_route():
             ),
         ],
     )
+    _seed_page_ocr_observations(page)
 
     blocks = _page_blocks_from_layout(page)
     assert len(blocks) == 1
@@ -9546,7 +9567,6 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
                         "status": BINDING_GEOMETRY_HIT,
                         "block_type": "equation",
                         "source_label": "inline_formula",
-                        "text": "$ GGF_{it}^{Post-short} $",
                         "parent_index": 0,
                         "candidate_bbox": [445, 556, 884, 620],
                         "manual_bbox": [445, 556, 653, 620],
@@ -9569,7 +9589,7 @@ def test_hanwang_manual_formula_candidate_does_not_replace_manual_sibling_route(
     assert sub_bboxes.count([445, 556, 653, 620]) == 1
     assert [686, 565, 884, 614] in sub_bboxes
     assert manual_left["block_content"] == ""
-    assert manual_left["_layout_manual_binding_text_stale"] is True
+    assert manual_left["_layout_manual_formula_observation_stale"] is True
 
     formula_segments = [
         segment
@@ -9640,7 +9660,6 @@ def test_hanwang_manual_formula_child_cannot_steal_parent_route_index():
                         "status": BINDING_GEOMETRY_HIT,
                         "block_type": "equation",
                         "source_label": "inline_formula",
-                        "text": "$ GGF_{it}^{Post-short} $",
                         "parent_index": 0,
                         "candidate_index": 0,
                         "candidate_bbox": [445, 556, 884, 620],
@@ -9842,7 +9861,6 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
                 "status": BINDING_PARENT_FORMULA_INFERRED,
                 "block_type": "equation",
                 "source_label": "inline_formula",
-                "text": "$ B $",
                 "parent_index": 0,
                 "manual_bbox": [110, 0, 140, 30],
             }
@@ -9869,6 +9887,7 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
             manual_formula,
         ],
     )
+    _seed_page_ocr_observations(page)
 
     micro_module.HanwangMicroRecBlockEngine(runner=fake_runner).recognize_page_blocks(
         np.zeros((60, 220, 3), dtype=np.uint8),
@@ -9882,7 +9901,8 @@ def test_hanwang_recognize_preserves_parent_bound_manual_formula_block():
     assert page.blocks[1] is manual_formula
     assert page.blocks[1].source == BlockSource.MANUAL_DRAW
     assert page.blocks[1].paddle_binding is not None
-    assert page.blocks[1].paddle_binding.text == "$ B $"
+    assert _block_ocr_observations(page.blocks[1])[0].text == "$ B $"
+    assert "text" not in page.blocks[1].paddle_binding.to_dict()
 
     print("test_hanwang_recognize_preserves_parent_bound_manual_formula_block PASSED")
 
@@ -9958,7 +9978,6 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
                 "status": BINDING_GEOMETRY_HIT,
                 "block_type": "equation",
                 "source_label": "inline_formula",
-                "text": "$ B_{old} $",
                 "parent_index": 0,
                 "candidate_bbox": [100, 0, 150, 30],
                 "manual_bbox": [110, 0, 140, 30],
@@ -10004,7 +10023,7 @@ def test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr():
     assert _block_ocr_observations(formula)[0].text == "$ B_{new} $"
     assert formula.paddle_binding is not None
     assert formula.paddle_binding.status == BINDING_FORMULA_CROP_OCR
-    assert formula.paddle_binding.text == "$ B_{new} $"
+    assert "text" not in formula.paddle_binding.to_dict()
 
     print("test_hanwang_recognize_rebinds_manual_formula_text_from_paddle_crop_ocr PASSED")
 
@@ -12417,7 +12436,7 @@ def test_layout_edit_service_manual_formula_writes_typed_paddle_binding():
     binding = block.paddle_binding
     assert binding is not None
     assert binding.status == BINDING_EMPTY_REVIEW
-    assert binding.text == ""
+    assert "text" not in binding.to_dict()
     assert block.origin is not None
     assert block.origin.source_label == "inline_formula"
     assert block.origin.raw_index == 0

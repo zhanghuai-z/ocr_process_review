@@ -157,7 +157,6 @@ class PaddleBinding:
     source: str = ""
     block_type: str = ""
     source_label: str = ""
-    text: str = ""
     parent_index: int = -1
     candidate_index: int = -1
     score: float = 0.0
@@ -171,7 +170,6 @@ class PaddleBinding:
             "source",
             "block_type",
             "source_label",
-            "text",
             "parent_index",
             "candidate_index",
             "score",
@@ -194,7 +192,6 @@ class PaddleBinding:
             source=_string_or_default(payload, "source"),
             block_type=_string_or_default(payload, "block_type"),
             source_label=_string_or_default(payload, "source_label"),
-            text=_string_or_default(payload, "text"),
             parent_index=_int_or_default(payload.get("parent_index"), -1, field="parent_index"),
             candidate_index=_int_or_default(payload.get("candidate_index"), -1, field="candidate_index"),
             score=_float_or_default(payload.get("score"), 0.0, field="score"),
@@ -210,7 +207,6 @@ class PaddleBinding:
             "source": self.source,
             "block_type": self.block_type,
             "source_label": self.source_label,
-            "text": self.text,
             "parent_index": self.parent_index,
             "candidate_index": self.candidate_index,
             "score": round(float(self.score), 6),

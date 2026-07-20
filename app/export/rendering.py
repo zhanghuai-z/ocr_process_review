@@ -78,7 +78,7 @@ def element_text(element: ExportElement) -> str:
         text = str(payload.get("text") or "").strip()
         return text or f"[表格: {payload.get('mode', 'image_fallback')} {payload.get('asset_ref') or ''}]".strip()
     if element.kind == "equation":
-        return str(payload.get("latex") or payload.get("text") or f"[公式: {payload.get('mode', 'image_fallback')}]")
+        return str(payload.get("text") or f"[公式: {payload.get('mode', 'image_fallback')}]")
     return f"[{element_label(element)}]"
 
 

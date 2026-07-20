@@ -775,7 +775,7 @@ def _formula_subblock_allows_parent_text_guess(item: dict[str, Any]) -> bool:
         return True
     if raw.get("_layout_manual_route_subblock"):
         return False
-    if raw.get("_layout_manual_binding_text_stale"):
+    if raw.get("_layout_manual_formula_observation_stale"):
         return False
     if raw.get("_layout_manual_unbound_route_subblock"):
         return False

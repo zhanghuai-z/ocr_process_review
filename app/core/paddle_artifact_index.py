@@ -222,12 +222,12 @@ class PaddleManualBinding:
         return OcrPolicy.MANUAL_ONLY if self.is_bound else OcrPolicy.TEXT_OCR
 
     def to_payload(self) -> dict[str, Any]:
+        """Return persistent binding metadata; recognized text is an OCR observation."""
         payload: dict[str, Any] = {
             "status": self.status,
             "source": self.source,
             "block_type": self.block_type.value,
             "source_label": self.source_label,
-            "text": self.text,
             "parent_index": self.parent_index,
             "candidate_index": self.candidate_index,
             "score": round(float(self.score), 6),
