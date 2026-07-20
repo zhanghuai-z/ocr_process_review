@@ -146,6 +146,55 @@ def test_main_window_binds_ocr_pages_before_selecting_imported_uid(tmp_path: Pat
     app.processEvents()
 
 
+def test_main_window_more_menu_opens_ocr_settings(monkeypatch) -> None:
+    from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+    app = QApplication.instance() or QApplication([])
+    controller = WorkflowController()
+    window = MainWindow(controller)
+    opened: list[ApiSettingsDialog] = []
+    monkeypatch.setattr(
+        ApiSettingsDialog,
+        "exec",
+        lambda dialog: opened.append(dialog) or 0,
+    )
+
+    menu = window._top_bar._btn_more_menu.menu()
+    settings_action = next(action for action in menu.actions() if action.text() == "设置…")
+    settings_action.trigger()
+
+    assert len(opened) == 1
+    controller.close()
+    window.deleteLater()
+    app.processEvents()
+
+
+def test_controller_composes_layout_client_from_current_settings(monkeypatch) -> None:
+    import app.controllers.workflow_controller as controller_module
+
+    monkeypatch.setattr(
+        controller_module,
+        "get_config",
+        lambda: {
+            "api_url": "https://paddleocr.aistudio-app.com",
+            "api_token": "configured-token",
+            "api_timeout": 45,
+            "paddle_api_network_mode": "env_proxy",
+        },
+    )
+    controller = WorkflowController()
+
+    service = controller._build_default_layout_analysis_service()
+    client = service._client
+
+    assert client.jobs_url == "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+    assert client.token == "configured-token"
+    assert client.request_timeout == 30
+    assert client.poll_timeout == 180
+    assert client.network_mode == "env_proxy"
+    controller.close()
+
+
 def test_controller_save_and_open_rebinds_only_the_session(tmp_path: Path) -> None:
     source = tmp_path / "page.png"
     Image.new("RGB", (24, 16), "white").save(source)

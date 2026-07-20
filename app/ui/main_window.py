@@ -186,6 +186,10 @@ class MainWindow(QMainWindow):
         self.addAction(close)
 
         more_menu = QMenu("更多", self)
+        settings = QAction("设置…", self)
+        settings.triggered.connect(self._show_ocr_settings)
+        more_menu.addAction(settings)
+        more_menu.addSeparator()
         describe = QAction("OCR 服务状态", self)
         describe.triggered.connect(
             lambda: self._set_status_message(self._controller.ocr_engine_description(), 5000)
@@ -411,6 +415,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法导出", str(exc))
             return
         ExportDialog(snapshot, self).exec()
+
+    def _show_ocr_settings(self) -> None:
+        from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
+
+        dialog = ApiSettingsDialog(self)
+        if dialog.exec():
+            self._set_status_message("OCR 设置已更新", 3000)
 
     def _confirm_save_before_discard(self, title: str) -> bool:
         if self._controller.session is None or not self._controller.is_dirty:

@@ -252,7 +252,7 @@ class WorkflowController(QObject):
         self._import_service = import_service or ImportService(
             cache_dir=self._session_dir / "imports"
         )
-        self._layout_analysis_service = layout_analysis_service or LayoutAnalysisService()
+        self._layout_analysis_service = layout_analysis_service
         self._ocr_job_service = ocr_job_service
         self._project_file_service = project_file_service or ProjectFileService()
         self._dirty = False
@@ -537,8 +537,9 @@ class WorkflowController(QObject):
             page_uid: self._layout_revision(page_uid)
             for page_uid in selected
         }
+        service = self._layout_analysis_service or self._build_default_layout_analysis_service()
         worker = _LayoutServiceWorker(
-            self._layout_analysis_service,
+            service,
             self._session,
             selected,
             expected,
@@ -555,6 +556,32 @@ class WorkflowController(QObject):
         self._emit_view_state()
         worker.start()
         return True
+
+    def _build_default_layout_analysis_service(self) -> LayoutAnalysisService:
+        """Compose the layout use case from the current application settings."""
+        from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
+        from app.core.paddle_v16_client import is_paddle_v16_endpoint
+        from app.integrations.paddle import PaddleVLClient
+
+        config = get_config()
+        jobs_url = resolve_api_endpoint_for_role(
+            config.get("api_url", ""),
+            profile=FIXED_LAYOUT_PROFILE,
+            role="layout",
+        )
+        if not jobs_url:
+            raise RuntimeError("请先在“更多 → 设置”中配置 Paddle API 地址")
+        if not is_paddle_v16_endpoint(jobs_url):
+            raise RuntimeError("版面分析需要 PaddleOCR-VL-1.6 jobs API 地址")
+        configured_timeout = max(1, int(config.get("api_timeout", 180)))
+        client = PaddleVLClient(
+            jobs_url=jobs_url,
+            token=str(config.get("api_token", "") or ""),
+            request_timeout=min(max(10, configured_timeout), 30),
+            poll_timeout=max(configured_timeout, 180),
+            network_mode=str(config.get("paddle_api_network_mode", "auto") or "auto"),
+        )
+        return LayoutAnalysisService(client)
 
     def _on_layout_progress(self, current: int, total: int) -> None:
         self.layout_progress.emit(current, total)

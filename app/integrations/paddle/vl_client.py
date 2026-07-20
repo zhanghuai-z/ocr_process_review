@@ -6,6 +6,7 @@ construct application records or know about project/session repositories.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 import time
 from typing import Any
@@ -16,6 +17,8 @@ import requests
 PADDLE_VL_JOBS_PATH = "/api/v2/ocr/jobs"
 PADDLE_VL_JOBS_URL = f"https://paddleocr.aistudio-app.com{PADDLE_VL_JOBS_PATH}"
 PADDLE_VL_MODEL = "PaddleOCR-VL-1.6"
+PADDLE_VL_NETWORK_MODES = frozenset({"direct", "env_proxy", "auto"})
+_DIRECT_PROXY_OVERRIDES = {"http": None, "https": None, "all": None}
 
 
 class PaddleVLClientError(RuntimeError):
@@ -24,6 +27,20 @@ class PaddleVLClientError(RuntimeError):
 
 class PaddleVLRequestCancelled(PaddleVLClientError):
     """The caller cancelled an in-flight vendor request."""
+
+
+def _has_env_proxy() -> bool:
+    return any(
+        os.environ.get(key)
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        )
+    )
 
 
 def _success_envelope(jsonl_text: str, *, job_id: str, job_data: dict[str, Any]) -> dict[str, Any]:
@@ -77,6 +94,7 @@ class PaddleVLClient:
     request_timeout: float = 30.0
     poll_timeout: float = 600.0
     poll_interval_s: float = 5.0
+    network_mode: str = "direct"
     sleep: Any = field(default=time.sleep, repr=False)
     cancel_callback: Any = field(default=None, repr=False)
 
@@ -86,6 +104,47 @@ class PaddleVLClient:
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"bearer {self.token}"} if self.token else {}
+
+    def _network_attempts(self) -> tuple[bool, ...]:
+        mode = str(self.network_mode or "direct").strip().lower()
+        if mode not in PADDLE_VL_NETWORK_MODES:
+            raise ValueError(f"unsupported Paddle VL network mode: {self.network_mode!r}")
+        if mode == "env_proxy":
+            return (True,)
+        if mode == "auto" and _has_env_proxy():
+            return (False, True)
+        return (False,)
+
+    @staticmethod
+    def _rewind_files(files: object) -> None:
+        if not isinstance(files, dict):
+            return
+        for value in files.values():
+            file_obj = value[1] if isinstance(value, tuple) and len(value) > 1 else value
+            if hasattr(file_obj, "seek"):
+                file_obj.seek(0)
+
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        attempts = self._network_attempts()
+        retryable = (
+            requests.exceptions.ProxyError,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.SSLError,
+        )
+        for index, use_env_proxy in enumerate(attempts):
+            request_kwargs = dict(kwargs)
+            if not use_env_proxy:
+                request_kwargs["proxies"] = _DIRECT_PROXY_OVERRIDES
+            try:
+                self._raise_if_cancelled()
+                if method == "POST":
+                    return requests.post(url, **request_kwargs)
+                return requests.get(url, **request_kwargs)
+            except retryable:
+                if index >= len(attempts) - 1:
+                    raise
+                self._rewind_files(kwargs.get("files"))
+        raise RuntimeError(f"Paddle VL request was not attempted: {method} {url}")
 
     @staticmethod
     def _raise_http(response: requests.Response, operation: str) -> None:
@@ -125,7 +184,8 @@ class PaddleVLClient:
             data["batchId"] = source_run_id
         file_obj = _NamedBytes(image_bytes, filename)
         try:
-            response = requests.post(
+            response = self._request(
+                "POST",
                 self.jobs_url,
                 data=data,
                 files={"file": (filename, file_obj, "application/octet-stream")},
@@ -140,7 +200,8 @@ class PaddleVLClient:
         json_url, job_data = self._wait_for_result(job_id)
         self._raise_if_cancelled()
         try:
-            result_response = requests.get(
+            result_response = self._request(
+                "GET",
                 json_url,
                 headers={},
                 timeout=self.request_timeout,
@@ -167,7 +228,8 @@ class PaddleVLClient:
         while time.monotonic() <= deadline:
             self._raise_if_cancelled()
             try:
-                response = requests.get(
+                response = self._request(
+                    "GET",
                     poll_url,
                     headers=self._headers(),
                     timeout=self.request_timeout,
@@ -217,6 +279,7 @@ class _NamedBytes:
 
 __all__ = [
     "PADDLE_VL_JOBS_URL",
+    "PADDLE_VL_NETWORK_MODES",
     "PaddleVLClient",
     "PaddleVLClientError",
     "PaddleVLRequestCancelled",

@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from app.core.layout_analyzer import LayoutAnalyzer
-from app.integrations.paddle import PaddleVLClient
 from app.models.entity_id import new_ulid
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.paddle_artifact import PaddleArtifact
@@ -52,12 +51,12 @@ class LayoutAnalysisService:
 
     def __init__(
         self,
-        client: PaddleLayoutClient | None = None,
+        client: PaddleLayoutClient,
         *,
         analyzer: LayoutAnalyzer | None = None,
         source_engine: str = "paddleocr-vl-1.6",
     ) -> None:
-        self._client = client if client is not None else PaddleVLClient()
+        self._client = client
         self._analyzer = analyzer if analyzer is not None else LayoutAnalyzer()
         if not isinstance(source_engine, str) or not source_engine.strip():
             raise ValueError("source_engine must be non-empty")
