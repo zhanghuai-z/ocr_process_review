@@ -22,12 +22,16 @@
 2. 每次 OCR 都重新取得整页 PP-OCRv6 行/word 观察。未修改且范围完全相同的自动版面块可复用原始 VL 文本；新建、移动、缩放或改类型的文本块必须按当前 bbox 裁图重新请求 VL，失败重试一次。
 3. `RoutingObservationBundle` 绑定 image hash、layout fingerprint、PP run 和块级 VL 观察。成功但为空的 VL 观察只产生非阻断诊断；传输或解析失败阻断该页。
 4. VL 块文本与其内部 PP 物理行只允许块内、单调、去空白后的精确对齐。对齐不唯一或文本不等时阻断该页，不做模糊匹配。VL 明确给出的圈号/括号编号可在精确正文对齐后建立 LineCut 前缀所有权。
-5. `compile_page_routing_plan()` 扣除公式、表格、图片和其他结构区域，再编译 CharOCR 输入。
+5. `compile_page_routing_plan()` 先在版面块内解析物理行，再扣除公式、表格、图片和目录装饰线，最后编译 CharOCR 输入。
+   - PP 行框只是物理行 seed。最终行几何由页面前景组件解析，但组件不得越过版面块所有权、结构排除区或另一条物理行的中心。
+   - 同一基线的 PP 碎片可以合成一条物理行；跨行页边线、表格线和其他纵向规则不能扩张行框。
+   - 物理行解析只改变本次路由几何，不写回 `LayoutSnapshot` 或 PP 原始响应。
 6. 对剩余正文区域：
-   - 不含拉丁字母或数字：一个 `text_other` slice，交给 LineCut。
-   - 纯拉丁/数字行：整条物理行作为一个 `text_latin` route，交给 EngCut。
-   - 汉字与拉丁/数字混合行：行图先按边界背景自动判断黑底白字或白底黑字；每个连通域只能归属一个 token。中心落入 proposal 是第一优先级；符号侧向回收只根据初始 token 归属执行一次，不能借已回收组件向邻近单词级联。超长横线保留给非 Latin 区域。若拉丁字符与标点物理黏连，只取黏连组件和该拉丁 proposal 的交集。相邻 Latin mask 之间只有空白时合并；存在其他墨迹时生成独立 route。
-   - 可唯一恢复完整组件的独立标点保留为 `PpOcrSymbolObservation`，但标点所在非拉丁区域仍由 LineCut 识别；它不是独立 native 分支。
+   - 不含拉丁字母或数字：保留一个 `text_other` 行路由，交给 LineCut。
+   - 含拉丁字母或数字：PP word box 只提供 token proposal，页面前景组件提供实际墨迹。每个完整组件只能有一个所有者；拉丁/数字 token 以 word 为单位生成 `text_latin` 路由，剩余墨迹仍属于同一物理行的 LineCut 输入。
+   - 标点不是第三个 native 分支。拉丁 token 内的 ASCII 标点可以随 word 进入 EngCut；外部标点和中文标点留在 LineCut。原生探针已验证 EngCut 可逐字符返回 `[`、`]` 和 `/`。
+   - PP 标点 token 的空白范围不得切伤相邻拉丁字形。只有与唯一拉丁所有者共享水平墨迹投影、且未被显式 LineCut 所有权占用的完整组件可以归还该拉丁 token；竞争归属保持未决。
+   - 可唯一恢复完整组件的独立标点可保留为 `PpOcrSymbolObservation`，用于对同一墨迹的 native observation 做确定性校正；它不是布局真值，也不能按文本邻近关系猜位置。
    - `text_latin` 只进入 EngCut。路由同时保留逐 token 的 PP 文本和组件 mask；当一个 EngCut group 与一个 PP token 通过中心几何唯一一对一绑定，且 EngCut 字符框重叠或文本不一致时，降级为带审计标记的 PP word observation。绑定不唯一时禁止替换。
 7. `HanwangMicroRecBlockEngine` 只接收显式 `PageRoutingPlan`。native 行通过布局块 UID 映射到 typed routes，不能从 Paddle 原始字典读取路由字段。缺少对应 text route 的 native 行会报错。
 8. 路由运行摘要以追加记录持久化；CharOCR 输出写入 OCR observation。公式文本仍由公式分支保有，不由 CharOCR 回填。
@@ -37,14 +41,15 @@ route 中与当前 group 唯一几何绑定的 observation；禁止恢复旧的�
 
 路由 segment 的 `bbox` 是行内 mask/crop 几何；公式可另外保留完整布局框 `content_bbox`。`text_latin` 可携带只读 `ppocr_latin_tokens`，行还可携带 `PpOcrSymbolObservation`；它们都不是布局或校对真值。
 
-## 2026-07-10 混合行实验结论
+## 已采纳的实验结论
 
 - 纯中文、纯英文/数字和混合行都必须先经过同一阶段的结构扣除；公式优先级高于文字分流。
 - PP-OCR word-box 默认承担几何 proposal；只有独立标点 observation 和唯一几何绑定的拉丁 word 降级结果可以产生明确标源的 OCR observation。
-- PP-OCR 的拉丁 token 只能生成自己的 mask；中文、标点和 token 外区域属于 LineCut。独立标点 observation 只提供文本与组件证据，不成为第三个 native 分支。
+- PP-OCR 的拉丁 token 只能生成自己的 word mask；中文、外部标点和 token 外区域属于 LineCut。独立标点 observation 只提供文本与组件证据，不成为第三个 native 分支。
 - PP-OCR 的 word-token 串无法复现其 line text、出现 CJK/Latin 混合 token，或某个拉丁 token 没有可归属墨迹时，视为路由不完整并阻断该页。当前不使用“整行回退”“PP-OCR 文本回填”或静默猜测。
 - 深色底白字和表格横线属于同一连通域分流算法的输入场景，不建立页面类型特判。
 - PP token proposal 与黏连组件存在交集时可生成受限片段。除上述两种显式 observation 外，片段仍只是本次路由 mask。
+- 路由失败只阻断对应页面；同批其他页面可继续。失败页必须保留可审计 issue，不能退回整块 OCR。
 
 ## 退役路径
 

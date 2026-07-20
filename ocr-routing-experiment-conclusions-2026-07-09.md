@@ -1,5 +1,10 @@
 # OCR Routing Experiment Conclusions 2026-07-09
 
+> Historical experiment note. The adopted production behavior is defined by
+> `routing-truth-contract.md` and enforced by current code/tests. Statements
+> below that describe proposed destinations must not be used as production
+> authority.
+
 ## Scope
 
 This note records current routing conclusions before the next production change.
