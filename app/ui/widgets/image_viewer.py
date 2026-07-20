@@ -6,7 +6,9 @@
 - pan 模式：按住 Space 临时进入平移，期间 BBox 不可编辑。
 """
 from __future__ import annotations
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass
+import math
+from typing import Callable, Iterable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QObject
 from PySide6.QtGui import (
@@ -18,13 +20,10 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsView,
 )
 
-from app.core.block_attributes import block_attributes
-from app.core.proof_char_text import char_display_text
-from app.models import BBox, Block, BlockType, Char
-from app.models.layout_block_view import LayoutBlockView
-from app.models.ocr_character_observation import set_ocr_char_bbox
-from app.models.ocr_observation import block_ocr_line_observations_by_uid
-from app.models.ocr_text_observation import line_ocr_confidence
+from app.models.enums import BlockType
+from app.models.geometry import BBox
+from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
+from app.models.ocr_records import OcrAtom
 from app.utils.image_io import read_cv_image
 
 
@@ -54,16 +53,59 @@ BLOCK_COLORS: dict[BlockType, QColor] = {
 
 _LINE_HIGHLIGHT = QColor(0xFF, 0x57, 0x22, 160)
 _LINE_OK_COLOR  = QColor(0x4C, 0xAF, 0x50, 100)
-_CHAR_BOX_COLOR = QColor("#ff8c00")
-_FORMULA_CHAR_BOX_COLOR = QColor("#2563eb")
-_CHAR_BOX_Z = 16
+_ATOM_BOX_COLOR = QColor("#ff8c00")
+_FORMULA_ATOM_BOX_COLOR = QColor("#2563eb")
+_ATOM_BOX_Z = 16
 
 
-def _block_observation_avg_confidence(block: Block) -> float:
-    lines = block_ocr_line_observations_by_uid(block.uid)
-    if not lines:
-        return 0.0
-    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
+@dataclass(frozen=True, slots=True)
+class OcrAtomBox:
+    """Immutable geometry presented by the OCR observation layer."""
+
+    uid: str
+    bbox: BBox
+    text: str = ""
+    confidence: float = 0.0
+    line_uid: str = ""
+    block_uid: str = ""
+    source: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.uid, str) or not self.uid.strip():
+            raise ValueError("OCR atom box requires a stable UID")
+        if not isinstance(self.bbox, BBox) or self.bbox.w <= 0 or self.bbox.h <= 0:
+            raise ValueError("OCR atom box requires non-empty BBox")
+        if not isinstance(self.text, str):
+            raise TypeError("OCR atom text must be str")
+        if not isinstance(self.line_uid, str) or not isinstance(self.block_uid, str):
+            raise TypeError("OCR atom relation UIDs must be str")
+        if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)):
+            raise TypeError("OCR atom confidence must be a number")
+        if not math.isfinite(float(self.confidence)) or not 0.0 <= float(self.confidence) <= 1.0:
+            raise ValueError("OCR atom confidence must be between 0 and 1")
+        if not isinstance(self.source, str):
+            raise TypeError("OCR atom source must be str")
+
+    @classmethod
+    def from_record(cls, atom: OcrAtom, *, block_uid: str = "") -> "OcrAtomBox":
+        if not isinstance(atom, OcrAtom):
+            raise TypeError("OCR atom box conversion requires OcrAtom")
+        return cls(
+            uid=atom.uid,
+            bbox=BBox.from_xyxy(*atom.bbox),
+            text=atom.text,
+            confidence=atom.confidence,
+            line_uid=atom.line_uid,
+            block_uid=block_uid,
+        )
+
+
+def _as_atom_box(value: OcrAtomBox | OcrAtom) -> OcrAtomBox:
+    if isinstance(value, OcrAtomBox):
+        return value
+    if isinstance(value, OcrAtom):
+        return OcrAtomBox.from_record(value)
+    raise TypeError("atom_boxes must contain immutable OcrAtom or OcrAtomBox values")
 
 # ── 缩放手柄 ──────────────────────────────────────────────────
 
@@ -177,8 +219,8 @@ class _ResizeHandle(QGraphicsRectItem):
 class _BBoxSignals(QObject):
     """BBoxItem 内部信号代理（QGraphicsRectItem 不能多继承 QObject）。"""
     edit_started = Signal(str)  # payload = block_uid
-    moved = Signal(object)  # payload = block
     geometry_changed = Signal(str, object)  # payload = block_uid, BBox
+    atom_geometry_changed = Signal(str, object)  # payload = atom_uid, BBox
 
 
 class BBoxItem(QGraphicsRectItem):
@@ -204,7 +246,8 @@ class BBoxItem(QGraphicsRectItem):
         self.setPen(pen)
         self._label = label
         self._color = color
-        self._block: Optional[object] = None
+        self._layout_block: Optional[LayoutBlockSnapshot] = None
+        self._atom_box: Optional[OcrAtomBox] = None
         self.signals = _BBoxSignals()
         self._handles: List[_ResizeHandle] = []
         self._editable = True
@@ -226,8 +269,17 @@ class BBoxItem(QGraphicsRectItem):
             h.update_position()
             self._handles.append(h)
 
-    def set_block(self, block: object) -> None:
-        self._block = block
+    def set_layout_block(self, block: LayoutBlockSnapshot) -> None:
+        if not isinstance(block, LayoutBlockSnapshot):
+            raise TypeError("layout viewer items require LayoutBlockSnapshot")
+        self._layout_block = block
+        self._atom_box = None
+
+    def set_atom_box(self, atom_box: OcrAtomBox) -> None:
+        if not isinstance(atom_box, OcrAtomBox):
+            raise TypeError("OCR viewer items require OcrAtomBox")
+        self._atom_box = atom_box
+        self._layout_block = None
 
     def set_editable(self, editable: bool) -> None:
         self._editable = editable
@@ -354,11 +406,11 @@ class BBoxItem(QGraphicsRectItem):
         super().mouseReleaseEvent(event)
 
     def _emit_edit_started_once(self) -> None:
-        if not self._editable or not self._selectable or self._block is None or self._edit_started_for_drag:
+        if not self._editable or not self._selectable or self._layout_block is None or self._edit_started_for_drag:
             return
-        if isinstance(self._block, Block) and self._block.uid:
+        if self._layout_block.uid:
             self._edit_started_for_drag = True
-            self.signals.edit_started.emit(self._block.uid)
+            self.signals.edit_started.emit(self._layout_block.uid)
 
     def _scene_bbox(self) -> BBox:
         pos = self.scenePos()
@@ -380,15 +432,12 @@ class BBoxItem(QGraphicsRectItem):
         return self.rect().adjusted(-outset, -outset, outset, outset)
 
     def _emit_geometry_changed(self, bbox: BBox) -> None:
-        if self._block is None or not hasattr(self._block, "bbox"):
+        if self._layout_block is not None:
+            if self._layout_block.uid:
+                self.signals.geometry_changed.emit(self._layout_block.uid, bbox)
             return
-        if isinstance(self._block, Block):
-            if self._block.uid:
-                self.signals.geometry_changed.emit(self._block.uid, bbox)
-            return
-        if isinstance(self._block, Char):
-            set_ocr_char_bbox(self._block, bbox)
-            self.signals.moved.emit(self._block)
+        if self._atom_box is not None:
+            self.signals.atom_geometry_changed.emit(self._atom_box.uid, bbox)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -426,7 +475,7 @@ class ImageViewer(QGraphicsView):
     block_geometry_change_requested = Signal(str, object)  # block_uid, BBox
     block_created  = Signal(object)  # BBox — Shift+左键拖拽画出新矩形
     block_deleted_uid = Signal(str)
-    char_bbox_moved = Signal(object)  # Char
+    atom_geometry_change_requested = Signal(str, object)  # atom_uid, BBox
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -434,8 +483,8 @@ class ImageViewer(QGraphicsView):
         self.setScene(self._scene)
 
         self._pixmap_item: Optional[QGraphicsPixmapItem] = None
-        self._block_items: List[Tuple[BBoxItem, Block]] = []
-        self._char_items: List[Tuple[BBoxItem, Char]] = []
+        self._block_items: List[Tuple[BBoxItem, LayoutBlockSnapshot]] = []
+        self._atom_items: List[Tuple[BBoxItem, OcrAtomBox]] = []
         self._readonly_overlay_items: List[QGraphicsRectItem] = []
         self._highlight_item = None  # highlight_bbox 使用
 
@@ -463,7 +512,7 @@ class ImageViewer(QGraphicsView):
         self._highlight_item = None
         self._scene.clear()
         self._block_items.clear()
-        self._char_items.clear()
+        self._atom_items.clear()
         self._readonly_overlay_items.clear()
         pixmap = _pixmap_from_path(image_path)
         self._pixmap_item = self._scene.addPixmap(pixmap)
@@ -475,7 +524,7 @@ class ImageViewer(QGraphicsView):
         self._highlight_item = None
         self._scene.clear()
         self._block_items.clear()
-        self._char_items.clear()
+        self._atom_items.clear()
         self._readonly_overlay_items.clear()
         pixmap = QPixmap.fromImage(qimage)
         self._pixmap_item = self._scene.addPixmap(pixmap)
@@ -492,43 +541,47 @@ class ImageViewer(QGraphicsView):
         self._selection_item = None
         self._pixmap_item = None
         self._block_items.clear()
-        self._char_items.clear()
+        self._atom_items.clear()
         self._readonly_overlay_items.clear()
         self._scene.clear()
         self._scene.setSceneRect(QRectF())
         self.resetTransform()
 
-    def show_blocks(self, blocks: List[Block]) -> None:
-        self._clear_overlays()
-        for block in blocks:
-            attrs = block_attributes(block)
-            color = BLOCK_COLORS.get(attrs.semantic_block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-            label = f"[{attrs.display_label}] 置信度: {_block_observation_avg_confidence(block):.2f}"
-            self._add_block_item(block, bbox=block.bbox, color=color, label=label)
-
-    def show_layout_block_views(self, views: List[LayoutBlockView]) -> None:
-        self._clear_overlays()
-        for view in views:
-            block = view.runtime_block
-            if block is None:
-                continue
-            color = BLOCK_COLORS.get(view.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
-            display_label = view.source_label or getattr(view.block_type, "value", str(view.block_type))
-            label = f"[{display_label}] 置信度: {_block_observation_avg_confidence(block):.2f}"
-            self._add_block_item(block, bbox=view.bbox, color=color, label=label)
-
-    def _add_block_item(
+    def show_layout_snapshot(
         self,
-        block: Block,
+        snapshot: LayoutSnapshot,
         *,
-        bbox: BBox,
+        atom_boxes: Iterable[OcrAtomBox | OcrAtom] = (),
+    ) -> None:
+        if not isinstance(snapshot, LayoutSnapshot):
+            raise TypeError("layout viewer requires LayoutSnapshot")
+        self._clear_overlays()
+        atom_values = tuple(atom_boxes)
+        confidence_by_block: dict[str, list[float]] = {}
+        for value in atom_values:
+            atom = _as_atom_box(value)
+            if atom.block_uid:
+                confidence_by_block.setdefault(atom.block_uid, []).append(atom.confidence)
+        for block in snapshot.blocks:
+            color = BLOCK_COLORS.get(block.block_type, BLOCK_COLORS[BlockType.UNKNOWN])
+            display_label = block.source_label or block.block_type.value
+            confidences = confidence_by_block.get(block.uid, [])
+            average = sum(confidences) / len(confidences) if confidences else 0.0
+            label = f"[{display_label}] 置信度: {average:.2f}"
+            self._add_layout_block_item(block, color=color, label=label)
+
+    def _add_layout_block_item(
+        self,
+        block: LayoutBlockSnapshot,
+        *,
         color: QColor,
         label: str,
     ) -> None:
+        bbox = block.bbox
         rect = QRectF(0, 0, bbox.w, bbox.h)
         item = BBoxItem(rect, color, label, stroke_outside=True)
         item.setPos(bbox.x, bbox.y)
-        item.set_block(block)
+        item.set_layout_block(block)
         item.set_selectable(True)
         item.set_editable(self._block_is_editable(block))
         item.setZValue(self._block_z_value(block))
@@ -560,42 +613,49 @@ class ImageViewer(QGraphicsView):
             self._scene.addItem(rect)
             self._readonly_overlay_items.append(rect)
 
-    def set_block_frame_occlusions(self, chars: List[Char]) -> None:
-        char_rects = [
-            QRectF(char.bbox.x, char.bbox.y, char.bbox.w, char.bbox.h)
-            for char in chars
-            if char.bbox is not None and char.bbox.w > 0 and char.bbox.h > 0
+    def set_block_frame_occlusions(self, atom_boxes: Iterable[OcrAtomBox | OcrAtom]) -> None:
+        atom_rects = [
+            QRectF(atom.bbox.x, atom.bbox.y, atom.bbox.w, atom.bbox.h)
+            for value in atom_boxes
+            for atom in (_as_atom_box(value),)
+            if atom.bbox.w > 0 and atom.bbox.h > 0
         ]
         for block_item, _block in self._block_items:
-            block_item.set_stroke_occlusions(char_rects)
+            block_item.set_stroke_occlusions(atom_rects)
 
-    def show_char_boxes(self, chars: List[Char], *, editable: bool = True) -> None:
-        """Overlay editable OCR char/token boxes on top of layout blocks."""
-        for item, _ in self._char_items:
+    def show_atom_boxes(
+        self,
+        atom_boxes: Iterable[OcrAtomBox | OcrAtom],
+        *,
+        editable: bool = False,
+    ) -> None:
+        """Render immutable OCR atom geometry on top of layout blocks."""
+        for item, _ in self._atom_items:
             if item.scene() is self._scene:
                 self._scene.removeItem(item)
-        self._char_items.clear()
-        for char in chars:
-            if char.bbox is None or char.bbox.w <= 0 or char.bbox.h <= 0:
+        self._atom_items.clear()
+        for value in atom_boxes:
+            atom = _as_atom_box(value)
+            if atom.bbox.w <= 0 or atom.bbox.h <= 0:
                 continue
-            bb = char.bbox
-            is_formula_carrier = char.bbox_source == "paddle_inline_formula"
-            color = _FORMULA_CHAR_BOX_COLOR if is_formula_carrier else _CHAR_BOX_COLOR
-            label = "[formula-token]" if is_formula_carrier else "[char]"
+            bb = atom.bbox
+            is_formula_carrier = atom.source == "paddle_inline_formula"
+            color = _FORMULA_ATOM_BOX_COLOR if is_formula_carrier else _ATOM_BOX_COLOR
+            label = "[formula-token]" if is_formula_carrier else "[atom]"
             item = BBoxItem(
                 QRectF(0, 0, bb.w, bb.h),
                 color,
-                f"{label} {char_display_text(char)}",
+                f"{label} {atom.text}",
                 pen_width=1.0,
             )
             item.setPos(bb.x, bb.y)
-            item.set_block(char)
+            item.set_atom_box(atom)
             item.set_selectable(editable)
             item.set_editable(editable and self._edit_mode and not self._space_pan_active)
-            item.setZValue(_CHAR_BOX_Z)
-            item.signals.moved.connect(self.char_bbox_moved.emit)
+            item.setZValue(_ATOM_BOX_Z)
+            item.signals.atom_geometry_changed.connect(self.atom_geometry_change_requested.emit)
             self._scene.addItem(item)
-            self._char_items.append((item, char))
+            self._atom_items.append((item, atom))
 
     def delete_selected(self) -> None:
         """删除所有选中的 BBoxItem，并 emit block_deleted_uid 信号。"""
@@ -605,7 +665,9 @@ class ImageViewer(QGraphicsView):
         ]
         for item, block in to_remove:
             self._scene.removeItem(item)
-            self._block_items.remove((item, block))
+            if (item, block) in self._block_items:
+                self._block_items.remove((item, block))
+        for _item, block in to_remove:
             if block.uid:
                 self.block_deleted_uid.emit(block.uid)
 
@@ -797,9 +859,9 @@ class ImageViewer(QGraphicsView):
         for item, _ in self._block_items:
             self._scene.removeItem(item)
         self._block_items.clear()
-        for item, _ in self._char_items:
+        for item, _ in self._atom_items:
             self._scene.removeItem(item)
-        self._char_items.clear()
+        self._atom_items.clear()
         for item in self._readonly_overlay_items:
             self._scene.removeItem(item)
         self._readonly_overlay_items.clear()
@@ -888,17 +950,16 @@ class ImageViewer(QGraphicsView):
         self._refresh_item_editability()
         self.viewport().unsetCursor()
 
-    def _block_is_editable(self, block: Block) -> bool:
+    def _block_is_editable(self, block: LayoutBlockSnapshot) -> bool:
         return self._edit_mode and not self._space_pan_active
 
     @staticmethod
-    def _block_z_value(block: Block) -> int:
-        attrs = block_attributes(block)
-        if attrs.semantic_block_type == BlockType.EQUATION:
+    def _block_z_value(block: LayoutBlockSnapshot) -> int:
+        if block.block_type == BlockType.EQUATION:
             return 14
-        if attrs.semantic_block_type == BlockType.TABLE:
+        if block.block_type == BlockType.TABLE:
             return 12
-        if attrs.semantic_block_type in (BlockType.FIGURE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION):
+        if block.block_type in (BlockType.FIGURE, BlockType.FIGURE_CAPTION, BlockType.TABLE_CAPTION):
             return 10
         return 8
 
@@ -907,6 +968,6 @@ class ImageViewer(QGraphicsView):
             item.set_selectable(True)
             item.set_editable(force if force is not None else self._block_is_editable(block))
             item.setZValue(self._block_z_value(block))
-        char_editable = force if force is not None else (self._edit_mode and not self._space_pan_active)
-        for item, _char in self._char_items:
-            item.set_editable(char_editable)
+        atom_editable = force if force is not None else False
+        for item, _atom in self._atom_items:
+            item.set_editable(atom_editable)

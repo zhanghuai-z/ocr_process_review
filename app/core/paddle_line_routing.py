@@ -7,7 +7,7 @@ from typing import Any
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.bbox_extraction import bbox_from_variant
-from app.core.ocr_ir import is_cjk_char, is_formula_marker_token, is_formula_token
+from app.core.text_classification import is_cjk_char, is_formula_marker_token, is_formula_token
 from app.models.charocr_routing import (
     ROUTING_SOURCE_PPOCR_V6_PREPASS,
     RoutingLine,

@@ -6,15 +6,15 @@ from docx.shared import Pt, RGBColor
 from app.export.base import ExporterBase
 from app.export.rendering import RichReflowBlock, rich_reflow_pages
 from app.export.ir_builder import build_export_ir
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 
 class DocxExporter(ExporterBase):
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "docx")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "docx")
         doc = Document()
-        doc.core_properties.title = project.name
+        doc.core_properties.title = snapshot.project.name
         doc.core_properties.author = "OCR Process"
 
         for page, blocks in rich_reflow_pages(document):

@@ -5,7 +5,7 @@ from jinja2 import Environment, BaseLoader
 from app.export.base import ExporterBase
 from app.export.ir_builder import build_export_ir
 from app.export.rendering import rich_reflow_pages
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 _TEMPLATE = """\
 <!DOCTYPE html>
@@ -61,8 +61,8 @@ _TEMPLATE = """\
 
 class HtmlExporter(ExporterBase):
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "html")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "html")
         env = Environment(loader=BaseLoader(), autoescape=True)
         tmpl = env.from_string(_TEMPLATE)
         html = tmpl.render(

@@ -11,7 +11,7 @@ from app.export.base import ExporterBase
 from app.export.ir import ExportAsset, ExportElement
 from app.export.ir_builder import build_export_ir
 from app.export.rendering import element_lines, join_reflow_text_lines
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 
 class MarkdownExporter(ExporterBase):
@@ -20,8 +20,8 @@ class MarkdownExporter(ExporterBase):
     def __init__(self, settings: "MarkdownExportSettings | None" = None) -> None:
         self.settings = settings or MarkdownExportSettings()
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "md")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "md")
         out_file = Path(out_path)
         out_dir = out_file.parent
         asset_dir = out_dir / f"{out_file.stem}_assets"

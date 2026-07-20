@@ -26,7 +26,7 @@ from app.models.charocr_routing import (
     VlSemanticMarkerObservation,
     is_text_route_segment_kind,
 )
-from app.core.ocr_ir import is_cjk_char
+from app.core.text_classification import is_cjk_char
 from app.core.charocr_text_partition import partition_charocr_text_region
 from app.core.ppocr_layout_ownership import (
     LayoutBlockCandidate,

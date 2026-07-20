@@ -1,212 +1,530 @@
-"""Business entry point for mutating editable layout blocks."""
+"""Pure layout edits over immutable page layout snapshots."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable
+from dataclasses import dataclass, replace
+from typing import Any, Iterable
 
-from app.core.block_attributes import normalize_source_label
-from app.core.inline_formula_edit_state import inline_formula_origin_bbox, mark_inline_formula_origin_handled
-from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
-from app.core.paddle_artifact_index import (
-    BINDING_AMBIGUOUS,
-    BINDING_EMPTY_REVIEW,
-    PaddleArtifactIndex,
-    apply_paddle_binding_to_block,
-)
-from app.models import BBox, Block, BlockOrigin, BlockType, LayoutEditEvent, OcrPolicy, Page
-from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
-from app.models.block_state import mark_ocr_text_invalidated, paddle_binding_dict, set_paddle_binding
-from app.models.layout_block_state import (
-    mark_layout_block_manual_draw,
-    mark_layout_block_user_edited,
-    set_layout_block_note,
-    set_layout_block_ocr_policy,
-    set_layout_block_order,
-    set_layout_block_source_label,
-    set_layout_block_type,
-)
+from app.models.entity_id import ensure_entity_uid
+from app.models.enums import BlockSource, BlockType, OcrPolicy
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
-from app.models.layout_snapshot_projection import (
-    apply_layout_snapshot_block_to_projection,
-    replace_page_layout_projection_from_snapshot,
-)
-from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.models.ocr_observation import (
-    block_ocr_line_observations_by_uid,
-    clear_block_ocr_line_observations,
-    discard_block_ocr_line_projection,
-    set_ocr_line_bbox,
-)
+from app.models.geometry import BBox
+from app.models.layout_origin import BlockOrigin
+from app.models.project_session import RevisionConflictError
 
 
-STRUCTURAL_BINDING_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
-_PRESERVE_EXPLICIT_SOURCE_LABELS = {
-    "abstract",
-    "chart",
-    "display_formula",
-    "doc_title",
-    "figure",
-    "figure_caption",
-    "figure_title",
-    "footer",
-    "footnote",
-    "formula",
-    "formula_number",
-    "header",
-    "heading_1",
-    "heading_2",
-    "heading_3",
-    "heading_4",
-    "heading_5",
-    "heading_6",
-    "inline_formula",
-    "number",
-    "paragraph_title",
-    "reference_content",
-    "table",
-    "table_caption",
-    "table_title",
-    "text",
-    "title",
+_DEFAULT_OCR_POLICY: dict[BlockType, OcrPolicy] = {
+    BlockType.TEXT: OcrPolicy.TEXT_OCR,
+    BlockType.TITLE: OcrPolicy.TEXT_OCR,
+    BlockType.FIGURE_CAPTION: OcrPolicy.TEXT_OCR,
+    BlockType.TABLE_CAPTION: OcrPolicy.TEXT_OCR,
+    BlockType.REFERENCE: OcrPolicy.TEXT_OCR,
+    BlockType.EQUATION: OcrPolicy.PRESERVE_AS_FORMULA,
+    BlockType.TABLE: OcrPolicy.PRESERVE_AS_TABLE,
+    BlockType.FIGURE: OcrPolicy.SKIP,
+    BlockType.UNKNOWN: OcrPolicy.SKIP,
 }
 
 
-@dataclass(frozen=True)
+def _copy_bbox(bbox: BBox | None) -> BBox | None:
+    if bbox is None:
+        return None
+    return BBox(x=bbox.x, y=bbox.y, w=bbox.w, h=bbox.h)
+
+
+def _copy_origin(origin: BlockOrigin) -> BlockOrigin:
+    return replace(origin, original_bbox=_copy_bbox(origin.original_bbox))
+
+
+def _copy_block(
+    block: LayoutBlockSnapshot,
+    **changes: Any,
+) -> LayoutBlockSnapshot:
+    values = {
+        "block_type": block.block_type,
+        "bbox": _copy_bbox(block.bbox),
+        "order": block.order,
+        "source_label": block.source_label,
+        "origin": _copy_origin(block.origin),
+        "ocr_policy": block.ocr_policy,
+        "authorship": block.authorship,
+        "uid": block.uid,
+    }
+    values.update(changes)
+    if values["bbox"] is None:
+        raise ValueError("layout block bbox cannot be None")
+    if values["origin"] is None:
+        raise ValueError("layout block origin cannot be None")
+    return LayoutBlockSnapshot(**values)
+
+
+@dataclass(frozen=True, slots=True)
 class LayoutEditCommand:
+    """An edit request addressed to one page-layout revision."""
+
+    page_uid: str
+    expected_revision: int
     op: str
-    page: Page
     block_uid: str = ""
     block_uids: tuple[str, ...] = ()
     snapshot_blocks: tuple[LayoutBlockSnapshot, ...] = ()
     bbox: BBox | None = None
     block_type: BlockType | None = None
     source_label: str = ""
-    before: dict | None = None
+    new_block_uid: str = ""
+    primary_block_uid: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.page_uid, str) or not self.page_uid.strip():
+            raise ValueError("page_uid must be a non-empty stable UID")
+        if (
+            isinstance(self.expected_revision, bool)
+            or not isinstance(self.expected_revision, int)
+            or self.expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        if not isinstance(self.op, str) or not self.op.strip():
+            raise ValueError("op must be non-empty text")
+        if not isinstance(self.source_label, str):
+            raise TypeError("source_label must be str")
+        if not isinstance(self.block_uid, str):
+            raise TypeError("block_uid must be str")
+        if not isinstance(self.new_block_uid, str):
+            raise TypeError("new_block_uid must be str")
+        if not isinstance(self.primary_block_uid, str):
+            raise TypeError("primary_block_uid must be str")
+        if self.op == "create_block" and not self.new_block_uid:
+            object.__setattr__(self, "new_block_uid", ensure_entity_uid("", "block"))
+
+        block_uids = tuple(self.block_uids)
+        if any(not isinstance(uid, str) for uid in block_uids):
+            raise TypeError("block_uids must contain only strings")
+        object.__setattr__(self, "block_uids", block_uids)
+
+        snapshot_blocks = tuple(self.snapshot_blocks)
+        if any(not isinstance(block, LayoutBlockSnapshot) for block in snapshot_blocks):
+            raise TypeError("snapshot_blocks must contain only LayoutBlockSnapshot values")
+        object.__setattr__(
+            self,
+            "snapshot_blocks",
+            tuple(_copy_block(block) for block in snapshot_blocks),
+        )
+        if self.bbox is not None:
+            if not isinstance(self.bbox, BBox):
+                raise TypeError("bbox must be BBox or None")
+            object.__setattr__(self, "bbox", _copy_bbox(self.bbox))
 
     @classmethod
     def create_block(
         cls,
-        page: Page,
+        page_uid: str,
+        expected_revision: int,
         bbox: BBox,
         block_type: BlockType,
         source_label: str,
+        *,
+        new_block_uid: str = "",
     ) -> "LayoutEditCommand":
-        return cls("create_block", page, bbox=bbox, block_type=block_type, source_label=source_label)
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="create_block",
+            bbox=bbox,
+            block_type=block_type,
+            source_label=source_label,
+            new_block_uid=new_block_uid,
+        )
 
     @classmethod
-    def delete_block(cls, page: Page, block_uid: str) -> "LayoutEditCommand":
-        return cls("delete_block", page, block_uid=block_uid)
+    def delete_block(
+        cls,
+        page_uid: str,
+        expected_revision: int,
+        block_uid: str,
+    ) -> "LayoutEditCommand":
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="delete_block",
+            block_uid=block_uid,
+        )
 
     @classmethod
     def change_kind(
         cls,
-        page: Page,
+        page_uid: str,
+        expected_revision: int,
         block_uid: str,
-        *,
-        block_type: BlockType,
-        source_label: str,
-    ) -> "LayoutEditCommand":
-        return cls("change_kind", page, block_uid=block_uid, block_type=block_type, source_label=source_label)
-
-    @classmethod
-    def merge_blocks(
-        cls,
-        page: Page,
-        block_uids: Iterable[str],
-        bbox: BBox,
         *,
         block_type: BlockType,
         source_label: str,
     ) -> "LayoutEditCommand":
         return cls(
-            "merge_blocks",
-            page,
-            block_uids=tuple(block_uids),
-            bbox=bbox,
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="change_kind",
+            block_uid=block_uid,
             block_type=block_type,
             source_label=source_label,
         )
 
     @classmethod
-    def update_geometry(
+    def resize_block(
         cls,
-        page: Page,
+        page_uid: str,
+        expected_revision: int,
         block_uid: str,
         *,
         bbox: BBox,
-        before: dict | None = None,
     ) -> "LayoutEditCommand":
-        return cls("resize_block", page, block_uid=block_uid, bbox=bbox, before=before)
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="resize_block",
+            block_uid=block_uid,
+            bbox=bbox,
+        )
+
+    @classmethod
+    def merge_blocks(
+        cls,
+        page_uid: str,
+        expected_revision: int,
+        block_uids: Iterable[str],
+        bbox: BBox,
+        *,
+        block_type: BlockType,
+        source_label: str,
+        primary_block_uid: str = "",
+    ) -> "LayoutEditCommand":
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="merge_blocks",
+            block_uids=tuple(block_uids),
+            bbox=bbox,
+            block_type=block_type,
+            source_label=source_label,
+            primary_block_uid=primary_block_uid,
+        )
 
     @classmethod
     def restore_blocks(
         cls,
-        page: Page,
+        page_uid: str,
+        expected_revision: int,
         blocks: Iterable[LayoutBlockSnapshot],
-        *,
-        before: dict | None = None,
     ) -> "LayoutEditCommand":
-        return cls("restore_blocks", page, snapshot_blocks=tuple(blocks), before=before)
+        return cls(
+            page_uid=page_uid,
+            expected_revision=expected_revision,
+            op="restore_blocks",
+            snapshot_blocks=tuple(blocks),
+        )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class OcrInvalidationDescriptor:
+    """The OCR work that a caller must discard or recompute after an edit."""
+
+    page_uid: str
+    block_uids: tuple[str, ...]
+    reason: str
+
+    @property
+    def affected_block_uids(self) -> tuple[str, ...]:
+        return self.block_uids
+
+    @property
+    def invalidated_block_uids(self) -> tuple[str, ...]:
+        return self.block_uids
+
+
+@dataclass(frozen=True, slots=True)
 class LayoutEditResult:
+    """The complete value result of applying one layout command."""
+
     op: str
-    block: Block | None = None
-    before: dict | None = None
-    after: dict | None = None
-    binding_status: str = ""
+    snapshot: LayoutSnapshot
+    affected_block_uids: tuple[str, ...]
+    before: dict[str, Any]
+    after: dict[str, Any]
+    ocr_invalidation: OcrInvalidationDescriptor
 
     @property
-    def binding_empty_review(self) -> bool:
-        return self.binding_status == BINDING_EMPTY_REVIEW
+    def new_snapshot(self) -> LayoutSnapshot:
+        return self.snapshot
 
     @property
-    def binding_ambiguous(self) -> bool:
-        return self.binding_status == BINDING_AMBIGUOUS
+    def before_values(self) -> dict[str, Any]:
+        return self.before
+
+    @property
+    def after_values(self) -> dict[str, Any]:
+        return self.after
 
 
 class LayoutEditService:
-    """Apply layout edit commands and record their audit events."""
+    """Apply layout commands without touching runtime state or stores."""
 
-    def apply(self, command: LayoutEditCommand) -> LayoutEditResult:
+    def apply(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        if not isinstance(current, LayoutSnapshot):
+            raise TypeError("current must be LayoutSnapshot")
+        if not isinstance(command, LayoutEditCommand):
+            raise TypeError("command must be LayoutEditCommand")
+        if current.page_uid != command.page_uid:
+            raise ValueError(
+                f"layout command page {command.page_uid!r} does not match "
+                f"snapshot page {current.page_uid!r}"
+            )
+        if current.revision != command.expected_revision:
+            raise RevisionConflictError(
+                f"layout revision mismatch: expected {command.expected_revision}, "
+                f"current {current.revision}"
+            )
+
+        self._validate_snapshot_blocks(current.blocks)
         if command.op == "create_block":
-            return self._create_block(
-                command.page,
-                self._require_bbox(command),
-                self._require_block_type(command),
-                command.source_label,
-            )
+            return self._create_block(current, command)
         if command.op == "delete_block":
-            return self._delete_block(
-                command.page,
-                self._require_block_uid(command),
-            )
+            return self._delete_block(current, command)
         if command.op == "change_kind":
-            return self._change_block_kind(
-                command.page,
-                self._require_block_uid(command),
-                block_type=self._require_block_type(command),
-                source_label=command.source_label,
-            )
-        if command.op == "merge_blocks":
-            return self._merge_blocks_into_bbox(
-                command.page,
-                command.block_uids,
-                self._require_bbox(command),
-                block_type=self._require_block_type(command),
-                source_label=command.source_label,
-            )
+            return self._change_kind(current, command)
         if command.op == "resize_block":
-            return self._update_block_geometry(
-                command.page,
-                self._require_block_uid(command),
-                bbox=self._require_bbox(command),
-                before=command.before,
-            )
+            return self._resize_block(current, command)
+        if command.op == "merge_blocks":
+            return self._merge_blocks(current, command)
         if command.op == "restore_blocks":
-            return self._restore_blocks(command.page, command.snapshot_blocks, before=command.before)
+            return self._restore_blocks(current, command)
         raise ValueError(f"Unsupported layout edit command: {command.op}")
+
+    def _create_block(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        bbox = self._require_bbox(command)
+        block_type = self._require_block_type(command)
+        uid = command.new_block_uid
+        if uid in {block.uid for block in current.blocks}:
+            raise ValueError(f"layout block uid {uid!r} already exists")
+        new_block = LayoutBlockSnapshot(
+            block_type=block_type,
+            bbox=_copy_bbox(bbox),
+            order=len(current.blocks),
+            source_label=command.source_label,
+            origin=BlockOrigin(
+                created_by=BlockSource.MANUAL_DRAW.value,
+                source_engine="layout_edit",
+                vendor_label=command.source_label,
+                original_bbox=_copy_bbox(bbox),
+                original_kind=block_type,
+            ),
+            ocr_policy=self._default_ocr_policy(block_type),
+            authorship=BlockSource.MANUAL_DRAW,
+            uid=uid,
+        )
+        next_blocks = self._normalize_blocks((*current.blocks, new_block))
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=(uid,),
+            before={},
+            after={"block": self.snapshot_block_state(self._block_by_uid(next_blocks, uid))},
+            reason="layout_block_created",
+        )
+
+    def _delete_block(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        block_uid = self._require_block_uid(command)
+        block = self._block_by_uid(current.blocks, block_uid)
+        next_blocks = self._normalize_blocks(
+            candidate for candidate in current.blocks if candidate.uid != block_uid
+        )
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=(block_uid,),
+            before={"block": self.snapshot_block_state(block)},
+            after={},
+            reason="layout_block_deleted",
+        )
+
+    def _change_kind(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        block_uid = self._require_block_uid(command)
+        block_type = self._require_block_type(command)
+        before_block = self._block_by_uid(current.blocks, block_uid)
+        changed = _copy_block(
+            before_block,
+            block_type=block_type,
+            source_label=command.source_label,
+            ocr_policy=self._default_ocr_policy(block_type),
+            authorship=BlockSource.USER_EDITED,
+        )
+        next_blocks = self._normalize_blocks(
+            changed if candidate.uid == block_uid else candidate
+            for candidate in current.blocks
+        )
+        after_block = self._block_by_uid(next_blocks, block_uid)
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=(block_uid,),
+            before={"block": self.snapshot_block_state(before_block)},
+            after={"block": self.snapshot_block_state(after_block)},
+            reason="layout_block_kind_changed",
+        )
+
+    def _resize_block(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        block_uid = self._require_block_uid(command)
+        bbox = self._require_bbox(command)
+        before_block = self._block_by_uid(current.blocks, block_uid)
+        resized = _copy_block(
+            before_block,
+            bbox=_copy_bbox(bbox),
+            authorship=BlockSource.USER_EDITED,
+        )
+        next_blocks = self._normalize_blocks(
+            resized if candidate.uid == block_uid else candidate
+            for candidate in current.blocks
+        )
+        after_block = self._block_by_uid(next_blocks, block_uid)
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=(block_uid,),
+            before={"block": self.snapshot_block_state(before_block)},
+            after={"block": self.snapshot_block_state(after_block)},
+            reason="layout_block_resized",
+        )
+
+    def _merge_blocks(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        block_uids = self._require_merge_uids(command)
+        block_by_uid = {block.uid: block for block in current.blocks}
+        selected = [block_by_uid[uid] for uid in block_uids]
+        selected.sort(key=lambda block: (block.order, current.blocks.index(block)))
+        primary_uid = command.primary_block_uid or selected[0].uid
+        if primary_uid not in {block.uid for block in selected}:
+            raise ValueError("primary_block_uid must identify one merged block")
+        if selected[0].uid != primary_uid:
+            selected = [block_by_uid[primary_uid], *[block for block in selected if block.uid != primary_uid]]
+        selected_uids = tuple(block.uid for block in selected)
+        primary = block_by_uid[primary_uid]
+        block_type = self._require_block_type(command)
+        bbox = self._require_bbox(command)
+        merged_bbox = self._merge_bbox(bbox, (block.bbox for block in selected))
+        merged = _copy_block(
+            primary,
+            block_type=block_type,
+            bbox=merged_bbox,
+            source_label=command.source_label,
+            ocr_policy=self._default_ocr_policy(block_type),
+            authorship=BlockSource.USER_EDITED,
+        )
+        remove_uids = set(selected_uids) - {primary_uid}
+        next_blocks = self._normalize_blocks(
+            merged if candidate.uid == primary_uid else candidate
+            for candidate in current.blocks
+            if candidate.uid not in remove_uids
+        )
+        after_block = self._block_by_uid(next_blocks, primary_uid)
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=selected_uids,
+            before={
+                "blocks": [self.snapshot_block_state(block) for block in selected],
+            },
+            after={"block": self.snapshot_block_state(after_block)},
+            reason="layout_blocks_merged",
+        )
+
+    def _restore_blocks(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult:
+        self._validate_snapshot_blocks(command.snapshot_blocks)
+        next_blocks = self._normalize_blocks(command.snapshot_blocks)
+        affected = self._unique_uids(
+            (*[block.uid for block in current.blocks], *[block.uid for block in next_blocks])
+        )
+        return self._result(
+            current,
+            command,
+            next_blocks,
+            affected_block_uids=affected,
+            before={
+                "blocks": [self.snapshot_block_state(block) for block in current.blocks],
+            },
+            after={
+                "blocks": [self.snapshot_block_state(block) for block in next_blocks],
+            },
+            reason="layout_snapshot_restored",
+        )
+
+    def _result(
+        self,
+        current: LayoutSnapshot,
+        command: LayoutEditCommand,
+        blocks: tuple[LayoutBlockSnapshot, ...],
+        *,
+        affected_block_uids: tuple[str, ...],
+        before: dict[str, Any],
+        after: dict[str, Any],
+        reason: str,
+    ) -> LayoutEditResult:
+        next_snapshot = LayoutSnapshot(
+            page_uid=current.page_uid,
+            revision=current.revision + 1,
+            artifact_uid=current.artifact_uid,
+            source_engine="layout_edit",
+            source_run_id=f"layout-edit:{current.page_uid}:{current.revision + 1}",
+            blocks=tuple(_copy_block(block) for block in blocks),
+        )
+        affected = tuple(affected_block_uids)
+        return LayoutEditResult(
+            op=command.op,
+            snapshot=next_snapshot,
+            affected_block_uids=affected,
+            before=before,
+            after=after,
+            ocr_invalidation=OcrInvalidationDescriptor(
+                page_uid=current.page_uid,
+                block_uids=affected,
+                reason=reason,
+            ),
+        )
+
+    @staticmethod
+    def _default_ocr_policy(block_type: BlockType) -> OcrPolicy:
+        try:
+            return _DEFAULT_OCR_POLICY[block_type]
+        except KeyError as exc:
+            raise ValueError(f"unsupported block type: {block_type!r}") from exc
 
     @staticmethod
     def _require_block_uid(command: LayoutEditCommand) -> str:
@@ -227,573 +545,88 @@ class LayoutEditService:
         return command.block_type
 
     @staticmethod
-    def _runtime_block_by_uid(page: Page, block_uid: str) -> Block:
-        for view in iter_page_layout_block_views(page):
-            if view.uid == block_uid and view.runtime_block is not None:
-                return view.runtime_block
-        raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
+    def _require_merge_uids(command: LayoutEditCommand) -> tuple[str, ...]:
+        if not command.block_uids:
+            raise ValueError("merge_blocks requires at least one block uid")
+        if any(not uid for uid in command.block_uids):
+            raise ValueError("merge_blocks requires non-empty block uids")
+        if len(set(command.block_uids)) != len(command.block_uids):
+            raise ValueError("merge_blocks does not accept duplicate block uids")
+        return command.block_uids
 
     @staticmethod
-    def _runtime_block_map(page: Page) -> dict[str, Block]:
-        return {
-            view.uid: view.runtime_block
-            for view in iter_page_layout_block_views(page)
-            if view.runtime_block is not None
-        }
+    def _validate_snapshot_blocks(blocks: Iterable[LayoutBlockSnapshot]) -> None:
+        seen: set[str] = set()
+        for block in blocks:
+            if not isinstance(block, LayoutBlockSnapshot):
+                raise TypeError("layout snapshots may contain only LayoutBlockSnapshot values")
+            if not block.uid:
+                raise ValueError("layout block uid must be non-empty")
+            if block.uid in seen:
+                raise ValueError(f"duplicate layout block uid: {block.uid!r}")
+            seen.add(block.uid)
 
     @staticmethod
-    def block_state(block: Block) -> dict:
-        return {
-            "uid": block.uid,
-            "block_type": getattr(block.block_type, "value", str(block.block_type)),
-            "bbox": list(block.bbox.to_xyxy()),
-            "order": block.order,
-            "source_label": block.source_label,
-            "ocr_policy": getattr(block.ocr_policy, "value", str(block.ocr_policy)),
-        }
-
-    def record_snapshot_edit(
-        self,
-        page: Page,
-        op: str,
-        block_uid: str,
-        *,
-        before: dict,
-        after: dict,
-    ) -> LayoutEditEvent:
-        event = LayoutEditEvent(
-            page_uid=page.uid,
-            target_uid=block_uid,
-            op=op,
-            before=before,
-            after=after,
-            actor="user",
-        )
-        page.layout_edit_events.append(event)
-        return event
-
-    def _persist_user_block_geometry(self, page: Page, block: Block) -> dict:
-        mark_layout_block_user_edited(block)
-        mark_ocr_text_invalidated(block, "block_geometry_changed")
-        clear_block_ocr_line_observations(block.uid)
-        discard_block_ocr_line_projection(block)
-        if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
-            return {}
-        if not self._update_existing_manual_binding_bbox(block):
-            binding = self.bind_manual_block_to_paddle(page, block)
-        else:
-            binding = paddle_binding_dict(block)
-        if self.is_generated_inline_formula_block(block):
-            self.mark_generated_inline_formula_handled(page, block)
-        return binding
-
-    def _update_block_geometry(
-        self,
-        page: Page,
-        block_uid: str,
-        *,
-        bbox: BBox,
-        before: dict | None,
-    ) -> LayoutEditResult:
-        snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
-        before = before or self.snapshot_block_state(snapshot_block)
-        block = self._runtime_block_by_uid(page, block_uid)
-        previous_ocr_policy = block.ocr_policy
-        previous_ocr_policy = block.ocr_policy
-        provisional = self._replace_snapshot_block(snapshot, snapshot_index, bbox=bbox)
-        apply_layout_snapshot_block_to_projection(block, provisional)
-        binding = self._persist_user_block_geometry(page, block)
-        final_snapshot_block = self._replace_snapshot_block(
-            snapshot,
-            snapshot_index,
-            bbox=block.bbox,
-            origin=block.origin or provisional.origin,
-            ocr_policy=block.ocr_policy,
-            note=block.note,
-        )
-        after = self.snapshot_block_state(final_snapshot_block)
-        event = self.record_snapshot_edit(
-            page,
-            "resize_block",
-            block_uid,
-            before=before,
-            after=after,
-        )
-        next_snapshot = self._snapshot_with_replaced_block(
-            snapshot,
-            snapshot_index,
-            final_snapshot_block,
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        apply_layout_snapshot_block_to_projection(block, final_snapshot_block)
-        return LayoutEditResult(
-            op="resize_block",
-            block=block,
-            before=before,
-            after=after,
-            binding_status=str(binding.get("status") or ""),
-        )
-
-    def _create_block(
-        self,
-        page: Page,
-        bbox: BBox,
-        block_type: BlockType,
-        source_label: str,
-    ) -> LayoutEditResult:
-        new_block = Block(
-            block_type=block_type,
-            bbox=bbox,
-            source_label=source_label,
-        )
-        mark_layout_block_manual_draw(new_block)
-        set_layout_block_order(new_block, len(current_layout_snapshot(page).blocks))
-        set_layout_block_ocr_policy(new_block, default_ocr_policy_for_block(new_block))
-        binding = self.bind_manual_block_to_paddle(page, new_block)
-        snapshot = current_layout_snapshot(page)
-        new_snapshot_block = self._snapshot_block_from_edit_block(new_block, order=len(snapshot.blocks))
-        after = {"block": self.snapshot_block_state(new_snapshot_block)}
-        event = self.record_snapshot_edit(
-            page,
-            "create_block",
-            new_block.uid,
-            before={},
-            after=after,
-        )
-        next_snapshot = self._snapshot_with_blocks(
-            snapshot,
-            (*snapshot.blocks, new_snapshot_block),
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(
-            page,
-            next_snapshot,
-            candidate_blocks=[new_block],
-        )
-        return LayoutEditResult(
-            op="create_block",
-            block=new_block,
-            before={},
-            after=after,
-            binding_status=str(binding.get("status") or ""),
-        )
-
-    def _delete_block(self, page: Page, block_uid: str) -> LayoutEditResult:
-        snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
-        block = self._runtime_block_by_uid(page, block_uid)
-        previous_ocr_policy = block.ocr_policy
-        previous_ocr_policy = block.ocr_policy
-        before = {"block": self.snapshot_block_state(snapshot_block)}
-        clear_block_ocr_line_observations(block_uid)
-        discard_block_ocr_line_projection(block)
-        self.mark_generated_inline_formula_handled(page, block, op="delete_inline_formula")
-        event = self.record_snapshot_edit(
-            page,
-            "delete_block",
-            block_uid,
-            before=before,
-            after={},
-        )
-        next_snapshot = self._snapshot_with_blocks(
-            snapshot,
-            tuple(
-                candidate
-                for index, candidate in enumerate(snapshot.blocks)
-                if index != snapshot_index
-            ),
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(page, next_snapshot)
-        return LayoutEditResult(op="delete_block", block=block, before=before, after={})
-
-    def _restore_blocks(
-        self,
-        page: Page,
+    def _block_by_uid(
         blocks: Iterable[LayoutBlockSnapshot],
-        *,
-        before: dict | None,
-    ) -> LayoutEditResult:
-        restore_blocks = tuple(blocks)
-        snapshot = current_layout_snapshot(page)
-        before = before or {"blocks": [self.snapshot_block_state(block) for block in snapshot.blocks]}
-        next_snapshot_blocks = tuple(
-            self._snapshot_block_with_order(block, order)
-            for order, block in enumerate(restore_blocks)
-        )
-        after = {"blocks": [self.snapshot_block_state(block) for block in next_snapshot_blocks]}
-        event = self.record_snapshot_edit(
-            page,
-            "restore_blocks",
-            "",
-            before=before,
-            after=after,
-        )
-        next_snapshot = self._snapshot_with_blocks(
-            snapshot,
-            next_snapshot_blocks,
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(page, next_snapshot)
-        return LayoutEditResult(op="restore_blocks", before=before, after=after)
-
-    def _change_block_kind(
-        self,
-        page: Page,
         block_uid: str,
-        *,
-        block_type: BlockType,
-        source_label: str,
-    ) -> LayoutEditResult:
-        snapshot = current_layout_snapshot(page)
-        snapshot_index, snapshot_block = self._snapshot_block_for_uid(snapshot, block_uid)
-        block = self._runtime_block_by_uid(page, block_uid)
-        previous_ocr_policy = block.ocr_policy
-        before = {"block": self.snapshot_block_state(snapshot_block)}
-        provisional = self._replace_snapshot_block(
-            snapshot,
-            snapshot_index,
-            block_type=block_type,
-            source_label=source_label,
-        )
-        apply_layout_snapshot_block_to_projection(block, provisional)
-        set_layout_block_type(block, block_type)
-        set_layout_block_source_label(block, source_label)
-        mark_layout_block_user_edited(block)
-        mark_ocr_text_invalidated(block, "block_kind_changed")
-        next_ocr_policy = default_ocr_policy_for_block(block)
-        set_layout_block_ocr_policy(block, next_ocr_policy)
-        if next_ocr_policy != previous_ocr_policy:
-            clear_block_ocr_line_observations(block.uid)
-            discard_block_ocr_line_projection(block)
-        binding = self.bind_manual_block_to_paddle(page, block)
-        final_snapshot_block = self._replace_snapshot_block(
-            snapshot,
-            snapshot_index,
-            block_type=block.block_type,
-            source_label=block.source_label,
-            origin=block.origin or provisional.origin,
-            ocr_policy=block.ocr_policy,
-            note=block.note,
-        )
-        after = {"block": self.snapshot_block_state(final_snapshot_block)}
-        event = self.record_snapshot_edit(
-            page,
-            "change_kind",
-            block_uid,
-            before=before,
-            after=after,
-        )
-        next_snapshot = self._snapshot_with_replaced_block(
-            snapshot,
-            snapshot_index,
-            final_snapshot_block,
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        apply_layout_snapshot_block_to_projection(block, final_snapshot_block)
-        return LayoutEditResult(
-            op="change_kind",
-            block=block,
-            before=before,
-            after=after,
-            binding_status=str(binding.get("status") or ""),
-        )
+    ) -> LayoutBlockSnapshot:
+        for block in blocks:
+            if block.uid == block_uid:
+                return block
+        raise ValueError(f"layout block {block_uid!r} is not present in the layout snapshot")
 
     @staticmethod
-    def snapshot_block_state(block: LayoutBlockSnapshot) -> dict:
+    def _normalize_blocks(
+        blocks: Iterable[LayoutBlockSnapshot],
+    ) -> tuple[LayoutBlockSnapshot, ...]:
+        normalized: list[LayoutBlockSnapshot] = []
+        seen: set[str] = set()
+        for order, block in enumerate(blocks):
+            if not isinstance(block, LayoutBlockSnapshot):
+                raise TypeError("layout snapshots may contain only LayoutBlockSnapshot values")
+            if block.uid in seen:
+                raise ValueError(f"duplicate layout block uid: {block.uid!r}")
+            seen.add(block.uid)
+            normalized.append(_copy_block(block, order=order))
+        return tuple(normalized)
+
+    @staticmethod
+    def _unique_uids(uids: Iterable[str]) -> tuple[str, ...]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for uid in uids:
+            if uid not in seen:
+                seen.add(uid)
+                result.append(uid)
+        return tuple(result)
+
+    @staticmethod
+    def _merge_bbox(requested: BBox, selected: Iterable[BBox]) -> BBox:
+        boxes = tuple(selected)
+        if not boxes:
+            return _copy_bbox(requested)  # pragma: no cover - merge validates selection
+        x1 = min(requested.x1, *(bbox.x1 for bbox in boxes))
+        y1 = min(requested.y1, *(bbox.y1 for bbox in boxes))
+        x2 = max(requested.x2, *(bbox.x2 for bbox in boxes))
+        y2 = max(requested.y2, *(bbox.y2 for bbox in boxes))
+        return BBox.from_xyxy(x1, y1, x2, y2)
+
+    @staticmethod
+    def snapshot_block_state(block: LayoutBlockSnapshot) -> dict[str, Any]:
         return {
             "uid": block.uid,
-            "block_type": getattr(block.block_type, "value", str(block.block_type)),
+            "block_type": block.block_type.value,
             "bbox": list(block.bbox.to_xyxy()),
             "order": block.order,
             "source_label": block.source_label,
-            "ocr_policy": getattr(block.ocr_policy, "value", str(block.ocr_policy)),
+            "ocr_policy": block.ocr_policy.value,
         }
 
-    @staticmethod
-    def _snapshot_block_for_uid(
-        snapshot: LayoutSnapshot,
-        block_uid: str,
-    ) -> tuple[int, LayoutBlockSnapshot]:
-        for index, snapshot_block in enumerate(snapshot.blocks):
-            if snapshot_block.uid == block_uid:
-                return index, snapshot_block
-        raise ValueError(f"layout block {block_uid!r} is not present in the active layout snapshot")
 
-    @staticmethod
-    def _replace_snapshot_block(
-        snapshot: LayoutSnapshot,
-        index: int,
-        *,
-        block_type: BlockType | None = None,
-        bbox: BBox | None = None,
-        order: int | None = None,
-        source_label: str | None = None,
-        origin: BlockOrigin | None = None,
-        ocr_policy: OcrPolicy | None = None,
-        note: str | None = None,
-    ) -> LayoutBlockSnapshot:
-        current = snapshot.blocks[index]
-        return LayoutBlockSnapshot(
-            block_type=block_type if block_type is not None else current.block_type,
-            bbox=bbox if bbox is not None else current.bbox,
-            order=order if order is not None else current.order,
-            source_label=source_label if source_label is not None else current.source_label,
-            origin=origin if origin is not None else current.origin,
-            ocr_policy=ocr_policy if ocr_policy is not None else current.ocr_policy,
-            note=note if note is not None else current.note,
-            uid=current.uid,
-        )
-
-    @staticmethod
-    def _snapshot_with_replaced_block(
-        snapshot: LayoutSnapshot,
-        index: int,
-        block: LayoutBlockSnapshot,
-        *,
-        source_run_id: str,
-    ) -> LayoutSnapshot:
-        blocks = list(snapshot.blocks)
-        blocks[index] = block
-        return LayoutEditService._snapshot_with_blocks(
-            snapshot,
-            tuple(blocks),
-            source_run_id=source_run_id,
-        )
-
-    @staticmethod
-    def _snapshot_with_blocks(
-        snapshot: LayoutSnapshot,
-        blocks: tuple[LayoutBlockSnapshot, ...],
-        *,
-        source_run_id: str,
-    ) -> LayoutSnapshot:
-        return LayoutSnapshot(
-            page_uid=snapshot.page_uid,
-            artifact_uid=snapshot.artifact_uid,
-            source_engine="layout_edit",
-            source_run_id=source_run_id,
-            blocks=blocks,
-        )
-
-    @staticmethod
-    def _snapshot_block_from_edit_block(
-        block: Block,
-        *,
-        order: int,
-    ) -> LayoutBlockSnapshot:
-        return LayoutBlockSnapshot(
-            block_type=block.block_type,
-            bbox=block.bbox,
-            order=order,
-            source_label=block.source_label,
-            origin=block.origin or BlockOrigin(
-                created_by=getattr(block.source, "value", str(block.source)),
-                source_label=block.source_label,
-                original_bbox=block.bbox,
-                original_kind=block.block_type,
-            ),
-            ocr_policy=block.ocr_policy,
-            note=block.note,
-            uid=block.uid,
-        )
-
-    @staticmethod
-    def _snapshot_block_with_order(
-        block: LayoutBlockSnapshot,
-        order: int,
-    ) -> LayoutBlockSnapshot:
-        return LayoutBlockSnapshot(
-            block_type=block.block_type,
-            bbox=block.bbox,
-            order=order,
-            source_label=block.source_label,
-            origin=block.origin,
-            ocr_policy=block.ocr_policy,
-            note=block.note,
-            uid=block.uid,
-        )
-
-    def _merge_blocks_into_bbox(
-        self,
-        page: Page,
-        block_uids: Iterable[str],
-        bbox: BBox,
-        *,
-        block_type: BlockType,
-        source_label: str,
-    ) -> LayoutEditResult:
-        snapshot = current_layout_snapshot(page)
-        runtime_by_uid = self._runtime_block_map(page)
-        snapshot_by_uid = {
-            snapshot_block.uid: (index, snapshot_block)
-            for index, snapshot_block in enumerate(snapshot.blocks)
-        }
-        ordered_uids = tuple(uid for uid in block_uids if uid)
-        for block_uid in ordered_uids:
-            if block_uid not in snapshot_by_uid:
-                raise ValueError(f"layout block {block_uid!r} is not present in the active layout snapshot")
-            if block_uid not in runtime_by_uid:
-                raise ValueError(f"layout block {block_uid!r} is not present in the active runtime projection")
-        ordered = sorted(
-            (
-                (snapshot_by_uid[block_uid][0], snapshot_by_uid[block_uid][1], runtime_by_uid[block_uid])
-                for block_uid in ordered_uids
-            ),
-            key=lambda item: (item[1].order, item[1].bbox.y, item[1].bbox.x),
-        )
-        if not ordered:
-            raise ValueError("merge_blocks_into_bbox requires at least one block")
-        before = {"blocks": [self.snapshot_block_state(snapshot_block) for _index, snapshot_block, _block in ordered]}
-        primary_index, primary_snapshot, primary = ordered[0]
-        x1 = min([bbox.x1, *(snapshot_block.bbox.x1 for _index, snapshot_block, _block in ordered)])
-        y1 = min([bbox.y1, *(snapshot_block.bbox.y1 for _index, snapshot_block, _block in ordered)])
-        x2 = max([bbox.x2, *(snapshot_block.bbox.x2 for _index, snapshot_block, _block in ordered)])
-        y2 = max([bbox.y2, *(snapshot_block.bbox.y2 for _index, snapshot_block, _block in ordered)])
-        merged_bbox = BBox.from_xyxy(x1, y1, x2, y2).clamp(page.width, page.height)
-        provisional = self._replace_snapshot_block(
-            snapshot,
-            primary_index,
-            block_type=block_type,
-            bbox=merged_bbox,
-            source_label=source_label,
-        )
-        apply_layout_snapshot_block_to_projection(primary, provisional)
-        clear_block_ocr_line_observations(primary.uid)
-        discard_block_ocr_line_projection(primary)
-        mark_layout_block_user_edited(primary)
-        set_layout_block_ocr_policy(primary, default_ocr_policy_for_block(primary))
-        set_layout_block_note(primary, "manual_draw_merge_requires_ocr_rerun")
-        mark_ocr_text_invalidated(primary, "manual_draw_merge")
-        binding = self.bind_manual_block_to_paddle(page, primary)
-        for _index, _snapshot_block, block in ordered[1:]:
-            self.mark_generated_inline_formula_handled(page, block, op="merge_inline_formula")
-        final_primary_snapshot = self._replace_snapshot_block(
-            snapshot,
-            primary_index,
-            block_type=primary.block_type,
-            bbox=primary.bbox,
-            source_label=primary.source_label,
-            origin=primary.origin or primary_snapshot.origin,
-            ocr_policy=primary.ocr_policy,
-            note=primary.note,
-        )
-        remove_uids = {snapshot_block.uid for _index, snapshot_block, _block in ordered[1:]}
-        next_snapshot_blocks: list[LayoutBlockSnapshot] = []
-        for snapshot_block in snapshot.blocks:
-            if snapshot_block.uid in remove_uids:
-                continue
-            if snapshot_block.uid == final_primary_snapshot.uid:
-                next_snapshot_blocks.append(final_primary_snapshot)
-            else:
-                next_snapshot_blocks.append(snapshot_block)
-        next_snapshot_blocks = [
-            self._snapshot_block_with_order(snapshot_block, order)
-            for order, snapshot_block in enumerate(next_snapshot_blocks)
-        ]
-        after_block = next(
-            snapshot_block
-            for snapshot_block in next_snapshot_blocks
-            if snapshot_block.uid == final_primary_snapshot.uid
-        )
-        after = {"block": self.snapshot_block_state(after_block)}
-        event = self.record_snapshot_edit(
-            page,
-            "merge_blocks",
-            primary.uid,
-            before=before,
-            after=after,
-        )
-        next_snapshot = self._snapshot_with_blocks(
-            snapshot,
-            tuple(next_snapshot_blocks),
-            source_run_id=event.uid,
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(
-            page,
-            next_snapshot,
-            candidate_blocks=[primary],
-        )
-        return LayoutEditResult(
-            op="merge_blocks",
-            block=primary,
-            before=before,
-            after=after,
-            binding_status=str(binding.get("status") or ""),
-        )
-
-    def bind_manual_block_to_paddle(self, page: Page, block: Block) -> dict:
-        if block.block_type not in STRUCTURAL_BINDING_BLOCK_TYPES:
-            return {}
-        explicit_source_label = block.source_label
-        binding = PaddleArtifactIndex.from_page(page).bind_manual_bbox(block.bbox, block.block_type)
-        apply_paddle_binding_to_block(block, binding)
-        self._preserve_inline_formula_origin_binding(block)
-        if normalize_source_label(explicit_source_label) in _PRESERVE_EXPLICIT_SOURCE_LABELS:
-            set_layout_block_source_label(block, explicit_source_label)
-        return paddle_binding_dict(block)
-
-    @staticmethod
-    def is_generated_inline_formula_block(block: Block) -> bool:
-        return (
-            normalize_source_label(block.source_label) == "inline_formula"
-            and inline_formula_origin_bbox(block) is not None
-        )
-
-    @staticmethod
-    def mark_generated_inline_formula_handled(
-        page: Page,
-        block: Block,
-        *,
-        op: str = "claim_inline_formula",
-    ) -> None:
-        mark_inline_formula_origin_handled(page, block, op=op)
-
-    @staticmethod
-    def _update_existing_manual_binding_bbox(block: Block) -> bool:
-        binding = paddle_binding_dict(block)
-        if not binding:
-            return False
-        status = str(binding.get("status") or "")
-        if status in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}:
-            return False
-        try:
-            if int(binding.get("parent_index", -1)) < 0:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-        manual_bbox = list(block.bbox.to_xyxy())
-        next_binding = dict(binding)
-        next_binding["manual_bbox"] = manual_bbox
-        origin_bbox = inline_formula_origin_bbox(block)
-        if not next_binding.get("candidate_bbox") and origin_bbox is not None:
-            next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
-        source_label = str(next_binding.get("source_label") or block.source_label or block.block_type.value)
-        set_layout_block_source_label(block, source_label)
-        set_layout_block_ocr_policy(block, OcrPolicy.PRESERVE_AS_FORMULA)
-        for line in block_ocr_line_observations_by_uid(block.uid):
-            set_ocr_line_bbox(line, block.bbox)
-        set_paddle_binding(block, next_binding)
-        return True
-
-    @staticmethod
-    def _preserve_inline_formula_origin_binding(block: Block) -> None:
-        if normalize_source_label(block.source_label) != "inline_formula":
-            return
-        origin_bbox = inline_formula_origin_bbox(block)
-        if origin_bbox is None:
-            return
-        binding = paddle_binding_dict(block)
-        if not binding or binding.get("candidate_bbox"):
-            return
-        next_binding = dict(binding)
-        next_binding["candidate_bbox"] = [int(value) for value in origin_bbox]
-        set_paddle_binding(block, next_binding)
+__all__ = [
+    "LayoutEditCommand",
+    "LayoutEditResult",
+    "LayoutEditService",
+    "OcrInvalidationDescriptor",
+]

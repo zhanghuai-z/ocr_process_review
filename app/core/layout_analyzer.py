@@ -1,1028 +1,367 @@
-"""Layout analysis wrapper. Supports local / api modes.
+"""Pure Paddle layout response normalization.
 
-主链的 layout 角色固定使用 PaddleOCR-VL-1.6：
-  resolve_api_endpoint_for_role(api_url, role="layout")
-    -> https://paddleocr.aistudio-app.com/api/v2/ocr/jobs  (官方预置)
-
-VL1.6 响应在这里采用固定抽取路径：
-  result.layoutParsingResults[0].prunedResult:
-    layout_det_res.boxes[]:                    # 版面 bbox（供主程序块提取）
-      label:      str  (e.g. "text", "paragraph_title", "display_formula",
-                        "inline_formula", "formula_number", "footnote",
-                        "header", "number", ...)
-      coordinate: [x1, y1, x2, y2]
-    parsing_res_list[]:                        # 顶层阅读顺序 / 块内容
-      block_label / block_bbox / block_content
-    markdown.text:                             # 供下游导出 Markdown / LaTeX
-
-PP-OCRv6 负责 OCR 路由所需的 line/word 观察，VL 负责版面块。
+This module owns only the conversion from the vendor response contract to an
+immutable :class:`LayoutSnapshot`.  It has no filesystem, HTTP, UI, or
+project-session responsibilities.  The application service owns artifact
+creation and repository adoption.
 """
 from __future__ import annotations
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-import hashlib
-import json
-from pathlib import Path
-import time
-from typing import Callable, Iterable, List
 
-from PySide6.QtCore import QThread, Signal
+from collections.abc import Mapping, Sequence
+from typing import Any
 
-from app.core.api_profiles import (
-    FIXED_LAYOUT_PROFILE,
-    resolve_api_endpoint_for_role,
-)
-from app.adapters.paddle import map_paddle_label_to_block_type
-from app.utils.image_io import read_cv_image
-from app.core.bbox_extraction import bbox_from_variant
-from app.core.bbox_utils import sanitize_xyxy_bbox, scale_bbox
-from app.core.logging import get_logger
-from app.core.ocr_dispatch_policy import default_ocr_policy_for_block
-from app.core.paddle_layout_schema import (
-    normalize_paddle_layout_record,
-    paddle_record_label,
-    raw_bbox_max_from_record,
-    route_subblock_payload,
-)
-from app.core.paddle_labels import (
-    is_hanwang_skip_label,
-    normalize_paddle_label,
-)
-from app.core.paddle_response import (
-    layout_geometry_records_from_item,
-    parsing_records_from_item,
-    pruned_result,
-    result_dict,
-    result_items,
-)
-from app.core.raw_ocr_artifact import set_paddle_raw_layout_records
-from app.core.paddle_v16_client import (
-    PaddleV16LayoutClient,
-    PaddleV16RequestCancelled,
-    build_paddle_v16_optional_payload,
-    is_paddle_v16_endpoint,
-)
-from app.models import (
-    Block,
-    BlockOrigin,
-    BlockSource,
-    BlockType,
-    LayoutBlockSnapshot,
-    LayoutSnapshot,
-    Page,
-)
-from app.models.layout_block_state import set_layout_block_ocr_policy
-from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
-from app.models.layout_snapshot_projection import (
-    layout_block_snapshot_from_projection_block,
-    replace_page_layout_projection_from_snapshot,
-)
-from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.models.page_state import clear_page_error_message, mark_page_layout_failed
-from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
-from app.services.layout_snapshot import (
-    adopt_page_layout_snapshot,
-    layout_snapshot_from_normalized_artifact,
-)
-
-logger = get_logger(__name__)
-LOCAL_LAYOUT_CANVAS_W = 800
-LOCAL_LAYOUT_CANVAS_H = 608
-LAYOUT_API_TIMEOUT_FLOOR = 180
-LAYOUT_API_REQUEST_TIMEOUT_CAP = 30
-LAYOUT_API_CONCURRENCY_CAP = 10
+from app.core.paddle_labels import normalize_paddle_label
+from app.models.entity_id import new_entity_uid
+from app.models.enums import BlockSource, BlockType, OcrPolicy
+from app.models.geometry import BBox
+from app.models.layout_origin import BlockOrigin
+from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 
 
-def _truthy_config(value) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() not in {"", "0", "false", "no", "off"}
-    return bool(value)
+class LayoutAnalysisError(ValueError):
+    """The Paddle response cannot produce a valid layout snapshot."""
 
 
-def _display_image_path(page: Page) -> Path:
-    image_path = Path(page.display_image_path)
-    if image_path.is_file():
-        return image_path
-    normalized = Path(str(page.display_image_path).replace("\\", "/"))
-    return normalized
+_LABEL_TO_BLOCK_TYPE: dict[str, BlockType] = {
+    "text": BlockType.TEXT,
+    "paragraph": BlockType.TEXT,
+    "paragraph_text": BlockType.TEXT,
+    "plain_text": BlockType.TEXT,
+    "body": BlockType.TEXT,
+    "body_text": BlockType.TEXT,
+    "content": BlockType.TEXT,
+    "doc_text": BlockType.TEXT,
+    "text_region": BlockType.TEXT,
+    "text_box": BlockType.TEXT,
+    "header": BlockType.TEXT,
+    "footer": BlockType.TEXT,
+    "footnote": BlockType.TEXT,
+    "number": BlockType.TEXT,
+    "page_number": BlockType.TEXT,
+    "reference": BlockType.REFERENCE,
+    "reference_content": BlockType.REFERENCE,
+    "references": BlockType.REFERENCE,
+    "reference_list": BlockType.REFERENCE,
+    "bibliography": BlockType.REFERENCE,
+    "title": BlockType.TITLE,
+    "doc_title": BlockType.TITLE,
+    "doc_heading": BlockType.TITLE,
+    "section_title": BlockType.TITLE,
+    "chapter_title": BlockType.TITLE,
+    "paragraph_title": BlockType.TITLE,
+    "text_title": BlockType.TITLE,
+    "heading": BlockType.TITLE,
+    "heading_1": BlockType.TITLE,
+    "heading_2": BlockType.TITLE,
+    "heading_3": BlockType.TITLE,
+    "heading_4": BlockType.TITLE,
+    "heading_5": BlockType.TITLE,
+    "heading_6": BlockType.TITLE,
+    "figure": BlockType.FIGURE,
+    "graphic": BlockType.FIGURE,
+    "photo": BlockType.FIGURE,
+    "image": BlockType.FIGURE,
+    "picture": BlockType.FIGURE,
+    "illustration": BlockType.FIGURE,
+    "chart": BlockType.FIGURE,
+    "logo": BlockType.FIGURE,
+    "seal": BlockType.FIGURE,
+    "figure_caption": BlockType.FIGURE_CAPTION,
+    "figure_title": BlockType.FIGURE_CAPTION,
+    "caption": BlockType.FIGURE_CAPTION,
+    "image_caption": BlockType.FIGURE_CAPTION,
+    "table": BlockType.TABLE,
+    "table_region": BlockType.TABLE,
+    "table_block": BlockType.TABLE,
+    "table_body": BlockType.TABLE,
+    "table_cell": BlockType.TABLE,
+    "table_caption": BlockType.TABLE_CAPTION,
+    "table_caption_text": BlockType.TABLE_CAPTION,
+    "table_note": BlockType.TABLE_CAPTION,
+    "table_title": BlockType.TABLE_CAPTION,
+    "equation": BlockType.EQUATION,
+    "equation_block": BlockType.EQUATION,
+    "display_formula": BlockType.EQUATION,
+    "isolated_formula": BlockType.EQUATION,
+    "inline_formula": BlockType.EQUATION,
+    "formula": BlockType.EQUATION,
+    "formula_block": BlockType.EQUATION,
+    "formula_number": BlockType.EQUATION,
+    "math": BlockType.EQUATION,
+    "math_formula": BlockType.EQUATION,
+    "math_block": BlockType.EQUATION,
+}
 
 
-def _clear_layout_analysis_result(
-    page: Page,
-    *,
-    source_engine: str,
-    source_run_id: str = "",
-) -> None:
-    snapshot = LayoutSnapshot(
-        page_uid=page.uid,
-        artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
-        source_engine=source_engine,
-        source_run_id=source_run_id,
-        blocks=(),
-    )
-    set_layout_snapshot_for_page(page, snapshot)
-    replace_page_layout_projection_from_snapshot(page, snapshot)
+def _block_type(label: str) -> BlockType:
+    return _LABEL_TO_BLOCK_TYPE.get(label, BlockType.UNKNOWN)
 
 
-def _layout_block_origin(
-    *,
-    source_engine: str,
-    source_run_id: str,
-    source_label: str,
-    bbox,
-    block_type: BlockType,
-    confidence: float | None = None,
-    raw_index: int | None = None,
-) -> BlockOrigin:
-    return BlockOrigin(
-        created_by=BlockSource.AUTO_LAYOUT.value,
-        source_engine=source_engine,
-        source_run_id=source_run_id,
-        source_label=source_label,
-        source_confidence=confidence,
-        original_bbox=bbox,
-        original_kind=block_type,
-        raw_index=raw_index,
-    )
+def _ocr_policy(block_type: BlockType) -> OcrPolicy:
+    if block_type is BlockType.EQUATION:
+        return OcrPolicy.PRESERVE_AS_FORMULA
+    if block_type is BlockType.TABLE:
+        return OcrPolicy.PRESERVE_AS_TABLE
+    if block_type in {BlockType.FIGURE, BlockType.UNKNOWN}:
+        return OcrPolicy.SKIP
+    return OcrPolicy.TEXT_OCR
 
 
-def _layout_worker_max_workers(total_pages: int) -> int:
-    if total_pages <= 1:
-        return 1
-    try:
-        from app.core.app_config import get_config
-
-        cfg = get_config()
-    except Exception:
-        return 1
-    mode = str(cfg.get("mode", "local") or "local").lower()
-    if mode not in {"api", "hanwang"}:
-        return 1
-    try:
-        configured = int(cfg.get("layout_concurrency", 2))
-    except (TypeError, ValueError):
-        configured = 2
-    return max(1, min(total_pages, LAYOUT_API_CONCURRENCY_CAP, configured))
+def _mapping(value: object, context: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise LayoutAnalysisError(f"{context} must be an object")
+    return value
 
 
-class LayoutWorker(QThread):
-    """版面分析 Worker 线程，避免阻塞 UI。"""
-    page_done = Signal(int, int)   # (completed_index, total)
-    all_done  = Signal(list)       # List[Page]
-    error     = Signal(str)
-    cancelled = Signal()
-    stage_update = Signal(int, int, str)  # page_index, total, message
+def _positive_dimension(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise LayoutAnalysisError(f"{field_name} must be a positive integer")
+    return value
 
-    def __init__(self, pages: List[Page], parent=None):
-        super().__init__(parent)
-        self._pages = pages
-        self._batch_id = f"ocr-process-layout-{int(time.time() * 1000)}"
-        self._cancel_requested = False
 
-    def cancel(self) -> None:
-        self._cancel_requested = True
-        self.requestInterruption()
+def _number(value: object, context: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LayoutAnalysisError(f"{context} must be numeric")
+    return float(value)
 
-    def _is_cancelled(self) -> bool:
-        return self._cancel_requested or self.isInterruptionRequested()
 
-    def _emit_stage(self, index: int, message: str) -> None:
-        if not self._is_cancelled():
-            self.stage_update.emit(index, len(self._pages), message)
+def _xyxy(value: object, context: str) -> tuple[float, float, float, float]:
+    if isinstance(value, Mapping):
+        if {"x", "y", "w", "h"}.issubset(value):
+            x = _number(value["x"], f"{context}.x")
+            y = _number(value["y"], f"{context}.y")
+            w = _number(value["w"], f"{context}.w")
+            h = _number(value["h"], f"{context}.h")
+            return x, y, x + w, y + h
+        if {"x1", "y1", "x2", "y2"}.issubset(value):
+            return tuple(
+                _number(value[key], f"{context}.{key}")
+                for key in ("x1", "y1", "x2", "y2")
+            )  # type: ignore[return-value]
+        raise LayoutAnalysisError(f"{context} has no supported coordinate fields")
 
-    def _analyze_page(self, index: int, page: Page) -> tuple[int, str | None]:
-        if self._is_cancelled():
-            return index, None
-        analyzer = LayoutAnalyzer(
-            layout_batch_id=self._batch_id,
-            cancel_callback=self._is_cancelled,
-            status_callback=lambda message, page_index=index: self._emit_stage(page_index, message),
-        )
-        try:
-            analyzer.analyze(page)
-            if self._is_cancelled():
-                return index, None
-            clear_page_error_message(page)
-            return index, None
-        except PaddleV16RequestCancelled:
-            return index, None
-        except Exception as e:
-            if self._is_cancelled():
-                return index, None
-            logger.error("Layout analysis failed for page %s: %s", page.display_image_path, e)
-            _clear_layout_analysis_result(
-                page,
-                source_engine="layout_analysis_failed",
-                source_run_id=self._batch_id,
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise LayoutAnalysisError(f"{context} must be coordinates or points")
+    if len(value) == 4 and not all(
+        isinstance(item, (list, tuple, Mapping)) for item in value
+    ):
+        return tuple(_number(item, f"{context}[{index}]") for index, item in enumerate(value))  # type: ignore[return-value]
+
+    points: list[tuple[float, float]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, Sequence) or isinstance(item, (str, bytes)) or len(item) < 2:
+            raise LayoutAnalysisError(f"{context}[{index}] must be a point")
+        points.append(
+            (
+                _number(item[0], f"{context}[{index}][0]"),
+                _number(item[1], f"{context}[{index}][1]"),
             )
-            mark_page_layout_failed(page, f"版面分析失败：{e}")
-            return index, f"第 {page.page_number} 页：{e}"
+        )
+    if len(points) < 2:
+        raise LayoutAnalysisError(f"{context} must contain at least two points")
+    return (
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    )
 
-    def run(self) -> None:
-        total = len(self._pages)
-        fatal_errors: list[tuple[int, str]] = []
-        completed = 0
-        max_workers = _layout_worker_max_workers(total)
 
-        if max_workers <= 1:
-            for i, page in enumerate(self._pages):
-                if self._is_cancelled():
-                    self.cancelled.emit()
-                    return
-                page_idx, error_message = self._analyze_page(i, page)
-                if self._is_cancelled():
-                    self.cancelled.emit()
-                    return
-                if error_message:
-                    fatal_errors.append((page_idx, error_message))
-                completed += 1
-                self.page_done.emit(completed - 1, total)
-        else:
-            executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="layout-api")
-            executor_shutdown = False
-            futures = {
-                executor.submit(self._analyze_page, i, page): i
-                for i, page in enumerate(self._pages)
-            }
-            pending = set(futures)
-            try:
-                while pending:
-                    if self._is_cancelled():
-                        for future in pending:
-                            future.cancel()
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        executor_shutdown = True
-                        self.cancelled.emit()
-                        return
-                    done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        page_idx = futures[future]
-                        try:
-                            page_idx, error_message = future.result()
-                        except PaddleV16RequestCancelled:
-                            error_message = None
-                        except Exception as exc:
-                            if self._is_cancelled():
-                                error_message = None
-                            else:
-                                page = self._pages[page_idx]
-                                logger.error("Layout analysis failed for page %s: %s", page.display_image_path, exc)
-                                _clear_layout_analysis_result(
-                                    page,
-                                    source_engine="layout_analysis_failed",
-                                    source_run_id=self._batch_id,
-                                )
-                                mark_page_layout_failed(page, f"版面分析失败：{exc}")
-                                error_message = f"第 {page.page_number} 页：{exc}"
-                        if self._is_cancelled():
-                            for pending_future in pending:
-                                pending_future.cancel()
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            executor_shutdown = True
-                            self.cancelled.emit()
-                            return
-                        if error_message:
-                            fatal_errors.append((page_idx, error_message))
-                        completed += 1
-                        self.page_done.emit(completed - 1, total)
-            finally:
-                if not executor_shutdown:
-                    if self._is_cancelled():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                    else:
-                        executor.shutdown(wait=True, cancel_futures=True)
+def _record_bbox(record: Mapping[str, Any], *, width: int, height: int, scale_x: float, scale_y: float, context: str) -> BBox:
+    coordinate_key = next(
+        (
+            key
+            for key in (
+                "block_bbox",
+                "coordinate",
+                "bbox",
+                "block_polygon_points",
+                "polygon_points",
+                "points",
+            )
+            if key in record
+        ),
+        None,
+    )
+    if coordinate_key is None:
+        raise LayoutAnalysisError(f"{context} has no layout bbox")
+    x1, y1, x2, y2 = _xyxy(record[coordinate_key], f"{context}.{coordinate_key}")
+    bbox = BBox.from_xyxy(
+        round(x1 * scale_x),
+        round(y1 * scale_y),
+        round(x2 * scale_x),
+        round(y2 * scale_y),
+    ).clamp(width, height)
+    if bbox.w <= 0 or bbox.h <= 0:
+        raise LayoutAnalysisError(f"{context} has an empty layout bbox")
+    return bbox
 
-        if len(fatal_errors) == total and total > 0:
-            messages = [message for _idx, message in sorted(fatal_errors, key=lambda item: item[0])]
-            self.error.emit("所有页面版面分析失败：\n" + "\n".join(messages[:5]))
-            return
-        self.all_done.emit(self._pages)
+
+def _label(record: Mapping[str, Any], context: str) -> tuple[str, str]:
+    raw = record.get("block_label", record.get("label"))
+    if not isinstance(raw, str) or not raw.strip():
+        raise LayoutAnalysisError(f"{context} has no layout label")
+    vendor_label = raw.strip()
+    return vendor_label, normalize_paddle_label(vendor_label)
+
+
+def _score(record: Mapping[str, Any], context: str) -> float | None:
+    for key in ("score", "confidence", "block_score"):
+        if key not in record or record[key] is None:
+            continue
+        return _number(record[key], f"{context}.{key}")
+    return None
+
+
+def _scale_for_item(item: Mapping[str, Any], result: Mapping[str, Any], width: int, height: int) -> tuple[float, float]:
+    shape: Mapping[str, Any] | None = None
+    data_info = result.get("dataInfo")
+    if isinstance(data_info, Mapping):
+        shape = data_info
+    else:
+        pruned = item.get("prunedResult")
+        if isinstance(pruned, Mapping) and isinstance(pruned.get("width"), (int, float)) and isinstance(pruned.get("height"), (int, float)):
+            shape = pruned
+    if shape is None:
+        return 1.0, 1.0
+    source_width = shape.get("width")
+    source_height = shape.get("height")
+    if isinstance(source_width, bool) or isinstance(source_height, bool):
+        raise LayoutAnalysisError("Paddle response dimensions must be numeric")
+    if not isinstance(source_width, (int, float)) or not isinstance(source_height, (int, float)):
+        raise LayoutAnalysisError("Paddle response dimensions must be numeric")
+    if source_width <= 0 or source_height <= 0:
+        raise LayoutAnalysisError("Paddle response dimensions must be positive")
+    return width / float(source_width), height / float(source_height)
+
+
+def _records_for_item(item: Mapping[str, Any], context: str) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+    pruned = _mapping(item.get("prunedResult"), f"{context}.prunedResult")
+    parsing = pruned.get("parsing_res_list")
+    if parsing is not None:
+        if not isinstance(parsing, list):
+            raise LayoutAnalysisError(f"{context}.prunedResult.parsing_res_list must be an array")
+        if parsing:
+            return tuple(
+                (f"{context}.prunedResult.parsing_res_list[{index}]", _mapping(value, f"{context}.parsing_res_list[{index}]"))
+                for index, value in enumerate(parsing)
+            )
+
+    detection = pruned.get("layout_det_res")
+    if isinstance(detection, Mapping):
+        boxes = detection.get("boxes")
+        if boxes is not None:
+            if not isinstance(boxes, list):
+                raise LayoutAnalysisError(f"{context}.prunedResult.layout_det_res.boxes must be an array")
+            return tuple(
+                (f"{context}.prunedResult.layout_det_res.boxes[{index}]", _mapping(value, f"{context}.layout_det_res.boxes[{index}]"))
+                for index, value in enumerate(boxes)
+            )
+    if parsing is None:
+        raise LayoutAnalysisError(f"{context}.prunedResult.parsing_res_list is missing")
+    return ()
 
 
 class LayoutAnalyzer:
+    """Normalize one successful Paddle VL response into layout truth."""
 
-    def __init__(
+    def analyze(
         self,
+        response: Mapping[str, Any],
         *,
-        layout_batch_id: str = "",
-        cancel_callback: Callable[[], bool] | None = None,
-        status_callback: Callable[[str], None] | None = None,
-    ) -> None:
-        self._engine = None
-        self._layout_batch_id = layout_batch_id
-        self._cancel_callback = cancel_callback
-        self._status_callback = status_callback
+        page_uid: str,
+        page_width: int,
+        page_height: int,
+        artifact_uid: str,
+        source_run_id: str,
+        source_engine: str = "paddleocr-vl-1.6",
+        revision: int = 1,
+    ) -> LayoutSnapshot:
+        if not isinstance(response, Mapping):
+            raise LayoutAnalysisError("Paddle response must be an object")
+        if not isinstance(page_uid, str) or not page_uid.strip():
+            raise LayoutAnalysisError("page_uid must be non-empty")
+        if not isinstance(artifact_uid, str) or not artifact_uid.strip():
+            raise LayoutAnalysisError("artifact_uid must be non-empty")
+        if not isinstance(source_run_id, str) or not source_run_id.strip():
+            raise LayoutAnalysisError("source_run_id must be non-empty")
+        if not isinstance(source_engine, str) or not source_engine.strip():
+            raise LayoutAnalysisError("source_engine must be non-empty")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise LayoutAnalysisError("revision must be a positive integer")
+        width = _positive_dimension(page_width, "page_width")
+        height = _positive_dimension(page_height, "page_height")
 
-    def _raise_if_cancelled(self) -> None:
-        if self._cancel_callback is not None and self._cancel_callback():
-            raise PaddleV16RequestCancelled("Paddle layout analysis cancelled")
-
-    def _emit_status(self, message: str) -> None:
-        if self._status_callback is not None:
-            self._status_callback(message)
-
-    # ── local mode ─────────────────────────────────────────────
-
-    def _get_engine(self):
-        if self._engine is None:
-            from paddleocr import PaddleOCR
-            logger.info(
-                "Initializing PaddleOCR layout engine: lang=ch, "
-                "use_angle_cls=False, layout=True, table=False, ocr=False, "
-                "models=package defaults"
+        error_code = response.get("errorCode")
+        if error_code not in (None, 0, "0"):
+            raise LayoutAnalysisError(
+                f"Paddle response failed: {response.get('errorMsg') or error_code}"
             )
-            self._engine = PaddleOCR(
-                use_angle_cls=False,
-                lang="ch",
-                show_log=False,
-                layout=True,
-                table=False,
-                ocr=False,
-            )
-        return self._engine
+        error_message = response.get("errorMsg")
+        if error_message not in (None, "", "Success"):
+            raise LayoutAnalysisError(f"Paddle response failed: {error_message}")
 
-    def _unwrap_layout_items(self, result) -> List[dict]:
-        """归一化不同 Paddle 结果包装结构。"""
-        if result is None:
-            return []
-        if isinstance(result, dict):
-            if isinstance(result.get("layout"), list):
-                return result["layout"]
-            if isinstance(result.get("result"), list):
-                return result["result"]
-            return [result]
-        if isinstance(result, list):
-            if len(result) == 1 and isinstance(result[0], dict):
-                wrapped = result[0]
-                if isinstance(wrapped.get("layout"), list):
-                    return wrapped["layout"]
-                if isinstance(wrapped.get("result"), list):
-                    return wrapped["result"]
-            return [item for item in result if isinstance(item, dict)]
-        return []
+        result = _mapping(response.get("result"), "Paddle response.result")
+        items = result.get("layoutParsingResults")
+        if not isinstance(items, list):
+            raise LayoutAnalysisError("Paddle response.result.layoutParsingResults must be an array")
 
-    def _extract_bbox_from_coordinate(self, coord, page: Page):
-        """归一化 API 返回的 xyxy / 四点坐标 / 扁平 polygon / xywh dict。"""
-        return bbox_from_variant(coord, max_w=page.width, max_h=page.height)
-
-    def _raw_bbox_max_from_item(self, item: dict) -> tuple[float, float] | None:
-        max_x = 0.0
-        max_y = 0.0
-        found = False
-        for record in parsing_records_from_item(item) + layout_geometry_records_from_item(item):
-            max_xy = raw_bbox_max_from_record(record)
-            if max_xy is None:
-                continue
-            max_x = max(max_x, max_xy[0])
-            max_y = max(max_y, max_xy[1])
-            found = True
-        return (max_x, max_y) if found else None
-
-    def _append_overlay_record(
-        self,
-        *,
-        page: Page,
-        record: dict,
-        scale_x: float,
-        scale_y: float,
-        raw_overlay_items: List[tuple[str, object]],
-    ) -> None:
-        normalized = normalize_paddle_layout_record(
-            record,
-            page_width=page.width,
-            page_height=page.height,
-            scale_x=scale_x,
-            scale_y=scale_y,
-        )
-        if normalized is None:
-            return
-        raw_overlay_items.append((normalized.label, normalized.bbox))
-
-    def _record_bbox_in_page_space(
-        self,
-        record: dict,
-        page: Page,
-        scale_x: float,
-        scale_y: float,
-    ):
-        normalized = normalize_paddle_layout_record(
-            record,
-            page_width=page.width,
-            page_height=page.height,
-            scale_x=scale_x,
-            scale_y=scale_y,
-        )
-        return normalized.bbox if normalized is not None else None
-
-    def _page_space_artifact_record(
-        self,
-        *,
-        page: Page,
-        record: dict,
-        scale_x: float,
-        scale_y: float,
-    ) -> dict | None:
-        """Return a layout artifact record whose bbox is in page image space."""
-        normalized = normalize_paddle_layout_record(
-            record,
-            page_width=page.width,
-            page_height=page.height,
-            scale_x=scale_x,
-            scale_y=scale_y,
-        )
-        if normalized is None:
-            return None
-        payload = dict(record)
-        payload["block_label"] = normalized.label
-        payload["block_bbox"] = list(normalized.bbox.to_xyxy())
-        if normalized.text:
-            payload["block_content"] = normalized.text
-        if normalized.score is not None:
-            payload["score"] = normalized.score
-        return payload
-
-    def _attach_route_subblocks(
-        self,
-        *,
-        page: Page,
-        parsing_records: list[dict],
-        geometry_records: list[dict],
-        scale_x: float,
-        scale_y: float,
-    ) -> dict[int, list[dict]]:
-        route_records = []
-        for record in geometry_records:
-            normalized = normalize_paddle_layout_record(
-                record,
-                page_width=page.width,
-                page_height=page.height,
-                scale_x=scale_x,
-                scale_y=scale_y,
-            )
-            if normalized is None or not is_hanwang_skip_label(normalized.label):
-                continue
-            route_records.append(normalized)
-        if not route_records:
-            return {}
-
-        parent_entries: list[tuple[int, dict, object]] = []
-        subblocks_by_parent: dict[int, list[dict]] = {}
-        for parent_index, parent in enumerate(parsing_records):
-            parent_label = paddle_record_label(parent)
-            if is_hanwang_skip_label(parent_label):
-                continue
-            parent_bbox = self._record_bbox_in_page_space(parent, page, scale_x, scale_y)
-            if parent_bbox is None:
-                continue
-            parent_entries.append((parent_index, parent, parent_bbox))
-            subblocks_by_parent[parent_index] = []
-
-        for child in route_records:
-            bbox = child.bbox
-            best_parent_index: int | None = None
-            best_score = 0.0
-            for parent_index, _parent, parent_bbox in parent_entries:
-                x1 = max(parent_bbox.x1, bbox.x1)
-                y1 = max(parent_bbox.y1, bbox.y1)
-                x2 = min(parent_bbox.x2, bbox.x2)
-                y2 = min(parent_bbox.y2, bbox.y2)
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                inter_area = (x2 - x1) * (y2 - y1)
-                center_inside = (
-                    parent_bbox.x1 <= (bbox.x1 + bbox.x2) / 2 <= parent_bbox.x2
-                    and parent_bbox.y1 <= (bbox.y1 + bbox.y2) / 2 <= parent_bbox.y2
-                )
-                if not center_inside and inter_area < bbox.area * 0.5:
-                    continue
-                score = (inter_area / max(1, bbox.area)) + (0.25 if center_inside else 0.0)
-                if score > best_score:
-                    best_score = score
-                    best_parent_index = parent_index
-            if best_parent_index is not None:
-                subblocks_by_parent[best_parent_index].append(route_subblock_payload(child))
-
-        return {
-            parent_index: subblocks
-            for parent_index, subblocks in subblocks_by_parent.items()
-            if subblocks
-        }
-
-    def _extract_api_blocks(self, page: Page, data: dict) -> tuple[List[Block], List[tuple[str, object]]]:
-        result = result_dict(data)
-        layout_results = result_items(data, "layoutParsingResults")
-        data_info = result.get("dataInfo") if isinstance(result, dict) else None
-        raw_overlay_items: List[tuple[str, object]] = []
-        artifact_records: list[dict] = []
-        route_attachments: dict[int, list[dict]] = {}
-
-        for item in layout_results:
-            parsing_records = parsing_records_from_item(item)
-            parsing_record_base_index = len(artifact_records)
-            scale_x, scale_y = self._detect_api_canvas_scale(page, item, data_info)
-            if abs(scale_x - 1.0) > 0.01 or abs(scale_y - 1.0) > 0.01:
-                logger.info(
-                    "API 返回坐标空间不同于原图，采用 scale_x=%.3f scale_y=%.3f 修正 (%s)",
-                    scale_x, scale_y, page.display_image_path,
-                )
-
-            geometry_records = layout_geometry_records_from_item(item)
-            if parsing_records:
-                item_route_attachments = self._attach_route_subblocks(
-                    page=page,
-                    parsing_records=parsing_records,
-                    geometry_records=geometry_records,
+        blocks: list[LayoutBlockSnapshot] = []
+        seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+        raw_index = 0
+        for item_index, raw_item in enumerate(items):
+            item = _mapping(raw_item, f"layoutParsingResults[{item_index}]")
+            scale_x, scale_y = _scale_for_item(item, result, width, height)
+            for record_path, record in _records_for_item(item, f"layoutParsingResults[{item_index}]"):
+                current_raw_index = raw_index
+                raw_index += 1
+                vendor_label, normalized_label = _label(record, record_path)
+                bbox = _record_bbox(
+                    record,
+                    width=width,
+                    height=height,
                     scale_x=scale_x,
                     scale_y=scale_y,
+                    context=record_path,
                 )
-                for local_index, subblocks in item_route_attachments.items():
-                    route_attachments[parsing_record_base_index + local_index] = subblocks
-            artifact_records.extend(
-                record
-                for record in (
-                    self._page_space_artifact_record(
-                        page=page,
-                        record=parsing_record,
-                        scale_x=scale_x,
-                        scale_y=scale_y,
+                signature = (normalized_label, bbox.to_xyxy())
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                block_type = _block_type(normalized_label)
+                origin = BlockOrigin(
+                    created_by=BlockSource.AUTO_LAYOUT.value,
+                    source_engine=source_engine,
+                    source_run_id=source_run_id,
+                    vendor_label=vendor_label,
+                    source_confidence=_score(record, record_path),
+                    original_bbox=bbox,
+                    original_kind=block_type,
+                    raw_artifact_uid=artifact_uid,
+                    raw_json_path=record_path,
+                    raw_index=current_raw_index,
+                )
+                blocks.append(
+                    LayoutBlockSnapshot(
+                        block_type=block_type,
+                        bbox=bbox,
+                        order=len(blocks),
+                        source_label=normalized_label,
+                        origin=origin,
+                        ocr_policy=_ocr_policy(block_type),
+                        authorship=BlockSource.AUTO_LAYOUT,
+                        uid=new_entity_uid("block"),
                     )
-                    for parsing_record in parsing_records
-                )
-                if record is not None
-            )
-
-            for record in parsing_records:
-                self._append_overlay_record(
-                    page=page,
-                    record=record,
-                    scale_x=scale_x,
-                    scale_y=scale_y,
-                    raw_overlay_items=raw_overlay_items,
-                )
-            for record in geometry_records:
-                self._append_overlay_record(
-                    page=page,
-                    record=record,
-                    scale_x=scale_x,
-                    scale_y=scale_y,
-                    raw_overlay_items=raw_overlay_items,
                 )
 
-        set_paddle_raw_layout_records(
-            page,
-            artifact_records,
-            route_attachments=route_attachments,
-            run_id=self._layout_batch_id,
+        return LayoutSnapshot(
+            page_uid=page_uid,
+            revision=revision,
+            artifact_uid=artifact_uid,
+            source_engine=source_engine,
+            source_run_id=source_run_id,
+            blocks=tuple(blocks),
         )
-        snapshot = layout_snapshot_from_normalized_artifact(
-            normalized_layout_artifact_from_page(page),
-            source_run_id=self._layout_batch_id,
-        )
-        page_blocks = adopt_page_layout_snapshot(page, snapshot)
-        return page_blocks, raw_overlay_items
 
-    def _shape_from_data_info(self, data_info: dict | None) -> tuple[float, float] | None:
-        if not isinstance(data_info, dict):
-            return None
-        try:
-            width = float(data_info.get("width"))
-            height = float(data_info.get("height"))
-        except (TypeError, ValueError):
-            return None
-        if width <= 0 or height <= 0:
-            return None
-        return width, height
 
-    def _scale_from_api_shape(
-        self,
-        page: Page,
-        api_w: float,
-        api_h: float,
-        raw_max: tuple[float, float] | None,
-    ) -> tuple[float, float]:
-        if raw_max is not None:
-            max_x, max_y = raw_max
-            metadata_contradicted = max_x > api_w * 1.05 or max_y > api_h * 1.05
-            looks_like_page_space = max_x <= page.width * 1.05 and max_y <= page.height * 1.05
-            if metadata_contradicted and looks_like_page_space:
-                return 1.0, 1.0
-        return page.width / api_w, page.height / api_h
-
-    def _detect_api_canvas_scale(
-        self, page: Page, item: dict, data_info: dict | None = None
-    ) -> tuple[float, float]:
-        """根据 API 返回内容反推坐标空间，返回 (scale_x, scale_y)。
-
-        优先级：
-          1) result.dataInfo.width/height（AIStudio 上传图像尺寸）
-          2) prunedResult.input_img_shape / doc_preprocessor_res 实际尺寸（若有）
-          3) parsing_res_list / layout_det_res.boxes 的最大坐标外推
-          5) (1.0, 1.0)
-        """
-        pruned = pruned_result(item)
-        raw_max = self._raw_bbox_max_from_item(item)
-
-        data_shape = self._shape_from_data_info(data_info)
-        if data_shape is not None and page.width > 0 and page.height > 0:
-            api_w, api_h = data_shape
-            return self._scale_from_api_shape(page, api_w, api_h, raw_max)
-
-        # (2) 显式的预处理输出尺寸
-        for key in ("input_img_shape", "img_shape", "image_shape"):
-            shape = pruned.get(key)
-            if (
-                isinstance(shape, (list, tuple))
-                and len(shape) >= 2
-                and shape[0]
-                and shape[1]
-                and page.width
-                and page.height
-            ):
-                api_h, api_w = float(shape[0]), float(shape[1])
-                if api_w > 0 and api_h > 0:
-                    return self._scale_from_api_shape(page, api_w, api_h, raw_max)
-
-        doc_pre = pruned.get("doc_preprocessor_res") or {}
-        if isinstance(doc_pre, dict):
-            for key in ("output_img_shape", "img_shape"):
-                shape = doc_pre.get(key)
-                if (
-                    isinstance(shape, (list, tuple))
-                    and len(shape) >= 2
-                    and shape[0]
-                    and shape[1]
-                ):
-                    api_h, api_w = float(shape[0]), float(shape[1])
-                    if api_w > 0 and api_h > 0:
-                        return self._scale_from_api_shape(page, api_w, api_h, raw_max)
-
-        # (2)/(3) 用最大坐标外推
-        if raw_max is None or page.width <= 0 or page.height <= 0:
-            return 1.0, 1.0
-
-        api_max_x, api_max_y = raw_max
-        if api_max_x <= 0 or api_max_y <= 0:
-            return 1.0, 1.0
-
-        # 若坐标已经接近原图尺寸（误差 < 5%），认为坐标空间一致
-        if (
-            api_max_x >= page.width * 0.6
-            and api_max_y >= page.height * 0.6
-            and api_max_x <= page.width * 1.05
-            and api_max_y <= page.height * 1.05
-        ):
-            return 1.0, 1.0
-
-        # 否则用「实际能到的最大坐标 ≈ 处理画布」推回
-        scale_x = page.width / api_max_x
-        scale_y = page.height / api_max_y
-
-        # 仅当 X / Y 比例接近时才认为是均匀缩放（防止把方向问题误判成缩放）
-        ratio_gap = max(scale_x, scale_y) / max(min(scale_x, scale_y), 1e-6)
-        if ratio_gap > 1.4:
-            logger.warning(
-                "API canvas scale 非均匀 (sx=%.3f sy=%.3f)，可能存在方向/裁剪问题；"
-                "暂按 1.0 处理，请检查 .layout-api.json: %s",
-                scale_x, scale_y, page.display_image_path,
-            )
-            return 1.0, 1.0
-        return scale_x, scale_y
-
-    def _write_api_debug_response(self, page: Page, data: dict) -> None:
-        """把 API 原始响应落到工作图旁边，方便复盘漂移页。"""
-        image_path = page.display_image_path
-        if not image_path:
-            return
-        debug_path = Path(image_path).with_suffix(".layout-api.json")
-        payload = {
-            "page": {
-                "display_image_path": image_path,
-                "source_path": page.source_path,
-                "width": page.width,
-                "height": page.height,
-                "page_number": page.page_number,
-            },
-            "response": data,
-        }
-        try:
-            debug_path.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError as exc:
-            logger.warning("Failed to write API layout debug response: %s", exc)
-
-    def _artifact_root_for_page(self, page: Page) -> Path:
-        image_path = Path(page.display_image_path)
-        if image_path.parent.name == "images" and image_path.parent.parent.name == ".cache":
-            return image_path.parent.parent / "paddle_artifacts"
-        return image_path.parent / ".cache" / "paddle_artifacts"
-
-    def _write_paddle_raw_artifact(self, page: Page, data: dict) -> None:
-        artifact = page.raw_layout_artifact
-        if artifact is None:
-            return
-        job = data.get("paddle_v16", {}) if isinstance(data, dict) else {}
-        run_id = str(job.get("jobId") or self._layout_batch_id or f"layout-{int(time.time() * 1000)}")
-        safe_run_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in run_id)
-        payload = {
-            "page": {
-                "uid": page.uid,
-                "display_image_path": page.display_image_path,
-                "source_path": page.source_path,
-                "width": page.width,
-                "height": page.height,
-                "page_number": page.page_number,
-            },
-            "response": data,
-        }
-        blob = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        artifact_dir = self._artifact_root_for_page(page) / page.uid
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-        artifact_path = artifact_dir / f"{safe_run_id}.json"
-        artifact_path.write_bytes(blob)
-
-        artifact.page_uid = page.uid
-        artifact.run_id = run_id
-        artifact.artifact_path = str(artifact_path)
-        artifact.artifact_hash = hashlib.sha256(blob).hexdigest()
-
-    def _write_bbox_overlay(
-        self,
-        page: Page,
-        *,
-        items: List[tuple[str, object]],
-        suffix: str,
-        color: tuple[int, int, int],
-    ) -> None:
-        import cv2
-
-        image_path = page.display_image_path
-        if not image_path:
-            return
-        img = read_cv_image(image_path)
-        if img is None:
-            return
-
-        canvas = img.copy()
-        for label, bbox in items:
-            if bbox is None or getattr(bbox, "area", 0) <= 0:
-                continue
-            x1, y1, x2, y2 = bbox.to_xyxy()
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
-            if label:
-                cv2.putText(
-                    canvas,
-                    str(label),
-                    (x1, max(20, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5,
-                    color,
-                    1,
-                    cv2.LINE_AA,
-                )
-
-        out_path = Path(image_path).with_suffix(suffix)
-        try:
-            cv2.imwrite(str(out_path), canvas)
-        except Exception as exc:
-            logger.warning("Failed to write bbox overlay %s: %s", out_path, exc)
-
-    def _rescale_blocks_if_suspicious(self, page: Page) -> None:
-        """当所有框都像落在较小坐标系上时，做一次统一比例修正。"""
-        snapshot = current_layout_snapshot(page)
-        valid_blocks = [block for block in snapshot.blocks if block.bbox.area > 0]
-        if len(valid_blocks) < 2 or page.width <= 0 or page.height <= 0:
-            return
-
-        max_x2 = max(block.bbox.x2 for block in valid_blocks)
-        max_y2 = max(block.bbox.y2 for block in valid_blocks)
-        if max_x2 <= 0 or max_y2 <= 0:
-            return
-
-        looks_like_local_model_canvas = (
-            page.width > LOCAL_LAYOUT_CANVAS_W * 1.2
-            and page.height > LOCAL_LAYOUT_CANVAS_H * 1.2
-            and max_x2 <= LOCAL_LAYOUT_CANVAS_W * 1.05
-            and max_y2 <= LOCAL_LAYOUT_CANVAS_H * 1.05
-        )
-        if looks_like_local_model_canvas:
-            scale_x = page.width / LOCAL_LAYOUT_CANVAS_W
-            scale_y = page.height / LOCAL_LAYOUT_CANVAS_H
-            logger.warning(
-                "Layout bbox coordinates look like local model canvas (%dx%d); "
-                "rescaling for %s with scale_x=%.3f scale_y=%.3f",
-                LOCAL_LAYOUT_CANVAS_W,
-                LOCAL_LAYOUT_CANVAS_H,
-                page.display_image_path,
-                scale_x,
-                scale_y,
-            )
-            self._replace_layout_snapshot_with_scaled_bboxes(page, snapshot, scale_x, scale_y)
-            return
-
-        scale_x = page.width / max_x2
-        scale_y = page.height / max_y2
-        ratio_gap = max(scale_x, scale_y) / max(min(scale_x, scale_y), 1e-6)
-
-        suspicious_uniform_scale = (
-            scale_x >= 1.2
-            and scale_y >= 1.2
-            and scale_x <= 6.0
-            and scale_y <= 6.0
-            and ratio_gap <= 1.2
-        )
-        if not suspicious_uniform_scale:
-            return
-
-        logger.warning(
-            "Layout bbox coordinates look scaled-down; applying uniform rescale "
-            "for %s: scale_x=%.3f scale_y=%.3f page=%dx%d max_bbox=(%d,%d)",
-            page.display_image_path, scale_x, scale_y, page.width, page.height, max_x2, max_y2,
-        )
-        self._replace_layout_snapshot_with_scaled_bboxes(page, snapshot, scale_x, scale_y)
-
-    @staticmethod
-    def _replace_layout_snapshot_with_scaled_bboxes(
-        page: Page,
-        snapshot: LayoutSnapshot,
-        scale_x: float,
-        scale_y: float,
-    ) -> None:
-        next_snapshot = LayoutSnapshot(
-            page_uid=snapshot.page_uid,
-            artifact_uid=snapshot.artifact_uid,
-            source_engine=snapshot.source_engine,
-            source_run_id=snapshot.source_run_id,
-            blocks=tuple(
-                LayoutBlockSnapshot(
-                    block_type=block.block_type,
-                    bbox=scale_bbox(block.bbox, scale_x, scale_y).clamp(page.width, page.height),
-                    order=block.order,
-                    source_label=block.source_label,
-                    origin=block.origin,
-                    ocr_policy=block.ocr_policy,
-                    note=block.note,
-                    uid=block.uid,
-                )
-                for block in snapshot.blocks
-            ),
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(page, next_snapshot)
-
-    def _local_analyze(self, page: Page) -> Page:
-        import cv2
-
-        engine = self._get_engine()
-        img = read_cv_image(page.display_image_path)
-        if img is None:
-            raise RuntimeError(f"Cannot read image: {page.display_image_path}")
-        page.height, page.width = img.shape[:2]
-        result = engine.predict(page.display_image_path)
-        items = self._unwrap_layout_items(result)
-        blocks: list[Block] = []
-        for i, item in enumerate(items):
-            raw_type = item.get("type", "unknown")
-            bbox_raw = item.get("bbox", [0, 0, 0, 0])
-            bbox = bbox_from_variant(bbox_raw, max_w=page.width, max_h=page.height)
-            if bbox is None:
-                continue
-            if bbox.area <= 0:
-                continue
-            block_type = map_paddle_label_to_block_type(raw_type)
-            normalized_type = normalize_paddle_label(raw_type)
-            block = Block(
-                block_type=block_type,
-                bbox=bbox,
-                order=i,
-                source_label=normalized_type,
-                origin=_layout_block_origin(
-                    source_engine="paddleocr-local",
-                    source_run_id=self._layout_batch_id,
-                    source_label=normalized_type,
-                    bbox=bbox,
-                    block_type=block_type,
-                    raw_index=i,
-                ),
-            )
-            set_layout_block_ocr_policy(block, default_ocr_policy_for_block(block))
-            blocks.append(block)
-        snapshot = LayoutSnapshot(
-            page_uid=page.uid,
-            artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
-            source_engine="paddleocr-local",
-            source_run_id=self._layout_batch_id,
-            blocks=tuple(
-                layout_block_snapshot_from_projection_block(block)
-                for block in blocks
-            ),
-        )
-        set_layout_snapshot_for_page(page, snapshot)
-        replace_page_layout_projection_from_snapshot(page, snapshot, candidate_blocks=blocks)
-        self._rescale_blocks_if_suspicious(page)
-        return page
-
-    # ── api mode ───────────────────────────────────────────────
-
-    def _api_analyze(self, page: Page) -> Page:
-        """Call the configured AiStudio model endpoint; raises on network/auth errors."""
-        from app.core.app_config import get_config
-
-        self._raise_if_cancelled()
-        cfg = get_config()
-        url = resolve_api_endpoint_for_role(
-            cfg["api_url"],
-            profile=FIXED_LAYOUT_PROFILE,
-            role="layout",
-        )
-        configured_timeout = max(1, int(cfg["api_timeout"]))
-        request_timeout = min(
-            max(10, configured_timeout),
-            LAYOUT_API_REQUEST_TIMEOUT_CAP,
-        )
-        poll_timeout = max(configured_timeout, LAYOUT_API_TIMEOUT_FLOOR)
-        token = cfg.get("api_token", "")
-
-        image_path = _display_image_path(page)
-        try:
-            image_bytes = image_path.read_bytes()
-        except OSError as exc:
-            raise RuntimeError(f"Cannot read image: {page.display_image_path}") from exc
-        if not image_bytes:
-            raise RuntimeError(f"Cannot read image: {page.display_image_path}")
-        if page.width <= 0 or page.height <= 0:
-            import cv2
-
-            img = read_cv_image(image_path)
-            if img is None:
-                raise RuntimeError(f"Cannot decode image dimensions: {page.display_image_path}")
-            page.height, page.width = img.shape[:2]
-        if not url:
-            raise RuntimeError("PaddleOCR-VL-1.6 版面分析 API 地址未配置")
-        if not is_paddle_v16_endpoint(url):
-            raise RuntimeError(f"版面分析只支持 PaddleOCR-VL-1.6 jobs API: {url}")
-        client = PaddleV16LayoutClient(
-            jobs_url=url,
-            token=token,
-            request_timeout=request_timeout,
-            poll_timeout=poll_timeout,
-            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
-            cancel_callback=self._cancel_callback,
-            status_callback=self._emit_status,
-        )
-        data = client.analyze_image_bytes(
-            image_bytes,
-            optional_payload=build_paddle_v16_optional_payload(),
-            batch_id=self._layout_batch_id,
-            filename=image_path.name or "page.png",
-        )
-        telemetry = (
-            data.get("paddle_v16", {})
-            .get("job", {})
-            .get("clientTelemetry", {})
-        )
-        if telemetry:
-            logger.info(
-                "Paddle VL1.6 page %s timing: total=%.2fs submit=%.2fs wait=%.2fs download=%.2fs network=%s batch=%s",
-                page.display_image_path,
-                float(telemetry.get("total_seconds") or 0.0),
-                float(telemetry.get("submit_seconds") or 0.0),
-                float(telemetry.get("wait_seconds") or 0.0),
-                float(telemetry.get("download_seconds") or 0.0),
-                telemetry.get("submit_network_mode") or telemetry.get("network_mode") or "",
-                telemetry.get("batch_id") or "",
-            )
-        _blocks, raw_overlay_items = self._extract_api_blocks(page, data)
-        self._write_paddle_raw_artifact(page, data)
-        # 注意：不再调用 _rescale_blocks_if_suspicious()——
-        # API 模式下坐标空间已在提取阶段通过 _detect_api_canvas_scale 修正，
-        # 再走通用启发式只会引入二次缩放。
-        if _truthy_config(cfg.get("layout_debug_artifacts", False)):
-            self._write_api_debug_response(page, data)
-            self._write_bbox_overlay(
-                page,
-                items=raw_overlay_items,
-                suffix=".layout-api-raw.png",
-                color=(0, 165, 255),
-            )
-            self._write_bbox_overlay(
-                page,
-                items=[(view.block_type.value, view.bbox) for view in iter_page_layout_block_views(page)],
-                suffix=".layout-app-overlay.png",
-                color=(80, 220, 80),
-            )
-        return page
-
-    # ── common interface ─────────────────────────────
-
-    def analyze(self, page: Page) -> Page:
-        from app.core.app_config import get_config
-        mode = get_config()["mode"]
-        if mode == "hanwang":
-            return self._api_analyze(page)
-        if mode == "api":
-            return self._api_analyze(page)
-        return self._local_analyze(page)
-
-    def analyze_pages(self, pages: List[Page]) -> List[Page]:
-        return [self.analyze(page) for page in pages]
+__all__ = ["LayoutAnalysisError", "LayoutAnalyzer"]

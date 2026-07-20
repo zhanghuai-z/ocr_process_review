@@ -44,7 +44,11 @@ def _block(
         bbox=BBox.from_xyxy(*xyxy),
         order=order,
         source_label=label or block_type.value,
-        origin=BlockOrigin(source_label=label or block_type.value, original_bbox=BBox.from_xyxy(*xyxy), original_kind=block_type),
+        origin=BlockOrigin(
+            vendor_label=label or block_type.value,
+            original_bbox=BBox.from_xyxy(*xyxy),
+            original_kind=block_type,
+        ),
         ocr_policy=policy,
     )
 
@@ -52,6 +56,7 @@ def _block(
 def _snapshot(*blocks: LayoutBlockSnapshot) -> LayoutSnapshot:
     return LayoutSnapshot(
         page_uid="page-1",
+        revision=1,
         artifact_uid="layout-run-1",
         source_engine="paddleocr-vl-1.6",
         source_run_id="layout-job-1",

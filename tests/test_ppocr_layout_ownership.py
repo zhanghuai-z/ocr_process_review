@@ -22,7 +22,7 @@ def _block(
         order=order,
         source_label=label,
         origin=BlockOrigin(
-            source_label=label,
+            vendor_label=label,
             original_bbox=box,
             original_kind=block_type,
         ),
@@ -33,6 +33,7 @@ def _block(
 def test_layout_ownership_uses_snapshot_blocks_and_structural_exclusion():
     snapshot = LayoutSnapshot(
         page_uid="page-1",
+        revision=1,
         artifact_uid="layout-1",
         source_engine="test",
         source_run_id="layout-run-1",
@@ -61,6 +62,7 @@ def test_layout_ownership_uses_snapshot_blocks_and_structural_exclusion():
 def test_layout_ownership_does_not_create_a_physical_group_for_vertical_text():
     snapshot = LayoutSnapshot(
         page_uid="page-1",
+        revision=1,
         artifact_uid="layout-1",
         source_engine="test",
         source_run_id="layout-run-1",

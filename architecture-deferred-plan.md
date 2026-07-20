@@ -1,5 +1,11 @@
 # 架构治理延期任务记录
 
+> 历史记录，已于 2026-07-20 被当前代码基线取代，不再作为实施指南。
+> 当前事实以 `ProjectSession` 、不可变记录、`LayoutSnapshot`、
+> append-only OCR observation、`ProofState` 和 `ExportProjectSnapshot` 为准。
+> 旧 `Page/Block/Line/Char` 对象树、`Page.blocks` 回写和 runtime layout projection
+> 已从生产代码移除。
+
 记录日期：2026-06-17
 
 ## 当前决定
@@ -122,4 +128,3 @@
 3. 增加 ratchet architecture test。
 4. 新建 `LayoutEditCommand/LayoutEditResult/LayoutEditService`。
 5. 只迁移 `LayoutPanel` 的一个最小编辑动作作为样板，再扩展到新增、删除、移动、改类型、合并。
-

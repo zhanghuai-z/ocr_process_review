@@ -1,5 +1,4 @@
 from app.export.base import ExporterBase
-from app.models import OcrProject
 
 
 def get_exporter(fmt: str) -> ExporterBase:

@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+import json
+from typing import Any, Iterable
 
-from app.core.bbox_extraction import bbox_from_variant
-from app.models.block_state import set_paddle_binding
-from app.models.ocr_observation import clear_block_ocr_line_observations, replace_block_ocr_line_observations
-from app.models.ocr_text_observation import create_ocr_text_line
 from app.core.paddle_labels import is_hanwang_skip_label, normalize_paddle_label
 from app.core.paddle_line_routing import (
     block_bbox_xyxy,
@@ -19,13 +16,10 @@ from app.core.paddle_line_routing import (
     route_subblocks_for_block,
     vertical_overlap_ratio,
 )
-from app.core.normalized_layout_artifact import LayoutRegion, normalized_layout_regions
-from app.models import BBox, Block, BlockOrigin, BlockType, OcrPolicy
-from app.models.layout_block_state import (
-    set_layout_block_note,
-    set_layout_block_ocr_policy,
-    set_layout_block_source_label,
-)
+from app.core.paddle_response import parsing_records_from_item, result_items
+from app.models.enums import BlockType, OcrPolicy
+from app.models.geometry import BBox
+from app.models.paddle_artifact import PaddleArtifact
 
 
 XYXY = tuple[int, int, int, int]
@@ -243,22 +237,40 @@ class PaddleManualBinding:
 
 
 class PaddleArtifactIndex:
-    """Index Paddle parent truth and geometry candidates for a page."""
+    """Index immutable Paddle facts for manual layout binding."""
 
-    def __init__(self, page_width: int, page_height: int, records: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        artifact: PaddleArtifact,
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> None:
+        if not isinstance(artifact, PaddleArtifact):
+            raise TypeError("PaddleArtifactIndex requires PaddleArtifact")
+        if isinstance(page_width, bool) or not isinstance(page_width, int) or page_width <= 0:
+            raise ValueError("page_width must be positive")
+        if isinstance(page_height, bool) or not isinstance(page_height, int) or page_height <= 0:
+            raise ValueError("page_height must be positive")
+        self.artifact = artifact
+        self.artifact_uid = artifact.uid
         self.page_width = page_width
         self.page_height = page_height
         self.parents: list[PaddleParentArtifact] = []
         self.formula_geometry: list[PaddleGeometryArtifact] = []
-        self._build(records)
+        self._build(_artifact_layout_records(artifact))
 
     @classmethod
-    def from_page(cls, page) -> "PaddleArtifactIndex":
-        index = cls(page.width, page.height, [])
-        index._build_regions(list(normalized_layout_regions(page)))
-        return index
+    def from_artifact(
+        cls,
+        artifact: PaddleArtifact,
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> "PaddleArtifactIndex":
+        return cls(artifact, page_width=page_width, page_height=page_height)
 
-    def _build(self, records: list[dict[str, Any]]) -> None:
+    def _build(self, records: Iterable[dict[str, Any]]) -> None:
         for index, record in enumerate(records):
             label = route_authority_label(record)
             bbox = block_bbox_xyxy(record, self.page_width, self.page_height)
@@ -271,19 +283,6 @@ class PaddleArtifactIndex:
             )
             self.parents.append(parent)
             self._collect_formula_geometry(parent, record)
-
-    def _build_regions(self, regions: list[LayoutRegion]) -> None:
-        for region in regions:
-            raw = dict(region.raw or {})
-            parent = PaddleParentArtifact(
-                index=region.index,
-                label=region.label,
-                bbox=region.bbox,
-                text=region.text,
-                raw=raw,
-            )
-            self.parents.append(parent)
-            self._collect_formula_geometry_from_region(parent, region)
 
     def _collect_formula_geometry(self, parent: PaddleParentArtifact, record: dict[str, Any]) -> None:
         subblocks = [
@@ -310,40 +309,6 @@ class PaddleArtifactIndex:
                     bbox=tuple(subblock["bbox"]),
                     parent_index=parent.index,
                     raw=dict(subblock.get("raw") or {}),
-                    text=text,
-                    span_index=span_index,
-                )
-            )
-
-    def _collect_formula_geometry_from_region(
-        self,
-        parent: PaddleParentArtifact,
-        region: LayoutRegion,
-    ) -> None:
-        subblocks = [
-            subregion
-            for subregion in region.subregions
-            if is_formula_label(subregion.label)
-        ]
-        spans = parent.formula_spans
-        ordered = _reading_order([
-            {"bbox": subregion.bbox, "subblock": subregion}
-            for subregion in subblocks
-        ])
-        count_matches = len(spans) == len(ordered)
-        for local_index, item in enumerate(ordered):
-            subregion = item["subblock"]
-            text = str(subregion.text or "")
-            span_index = local_index if local_index < len(spans) else -1
-            if not text and count_matches and span_index >= 0:
-                text = spans[span_index]
-            self.formula_geometry.append(
-                PaddleGeometryArtifact(
-                    kind="formula",
-                    label=str(subregion.label),
-                    bbox=tuple(subregion.bbox),
-                    parent_index=parent.index,
-                    raw=dict(subregion.raw or {}),
                     text=text,
                     span_index=span_index,
                 )
@@ -563,40 +528,17 @@ class PaddleArtifactIndex:
         )
 
 
-def apply_paddle_binding_to_block(block: Block, binding: PaddleManualBinding) -> None:
-    """Persist a binding on a layout block without changing its geometry."""
-    existing_origin = block.origin
-    block.origin = BlockOrigin(
-        created_by=existing_origin.created_by if existing_origin else block.source.value,
-        source_engine=existing_origin.source_engine if existing_origin else "paddleocr-vl",
-        source_run_id=existing_origin.source_run_id if existing_origin else "",
-        source_label=binding.source_label or (existing_origin.source_label if existing_origin else ""),
-        source_confidence=binding.score if binding.score else (existing_origin.source_confidence if existing_origin else None),
-        original_bbox=existing_origin.original_bbox if existing_origin and existing_origin.original_bbox else block.bbox,
-        original_kind=existing_origin.original_kind if existing_origin and existing_origin.original_kind else block.block_type,
-        raw_artifact_uid=existing_origin.raw_artifact_uid if existing_origin else "",
-        raw_json_path=existing_origin.raw_json_path if existing_origin else "",
-        raw_index=binding.parent_index if binding.parent_index >= 0 else (existing_origin.raw_index if existing_origin else None),
-    )
-    set_paddle_binding(block, binding.to_payload())
-    set_layout_block_source_label(block, binding.source_label or block.source_label or block.block_type.value)
-    set_layout_block_ocr_policy(block, binding.ocr_policy)
-    if binding.text:
-        replace_block_ocr_line_observations(block.uid, [
-            create_ocr_text_line(
-                text=binding.text,
-                confidence=0.0,
-                bbox=block.bbox,
-                source_text=binding.text,
-                review_flags=list(binding.review_flags),
-            )
-        ])
-    else:
-        clear_block_ocr_line_observations(block.uid)
-    if binding.status == BINDING_EMPTY_REVIEW:
-        set_layout_block_note(block, binding.source)
-    elif binding.status == BINDING_AMBIGUOUS:
-        set_layout_block_note(block, "manual_binding_ambiguous")
+def _artifact_layout_records(artifact: PaddleArtifact) -> tuple[dict[str, Any], ...]:
+    try:
+        payload = json.loads(artifact.payload_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Paddle artifact payload is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Paddle layout artifact payload must be an object")
+    records: list[dict[str, Any]] = []
+    for item in result_items(payload, "layoutParsingResults"):
+        records.extend(dict(record) for record in parsing_records_from_item(item))
+    return tuple(records)
 
 
 __all__ = [
@@ -611,5 +553,4 @@ __all__ = [
     "PaddleGeometryArtifact",
     "PaddleManualBinding",
     "PaddleParentArtifact",
-    "apply_paddle_binding_to_block",
 ]

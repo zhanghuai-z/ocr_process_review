@@ -6,13 +6,14 @@ from typing import Any
 import numpy as np
 
 from app.core.layout_scope import layout_snapshot_fingerprint, page_image_hash
-from app.core.normalized_layout_artifact import normalized_layout_artifact_from_page
 from app.core.paddle_layout_schema import normalize_paddle_layout_record
 from app.core.paddle_response import parsing_records_from_item, result_items
 from app.core.paddle_v16_client import PaddleV16LayoutClient, build_paddle_v16_optional_payload
-from app.models import BlockSource, BlockType, OcrPolicy, Page
+from app.models.enums import BlockSource, BlockType, OcrPolicy
 from app.models.entity_id import ensure_entity_uid
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
+from app.models.paddle_artifact import PaddleArtifact
+from app.models.project_session import PageRecord
 from app.models.ocr_routing_observation import (
     BlockVlObservation,
     BlockVlObservationStatus,
@@ -35,19 +36,24 @@ class BlockVlObservationRefreshError(RuntimeError):
 
 def acquire_routing_observation_bundle(
     *,
-    page: Page,
+    page: PageRecord,
     snapshot: LayoutSnapshot,
+    artifact: PaddleArtifact,
     image_bgr: np.ndarray,
     prepass: object,
     vl_client: PaddleV16LayoutClient,
 ) -> RoutingObservationBundle[object]:
     """Acquire all external observations against one immutable layout scope."""
-    if snapshot.page_uid != page.uid:
-        raise ValueError("routing observation snapshot belongs to another page")
+    if snapshot.page_uid != page.uid or artifact.page_uid != page.uid:
+        raise ValueError("routing observations belong to different pages")
+    if artifact.project_uid != page.project_uid:
+        raise ValueError("routing artifact belongs to another project")
+    if snapshot.artifact_uid != artifact.uid:
+        raise ValueError("routing snapshot does not reference the supplied Paddle artifact")
     image_hash = page_image_hash(image_bgr)
     layout_fingerprint = layout_snapshot_fingerprint(snapshot)
     run_uid = ensure_entity_uid("", "ocrrun")
-    normalized_original = normalized_layout_artifact_from_page(page)
+    original_records = _artifact_layout_records(artifact)
     observations: list[BlockVlObservation] = []
     for block in snapshot.blocks:
         if not _requires_text_observation(block):
@@ -55,9 +61,10 @@ def acquire_routing_observation_bundle(
         original = _observation_from_original_artifact(
             page=page,
             block=block,
+            artifact=artifact,
             image_hash=image_hash,
             layout_fingerprint=layout_fingerprint,
-            normalized_original=normalized_original,
+            original_records=original_records,
         )
         if original is not None:
             observations.append(original)
@@ -87,36 +94,40 @@ def _requires_text_observation(block: LayoutBlockSnapshot) -> bool:
 
 def _observation_from_original_artifact(
     *,
-    page: Page,
+    page: PageRecord,
     block: LayoutBlockSnapshot,
+    artifact: PaddleArtifact,
     image_hash: str,
     layout_fingerprint: str,
-    normalized_original: Any,
+    original_records: tuple[dict[str, Any], ...],
 ) -> BlockVlObservation | None:
     origin = block.origin
     if (
         origin is None
+        or block.authorship != BlockSource.AUTO_LAYOUT
         or origin.created_by != BlockSource.AUTO_LAYOUT.value
-        or origin.raw_artifact_uid != normalized_original.artifact_uid
+        or origin.raw_artifact_uid != artifact.uid
         or origin.raw_index is None
         or origin.original_bbox is None
         or origin.original_bbox.to_xyxy() != block.bbox.to_xyxy()
         or origin.original_kind != block.block_type
-        or str(origin.source_label or "") != str(block.source_label or "")
     ):
         return None
-    region = next(
-        (candidate for candidate in normalized_original.regions if candidate.index == origin.raw_index),
-        None,
+    if origin.raw_index >= len(original_records):
+        return None
+    region = normalize_paddle_layout_record(
+        original_records[origin.raw_index],
+        page_width=page.width,
+        page_height=page.height,
     )
-    if region is None or region.bbox != block.bbox.to_xyxy():
+    if region is None or region.bbox.to_xyxy() != block.bbox.to_xyxy():
         return None
     text_regions = () if not region.text else (
         BlockVlTextRegion(
-            index=region.index,
+            index=origin.raw_index,
             label=region.label,
             text=region.text,
-            bbox=region.bbox,
+            bbox=region.bbox.to_xyxy(),
         ),
     )
     return BlockVlObservation(
@@ -131,16 +142,16 @@ def _observation_from_original_artifact(
             else BlockVlObservationStatus.EMPTY
         ),
         regions=text_regions,
-        source_artifact_uid=normalized_original.artifact_uid,
+        source_artifact_uid=artifact.uid,
         source_run_id=origin.source_run_id,
-        raw_response_ref=normalized_original.artifact_uid,
+        raw_response_ref=artifact.uid,
         attempts=0,
     )
 
 
 def _refresh_block_observation(
     *,
-    page: Page,
+    page: PageRecord,
     block: LayoutBlockSnapshot,
     image_bgr: np.ndarray,
     image_hash: str,
@@ -194,6 +205,18 @@ def _refresh_block_observation(
         raw_response_ref=raw_response_ref,
         attempts=attempts,
     )
+
+
+def _artifact_layout_records(artifact: PaddleArtifact) -> tuple[dict[str, Any], ...]:
+    import json
+
+    payload = json.loads(artifact.payload_json)
+    if not isinstance(payload, dict):
+        raise ValueError("Paddle layout artifact must contain an object response")
+    records: list[dict[str, Any]] = []
+    for item in result_items(payload, "layoutParsingResults"):
+        records.extend(dict(record) for record in parsing_records_from_item(item))
+    return tuple(records)
 
 
 def _validated_text_regions_from_crop_response(

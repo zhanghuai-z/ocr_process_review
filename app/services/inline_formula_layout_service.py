@@ -1,37 +1,25 @@
-"""Adopt Paddle inline-formula subregions into layout truth."""
+"""Derive inline-formula layout edits from immutable Paddle artifacts."""
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
-from typing import Iterable
+from dataclasses import dataclass, replace
+from typing import Any, Iterable
 
-from app.core.inline_formula_edit_state import (
-    handled_inline_formula_origin_bboxes,
-    inline_formula_origin_bbox,
-)
-from app.core.normalized_layout_artifact import (
-    LayoutRegion,
-    LayoutSubregion,
-    layout_region_route_record,
-    normalized_layout_regions,
-)
-from app.core.ocr_ir import is_formula_marker_token
+from app.core.text_classification import is_formula_marker_token
 from app.core.paddle_labels import normalize_paddle_label
-from app.core.paddle_line_routing import block_text, formula_texts_by_subblock_bbox
-from app.models import (
-    BBox,
-    BlockOrigin,
-    BlockSource,
-    BlockType,
-    LayoutBlockSnapshot,
-    LayoutSnapshot,
-    OcrPolicy,
-    Page,
+from app.core.paddle_line_routing import block_text, route_subblocks_for_block
+from app.core.paddle_response import parsing_records_from_item, result_items
+from app.models.enums import BlockSource, BlockType, OcrPolicy
+from app.models.geometry import BBox
+from app.models.layout_origin import BlockOrigin
+from app.models.layout_snapshot import LayoutSnapshot
+from app.models.paddle_artifact import PaddleArtifact
+from app.services.layout_edit_service import (
+    LayoutEditCommand,
+    LayoutEditResult,
+    LayoutEditService,
 )
-from app.models.layout_block_view import current_layout_snapshot, iter_page_layout_block_views
-from app.models.layout_snapshot_projection import replace_page_layout_projection_from_snapshot
-from app.models.layout_snapshot_store import set_layout_snapshot_for_page
-from app.services.layout_routing_plan import routing_plan_for_block_record
 
 
 INLINE_FORMULA_SPAN_RE = re.compile(
@@ -40,149 +28,219 @@ INLINE_FORMULA_SPAN_RE = re.compile(
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class InlineFormulaRegion:
+    """One formula geometry fact addressed within a Paddle artifact."""
+
+    artifact_uid: str
     parent_index: int
-    parent: LayoutRegion
-    subregion: LayoutSubregion
+    subregion_index: int
+    parent_label: str
+    label: str
     bbox: BBox
+    text: str = ""
 
 
 class InlineFormulaLayoutService:
-    """Promote normalized inline formulas at the layout-adoption boundary."""
+    """Produce pure snapshot edits; persistence belongs to the caller."""
 
-    def adopt_page(self, page: Page) -> int:
-        if page.raw_layout_artifact is None:
-            return 0
-        snapshot = current_layout_snapshot(page)
-        handled_origins = handled_inline_formula_origin_bboxes(page)
-        existing_origins = self._existing_origins(page)
-        next_blocks = list(snapshot.blocks)
-        created = 0
-        for region in self.iter_regions(page):
-            origin = region.bbox.to_xyxy()
-            if origin in handled_origins or origin in existing_origins:
-                continue
-            next_blocks.append(self._snapshot_block(page, region, order=len(next_blocks)))
-            existing_origins.add(origin)
-            created += 1
-        if not created:
-            return 0
-        next_snapshot = LayoutSnapshot(
-            page_uid=snapshot.page_uid,
-            artifact_uid=snapshot.artifact_uid,
-            source_engine=snapshot.source_engine,
-            source_run_id=snapshot.source_run_id,
-            blocks=tuple(next_blocks),
-        )
-        set_layout_snapshot_for_page(page, next_snapshot)
-        replace_page_layout_projection_from_snapshot(page, next_snapshot)
-        return created
-
-    def iter_regions(self, page: Page) -> Iterable[InlineFormulaRegion]:
-        for parent in normalized_layout_regions(page):
-            for subregion in parent.subregions:
-                if normalize_paddle_label(subregion.label) != "inline_formula":
-                    continue
-                bbox = BBox.from_xyxy(*subregion.bbox).clamp(page.width, page.height)
-                formula_text = self._subregion_text(page, parent, bbox)
-                if formula_text and is_formula_marker_token(formula_text):
-                    continue
-                yield InlineFormulaRegion(parent.index, parent, subregion, bbox)
-
-    @staticmethod
-    def _snapshot_block(
-        page: Page,
-        region: InlineFormulaRegion,
-        *,
-        order: int,
-    ) -> LayoutBlockSnapshot:
-        return LayoutBlockSnapshot(
-            block_type=BlockType.EQUATION,
-            bbox=region.bbox,
-            order=order,
-            source_label="inline_formula",
-            origin=BlockOrigin(
-                created_by=BlockSource.AUTO_LAYOUT.value,
-                source_engine="paddleocr-vl",
-                source_label="inline_formula",
-                original_bbox=region.bbox,
-                original_kind=BlockType.EQUATION,
-                raw_artifact_uid=page.raw_layout_artifact.uid if page.raw_layout_artifact else "",
-                raw_index=region.parent_index,
-            ),
-            ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
-        )
-
-    def _subregion_text(self, page: Page, parent: LayoutRegion, bbox: BBox) -> str:
-        target = bbox.to_xyxy()
-        marker_text = self._marker_text_from_parent_order(page, parent, target)
-        if marker_text:
-            return marker_text
-        parent_raw = layout_region_route_record(parent)
-        plan = routing_plan_for_block_record(parent_raw, page.width, page.height)
-        for route in plan.lines:
-            for segment in route.segments:
-                if segment.kind != "formula":
-                    continue
-                if self._same_route_span(segment.bbox, target):
-                    return segment.text
-        for formula_bbox, text in formula_texts_by_subblock_bbox(
-            parent_raw,
-            page.width,
-            page.height,
-        ).items():
-            if self._same_route_span(formula_bbox, target):
-                return text
-        return ""
-
-    def _marker_text_from_parent_order(
+    def iter_regions(
         self,
-        page: Page,
-        parent: LayoutRegion,
-        target: tuple[int, int, int, int],
-    ) -> str:
-        source_text = parent.text or block_text(dict(parent.raw or {}))
-        spans = [match.group(0) for match in INLINE_FORMULA_SPAN_RE.finditer(source_text)]
-        formula_bboxes = sorted(
-            (
-                BBox.from_xyxy(*subregion.bbox).clamp(page.width, page.height).to_xyxy()
-                for subregion in parent.subregions
-                if normalize_paddle_label(subregion.label) == "inline_formula"
-            ),
-            key=lambda item: (item[1], item[0]),
+        artifact: PaddleArtifact,
+        *,
+        page_width: int,
+        page_height: int,
+    ) -> tuple[InlineFormulaRegion, ...]:
+        if not isinstance(artifact, PaddleArtifact):
+            raise TypeError("inline formula regions require PaddleArtifact")
+        _validate_dimensions(page_width, page_height)
+        records = _artifact_layout_records(artifact)
+        regions: list[InlineFormulaRegion] = []
+        for parent_index, record in enumerate(records):
+            parent_label = str(record.get("block_label") or record.get("label") or "")
+            subregions = route_subblocks_for_block(record, page_width, page_height)
+            formula_subregions = [
+                (index, value)
+                for index, value in enumerate(subregions)
+                if normalize_paddle_label(value.get("label")) == "inline_formula"
+            ]
+            marker_spans = _formula_spans(block_text(record))
+            for formula_index, (subregion_index, value) in enumerate(formula_subregions):
+                bbox = BBox.from_xyxy(*value["bbox"]).clamp(page_width, page_height)
+                if bbox.w <= 0 or bbox.h <= 0:
+                    continue
+                text = str(value.get("text") or "")
+                if not text and formula_index < len(marker_spans):
+                    text = marker_spans[formula_index]
+                if text and is_formula_marker_token(text):
+                    continue
+                regions.append(
+                    InlineFormulaRegion(
+                        artifact_uid=artifact.uid,
+                        parent_index=parent_index,
+                        subregion_index=subregion_index,
+                        parent_label=parent_label,
+                        label=str(value.get("label") or "inline_formula"),
+                        bbox=bbox,
+                        text=text,
+                    )
+                )
+        return tuple(regions)
+
+    def snapshot_edit_commands(
+        self,
+        snapshot: LayoutSnapshot,
+        artifact: PaddleArtifact,
+        *,
+        page_width: int,
+        page_height: int,
+        handled_bboxes: Iterable[tuple[int, int, int, int]] = (),
+    ) -> tuple[LayoutEditCommand, ...]:
+        """Return sequential edit intents without changing ``snapshot``."""
+
+        _validate_snapshot_artifact(snapshot, artifact)
+        handled = {tuple(int(item) for item in bbox) for bbox in handled_bboxes}
+        existing = {
+            block.bbox.to_xyxy()
+            for block in snapshot.blocks
+            if normalize_paddle_label(block.source_label) == "inline_formula"
+        }
+        existing.update(
+            block.origin.original_bbox.to_xyxy()
+            for block in snapshot.blocks
+            if block.origin.raw_artifact_uid == artifact.uid
+            and block.origin.original_bbox is not None
         )
-        for index, formula_bbox in enumerate(formula_bboxes):
-            if index >= len(spans) or not self._same_route_span(formula_bbox, target):
+        commands: list[LayoutEditCommand] = []
+        next_revision = snapshot.revision
+        for region in self.iter_regions(
+            artifact,
+            page_width=page_width,
+            page_height=page_height,
+        ):
+            bbox = region.bbox.to_xyxy()
+            if bbox in handled or bbox in existing:
                 continue
-            return spans[index] if is_formula_marker_token(spans[index]) else ""
-        return ""
+            commands.append(
+                LayoutEditCommand.create_block(
+                    snapshot.page_uid,
+                    next_revision,
+                    region.bbox,
+                    BlockType.EQUATION,
+                    normalize_paddle_label(region.label) or "inline_formula",
+                    new_block_uid=(
+                        f"inline_formula_{artifact.uid}_"
+                        f"{region.parent_index}_{region.subregion_index}"
+                    ),
+                )
+            )
+            next_revision += 1
+            existing.add(bbox)
+        return tuple(commands)
 
-    @staticmethod
-    def _same_route_span(
-        route_bbox: tuple[int, int, int, int],
-        raw_bbox: tuple[int, int, int, int],
-    ) -> bool:
-        if route_bbox == raw_bbox:
-            return True
-        if route_bbox[0] != raw_bbox[0] or route_bbox[2] != raw_bbox[2]:
-            return False
-        overlap = max(0, min(route_bbox[3], raw_bbox[3]) - max(route_bbox[1], raw_bbox[1]))
-        denom = max(1, min(route_bbox[3] - route_bbox[1], raw_bbox[3] - raw_bbox[1]))
-        return overlap / denom >= 0.5
+    def apply_snapshot_edits(
+        self,
+        snapshot: LayoutSnapshot,
+        artifact: PaddleArtifact,
+        *,
+        page_width: int,
+        page_height: int,
+        handled_bboxes: Iterable[tuple[int, int, int, int]] = (),
+    ) -> tuple[LayoutEditResult, ...]:
+        """Apply generated commands through ``LayoutEditService`` in memory."""
 
-    @staticmethod
-    def _existing_origins(page: Page) -> set[tuple[int, int, int, int]]:
-        origins: set[tuple[int, int, int, int]] = set()
-        for view in iter_page_layout_block_views(page):
-            block = view.runtime_block
-            if block is not None:
-                origin = inline_formula_origin_bbox(block)
-                if origin is not None:
-                    origins.add(origin)
-            if normalize_paddle_label(view.source_label) == "inline_formula":
-                origins.add(view.bbox.to_xyxy())
-        return origins
+        commands = self.snapshot_edit_commands(
+            snapshot,
+            artifact,
+            page_width=page_width,
+            page_height=page_height,
+            handled_bboxes=handled_bboxes,
+        )
+        editor = LayoutEditService()
+        current = snapshot
+        results: list[LayoutEditResult] = []
+        regions_by_bbox = {
+            region.bbox.to_xyxy(): region
+            for region in self.iter_regions(
+                artifact,
+                page_width=page_width,
+                page_height=page_height,
+            )
+        }
+        for command in commands:
+            result = editor.apply(current, command)
+            created_uid = result.affected_block_uids[0]
+            created = next(block for block in result.snapshot.blocks if block.uid == created_uid)
+            region = regions_by_bbox[created.bbox.to_xyxy()]
+            enriched = replace(
+                created,
+                authorship=BlockSource.AUTO_LAYOUT,
+                ocr_policy=OcrPolicy.PRESERVE_AS_FORMULA,
+                origin=BlockOrigin(
+                    created_by=BlockSource.AUTO_LAYOUT.value,
+                    source_engine=artifact.source_engine,
+                    source_run_id=artifact.source_run_id,
+                    vendor_label=region.label,
+                    original_bbox=region.bbox,
+                    original_kind=BlockType.EQUATION,
+                    raw_artifact_uid=artifact.uid,
+                    raw_index=region.parent_index,
+                ),
+            )
+            next_snapshot = replace(
+                result.snapshot,
+                source_engine=artifact.source_engine,
+                source_run_id=artifact.source_run_id,
+                blocks=tuple(
+                    enriched if block.uid == created_uid else block
+                    for block in result.snapshot.blocks
+                ),
+            )
+            result = replace(result, snapshot=next_snapshot)
+            results.append(result)
+            current = next_snapshot
+        return tuple(results)
 
 
-__all__ = ["InlineFormulaLayoutService", "InlineFormulaRegion"]
+def _validate_dimensions(page_width: int, page_height: int) -> None:
+    if isinstance(page_width, bool) or not isinstance(page_width, int) or page_width <= 0:
+        raise ValueError("page_width must be positive")
+    if isinstance(page_height, bool) or not isinstance(page_height, int) or page_height <= 0:
+        raise ValueError("page_height must be positive")
+
+
+def _validate_snapshot_artifact(
+    snapshot: LayoutSnapshot,
+    artifact: PaddleArtifact,
+) -> None:
+    if not isinstance(snapshot, LayoutSnapshot):
+        raise TypeError("inline formula edits require LayoutSnapshot")
+    if not isinstance(artifact, PaddleArtifact):
+        raise TypeError("inline formula edits require PaddleArtifact")
+    if snapshot.page_uid != artifact.page_uid:
+        raise ValueError("layout snapshot and Paddle artifact belong to different pages")
+    if snapshot.artifact_uid != artifact.uid:
+        raise ValueError("layout snapshot does not reference the supplied Paddle artifact")
+
+
+def _artifact_layout_records(artifact: PaddleArtifact) -> tuple[dict[str, Any], ...]:
+    try:
+        payload = json.loads(artifact.payload_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Paddle artifact payload is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Paddle layout artifact payload must be an object")
+    records: list[dict[str, Any]] = []
+    for item in result_items(payload, "layoutParsingResults"):
+        records.extend(dict(record) for record in parsing_records_from_item(item))
+    return tuple(records)
+
+
+def _formula_spans(text: str) -> list[str]:
+    return [match.group(0) for match in INLINE_FORMULA_SPAN_RE.finditer(text or "")]
+
+
+__all__ = [
+    "InlineFormulaLayoutService",
+    "InlineFormulaRegion",
+]

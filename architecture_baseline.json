@@ -1,45 +1,13 @@
 {
   "core_to_engines": [],
   "core_qt_imports": [
-    "app.core.app_config -> PySide6.QtCore",
-    "app.core.layout_analyzer -> PySide6.QtCore",
-    "app.core.page_image_cache -> PySide6.QtCore",
-    "app.core.page_image_cache -> PySide6.QtGui"
+    "app.core.app_config -> PySide6.QtCore"
   ],
   "engines_to_core": [
-    "app.engines.hanwang.micro_recblock -> app.core.api_profiles",
-    "app.engines.hanwang.micro_recblock -> app.core.app_config",
-    "app.engines.hanwang.micro_recblock -> app.core.bbox_extraction",
-    "app.engines.hanwang.micro_recblock -> app.core.block_attributes",
-    "app.engines.hanwang.micro_recblock -> app.core.block_payload",
-    "app.engines.hanwang.micro_recblock -> app.core.inline_formula_edit_state",
-    "app.engines.hanwang.micro_recblock -> app.core.latin_span_recovery",
     "app.engines.hanwang.micro_recblock -> app.core.logging",
-    "app.engines.hanwang.micro_recblock -> app.core.ocr_dispatch_policy",
-    "app.engines.hanwang.micro_recblock -> app.core.ocr_line_hints",
-    "app.engines.hanwang.micro_recblock -> app.core.paddle_artifact_index",
     "app.engines.hanwang.micro_recblock -> app.core.paddle_labels",
     "app.engines.hanwang.micro_recblock -> app.core.paddle_line_routing",
-    "app.engines.hanwang.micro_recblock -> app.core.paddle_v16_client",
-    "app.engines.hanwang.micro_recblock -> app.core.proof_line_facts",
-    "app.engines.hanwang.micro_recblock -> app.core.proof_status",
-    "app.engines.hanwang.micro_recblock -> app.core.raw_ocr_artifact",
-    "app.engines.hanwang.native_bridge -> app.core.logging",
-    "app.engines.hanwang.translator -> app.core.ocr_ir",
-    "app.engines.hanwang.translator -> app.core.ocr_proof_projection",
-    "app.engines.hanwang_layout_engine -> app.core.logging",
-    "app.engines.real_ocr_adapter -> app.core.api_http",
-    "app.engines.real_ocr_adapter -> app.core.api_image_codec",
-    "app.engines.real_ocr_adapter -> app.core.api_profiles",
-    "app.engines.real_ocr_adapter -> app.core.app_config",
-    "app.engines.real_ocr_adapter -> app.core.bbox_extraction",
-    "app.engines.real_ocr_adapter -> app.core.bbox_utils",
-    "app.engines.real_ocr_adapter -> app.core.logging",
-    "app.engines.real_ocr_adapter -> app.core.ocr_ir",
-    "app.engines.real_ocr_adapter -> app.core.ocr_ir_builder",
-    "app.engines.real_ocr_adapter -> app.core.ocr_proof_projection",
-    "app.engines.real_ocr_adapter -> app.core.paddle_response",
-    "app.engines.real_ocr_adapter -> app.core.proof_status"
+    "app.engines.hanwang.native_bridge -> app.core.logging"
   ],
   "models_to_core": [],
   "ui_to_engines": []

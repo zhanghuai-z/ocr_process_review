@@ -9,14 +9,14 @@ from lxml import etree
 from app.export.base import ExporterBase
 from app.export.ir import ExportDocument
 from app.export.ir_builder import build_export_ir
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 
 class XmlExporter(ExporterBase):
     """Write the XML authority archive for Export IR semantics."""
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "xml")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "xml")
         root = _build_xml_archive(document)
         tree = etree.ElementTree(root)
         tree.write(

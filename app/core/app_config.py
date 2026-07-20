@@ -38,13 +38,6 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 
     # 校对质量评测（quality probe）
     # 这些键供 SamplerConfig.from_app_config 读取。改完无需重启即生效。
-    "quality_probe_sand_count": 25,        # 每 quality_probe_sand_unit_chars 个可切图字符投放几个沙子
-    "quality_probe_sand_unit_chars": 1000, # 1000=每千字；10000=每万字
-    "quality_probe_min_total": 8,
-    "quality_probe_max_total": 35,
-    "quality_probe_max_per_page": 2,
-    "quality_probe_max_per_line": 1,
-    "quality_probe_auto_enable": True,     # 打开有 OCR 数据的项目时是否自动启用评测
 }
 
 

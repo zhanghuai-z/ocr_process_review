@@ -1,27 +1,31 @@
-"""Structured accessors for Paddle/PP-VL block attributes."""
+"""Structured attributes for immutable layout blocks.
+
+Layout semantics are derived from the adopted snapshot.  Vendor payloads and
+runtime projections are intentionally outside this boundary.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from app.adapters.paddle import map_paddle_label_to_block_type
 from app.core.paddle_labels import normalize_paddle_label
-from app.models import Block, BlockType
-from app.models.layout_block_state import is_user_authored_layout_block
+from app.models.enums import BlockType
+from app.models.layout_snapshot import LayoutBlockSnapshot
 
 
 def normalize_source_label(label: object) -> str:
     return normalize_paddle_label(label)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BlockAttributes:
-    """Canonical view of layout attributes for UI/proof/export consumers."""
+    """Canonical, read-only attributes of one adopted layout block."""
 
     block_type: BlockType
     source_label: str = ""
     current_label: str = ""
     origin_label: str = ""
-    raw_label: str = ""
     semantic_label: str = ""
     semantic_block_type: BlockType = BlockType.UNKNOWN
 
@@ -52,88 +56,67 @@ class BlockAttributes:
         }
 
     def to_export_dict(self) -> dict[str, Any]:
-        payload = {
+        return {
             "block_type": self.block_type.value,
             "source_label": self.source_label,
             "current_label": self.current_label,
             "origin_label": self.origin_label,
-            "raw_label": self.raw_label,
             "semantic_label": self.semantic_label,
             "semantic_block_type": self.semantic_block_type.value,
         }
-        return payload
 
 
-def block_attributes(block: Block) -> BlockAttributes:
-    origin = getattr(block, "origin", None)
-    origin_label = normalize_source_label(str(getattr(origin, "source_label", "") or ""))
-    raw_label = ""
+def block_attributes(block: LayoutBlockSnapshot) -> BlockAttributes:
+    """Return attributes for an immutable ``LayoutBlockSnapshot`` only."""
+
+    if not isinstance(block, LayoutBlockSnapshot):
+        raise TypeError("block attributes require LayoutBlockSnapshot")
     current_label = normalize_source_label(block.source_label or block.block_type.value)
-    source_label = origin_label or current_label
-    user_authored_label = is_user_authored_layout_block(block)
-    semantic_source = (
-        current_label
-        if user_authored_label
-        else _best_auto_semantic_label(
-            block.block_type,
-            origin_label=origin_label,
-            current_label=current_label,
-        )
-    )
-    semantic_label = normalize_source_label(semantic_source or block.block_type.value)
+    origin_label = normalize_source_label(block.origin.vendor_label)
+    semantic_label = current_label or origin_label or block.block_type.value
     semantic_block_type = map_paddle_label_to_block_type(semantic_label)
-    if semantic_block_type == BlockType.UNKNOWN:
+    if semantic_block_type is BlockType.UNKNOWN:
         semantic_block_type = block.block_type
     return BlockAttributes(
         block_type=block.block_type,
-        source_label=source_label,
+        source_label=current_label,
         current_label=current_label,
         origin_label=origin_label,
-        raw_label=raw_label,
-        semantic_label=semantic_label,
+        semantic_label=normalize_source_label(semantic_label),
         semantic_block_type=semantic_block_type,
     )
 
 
-def semantic_block_type(block: Block) -> BlockType:
+def semantic_block_type(block: LayoutBlockSnapshot) -> BlockType:
     return block_attributes(block).semantic_block_type
 
 
-def _best_auto_semantic_label(
-    block_type: BlockType,
-    *,
-    origin_label: str,
-    current_label: str,
-) -> str:
-    origin_kind = map_paddle_label_to_block_type(origin_label)
-    if origin_label and origin_kind not in {BlockType.UNKNOWN, block_type}:
-        return origin_label
-    return origin_label or current_label
-
-
-def semantic_label(block: Block) -> str:
+def semantic_label(block: LayoutBlockSnapshot) -> str:
     return block_attributes(block).normalized_semantic_label
 
 
-def current_source_label(block: Block, *, fallback_to_type: bool = True) -> str:
-    label = normalize_source_label(str(getattr(block, "source_label", "") or ""))
+def current_source_label(
+    block: LayoutBlockSnapshot,
+    *,
+    fallback_to_type: bool = True,
+) -> str:
+    if not isinstance(block, LayoutBlockSnapshot):
+        raise TypeError("current source label requires LayoutBlockSnapshot")
+    label = normalize_source_label(block.source_label)
     if label or not fallback_to_type:
         return label
     return normalize_source_label(block.block_type.value)
 
 
-def origin_source_label(block: Block) -> str:
-    origin = getattr(block, "origin", None)
-    return normalize_source_label(str(getattr(origin, "source_label", "") or ""))
+def origin_source_label(block: LayoutBlockSnapshot) -> str:
+    if not isinstance(block, LayoutBlockSnapshot):
+        raise TypeError("origin source label requires LayoutBlockSnapshot")
+    return normalize_source_label(block.origin.vendor_label)
 
 
-def route_source_label(block: Block) -> str:
-    """Label to emit into runtime OCR/layout rows.
+def route_source_label(block: LayoutBlockSnapshot) -> str:
+    """Return the explicit route label carried by the adopted snapshot."""
 
-    Current user edits win over original source labels. If no explicit current
-    label exists, origin/semantic labels keep the OCR route tied to structured
-    provenance instead of falling back to raw/app payload guesses.
-    """
     attrs = block_attributes(block)
     return (
         current_source_label(block, fallback_to_type=False)
@@ -143,9 +126,23 @@ def route_source_label(block: Block) -> str:
     )
 
 
-def block_display_label(block: Block) -> str:
+def block_display_label(block: LayoutBlockSnapshot) -> str:
     return block_attributes(block).display_label
 
 
-def is_position_only_block(block: Block) -> bool:
+def is_position_only_block(block: LayoutBlockSnapshot) -> bool:
     return block_attributes(block).is_position_only
+
+
+__all__ = [
+    "BlockAttributes",
+    "block_attributes",
+    "block_display_label",
+    "current_source_label",
+    "is_position_only_block",
+    "normalize_source_label",
+    "origin_source_label",
+    "route_source_label",
+    "semantic_block_type",
+    "semantic_label",
+]

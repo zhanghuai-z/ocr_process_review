@@ -2,10 +2,10 @@
 from __future__ import annotations
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Iterable, Optional
 
 from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QKeySequence, QShortcut, QColor
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
@@ -14,29 +14,19 @@ from PySide6.QtWidgets import (
 )
 
 from app.utils.icon_manager import get_icon
-from app.models.block_state import is_ocr_text_invalidated
 from app.core.paddle_labels import normalize_paddle_label
-from app.core.proof_line_facts import proof_display_text, proof_search_texts
-from app.core.proof_char_text import char_display_text
-from app.models import BBox, Block, BlockSource, BlockType, LayoutBlockSnapshot, Page
-from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.layout_snapshot_store import layout_snapshot_for_page
-from app.models.ocr_character_observation import line_ocr_chars_by_uid
-from app.models.ocr_observation import (
-    block_ocr_line_observations_by_uid,
-    iter_page_ocr_line_observation_occurrences,
+from app.models.enums import BlockType, OcrPolicy
+from app.models.geometry import BBox
+from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
+from app.models.paddle_artifact import PaddleArtifact
+from app.models.project_session import (
+    ProjectSession,
+    PageRecord,
+    RecordNotFoundError,
 )
-from app.models.ocr_text_observation import line_ocr_confidence
-from app.models.page_state import (
-    page_error_message,
-    page_has_error,
-    page_is_layout_analyzed,
-    page_needs_ocr_rerun,
-)
-from app.services.ocr_dispatch_plan import count_text_ocr_blocks
 from app.services.layout_edit_service import LayoutEditCommand, LayoutEditResult, LayoutEditService
 from app.services.layout_overlay_service import LayoutOverlayService
-from app.ui.widgets.image_viewer import ImageViewer
+from app.ui.widgets.image_viewer import ImageViewer, OcrAtomBox
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
 from app.utils.image_io import read_cv_image
@@ -45,21 +35,134 @@ STATUS_LABEL_MAX_CHARS = 96
 STRUCTURAL_DRAW_BLOCK_TYPES = {BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE}
 
 
-def _ocr_observation_lines(block: Block):
-    return block_ocr_line_observations_by_uid(block.uid)
+@dataclass(frozen=True, slots=True)
+class PageLayoutInput:
+    """Immutable UI input for one page and its adopted layout facts."""
+
+    page: PageRecord
+    layout: LayoutSnapshot | None = None
+    artifact: PaddleArtifact | None = None
+    atom_boxes: tuple[OcrAtomBox, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.page, PageRecord):
+            raise TypeError("page layout input requires PageRecord")
+        if self.layout is not None and not isinstance(self.layout, LayoutSnapshot):
+            raise TypeError("layout must be LayoutSnapshot or None")
+        if self.artifact is not None and not isinstance(self.artifact, PaddleArtifact):
+            raise TypeError("artifact must be PaddleArtifact or None")
+        if self.artifact is not None:
+            if self.artifact.project_uid != self.page.project_uid:
+                raise ValueError("artifact project UID does not match PageRecord")
+            if self.artifact.page_uid != self.page.uid:
+                raise ValueError("artifact page UID does not match PageRecord")
+        if self.layout is not None:
+            if self.layout.page_uid != self.page.uid:
+                raise ValueError("layout page UID does not match PageRecord")
+            if self.layout.artifact_uid:
+                if self.artifact is None or self.artifact.uid != self.layout.artifact_uid:
+                    raise ValueError("layout input must include its adopted PaddleArtifact")
+        atoms = tuple(self.atom_boxes)
+        if any(not isinstance(atom, OcrAtomBox) for atom in atoms):
+            raise TypeError("atom_boxes must contain OcrAtomBox values")
+        object.__setattr__(self, "atom_boxes", atoms)
+
+    @property
+    def uid(self) -> str:
+        return self.page.uid
+
+    @property
+    def page_number(self) -> int:
+        return self.page.page_number
+
+    @property
+    def width(self) -> int:
+        return self.page.width
+
+    @property
+    def height(self) -> int:
+        return self.page.height
+
+    @property
+    def image_path(self) -> str:
+        return self.page.cache_image_path or self.page.image_path
+
+    @property
+    def source_path(self) -> str:
+        return self.page.source_path
+
+    @property
+    def thumbnail_path(self) -> str:
+        return self.page.thumbnail_path
+
+    @property
+    def status(self) -> str:
+        return self.page.status
+
+    @property
+    def error(self) -> str:
+        return self.page.error
 
 
-def _ocr_observation_line_count(page: Page) -> int:
-    if layout_snapshot_for_page(page) is None:
-        return 0
-    return sum(1 for _occurrence in iter_page_ocr_line_observation_occurrences(page))
+@dataclass(frozen=True, slots=True)
+class LayoutBlockPresentation:
+    """Snapshot block plus the immutable OCR atoms mapped to its UID."""
+
+    page_uid: str
+    snapshot_block: LayoutBlockSnapshot
+    atom_boxes: tuple[OcrAtomBox, ...] = ()
+
+    @property
+    def uid(self) -> str:
+        return self.snapshot_block.uid
+
+    @property
+    def block_type(self) -> BlockType:
+        return self.snapshot_block.block_type
+
+    @property
+    def bbox(self) -> BBox:
+        return self.snapshot_block.bbox
+
+    @property
+    def order(self) -> int:
+        return self.snapshot_block.order
+
+    @property
+    def source_label(self) -> str:
+        return self.snapshot_block.source_label
+
+    @property
+    def ocr_policy(self) -> OcrPolicy:
+        return self.snapshot_block.ocr_policy
 
 
-def _ocr_observation_avg_confidence(block: Block) -> float:
-    lines = _ocr_observation_lines(block)
-    if not lines:
+def _layout_blocks(page: PageLayoutInput) -> tuple[LayoutBlockPresentation, ...]:
+    if page.layout is None:
+        return ()
+    atoms_by_block: dict[str, list[OcrAtomBox]] = {}
+    for atom in page.atom_boxes:
+        if atom.block_uid:
+            atoms_by_block.setdefault(atom.block_uid, []).append(atom)
+    return tuple(
+        LayoutBlockPresentation(
+            page_uid=page.uid,
+            snapshot_block=block,
+            atom_boxes=tuple(atoms_by_block.get(block.uid, ())),
+        )
+        for block in page.layout.blocks
+    )
+
+
+def _ocr_observation_line_count(page: PageLayoutInput) -> int:
+    return len({atom.line_uid for atom in page.atom_boxes if atom.line_uid})
+
+
+def _ocr_observation_avg_confidence(page: PageLayoutInput, block_uid: str) -> float:
+    atoms = [atom for atom in page.atom_boxes if atom.block_uid == block_uid]
+    if not atoms:
         return 0.0
-    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
+    return sum(atom.confidence for atom in atoms) / len(atoms)
 
 
 @dataclass(frozen=True)
@@ -221,27 +324,30 @@ class LayoutPanel(QWidget):
     OCR 入口由用户提交当前版面后发出，不在结果展示时自动触发。
     """
     analysis_confirmed = Signal()
-    page_selected = Signal(int)   # payload: page_number
+    page_selected = Signal(str)   # payload: stable page UID
     geometry_changed = Signal()
-    block_contract_changed = Signal(int, str)  # page_number, change_kind
-    ocr_entry_requested = Signal(str, int)  # source, page_number
-    page_completed = Signal(int)  # 用户点「完成」时（payload: page idx）
-    edits_cancelled = Signal(int) # 用户点「取消」时（payload: page idx）
+    block_contract_changed = Signal(str, str)  # page_uid, change_kind
+    layout_edit_requested = Signal(object)  # immutable LayoutEditCommand
+    layout_edit_applied = Signal(object)  # immutable LayoutEditResult
+    atom_geometry_change_requested = Signal(str, object)  # atom_uid, BBox
+    ocr_entry_requested = Signal(str, str)  # source, page_uid
+    page_completed = Signal(str)  # stable page UID
+    edits_cancelled = Signal(str)  # stable page UID
     analysis_cancel_requested = Signal()
     DRAW_SNAP_TOLERANCE = 8
     DRAW_INK_SNAP_TOLERANCE = 16
 
-    def __init__(self, parent=None):
+    def __init__(self, session: ProjectSession | None = None, parent=None):
         super().__init__(parent)
-        self._pages: List[Page] = []
+        self._session: ProjectSession | None = None
+        self._pages: list[PageLayoutInput] = []
         self._current_page_idx: int = 0
         self._selected_block_uid: str | None = None
-        self._page_gate_states: dict[int, tuple[str, bool, str, str]] = {}
-        self._primary_actions: dict[int, tuple[str, str, bool]] = {}
+        self._page_gate_states: dict[str, tuple[str, bool, str, str]] = {}
+        self._primary_actions: dict[str, tuple[str, str, bool]] = {}
         self._layout_edit_service = LayoutEditService()
         self._layout_overlay_service = LayoutOverlayService()
-        self._undo_stack: list[list[tuple[int, tuple[LayoutBlockSnapshot, ...]]]] = []
-        self._layout_edit_start_state: dict[str, dict] = {}
+        self._undo_stack: list[list[tuple[str, tuple[LayoutBlockSnapshot, ...]]]] = []
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
         self._new_subtype: LayoutSubtypeSpec = DEFAULT_SUBTYPE_BY_SOURCE_LABEL["text"]
         self._analysis_running = False
@@ -254,6 +360,8 @@ class LayoutPanel(QWidget):
         self._block_search_matches: list[tuple[int, str]] = []
         self._search_text_fields_only = False
         self._build_ui()
+        if session is not None:
+            self.set_session(session)
 
     def _build_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -325,16 +433,16 @@ class LayoutPanel(QWidget):
         vtl.setContentsMargins(16, 0, 16, 0)
         vtl.setSpacing(12)
 
-        self._btn_char_boxes = QPushButton("字框")
-        self._btn_char_boxes.setIcon(get_icon("layout_box", color="#6B6B6B"))
-        self._btn_char_boxes.setIconSize(QSize(16, 16))
-        self._btn_char_boxes.setObjectName("pillToolBtn")
-        self._btn_char_boxes.setCheckable(True)
-        self._btn_char_boxes.setChecked(True)
-        self._btn_char_boxes.setFixedHeight(28)
-        self._btn_char_boxes.setToolTip("\u663e\u793a/\u9690\u85cf OCR \u5b57\u6846")
-        self._btn_char_boxes.clicked.connect(self._refresh_current_page_layers)
-        vtl.addWidget(self._btn_char_boxes)
+        self._btn_atom_boxes = QPushButton("字框")
+        self._btn_atom_boxes.setIcon(get_icon("layout_box", color="#6B6B6B"))
+        self._btn_atom_boxes.setIconSize(QSize(16, 16))
+        self._btn_atom_boxes.setObjectName("pillToolBtn")
+        self._btn_atom_boxes.setCheckable(True)
+        self._btn_atom_boxes.setChecked(True)
+        self._btn_atom_boxes.setFixedHeight(28)
+        self._btn_atom_boxes.setToolTip("\u663e\u793a/\u9690\u85cf OCR \u539f\u5b50\u6846")
+        self._btn_atom_boxes.clicked.connect(self._refresh_current_page_layers)
+        vtl.addWidget(self._btn_atom_boxes)
 
         self._btn_delete = QPushButton("删除")
         self._btn_delete.setIcon(get_icon("delete", color="#6B6B6B"))
@@ -390,7 +498,9 @@ class LayoutPanel(QWidget):
         self._viewer.block_geometry_change_requested.connect(self._on_block_geometry_change_requested)
         self._viewer.block_created.connect(self._on_block_created)
         self._viewer.block_deleted_uid.connect(self._on_block_deleted_uid)
-        self._viewer.char_bbox_moved.connect(self._on_char_bbox_moved)
+        self._viewer.atom_geometry_change_requested.connect(
+            self._on_atom_geometry_change_requested
+        )
         self._viewer.set_bbox_snapper(self._snap_current_draw_bbox)
         vw_lay.addWidget(self._viewer, 1)
         splitter.addWidget(vw_wrap)
@@ -675,21 +785,93 @@ class LayoutPanel(QWidget):
 
     # ------------------------------------------------------------------ public
 
-    def set_pages(self, pages: List[Page]) -> None:
-        """设置待分析的页面（已加载图片路径）。"""
-        self._pages = pages
+    def set_session(self, session: ProjectSession) -> None:
+        """Bind the panel to one project session and its repository snapshots."""
+        if not isinstance(session, ProjectSession):
+            raise TypeError("layout panel requires ProjectSession")
+        values = self._page_inputs_from_session(session)
+        self._session = session
+        self._set_page_layout_inputs(values)
+
+    def set_page_layout_inputs(self, inputs: Iterable[PageLayoutInput]) -> None:
+        """Display immutable page/layout/artifact inputs without taking ownership."""
+        self._session = None
+        self._set_page_layout_inputs(inputs)
+
+    def _set_page_layout_inputs(self, inputs: Iterable[PageLayoutInput]) -> None:
+        values = tuple(inputs)
+        if any(not isinstance(value, PageLayoutInput) for value in values):
+            raise TypeError("layout panel inputs must be PageLayoutInput values")
+        if len({value.uid for value in values}) != len(values):
+            raise ValueError("layout panel inputs contain duplicate page UIDs")
+        self._pages = sorted(values, key=lambda value: value.page_number)
         self._ink_mask_cache.clear()
-        self._page_list.set_pages(pages)
+        self._page_list.set_pages([value.page for value in self._pages])
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()
-        self._btn_run.setEnabled(bool(pages))
-        if pages:
+        self._btn_run.setEnabled(bool(self._pages))
+        if self._pages:
             self._page_list.set_current_index(0)
         self._update_page_nav()
 
+    @staticmethod
+    def _page_inputs_from_session(session: ProjectSession) -> tuple[PageLayoutInput, ...]:
+        inputs: list[PageLayoutInput] = []
+        for page in sorted(session.page_repository.all(), key=lambda value: value.page_number):
+            try:
+                layout = session.layout_repository.get(page.uid)
+            except RecordNotFoundError:
+                layout = None
+            artifact = None
+            if layout is not None and layout.artifact_uid:
+                artifact = session.paddle_artifact_repository.get(layout.artifact_uid)
+            inputs.append(
+                PageLayoutInput(
+                    page=page,
+                    layout=layout,
+                    artifact=artifact,
+                    atom_boxes=LayoutPanel._session_atom_boxes(session, page.uid),
+                )
+            )
+        return tuple(inputs)
+
+    @staticmethod
+    def _session_atom_boxes(
+        session: ProjectSession,
+        page_uid: str,
+    ) -> tuple[OcrAtomBox, ...]:
+        ocr = session.ocr_observation_repository
+        try:
+            pointer = ocr.get_active_pointer(page_uid)
+        except RecordNotFoundError:
+            return ()
+        batch = ocr.get_batch(pointer.batch_uid)
+        region_by_uid = {
+            region.uid: region
+            for region in ocr.all_regions()
+            if region.uid in batch.region_uids
+        }
+        block_by_region = {
+            binding.target_uid: binding.source_uid
+            for binding in session.binding_repository.all()
+            if binding.relation == "observed_by"
+            and binding.target_uid in region_by_uid
+        }
+        atom_boxes: list[OcrAtomBox] = []
+        for atom_uid in batch.atom_uids:
+            atom = ocr.get_atom(atom_uid)
+            atom_boxes.append(
+                OcrAtomBox.from_record(
+                    atom,
+                    block_uid=block_by_region.get(atom.region_uid, ""),
+                )
+            )
+        return tuple(atom_boxes)
+
     def reset(self) -> None:
         self.finish_analysis_progress()
+        self._session = None
         self._pages = []
         self._current_page_idx = 0
         self._selected_block_uid = None
@@ -712,25 +894,34 @@ class LayoutPanel(QWidget):
         self._update_project_stats()
         self._update_page_nav()
 
-    def show_analysis_result(self, pages: List[Page]) -> None:
-        """版面分析完成后，更新显示并保持当前选中页。"""
+    def show_analysis_result(
+        self,
+        value: ProjectSession | Iterable[PageLayoutInput],
+    ) -> None:
+        """Refresh from a session or from caller-owned immutable inputs."""
         self.finish_analysis_progress()
-        self._pages = pages
+        if isinstance(value, ProjectSession):
+            self.set_session(value)
+        else:
+            self.set_page_layout_inputs(value)
         self._ink_mask_cache.clear()
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()
-        current_idx = min(self._current_page_idx, len(pages) - 1)
+        if not self._pages:
+            self._update_page_nav()
+            return
+        current_idx = min(self._current_page_idx, len(self._pages) - 1)
         self._update_viewer(current_idx)
         self._update_page_nav()
-        total_blocks = sum(self._layout_block_count(page) for page in pages)
-        failed = sum(1 for page in pages if page_has_error(page))
+        total_blocks = sum(self._layout_block_count(page) for page in self._pages)
+        failed = sum(1 for page in self._pages if bool(page.error))
         if failed:
             self._set_status_text(
-                f"共 {len(pages)} 页，{total_blocks} 个版面块，{failed} 页分析失败"
+                f"共 {len(self._pages)} 页，{total_blocks} 个版面块，{failed} 页分析失败"
             )
         else:
-            self._set_status_text(f"共 {len(pages)} 页，{total_blocks} 个版面块")
+            self._set_status_text(f"共 {len(self._pages)} 页，{total_blocks} 个版面块")
 
     def start_analysis_progress(self, total_pages: int) -> None:
         self._analysis_running = True
@@ -762,9 +953,9 @@ class LayoutPanel(QWidget):
         if message:
             self._set_status_text(message)
 
-    def set_current_page_number(self, page_number: int) -> None:
+    def set_current_page_uid(self, page_uid: str) -> None:
         for idx, page in enumerate(self._pages):
-            if page.page_number == page_number:
+            if page.uid == page_uid:
                 self._page_list.set_current_index(idx)
                 self._current_page_idx = idx
                 self._update_viewer(idx)
@@ -773,19 +964,19 @@ class LayoutPanel(QWidget):
 
     def set_page_gate_state(
         self,
-        page_number: int,
+        page_uid: str,
         page_state: str,
         is_pending: bool,
         reason_code: str,
         reason_text: str,
     ) -> None:
-        self._page_gate_states[page_number] = (page_state, is_pending, reason_code, reason_text)
-        if self._pages and self._pages[self._current_page_idx].page_number == page_number:
+        self._page_gate_states[page_uid] = (page_state, is_pending, reason_code, reason_text)
+        if self._pages and self._pages[self._current_page_idx].uid == page_uid:
             self._set_status_text(reason_text)
 
-    def set_primary_action(self, page_number: int, action_key: str, label: str, enabled: bool) -> None:
-        self._primary_actions[page_number] = (action_key, label, enabled)
-        if self._pages and self._pages[self._current_page_idx].page_number == page_number:
+    def set_primary_action(self, page_uid: str, action_key: str, label: str, enabled: bool) -> None:
+        self._primary_actions[page_uid] = (action_key, label, enabled)
+        if self._pages and self._pages[self._current_page_idx].uid == page_uid:
             self._btn_submit.setText(label)
             self._btn_submit.setEnabled(enabled)
 
@@ -825,15 +1016,20 @@ class LayoutPanel(QWidget):
             self._project_stats_lbl.setText("暂无项目")
             return
         total_pages = len(self._pages)
-        analyzed_pages = sum(1 for page in self._pages if page_is_layout_analyzed(page))
-        failed_pages = sum(1 for page in self._pages if page_has_error(page))
-        layout_pages = [page for page in self._pages if layout_snapshot_for_page(page) is not None]
+        analyzed_pages = sum(1 for page in self._pages if page.layout is not None)
+        failed_pages = sum(1 for page in self._pages if bool(page.error))
+        layout_pages = [page for page in self._pages if page.layout is not None]
         total_blocks = sum(self._layout_block_count(page) for page in layout_pages)
-        text_ocr_blocks = count_text_ocr_blocks(layout_pages)
+        text_ocr_blocks = sum(
+            1
+            for page in layout_pages
+            for view in _layout_blocks(page)
+            if view.ocr_policy is OcrPolicy.TEXT_OCR
+        )
         total_lines = sum(_ocr_observation_line_count(page) for page in self._pages)
         counts: dict[str, int] = {}
         for page in layout_pages:
-            for view in iter_page_layout_block_views(page):
+            for view in _layout_blocks(page):
                 label = _block_type_label(view.block_type)
                 counts[label] = counts.get(label, 0) + 1
         count_text = "，".join(
@@ -852,93 +1048,27 @@ class LayoutPanel(QWidget):
         )
 
     @staticmethod
-    def _layout_block_count(page: Page) -> int:
-        if layout_snapshot_for_page(page) is None:
-            return 0
-        return sum(1 for _view in iter_page_layout_block_views(page))
+    def _layout_block_count(page: PageLayoutInput) -> int:
+        return len(_layout_blocks(page))
 
     @staticmethod
-    def _block_search_fields(block: Block) -> list[str]:
-        parts: list[str] = [
-            block.source_label,
-            getattr(block.block_type, "value", str(block.block_type)),
-            block.note,
-        ]
-        for line in _ocr_observation_lines(block):
-            parts.extend(proof_search_texts(line))
-        return [str(part or "").strip() for part in parts if str(part or "").strip()]
-
-    @staticmethod
-    def _block_text_search_fields(block: Block) -> list[str]:
-        parts: list[str] = []
-        for line in _ocr_observation_lines(block):
-            parts.extend(proof_search_texts(line))
-        if block.note:
-            parts.append(block.note.split("|", 1)[0])
-        return [str(part or "").strip() for part in parts if str(part or "").strip()]
-
-    @staticmethod
-    def _block_display_text(block: Block) -> str:
-        return " ".join(LayoutPanel._block_search_fields(block))
-
-    @staticmethod
-    def _block_preview_text(block: Block) -> str:
-        for line in _ocr_observation_lines(block):
-            text = proof_display_text(line)
-            if text:
-                return _compact_status_text(text)
-        if block.note:
-            return _compact_status_text(block.note.split("|", 1)[0])
-        return block.source_label or getattr(block.block_type, "value", str(block.block_type))
-
-    @staticmethod
-    def _block_matches_search_source_filter(block: Block, filter_key: str) -> bool:
-        if filter_key == "any":
-            return True
-        label = normalize_paddle_label(block.source_label or block.block_type.value)
-        if filter_key == "title":
-            return LayoutPanel._is_title_like_block(block)
-        if filter_key == "text":
-            return block.block_type == BlockType.TEXT and label not in {"header", "footer", "number", "footnote"}
-        if filter_key == "equation":
-            return block.block_type == BlockType.EQUATION or label in {
-                "formula", "inline_formula", "display_formula", "equation",
-            }
-        if filter_key == "figure":
-            return block.block_type in {BlockType.FIGURE, BlockType.FIGURE_CAPTION} or label in {
-                "figure", "chart", "figure_title",
-            }
-        if filter_key == "table":
-            return block.block_type in {BlockType.TABLE, BlockType.TABLE_CAPTION} or label in {
-                "table", "table_title",
-            }
-        if filter_key == "reference":
-            return block.block_type == BlockType.REFERENCE or label == "reference_content"
-        return True
-
-    @staticmethod
-    def _layout_view_search_fields(view: LayoutBlockView, block: Block) -> list[str]:
+    def _layout_view_search_fields(view: LayoutBlockPresentation) -> list[str]:
         parts: list[str] = [
             view.source_label,
             getattr(view.block_type, "value", str(view.block_type)),
-            view.note,
         ]
-        for line in _ocr_observation_lines(block):
-            parts.extend(proof_search_texts(line))
+        parts.extend(atom.text for atom in view.atom_boxes if atom.text.strip())
         return [str(part or "").strip() for part in parts if str(part or "").strip()]
 
     @staticmethod
-    def _layout_view_preview_text(view: LayoutBlockView, block: Block) -> str:
-        for line in _ocr_observation_lines(block):
-            text = proof_display_text(line)
-            if text:
-                return _compact_status_text(text)
-        if view.note:
-            return _compact_status_text(view.note.split("|", 1)[0])
+    def _layout_view_preview_text(view: LayoutBlockPresentation) -> str:
+        for atom in view.atom_boxes:
+            if atom.text.strip():
+                return _compact_status_text(atom.text)
         return view.source_label or getattr(view.block_type, "value", str(view.block_type))
 
     @staticmethod
-    def _layout_view_matches_search_source_filter(view: LayoutBlockView, filter_key: str) -> bool:
+    def _layout_view_matches_search_source_filter(view: LayoutBlockPresentation, filter_key: str) -> bool:
         if filter_key == "any":
             return True
         label = normalize_paddle_label(view.source_label or view.block_type.value)
@@ -991,18 +1121,15 @@ class LayoutPanel(QWidget):
             needle = query if self._search_case.isChecked() else query.lower()
 
         for page_idx, page in enumerate(self._pages):
-            if layout_snapshot_for_page(page) is None:
+            if page.layout is None:
                 continue
-            for view in iter_page_layout_block_views(page):
-                block = view.runtime_block
-                if block is None:
-                    continue
+            for view in _layout_blocks(page):
                 if not self._layout_view_matches_search_source_filter(view, str(source_filter or "any")):
                     continue
                 fields = (
-                    self._block_text_search_fields(block)
+                    [atom.text for atom in view.atom_boxes if atom.text.strip()]
                     if self._search_text_fields_only
-                    else self._layout_view_search_fields(view, block)
+                    else self._layout_view_search_fields(view)
                 )
                 if matcher is not None:
                     matched = any(bool(matcher.search(field)) for field in fields)
@@ -1015,7 +1142,7 @@ class LayoutPanel(QWidget):
                     continue
                 match_idx = len(self._block_search_matches)
                 self._block_search_matches.append((page_idx, view.uid))
-                item = QListWidgetItem(self._layout_view_preview_text(view, block))
+                item = QListWidgetItem(self._layout_view_preview_text(view))
                 item.setData(Qt.ItemDataRole.UserRole, match_idx)
                 self._search_results.addItem(item)
 
@@ -1081,23 +1208,21 @@ class LayoutPanel(QWidget):
         if not (0 <= page_idx < len(self._pages)):
             return
         view = None
-        block = None
-        for candidate in iter_page_layout_block_views(self._pages[page_idx]):
+        for candidate in _layout_blocks(self._pages[page_idx]):
             if candidate.uid == block_uid:
                 view = candidate
-                block = candidate.runtime_block
                 break
         if view is None:
             return
         self._current_page_idx = page_idx
         self._page_list.set_current_index(page_idx)
         self._update_viewer(page_idx)
-        if block is not None and self._viewer.select_block_uid(block_uid):
+        if self._viewer.select_block_uid(block_uid):
             self._on_block_clicked_uid(block_uid)
         else:
             self._viewer.highlight_bbox(view.bbox, zoom=True)
             self._selected_block_uid = block_uid
-            self._sync_selected_type_buttons(block)
+            self._sync_selected_type_buttons(view.snapshot_block)
 
     def _current_checked_subtype(self) -> LayoutSubtypeSpec:
         for source_label, button in self._new_subtype_buttons.items():
@@ -1123,7 +1248,7 @@ class LayoutPanel(QWidget):
         for page_idx, block_uids in affected.items():
             page = self._pages[page_idx]
             for block_uid in block_uids:
-                block = self._runtime_block_by_uid(page, block_uid)
+                block = self._layout_block_by_uid(page, block_uid)
                 if block is None:
                     continue
                 source_label = self._source_label_for_subtype(page, block, subtype)
@@ -1133,15 +1258,15 @@ class LayoutPanel(QWidget):
                 )
                 if not is_changed:
                     continue
-                self._layout_edit_service.apply(LayoutEditCommand.change_kind(
-                    page,
+                result = self._apply_layout_edit(page, LayoutEditCommand.change_kind(
+                    page.uid,
+                    self._required_layout_snapshot(page).revision,
                     block.uid,
                     block_type=subtype.block_type,
                     source_label=source_label,
                 ))
-                if is_changed:
+                if result is not None:
                     changed += 1
-            self.block_contract_changed.emit(page.page_number, "block_type_changed")
         self._show_page_layers(self._pages[self._current_page_idx])
         self._rebuild_heading_outline()
         self._refresh_block_search()
@@ -1237,7 +1362,7 @@ class LayoutPanel(QWidget):
     def _set_selected_type_buttons_enabled(self, enabled: bool) -> None:
         self._set_type_buttons_enabled(enabled)
 
-    def _sync_type_buttons(self, block: Block | None) -> None:
+    def _sync_type_buttons(self, block: LayoutBlockSnapshot | None) -> None:
         if block is None:
             self._set_type_buttons_enabled(True)
             self._type_context_title.setText("新建框类型")
@@ -1257,7 +1382,7 @@ class LayoutPanel(QWidget):
         )
         self._update_selection_type_status(block)
 
-    def _sync_selected_type_buttons(self, block: Block | None) -> None:
+    def _sync_selected_type_buttons(self, block: LayoutBlockSnapshot | None) -> None:
         self._sync_type_buttons(block)
 
     def _set_new_block_type(self, subtype: LayoutSubtypeSpec | BlockType | str) -> None:
@@ -1272,7 +1397,7 @@ class LayoutPanel(QWidget):
             return
         self._set_new_block_type(subtype)
 
-    def _update_selection_type_status(self, block: Block | None) -> None:
+    def _update_selection_type_status(self, block: LayoutBlockSnapshot | None) -> None:
         if block is None:
             spec = self._new_subtype
             self._selection_mode_lbl.setText("新建模式:")
@@ -1295,30 +1420,7 @@ class LayoutPanel(QWidget):
         self._selection_type_status.setToolTip(tooltip)
 
     @staticmethod
-    def _heading_level_for_block(block: Block) -> int:
-        label = normalize_paddle_label(block.source_label)
-        match = re.fullmatch(r"heading_([1-6])", label)
-        if match:
-            return int(match.group(1))
-        if label == "doc_title":
-            return 1
-        if label in {"paragraph_title", "section_title", "chapter_title", "title"}:
-            return 0
-        return 0
-
-    @staticmethod
-    def _is_title_like_block(block: Block) -> bool:
-        label = normalize_paddle_label(block.source_label)
-        return block.block_type == BlockType.TITLE or label in {
-            "doc_title",
-            "paragraph_title",
-            "section_title",
-            "chapter_title",
-            "title",
-        } or bool(re.fullmatch(r"heading_[1-6]", label))
-
-    @staticmethod
-    def _heading_level_for_layout_view(view: LayoutBlockView) -> int:
+    def _heading_level_for_layout_view(view: LayoutBlockPresentation) -> int:
         label = normalize_paddle_label(view.source_label)
         match = re.fullmatch(r"heading_([1-6])", label)
         if match:
@@ -1330,7 +1432,7 @@ class LayoutPanel(QWidget):
         return 0
 
     @staticmethod
-    def _is_title_like_layout_view(view: LayoutBlockView) -> bool:
+    def _is_title_like_layout_view(view: LayoutBlockPresentation) -> bool:
         label = normalize_paddle_label(view.source_label)
         return view.block_type == BlockType.TITLE or label in {
             "doc_title",
@@ -1346,20 +1448,20 @@ class LayoutPanel(QWidget):
         self._outline_tree.clear()
         stack: list[tuple[int, QTreeWidgetItem]] = []
         for page_idx, page in enumerate(self._pages):
-            if layout_snapshot_for_page(page) is None:
+            if page.layout is None:
                 continue
             heading_blocks = [
-                (view, view.runtime_block)
-                for view in iter_page_layout_block_views(page)
-                if view.runtime_block is not None and self._is_title_like_layout_view(view)
+                view
+                for view in _layout_blocks(page)
+                if self._is_title_like_layout_view(view)
             ]
             if not heading_blocks:
                 continue
-            for view, block in sorted(heading_blocks, key=lambda item: (item[0].bbox.y, item[0].bbox.x, item[0].order)):
+            for view in sorted(heading_blocks, key=lambda item: (item.bbox.y, item.bbox.x, item.order)):
                 level = self._heading_level_for_layout_view(view)
                 outline_level = level if 1 <= level <= 6 else 1
                 level_text = f"H{level}" if level else "标题候选"
-                text = self._layout_view_preview_text(view, block)
+                text = self._layout_view_preview_text(view)
                 item = QTreeWidgetItem([text])
                 item.setData(0, Qt.ItemDataRole.UserRole, (page_idx, view.uid))
                 item.setToolTip(0, f"级别：{level_text}\n第 {page.page_number} 页")
@@ -1393,25 +1495,25 @@ class LayoutPanel(QWidget):
             self._current_page_idx = idx
             self._update_viewer(idx)
             self._update_page_nav()
-            self.page_selected.emit(self._pages[idx].page_number)
+            self.page_selected.emit(self._pages[idx].uid)
 
     def _update_viewer(self, idx: int) -> None:
         if not self._pages:
             return
         page = self._pages[idx]
-        self._viewer.set_image(page.display_image_path)
-        if page_is_layout_analyzed(page):
+        self._viewer.set_image(page.image_path)
+        if page.layout is not None:
             self._show_page_layers(page)
-        elif page_error_message(page):
-            self._set_status_text(f"第 {page.page_number} 页分析失败：{page_error_message(page)}")
+        elif page.error:
+            self._set_status_text(f"第 {page.page_number} 页分析失败：{page.error}")
         self._selected_block_uid = None
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
         self._update_project_stats()
-        gate = self._page_gate_states.get(page.page_number)
+        gate = self._page_gate_states.get(page.uid)
         if gate is not None:
             self._set_status_text(gate[3])
-        action = self._primary_actions.get(page.page_number)
+        action = self._primary_actions.get(page.uid)
         if action is not None:
             self._btn_submit.setText(action[1])
             self._btn_submit.setEnabled(action[2])
@@ -1422,7 +1524,7 @@ class LayoutPanel(QWidget):
             return
         self._show_page_layers(self._pages[self._current_page_idx])
 
-    def _clear_selection_ui(self, page: Page) -> None:
+    def _clear_selection_ui(self, page: PageLayoutInput) -> None:
         self._selected_block_uid = None
         self._sync_selected_type_buttons(None)
         self._prop_conf.hide()
@@ -1432,59 +1534,120 @@ class LayoutPanel(QWidget):
         if not block_uid or not self._pages:
             return
         page = self._pages[self._current_page_idx]
-        block = self._runtime_block_by_uid(page, block_uid)
+        block = self._layout_block_by_uid(page, block_uid)
         if block is None:
             return
         self._selected_block_uid = block_uid
         self._sync_selected_type_buttons(block)
-        self._prop_conf.set_score(_ocr_observation_avg_confidence(block))
-
-    @staticmethod
-    def _layout_block_state(block: Block) -> dict:
-        return LayoutEditService.block_state(block)
+        self._prop_conf.set_score(_ocr_observation_avg_confidence(page, block.uid))
 
     def _on_block_edit_started_uid(self, block_uid: str) -> None:
         if not block_uid or not self._pages:
             return
-        block = self._runtime_block_by_uid(self._pages[self._current_page_idx], block_uid)
+        block = self._layout_block_by_uid(self._pages[self._current_page_idx], block_uid)
         if block is None:
             return
         self._push_undo_snapshot()
-        self._layout_edit_start_state[block_uid] = self._layout_block_state(block)
 
-    def _runtime_block_by_uid(self, page: Page, block_uid: str) -> Block | None:
-        for view in iter_page_layout_block_views(page):
+    def _required_layout_snapshot(self, page: PageLayoutInput) -> LayoutSnapshot:
+        snapshot = page.layout
+        if self._session is not None:
+            try:
+                snapshot = self._session.layout_repository.get(page.uid)
+            except RecordNotFoundError:
+                snapshot = None
+        if snapshot is None:
+            raise RuntimeError(f"page {page.uid!r} has no layout snapshot")
+        return snapshot
+
+    def _layout_block_by_uid(
+        self,
+        page: PageLayoutInput,
+        block_uid: str,
+    ) -> LayoutBlockSnapshot | None:
+        effective = page
+        if self._session is not None:
+            try:
+                snapshot = self._session.layout_repository.get(page.uid)
+            except RecordNotFoundError:
+                snapshot = None
+            if snapshot is not None and snapshot is not page.layout:
+                effective = PageLayoutInput(
+                    page=page.page,
+                    layout=snapshot,
+                    artifact=page.artifact,
+                    atom_boxes=page.atom_boxes,
+                )
+        for view in _layout_blocks(effective):
             if view.uid == block_uid:
-                return view.runtime_block
+                return view.snapshot_block
         return None
 
-    def _selected_block_for_current_page(self) -> Block | None:
+    def _selected_block_for_current_page(self) -> LayoutBlockSnapshot | None:
         if self._selected_block_uid is None or not self._pages:
             return None
         page = self._pages[self._current_page_idx]
-        return self._runtime_block_by_uid(page, self._selected_block_uid)
+        return self._layout_block_by_uid(page, self._selected_block_uid)
+
+    def _apply_layout_edit(
+        self,
+        page: PageLayoutInput,
+        command: LayoutEditCommand,
+    ) -> LayoutEditResult | None:
+        current = page.layout
+        if self._session is not None:
+            try:
+                current = self._session.layout_repository.get(page.uid)
+            except RecordNotFoundError:
+                current = None
+        if current is None:
+            self._set_status_text("当前页面没有可编辑的版面快照")
+            return None
+        result = self._layout_edit_service.apply(current, command)
+        if self._session is None:
+            self.layout_edit_requested.emit(command)
+            self.layout_edit_applied.emit(result)
+            return result
+        self._session.layout_repository.put(
+            result.snapshot,
+            expected_revision=current.revision,
+        )
+        self._refresh_session_inputs(page.uid)
+        descriptor = result.ocr_invalidation
+        self.block_contract_changed.emit(page.uid, descriptor.reason)
+        self.layout_edit_applied.emit(result)
+        return result
+
+    def _refresh_session_inputs(self, page_uid: str) -> None:
+        if self._session is None:
+            return
+        current_uid = page_uid
+        self._pages = list(self._page_inputs_from_session(self._session))
+        self._page_list.set_pages([value.page for value in self._pages])
+        self._current_page_idx = next(
+            (index for index, value in enumerate(self._pages) if value.uid == current_uid),
+            min(self._current_page_idx, max(0, len(self._pages) - 1)),
+        )
+        if self._pages:
+            self._page_list.set_current_index(self._current_page_idx)
 
     def _on_block_geometry_change_requested(self, block_uid: str, bbox: BBox) -> None:
         if not block_uid or not self._pages:
             return
         page = self._pages[self._current_page_idx]
-        block = self._runtime_block_by_uid(page, block_uid)
+        block = self._layout_block_by_uid(page, block_uid)
         if block is None:
             return
-        before = self._layout_edit_start_state.pop(block_uid, self._layout_block_state(block))
-        self._layout_edit_service.apply(LayoutEditCommand.update_geometry(
-            page,
+        result = self._apply_layout_edit(page, LayoutEditCommand.resize_block(
+            page.uid,
+            self._required_layout_snapshot(page).revision,
             block.uid,
             bbox=bbox,
-            before=before,
         ))
+        if result is None:
+            return
         self._update_project_stats()
         self.geometry_changed.emit()
-        self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_moved")
-
-    @staticmethod
-    def _is_generated_inline_formula_block(block: Block) -> bool:
-        return LayoutEditService.is_generated_inline_formula_block(block)
 
     def _on_block_created(self, bbox: BBox) -> None:
         if not self._pages:
@@ -1502,14 +1665,17 @@ class LayoutPanel(QWidget):
             bt,
         )
         if intersecting:
-            result = self._layout_edit_service.apply(LayoutEditCommand.merge_blocks(
-                page,
+            result = self._apply_layout_edit(page, LayoutEditCommand.merge_blocks(
+                page.uid,
+                self._required_layout_snapshot(page).revision,
                 [block.uid for block in intersecting],
                 bbox,
                 block_type=bt,
                 source_label=source_label,
             ))
-            merged = result.block
+            if result is None:
+                return
+            merged = self._layout_block_by_uid(page, result.affected_block_uids[0])
             if merged is None:
                 return
             self._show_page_layers(page)
@@ -1519,15 +1685,17 @@ class LayoutPanel(QWidget):
             self._refresh_block_search()
             self._update_project_stats()
             self.geometry_changed.emit()
-            self.block_contract_changed.emit(page.page_number, "blocks_merged_by_draw")
             return
-        result = self._layout_edit_service.apply(LayoutEditCommand.create_block(
-            page,
+        result = self._apply_layout_edit(page, LayoutEditCommand.create_block(
+            page.uid,
+            self._required_layout_snapshot(page).revision,
             bbox,
             bt,
             source_label,
         ))
-        new_block = result.block
+        if result is None:
+            return
+        new_block = self._layout_block_by_uid(page, result.affected_block_uids[0])
         if new_block is None:
             return
         self._set_status_text_for_layout_edit_result(result)
@@ -1537,24 +1705,28 @@ class LayoutPanel(QWidget):
         self._refresh_block_search()
         self._update_project_stats()
         self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "block_created")
 
     def _on_block_deleted_uid(self, block_uid: str) -> None:
-        """viewer 键盘 Delete 已删除框 → 从 page 数据中移除。"""
+        """Apply a delete command to the adopted layout snapshot."""
         if not block_uid or not self._pages:
             return
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
-        self._layout_edit_service.apply(LayoutEditCommand.delete_block(page, block_uid))
+        result = self._apply_layout_edit(page, LayoutEditCommand.delete_block(
+            page.uid,
+            self._required_layout_snapshot(page).revision,
+            block_uid,
+        ))
+        if result is None:
+            return
         if self._selected_block_uid == block_uid:
             self._selected_block_uid = None
-            self._selected_char_box_index = -1
             self._prop_conf.hide()
+        self._show_page_layers(page)
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()
         self.geometry_changed.emit()
-        self.block_contract_changed.emit(page.page_number, "block_deleted")
 
     def _delete_selected(self) -> None:
         """顶部栏删除框按钮。"""
@@ -1578,68 +1750,70 @@ class LayoutPanel(QWidget):
         self._push_undo_snapshot()
         page = self._pages[self._current_page_idx]
         source_label = self._source_label_for_subtype(page, selected_block, new_subtype)
-        result = self._layout_edit_service.apply(LayoutEditCommand.change_kind(
-            page,
+        result = self._apply_layout_edit(page, LayoutEditCommand.change_kind(
+            page.uid,
+            self._required_layout_snapshot(page).revision,
             selected_block.uid,
             block_type=new_subtype.block_type,
             source_label=source_label,
         ))
+        if result is None:
+            return
         self._set_status_text_for_layout_edit_result(result)
         self._show_page_layers(page)
         self._viewer.select_block_uid(selected_block.uid)
-        self._sync_selected_type_buttons(selected_block)
+        self._sync_selected_type_buttons(self._layout_block_by_uid(page, selected_block.uid))
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self._update_project_stats()
         self.geometry_changed.emit()
-        self.block_contract_changed.emit(self._pages[self._current_page_idx].page_number, "block_type_changed")
 
-    def _on_char_bbox_moved(self, char) -> None:
-        bb = char.bbox
-        self.geometry_changed.emit()
+    def _on_atom_geometry_change_requested(self, atom_uid: str, bbox: BBox) -> None:
+        if not atom_uid or not isinstance(bbox, BBox):
+            return
+        self.atom_geometry_change_requested.emit(atom_uid, bbox)
 
     @staticmethod
-    def _collect_page_chars(page: Page):
-        if page_needs_ocr_rerun(page):
-            return []
-        chars = []
-        for view in iter_page_layout_block_views(page):
-            block = view.runtime_block
-            if block is None:
-                continue
-            if is_ocr_text_invalidated(block):
-                continue
-            for line in _ocr_observation_lines(block):
-                chars.extend([
-                    char
-                    for char in line_ocr_chars_by_uid(line.uid)
-                    if (
-                        char.bbox is not None
-                        and char.bbox_source != "paddle_inline_formula"
-                        and char_display_text(char)
-                    )
-                ])
-        return chars
+    def _collect_page_atom_boxes(page: PageLayoutInput) -> tuple[OcrAtomBox, ...]:
+        return page.atom_boxes
 
-    def _show_page_layers(self, page: Page) -> None:
-        self._viewer.show_layout_block_views(list(iter_page_layout_block_views(page)))
-        self._viewer.show_readonly_overlays(self._layout_overlay_service.readonly_layout_overlays(page))
-        chars = self._collect_page_chars(page)
-        self._viewer.set_block_frame_occlusions(chars)
-        if self._btn_char_boxes.isChecked():
-            self._viewer.show_char_boxes(chars, editable=False)
+    def _show_page_layers(self, page: PageLayoutInput) -> None:
+        if self._session is not None:
+            for value in self._pages:
+                if value.uid == page.uid:
+                    page = value
+                    break
+        if page.layout is None:
+            self._viewer.clear_overlays()
+            return
+        atom_boxes = self._collect_page_atom_boxes(page)
+        self._viewer.show_layout_snapshot(page.layout, atom_boxes=atom_boxes)
+        overlays: list[tuple[str, BBox]] = []
+        if page.artifact is not None:
+            overlays = self._layout_overlay_service.readonly_layout_overlays(
+                page.artifact,
+                page_width=page.width,
+                page_height=page.height,
+            )
+        self._viewer.show_readonly_overlays(overlays)
+        self._viewer.set_block_frame_occlusions(atom_boxes)
+        if self._btn_atom_boxes.isChecked():
+            self._viewer.show_atom_boxes(atom_boxes, editable=False)
 
     def _select_block_uid_for_edit(self, block_uid: str) -> None:
         self._viewer.select_block_uid(block_uid)
         self._on_block_clicked_uid(block_uid)
 
     def _set_status_text_for_layout_edit_result(self, result: LayoutEditResult) -> None:
-        if result.binding_empty_review:
-            self._set_status_text("已创建校验框")
-        elif result.binding_ambiguous:
-            self._set_status_text("已创建校验框，需确认")
-        elif result.binding_status:
-            self._set_status_text("已绑定识别结果")
+        status_text = {
+            "create_block": "已创建版面框",
+            "delete_block": "已删除版面框",
+            "change_kind": "已更新版面类型",
+            "resize_block": "已更新版面框",
+            "merge_blocks": "已合并版面框",
+            "restore_blocks": "已恢复版面快照",
+        }.get(result.op, "已更新版面")
+        self._set_status_text(status_text)
 
     def _push_undo_snapshot(self) -> None:
         if not self._pages:
@@ -1652,16 +1826,16 @@ class LayoutPanel(QWidget):
     def _push_undo_snapshot_for_pages(self, page_indices) -> None:
         if not self._pages:
             return
-        snapshots: list[tuple[int, tuple[LayoutBlockSnapshot, ...]]] = []
-        seen: set[int] = set()
+        snapshots: list[tuple[str, tuple[LayoutBlockSnapshot, ...]]] = []
+        seen: set[str] = set()
         for page_idx in page_indices:
             if not isinstance(page_idx, int) or page_idx in seen:
                 continue
             if not (0 <= page_idx < len(self._pages)):
                 continue
-            seen.add(page_idx)
+            seen.add(self._pages[page_idx].uid)
             page = self._pages[page_idx]
-            snapshots.append((page_idx, self._layout_snapshot_blocks_for_undo(page)))
+            snapshots.append((page.uid, self._layout_snapshot_blocks_for_undo(page)))
         if not snapshots:
             return
         self._undo_stack.append(snapshots)
@@ -1675,21 +1849,21 @@ class LayoutPanel(QWidget):
         snapshots = self._undo_stack.pop()
         previous_idx = self._current_page_idx
         restored_page_indices: list[int] = []
-        for page_idx, blocks in snapshots:
-            if not (0 <= page_idx < len(self._pages)):
+        for page_uid, blocks in snapshots:
+            page_idx = next(
+                (index for index, value in enumerate(self._pages) if value.uid == page_uid),
+                -1,
+            )
+            if page_idx < 0:
                 continue
             page = self._pages[page_idx]
-            self._layout_edit_service.apply(LayoutEditCommand.restore_blocks(
-                page,
+            result = self._apply_layout_edit(page, LayoutEditCommand.restore_blocks(
+                page.uid,
+                self._required_layout_snapshot(page).revision,
                 blocks,
-                before={
-                    "blocks": [
-                        LayoutEditService.snapshot_block_state(view.snapshot_block)
-                        for view in iter_page_layout_block_views(page)
-                    ]
-                },
             ))
-            restored_page_indices.append(page_idx)
+            if result is not None:
+                restored_page_indices.append(page_idx)
         if not restored_page_indices:
             self._btn_undo.setEnabled(bool(self._undo_stack))
             return
@@ -1712,24 +1886,18 @@ class LayoutPanel(QWidget):
         self._rebuild_heading_outline()
         self._refresh_block_search()
         self.geometry_changed.emit()
-        for page_idx in restored_page_indices:
-            self.block_contract_changed.emit(self._pages[page_idx].page_number, "layout_undo")
 
-    @staticmethod
-    def _layout_snapshot_blocks_for_undo(page: Page) -> tuple[LayoutBlockSnapshot, ...]:
-        return tuple(
-            LayoutBlockSnapshot(
-                block_type=view.block_type,
-                bbox=view.bbox,
-                order=view.order,
-                note=view.note,
-                source_label=view.source_label,
-                origin=view.origin,
-                ocr_policy=view.ocr_policy,
-                uid=view.uid,
-            )
-            for view in iter_page_layout_block_views(page)
-        )
+    def _layout_snapshot_blocks_for_undo(
+        self,
+        page: PageLayoutInput,
+    ) -> tuple[LayoutBlockSnapshot, ...]:
+        snapshot = page.layout
+        if self._session is not None:
+            try:
+                snapshot = self._session.layout_repository.get(page.uid)
+            except RecordNotFoundError:
+                snapshot = None
+        return tuple(snapshot.blocks) if snapshot is not None else ()
 
     @staticmethod
     def _bbox_hits_frame(a: BBox, b: BBox, tolerance: int = 6) -> bool:
@@ -1745,7 +1913,7 @@ class LayoutPanel(QWidget):
         )
         return any(a.x1 < band.x2 and band.x1 < a.x2 and a.y1 < band.y2 and band.y1 < a.y2 for band in bands)
 
-    def _snap_drawn_bbox(self, page: Page, bbox: BBox) -> BBox:
+    def _snap_drawn_bbox(self, page: PageLayoutInput, bbox: BBox) -> BBox:
         bbox = bbox.clamp(page.width, page.height)
         if bbox.area <= 0:
             return bbox
@@ -1777,7 +1945,7 @@ class LayoutPanel(QWidget):
             return bbox
         return self._snap_drawn_bbox(self._pages[self._current_page_idx], bbox)
 
-    def _snap_bbox_to_image_ink(self, page: Page, bbox: BBox) -> Optional[BBox]:
+    def _snap_bbox_to_image_ink(self, page: PageLayoutInput, bbox: BBox) -> Optional[BBox]:
         mask_info = self._get_page_ink_mask(page)
         if mask_info is None:
             return None
@@ -1823,8 +1991,11 @@ class LayoutPanel(QWidget):
             return None
         return BBox.from_xyxy(snapped_x1, snapped_y1, snapped_x2, snapped_y2).clamp(page.width, page.height)
 
-    def _get_page_ink_mask(self, page: Page) -> Optional[tuple[object, int, int, list[tuple[int, int, int, int, int]]]]:
-        image_path = getattr(page, "display_image_path", None) or getattr(page, "image_path", None)
+    def _get_page_ink_mask(
+        self,
+        page: PageLayoutInput,
+    ) -> Optional[tuple[object, int, int, list[tuple[int, int, int, int, int]]]]:
+        image_path = page.image_path
         if not image_path:
             return None
         key = str(image_path)
@@ -1854,18 +2025,24 @@ class LayoutPanel(QWidget):
         self._ink_mask_cache[key] = cached
         return cached
 
-    def _blocks_intersecting_bbox(self, page: Page, bbox: BBox) -> list[Block]:
-        blocks: list[Block] = []
-        for view in iter_page_layout_block_views(page):
-            block = view.runtime_block
-            if block is not None and self._bbox_hits_frame(bbox, view.bbox):
-                blocks.append(block)
+    def _blocks_intersecting_bbox(
+        self,
+        page: PageLayoutInput,
+        bbox: BBox,
+    ) -> list[LayoutBlockSnapshot]:
+        blocks: list[LayoutBlockSnapshot] = []
+        for view in _layout_blocks(page):
+            if self._bbox_hits_frame(bbox, view.bbox):
+                blocks.append(view.snapshot_block)
         return blocks
 
     @staticmethod
-    def _draw_merge_candidates(blocks: list[Block], block_type: BlockType) -> list[Block]:
+    def _draw_merge_candidates(
+        blocks: list[LayoutBlockSnapshot],
+        block_type: BlockType,
+    ) -> list[LayoutBlockSnapshot]:
         target_structural = block_type in STRUCTURAL_DRAW_BLOCK_TYPES
-        candidates: list[Block] = []
+        candidates: list[LayoutBlockSnapshot] = []
         for block in blocks:
             existing_structural = block.block_type in STRUCTURAL_DRAW_BLOCK_TYPES
             if target_structural != existing_structural:
@@ -1875,21 +2052,37 @@ class LayoutPanel(QWidget):
             candidates.append(block)
         return candidates
 
-    def _source_label_for_subtype(self, page: Page, block: Block, subtype: LayoutSubtypeSpec) -> str:
+    def _source_label_for_subtype(
+        self,
+        page: PageLayoutInput,
+        block: LayoutBlockSnapshot,
+        subtype: LayoutSubtypeSpec,
+    ) -> str:
         if normalize_paddle_label(subtype.source_label) == "formula":
-            return self._infer_formula_source_label_for_bbox(page, block.bbox, exclude=block)
+            return self._infer_formula_source_label_for_bbox(page, block.bbox, exclude_uid=block.uid)
         return subtype.source_label
 
-    def _source_label_for_bbox_subtype(self, page: Page, bbox: BBox, subtype: LayoutSubtypeSpec) -> str:
+    def _source_label_for_bbox_subtype(
+        self,
+        page: PageLayoutInput,
+        bbox: BBox,
+        subtype: LayoutSubtypeSpec,
+    ) -> str:
         if normalize_paddle_label(subtype.source_label) == "formula":
             return self._infer_formula_source_label_for_bbox(page, bbox)
         return subtype.source_label
 
-    def _infer_formula_source_label_for_bbox(self, page: Page, bbox: BBox, *, exclude: Block | None = None) -> str:
+    def _infer_formula_source_label_for_bbox(
+        self,
+        page: PageLayoutInput,
+        bbox: BBox,
+        *,
+        exclude_uid: str = "",
+    ) -> str:
         cx = (bbox.x1 + bbox.x2) / 2.0
         cy = (bbox.y1 + bbox.y2) / 2.0
-        for view in iter_page_layout_block_views(page):
-            if view.runtime_block is exclude or view.block_type != BlockType.TEXT:
+        for view in _layout_blocks(page):
+            if view.uid == exclude_uid or view.block_type != BlockType.TEXT:
                 continue
             if not (view.bbox.x1 <= cx <= view.bbox.x2 and view.bbox.y1 <= cy <= view.bbox.y2):
                 continue
@@ -1919,7 +2112,7 @@ class LayoutPanel(QWidget):
         return DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block_type, default)
 
     @staticmethod
-    def _button_source_label_for_block(block: Block) -> str:
+    def _button_source_label_for_block(block: LayoutBlockSnapshot) -> str:
         normalized = normalize_paddle_label(block.source_label)
         if normalized in {
             "display_formula",
@@ -1936,8 +2129,17 @@ class LayoutPanel(QWidget):
         spec = DEFAULT_SUBTYPE_BY_BLOCK_TYPE.get(block.block_type)
         return spec.source_label if spec is not None else ""
 
-    def _collect_readonly_layout_overlays(self, page: Page) -> List[tuple[str, BBox]]:
-        return self._layout_overlay_service.readonly_layout_overlays(page)
+    def _collect_readonly_layout_overlays(
+        self,
+        page: PageLayoutInput,
+    ) -> list[tuple[str, BBox]]:
+        if page.artifact is None:
+            return []
+        return self._layout_overlay_service.readonly_layout_overlays(
+            page.artifact,
+            page_width=page.width,
+            page_height=page.height,
+        )
 
     # ── 底栏：翻页 / 完成 / 取消 / 提交 ─────────────────────────
 
@@ -1951,8 +2153,8 @@ class LayoutPanel(QWidget):
         self._btn_done.setEnabled(has_pages)
         self._btn_cancel.setEnabled(has_pages)
         if has_pages:
-            page_number = self._pages[self._current_page_idx].page_number
-            action = self._primary_actions.get(page_number)
+            page_uid = self._pages[self._current_page_idx].uid
+            action = self._primary_actions.get(page_uid)
             if action is not None:
                 self._btn_submit.setText(action[1])
                 self._btn_submit.setEnabled(action[2])
@@ -1974,14 +2176,14 @@ class LayoutPanel(QWidget):
             self._current_page_idx = new_idx
             self._update_viewer(new_idx)
             self._update_page_nav()
-            self.page_selected.emit(self._pages[new_idx].page_number)
+            self.page_selected.emit(self._pages[new_idx].uid)
 
     def _on_done_clicked(self) -> None:
         """完成本页编辑（占位：发出信号供控制器处理；当前仅状态提示）。"""
         if not self._pages:
             return
         self._set_status_text(f"第 {self._pages[self._current_page_idx].page_number} 页编辑已记录")
-        self.page_completed.emit(self._current_page_idx)
+        self.page_completed.emit(self._pages[self._current_page_idx].uid)
 
     def _on_cancel_clicked(self) -> None:
         """取消本页未提交的编辑（占位：发出信号供控制器处理）。"""
@@ -1992,14 +2194,14 @@ class LayoutPanel(QWidget):
         if not self._pages:
             return
         self._set_status_text(f"已取消第 {self._pages[self._current_page_idx].page_number} 页编辑")
-        self.edits_cancelled.emit(self._current_page_idx)
+        self.edits_cancelled.emit(self._pages[self._current_page_idx].uid)
 
     def _on_submit_clicked(self) -> None:
         """提交版面分析结果，进入 OCR 阶段。"""
         if not self._pages:
             return
-        page_number = self._pages[self._current_page_idx].page_number
-        self.ocr_entry_requested.emit("layout_submit", page_number)
+        page_uid = self._pages[self._current_page_idx].uid
+        self.ocr_entry_requested.emit("layout_submit", page_uid)
         self.analysis_confirmed.emit()
 
     @property

@@ -355,13 +355,13 @@ def test_hanwang_reconciles_explicit_vl_marker_with_linecut_geometry():
             proposal_bbox=(4, 6, 38, 36),
         ),),
     )
-    grouped = {(0, 0, 0): [micro_module.LineResult(
+    grouped = {(0, 0, 0): [micro_module._NativeLineResult(
         text="12Barry",
         bbox=(6, 8, 120, 34),
         chars=[
-            micro_module.CharResult(text="1", bbox=(8, 10, 14, 32)),
-            micro_module.CharResult(text="2", bbox=(15, 10, 24, 32)),
-            micro_module.CharResult(text="Barry", bbox=(42, 8, 110, 34)),
+            micro_module._NativeAtomResult(text="1", bbox=(8, 10, 14, 32)),
+            micro_module._NativeAtomResult(text="2", bbox=(15, 10, 24, 32)),
+            micro_module._NativeAtomResult(text="Barry", bbox=(42, 8, 110, 34)),
         ],
     )]}
 
@@ -392,22 +392,22 @@ def test_hanwang_assembles_explicit_text_segment_kinds():
     )
     grouped = {
         (0, 0, 0): [
-            micro_module.LineResult(
+            micro_module._NativeLineResult(
                 text="甲",
                 bbox=(0, 0, 60, 30),
                 confidence=0.9,
-                chars=[micro_module.CharResult(text="甲", confidence=0.9, bbox=(0, 0, 20, 30))],
+                chars=[micro_module._NativeAtomResult(text="甲", confidence=0.9, bbox=(0, 0, 20, 30))],
             )
         ],
         (0, 0, 2): [
-            micro_module.LineResult(
+            micro_module._NativeLineResult(
                 text="abc",
                 bbox=(100, 0, 160, 30),
                 confidence=0.9,
                 chars=[
-                    micro_module.CharResult(text="a", confidence=0.9, bbox=(100, 0, 112, 30)),
-                    micro_module.CharResult(text="b", confidence=0.9, bbox=(116, 0, 128, 30)),
-                    micro_module.CharResult(text="c", confidence=0.9, bbox=(132, 0, 144, 30)),
+                    micro_module._NativeAtomResult(text="a", confidence=0.9, bbox=(100, 0, 112, 30)),
+                    micro_module._NativeAtomResult(text="b", confidence=0.9, bbox=(116, 0, 128, 30)),
+                    micro_module._NativeAtomResult(text="c", confidence=0.9, bbox=(132, 0, 144, 30)),
                 ],
             )
         ],
@@ -438,20 +438,20 @@ def test_hanwang_merges_low_sitting_latin_slice_into_its_physical_routing_line()
         ),
     )
     grouped = {
-        (0, 0, 0): [micro_module.LineResult(
+        (0, 0, 0): [micro_module._NativeLineResult(
             text="China",
             bbox=(0, 2, 98, 42),
-            chars=[micro_module.CharResult(text="China", bbox=(0, 2, 98, 42))],
+            chars=[micro_module._NativeAtomResult(text="China", bbox=(0, 2, 98, 42))],
         )],
-        (0, 0, 1): [micro_module.LineResult(
+        (0, 0, 1): [micro_module._NativeLineResult(
             text="’",
             bbox=(102, 4, 112, 18),
-            chars=[micro_module.CharResult(text="’", bbox=(102, 4, 112, 18))],
+            chars=[micro_module._NativeAtomResult(text="’", bbox=(102, 4, 112, 18))],
         )],
-        (0, 0, 2): [micro_module.LineResult(
+        (0, 0, 2): [micro_module._NativeLineResult(
             text="s",
             bbox=(122, 25, 138, 43),
-            chars=[micro_module.CharResult(text="s", bbox=(122, 25, 138, 43))],
+            chars=[micro_module._NativeAtomResult(text="s", bbox=(122, 25, 138, 43))],
         )],
     }
 
@@ -478,13 +478,13 @@ def test_hanwang_keeps_ppocr_physical_row_when_native_group_is_partial():
         segments=(RoutingSegment(kind="text_other", bbox=(100, 200, 700, 290)),),
     )
     grouped = {
-        (0, 0, 0): [micro_module.LineResult(
+        (0, 0, 0): [micro_module._NativeLineResult(
             text="第二章",
             bbox=(108, 205, 350, 250),
             chars=[
-                micro_module.CharResult(text="第", bbox=(108, 205, 170, 250)),
-                micro_module.CharResult(text="二", bbox=(180, 220, 250, 235)),
-                micro_module.CharResult(text="章", bbox=(270, 205, 350, 250)),
+                micro_module._NativeAtomResult(text="第", bbox=(108, 205, 170, 250)),
+                micro_module._NativeAtomResult(text="二", bbox=(180, 220, 250, 235)),
+                micro_module._NativeAtomResult(text="章", bbox=(270, 205, 350, 250)),
             ],
         )],
     }

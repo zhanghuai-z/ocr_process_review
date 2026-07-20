@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from app.services import ImportService
+from app.models.project_session import ProjectRecord, ProjectSession
 from app.utils.image_io import read_cv_image
 
 
@@ -36,11 +37,15 @@ def test_import_materializes_non_ascii_source_to_ascii_cache_path(tmp_path):
     source.parent.mkdir()
     Image.new("RGB", (12, 8), color="white").save(source)
 
-    result = ImportService(cache_dir=tmp_path / "work_cache").import_paths([str(source)])
+    session = ProjectSession(ProjectRecord("project-1", "Image import"))
+    result = ImportService(cache_dir=tmp_path / "work_cache").import_paths(
+        session,
+        [str(source)],
+    )
 
     assert result.success_count == 1
     page = result.pages[0]
     assert page.source_path == str(source)
-    assert page.display_image_path.endswith(".png")
-    assert page.display_image_path.rsplit("/", 1)[-1].isascii()
-    assert Path(page.display_image_path).name.startswith("image_")
+    assert page.image_path.endswith(".png")
+    assert page.image_path.rsplit("/", 1)[-1].isascii()
+    assert Path(page.image_path).name.startswith("page_")

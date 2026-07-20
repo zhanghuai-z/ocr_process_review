@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 import re
 from typing import Iterable, Sequence
 
-from app.core.ocr_ir import is_formula_marker_token
+from app.core.text_classification import is_formula_marker_token
 from app.services.formula_crop_ocr_service import FormulaRecognition, normalize_formula_key
 
 XYXY = tuple[int, int, int, int]

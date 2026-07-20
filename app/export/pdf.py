@@ -15,7 +15,7 @@ from app.core.table_text_layer import (
 )
 from app.export.ir import ExportDocument, ExportElement, ExportPage
 from app.export.ir_builder import build_export_ir
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 _RESOURCES_FONTS = Path(__file__).parent.parent.parent / "resources" / "fonts"
 logger = get_logger(__name__)
@@ -132,10 +132,10 @@ class PdfExporter(ExporterBase):
     def __init__(self, profile: str = "pdf-single"):
         self.profile = "pdf-single" if profile == "pdf" else profile
 
-    def export(self, project: OcrProject, out_path: str) -> None:
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
         from fpdf import FPDF
 
-        document = build_export_ir(project, self.profile)
+        document = build_export_ir(snapshot, self.profile)
         include_text = document.profile.format == "pdf-dual"
         plans = build_pdf_page_plans(
             document,

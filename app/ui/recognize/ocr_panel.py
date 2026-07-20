@@ -1,77 +1,86 @@
-"""OCR 识别面板：进度条 + 结果树状展示。"""
+"""OCR workspace projection over immutable export snapshots."""
 from __future__ import annotations
-from typing import List
+
+from collections.abc import Iterable
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QProgressBar, QPushButton,
-    QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 
-from app.core.block_attributes import normalize_source_label
-from app.core.proof_line_facts import proof_line_facts
-from app.models import Block, Page, ProofStatus
-from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_line_observations_by_uid
-from app.models.ocr_text_observation import line_ocr_confidence
-from app.ui.widgets.image_viewer import ImageViewer
-from app.ui.widgets.confidence_badge import ConfidenceBadge
-
-
-def _runtime_layout_views(page: Page) -> list[LayoutBlockView]:
-    return [view for view in iter_page_layout_block_views(page) if view.runtime_block is not None]
-
-
-def _view_display_label(view: LayoutBlockView) -> str:
-    source_label = normalize_source_label(view.origin.source_label or view.source_label)
-    if source_label and source_label != view.block_type.value:
-        return f"{view.block_type.value} · {source_label}"
-    return view.block_type.value
-
-
-def _observation_lines(block: Block):
-    return block_ocr_line_observations_by_uid(block.uid)
-
-
-def _observation_line_count(block: Block) -> int:
-    return len(_observation_lines(block))
-
-
-def _observation_avg_confidence(block: Block) -> float:
-    lines = _observation_lines(block)
-    if not lines:
-        return 0.0
-    return sum(line_ocr_confidence(line) for line in lines) / len(lines)
+from app.core.workflow_state import WorkflowProgressState
+from app.models.export_snapshot import ExportPageSnapshot, ExportProjectSnapshot
+from app.models.layout_snapshot import LayoutBlockSnapshot
+from app.models.ocr_records import OcrLine
+from app.models.project_session import PageRecord
+from app.ui.widgets.page_directory import PageDirectoryList
 
 
 def _tree_payload(kind: str, *uids: str) -> tuple[str, ...]:
     return (kind, *uids)
 
 
-class OcrPanel(QWidget):
-    """
-    步骤3: OCR 识别结果展示。
-    左：图像预览；右：结果树（Block → Line → Char）。
+class _PageImage(QWidget):
+    """Small image projection that never receives a mutable domain object."""
 
-    信号：
-    - go_to_proof_requested: 用户点击"进入校对"按钮（纯导航意图）
-      （注意：不要在按钮点击中重新发射 OCR 完成信号）
-    """
-    go_to_proof_requested = Signal()   # 纯导航意图
-
-    def __init__(self, parent=None):
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._pages: List[Page] = []
+        self._image = QLabel()
+        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setText("暂无页面图像")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addWidget(self._image)
+
+    def set_page(self, page: PageRecord | None) -> None:
+        if page is None:
+            self._image.clear()
+            self._image.setText("暂无页面图像")
+            return
+        path = page.thumbnail_path or page.image_path or page.source_path
+        pixmap = QPixmap(path) if path else QPixmap()
+        if pixmap.isNull():
+            self._image.clear()
+            self._image.setText(f"无法读取图像：{path}")
+            return
+        self._image.setText("")
+        self._image.setPixmap(pixmap)
+        self._image.setScaledContents(False)
+
+
+class OcrPanel(QWidget):
+    """Browse adopted layout and OCR observations from one export snapshot."""
+
+    page_selected = Signal(str)
+    ocr_requested = Signal()
+    go_to_proof_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pages: tuple[PageRecord, ...] = ()
+        self._snapshots: tuple[ExportPageSnapshot, ...] = ()
+        self._pages_by_uid: dict[str, PageRecord] = {}
+        self._snapshots_by_uid: dict[str, ExportPageSnapshot] = {}
+        self._current_page_uid = ""
         self._build_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 标题 + 进度
         top = QHBoxLayout()
         top.setContentsMargins(12, 12, 12, 4)
-        title = QLabel("③ OCR 识别")
+        title = QLabel("OCR 工作区")
         title.setObjectName("pageTitle")
         top.addWidget(title)
         top.addStretch()
@@ -81,148 +90,217 @@ class OcrPanel(QWidget):
         self._progress.setFixedWidth(200)
         self._progress.setFixedHeight(16)
         self._progress.setFormat("%p%")
-        self._progress.setTextVisible(True)
-        self._progress.setVisible(False)
+        self._progress.hide()
         top.addWidget(self._progress)
         layout.addLayout(top)
 
-        # 主体：左图右树
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._directory = PageDirectoryList()
+        self._directory.page_selected.connect(self._on_page_selected)
+        splitter.addWidget(self._directory)
 
-        self._viewer = ImageViewer()
-        splitter.addWidget(self._viewer)
+        self._image = _PageImage()
+        image_scroll = QScrollArea()
+        image_scroll.setWidgetResizable(True)
+        image_scroll.setWidget(self._image)
+        splitter.addWidget(image_scroll)
 
-        # 结果树
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 0, 4, 0)
-
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(["内容", "置信度", "状态"])
-        self._tree.setColumnWidth(0, 300)
-        self._tree.setColumnWidth(1, 70)
+        self._tree.setColumnWidth(0, 280)
+        self._tree.setColumnWidth(1, 80)
         self._tree.currentItemChanged.connect(self._on_item_selected)
         right_layout.addWidget(self._tree)
-
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 1)
+        layout.addWidget(splitter, 1)
 
-        # 底部
-        btn_row = QHBoxLayout()
-        btn_row.setContentsMargins(12, 8, 12, 8)
-        self._status_lbl = QLabel("等待识别…")
-        self._status_lbl.setObjectName("muted")
-        btn_row.addWidget(self._status_lbl)
-        btn_row.addStretch()
-        self._btn_next = QPushButton("进入校对 →")
-        self._btn_next.setEnabled(False)
-        self._btn_next.setObjectName("primaryBtn"); self._btn_next.setMinimumHeight(34)
-        self._btn_next.clicked.connect(self.go_to_proof_requested.emit)
-        btn_row.addWidget(self._btn_next)
-        layout.addLayout(btn_row)
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(12, 8, 12, 8)
+        self._status = QLabel("等待导入")
+        self._status.setObjectName("muted")
+        bottom.addWidget(self._status)
+        bottom.addStretch()
+        self._start_ocr = QPushButton("开始 OCR")
+        self._start_ocr.setObjectName("primaryBtn")
+        self._start_ocr.setEnabled(False)
+        self._start_ocr.clicked.connect(self.ocr_requested.emit)
+        bottom.addWidget(self._start_ocr)
+        self._go_proof = QPushButton("进入校对")
+        self._go_proof.setObjectName("secondaryBtn")
+        self._go_proof.setEnabled(False)
+        self._go_proof.clicked.connect(self.go_to_proof_requested.emit)
+        bottom.addWidget(self._go_proof)
+        layout.addLayout(bottom)
 
-    # ------------------------------------------------------------------ public
+    # ------------------------------------------------------------------ public API
 
-    def set_pages(self, pages: List[Page]) -> None:
-        self._pages = pages
-        if pages:
-            self._viewer.set_image(pages[0].display_image_path)
+    def set_pages(self, pages: Iterable[PageRecord]) -> None:
+        records = tuple(pages)
+        if any(not isinstance(page, PageRecord) for page in records):
+            raise TypeError("OCR panel requires PageRecord values")
+        self._pages = records
+        self._pages_by_uid = {page.uid: page for page in records}
+        self._snapshots = ()
+        self._snapshots_by_uid = {}
+        self._directory.set_pages(records)
+        self._tree.clear()
+        self._set_current_uid(records[0].uid if records else "")
+        self._start_ocr.setEnabled(False)
+        self._go_proof.setEnabled(False)
+        self._status.setText("已导入页面，等待版面分析") if records else self._status.setText("等待导入")
 
-    def on_progress(self, page_idx: int, total: int) -> None:
-        self._progress.setVisible(True)
-        pct = int((page_idx + 1) / total * 100)
-        self._progress.setValue(pct)
-        self._progress.setFormat("%p%")
-        self._status_lbl.setText("识别中…")
-
-    def on_recognition_complete(self, pages: List[Page]) -> None:
-        self._pages = pages
-        self._progress.setVisible(False)
-        self._populate_tree(pages)
-        flagged = sum(
-            1 for p in pages for view in _runtime_layout_views(p)
-            for l in _observation_lines(view.runtime_block)
-            if proof_line_facts(l).status == ProofStatus.AUTO_FLAGGED
+    def set_snapshot(self, snapshot: ExportProjectSnapshot) -> None:
+        if not isinstance(snapshot, ExportProjectSnapshot):
+            raise TypeError("OCR panel requires ExportProjectSnapshot")
+        self._snapshots = tuple(snapshot.pages)
+        self._snapshots_by_uid = {
+            page.page.uid: page for page in self._snapshots
+        }
+        self._pages = tuple(page.page for page in self._snapshots)
+        self._pages_by_uid = {page.uid: page for page in self._pages}
+        self._directory.set_pages(self._pages)
+        target_uid = self._current_page_uid if self._current_page_uid in self._pages_by_uid else (
+            self._pages[0].uid if self._pages else ""
         )
-        total_lines = sum(
-            _observation_line_count(view.runtime_block)
-            for p in pages for view in _runtime_layout_views(p)
+        self._set_current_uid(target_uid)
+        self._populate_tree()
+        has_ocr = any(page.active_ocr_batch is not None for page in self._snapshots)
+        self._start_ocr.setEnabled(bool(self._pages) and not has_ocr)
+        self._go_proof.setEnabled(has_ocr)
+        self._status.setText(
+            f"已载入 {len(self._pages)} 页会话快照，{sum(len(page.ocr_lines) for page in self._snapshots)} 行 OCR 观察"
         )
-        self._status_lbl.setText(
-            f"识别完成：{total_lines} 行，其中 {flagged} 行置信度偏低（已自动标记）"
-        )
-        self._btn_next.setEnabled(True)
+
+    def on_progress(self, progress: WorkflowProgressState) -> None:
+        if not isinstance(progress, WorkflowProgressState):
+            raise TypeError("OCR panel requires WorkflowProgressState")
+        total_pages = max(1, progress.total_pages)
+        completed = max(0, min(progress.completed_pages, total_pages))
+        value = int(round(completed / total_pages * 100))
+        if progress.total > 0:
+            value = max(value, int(round(progress.current / progress.total * 100)))
+        self._progress.show()
+        self._progress.setValue(max(0, min(100, value)))
+        self._status.setText(progress.message or "OCR 处理中")
+        self._start_ocr.setEnabled(False)
+
+    def set_current_page_uid(self, page_uid: str) -> None:
+        if page_uid not in self._pages_by_uid:
+            raise ValueError(f"page UID is not present in OCR panel: {page_uid!r}")
+        self._set_current_uid(page_uid)
+        self._directory.set_current_uid(page_uid)
+
+    def set_ocr_enabled(self, enabled: bool) -> None:
+        self._start_ocr.setEnabled(bool(enabled) and bool(self._pages))
+
+    def finish_progress(self, message: str = "") -> None:
+        self._progress.hide()
+        if message:
+            self._status.setText(message)
+
+    def reset(self) -> None:
+        self._pages = ()
+        self._snapshots = ()
+        self._pages_by_uid = {}
+        self._snapshots_by_uid = {}
+        self._current_page_uid = ""
+        self._directory.set_pages(())
+        self._tree.clear()
+        self._image.set_page(None)
+        self._progress.hide()
+        self._status.setText("等待导入")
+        self._start_ocr.setEnabled(False)
+        self._go_proof.setEnabled(False)
 
     # ------------------------------------------------------------------ private
 
-    def _populate_tree(self, pages: List[Page]) -> None:
+    def _set_current_uid(self, page_uid: str) -> None:
+        self._current_page_uid = page_uid
+        self._image.set_page(self._pages_by_uid.get(page_uid))
+
+    def _on_page_selected(self, page_uid: str) -> None:
+        if page_uid not in self._pages_by_uid:
+            return
+        self._set_current_uid(page_uid)
+        self.page_selected.emit(page_uid)
+
+    def _populate_tree(self) -> None:
         self._tree.clear()
-        for page in pages:
+        for page_snapshot in self._snapshots:
+            page = page_snapshot.page
             page_item = QTreeWidgetItem(self._tree, [f"第 {page.page_number} 页", "", ""])
             page_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("page", page.uid))
-            for view in _runtime_layout_views(page):
-                block = view.runtime_block
-                if block is None:
-                    continue
+            for block in page_snapshot.layout.blocks:
+                lines = self._lines_for_block(page_snapshot, block)
                 block_item = QTreeWidgetItem(
                     page_item,
-                    [f"[{_view_display_label(view)}]", f"{_observation_avg_confidence(block):.2f}", ""],
+                    [
+                        f"[{block.source_label or block.block_type.value}]",
+                        self._average_confidence(lines),
+                        f"{len(lines)} 行",
+                    ],
                 )
-                block_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("block", page.uid, view.uid))
-                for line in _observation_lines(block):
-                    facts = proof_line_facts(line)
-                    line_text = facts.text
-                    preview = line_text[:40] + ("…" if len(line_text) > 40 else "")
-                    status_str = {
-                        ProofStatus.UNCHECKED: "",
-                        ProofStatus.AUTO_FLAGGED: "⚠ 低置信",
-                        ProofStatus.MODIFIED: "✎ 已修改",
-                        ProofStatus.OK: "✓ 确认",
-                    }.get(facts.status, "")
+                block_item.setData(
+                    0,
+                    Qt.ItemDataRole.UserRole,
+                    _tree_payload("block", page.uid, block.uid),
+                )
+                for line in lines:
                     line_item = QTreeWidgetItem(
                         block_item,
-                        [preview, f"{facts.confidence:.2f}", status_str],
+                        [line.text[:48], f"{line.confidence:.2f}", "观察"],
                     )
-                    line_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("line", page.uid, view.uid, line.uid))
-                    if facts.status == ProofStatus.AUTO_FLAGGED:
-                        line_item.setForeground(1, Qt.GlobalColor.red)
+                    line_item.setData(
+                        0,
+                        Qt.ItemDataRole.UserRole,
+                        _tree_payload("line", page.uid, block.uid, line.uid),
+                    )
             page_item.setExpanded(True)
 
-    def _on_item_selected(self, current: QTreeWidgetItem, _) -> None:
+    def _lines_for_block(
+        self,
+        page_snapshot: ExportPageSnapshot,
+        block: LayoutBlockSnapshot,
+    ) -> tuple[OcrLine, ...]:
+        region_uids = {
+            binding.target_uid
+            for binding in page_snapshot.bindings
+            if binding.source_uid == block.uid
+        }
+        return tuple(sorted(
+            (
+                line
+                for line in page_snapshot.ocr_lines
+                if line.region_uid in region_uids
+            ),
+            key=lambda line: (line.order, line.uid),
+        ))
+
+    @staticmethod
+    def _average_confidence(lines: tuple[OcrLine, ...]) -> str:
+        if not lines:
+            return "--"
+        return f"{sum(line.confidence for line in lines) / len(lines):.2f}"
+
+    def _on_item_selected(self, current: QTreeWidgetItem | None, _previous) -> None:
         if current is None:
             return
         payload = current.data(0, Qt.ItemDataRole.UserRole)
-        if not isinstance(payload, tuple) or not payload:
+        if not isinstance(payload, tuple) or len(payload) < 2:
             return
-        kind = payload[0]
-        if kind == "page" and len(payload) == 2:
-            page = self._page_by_uid(payload[1])
-            if page is None:
-                return
-            self._viewer.set_image(page.display_image_path)
-            self._viewer.show_layout_block_views(_runtime_layout_views(page))
-            return
-        if kind == "block" and len(payload) == 3:
-            page = self._page_by_uid(payload[1])
-            if page is None:
-                return
-            view = self._layout_view_by_uid(page, payload[2])
-            if view is None:
-                return
-            self._viewer.set_image(page.display_image_path)
-            self._viewer.show_layout_block_views([view])
+        page_uid = payload[1]
+        if page_uid in self._pages_by_uid:
+            self._set_current_uid(page_uid)
+        if payload[0] == "line" and len(payload) == 4:
+            self._status.setText(f"已选中 OCR 行：{payload[3]}")
+        elif payload[0] == "block" and len(payload) == 3:
+            self._status.setText(f"已选中版面块：{payload[2]}")
 
-    def _page_by_uid(self, page_uid: str) -> Page | None:
-        for page in self._pages:
-            if page.uid == page_uid:
-                return page
-        return None
 
-    @staticmethod
-    def _layout_view_by_uid(page: Page, block_uid: str) -> LayoutBlockView | None:
-        for view in _runtime_layout_views(page):
-            if view.uid == block_uid:
-                return view
-        return None
+__all__ = ["OcrPanel"]

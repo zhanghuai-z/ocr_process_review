@@ -1,30 +1,17 @@
-"""Page-level PP-VL block -> Hanwang linecut micro-recblock integration."""
+"""Hanwang native linecut micro-recblock adapter."""
 from __future__ import annotations
 
 import os
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 
-from app.adapters.paddle import map_paddle_label_to_block_type
-from app.core.bbox_extraction import bbox_from_variant
 from app.geometry.char_reconciler import reconcile_char_geometry
-from app.models.block_state import (
-    clear_ocr_text_invalidation,
-    is_ocr_text_invalidated,
-    paddle_binding_dict,
-    set_paddle_binding,
-)
-from app.models.layout_block_view import LayoutBlockView, iter_page_layout_block_views
-from app.models.ocr_observation import block_ocr_line_observations_by_uid, replace_block_ocr_line_observations
-from app.core.block_attributes import route_source_label
-from app.core.inline_formula_edit_state import filter_handled_inline_formula_subblocks
 from app.models.charocr_routing import (
     PageRoutingPlan,
     PpOcrLatinTokenObservation,
@@ -37,6 +24,15 @@ from app.models.charocr_routing import (
     is_text_route_segment_kind,
 )
 from app.models.char_geometry import NativeGeometryProposal
+from app.models.charocr_execution import (
+    CharOcrAtomObservation,
+    CharOcrCandidateObservation,
+    CharOcrLineObservation,
+    CharOcrPageRequest,
+    CharOcrPageResult,
+    CharOcrRegionObservation,
+)
+from app.models.enums import OcrPolicy
 from app.core.logging import get_logger
 from .engcut_payload import (
     EngcutChar,
@@ -51,28 +47,14 @@ _ENGCUT_NATIVE_EXECUTOR = ThreadPoolExecutor(
 )
 _MAX_ENGCUT_LINES_PER_PAGE = 4
 from app.core.paddle_line_routing import (
-    LAYOUT_LINE_ROUTES_FIELD,
     ROUTE_INLINE_FORMULA_FLAG,
-    ROUTE_SUBBLOCKS_FIELD,
     ROUTE_TABLE_FLAG,
     block_bbox_xyxy,
-    block_text as paddle_block_text,
     is_formula_label,
-    is_formula_style_position_block,
     is_table_label,
     route_authority_label,
     union_xyxy,
     vertical_overlap_ratio,
-)
-from app.services.formula_crop_ocr_service import recognize_formula_bboxes_with_retry
-from app.core.paddle_artifact_index import (
-    BINDING_AMBIGUOUS,
-    BINDING_EMPTY_REVIEW,
-    BINDING_FORMULA_CROP_OCR,
-    BINDING_GEOMETRY_HIT,
-    BINDING_PARENT_FIGURE_HIT,
-    BINDING_PARENT_FORMULA_INFERRED,
-    BINDING_PARENT_TABLE_HIT,
 )
 from app.core.paddle_labels import (
     PADDLE_HANWANG_SKIP_LABELS,
@@ -80,48 +62,19 @@ from app.core.paddle_labels import (
     is_hanwang_skip_label,
     normalize_paddle_label,
 )
-from app.core.proof_line_facts import proof_block_text, proof_display_text
-from app.core.proof_status import proof_status_for
-from app.core.raw_ocr_artifact import (
-    layout_records_with_route_attachments,
-    raw_block_payload,
-    raw_layout_records,
-)
-from app.engines import OCR_BBOX_SPACE_PAGE
-from app.models import (
-    BBox,
-    Block,
-    BlockType,
-    Char,
-    Line,
-    OcrPolicy,
-    Page,
-    ProofLineState,
-)
-from app.models.layout_block_state import (
-    block_source_value,
-    is_user_authored_layout_block,
-    is_user_authored_layout_source,
-)
-from app.models.ocr_character_observation import replace_line_ocr_char_observations
-from app.models.ocr_text_observation import create_ocr_text_line
-from app.models.proof_line_state_store import set_proof_state_for_line
 
 from . import native_bridge
 
 logger = get_logger(__name__)
 
 
-ROUTE_ROW_PADDLE_BINDING_KEY = "paddle_binding"
 ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY = "_hanwang_bbox_audit"
 ROUTE_ROW_LAYOUT_BLOCK_UID_KEY = "_layout_block_uid"
-ROUTE_ROW_OCR_POLICY_KEY = "_layout_block_ocr_policy"
+ROUTE_ROW_OCR_POLICY_KEY = "_layout_ocr_policy"
 
 TEXT_LABELS: set[str] = set(PADDLE_HANWANG_TEXT_LABELS)
 SKIP_LABELS: set[str] = set(PADDLE_HANWANG_SKIP_LABELS)
 DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG = "hanwang_digitlike_numeric_context"
-FORMULA_CROP_OCR_REVIEW_FLAG = "paddle_formula_crop_ocr"
-FORMULA_CROP_OCR_FAILED_FLAG = "paddle_formula_crop_ocr_failed"
 LATIN_ENGCUT_ROUTE_SOURCE = "hanwang:EngCut:latin_route"
 PPOCR_LATIN_TOKEN_ALIGNMENT_SOURCE = "ppocrv6:latin_token_text_alignment"
 PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX = ":ppocr_text_disagreement"
@@ -148,29 +101,30 @@ _BATCH_DISABLE_REASON = (
 
 
 @dataclass
-class CharResult:
+class _NativeAtomResult:
     text: str
     confidence: float = 0.0
     bbox: tuple[int, int, int, int] | None = None
     candidates: list[str] = field(default_factory=list)
+    candidate_confidences: list[float] = field(default_factory=list)
     source: str = "hanwang:micro_recblock"
     bbox_granularity: str = ""
     token_text: str = ""
 
 
 @dataclass
-class LineResult:
+class _NativeLineResult:
     text: str
     bbox: tuple[int, int, int, int]
     confidence: float = 0.0
-    chars: list[CharResult] = field(default_factory=list)
+    chars: list[_NativeAtomResult] = field(default_factory=list)
     source: str = "hanwang"
     bbox_source: str = ""
     review_flags: list[str] = field(default_factory=list)
 
 
 @dataclass
-class BlockResult:
+class _NativeRegionResult:
     block_idx: int
     block_label: str
     block_bbox: tuple[int, int, int, int]
@@ -178,7 +132,7 @@ class BlockResult:
     text: str
     ppvl_text: str
     group_count: int = 0
-    lines: list[LineResult] = field(default_factory=list)
+    lines: list[_NativeLineResult] = field(default_factory=list)
     fallback_reason: str = ""
     raw_block: dict[str, Any] = field(default_factory=dict)
     layout_bbox: tuple[int, int, int, int] | None = None
@@ -370,18 +324,6 @@ def _is_engcut_text_route(route: _TextRoute) -> bool:
     return route.kind == ROUTE_SEGMENT_TEXT_LATIN
 
 
-@dataclass(frozen=True)
-class _LayoutOcrInputPlan:
-    rows: tuple[dict[str, Any], ...]
-
-
-@dataclass(frozen=True)
-class _LayoutOcrEntry:
-    view: LayoutBlockView
-    block: Block
-    row: dict[str, Any]
-
-
 def _label_from_block(block: dict[str, Any], default: str = "unknown") -> str:
     return route_authority_label(block, default)
 
@@ -401,31 +343,26 @@ def _is_unknown_hanwang_label(label: str) -> bool:
     return not _is_skip_label(label)
 
 
-def _row_ocr_policy(block: dict[str, Any]) -> OcrPolicy:
+def _row_ocr_policy(block: dict[str, Any]) -> str:
     raw = str(block.get(ROUTE_ROW_OCR_POLICY_KEY) or "").strip()
     if not raw:
         raise RuntimeError("CharOCR native input row is missing its explicit OCR policy")
     try:
-        return OcrPolicy(raw)
+        return OcrPolicy(raw).value
     except ValueError as exc:
         raise RuntimeError(f"CharOCR native input row has invalid OCR policy: {raw!r}") from exc
 
 
 def _row_dispatches_to_text_ocr(block: dict[str, Any]) -> bool:
-    return _row_ocr_policy(block) == OcrPolicy.TEXT_OCR
+    return _row_ocr_policy(block) == OcrPolicy.TEXT_OCR.value
 
 
 def _block_text(block: dict[str, Any]) -> str:
-    return paddle_block_text(block)
+    return str(block.get("block_content") or "")
 
 
 def _effective_label_for_block(block: dict[str, Any]) -> str:
-    label = _label_from_block(block)
-    if map_paddle_label_to_block_type(label) == BlockType.EQUATION:
-        return label
-    if is_formula_style_position_block(block):
-        return "formula"
-    return label
+    return _label_from_block(block)
 
 
 def _intersect_xyxy(
@@ -591,10 +528,10 @@ def _materialize_linecut_masked_line_crop(
 
 
 def _merge_physical_routing_line(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     *,
     route_bbox: tuple[int, int, int, int],
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     """Materialize one PP physical row without promoting native group geometry."""
     if not lines:
         return []
@@ -608,7 +545,7 @@ def _merge_physical_routing_line(
     chars = [char for line in ordered for char in line.chars]
     confidence_values = [line.confidence for line in ordered if line.confidence > 0]
     flags = sorted({flag for line in ordered for flag in line.review_flags})
-    return [LineResult(
+    return [_NativeLineResult(
         text="".join(line.text for line in ordered if line.text),
         bbox=route_bbox,
         confidence=sum(confidence_values) / len(confidence_values) if confidence_values else 0.0,
@@ -620,9 +557,9 @@ def _merge_physical_routing_line(
 
 
 def _reconcile_ppocr_symbol_observations(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation, ...],
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     """Apply typed PP symbol ownership to native output for the same ink.
 
     PP supplies the symbol identity and token cell; foreground analysis
@@ -639,9 +576,9 @@ def _reconcile_ppocr_symbol_observations(
 
 
 def _reconcile_vl_marker_observations(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     observations: tuple[VlSemanticMarkerObservation, ...],
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     """Bind explicit VL marker identity to its measured LineCut geometry."""
     return _reconcile_owned_text_observations(
         lines,
@@ -651,11 +588,11 @@ def _reconcile_vl_marker_observations(
 
 
 def _reconcile_owned_text_observations(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     observations: tuple[PpOcrSymbolObservation | VlSemanticMarkerObservation, ...],
     *,
     source: str,
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     if not lines or not observations:
         return lines
     resolved = list(lines)
@@ -678,7 +615,7 @@ def _reconcile_owned_text_observations(
             and _point_in_xyxy(_bbox_center(char.bbox), observation.proposal_bbox)
             and _intersect_xyxy(char.bbox, observation.bbox) is not None
         ]
-        observed_char = CharResult(
+        observed_char = _NativeAtomResult(
             text=observation.text,
             confidence=0.0,
             bbox=observation.bbox,
@@ -701,7 +638,7 @@ def _reconcile_owned_text_observations(
                     insertion = index
                     break
 
-        additions: list[CharResult] = []
+        additions: list[_NativeAtomResult] = []
         leading_space = isinstance(observation, PpOcrSymbolObservation) and observation.leading_space
         trailing_space = isinstance(observation, PpOcrSymbolObservation) and observation.trailing_space
         if leading_space and (
@@ -723,17 +660,17 @@ def _reconcile_owned_text_observations(
 
 
 def _reconcile_route_observations(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     route: RoutingLine,
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     return _reconcile_vl_marker_observations(
         _reconcile_ppocr_symbol_observations(lines, route.ppocr_symbol_observations),
         route.vl_marker_observations,
     )
 
 
-def _ppocr_symbol_space() -> CharResult:
-    return CharResult(
+def _ppocr_symbol_space() -> _NativeAtomResult:
+    return _NativeAtomResult(
         text=" ",
         confidence=0.0,
         bbox=None,
@@ -745,9 +682,9 @@ def _ppocr_symbol_space() -> CharResult:
 
 
 def _distribute_linecut_results(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     route: _LineCutMaskedLineRoute,
-) -> dict[tuple[int, int, int], list[LineResult]]:
+) -> dict[tuple[int, int, int], list[_NativeLineResult]]:
     """Return native observations to their explicit route regions.
 
     Character centers must have exactly one LineCut owner.  Ambiguous or
@@ -759,7 +696,7 @@ def _distribute_linecut_results(
         if not line.text and not line.chars:
             continue
         if line.chars:
-            buckets: dict[tuple[int, int, int], list[CharResult]] = {
+            buckets: dict[tuple[int, int, int], list[_NativeAtomResult]] = {
                 segment.key: [] for segment in route.linecut_segments
             }
             for char in line.chars:
@@ -786,7 +723,7 @@ def _distribute_linecut_results(
                     continue
                 boxes = [char.bbox for char in chars if char.bbox is not None]
                 observed_bbox = _intersect_xyxy(line.bbox, segment.bbox)
-                distributed[segment.key].append(LineResult(
+                distributed[segment.key].append(_NativeLineResult(
                     text="".join(char.text for char in chars),
                     bbox=observed_bbox or union_xyxy(boxes),
                     confidence=line.confidence,
@@ -817,7 +754,7 @@ def _recognize_oriented_linecut_route(
     *,
     timeout: float,
     include_chars: bool,
-) -> dict[tuple[int, int, int], list[LineResult]]:
+) -> dict[tuple[int, int, int], list[_NativeLineResult]]:
     """Recognize one non-horizontal physical line through a reversible crop."""
     crop, offset_x, offset_y = _materialize_linecut_masked_line_crop(image_bgr, route)
     oriented = _orient_crop_for_native(
@@ -856,8 +793,8 @@ def _recognize_oriented_linecut_route(
     )
 
 
-def _cluster_lines_by_shape(lines: list[LineResult]) -> list[list[LineResult]]:
-    buckets: list[list[LineResult]] = []
+def _cluster_lines_by_shape(lines: list[_NativeLineResult]) -> list[list[_NativeLineResult]]:
+    buckets: list[list[_NativeLineResult]] = []
     for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
         for bucket in buckets:
             if vertical_overlap_ratio(bucket[0].bbox, line.bbox) >= 0.5:
@@ -881,8 +818,8 @@ def _assemble_layout_route_line(
     block_idx: int,
     line_idx: int,
     route: RoutingLine,
-    grouped_lines: dict[tuple[int, int, int], list[LineResult]],
-) -> list[LineResult]:
+    grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
+) -> list[_NativeLineResult]:
     segments = route.segments
     if not segments:
         return []
@@ -894,7 +831,7 @@ def _assemble_layout_route_line(
             return []
         flags = [ROUTE_TABLE_FLAG] if is_table_label(segment.label) else []
         return [
-            LineResult(
+            _NativeLineResult(
                 text=text,
                 bbox=segment.bbox,
                 confidence=0.0,
@@ -905,8 +842,8 @@ def _assemble_layout_route_line(
             )
         ]
 
-    slice_lines_by_segment: dict[int, list[LineResult]] = {}
-    all_text_lines: list[LineResult] = []
+    slice_lines_by_segment: dict[int, list[_NativeLineResult]] = {}
+    all_text_lines: list[_NativeLineResult] = []
     has_formula = any(segment.kind == "formula" for segment in segments)
     for segment_idx, segment in enumerate(segments):
         if not is_text_route_segment_kind(segment.kind):
@@ -922,7 +859,7 @@ def _assemble_layout_route_line(
         all_text_lines.extend(current_lines)
 
     if not has_formula:
-        merged_text_lines: list[LineResult] = []
+        merged_text_lines: list[_NativeLineResult] = []
         for segment_idx in range(len(segments)):
             merged_text_lines.extend(slice_lines_by_segment.get(segment_idx, []))
         return _reconcile_route_observations(
@@ -937,14 +874,14 @@ def _assemble_layout_route_line(
     if not clusters:
         return []
 
-    assembled: list[LineResult] = []
+    assembled: list[_NativeLineResult] = []
     for cluster in clusters:
         cluster_bbox = union_xyxy([line.bbox for line in cluster])
         components: list[
             tuple[
                 tuple[int, int, int, int],
                 str,
-                list[CharResult],
+                list[_NativeAtomResult],
                 float,
                 set[str],
             ]
@@ -973,7 +910,7 @@ def _assemble_layout_route_line(
                 if not formula_text:
                     continue
                 content_bbox = segment.content_bbox or segment_bbox
-                formula_char = CharResult(
+                formula_char = _NativeAtomResult(
                     text=formula_text,
                     confidence=0.0,
                     bbox=content_bbox,
@@ -992,7 +929,7 @@ def _assemble_layout_route_line(
 
         components.sort(key=lambda item: (item[0][0], item[0][1], item[0][2], item[0][3]))
         text_parts: list[str] = []
-        chars: list[CharResult] = []
+        chars: list[_NativeAtomResult] = []
         confidence_values: list[float] = []
         flags: set[str] = set()
         for _bbox, text, component_chars, confidence, component_flags in components:
@@ -1005,7 +942,7 @@ def _assemble_layout_route_line(
         if not merged_text:
             continue
         assembled.append(
-            LineResult(
+            _NativeLineResult(
                 text=merged_text,
                 bbox=route.bbox,
                 confidence=(
@@ -1026,11 +963,11 @@ def _assemble_routing_lines(
     *,
     block_idx: int,
     line_routes: tuple[RoutingLine, ...],
-    grouped_lines: dict[tuple[int, int, int], list[LineResult]],
-) -> list[LineResult]:
+    grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]],
+) -> list[_NativeLineResult]:
     if not line_routes:
         return []
-    assembled: list[LineResult] = []
+    assembled: list[_NativeLineResult] = []
     for line_idx, route in enumerate(line_routes):
         assembled.extend(
             _assemble_layout_route_line(
@@ -1234,7 +1171,7 @@ def _raw_block_with_bbox_audit(
     return value
 
 
-def _char_result(raw: dict) -> CharResult:
+def _char_result(raw: dict) -> _NativeAtomResult:
     codes = raw.get("codes") or []
     scores = raw.get("scores") or []
     candidates: list[str] = []
@@ -1245,13 +1182,40 @@ def _char_result(raw: dict) -> CharResult:
             text = ""
         if text:
             candidates.append(text)
+    candidate_confidences = [
+        _score_to_confidence(score)
+        for score in scores[:len(candidates)]
+    ]
+    if not candidates:
+        raw_candidates = raw.get("candidates")
+        if isinstance(raw_candidates, (list, tuple)):
+            for candidate in raw_candidates:
+                if isinstance(candidate, dict):
+                    candidate_text = str(candidate.get("text") or "")
+                    candidate_confidence = candidate.get("confidence")
+                    try:
+                        candidate_confidence = float(candidate_confidence)
+                    except (TypeError, ValueError):
+                        candidate_confidence = 0.0
+                else:
+                    candidate_text = str(candidate or "")
+                    candidate_confidence = 0.0
+                if candidate_text:
+                    candidates.append(candidate_text)
+                    candidate_confidences.append(candidate_confidence)
+        if not candidates:
+            text_value = str(raw.get("text") or "")
+            if text_value:
+                candidates.append(text_value)
+                candidate_confidences.append(0.0)
     text = candidates[0] if candidates else ""
-    confidence = _score_to_confidence(scores[0] if scores else 100)
-    return CharResult(
+    confidence = candidate_confidences[0] if candidate_confidences else 0.0
+    return _NativeAtomResult(
         text=text,
         confidence=confidence,
         bbox=_optional_bbox_tuple(raw.get("bbox")),
         candidates=candidates,
+        candidate_confidences=candidate_confidences,
     )
 
 
@@ -1261,8 +1225,8 @@ def _fallback_line(
     *,
     source: str,
     synthesize_chars: bool = True,
-) -> LineResult:
-    return LineResult(
+) -> _NativeLineResult:
+    return _NativeLineResult(
         text=text,
         bbox=bbox,
         confidence=0.0,
@@ -1270,7 +1234,14 @@ def _fallback_line(
         bbox_source=f"{source}:bbox",
         chars=(
             [
-                CharResult(text=ch, confidence=0.0, bbox=None, candidates=[ch], source=source)
+                _NativeAtomResult(
+                    text=ch,
+                    confidence=0.0,
+                    bbox=None,
+                    candidates=[ch],
+                    candidate_confidences=[0.0],
+                    source=source,
+                )
                 for ch in text
             ]
             if synthesize_chars
@@ -1285,8 +1256,8 @@ def _line_results_from_recog(
     fallback_bbox: tuple[int, int, int, int],
     include_chars: bool,
     fallback_empty: bool = True,
-) -> list[LineResult]:
-    lines: list[LineResult] = []
+) -> list[_NativeLineResult]:
+    lines: list[_NativeLineResult] = []
     for area in raw.get("lines", []) or []:
         for group in area.get("groups", []) or []:
             line_bbox = _bbox_tuple(group.get("bbox"), fallback_bbox)
@@ -1309,7 +1280,7 @@ def _line_results_from_recog(
                 else []
             )
             lines.append(
-                LineResult(
+                _NativeLineResult(
                     text=text,
                     bbox=line_bbox,
                     confidence=confidence,
@@ -1324,33 +1295,34 @@ def _line_results_from_recog(
 
 
 def _offset_line_results(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     *,
     dx: int,
     dy: int,
-) -> list[LineResult]:
-    shifted: list[LineResult] = []
+) -> list[_NativeLineResult]:
+    shifted: list[_NativeLineResult] = []
     for line in lines:
         lx1, ly1, lx2, ly2 = line.bbox
-        chars: list[CharResult] = []
+        chars: list[_NativeAtomResult] = []
         for char in line.chars:
             bbox = None
             if char.bbox is not None:
                 cx1, cy1, cx2, cy2 = char.bbox
                 bbox = (cx1 + dx, cy1 + dy, cx2 + dx, cy2 + dy)
             chars.append(
-                CharResult(
+                _NativeAtomResult(
                     text=char.text,
                     confidence=char.confidence,
                     bbox=bbox,
                     candidates=list(char.candidates),
+                    candidate_confidences=list(char.candidate_confidences),
                     source=char.source,
                     bbox_granularity=char.bbox_granularity,
                     token_text=char.token_text,
                 )
             )
         shifted.append(
-            LineResult(
+            _NativeLineResult(
                 text=line.text,
                 bbox=(lx1 + dx, ly1 + dy, lx2 + dx, ly2 + dy),
                 confidence=line.confidence,
@@ -1364,13 +1336,13 @@ def _offset_line_results(
 
 
 def _rescale_line_results(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     *,
     scale_x: float,
     scale_y: float,
     target_width: int,
     target_height: int,
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     if scale_x == 1.0 and scale_y == 1.0:
         return lines
 
@@ -1384,21 +1356,22 @@ def _rescale_line_results(
         )
         return _clamp_xyxy(mapped, target_width, target_height)
 
-    scaled: list[LineResult] = []
+    scaled: list[_NativeLineResult] = []
     for line in lines:
         chars = [
-            CharResult(
+            _NativeAtomResult(
                 text=char.text,
                 confidence=char.confidence,
                 bbox=rescale_bbox(char.bbox) if char.bbox is not None else None,
                 candidates=list(char.candidates),
+                candidate_confidences=list(char.candidate_confidences),
                 source=char.source,
                 bbox_granularity=char.bbox_granularity,
                 token_text=char.token_text,
             )
             for char in line.chars
         ]
-        scaled.append(LineResult(
+        scaled.append(_NativeLineResult(
             text=line.text,
             bbox=rescale_bbox(line.bbox),
             confidence=line.confidence,
@@ -1420,9 +1393,9 @@ def _point_in_xyxy(point: tuple[float, float], box: tuple[int, int, int, int]) -
 
 
 def _filter_line_results_to_route_bbox(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     route_bbox: tuple[int, int, int, int],
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     """Drop OCR context characters that fall outside the current text route.
 
     Recognition crops may intentionally include a few pixels of neighbouring
@@ -1430,13 +1403,13 @@ def _filter_line_results_to_route_bbox(
     still belongs to the route slice, so characters centered outside that slice
     must not enter the assembled line.
     """
-    filtered: list[LineResult] = []
+    filtered: list[_NativeLineResult] = []
     for line in lines:
         if not line.chars:
             if _intersection_area(line.bbox, route_bbox) > 0:
                 filtered.append(line)
             continue
-        kept_chars: list[CharResult] = []
+        kept_chars: list[_NativeAtomResult] = []
         dropped = False
         for char in line.chars:
             if char.bbox is None or _point_in_xyxy(_char_center(char.bbox), route_bbox):
@@ -1456,7 +1429,7 @@ def _filter_line_results_to_route_bbox(
             else line.confidence
         )
         filtered.append(
-            LineResult(
+            _NativeLineResult(
                 text=text,
                 bbox=union_xyxy(boxes) if boxes else line.bbox,
                 confidence=confidence,
@@ -1469,11 +1442,11 @@ def _filter_line_results_to_route_bbox(
     return filtered
 
 
-def _line_chars_text(chars: list[CharResult]) -> str:
+def _line_chars_text(chars: list[_NativeAtomResult]) -> str:
     return "".join(char.text for char in chars)
 
 
-def _normalize_digitlike_numeric_context_lines(lines: list[LineResult]) -> None:
+def _normalize_digitlike_numeric_context_lines(lines: list[_NativeLineResult]) -> None:
     for line in lines:
         if not line.chars:
             continue
@@ -1495,7 +1468,7 @@ def _normalize_digitlike_numeric_context_lines(lines: list[LineResult]) -> None:
                 line.review_flags.append(DIGITLIKE_NUMERIC_CONTEXT_REVIEW_FLAG)
 
 
-def _digitlike_numeric_context_replacement(chars: list[CharResult], index: int) -> str | None:
+def _digitlike_numeric_context_replacement(chars: list[_NativeAtomResult], index: int) -> str | None:
     char = chars[index]
     text = str(char.text or "")
     if text in _DIGITLIKE_ZERO_CHARS:
@@ -1513,7 +1486,7 @@ def _digitlike_numeric_context_replacement(chars: list[CharResult], index: int) 
     return replacement
 
 
-def _adjacent_visible_text(chars: list[CharResult], index: int, *, step: int) -> str:
+def _adjacent_visible_text(chars: list[_NativeAtomResult], index: int, *, step: int) -> str:
     pos = index + step
     while 0 <= pos < len(chars):
         text = str(chars[pos].text or "")
@@ -1525,7 +1498,7 @@ def _adjacent_visible_text(chars: list[CharResult], index: int, *, step: int) ->
 
 def _reconcile_native_char_geometry(
     crop_bgr: np.ndarray,
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     stats: RunStats,
 ) -> None:
     if crop_bgr.size == 0:
@@ -1546,7 +1519,7 @@ def _reconcile_native_char_geometry(
             region_bbox=line.bbox,
         )
         atoms_by_start = {min(atom.proposal_indices): atom for atom in result.atoms}
-        rebuilt: list[CharResult] = []
+        rebuilt: list[_NativeAtomResult] = []
         consumed: set[int] = set()
         for index, char in enumerate(line.chars):
             if index in consumed:
@@ -1561,7 +1534,7 @@ def _reconcile_native_char_geometry(
                 rebuilt.append(char)
                 continue
             text = _line_chars_text(members)
-            rebuilt.append(CharResult(
+            rebuilt.append(_NativeAtomResult(
                 text=text,
                 confidence=sum(member.confidence for member in members) / len(members),
                 bbox=atom.bbox,
@@ -1688,12 +1661,12 @@ def _orient_crop_for_native(
 
 
 def _line_results_from_oriented_crop(
-    lines: list[LineResult],
+    lines: list[_NativeLineResult],
     oriented: _OrientedNativeCrop,
-) -> list[LineResult]:
+) -> list[_NativeLineResult]:
     if oriented.rotation_quarters_clockwise % 4 == 0:
         return lines
-    transformed: list[LineResult] = []
+    transformed: list[_NativeLineResult] = []
     for line in lines:
         chars = [
             replace(
@@ -1738,9 +1711,9 @@ def _engcut_route_line_text_and_chars(
     *,
     source: str = LATIN_ENGCUT_ROUTE_SOURCE,
     ppocr_tokens: tuple[PpOcrLatinTokenObservation, ...] = (),
-) -> tuple[str, list[CharResult]]:
+) -> tuple[str, list[_NativeAtomResult]]:
     text_parts: list[str] = []
-    results: list[CharResult] = []
+    results: list[_NativeAtomResult] = []
     has_output_group = False
     visible_groups = [
         visible
@@ -1760,7 +1733,7 @@ def _engcut_route_line_text_and_chars(
         if has_output_group:
             text_parts.append(" ")
             results.append(
-                CharResult(
+                _NativeAtomResult(
                     text=" ",
                     confidence=0.0,
                     bbox=None,
@@ -1783,7 +1756,7 @@ def _engcut_route_line_text_and_chars(
             assert token is not None
             text_parts.append(token.text)
             results.extend(
-                CharResult(
+                _NativeAtomResult(
                     text=aligned_text,
                     confidence=0.0,
                     bbox=native_char.bbox,
@@ -1807,7 +1780,7 @@ def _engcut_route_line_text_and_chars(
         ):
             result_source = f"{source}{PPOCR_LATIN_TOKEN_DISAGREEMENT_SUFFIX}"
         results.extend(
-            CharResult(
+            _NativeAtomResult(
                 text=str(char.text or ""),
                 confidence=0.0,
                 bbox=char.bbox,
@@ -1991,7 +1964,7 @@ def _recognize_engcut_masked_line(
     stats: RunStats,
     *,
     timeout: float,
-) -> dict[tuple[int, int, int], LineResult]:
+) -> dict[tuple[int, int, int], _NativeLineResult]:
     """Recognize a Latin-only physical line and rebind each native character.
 
     Every character must belong to exactly one Latin segment. An empty segment
@@ -2029,7 +2002,7 @@ def _recognize_engcut_masked_line(
             owner = _engcut_segment_for_char(char, route.segments)
             grouped_by_route[owner.key].append(char)
 
-    results: dict[tuple[int, int, int], LineResult] = {}
+    results: dict[tuple[int, int, int], _NativeLineResult] = {}
     for segment in route.segments:
         if segment.kind != ROUTE_SEGMENT_TEXT_LATIN:
             raise RuntimeError(f"EngCut received a non-Latin route: {segment.kind!r}")
@@ -2049,11 +2022,11 @@ def _recognize_engcut_masked_line(
                     f"line={route.bbox} segment={segment.bbox}"
                 )
             stats.latin_empty_native_fallbacks += 1
-            results[segment.key] = LineResult(
+            results[segment.key] = _NativeLineResult(
                 text=fallback_text,
                 bbox=segment.bbox,
                 confidence=0.0,
-                chars=[CharResult(
+                chars=[_NativeAtomResult(
                     text=fallback_text,
                     confidence=0.0,
                     bbox=segment.bbox,
@@ -2074,7 +2047,7 @@ def _recognize_engcut_masked_line(
         )
         if token_disagreement_count:
             stats.latin_token_text_disagreements += 1
-        results[segment.key] = LineResult(
+        results[segment.key] = _NativeLineResult(
             text=text,
             bbox=union_xyxy(boxes) if boxes else segment.bbox,
             confidence=0.0,
@@ -2096,14 +2069,14 @@ def _recognize_engcut_masked_lines(
     stats: RunStats,
     *,
     timeout: float,
-) -> list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], LineResult]]]:
+) -> list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], _NativeLineResult]]]:
     """Recognize independent physical lines with bounded native concurrency.
 
     The process-wide executor caps total EngCut subprocess pressure while the
     per-page chunks keep one page from occupying every worker when page OCR is
     already concurrent.
     """
-    results: list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], LineResult]]] = []
+    results: list[tuple[_EngCutMaskedLineRoute, dict[tuple[int, int, int], _NativeLineResult]]] = []
 
     def recognize(route: _EngCutMaskedLineRoute):
         local_stats = RunStats()
@@ -2178,7 +2151,7 @@ def _chunk_group_bboxes(
 def _write_micro_recblock_hook(
     image_bgr: np.ndarray,
     ppvl_blocks: list[dict],
-    rows: list[BlockResult],
+    rows: list[_NativeRegionResult],
     stats: RunStats,
 ) -> None:
     hook_dir = os.environ.get("HANWANG_MICRO_RECBLOCK_HOOK_DIR", "").strip()
@@ -2233,54 +2206,9 @@ def _write_micro_recblock_hook(
         logger.warning("Failed to write Hanwang micro_recblock hook: %s", exc)
 
 
-def _formula_texts_by_layout_bbox(page: Page) -> dict[tuple[int, int, int, int], str]:
-    """Read current formula observations only while projecting a routing plan.
-
-    Formula text remains owned by the formula branch.  This bridge supplies it
-    to the transient typed route map consumed by the native runner.
-    """
-    values: dict[tuple[int, int, int, int], str] = {}
-    for view in iter_page_layout_block_views(page):
-        if view.block_type != BlockType.EQUATION:
-            continue
-        lines = block_ocr_line_observations_by_uid(view.uid)
-        text = "".join(proof_display_text(line) for line in lines if proof_display_text(line)).strip()
-        if text:
-            values[tuple(int(value) for value in view.bbox.to_xyxy())] = text
-    return values
-
-
-def _routing_line_for_native_runner(
-    line: RoutingLine,
-    formula_texts_by_bbox: dict[tuple[int, int, int, int], str],
-) -> RoutingLine:
-    segments = []
-    for segment in line.segments:
-        text = segment.text
-        if segment.kind == "formula" and not text:
-            content_bbox = segment.content_bbox or segment.bbox
-            _center_x, center_y = _bbox_center(content_bbox)
-            if line.bbox[1] <= center_y < line.bbox[3]:
-                text = formula_texts_by_bbox.get(content_bbox, "")
-                if not text:
-                    containing = [
-                        candidate_text
-                        for bbox, candidate_text in formula_texts_by_bbox.items()
-                        if bbox[0] <= content_bbox[0]
-                        and bbox[1] <= content_bbox[1]
-                        and bbox[2] >= content_bbox[2]
-                        and bbox[3] >= content_bbox[3]
-                    ]
-                    if len(containing) == 1:
-                        text = containing[0]
-        segments.append(replace(segment, text=text))
-    return replace(line, segments=tuple(segments))
-
-
 def _compile_native_route_map(
     ppvl_blocks: list[dict],
     routing_plan: PageRoutingPlan,
-    page: Page,
 ) -> dict[int, tuple[RoutingLine, ...]]:
     """Map immutable page routes to transient native row indexes.
 
@@ -2295,7 +2223,6 @@ def _compile_native_route_map(
         uid = str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
         if uid:
             rows_by_uid[uid] = (index, row)
-    formula_texts_by_bbox = _formula_texts_by_layout_bbox(page)
     routes_by_block_index: dict[int, tuple[RoutingLine, ...]] = {}
     for block_route in routing_plan.blocks:
         entry = rows_by_uid.get(block_route.block_uid)
@@ -2305,10 +2232,7 @@ def _compile_native_route_map(
                 f"{block_route.block_uid}"
             )
         block_index, _row = entry
-        routes_by_block_index[block_index] = tuple(
-            _routing_line_for_native_runner(line, formula_texts_by_bbox)
-            for line in block_route.plan.lines
-        )
+        routes_by_block_index[block_index] = tuple(block_route.plan.lines)
     missing_text_rows = [
         index
         for index, row in enumerate(ppvl_blocks)
@@ -2331,15 +2255,12 @@ def run_micro_recblock(
     recog_timeout: float = 60.0,
     include_chars: bool = True,
     routing_plan: PageRoutingPlan,
-    page: Page,
     progress_callback: Callable[[int, int, str], None] | None = None,
-) -> tuple[list[BlockResult], RunStats]:
+) -> tuple[tuple[CharOcrRegionObservation, ...], RunStats]:
     """Run native CharOCR from one explicit page routing plan."""
     global _BATCH_DISABLED_FOR_SESSION, _BATCH_DISABLE_REASON
     height, width = image_bgr.shape[:2]
-    if routing_plan.page_uid != page.uid:
-        raise RuntimeError("Hanwang native runner requires the current page's explicit routing plan")
-    native_routes_by_block_index = _compile_native_route_map(ppvl_blocks, routing_plan, page)
+    native_routes_by_block_index = _compile_native_route_map(ppvl_blocks, routing_plan)
     stats = RunStats(n_blocks_total=len(ppvl_blocks))
     text_indices: list[int] = []
     skip_indices: list[int] = []
@@ -2354,7 +2275,7 @@ def run_micro_recblock(
 
     stats.n_blocks_hanwang = len(text_indices)
     stats.n_blocks_ppvl = len(skip_indices)
-    rows: list[BlockResult | None] = [None] * len(ppvl_blocks)
+    rows: list[_NativeRegionResult | None] = [None] * len(ppvl_blocks)
     text_routes: list[_TextRoute] = []
     engcut_masked_line_routes: list[_EngCutMaskedLineRoute] = []
     linecut_masked_line_routes: list[_LineCutMaskedLineRoute] = []
@@ -2410,8 +2331,8 @@ def run_micro_recblock(
         layout_bbox = _layout_block_bbox(block, width, height)
         block_bbox_source = "layout_block_bbox"
         ppvl_text = _block_text(block)
-        synthesize_chars = map_paddle_label_to_block_type(label) != BlockType.EQUATION
-        rows[idx] = BlockResult(
+        synthesize_chars = not is_formula_label(label)
+        rows[idx] = _NativeRegionResult(
             block_idx=idx,
             block_label=label,
             block_bbox=bbox,
@@ -2456,7 +2377,7 @@ def run_micro_recblock(
                 group["_area_idx"] = area_idx
                 groups.append(group)
         started = time.time()
-        grouped_lines: dict[tuple[int, int, int], list[LineResult]] = {
+        grouped_lines: dict[tuple[int, int, int], list[_NativeLineResult]] = {
             route.key: []
             for route in text_routes
         }
@@ -3019,7 +2940,7 @@ def run_micro_recblock(
             hw_text = "".join(line.text for line in lines).strip()
             source = "hanwang"
             text = hw_text
-            rows[block_idx] = BlockResult(
+            rows[block_idx] = _NativeRegionResult(
                 block_idx=block_idx,
                 block_label=label,
                 block_bbox=bbox,
@@ -3071,7 +2992,7 @@ def run_micro_recblock(
             for item in segimg_group_audits_by_route.get(route.key, [])
         ]
         ppvl_text = _block_text(block)
-        rows[block_idx] = BlockResult(
+        rows[block_idx] = _NativeRegionResult(
             block_idx=block_idx,
             block_label=label,
             block_bbox=bbox,
@@ -3101,849 +3022,209 @@ def run_micro_recblock(
 
     final_rows = [row for row in rows if row is not None]
     _write_micro_recblock_hook(image_bgr, ppvl_blocks, final_rows, stats)
-    return final_rows, stats
+    return tuple(_native_region_observation(row) for row in final_rows), stats
 
 
-def _bbox_from_xyxy_tuple(raw: tuple[int, int, int, int], width: int, height: int) -> BBox:
-    x1, y1, x2, y2 = _clamp_xyxy(raw, width, height)
-    return BBox.from_xyxy(x1, y1, x2, y2)
-
-
-def _char_to_model(char: CharResult) -> Char:
-    bbox = BBox.from_xyxy(*char.bbox) if char.bbox else None
-    return Char(
-        char=char.text,
-        confidence=char.confidence,
-        bbox=bbox,
-        bbox_source=char.source,
-        bbox_granularity=char.bbox_granularity or ("char" if bbox is not None else "fallback"),
-        token_text=char.token_text or char.text,
+def _has_geometry(bbox: tuple[int, int, int, int] | None) -> bool:
+    return bool(
+        bbox is not None
+        and bbox[2] > bbox[0]
+        and bbox[3] > bbox[1]
     )
 
 
-def _line_to_model(line: LineResult, width: int, height: int, review_flags: list[str]) -> Line:
-    chars = [_char_to_model(char) for char in line.chars]
-    merged_review_flags = [*review_flags, *line.review_flags]
-    model = create_ocr_text_line(
-        text=line.text,
-        confidence=line.confidence,
-        bbox=_bbox_from_xyxy_tuple(line.bbox, width, height),
-        source_text=line.text,
-        review_flags=merged_review_flags,
-    )
-    replace_line_ocr_char_observations(model.uid, chars)
-    set_proof_state_for_line(
-        model,
-        ProofLineState(
-            line_uid=model.uid,
-            proof_status=proof_status_for(line.confidence, merged_review_flags),
-        ),
-    )
-    return model
-
-
-_PARENT_BINDING_STATUSES = {
-    BINDING_GEOMETRY_HIT,
-    BINDING_FORMULA_CROP_OCR,
-    BINDING_PARENT_FORMULA_INFERRED,
-    BINDING_PARENT_TABLE_HIT,
-    BINDING_PARENT_FIGURE_HIT,
-}
-
-_INTERNAL_LAYOUT_NOTES = {
-    "manual_draw_merge_requires_ocr_rerun",
-    "manual_merge_requires_ocr_rerun",
-    "manual_binding_ambiguous",
-    "manual_geometry_empty_formula_review",
-}
-
-
-def _payload_bbox_xyxy(raw_payload: dict[str, Any], width: int, height: int) -> tuple[int, int, int, int] | None:
-    bbox = bbox_from_variant(raw_payload, max_w=width, max_h=height)
-    if bbox is None:
-        return None
-    return _clamp_xyxy(bbox.to_xyxy(), width, height)
-
-
-def _int_value(value: object, default: int = -1) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parent_index_for_raw_payload(page: Page, raw_payload: dict[str, Any]) -> int:
-    records = raw_layout_records(page)
-    if not raw_payload or not records:
-        return -1
-
-    label = route_authority_label(raw_payload)
-    bbox = _payload_bbox_xyxy(raw_payload, page.width, page.height)
-    text = paddle_block_text(raw_payload)
-    for index, record in enumerate(records):
-        if label and label != route_authority_label(record):
-            continue
-        if bbox is not None and bbox != block_bbox_xyxy(record, page.width, page.height):
-            continue
-        record_text = paddle_block_text(record)
-        if text and record_text and text != record_text:
-            continue
-        return index
-    return -1
-
-
-def _origin_raw_index(block: Block) -> int:
-    origin = getattr(block, "origin", None)
-    return _int_value(getattr(origin, "raw_index", None))
-
-
-def _route_source_label_from_view(block: Block, view: LayoutBlockView | None) -> str:
-    if view is None:
-        return route_source_label(block)
-    return str(view.source_label or "") or route_source_label(block) or view.block_type.value
-
-
-def _layout_row_from_block(
-    page: Page,
-    block: Block,
-    *,
-    view: LayoutBlockView | None = None,
-) -> dict[str, Any]:
-    raw_payload = raw_block_payload(block, page)
-    raw_payload.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-    parent_index = _origin_raw_index(block)
-    if parent_index < 0:
-        parent_index = _parent_index_for_raw_payload(page, raw_payload)
-    binding = paddle_binding_dict(block)
-    if parent_index < 0 and isinstance(binding, dict):
-        parent_index = _int_value(binding.get("parent_index"))
-    layout_bbox = view.bbox if view is not None else block.bbox
-    source_label = _route_source_label_from_view(block, view)
-    ocr_policy = view.ocr_policy if view is not None else block.ocr_policy
-    note = view.note if view is not None else block.note
-    row = {
-        **raw_payload,
-        "block_label": source_label,
-        "block_bbox": list(layout_bbox.to_xyxy()),
-        "block_content": _layout_block_content(block, raw_payload, note=note),
-        "source_label": source_label,
-        ROUTE_ROW_LAYOUT_BLOCK_UID_KEY: view.uid if view is not None else block.uid,
-        "_layout_block_source": block_source_value(block),
-        ROUTE_ROW_OCR_POLICY_KEY: ocr_policy.value,
-    }
-    if binding:
-        row[ROUTE_ROW_PADDLE_BINDING_KEY] = dict(binding)
-    records = layout_records_with_route_attachments(page)
-    if ROUTE_SUBBLOCKS_FIELD not in row and 0 <= parent_index < len(records):
-        parent_record = records[parent_index]
-        if isinstance(parent_record, dict) and ROUTE_SUBBLOCKS_FIELD in parent_record:
-            row[ROUTE_SUBBLOCKS_FIELD] = parent_record[ROUTE_SUBBLOCKS_FIELD]
-    current_subblocks = row.get(ROUTE_SUBBLOCKS_FIELD)
-    if isinstance(current_subblocks, list):
-        row[ROUTE_SUBBLOCKS_FIELD] = filter_handled_inline_formula_subblocks(page, current_subblocks)
-    if parent_index >= 0:
-        row["_layout_paddle_parent_index"] = parent_index
-    return row
-
-
-def _layout_block_uid_from_route_row(row: BlockResult) -> str:
-    uid = str(dict(row.raw_block or {}).get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
-    if not uid:
-        raise RuntimeError(
-            "Hanwang route row missing layout block uid; OCR cannot write layout observations safely"
-        )
-    return uid
-
-
-def _ocr_audit_from_route_row(row: BlockResult) -> dict[str, Any]:
-    raw = dict(row.raw_block or {})
-    value = raw.get(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY)
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _apply_row_ocr_audit(block: Block, *, ocr_audit: dict[str, Any]) -> None:
-    block.ocr_audit = dict(ocr_audit)
-
-
-def _layout_block_content(
-    block: Block,
-    raw_payload: dict[str, Any] | None = None,
-    *,
-    note: str | None = None,
-) -> str:
-    raw_text = paddle_block_text(raw_payload or {})
-    if raw_text:
-        return raw_text
-    text = proof_block_text(block)
-    if text:
-        return text
-    note_text = str(block.note if note is None else note or "")
-    if note_text in _INTERNAL_LAYOUT_NOTES:
-        return ""
-    return note_text
-
-
-def _binding_payload_from_block(block: Block) -> dict[str, Any] | None:
-    binding = paddle_binding_dict(block)
-    if not binding:
-        return None
-    status = str(binding.get("status") or "")
-    if status in {BINDING_EMPTY_REVIEW, BINDING_AMBIGUOUS}:
-        return None
-    if status not in _PARENT_BINDING_STATUSES:
-        return None
-    if _int_value(binding.get("parent_index")) < 0:
-        return None
-    return binding
-
-
-def _row_matches_paddle_parent_record(page: Page, row: dict[str, Any], parent_index: int) -> bool:
-    records = raw_layout_records(page)
-    if not (0 <= parent_index < len(records)):
-        return False
-    parent_record = records[parent_index]
-    if not isinstance(parent_record, dict):
-        return False
-    row_bbox = block_bbox_xyxy(row, page.width, page.height)
-    parent_bbox = block_bbox_xyxy(parent_record, page.width, page.height)
-    if row_bbox != parent_bbox:
-        return False
-    row_label = route_authority_label(row)
-    parent_label = route_authority_label(parent_record)
-    return not row_label or not parent_label or row_label == parent_label
-
-
-def _manual_bbox_from_entry(entry: _LayoutOcrEntry) -> tuple[int, int, int, int]:
-    return tuple(int(value) for value in entry.view.bbox.to_xyxy())
-
-
-def _route_subblock_overlaps_bbox(
-    value: dict[str, Any],
-    bbox: tuple[int, int, int, int],
-    width: int,
-    height: int,
-) -> bool:
-    current = block_bbox_xyxy(value, width, height)
-    if current == bbox:
-        return True
-    overlap = _intersect_xyxy(current, bbox)
-    if overlap is None:
-        return False
-    area = (overlap[2] - overlap[0]) * (overlap[3] - overlap[1])
-    current_area = max(1, (current[2] - current[0]) * (current[3] - current[1]))
-    bbox_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
-    return area / min(current_area, bbox_area) >= 0.7
-
-
-def _manual_binding_route_subblock(entry: _LayoutOcrEntry, binding: dict[str, Any]) -> dict[str, Any]:
-    block = entry.block
-    manual_bbox = _manual_bbox_from_entry(entry)
-    label = str(binding.get("source_label") or _route_source_label_from_view(block, entry.view))
-    text_is_stale = _manual_formula_observation_is_stale(manual_bbox, binding)
-    text = "" if text_is_stale else proof_block_text(block)
-    payload = {
-        "block_label": label,
-        "block_bbox": list(manual_bbox),
-        "block_content": text,
-        ROUTE_ROW_PADDLE_BINDING_KEY: dict(binding),
-        "_layout_block_source": block_source_value(block),
-        "_layout_manual_route_subblock": True,
-    }
-    if text_is_stale:
-        payload["_layout_manual_formula_observation_stale"] = True
-    return payload
-
-
-def _manual_formula_observation_is_stale(
-    manual_bbox: tuple[int, int, int, int],
-    binding: dict[str, Any],
-) -> bool:
-    candidate = bbox_from_variant(binding.get("candidate_bbox"))
-    if candidate is None:
-        return False
-    candidate_bbox = tuple(int(value) for value in candidate.to_xyxy())
-    return candidate_bbox != manual_bbox
-
-
-def _manual_unbound_route_subblock(entry: _LayoutOcrEntry) -> dict[str, Any]:
-    block = entry.block
-    manual_bbox = _manual_bbox_from_entry(entry)
-    label = _route_source_label_from_view(block, entry.view)
-    if entry.view.block_type == BlockType.EQUATION and normalize_paddle_label(label) in {"", "equation", "formula"}:
-        label = "inline_formula"
-    return {
-        "block_label": label,
-        "block_bbox": list(manual_bbox),
-        "block_content": proof_block_text(block),
-        "_layout_block_source": block_source_value(block),
-        "_layout_manual_route_subblock": True,
-        "_layout_manual_unbound_route_subblock": True,
-    }
-
-
-def _replace_or_append_route_subblock(
-    row: dict[str, Any],
-    route_subblock: dict[str, Any],
-    binding: dict[str, Any],
-    width: int,
-    height: int,
-) -> None:
-    current_values = row.get(ROUTE_SUBBLOCKS_FIELD)
-    values = [dict(value) for value in current_values if isinstance(value, dict)] if isinstance(current_values, list) else []
-    candidate_bbox = bbox_from_variant(binding.get("candidate_bbox"))
-    target_bbox = tuple(int(value) for value in candidate_bbox.to_xyxy()) if candidate_bbox is not None else None
-    manual_bbox = tuple(route_subblock["block_bbox"])
-
-    replaced = False
-    next_values: list[dict[str, Any]] = []
-    for value in values:
-        current_bbox = block_bbox_xyxy(value, width, height)
-        value_is_manual = bool(value.get("_layout_manual_route_subblock"))
-        if current_bbox == manual_bbox:
-            if not replaced:
-                next_values.append(route_subblock)
-                replaced = True
-            continue
-        if value_is_manual:
-            next_values.append(value)
-            continue
-        should_replace = (
-            target_bbox is not None
-            and _route_subblock_overlaps_bbox(value, target_bbox, width, height)
-        ) or _route_subblock_overlaps_bbox(value, manual_bbox, width, height)
-        if should_replace:
-            if not replaced:
-                next_values.append(route_subblock)
-                replaced = True
-            continue
-        next_values.append(value)
-    if not replaced:
-        next_values.append(route_subblock)
-    row[ROUTE_SUBBLOCKS_FIELD] = next_values
-    row.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-
-
-def _append_manual_route_subblock(
-    row: dict[str, Any],
-    route_subblock: dict[str, Any],
-    width: int,
-    height: int,
-) -> None:
-    current_values = row.get(ROUTE_SUBBLOCKS_FIELD)
-    values = [dict(value) for value in current_values if isinstance(value, dict)] if isinstance(current_values, list) else []
-    manual_bbox = tuple(route_subblock["block_bbox"])
-    next_values: list[dict[str, Any]] = []
-    replaced = False
-    for value in values:
-        current_bbox = block_bbox_xyxy(value, width, height)
-        if current_bbox == manual_bbox:
-            next_values.append(route_subblock)
-            replaced = True
-        else:
-            next_values.append(value)
-    if not replaced:
-        next_values.append(route_subblock)
-    row[ROUTE_SUBBLOCKS_FIELD] = next_values
-    row.pop(LAYOUT_LINE_ROUTES_FIELD, None)
-
-
-def _manual_structure_parent_row(
-    entries: list[_LayoutOcrEntry],
-    entry: _LayoutOcrEntry,
-    page: Page,
-) -> dict[str, Any] | None:
-    block = entry.block
-    if entry.view.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
-        return None
-    if not is_user_authored_layout_block(block):
-        return None
-    block_bbox = tuple(int(value) for value in entry.view.bbox.to_xyxy())
-    best: tuple[float, dict[str, Any]] | None = None
-    for candidate in entries:
-        candidate_row = candidate.row
-        if candidate is entry:
-            continue
-        label = route_authority_label(candidate_row)
-        if map_paddle_label_to_block_type(label) != BlockType.TEXT:
-            continue
-        if is_hanwang_skip_label(label) or is_formula_label(label) or is_table_label(label):
-            continue
-        candidate_bbox = block_bbox_xyxy(candidate_row, page.width, page.height)
-        overlap_area = _intersection_area(block_bbox, candidate_bbox)
-        if overlap_area <= 0:
-            continue
-        block_area = max(1, (block_bbox[2] - block_bbox[0]) * (block_bbox[3] - block_bbox[1]))
-        score = overlap_area / block_area
-        center_inside = (
-            candidate_bbox[0] <= (block_bbox[0] + block_bbox[2]) / 2 <= candidate_bbox[2]
-            and candidate_bbox[1] <= (block_bbox[1] + block_bbox[3]) / 2 <= candidate_bbox[3]
-        )
-        score += 0.25 if center_inside else 0.0
-        if best is None or score > best[0]:
-            best = (score, candidate_row)
-    if best is None or best[0] < 0.25:
-        return None
-    return best[1]
-
-
-def _apply_manual_parent_binding(
-    *,
-    page: Page,
-    parent_row: dict[str, Any],
-    entry: _LayoutOcrEntry,
-    binding: dict[str, Any],
-) -> None:
-    block = entry.block
-    block_type = map_paddle_label_to_block_type(str(binding.get("block_type") or entry.view.block_type.value))
-    parent_index = _int_value(binding.get("parent_index"))
-    records = raw_layout_records(page)
-    parent_record = records[parent_index] if 0 <= parent_index < len(records) else {}
-    if block_type == BlockType.EQUATION:
-        parent_text = paddle_block_text(parent_record)
-        if parent_text:
-            parent_row["block_content"] = parent_text
-            parent_row["_layout_block_content_authority"] = "paddle_parent_binding"
-        route_subblock = _manual_binding_route_subblock(entry, binding)
-        _replace_or_append_route_subblock(
-            parent_row,
-            route_subblock,
-            binding,
-            page.width,
-            page.height,
-        )
-        return
-
-    manual_bbox = list(_manual_bbox_from_entry(entry))
-    parent_row["block_bbox"] = manual_bbox
-    observation_text = proof_block_text(block)
-    if observation_text:
-        parent_row["block_content"] = observation_text
-    parent_row["_layout_parent_replaced_by_manual_binding"] = True
-
-
-def _apply_manual_unbound_parent_route(
-    *,
-    page: Page,
-    parent_row: dict[str, Any],
-    entry: _LayoutOcrEntry,
-) -> None:
-    route_subblock = _manual_unbound_route_subblock(entry)
-    _append_manual_route_subblock(parent_row, route_subblock, page.width, page.height)
-
-
-def _compile_layout_ocr_input_plan(page: Page) -> _LayoutOcrInputPlan:
-    entries: list[_LayoutOcrEntry] = []
-    for view in iter_page_layout_block_views(page):
-        block = view.runtime_block
-        if block is None:
-            continue
-        entries.append(
-            _LayoutOcrEntry(
-                view=view,
-                block=block,
-                row=_layout_row_from_block(page, block, view=view),
-            )
-        )
-    parent_rows: dict[int, dict[str, Any]] = {}
-    for entry in entries:
-        row = entry.row
-        parent_index = _int_value(row.get("_layout_paddle_parent_index"))
-        if (
-            parent_index >= 0
-            and parent_index not in parent_rows
-            and _row_matches_paddle_parent_record(page, row, parent_index)
-        ):
-            parent_rows[parent_index] = row
-
-    skip_block_ids: set[int] = set()
-    for entry in entries:
-        block = entry.block
-        row = entry.row
-        if entry.view.block_type not in (BlockType.EQUATION, BlockType.TABLE, BlockType.FIGURE):
-            continue
-        binding = _binding_payload_from_block(block)
-        parent_row = parent_rows.get(_int_value(binding.get("parent_index"))) if binding is not None else None
-        if parent_row is None:
-            parent_row = _manual_structure_parent_row(entries, entry, page)
-        if parent_row is None or parent_row is row:
-            continue
-        if binding is not None:
-            _apply_manual_parent_binding(
-                page=page,
-                parent_row=parent_row,
-                entry=entry,
-                binding=binding,
-            )
-        else:
-            _apply_manual_unbound_parent_route(
-                page=page,
-                parent_row=parent_row,
-                entry=entry,
-            )
-        skip_block_ids.add(id(block))
-
-    blocks: list[dict] = []
-    for entry in entries:
-        block = entry.block
-        if id(block) in skip_block_ids:
-            continue
-        blocks.append(entry.row)
-    return _LayoutOcrInputPlan(
-        rows=tuple(blocks),
-    )
-
-
-def _page_blocks_from_layout(page: Page) -> list[dict]:
-    return [dict(row) for row in _compile_layout_ocr_input_plan(page).rows]
-
-
-def _current_layout_blocks_for_ocr(page: Page) -> list[dict]:
-    """Build OCR input from the current layout truth only.
-
-    Paddle parsing records remain available as origin/reference data for binding,
-    but OCR dispatch must not switch data sources based on whether a user edited
-    the page.
-    """
-    return _page_blocks_from_layout(page)
-
-
-def _inline_formula_crop_ocr_targets(page: Page) -> list[Block]:
-    targets: list[tuple[LayoutBlockView, Block]] = []
-    for view in iter_page_layout_block_views(page):
-        block = view.runtime_block
-        if block is None:
-            continue
-        if view.block_type != BlockType.EQUATION:
-            continue
-        label = _route_source_label_from_view(block, view)
-        if label not in {"inline_formula", "formula"}:
-            continue
-        if view.bbox is None or view.bbox.area <= 0:
-            continue
-        targets.append((view, block))
-    targets.sort(key=lambda item: (item[0].bbox.y, item[0].bbox.x, item[0].order))
-    return [block for _view, block in targets]
-
-
-def _existing_parent_index(block: Block) -> int:
-    origin_index = _origin_raw_index(block)
-    if origin_index >= 0:
-        return origin_index
-    binding = paddle_binding_dict(block)
-    if binding:
-        parent_index = _int_value(binding.get("parent_index"))
-        if parent_index >= 0:
-            return parent_index
-    return -1
-
-
-def _set_inline_formula_crop_ocr_text(block: Block, text: str) -> None:
-    bbox_xyxy = [int(value) for value in block.bbox.to_xyxy()]
-    parent_index = _existing_parent_index(block)
-    binding: dict[str, Any] = {
-        "status": BINDING_FORMULA_CROP_OCR,
-        "source": "paddle_formula_crop_ocr",
-        "block_type": BlockType.EQUATION.value,
-        "source_label": "inline_formula",
-        "parent_index": parent_index,
-        "candidate_index": -1,
-        "score": 1.0,
-        "manual_bbox": bbox_xyxy,
-        "review_flags": [FORMULA_CROP_OCR_REVIEW_FLAG],
-    }
-    set_paddle_binding(block, binding)
-    clear_ocr_text_invalidation(block)
-    replace_block_ocr_line_observations(block.uid, [
-        create_ocr_text_line(
+def _observation_candidates(
+    atom: _NativeAtomResult,
+) -> tuple[CharOcrCandidateObservation, ...]:
+    texts = list(atom.candidates)
+    if not texts and atom.text:
+        texts = [atom.text]
+    return tuple(
+        CharOcrCandidateObservation(
             text=text,
-            confidence=1.0,
-            bbox=block.bbox,
-            source_text=text,
-            review_flags=[FORMULA_CROP_OCR_REVIEW_FLAG],
-        )
-    ])
-
-
-def _mark_inline_formula_needs_text(block: Block, reason: str = "") -> None:
-    bbox_xyxy = [int(value) for value in block.bbox.to_xyxy()]
-    parent_index = _existing_parent_index(block)
-    flags = ["manual_formula_needs_text"]
-    if reason:
-        flags.append(FORMULA_CROP_OCR_FAILED_FLAG)
-    set_paddle_binding(block, {
-            "status": BINDING_EMPTY_REVIEW,
-            "source": "paddle_formula_crop_ocr_empty",
-            "block_type": BlockType.EQUATION.value,
-            "source_label": "inline_formula",
-            "parent_index": parent_index,
-            "candidate_index": -1,
-            "score": 0.0,
-            "manual_bbox": bbox_xyxy,
-            "review_flags": flags,
-    })
-    replace_block_ocr_line_observations(block.uid, [
-        create_ocr_text_line(
-            text="",
-            confidence=0.0,
-            bbox=block.bbox,
-            source_text="",
-            review_flags=flags,
-        )
-    ])
-
-
-def _mark_formula_crop_ocr_unavailable(blocks: list[Block]) -> None:
-    for block in blocks:
-        binding = paddle_binding_dict(block)
-        binding_source = str(binding.get("source") or "") if isinstance(binding, dict) else ""
-        invalidated = is_ocr_text_invalidated(block)
-        stale_parent_binding = "parent_text" in binding_source or binding_source == "paddle_geometry"
-        if invalidated or stale_parent_binding or not proof_block_text(block):
-            _mark_inline_formula_needs_text(block)
-
-
-def _mark_formula_crop_ocr_failed(blocks: list[Block], reason: str) -> None:
-    for block in blocks:
-        _mark_inline_formula_needs_text(block, reason)
-
-
-def _build_formula_rebind_client(progress_callback: Callable[[int, int, str], None] | None) -> Any | None:
-    try:
-        from app.core.app_config import get_config
-        from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
-        from app.core.paddle_v16_client import (
-            PaddleV16LayoutClient,
-            is_paddle_v16_endpoint,
-        )
-
-        cfg = get_config()
-        url = resolve_api_endpoint_for_role(
-            cfg.get("api_url", ""),
-            profile=FIXED_LAYOUT_PROFILE,
-            role="layout",
-        )
-        if not url or not is_paddle_v16_endpoint(url):
-            return None
-        configured_timeout = max(1, int(cfg.get("api_timeout", 180)))
-        return PaddleV16LayoutClient(
-            jobs_url=url,
-            token=str(cfg.get("api_token", "") or ""),
-            request_timeout=min(max(10, configured_timeout), 30),
-            poll_timeout=max(configured_timeout, 180),
-            network_mode=str(cfg.get("paddle_api_network_mode", "auto") or "auto"),
-            status_callback=(
-                (lambda message: progress_callback(0, 1, f"Paddle 公式重识别：{message}"))
-                if progress_callback
-                else None
+            confidence=(
+                atom.candidate_confidences[index]
+                if index < len(atom.candidate_confidences)
+                else (atom.confidence if index == 0 else 0.0)
             ),
         )
-    except Exception as exc:
-        logger.warning("Cannot create Paddle formula crop OCR client: %s", exc)
-        return None
+        for index, text in enumerate(texts)
+    )
+
+
+def _native_line_observation(line: _NativeLineResult) -> CharOcrLineObservation:
+    atoms = tuple(
+        CharOcrAtomObservation(
+            text=atom.text,
+            bbox=(
+                atom.bbox
+                if _has_geometry(atom.bbox)
+                else line.bbox
+            ),
+            confidence=atom.confidence,
+            source=atom.source,
+            granularity=(
+                atom.bbox_granularity
+                or ("char" if _has_geometry(atom.bbox) else "fallback")
+            ),
+            token_text=atom.token_text or atom.text,
+            candidates=_observation_candidates(atom),
+        )
+        for atom in line.chars
+    )
+    return CharOcrLineObservation(
+        text=line.text,
+        bbox=line.bbox,
+        confidence=line.confidence,
+        source=line.source,
+        atoms=atoms,
+        review_flags=tuple(line.review_flags),
+    )
+
+
+def _native_region_observation(
+    row: _NativeRegionResult,
+) -> CharOcrRegionObservation:
+    block_uid = str(row.raw_block.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
+    if not block_uid:
+        raise RuntimeError(
+            "Hanwang native output row is missing the request input row UID"
+        )
+    audit = row.raw_block.get(ROUTE_ROW_HANWANG_BBOX_AUDIT_KEY, {})
+    if not isinstance(audit, dict):
+        audit = {}
+    return CharOcrRegionObservation(
+        block_uid=block_uid,
+        label=row.block_label,
+        bbox=row.block_bbox,
+        source=row.source,
+        lines=tuple(_native_line_observation(line) for line in row.lines),
+        audit_json=json.dumps(
+            audit,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ),
+    )
+
+
+def _stats_metrics(stats: RunStats) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (name, str(value))
+        for name, value in stats.__dict__.items()
+    )
+
+
+def _validate_runner_regions(
+    regions: object,
+    request: CharOcrPageRequest,
+) -> tuple[CharOcrRegionObservation, ...]:
+    if not isinstance(regions, (list, tuple)):
+        raise TypeError("Hanwang native runner must return a sequence of regions")
+    observed: dict[str, CharOcrRegionObservation] = {}
+    for region in regions:
+        if not isinstance(region, CharOcrRegionObservation):
+            raise TypeError(
+                "Hanwang native runner must return CharOcrRegionObservation values"
+            )
+        if not region.block_uid:
+            raise RuntimeError("Hanwang native output region has an empty block UID")
+        if region.block_uid in observed:
+            raise RuntimeError(
+                "Hanwang native runner returned duplicate region UID: "
+                + region.block_uid
+            )
+        observed[region.block_uid] = region
+
+    expected = tuple(row.block_uid for row in request.rows)
+    unexpected = sorted(set(observed) - set(expected))
+    if unexpected:
+        raise RuntimeError(
+            "Hanwang native runner returned regions outside the request rows: "
+            + ", ".join(unexpected)
+        )
+    missing = [uid for uid in expected if uid not in observed]
+    if missing:
+        raise RuntimeError(
+            "Hanwang native runner did not return request rows: "
+            + ", ".join(missing[:5])
+        )
+    return tuple(observed[uid] for uid in expected)
 
 
 class HanwangMicroRecBlockEngine:
-    """OcrPipeline page-level engine for PP-VL layout + Hanwang text OCR."""
+    """Hanwang native adapter with one immutable CharOCR page contract."""
 
     engine_id = "hanwang.micro_recblock"
-    prefer_page_hybrid_blocks = True
-    bbox_space = OCR_BBOX_SPACE_PAGE
+    bbox_space = "page"
 
     def __init__(
         self,
         *,
         seg_timeout: float = 120.0,
         recog_timeout: float = 60.0,
-        formula_rebind_client: Any | None = None,
         runner=run_micro_recblock,
     ) -> None:
         self._seg_timeout = seg_timeout
         self._recog_timeout = recog_timeout
-        self._formula_rebind_client = formula_rebind_client
         self._runner = runner
 
-    def recognize_page_blocks(
+    def recognize_page(
         self,
         image_bgr: np.ndarray,
-        page: Page,
+        request: CharOcrPageRequest,
         progress_callback: Callable[[int, int, str], None] | None = None,
-        routing_plan: object | None = None,
-    ) -> RunStats:
-        if not isinstance(routing_plan, PageRoutingPlan):
-            raise RuntimeError(
-                "Hanwang micro_recblock requires an explicit PageRoutingPlan; "
-                "legacy page-line routing is not a production OCR path"
+    ) -> CharOcrPageResult:
+        if not isinstance(request, CharOcrPageRequest):
+            raise TypeError(
+                "Hanwang native adapter requires CharOcrPageRequest"
             )
-        self._refresh_inline_formula_texts_from_current_crops(
+        native_rows = [
+            row.native_payload()
+            for row in request.rows
+        ]
+        runner_result = self._runner(
             image_bgr,
-            page,
+            native_rows,
+            seg_timeout=self._seg_timeout,
+            recog_timeout=self._recog_timeout,
+            include_chars=True,
+            routing_plan=request.routing_plan,
             progress_callback=progress_callback,
         )
-        input_plan = _compile_layout_ocr_input_plan(page)
-        ppvl_blocks = deepcopy(list(input_plan.rows))
-        if not ppvl_blocks:
-            raise RuntimeError("Hanwang micro_recblock requires PP-VL parsing_res_list blocks")
-        expected_uids = {
-            str(row.get(ROUTE_ROW_LAYOUT_BLOCK_UID_KEY) or "")
-            for row in ppvl_blocks
-        }
-        expected_uids.discard("")
-
-        runner_kwargs: dict[str, Any] = {
-            "seg_timeout": self._seg_timeout,
-            "recog_timeout": self._recog_timeout,
-            "include_chars": True,
-            "routing_plan": routing_plan,
-            "page": page,
-            "progress_callback": progress_callback,
-        }
-        rows, stats = self._runner(image_bgr, ppvl_blocks, **runner_kwargs)
-
-        height, width = image_bgr.shape[:2]
-        runtime_blocks_by_uid = {
-            view.uid: view.runtime_block
-            for view in iter_page_layout_block_views(page)
-            if view.runtime_block is not None
-        }
-        written_uids: set[str] = set()
-        line_updates: list[tuple[str, list[Line]]] = []
-        for row in rows:
-            block_uid = _layout_block_uid_from_route_row(row)
-            written_uids.add(block_uid)
-            block_type = map_paddle_label_to_block_type(row.block_label)
-            flags: list[str] = []
-            if (
-                block_type == BlockType.EQUATION
-                and not row.text
-                and is_user_authored_layout_source(row.raw_block.get("_layout_block_source"))
-            ):
-                flags.append("manual_formula_needs_text")
-            lines = [_line_to_model(line, width, height, flags) for line in row.lines if line.text]
-            if not lines and block_type == BlockType.EQUATION and "manual_formula_needs_text" in flags:
-                lines = [
-                    _line_to_model(
-                        LineResult(
-                            text="",
-                            bbox=row.block_bbox,
-                            confidence=0.0,
-                            source="manual_formula_placeholder",
-                            review_flags=["manual_formula_needs_text"],
-                        ),
-                        width,
-                        height,
-                        flags,
-                    )
-                ]
-            line_updates.append((block_uid, lines))
-            ocr_audit = _ocr_audit_from_route_row(row)
-            block = runtime_blocks_by_uid.get(block_uid)
-            if block is not None and ocr_audit:
-                _apply_row_ocr_audit(block, ocr_audit=ocr_audit)
-        missing_uids = sorted(expected_uids - written_uids)
-        if missing_uids:
-            raise RuntimeError(
-                "Hanwang OCR did not return rows for layout blocks: "
-                + ", ".join(missing_uids[:5])
+        if (
+            not isinstance(runner_result, tuple)
+            or len(runner_result) != 2
+        ):
+            raise TypeError(
+                "Hanwang native runner must return (regions, RunStats)"
             )
-        for block_uid, lines in line_updates:
-            replace_block_ocr_line_observations(block_uid, lines)
+        regions, stats = runner_result
+        if not isinstance(stats, RunStats):
+            raise TypeError("Hanwang native runner returned invalid RunStats")
+        ordered_regions = _validate_runner_regions(regions, request)
         logger.info(
-            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d fallback=%d "
-            "unknown_labels=%d groups=%d group_failures=%d chunks=%d guarded_chunks=%d "
-            "batch_failures=%d batch_disabled=%s "
-            "seg=%.2fs recog=%.2fs "
-            "max_batch_crop=%dx%d probe_calls=%d recog_pixels=%d/%d "
-            "engcut_route_calls=%d "
-            "geometry_conflicts=%d geometry_token_atoms=%d",
-            page.page_number,
+            "Hanwang micro_recblock page=%s blocks=%d hanwang=%d ppvl=%d "
+            "groups=%d group_failures=%d",
+            request.page.uid,
             stats.n_blocks_total,
             stats.n_blocks_hanwang,
             stats.n_blocks_ppvl,
-            stats.n_blocks_fallback,
-            stats.n_unknown_paddle_labels,
             stats.n_groups,
             stats.recog_group_failures,
-            stats.recog_batch_chunks,
-            stats.recog_batch_guarded_chunks,
-            stats.recog_batch_failures,
-            stats.recog_batch_disabled,
-            stats.seg_seconds,
-            stats.recog_seconds,
-            stats.recog_max_batch_crop_width,
-            stats.recog_max_batch_crop_height,
-            stats.recog_probe_calls,
-            stats.recog_crop_pixels,
-            stats.recog_full_page_pixels,
-            stats.engcut_route_calls,
-            stats.geometry_conflict_groups,
-            stats.geometry_token_atoms,
         )
-        return stats
-
-    def _refresh_inline_formula_texts_from_current_crops(
-        self,
-        image_bgr: np.ndarray,
-        page: Page,
-        *,
-        progress_callback: Callable[[int, int, str], None] | None = None,
-    ) -> None:
-        targets = _inline_formula_crop_ocr_targets(page)
-        if not targets:
-            return
-        client = self._formula_rebind_client or _build_formula_rebind_client(progress_callback)
-        if client is None:
-            _mark_formula_crop_ocr_unavailable(targets)
-            if progress_callback:
-                progress_callback(0, max(1, len(targets)), "Paddle 公式重识别未配置，公式框保留待确认")
-            return
-
-        if progress_callback:
-            progress_callback(0, max(1, len(targets)), f"Paddle 公式重识别中… {len(targets)} 个框")
-        try:
-            bboxes = [tuple(int(value) for value in block.bbox.to_xyxy()) for block in targets]
-            outcome = recognize_formula_bboxes_with_retry(
-                image_bgr,
-                bboxes,
-                client=client,
-                batch_id_prefix=f"ocr-process-formula-{page.page_number}-{int(time.time() * 1000)}",
-                filename_prefix=f"page-{page.page_number}-inline-formula-pseudo",
-            )
-        except Exception as exc:
-            logger.warning("Paddle formula crop OCR failed for page=%s: %s", page.page_number, exc)
-            _mark_formula_crop_ocr_failed(targets, str(exc))
-            if progress_callback:
-                progress_callback(0, max(1, len(targets)), "公式文本为空，需人工补全")
-            return
-
-        if outcome.error:
-            logger.warning(
-                "Paddle formula crop OCR left empty formulas page=%s failed=%s error=%s",
-                page.page_number,
-                list(outcome.failed_indices),
-                outcome.error,
-            )
-        text_by_index = outcome.texts_by_index
-        for index, block in enumerate(targets):
-            text = str(text_by_index.get(index) or "").strip()
-            if text:
-                _set_inline_formula_crop_ocr_text(block, text)
-            else:
-                reason = outcome.error if index in outcome.failed_indices else ""
-                _mark_inline_formula_needs_text(block, reason)
-        if progress_callback:
-            progress_callback(
-                len(text_by_index),
-                max(1, len(targets)),
-                f"公式文本识别：{len(text_by_index)}/{len(targets)}",
-            )
+        return CharOcrPageResult(
+            page_uid=request.page.uid,
+            input_fingerprint=request.input_fingerprint,
+            regions=ordered_regions,
+            metrics=_stats_metrics(stats),
+        )
 
 
 __all__ = [
     "TEXT_LABELS",
     "SKIP_LABELS",
-    "CharResult",
-    "LineResult",
-    "BlockResult",
     "RunStats",
     "HanwangMicroRecBlockEngine",
     "decode_gbk",

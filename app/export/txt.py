@@ -2,7 +2,7 @@ from app.export.base import ExporterBase
 from app.export.ir_builder import build_export_ir
 from app.export.ir import ExportElement
 from app.export.rendering import element_lines, join_reflow_text_lines
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 
 def txt_output_paths(out_path: str) -> tuple[str, str]:
@@ -20,8 +20,8 @@ def txt_output_paths(out_path: str) -> tuple[str, str]:
 class TxtExporter(ExporterBase):
     """纯文本导出：页标记 + 纯文本块，分别落 UTF-8/GBK。"""
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "txt")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "txt")
         page_sections: list[str] = []
         for page in document.pages:
             block_texts: list[str] = []

@@ -1,7 +1,7 @@
 """Typed Export IR v1 contracts.
 
-The project model remains the source of truth.  These dataclasses are the
-normalised export boundary consumed by format renderers.
+The immutable export snapshot remains the business input. These dataclasses
+are a normalized value boundary consumed by format renderers.
 """
 from __future__ import annotations
 

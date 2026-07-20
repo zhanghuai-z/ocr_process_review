@@ -18,7 +18,7 @@ from app.models.charocr_routing import (
     PpOcrSymbolObservation,
     RoutingSegment,
 )
-from app.core.ocr_ir import is_cjk_char
+from app.core.text_classification import is_cjk_char
 
 
 XYXY = tuple[int, int, int, int]

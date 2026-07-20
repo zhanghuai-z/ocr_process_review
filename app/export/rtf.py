@@ -2,7 +2,7 @@
 from app.export.base import ExporterBase
 from app.export.ir_builder import build_export_ir
 from app.export.rendering import RichReflowBlock, rich_reflow_pages
-from app.models import OcrProject
+from app.models.export_snapshot import ExportProjectSnapshot
 
 
 def _rtf_escape(text: str) -> str:
@@ -24,8 +24,8 @@ def _rtf_escape(text: str) -> str:
 
 class RtfExporter(ExporterBase):
 
-    def export(self, project: OcrProject, out_path: str) -> None:
-        document = build_export_ir(project, "rtf")
+    def export(self, snapshot: ExportProjectSnapshot, out_path: str) -> None:
+        document = build_export_ir(snapshot, "rtf")
         parts = [
             r"{\rtf1\ansi\ansicpg936\deff0"
             r"{\fonttbl{\f0\fnil\fcharset134 SimSun;}}"
