@@ -115,6 +115,11 @@ class _CommitTextEdit(QPlainTextEdit):
     commit_requested = Signal()
     cancel_requested = Signal()
     navigate_requested = Signal(int)
+    focused = Signal()
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        self.focused.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
         modifiers = event.modifiers()
@@ -162,6 +167,7 @@ class _ProofRowWidget(QFrame):
     cancel_requested = Signal()
     navigate_requested = Signal(int)
     confirm_requested = Signal()
+    activated = Signal()
 
     def __init__(self, row: _ProofRow, parent=None) -> None:
         super().__init__(parent)
@@ -217,6 +223,7 @@ class _ProofRowWidget(QFrame):
         self.editor.commit_requested.connect(self.commit_requested)
         self.editor.cancel_requested.connect(self.cancel_requested)
         self.editor.navigate_requested.connect(self.navigate_requested)
+        self.editor.focused.connect(self.activated)
         content_layout.addWidget(self.editor)
         root.addWidget(content, 1)
 
@@ -226,7 +233,14 @@ class _ProofRowWidget(QFrame):
         self.confirm_button.clicked.connect(self.confirm_requested)
         root.addWidget(self.confirm_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.set_status(row.unit.status)
+        self.set_active(False)
         self._refresh_image()
+
+    def set_active(self, active: bool) -> None:
+        self.setProperty("active", active)
+        self._active_bar.setVisible(active)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -273,6 +287,7 @@ class HProofPanel(QWidget):
         self._row_widgets: dict[tuple[str, str], _ProofRowWidget] = {}
         self._dirty_text: dict[tuple[str, str], str] = {}
         self._selected_page_uid: str | None = None
+        self._active_key: tuple[str, str] | None = None
         self._status_message = ""
         self._build_ui()
         if session is not None:
@@ -437,6 +452,7 @@ class HProofPanel(QWidget):
         self._visible_rows = ()
         self._dirty_text.clear()
         self._selected_page_uid = None
+        self._active_key = None
         self._populate_page_selector()
         self._render_rows()
         self._status.setText("暂无可校对内容")
@@ -515,9 +531,19 @@ class HProofPanel(QWidget):
             widget.cancel_requested.connect(lambda row=row, widget=widget: self._cancel_row(row, widget))
             widget.navigate_requested.connect(lambda delta, row=row: self._navigate_from(row, delta))
             widget.confirm_requested.connect(lambda row=row, widget=widget: self._confirm_row(row, widget))
+            widget.activated.connect(lambda key=row.key: self._activate_row(key))
             self._rows_layout.addWidget(widget)
             self._row_widgets[row.key] = widget
         self._rows_layout.addStretch(1)
+        visible_keys = {row.key for row in self._visible_rows}
+        if self._active_key not in visible_keys:
+            self._active_key = self._visible_rows[0].key if self._visible_rows else None
+        self._activate_row(self._active_key)
+
+    def _activate_row(self, key: tuple[str, str] | None) -> None:
+        self._active_key = key
+        for row_key, widget in self._row_widgets.items():
+            widget.set_active(row_key == key)
 
     def _on_text_changed(self, row: _ProofRow, widget: _ProofRowWidget) -> None:
         text = widget.editor.toPlainText()
@@ -648,6 +674,7 @@ class HProofPanel(QWidget):
         target = max(0, min(len(self._visible_rows) - 1, current_index + delta))
         widget = self._row_widgets.get(self._visible_rows[target].key)
         if widget is not None:
+            self._activate_row(self._visible_rows[target].key)
             widget.editor.setFocus(Qt.FocusReason.OtherFocusReason)
             widget.editor.selectAll()
 

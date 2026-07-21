@@ -251,6 +251,7 @@ def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
     assert panel._scroll.objectName() == "proofScroll"
     assert panel._rows_root.objectName() == "proofLineList"
     assert len(panel._rows) == 1
+    assert panel._row_widgets[("proof-1", "unit-1")].property("active") is True
     editor = panel._row_widgets[("proof-1", "unit-1")].editor
     editor.setPlainText("ax")
     assert panel.save() is True
