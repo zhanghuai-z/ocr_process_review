@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -111,38 +112,50 @@ class VProofPanel(QWidget):
     def _build_ui(self) -> None:
         self.setObjectName("proofRoot")
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(8)
 
-        toolbar = QHBoxLayout()
+        self._toolbar = QFrame()
+        self._toolbar.setObjectName("proofToolbar")
+        toolbar = QHBoxLayout(self._toolbar)
+        toolbar.setContentsMargins(8, 4, 8, 4)
+        toolbar.setSpacing(6)
         self._btn_refresh = QPushButton("刷新索引")
+        self._btn_refresh.setObjectName("ghostBtn")
         self._btn_refresh.clicked.connect(self.refresh_from_session)
         toolbar.addWidget(self._btn_refresh)
         self._page_select = QComboBox()
         self._page_select.currentIndexChanged.connect(self._on_page_changed)
         toolbar.addWidget(self._page_select, 1)
-        root.addLayout(toolbar)
+        root.addWidget(self._toolbar)
 
         self._status = QLabel("暂无可校对字符")
-        self._status.setObjectName("muted")
+        self._status.setObjectName("proofStatusBar")
         root.addWidget(self._status)
 
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setObjectName("proofSplitter")
         main_splitter.setChildrenCollapsible(False)
-        left = QWidget()
+        left = QFrame()
+        left.setObjectName("proofLeftPane")
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(QLabel("字符索引"))
+        left_layout.setContentsMargins(12, 12, 12, 12)
+        left_title = QLabel("字符索引")
+        left_title.setObjectName("sectionTitle")
+        left_layout.addWidget(left_title)
         self._char_list = QListWidget()
+        self._char_list.setObjectName("charIndexList")
         self._char_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._char_list.currentItemChanged.connect(self._on_char_changed)
         left_layout.addWidget(self._char_list, 1)
         main_splitter.addWidget(left)
 
-        right = QWidget()
+        right = QFrame()
+        right.setObjectName("proofRightPane")
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(4, 4, 4, 4)
+        right_layout.setContentsMargins(12, 12, 12, 12)
         self._gallery_header = QLabel("相同字索引")
+        self._gallery_header.setObjectName("sectionTitle")
         right_layout.addWidget(self._gallery_header)
         self._gallery = QListWidget()
         self._gallery.setSelectionMode(
@@ -176,6 +189,7 @@ class VProofPanel(QWidget):
         self._edit_input.setPlaceholderText("替换选中的字符")
         self._edit_input.returnPressed.connect(self._on_apply)
         self._btn_apply = QPushButton("应用")
+        self._btn_apply.setObjectName("primaryBtn")
         self._btn_apply.clicked.connect(self._on_apply)
         edit_row.addWidget(self._edit_input, 1)
         edit_row.addWidget(self._btn_apply)

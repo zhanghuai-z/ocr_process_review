@@ -244,6 +244,10 @@ def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
 
     session, service = _session(tmp_path)
     panel = HProofPanel(session=session, proof_service=service)
+    assert panel.objectName() == "proofRoot"
+    assert panel._toolbar.objectName() == "proofToolbar"
+    assert panel._scroll.objectName() == "proofScroll"
+    assert panel._rows_root.objectName() == "proofLineList"
     assert len(panel._rows) == 1
     editor = panel._row_widgets[("proof-1", "unit-1")].editor
     editor.setPlainText("ax")
@@ -284,6 +288,11 @@ def test_vproof_index_edit_uses_stable_entry_ids_and_service_cas(
 
     session, service = _session(tmp_path)
     panel = VProofPanel(session=session, proof_service=service)
+    assert panel.objectName() == "proofRoot"
+    assert panel._toolbar.objectName() == "proofToolbar"
+    assert panel._char_list.objectName() == "charIndexList"
+    assert panel._char_list.parentWidget().objectName() == "proofLeftPane"
+    assert panel._gallery.parentWidget().objectName() == "proofRightPane"
     assert panel._char_list.count() == 2
     assert panel._selected_entry is not None
     selected_key = (
