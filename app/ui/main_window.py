@@ -108,7 +108,7 @@ class MainWindow(QMainWindow):
         self._stack_by_step = {
             STEP_IMPORT: self._import_panel,
             STEP_LAYOUT: self._layout_panel,
-            STEP_OCR: self._ocr_panel,
+            STEP_OCR: self._layout_panel,
             STEP_HPROOF: self._hproof_panel,
             STEP_VPROOF: self._vproof_panel,
         }

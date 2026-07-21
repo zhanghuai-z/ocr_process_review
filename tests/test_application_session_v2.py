@@ -146,6 +146,37 @@ def test_main_window_binds_ocr_pages_before_selecting_imported_uid(tmp_path: Pat
     app.processEvents()
 
 
+def test_main_window_keeps_ocr_stage_on_layout_workbench(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "page.png"
+    Image.new("RGB", (24, 16), "white").save(source)
+    controller = WorkflowController()
+    window = MainWindow(controller)
+    result = controller.import_paths([source])
+    page = result.pages[0]
+    assert controller.session is not None
+    controller.session.layout_repository.put(
+        LayoutSnapshot(
+            page_uid=page.uid,
+            revision=1,
+            artifact_uid="",
+            source_engine="test",
+            source_run_id="layout-run",
+            blocks=(),
+        ),
+        expected_revision=0,
+    )
+
+    window._go_to_step(STEP_OCR)
+
+    assert window._stack.currentWidget() is window._layout_panel
+    assert window._stack_by_step[STEP_LAYOUT] is window._layout_panel
+    assert window._stack_by_step[STEP_OCR] is window._layout_panel
+    controller.close()
+    window.deleteLater()
+    app.processEvents()
+
+
 def test_main_window_more_menu_opens_ocr_settings(monkeypatch) -> None:
     from app.ui.widgets.api_settings_dialog import ApiSettingsDialog
 
