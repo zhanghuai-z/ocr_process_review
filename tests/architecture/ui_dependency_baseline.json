@@ -1,0 +1,19 @@
+{
+  "forbidden_target_prefixes": [
+    "app.repositories",
+    "app.services",
+    "app.infrastructure",
+    "app.engines",
+    "app.export"
+  ],
+  "existing_violations": [
+    "app.ui.export.export_dialog -> app.export",
+    "app.ui.export.export_dialog -> app.services.export_service",
+    "app.ui.main_window -> app.services.import_service",
+    "app.ui.proof.confidence_utils -> app.services.proof_session_service",
+    "app.ui.proof.h_proof -> app.services.proof_session_service",
+    "app.ui.proof.v_proof -> app.services.proof_session_service",
+    "app.ui.recognize.layout_panel -> app.services.layout_edit_service",
+    "app.ui.recognize.layout_panel -> app.services.layout_overlay_service"
+  ]
+}
