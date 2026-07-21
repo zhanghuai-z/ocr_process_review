@@ -1241,6 +1241,7 @@ class ProjectSession:
         expected_pointer_fingerprint: str | None,
         bindings: tuple[BindingRecord, ...],
         proof_states: tuple[ProofState, ...],
+        new_proof_states: tuple[ProofState, ...] = (),
     ) -> None:
         """Adopt one page OCR result as one rollback-safe aggregate mutation."""
         ocr = self.ocr_observation_repository
@@ -1264,6 +1265,11 @@ class ProjectSession:
         previous_proof = {
             item.uid: proof_store._records.get(item.uid) for item in proof_states
         }
+        previous_new_proof = {
+            item.uid: proof_store._records.get(item.uid) for item in new_proof_states
+        }
+        if any(value is not None for value in previous_new_proof.values()):
+            raise InvalidRecordError("new proof state UID already exists")
         try:
             ocr.append_observation_batch(
                 run=run,
@@ -1301,6 +1307,8 @@ class ProjectSession:
                     expected_revision=current_state.revision,
                     expected_fingerprint=current_state.fingerprint,
                 )
+            for proof_state in new_proof_states:
+                self.proof_repository.create_state(proof_state)
         except Exception:
             for uid in new_ocr_uids["run"]:
                 ocr._runs.pop(uid, None)
@@ -1329,6 +1337,8 @@ class ProjectSession:
             for uid, previous in previous_proof.items():
                 if previous is not None:
                     proof_store._records[uid] = previous
+            for uid in previous_new_proof:
+                proof_store._records.pop(uid, None)
             raise
 
     @classmethod

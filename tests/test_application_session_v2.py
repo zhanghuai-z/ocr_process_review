@@ -10,13 +10,14 @@ from app.controllers.workflow_controller import WorkflowController
 from app.core.workflow_state import (
     STEP_LAYOUT,
     STEP_OCR,
+    WorkflowProgressState,
     compute_max_step,
     page_gate_info,
     pending_ocr_page_uids,
 )
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
-from app.ui.main_window import MainWindow
+from app.ui.main_window import MainWindow, _ShellProgress
 
 
 def _page(session: ProjectSession) -> PageRecord:
@@ -174,6 +175,43 @@ def test_main_window_keeps_ocr_stage_on_layout_workbench(tmp_path: Path) -> None
     assert window._stack_by_step[STEP_OCR] is window._layout_panel
     controller.close()
     window.deleteLater()
+    app.processEvents()
+
+
+def test_shell_progress_combines_page_and_in_page_ocr_progress() -> None:
+    app = QApplication.instance() or QApplication([])
+    progress = _ShellProgress()
+
+    progress.update_ocr(WorkflowProgressState(
+        phase="ocr",
+        current=5,
+        total=10,
+        completed_pages=1,
+        total_pages=2,
+        message="Hanwang OCR 识别中 5/10",
+        page_uid="page-2",
+    ))
+
+    assert progress.active is True
+    assert progress._title.text() == "OCR"
+    assert progress._detail.text() == "字符识别"
+    assert progress._count.text() == "2/2 页"
+    assert progress._bar.value() == 85
+    progress.finish()
+    assert progress.active is False
+    progress.deleteLater()
+    app.processEvents()
+
+
+def test_shell_progress_uses_one_based_layout_page_count() -> None:
+    app = QApplication.instance() or QApplication([])
+    progress = _ShellProgress()
+
+    progress.update_layout_stage(1, 3, "版面分析")
+
+    assert progress._count.text() == "1/3 页"
+    assert progress._bar.value() == 2
+    progress.deleteLater()
     app.processEvents()
 
 

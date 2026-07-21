@@ -48,6 +48,13 @@ STATUS_COLORS = {
     "unchecked": "#8090A0",
 }
 
+STATUS_LABELS = {
+    "unchecked": "待校对",
+    "checked": "已校对",
+    "modified": "已修改",
+    "conflict": "有冲突",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class _ProofRow:
@@ -168,15 +175,12 @@ class _ProofRowWidget(QFrame):
         root.setSpacing(4)
 
         header = QHBoxLayout()
-        self._title = QLabel(
-            f"P{row.page.page_number} · region {row.region_uid or '-'} · "
-            f"line {row.line.uid if row.line else '-'}"
-        )
+        self._title = QLabel(f"第 {row.page.page_number} 页 · 第 {row.unit.order + 1} 行")
         self._title.setObjectName("proofRowTitle")
         header.addWidget(self._title, 1)
         self._status = QLabel()
         header.addWidget(self._status)
-        self.confirm_button = QPushButton("Confirm")
+        self.confirm_button = QPushButton("确认")
         self.confirm_button.setFixedHeight(24)
         self.confirm_button.clicked.connect(self.confirm_requested)
         header.addWidget(self.confirm_button)
@@ -186,7 +190,7 @@ class _ProofRowWidget(QFrame):
         self._image = QLabel()
         self._image.setFixedSize(ROW_IMAGE_SIZE)
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._image.setText("image unavailable")
+        self._image.setText("无可用行图像")
         pixmap = _image_for_row(row.page, row.bbox)
         if not pixmap.isNull():
             self._image.setPixmap(pixmap)
@@ -194,14 +198,14 @@ class _ProofRowWidget(QFrame):
         body.addWidget(self._image)
 
         text_column = QVBoxLayout()
-        self._observation = QLabel(f"OCR: {row.ocr_text or 'no active line observation'}")
+        self._observation = QLabel(f"OCR 原文：{row.ocr_text or '无有效识别行'}")
         self._observation.setWordWrap(True)
         text_column.addWidget(self._observation)
         self.editor = _CommitTextEdit()
         self.editor.setPlainText(row.unit.text)
         self.editor.setMinimumHeight(42)
         self.editor.setMaximumHeight(74)
-        self.editor.setPlaceholderText("Proof text")
+        self.editor.setPlaceholderText("校对文本")
         self.editor.commit_requested.connect(self.commit_requested)
         self.editor.cancel_requested.connect(self.cancel_requested)
         self.editor.navigate_requested.connect(self.navigate_requested)
@@ -212,7 +216,7 @@ class _ProofRowWidget(QFrame):
 
     def set_status(self, status: str) -> None:
         color = STATUS_COLORS.get(status, STATUS_COLORS["unchecked"])
-        self._status.setText(status)
+        self._status.setText(STATUS_LABELS.get(status, status))
         self._status.setStyleSheet(f"color: {color}; font-weight: 600;")
 
 
@@ -256,10 +260,10 @@ class HProofPanel(QWidget):
         root.setSpacing(6)
 
         toolbar = QHBoxLayout()
-        self._btn_prev = QPushButton("Previous")
-        self._btn_next = QPushButton("Next")
-        self._btn_save = QPushButton("Save")
-        self._btn_refresh = QPushButton("Refresh")
+        self._btn_prev = QPushButton("上一行")
+        self._btn_next = QPushButton("下一行")
+        self._btn_save = QPushButton("保存")
+        self._btn_refresh = QPushButton("刷新")
         self._btn_prev.clicked.connect(lambda: self._focus_row(-1))
         self._btn_next.clicked.connect(lambda: self._focus_row(1))
         self._btn_save.clicked.connect(self.save)
@@ -273,7 +277,7 @@ class HProofPanel(QWidget):
         toolbar.addWidget(self._page_select, 1)
         root.addLayout(toolbar)
 
-        self._status = QLabel("No project session")
+        self._status = QLabel("暂无可校对内容")
         self._status.setObjectName("muted")
         root.addWidget(self._status)
 
@@ -360,19 +364,19 @@ class HProofPanel(QWidget):
         self._selected_page_uid = None
         self._populate_page_selector()
         self._render_rows()
-        self._status.setText("No project session")
+        self._status.setText("暂无可校对内容")
 
     def _populate_page_selector(self) -> None:
         self._page_select.blockSignals(True)
         self._page_select.clear()
-        self._page_select.addItem("All scopes", "")
+        self._page_select.addItem("全部页面", "")
         selected_index = 0
         if self._session is not None:
             for page in sorted(
                 self._session.page_repository.all(),
                 key=lambda item: (item.page_number, item.uid),
             ):
-                self._page_select.addItem(f"Scope {page.page_number}", page.uid)
+                self._page_select.addItem(f"第 {page.page_number} 页", page.uid)
                 if page.uid == self._selected_page_uid:
                     selected_index = self._page_select.count() - 1
         self._page_select.setCurrentIndex(selected_index)
@@ -389,7 +393,7 @@ class HProofPanel(QWidget):
             self._rows = ()
             self._visible_rows = ()
             self._render_rows()
-            self._status.setText("No project session")
+            self._status.setText("暂无可校对内容")
             return
         try:
             contexts = build_proof_contexts(self._session, self._proof_service)
@@ -398,7 +402,7 @@ class HProofPanel(QWidget):
             self._rows = ()
             self._visible_rows = ()
             self._render_rows()
-            self._status.setText(f"Unable to load proof context: {exc}")
+            self._status.setText(f"无法加载校对内容：{exc}")
             return
         rows = [
             _row_for_unit(context, unit, self._proof_service)
@@ -412,8 +416,8 @@ class HProofPanel(QWidget):
         self._dirty_text.clear()
         self._render_rows()
         self._status.setText(
-            f"{len(self._rows)} proof units · "
-            f"{sum(len(row.unit.text) for row in self._rows)} characters"
+            f"{len(self._rows)} 行 · "
+            f"{sum(len(row.unit.text) for row in self._rows)} 字符"
         )
 
     def _render_rows(self) -> None:
@@ -467,7 +471,7 @@ class HProofPanel(QWidget):
                 expected_unit_fingerprint=row.snapshot.text_unit_fingerprint,
             )
         except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"Edit conflict: {exc}")
+            self._status.setText(f"编辑冲突：{exc}")
             return False
         self._dirty_text.pop(row.key, None)
         self._publish_result(result)
@@ -503,7 +507,7 @@ class HProofPanel(QWidget):
                     },
                 )
             except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-                self._status.setText(f"Save conflict: {exc}")
+                self._status.setText(f"保存冲突：{exc}")
                 return False
             changed = changed or result.changed
             self._publish_result(result)
@@ -538,7 +542,7 @@ class HProofPanel(QWidget):
                 expected_unit_fingerprint=current.snapshot.text_unit_fingerprint,
             )
         except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"Status conflict: {exc}")
+            self._status.setText(f"状态冲突：{exc}")
             return
         self._publish_result(result)
         self.refresh_from_session()

@@ -27,7 +27,7 @@ from app.models.proof_records import ProofAnchorSnapshot, ProofState, ProofTextU
 from app.services.ocr_job_service import OcrJobService
 
 
-def _session() -> ProjectSession:
+def _session(*, with_proof: bool = True) -> ProjectSession:
     session = ProjectSession(ProjectRecord("project-1", "Book"))
     page = PageRecord(
         project_uid="project-1", uid="page-1", image_path="page.png",
@@ -59,13 +59,14 @@ def _session() -> ProjectSession:
         layout_fingerprint="old-layout", source_fingerprint="old-source",
         anchor_revision=1,
     )
-    session.proof_repository.create_state(ProofState(
-        project_uid="project-1", uid="proof-1", anchor_snapshot=anchor,
-        text_units=(ProofTextUnit(
-            project_uid="project-1", uid="proof-text-1", order=0,
-            text="human correction",
-        ),),
-    ))
+    if with_proof:
+        session.proof_repository.create_state(ProofState(
+            project_uid="project-1", uid="proof-1", anchor_snapshot=anchor,
+            text_units=(ProofTextUnit(
+                project_uid="project-1", uid="proof-text-1", order=0,
+                text="human correction",
+            ),),
+        ))
     return session
 
 
@@ -86,7 +87,7 @@ class _Engine:
                 lines=(CharOcrLineObservation(
                     text="machine", bbox=(2, 3, 30, 15), confidence=0.9, source="test",
                     atoms=(CharOcrAtomObservation(
-                        text="机", bbox=(2, 3, 8, 15), confidence=0.8, source="test",
+                        text="machine", bbox=(2, 3, 30, 15), confidence=0.8, source="test",
                     ),),
                 ),),
             ),),
@@ -118,6 +119,77 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     binding = session.binding_repository.get("ocrbind_block-1")
     assert binding.source_uid == "block-1"
     assert binding.target_uid == session.ocr_observation_repository.all_regions()[0].uid
+
+
+def test_first_page_ocr_creates_editable_proof_state_with_exact_alignment(monkeypatch) -> None:
+    from app.services.char_index_service import CharIndexService
+
+    session = _session(with_proof=False)
+    layout = session.layout_repository.get("page-1")
+    routing = PageRoutingPlan(
+        page_uid="page-1", routing_run_uid="routing-1",
+        layout_fingerprint=layout_snapshot_fingerprint(layout),
+        prepass_run_id="prepass-1", blocks=(),
+    )
+    monkeypatch.setattr(module, "acquire_routing_observation_bundle", lambda **_kwargs: object())
+    monkeypatch.setattr(module, "compile_page_routing_plan", lambda *_args, **_kwargs: routing)
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+
+    commit = service.run_page(session, "page-1", np.zeros((80, 100, 3), dtype=np.uint8))
+
+    assert commit.proof_states_created == 1
+    state = session.proof_repository.get_state("proof_page-1")
+    assert [unit.text for unit in state.text_units] == ["machine"]
+    assert state.rebind_required is False
+    pointer = session.ocr_observation_repository.get_active_pointer("page-1")
+    batch = session.ocr_observation_repository.get_batch(pointer.batch_uid)
+    lines = tuple(
+        session.ocr_observation_repository.get_line(uid) for uid in batch.line_uids
+    )
+    atoms = tuple(
+        session.ocr_observation_repository.get_atom(uid) for uid in batch.atom_uids
+    )
+    index = CharIndexService().build(
+        page=session.page_repository.get("page-1"),
+        batch=batch,
+        lines=lines,
+        atoms=atoms,
+        state=state,
+    )
+    assert "".join(entry.text for entry in index.entries) == "machine"
+    assert all(entry.available for entry in index.entries)
+
+
+def test_first_page_ocr_is_visible_in_both_proof_panels(monkeypatch) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from app.ui.proof.h_proof import HProofPanel
+    from app.ui.proof.v_proof import VProofPanel
+
+    app = QApplication.instance() or QApplication([])
+    session = _session(with_proof=False)
+    layout = session.layout_repository.get("page-1")
+    routing = PageRoutingPlan(
+        page_uid="page-1",
+        routing_run_uid="routing-1",
+        layout_fingerprint=layout_snapshot_fingerprint(layout),
+        prepass_run_id="prepass-1",
+        blocks=(),
+    )
+    monkeypatch.setattr(module, "acquire_routing_observation_bundle", lambda **_kwargs: object())
+    monkeypatch.setattr(module, "compile_page_routing_plan", lambda *_args, **_kwargs: routing)
+    service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
+
+    service.run_page(session, "page-1", np.zeros((80, 100, 3), dtype=np.uint8))
+    horizontal = HProofPanel(session=session)
+    vertical = VProofPanel(session=session)
+
+    assert [row.unit.text for row in horizontal._rows] == ["machine"]
+    assert vertical._entries
+    assert "".join(entry.text for entry in vertical._entries) == "machine"
+    horizontal.close()
+    vertical.close()
+    app.processEvents()
 
 
 def test_observation_batch_validation_is_all_or_nothing() -> None:

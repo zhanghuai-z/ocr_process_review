@@ -20,7 +20,13 @@ from app.models.ocr_records import (
     OcrRegion,
     OcrRun,
 )
-from app.models.proof_records import ProofAnchorSnapshot, ProofState
+from app.models.proof_records import (
+    ProofAlignmentSegment,
+    ProofAlignmentSlice,
+    ProofAnchorSnapshot,
+    ProofState,
+    ProofTextUnit,
+)
 from app.models.project_session import BindingRecord, ProjectSession, RecordNotFoundError
 from app.services.charocr_input_service import compile_charocr_page_request
 from app.services.ocr_routing_observation_service import acquire_routing_observation_bundle
@@ -43,6 +49,7 @@ class OcrPageCommit:
     run_uid: str
     batch_uid: str
     pointer_revision: int
+    proof_states_created: int
     proof_states_marked_for_rebind: int
 
 
@@ -81,7 +88,11 @@ class OcrJobService:
         if not layout.artifact_uid:
             raise RuntimeError("OCR requires an adopted Paddle layout artifact")
         artifact = session.paddle_artifact_repository.get(layout.artifact_uid)
+        if progress_callback is not None:
+            progress_callback(0, 0, "PP-OCRv6 行框定位")
         prepass = self._prepass_client.analyze_page(image_bgr, page_uid=page.uid)
+        if progress_callback is not None:
+            progress_callback(0, 0, "PP-OCRv6 行框完成")
         observations = acquire_routing_observation_bundle(
             page=page,
             snapshot=layout,
@@ -90,6 +101,8 @@ class OcrJobService:
             prepass=prepass,
             vl_client=self._vl_client,
         )
+        if progress_callback is not None:
+            progress_callback(0, 0, "OCR 路由编译")
         routing_plan = compile_page_routing_plan(
             observations,
             page_width=page.width,
@@ -158,19 +171,33 @@ class OcrJobService:
             session, page_uid=page.uid, layout_fingerprint=run.layout_fingerprint,
             source_fingerprint=batch.fingerprint,
         )
+        new_proof_states = (
+            ()
+            if proof_states
+            else (_initial_proof_state(
+                project_uid=session.project_uid,
+                page_uid=page.uid,
+                layout_fingerprint=run.layout_fingerprint,
+                source_fingerprint=batch.fingerprint,
+                lines=batch_records.lines,
+            ),)
+        )
         session.adopt_ocr_page_observation(
             run=run, regions=batch_records.regions, lines=batch_records.lines,
             atoms=batch_records.atoms, candidates=batch_records.candidates,
             batch=batch, pointer=pointer,
             expected_pointer_revision=expected_revision,
             expected_pointer_fingerprint=expected_fingerprint,
-            bindings=bindings, proof_states=proof_states,
+            bindings=bindings,
+            proof_states=proof_states,
+            new_proof_states=new_proof_states,
         )
         return OcrPageCommit(
             page_uid=page.uid,
             run_uid=run.uid,
             batch_uid=batch.uid,
             pointer_revision=pointer.revision,
+            proof_states_created=len(new_proof_states),
             proof_states_marked_for_rebind=len(proof_states),
         )
 
@@ -270,7 +297,7 @@ def _observation_records(
             order=region_index,
             label=observed_region.label,
         ))
-        for line_index, observed_line in enumerate(observed_region.lines):
+        for observed_line in observed_region.lines:
             line_uid = _uid("ocrline")
             atom_records: list[OcrAtom] = []
             for atom_index, observed_atom in enumerate(observed_line.atoms):
@@ -317,7 +344,7 @@ def _observation_records(
                 text=observed_line.text,
                 bbox=observed_line.bbox,
                 confidence=observed_line.confidence,
-                order=line_index,
+                order=len(lines),
                 atom_uids=tuple(item.uid for item in atom_records),
                 source_fingerprint=result.input_fingerprint,
             )
@@ -347,6 +374,73 @@ def _observation_records(
         run=run, regions=tuple(regions), lines=tuple(lines), atoms=tuple(atoms),
         candidates=tuple(candidates), batch=batch,
         block_region_uids=tuple(block_region_uids),
+    )
+
+
+def _initial_proof_state(
+    *,
+    project_uid: str,
+    page_uid: str,
+    layout_fingerprint: str,
+    source_fingerprint: str,
+    lines: tuple[OcrLine, ...],
+) -> ProofState:
+    """Create the first human-editable aggregate from one adopted OCR batch."""
+
+    ordered_lines = tuple(sorted(lines, key=lambda item: (item.order, item.uid)))
+    anchor_uid = f"proofanchor_{page_uid}"
+    text_units: list[ProofTextUnit] = []
+    segments: list[ProofAlignmentSegment] = []
+    slices: list[ProofAlignmentSlice] = []
+    source_cursor = 0
+    proof_cursor = 0
+    for order, line in enumerate(ordered_lines):
+        unit_uid = f"proofunit_{line.uid}"
+        segment_uid = f"proofsegment_{line.uid}"
+        text_units.append(ProofTextUnit(
+            project_uid=project_uid,
+            uid=unit_uid,
+            order=order,
+            text=line.text,
+        ))
+        source_end = source_cursor + len(line.text)
+        proof_end = proof_cursor + len(line.text)
+        segments.append(ProofAlignmentSegment(
+            project_uid=project_uid,
+            uid=segment_uid,
+            anchor_uid=anchor_uid,
+            source_start=source_cursor,
+            source_end=source_end,
+            proof_start=proof_cursor,
+            proof_end=proof_end,
+        ))
+        slices.append(ProofAlignmentSlice(
+            project_uid=project_uid,
+            uid=f"proofslice_{line.uid}",
+            segment_uid=segment_uid,
+            source_start=source_cursor,
+            source_end=source_end,
+            proof_start=proof_cursor,
+            proof_end=proof_end,
+            source_text=line.text,
+            proof_text=line.text,
+        ))
+        source_cursor = source_end
+        proof_cursor = proof_end
+    return ProofState(
+        project_uid=project_uid,
+        uid=f"proof_{page_uid}",
+        anchor_snapshot=ProofAnchorSnapshot(
+            project_uid=project_uid,
+            uid=anchor_uid,
+            scope_uid=page_uid,
+            layout_fingerprint=layout_fingerprint,
+            source_fingerprint=source_fingerprint,
+            anchor_revision=1,
+        ),
+        text_units=tuple(text_units),
+        alignment_segments=tuple(segments),
+        alignment_slices=tuple(slices),
     )
 
 

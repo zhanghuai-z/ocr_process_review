@@ -1,9 +1,12 @@
 """Qt shell for the session-scoped OCR workbench."""
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
+    QHBoxLayout,
+    QLabel,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -38,32 +41,120 @@ class _ShellProgress(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._active = False
+        self._title = QLabel("进度")
+        self._title.setFixedWidth(58)
+        self._detail = QLabel("")
+        self._detail.setMinimumWidth(96)
+        self._count = QLabel("")
+        self._count.setFixedWidth(62)
+        self._count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._bar = QProgressBar()
         self._bar.setRange(0, 100)
-        self._bar.setFixedWidth(180)
+        self._bar.setFixedWidth(150)
         self._bar.setFixedHeight(16)
         self._bar.setTextVisible(True)
         self._bar.setFormat("%p%")
-        self._bar.hide()
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 0, 4, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._title)
+        layout.addWidget(self._detail)
         layout.addWidget(self._bar)
+        layout.addWidget(self._count)
+        self.hide()
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def _show_progress(self, title: str, detail: str, count: str, value: int) -> None:
+        self._active = True
+        self._title.setText(title)
+        self._detail.setText(detail)
+        self._count.setText(count)
+        self._bar.setValue(max(0, min(100, int(value))))
+        self.show()
+
+    def start_layout(self, total: int) -> None:
+        total = max(1, int(total))
+        self._show_progress("版面分析", "提交请求", f"0/{total} 页", 0)
 
     def update_layout(self, current: int, total: int) -> None:
         total = max(1, int(total))
-        self._bar.show()
-        self._bar.setValue(max(0, min(100, int(round(current / total * 100)))))
+        done = max(0, min(int(current), total))
+        self._show_progress(
+            "版面分析",
+            "解析结果" if done >= total else "等待结果",
+            f"{done}/{total} 页",
+            round(done / total * 100),
+        )
+
+    def update_layout_stage(self, current: int, total: int, message: str) -> None:
+        total = max(1, int(total))
+        page = max(1, min(int(current), total))
+        completed = max(0, min(page - 1, total - 1))
+        self._show_progress(
+            "版面分析",
+            message or "处理中",
+            f"{page}/{total} 页",
+            round((completed + 0.05) / total * 100),
+        )
 
     def update_ocr(self, progress: WorkflowProgressState) -> None:
         total_pages = max(1, progress.total_pages)
-        value = int(round(progress.completed_pages / total_pages * 100))
-        if progress.total > 0:
-            value = max(value, int(round(progress.current / progress.total * 100)))
-        self._bar.show()
-        self._bar.setValue(max(0, min(100, value)))
+        completed = max(0, min(progress.completed_pages, total_pages))
+        message = str(progress.message or "")
+        if message == "已完成":
+            page_fraction = 0.0
+            page = max(1, completed)
+        else:
+            page_fraction = self._ocr_page_fraction(progress)
+            page = min(total_pages, completed + 1)
+        value = round((completed + page_fraction) / total_pages * 100)
+        self._show_progress(
+            "OCR", self._ocr_stage_label(message), f"{page}/{total_pages} 页", value
+        )
+
+    @staticmethod
+    def _ocr_stage_label(message: str) -> str:
+        lowered = message.lower()
+        if "行框" in message or "pp-ocr" in lowered or "prepass" in lowered:
+            return "行框定位"
+        if "路由" in message:
+            return "路由编译"
+        if "segimg" in lowered or "分块" in message:
+            return "字符切分"
+        if "recog" in lowered and "准备" in message:
+            return "识别准备"
+        if "识别" in message or "hanwang" in lowered:
+            return "字符识别"
+        if "完成" in message:
+            return "写回结果"
+        return "准备中"
+
+    @staticmethod
+    def _ocr_page_fraction(progress: WorkflowProgressState) -> float:
+        message = str(progress.message or "")
+        lowered = message.lower()
+        if "行框定位" in message:
+            return 0.08
+        if "行框完成" in message:
+            return 0.16
+        if "路由" in message:
+            return 0.24
+        if "segimg" in lowered or "分块" in message:
+            return 0.34
+        if "recog" in lowered and "准备" in message:
+            return 0.44
+        if progress.total > 0 and ("识别" in message or "hanwang" in lowered):
+            ratio = max(0.0, min(1.0, progress.current / progress.total))
+            return 0.44 + ratio * 0.52
+        return 0.03
 
     def finish(self) -> None:
-        self._bar.hide()
+        self._active = False
+        self.hide()
 
 
 class MainWindow(QMainWindow):
@@ -273,7 +364,7 @@ class MainWindow(QMainWindow):
         self._set_status_message("版面分析处理中")
 
     def _on_layout_stage(self, page_uid: str, current: int, total: int, message: str) -> None:
-        self._progress.update_layout(current, total)
+        self._progress.update_layout_stage(current, total, message)
         self._layout_panel.update_analysis_stage(message)
         self._set_status_message(f"{message}：{page_uid}")
 
@@ -333,6 +424,7 @@ class MainWindow(QMainWindow):
         if not self._controller.has_pages:
             return
         try:
+            self._progress.start_layout(len(self._controller.page_records))
             self._layout_panel.start_analysis_progress(len(self._controller.page_records))
             self._controller.start_layout_analysis()
             self._set_status_message("正在运行版面分析…")

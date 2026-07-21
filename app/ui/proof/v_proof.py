@@ -115,7 +115,7 @@ class VProofPanel(QWidget):
         root.setSpacing(6)
 
         toolbar = QHBoxLayout()
-        self._btn_refresh = QPushButton("Refresh")
+        self._btn_refresh = QPushButton("刷新索引")
         self._btn_refresh.clicked.connect(self.refresh_from_session)
         toolbar.addWidget(self._btn_refresh)
         self._page_select = QComboBox()
@@ -123,7 +123,7 @@ class VProofPanel(QWidget):
         toolbar.addWidget(self._page_select, 1)
         root.addLayout(toolbar)
 
-        self._status = QLabel("No project session")
+        self._status = QLabel("暂无可校对字符")
         self._status.setObjectName("muted")
         root.addWidget(self._status)
 
@@ -132,7 +132,7 @@ class VProofPanel(QWidget):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(QLabel("Characters"))
+        left_layout.addWidget(QLabel("字符索引"))
         self._char_list = QListWidget()
         self._char_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._char_list.currentItemChanged.connect(self._on_char_changed)
@@ -142,7 +142,7 @@ class VProofPanel(QWidget):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 4, 4, 4)
-        self._gallery_header = QLabel("Occurrences")
+        self._gallery_header = QLabel("相同字索引")
         right_layout.addWidget(self._gallery_header)
         self._gallery = QListWidget()
         self._gallery.setSelectionMode(
@@ -154,15 +154,15 @@ class VProofPanel(QWidget):
         self._ocr_context = QPlainTextEdit()
         self._ocr_context.setReadOnly(True)
         self._ocr_context.setMaximumHeight(58)
-        self._ocr_context.setPlaceholderText("OCR observation")
+        self._ocr_context.setPlaceholderText("OCR 文本上下文")
         right_layout.addWidget(self._ocr_context)
         self._proof_context = QPlainTextEdit()
         self._proof_context.setReadOnly(True)
         self._proof_context.setMaximumHeight(58)
-        self._proof_context.setPlaceholderText("Proof text unit")
+        self._proof_context.setPlaceholderText("校对文本上下文")
         right_layout.addWidget(self._proof_context)
 
-        self._image = QLabel("image unavailable")
+        self._image = QLabel("无可用原稿图像")
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image.setMinimumHeight(180)
         self._image.setSizePolicy(
@@ -173,9 +173,9 @@ class VProofPanel(QWidget):
 
         edit_row = QHBoxLayout()
         self._edit_input = QLineEdit()
-        self._edit_input.setPlaceholderText("Replace selected occurrence(s)")
+        self._edit_input.setPlaceholderText("替换选中的字符")
         self._edit_input.returnPressed.connect(self._on_apply)
-        self._btn_apply = QPushButton("Apply")
+        self._btn_apply = QPushButton("应用")
         self._btn_apply.clicked.connect(self._on_apply)
         edit_row.addWidget(self._edit_input, 1)
         edit_row.addWidget(self._btn_apply)
@@ -246,12 +246,12 @@ class VProofPanel(QWidget):
         self._populate_page_selector()
         self._rebuild_char_list()
         self._render_entry(None)
-        self._status.setText("No project session")
+        self._status.setText("暂无可校对字符")
 
     def _populate_page_selector(self) -> None:
         self._page_select.blockSignals(True)
         self._page_select.clear()
-        self._page_select.addItem("All scopes", "")
+        self._page_select.addItem("全部页面", "")
         selected_index = 0
         if self._session is not None:
             pages = sorted(
@@ -259,7 +259,7 @@ class VProofPanel(QWidget):
                 key=lambda item: (item.page_number, item.uid),
             )
             for page in pages:
-                self._page_select.addItem(f"Scope {page.page_number}", page.uid)
+                self._page_select.addItem(f"第 {page.page_number} 页", page.uid)
                 if page.uid == self._selected_page_uid:
                     selected_index = self._page_select.count() - 1
         self._page_select.setCurrentIndex(selected_index)
@@ -288,7 +288,7 @@ class VProofPanel(QWidget):
             self._entries = ()
             self._indexes.clear()
             self._rebuild_char_list()
-            self._status.setText(f"Unable to load proof context: {exc}")
+            self._status.setText(f"无法加载校对内容：{exc}")
             return
         self._contexts = contexts
         self._pages = {context.page.uid: context.page for context in contexts}
@@ -307,8 +307,8 @@ class VProofPanel(QWidget):
         }
         self._rebuild_char_list()
         self._status.setText(
-            f"{len(self._entries)} indexed characters · "
-            f"{len(self._states)} proof states"
+            f"{len(self._entries)} 个索引字符 · "
+            f"{len(self._states)} 个校对页"
         )
 
     def _rebuild_char_list(self) -> None:
@@ -335,7 +335,7 @@ class VProofPanel(QWidget):
         else:
             self._selected_char = ""
             self._gallery.clear()
-            self._gallery_header.setText("Occurrences")
+            self._gallery_header.setText("相同字索引")
             self._render_entry(None)
 
     def _on_char_changed(self, current: QListWidgetItem | None, _previous) -> None:
@@ -356,10 +356,10 @@ class VProofPanel(QWidget):
         self._gallery.blockSignals(True)
         self._gallery.clear()
         for entry in entries:
-            geometry = "bbox" if entry.available else "no geometry"
+            geometry = "有字框" if entry.available else "无字框"
             item = QListWidgetItem(
-                f"P{entry.page_number} · {entry.line_uid or '-'} · "
-                f"unit {entry.text_unit_uid} · {geometry}"
+                f"第 {entry.page_number} 页 · 行 {entry.line_uid or '-'} · "
+                f"文本 {entry.text_unit_uid} · {geometry}"
             )
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self._gallery.addItem(item)
@@ -378,7 +378,7 @@ class VProofPanel(QWidget):
             self._selected_entry = None
             self._render_entry(None)
         self._gallery_header.setText(
-            f"{self._selected_char!r} · {self._gallery.count()} occurrences"
+            f"{self._selected_char!r} · {self._gallery.count()} 处"
         )
 
     def _on_gallery_changed(self, current: QListWidgetItem | None, _previous) -> None:
@@ -406,7 +406,7 @@ class VProofPanel(QWidget):
         text = self._edit_input.text()
         changed = self._apply_replacement_to_selected(text)
         if changed:
-            self._status.setText(f"Updated {changed} occurrence(s)")
+            self._status.setText(f"已修改 {changed} 处")
 
     def _apply_replacement_to_selected(self, text: str) -> int:
         if self._proof_service is None:
@@ -456,7 +456,7 @@ class VProofPanel(QWidget):
                     },
                 )
             except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-                self._status.setText(f"Edit conflict: {exc}")
+                self._status.setText(f"编辑冲突：{exc}")
                 return changed_count
             if result.changed:
                 changed_count += len(entries)
@@ -475,7 +475,7 @@ class VProofPanel(QWidget):
         if entry is None or self._session is None:
             self._ocr_context.clear()
             self._proof_context.clear()
-            self._image.setText("image unavailable")
+            self._image.setText("无可用原稿图像")
             self._image.setPixmap(QPixmap())
             self._evidence.clear()
             return
@@ -487,7 +487,7 @@ class VProofPanel(QWidget):
             state = service.get_state(entry.proof_uid)
             unit = next(item for item in state.text_units if item.uid == entry.text_unit_uid)
         except (KeyError, ValueError, ProofSessionError) as exc:
-            self._status.setText(f"Unable to read selected proof unit: {exc}")
+            self._status.setText(f"无法读取选中的校对文本：{exc}")
             return
         observations = self._session.ocr_observation_repository
         observation_line: OcrLine | None = None
@@ -513,17 +513,17 @@ class VProofPanel(QWidget):
             ocr_char=ocr_char,
         )
         self._ocr_context.setPlainText(
-            f"OCR line {entry.line_uid or '-'}: {observation_line.text if observation_line else '-'}"
+            f"OCR 行 {entry.line_uid or '-'}：{observation_line.text if observation_line else '-'}"
         )
-        self._proof_context.setPlainText(f"Proof unit {unit.uid}: {unit.text}")
+        self._proof_context.setPlainText(f"校对文本 {unit.uid}：{unit.text}")
         self._evidence.setText(
             f"{verdict.severity}: {verdict.evidence} · "
-            f"region {atom.region_uid if atom else '-'} · atom {entry.atom_uid or '-'}"
+            f"区域 {atom.region_uid if atom else '-'} · 字符 {entry.atom_uid or '-'}"
         )
         self._evidence.setStyleSheet(f"color: {verdict.color};")
         pixmap = _page_pixmap(page, entry.bbox)
         self._image.setPixmap(pixmap)
-        self._image.setText("" if not pixmap.isNull() else "image unavailable")
+        self._image.setText("" if not pixmap.isNull() else "无可用原稿图像")
 
     def closeEvent(self, event: QEvent) -> None:  # type: ignore[override]
         super().closeEvent(event)
