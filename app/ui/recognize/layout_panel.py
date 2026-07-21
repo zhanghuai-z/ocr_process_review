@@ -1583,6 +1583,9 @@ class LayoutPanel(QWidget):
                 for region in page.regions:
                     for line in region.lines:
                         for atom in line.atoms:
+                            if atom.bbox.w <= 0 or atom.bbox.h <= 0:
+                                # 退化几何的 atom 无法入画（真实数据存在），跳过
+                                continue
                             confidence = float(atom.confidence)
                             if confidence > 1.0:
                                 confidence = confidence / 100.0
