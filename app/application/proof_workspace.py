@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from app.core.char_index import CharIndexEntry
 from app.core.ocr_currentness import CurrentOcrObservation, current_ocr_observation
-from app.models.ocr_records import OcrAtom, OcrBatch, OcrLine
+from app.models.ocr_records import OcrAtom, OcrBatch, OcrLine, OcrRegion
 from app.models.proof_records import ProofState, ProofTextUnit
 from app.models.project_session import PageRecord, ProjectSession
 from app.services.char_index_service import CharIndexService
@@ -34,6 +34,19 @@ def _bbox(value: BBox, field_name: str = "bbox") -> BBox:
     if result[2] <= result[0] or result[3] <= result[1]:
         raise ValueError(f"{field_name} must be non-empty")
     return result  # type: ignore[return-value]
+
+
+def _char_span(value: object) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise TypeError("char_span must contain two integer offsets or be None")
+    if any(isinstance(item, bool) or not isinstance(item, int) for item in value):
+        raise TypeError("char_span offsets must be integers")
+    start, end = tuple(value)
+    if start < 0 or end <= start:
+        raise ValueError("char_span must be a non-empty half-open range")
+    return start, end
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +101,12 @@ class ProofAtomView:
     text: str
     confidence: float
     bbox: BBox
+    source: str
+    granularity: str
+    token_text: str
+    render_kind: str
+    char_span: tuple[int, int] | None
+    geometry_available: bool
 
     def __post_init__(self) -> None:
         _uid(self.proof_uid, "proof_uid")
@@ -104,6 +123,19 @@ class ProofAtomView:
             raise TypeError("confidence must be a number")
         object.__setattr__(self, "confidence", float(self.confidence))
         object.__setattr__(self, "bbox", _bbox(self.bbox))
+        if not isinstance(self.source, str):
+            raise TypeError("source must be str")
+        if not isinstance(self.granularity, str) or not self.granularity:
+            raise ValueError("granularity must be a non-empty str")
+        if not isinstance(self.token_text, str):
+            raise TypeError("token_text must be str")
+        if self.render_kind not in {"text", "formula", "table"}:
+            raise ValueError("render_kind must be text, formula, or table")
+        object.__setattr__(self, "char_span", _char_span(self.char_span))
+        if not isinstance(self.geometry_available, bool):
+            raise TypeError("geometry_available must be bool")
+        if self.geometry_available != (self.char_span is not None):
+            raise ValueError("geometry_available must agree with char_span availability")
 
     @property
     def proof_state_uid(self) -> str:
@@ -112,6 +144,14 @@ class ProofAtomView:
     @property
     def ocr_text(self) -> str:
         return self.text
+
+    @property
+    def char_start(self) -> int | None:
+        return None if self.char_span is None else self.char_span[0]
+
+    @property
+    def char_end(self) -> int | None:
+        return None if self.char_span is None else self.char_span[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +172,7 @@ class ProofLineView:
     status: str
     confidence: float | None
     bbox: BBox | None
+    render_kind: str
     atoms: tuple[ProofAtomView, ...]
     state_revision: int
     state_fingerprint: str
@@ -168,6 +209,8 @@ class ProofLineView:
             object.__setattr__(self, "confidence", float(self.confidence))
         if self.bbox is not None:
             object.__setattr__(self, "bbox", _bbox(self.bbox))
+        if self.render_kind not in {"text", "formula", "table", "mixed"}:
+            raise ValueError("invalid proof line render_kind")
 
     @property
     def proof_state_uid(self) -> str:
@@ -313,6 +356,11 @@ def _ordered_lines(ocr, batch: OcrBatch) -> tuple[OcrLine, ...]:
     return tuple(sorted(lines, key=lambda item: (item.order, item.uid)))
 
 
+def _ordered_regions(ocr, batch: OcrBatch) -> tuple[OcrRegion, ...]:
+    regions = tuple(ocr.get_region(uid) for uid in batch.region_uids)
+    return tuple(sorted(regions, key=lambda item: (item.order, item.uid)))
+
+
 def _ordered_atoms(ocr, batch: OcrBatch) -> tuple[OcrAtom, ...]:
     atoms = tuple(ocr.get_atom(uid) for uid in batch.atom_uids)
     return tuple(sorted(atoms, key=lambda item: (item.line_uid, item.index, item.uid)))
@@ -329,7 +377,47 @@ def _entries_by_unit(
     return tuple(item for item in entries if item.text_unit_uid == unit.uid)
 
 
-def _atom_view(proof_uid: str, batch_uid: str, page_uid: str, atom: OcrAtom) -> ProofAtomView:
+def _atom_char_span(
+    atom: OcrAtom,
+    entries: tuple[CharIndexEntry, ...],
+) -> tuple[int, int] | None:
+    """Return only a contiguous span backed by current index entries."""
+
+    indices = sorted({
+        item.char_index
+        for item in entries
+        if item.atom_uid == atom.uid
+        and item.available
+        and item.atom_fingerprint == atom.fingerprint
+    })
+    if not indices:
+        return None
+    start, end = indices[0], indices[-1] + 1
+    if indices != list(range(start, end)):
+        return None
+    return start, end
+
+
+def _render_kind(*, region_kind: str, atom_source: str = "") -> str:
+    normalized = region_kind.strip().lower()
+    if normalized in {"equation", "formula", "inline_formula", "display_formula", "display_equation"}:
+        return "formula"
+    if normalized == "table":
+        return "table"
+    if atom_source == "paddle_inline_formula":
+        return "formula"
+    return "text"
+
+
+def _atom_view(
+    proof_uid: str,
+    batch_uid: str,
+    page_uid: str,
+    atom: OcrAtom,
+    region_kind: str,
+    entries: tuple[CharIndexEntry, ...],
+) -> ProofAtomView:
+    char_span = _atom_char_span(atom, entries)
     return ProofAtomView(
         proof_uid=proof_uid,
         batch_uid=batch_uid,
@@ -341,6 +429,12 @@ def _atom_view(proof_uid: str, batch_uid: str, page_uid: str, atom: OcrAtom) -> 
         text=atom.text,
         confidence=atom.confidence,
         bbox=atom.bbox,
+        source=atom.source,
+        granularity=atom.granularity,
+        token_text=atom.token_text,
+        render_kind=_render_kind(region_kind=region_kind, atom_source=atom.source),
+        char_span=char_span,
+        geometry_available=char_span is not None,
     )
 
 
@@ -352,6 +446,7 @@ def _line_view(
     page: PageRecord,
     lines_by_uid: dict[str, OcrLine],
     atoms_by_uid: dict[str, OcrAtom],
+    regions_by_uid: dict[str, OcrRegion],
     entries: tuple[CharIndexEntry, ...],
 ) -> ProofLineView:
     mapped_line_uids = _unique(item.line_uid for item in entries if item.line_uid)
@@ -361,14 +456,27 @@ def _line_view(
             key=lambda item: (item.order, item.uid),
         )
     )
-    mapped_atom_uids = _unique(item.atom_uid for item in entries if item.atom_uid)
+    line_position = {line.uid: index for index, line in enumerate(mapped_lines)}
     mapped_atoms = tuple(
         sorted(
-            (atoms_by_uid[uid] for uid in mapped_atom_uids),
-            key=lambda item: (item.index, item.uid),
+            (
+                atoms_by_uid[atom_uid]
+                for line in mapped_lines
+                for atom_uid in line.atom_uids
+            ),
+            key=lambda item: (line_position[item.line_uid], item.index, item.uid),
         )
     )
     region_uids = _unique(item.region_uid for item in mapped_lines)
+    region_kinds = _unique(regions_by_uid[uid].kind for uid in region_uids)
+    line_render_kinds = _unique(
+        _render_kind(region_kind=kind) for kind in region_kinds
+    )
+    render_kind = (
+        line_render_kinds[0]
+        if len(line_render_kinds) == 1
+        else "mixed" if line_render_kinds else "text"
+    )
     line_uid = mapped_lines[0].uid if len(mapped_lines) == 1 else None
     region_uid = region_uids[0] if len(region_uids) == 1 else None
     confidence: float | None
@@ -394,8 +502,17 @@ def _line_view(
         status=unit.status,
         confidence=confidence,
         bbox=bbox,
+        render_kind=render_kind,
         atoms=tuple(
-            _atom_view(state.uid, batch.uid, page.uid, atom) for atom in mapped_atoms
+            _atom_view(
+                state.uid,
+                batch.uid,
+                page.uid,
+                atom,
+                regions_by_uid[atom.region_uid].kind,
+                entries,
+            )
+            for atom in mapped_atoms
         ),
         state_revision=state.revision,
         state_fingerprint=state.fingerprint,
@@ -425,6 +542,7 @@ def _state_view(
     if batch.scope_uid != scope_uid:
         raise ValueError("active OCR batch scope does not match proof state")
 
+    regions = _ordered_regions(ocr, batch)
     lines = _ordered_lines(ocr, batch)
     atoms = _ordered_atoms(ocr, batch)
     index = CharIndexService().build(
@@ -436,6 +554,7 @@ def _state_view(
     )
     lines_by_uid = {item.uid: item for item in lines}
     atoms_by_uid = {item.uid: item for item in atoms}
+    regions_by_uid = {item.uid: item for item in regions}
     line_views = tuple(
         _line_view(
             state=state,
@@ -444,6 +563,7 @@ def _state_view(
             page=page,
             lines_by_uid=lines_by_uid,
             atoms_by_uid=atoms_by_uid,
+            regions_by_uid=regions_by_uid,
             entries=_entries_by_unit(index.entries, unit),
         )
         for unit in state.text_units

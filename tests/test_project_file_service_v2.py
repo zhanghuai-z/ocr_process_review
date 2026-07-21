@@ -157,6 +157,9 @@ def _session(tmp_path: Path, project_uid: str = "project-1") -> ProjectSession:
             bbox=(1, 2, 5, 12),
             confidence=0.9,
             candidate_uids=("candidate-1",),
+            source="test",
+            granularity="char",
+            token_text="o",
         )
     )
     batch = ocr.append_batch(

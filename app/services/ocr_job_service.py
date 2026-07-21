@@ -443,6 +443,9 @@ def _observation_records(
                     bbox=observed_atom.bbox,
                     confidence=observed_atom.confidence,
                     candidate_uids=tuple(item.uid for item in candidate_records),
+                    source=observed_atom.source,
+                    granularity=observed_atom.granularity,
+                    token_text=observed_atom.token_text,
                     source_fingerprint=result.input_fingerprint,
                 )
                 atom_records.append(atom_record)

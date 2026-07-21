@@ -13,16 +13,16 @@ _TINY_SVG = (
 )
 
 
-def test_formula_rendering_experiment_renders_latin_math(monkeypatch):
-    from app.experimental import formula_rendering
+def test_formula_renderer_renders_latin_math(monkeypatch):
+    from app.ui.proof import formula_renderer
 
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_RENDER", raising=False)
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_ENGINE", raising=False)
-    monkeypatch.setattr(formula_rendering, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
+    monkeypatch.delenv("OCR_FORMULA_ENGINE", raising=False)
+    monkeypatch.setattr(formula_renderer, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
-    result = formula_rendering.render_formula_pixmap(
+    result = formula_renderer.render_formula_pixmap(
         r"$Y_t = \alpha + \beta Incentive_c \times Post_t$",
         target_height=34,
     )
@@ -36,10 +36,10 @@ def test_formula_rendering_experiment_renders_latin_math(monkeypatch):
     assert result.backend == "mathjax_svg"
 
 
-def test_formula_rendering_experiment_skips_cjk_mixed_lines(monkeypatch):
-    from app.experimental.formula_rendering import normalize_formula_latex, render_formula_pixmap
+def test_formula_renderer_skips_cjk_mixed_lines(monkeypatch):
+    from app.ui.proof.formula_renderer import normalize_formula_latex, render_formula_pixmap
 
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_RENDER", raising=False)
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
@@ -49,43 +49,43 @@ def test_formula_rendering_experiment_skips_cjk_mixed_lines(monkeypatch):
     assert render_formula_pixmap(text, target_height=34) is None
 
 
-def test_formula_rendering_experiment_can_be_disabled(monkeypatch):
-    from app.experimental.formula_rendering import render_formula_pixmap
+def test_formula_renderer_can_be_disabled(monkeypatch):
+    from app.ui.proof.formula_renderer import render_formula_pixmap
 
-    monkeypatch.setenv("OCR_EXPERIMENTAL_FORMULA_RENDER", "0")
+    monkeypatch.setenv("OCR_FORMULA_RENDER", "0")
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
     assert render_formula_pixmap("Incentive_c × Post_t", target_height=34) is None
 
 
-def test_formula_rendering_experiment_can_force_latex_svg(monkeypatch):
-    from app.experimental import formula_rendering
+def test_formula_renderer_can_force_latex_svg(monkeypatch):
+    from app.ui.proof import formula_renderer
 
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_RENDER", raising=False)
-    monkeypatch.setenv("OCR_EXPERIMENTAL_FORMULA_ENGINE", "latex_svg")
-    monkeypatch.setattr(formula_rendering, "_render_latex_svg", lambda _latex, _color_hex: _TINY_SVG)
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
+    monkeypatch.setenv("OCR_FORMULA_ENGINE", "latex_svg")
+    monkeypatch.setattr(formula_renderer, "_render_latex_svg", lambda _latex, _color_hex: _TINY_SVG)
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
-    result = formula_rendering.render_formula_pixmap(r"$E=mc^2$", target_height=28)
+    result = formula_renderer.render_formula_pixmap(r"$E=mc^2$", target_height=28)
 
     assert result is not None
     assert result.backend == "latex_svg"
     assert result.logical_height == 28
 
 
-def test_formula_rendering_experiment_normalizes_target_logical_size(monkeypatch):
-    from app.experimental import formula_rendering
+def test_formula_renderer_normalizes_target_logical_size(monkeypatch):
+    from app.ui.proof import formula_renderer
 
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_RENDER", raising=False)
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_ENGINE", raising=False)
-    monkeypatch.setattr(formula_rendering, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
+    monkeypatch.delenv("OCR_FORMULA_ENGINE", raising=False)
+    monkeypatch.setattr(formula_renderer, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
-    small = formula_rendering.render_formula_pixmap(r"$x^2$", target_height=18, oversample=1.0)
-    large = formula_rendering.render_formula_pixmap(r"$x^2$", target_height=42, oversample=2.0)
+    small = formula_renderer.render_formula_pixmap(r"$x^2$", target_height=18, oversample=1.0)
+    large = formula_renderer.render_formula_pixmap(r"$x^2$", target_height=42, oversample=2.0)
 
     assert small is not None
     assert large is not None
@@ -94,17 +94,17 @@ def test_formula_rendering_experiment_normalizes_target_logical_size(monkeypatch
     assert large.logical_width > small.logical_width
 
 
-def test_formula_rendering_experiment_prefers_mathjax_by_default(monkeypatch):
-    from app.experimental import formula_rendering
+def test_formula_renderer_prefers_mathjax_by_default(monkeypatch):
+    from app.ui.proof import formula_renderer
 
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_RENDER", raising=False)
-    monkeypatch.delenv("OCR_EXPERIMENTAL_FORMULA_ENGINE", raising=False)
-    monkeypatch.setattr(formula_rendering, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
-    formula_rendering.clear_formula_render_cache()
+    monkeypatch.delenv("OCR_FORMULA_RENDER", raising=False)
+    monkeypatch.delenv("OCR_FORMULA_ENGINE", raising=False)
+    monkeypatch.setattr(formula_renderer, "_render_mathjax_svg", lambda _latex, _color: _TINY_SVG)
+    formula_renderer.clear_formula_render_cache()
     app = QApplication.instance() or QApplication([])
     assert app is not None
 
-    result = formula_rendering.render_formula_pixmap(
+    result = formula_renderer.render_formula_pixmap(
         r"$\frac{a+b}{c+d} = \sum_{i=1}^{n} x_i$",
         target_height=30,
     )
@@ -115,19 +115,19 @@ def test_formula_rendering_experiment_prefers_mathjax_by_default(monkeypatch):
 
 
 def test_formula_rendering_node_executable_can_be_overridden(monkeypatch, tmp_path):
-    from app.experimental import formula_rendering
+    from app.ui.proof import formula_renderer
 
     node = tmp_path / ("node.exe")
     node.write_text("", encoding="utf-8")
 
     monkeypatch.setenv("OCR_MATHJAX_NODE_BIN", str(node))
 
-    assert formula_rendering._mathjax_node_executable() == str(node)
+    assert formula_renderer._mathjax_node_executable() == str(node)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not available")
 def test_formula_rendering_mathjax_supports_aligned_environment(monkeypatch):
-    from app.experimental import formula_rendering
+    from app.ui.proof import formula_renderer
 
     node_modules = (
         Path(__file__).resolve().parents[1]
@@ -140,9 +140,9 @@ def test_formula_rendering_mathjax_supports_aligned_environment(monkeypatch):
         pytest.skip("bundled mathjax resources are not available")
 
     monkeypatch.setenv("OCR_MATHJAX_NODE_MODULES", str(node_modules))
-    formula_rendering.clear_formula_render_cache()
+    formula_renderer.clear_formula_render_cache()
 
-    svg = formula_rendering._render_mathjax_svg(
+    svg = formula_renderer._render_mathjax_svg(
         r"\begin{aligned}y_{it}=\beta_0+\beta_k k_{it}\\+X_{it}\boldsymbol{\gamma}^{\prime}\end{aligned}",
         "#2C2C2C",
     )

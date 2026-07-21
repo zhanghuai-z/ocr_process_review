@@ -89,6 +89,7 @@ class _Engine:
                     text="machine", bbox=(2, 3, 30, 15), confidence=0.9, source="test",
                     atoms=(CharOcrAtomObservation(
                         text="machine", bbox=(2, 3, 30, 15), confidence=0.8, source="test",
+                        granularity="word", token_text="machine",
                     ),),
                 ),),
             ),),
@@ -112,6 +113,11 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     pointer = session.ocr_observation_repository.get_active_pointer("page-1")
     assert pointer.batch_uid == commit.batch_uid
     assert len(session.ocr_observation_repository.all_lines()) == 1
+    batch = session.ocr_observation_repository.get_batch(commit.batch_uid)
+    atom = session.ocr_observation_repository.get_atom(batch.atom_uids[0])
+    assert atom.source == "test"
+    assert atom.granularity == "word"
+    assert atom.token_text == "machine"
     proof = session.proof_repository.get_state("proof-1")
     assert proof.text_units[0].text == "human correction"
     assert proof.rebind_required is True

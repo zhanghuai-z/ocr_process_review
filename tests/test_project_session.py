@@ -259,6 +259,9 @@ def test_ocr_facts_are_immutable_append_only_and_have_no_revision_or_replace_api
             bbox=(0, 0, 10, 10),
             confidence=0.9,
             candidate_uids=("candidate-1",),
+            source="test",
+            granularity="char",
+            token_text="a",
         )
     )
     batch = repository.append_batch(_batch("project-a", "batch-1", run))

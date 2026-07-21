@@ -237,6 +237,9 @@ class OcrAtom:
     text: str
     bbox: XYXY
     confidence: float
+    source: str
+    granularity: str
+    token_text: str
     candidate_uids: tuple[str, ...] = ()
     source_fingerprint: str = ""
     fingerprint: str = field(init=False)
@@ -253,13 +256,15 @@ class OcrAtom:
         object.__setattr__(self, "bbox", _bbox(self.bbox))
         object.__setattr__(self, "confidence", _confidence(self.confidence))
         object.__setattr__(self, "candidate_uids", _uid_tuple(self.candidate_uids, "candidate_uids"))
+        _required_text(self.source, "source")
+        _required_text(self.granularity, "granularity")
+        _text(self.token_text, "token_text")
         _text(self.source_fingerprint, "source_fingerprint")
         _set_fingerprint(self)
 
     @property
     def atom_uid(self) -> str:
         return self.uid
-
 
 @dataclass(frozen=True, slots=True)
 class OcrCandidate:

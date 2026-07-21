@@ -1,4 +1,4 @@
-"""Experimental formula rendering for proof views.
+"""Formula rendering for proof views.
 
 This module is intentionally isolated:
 
@@ -6,11 +6,8 @@ This module is intentionally isolated:
 - no OCR/layout dependency;
 - no import from UI panels;
 - one public rendering function returning a ``QPixmap``;
-- removable by deleting this file and the thin HProof call site.
-
-Current default backend: MathJax SVG.  LaTeX + dvisvgm remains available as an
-explicit opt-in compatibility backend, but it is not part of the normal
-delivery path because it depends on a full TeX installation.
+Current default backend is MathJax SVG. LaTeX + dvisvgm remains an explicit
+optional backend because it depends on a full TeX installation.
 """
 from __future__ import annotations
 
@@ -29,8 +26,8 @@ from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 
-ENV_FLAG = "OCR_EXPERIMENTAL_FORMULA_RENDER"
-ENV_ENGINE = "OCR_EXPERIMENTAL_FORMULA_ENGINE"
+ENV_FLAG = "OCR_FORMULA_RENDER"
+ENV_ENGINE = "OCR_FORMULA_ENGINE"
 ENV_MATHJAX_NODE_MODULES = "OCR_MATHJAX_NODE_MODULES"
 ENV_MATHJAX_NODE_BIN = "OCR_MATHJAX_NODE_BIN"
 ENV_MATHJAX_TIMEOUT = "OCR_MATHJAX_TIMEOUT"
@@ -49,11 +46,10 @@ class FormulaRenderResult:
 
 
 def formula_rendering_enabled() -> bool:
-    """Return whether the experiment is active.
+    """Return whether formula rendering is active.
 
-    The experiment is enabled by default so formula-debug rows can be evaluated
-    in normal manual testing.  Set ``OCR_EXPERIMENTAL_FORMULA_RENDER=0`` to
-    disable it without changing code.
+    Rendering is enabled by default. Set ``OCR_FORMULA_RENDER=0`` to disable it
+    without changing code.
     """
     value = os.environ.get(ENV_FLAG, "1").strip().lower()
     return value not in {"0", "false", "no", "off"}
@@ -69,8 +65,9 @@ def render_formula_pixmap(
 ) -> FormulaRenderResult | None:
     """Render a formula-like text fragment to a transparent pixmap.
 
-    Returns ``None`` for disabled experiment, invalid text, unsupported TeX, or
-    unavailable renderers.  Callers must treat ``None`` as "use old display".
+    Returns ``None`` for disabled rendering, invalid text, unsupported TeX, or
+    unavailable renderers. Callers must treat ``None`` as "show the formula
+    source without a rendered preview".
 
     The returned pixmap is already scaled to the requested logical height and
     tagged with the active screen DPR.  Callers should use ``logical_width`` and
@@ -128,7 +125,7 @@ def render_formula_pixmap(
 
 
 def clear_formula_render_cache() -> None:
-    """Clear cached formula renderer outputs for manual renderer experiments."""
+    """Clear cached formula renderer outputs."""
     for renderer in (_render_mathjax_svg, _render_latex_svg):
         cache_clear = getattr(renderer, "cache_clear", None)
         if callable(cache_clear):

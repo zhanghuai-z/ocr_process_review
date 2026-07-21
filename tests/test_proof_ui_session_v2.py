@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,9 @@ def _session(tmp_path: Path) -> tuple[ProjectSession, ProofSessionService]:
                 text="a",
                 bbox=(10, 10, 30, 30),
                 confidence=0.96,
+                source="test",
+                granularity="char",
+                token_text="a",
             )
         ),
         ocr.append_atom(
@@ -141,6 +145,9 @@ def _session(tmp_path: Path) -> tuple[ProjectSession, ProofSessionService]:
                 text="b",
                 bbox=(30, 10, 50, 30),
                 confidence=0.7,
+                source="test",
+                granularity="char",
+                token_text="b",
             )
         ),
     )
@@ -316,6 +323,175 @@ def test_hproof_status_and_history_are_commands(
     assert [command.op for command in commands] == ["set_status", "undo", "redo"]
     assert commands[0].status == "checked"
     assert commands[0].expected_unit_revision == row.unit.revision
+    panel.close()
+
+
+def test_hproof_restores_atom_geometry_for_image_text_lookup(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from PySide6.QtCore import QPoint
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    row = panel._rows[0]
+    row_widget = panel._row_widgets[row.key]
+
+    assert [entry.atom_uid for entry in row.entries] == ["atom-1", "atom-2"]
+    assert [entry.bbox for entry in row.entries] == [
+        (10, 10, 30, 30),
+        (30, 10, 50, 30),
+    ]
+    assert row_widget._line_bbox == (10, 10, 50, 30)
+
+    row_widget._image.resize(200, 58)
+    row_widget._refresh_image()
+    row_widget._on_image_clicked(QPoint(16, 29))
+
+    assert row_widget.editor.textCursor().selectedText() == "a"
+    panel.close()
+
+
+def test_hproof_projects_atom_geometry_into_editor_typography(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from PySide6.QtGui import QFont, QTextCursor
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    panel = HProofPanel(build_proof_workspace_view(session))
+    row = panel._rows[0]
+    row_widget = panel._row_widgets[row.key]
+
+    row_widget._image.resize(200, 58)
+    row_widget._refresh_image()
+
+    first = QTextCursor(row_widget.editor.document())
+    first.setPosition(0)
+    first.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
+    first_format = first.charFormat()
+
+    assert row_widget.editor.font().pixelSize() >= 17
+    assert first_format.fontLetterSpacingType() == QFont.SpacingType.AbsoluteSpacing
+    assert first_format.fontLetterSpacing() != 0.0
+
+    row_widget.editor.setPlainText("abc")
+    reset = QTextCursor(row_widget.editor.document())
+    reset.setPosition(0)
+    reset.setPosition(1, QTextCursor.MoveMode.KeepAnchor)
+    assert reset.charFormat().fontLetterSpacing() == 0.0
+    panel.close()
+
+
+def test_hproof_formula_and_table_rows_have_explicit_preview_entries(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    unit = state.text_units[0]
+    line = state.lines[0]
+
+    def workspace_with_text(text: str, render_kind: str = "text"):
+        next_unit = replace(unit, text=text)
+        atom = replace(
+            line.atoms[0],
+            text=text,
+            render_kind=render_kind,
+            char_span=(0, len(text)),
+            geometry_available=True,
+        )
+        next_line = replace(
+            line,
+            ocr_text=text,
+            proof_text=text,
+            bbox=None,
+            render_kind=render_kind,
+            atoms=(atom,),
+        )
+        next_state = replace(state, text_units=(next_unit,), lines=(next_line,))
+        return replace(workspace, proof_states=(next_state,), lines=(next_line,))
+
+    formula_panel = HProofPanel(workspace_with_text(r"$E=mc^2$", "formula"))
+    formula_widget = formula_panel._row_widgets[("proof-1", "unit-1")]
+    assert formula_widget.row.kind == "formula"
+    assert formula_widget._preview_button.text() == "隐藏公式预览"
+    formula_widget._toggle_preview()
+    assert formula_widget._preview_visible is False
+    formula_panel.close()
+
+    table_panel = HProofPanel(workspace_with_text("a|b\nc|d", "table"))
+    table_widget = table_panel._row_widgets[("proof-1", "unit-1")]
+    assert table_widget.row.kind == "table"
+    assert not table_widget._line_crop.isNull()
+    assert table_widget._preview_button.isVisible() is False
+    table_panel.close()
+
+    plain_panel = HProofPanel(workspace_with_text(r"$a|b$"))
+    plain_widget = plain_panel._row_widgets[("proof-1", "unit-1")]
+    assert plain_widget.row.kind == "text"
+    assert plain_widget._preview_button.isVisible() is False
+    plain_panel.close()
+
+
+def test_hproof_page_directory_uses_proof_page_thumbnail_cards(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    panel = HProofPanel(workspace)
+
+    assert panel._page_directory.count() == 1
+    item = panel._page_directory.item(0)
+    card = panel._page_directory.itemWidget(item)
+    assert card is panel._page_cards["page-1"]
+    assert card.page is workspace.pages[0]
+    assert card._page_number.text() == "第 1 页"
+    assert card._filename.text() == "source.pdf"
+    assert not card._source_pixmap.isNull()
+    assert card.property("selected") is True
+    panel.close()
+
+
+def test_hproof_does_not_invent_atom_mapping_without_explicit_span(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.h_proof import HProofPanel
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    state = workspace.proof_states[0]
+    line = state.lines[0]
+    unit = state.text_units[0]
+    first_atom = replace(line.atoms[0], char_span=(0, 1), geometry_available=True)
+    second_atom = replace(line.atoms[1], char_span=None, geometry_available=False)
+    next_line = replace(
+        line,
+        ocr_text="a",
+        proof_text="a",
+        bbox=None,
+        atoms=(first_atom, second_atom),
+    )
+    next_state = replace(
+        state,
+        text_units=(replace(unit, text="a"),),
+        lines=(next_line,),
+    )
+    panel = HProofPanel(replace(workspace, proof_states=(next_state,), lines=(next_line,)))
+    row = panel._rows[0]
+
+    assert row.entries[0].atom_uid == "atom-1"
+    assert row.entries[0].bbox == (10, 10, 30, 30)
+    assert row.atom_placements[1].char_indices == ()
     panel.close()
 
 

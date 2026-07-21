@@ -119,6 +119,9 @@ def _session() -> tuple[ProjectSession, ProofState]:
             text="a",
             bbox=(10, 10, 20, 30),
             confidence=0.9,
+            source="test",
+            granularity="char",
+            token_text="a",
         )
     )
     atom_b = ocr.append_atom(
@@ -132,6 +135,9 @@ def _session() -> tuple[ProjectSession, ProofState]:
             text="b",
             bbox=(20, 10, 30, 30),
             confidence=0.8,
+            source="test",
+            granularity="char",
+            token_text="b",
         )
     )
     batch = ocr.append_batch(

@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -46,33 +47,48 @@ def _page_pixmap(
     bbox: tuple[int, int, int, int] | None,
     target_size: QSize | None = None,
 ) -> QPixmap:
-    pixmap = QPixmap(page.image_path)
-    if pixmap.isNull():
+    """Return a character crop, never a full-page thumbnail."""
+
+    if bbox is None:
         return QPixmap()
+    source = QPixmap(page.image_path)
+    if source.isNull() or page.width <= 0 or page.height <= 0:
+        return QPixmap()
+    left, top, right, bottom = bbox
+    x_scale = source.width() / page.width
+    y_scale = source.height() / page.height
+    crop_rect = QRect(
+        round(left * x_scale),
+        round(top * y_scale),
+        max(1, round((right - left) * x_scale)),
+        max(1, round((bottom - top) * y_scale)),
+    ).intersected(source.rect())
+    if crop_rect.isEmpty():
+        return QPixmap()
+    crop = source.copy(crop_rect)
     target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
-    pixmap = pixmap.scaled(
+    return crop.scaled(
         max(1, target.width()),
         max(1, target.height()),
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
-    if bbox is not None and page.width > 0 and page.height > 0:
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(QColor("#D43D3D"), 2))
-        left, top, right, bottom = bbox
-        x_scale = pixmap.width() / page.width
-        y_scale = pixmap.height() / page.height
-        painter.drawRect(
-            QRect(
-                round(left * x_scale),
-                round(top * y_scale),
-                max(1, round((right - left) * x_scale)),
-                max(1, round((bottom - top) * y_scale)),
-            )
-        )
-        painter.end()
-    return pixmap
+
+
+def _occurrence_offset(
+    line: ProofLineView,
+    page: ProofPageView,
+    entry: ProofCharView,
+) -> int | None:
+    """Find the active OCR offset represented by one immutable char view."""
+
+    offset = 0
+    for candidate in build_char_views(line, page):
+        if _entry_key(candidate) == _entry_key(entry):
+            return offset if offset < len(line.ocr_text) else None
+        if candidate.ocr_char is not None:
+            offset += len(candidate.ocr_char)
+    return None
 
 
 class VProofPanel(QWidget):
@@ -197,17 +213,14 @@ class VProofPanel(QWidget):
         context_card.setObjectName("proofCard")
         context_layout = QVBoxLayout(context_card)
         context_layout.setContentsMargins(10, 8, 10, 10)
-        context_title = QLabel("文本上下文")
+        context_title = QLabel("OCR 文本上下文")
         context_title.setObjectName("sectionTitle")
         context_layout.addWidget(context_title)
         self._ocr_context = QPlainTextEdit()
+        self._ocr_context.setObjectName("vproofOcrContext")
         self._ocr_context.setReadOnly(True)
         self._ocr_context.setPlaceholderText("OCR 文本上下文")
         context_layout.addWidget(self._ocr_context, 1)
-        self._proof_context = QPlainTextEdit()
-        self._proof_context.setReadOnly(True)
-        self._proof_context.setPlaceholderText("校对文本上下文")
-        context_layout.addWidget(self._proof_context, 1)
         center_layout.addWidget(context_card, 2)
 
         self._status = QLabel("暂无可校对字符")
@@ -301,7 +314,6 @@ class VProofPanel(QWidget):
         self._selected_entry = None
         self._populate_page_selector()
         self._rebuild_char_list()
-        self._render_entry(None)
         self._status.setText(
             "暂无可校对字符" if not self._entries else f"{len(self._entries)} 个字符"
         )
@@ -346,11 +358,13 @@ class VProofPanel(QWidget):
             item = QListWidgetItem(f"{text}  {count}")
             item.setData(Qt.ItemDataRole.UserRole, text)
             self._char_list.addItem(item)
-        self._char_list.blockSignals(False)
         self._char_count.setText(f"{len(available)} 项")
         if self._char_list.count():
             self._char_list.setCurrentRow(0)
+            self._char_list.blockSignals(False)
+            self._on_char_changed(self._char_list.item(0), None)
         else:
+            self._char_list.blockSignals(False)
             self._selected_char = ""
             self._set_gallery(())
 
@@ -365,6 +379,7 @@ class VProofPanel(QWidget):
         return tuple(entry for entry in entries if entry.page_uid == self._selected_page_uid)
 
     def _set_gallery(self, entries: tuple[ProofCharView, ...]) -> None:
+        self._gallery.blockSignals(True)
         self._gallery.clear()
         self._gallery_header.setText(
             "相同字索引" if not self._selected_char else f"相同字索引 · {self._selected_char}"
@@ -378,9 +393,13 @@ class VProofPanel(QWidget):
             self._gallery.addItem(item)
         if self._gallery.count():
             self._gallery.setCurrentRow(0)
+            first = self._gallery.item(0)
+            entry = first.data(Qt.ItemDataRole.UserRole)
+            self._selected_entry = entry if isinstance(entry, ProofCharView) else None
         else:
             self._selected_entry = None
-            self._render_entry(None)
+        self._gallery.blockSignals(False)
+        self._render_entry(self._selected_entry)
 
     def _entry_icon(self, entry: ProofCharView) -> QIcon:
         page = self._pages.get(entry.page_uid)
@@ -500,7 +519,7 @@ class VProofPanel(QWidget):
     def _render_entry(self, entry: ProofCharView | None) -> None:
         if entry is None:
             self._ocr_context.clear()
-            self._proof_context.clear()
+            self._ocr_context.setExtraSelections([])
             self._image.setText("无可用原稿图像")
             self._image.setPixmap(QPixmap())
             self._evidence.clear()
@@ -516,14 +535,29 @@ class VProofPanel(QWidget):
             text_char=entry.text,
             ocr_char=entry.ocr_char,
         )
-        self._ocr_context.setPlainText(
-            f"OCR 行 {entry.line_uid or '-'}：{line.ocr_text or '-'}"
-        )
-        self._proof_context.setPlainText(
-            f"校对文本 {entry.text_unit_uid}：{unit.text}"
-        )
+        ocr_text = line.ocr_text or "-"
+        self._ocr_context.setPlainText(ocr_text)
+        self._ocr_context.setExtraSelections([])
+        occurrence_offset = _occurrence_offset(line, page, entry)
+        if occurrence_offset is not None and occurrence_offset < len(line.ocr_text):
+            cursor = self._ocr_context.textCursor()
+            cursor.setPosition(occurrence_offset)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Right,
+                QTextCursor.MoveMode.KeepAnchor,
+                max(1, len(entry.ocr_char or "")),
+            )
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setBackground(QColor("#FFE28A"))
+            selection.format.setForeground(QColor("#1F2937"))
+            self._ocr_context.setExtraSelections([selection])
+            view_cursor = self._ocr_context.textCursor()
+            view_cursor.setPosition(occurrence_offset)
+            self._ocr_context.setTextCursor(view_cursor)
+            self._ocr_context.ensureCursorVisible()
         self._evidence.setText(
-            f"{verdict.severity}: {verdict.evidence} · "
+            f"{verdict.severity}: {verdict.evidence} · 校对字符 {entry.text} · "
             f"区域 {entry.region_uid or '-'} · 字符 {entry.atom_uid or '-'}"
         )
         self._evidence.setStyleSheet(f"color: {verdict.color};")

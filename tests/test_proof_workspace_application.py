@@ -61,7 +61,11 @@ def _page(uid: str, page_number: int) -> PageRecord:
     )
 
 
-def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
+def _session(
+    *,
+    proof_text: str = "ac",
+    source_end: int = 2,
+) -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
     session = ProjectSession(PROJECT_UID)
     session.page_repository.put(_page("page-1", 1), expected_revision=0)
     session.page_repository.put(_page("page-2", 2), expected_revision=0)
@@ -133,6 +137,9 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
             text="a",
             bbox=(10, 10, 30, 30),
             confidence=0.96,
+            source="ocr:test",
+            granularity="char",
+            token_text="a",
         )
     )
     atom_b = ocr.append_atom(
@@ -146,6 +153,9 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
             text="b",
             bbox=(30, 10, 50, 30),
             confidence=0.72,
+            source="ocr:test",
+            granularity="char",
+            token_text="b",
         )
     )
     batch = ocr.append_batch(
@@ -187,20 +197,20 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
         uid="segment-1",
         anchor_uid=anchor.uid,
         source_start=0,
-        source_end=2,
+        source_end=source_end,
         proof_start=0,
-        proof_end=2,
+        proof_end=len(proof_text),
     )
     alignment = ProofAlignmentSlice(
         project_uid=PROJECT_UID,
         uid="slice-1",
         segment_uid=segment.uid,
         source_start=0,
-        source_end=2,
+        source_end=source_end,
         proof_start=0,
-        proof_end=2,
-        source_text="ab",
-        proof_text="ac",
+        proof_end=len(proof_text),
+        source_text="ab"[:source_end],
+        proof_text=proof_text,
     )
     state = session.proof_repository.create_state(
         ProofState(
@@ -212,7 +222,7 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
                     project_uid=PROJECT_UID,
                     uid="unit-1",
                     order=0,
-                    text="ac",
+                    text=proof_text,
                     status="modified",
                 ),
             ),
@@ -285,8 +295,32 @@ def test_query_projects_active_ocr_and_proof_state_into_stable_read_views() -> N
     assert atom.atom_uid == "atom-1"
     assert atom.text == "a"
     assert atom.bbox == (10, 10, 30, 30)
+    assert atom.source == "ocr:test"
+    assert atom.granularity == "char"
+    assert atom.token_text == "a"
+    assert atom.render_kind == "text"
+    assert atom.char_span == (0, 1)
+    assert atom.geometry_available is True
     assert view.atoms == line.atoms
     _assert_dto_graph_is_value_only(view)
+
+
+def test_line_view_keeps_complete_mapped_line_atoms_with_explicit_unmapped_metadata() -> None:
+    session, state, _batch, _pointer = _session(proof_text="a", source_end=1)
+
+    view = build_proof_workspace_view(session, proof_uid=state.uid)
+    line = view.lines[0]
+
+    assert line.line_uid == "line-1"
+    assert line.ocr_text == "ab"
+    assert tuple(atom.atom_uid for atom in line.atoms) == ("atom-1", "atom-2")
+    assert line.atoms[0].char_span == (0, 1)
+    assert line.atoms[0].geometry_available is True
+    assert line.atoms[1].char_span is None
+    assert line.atoms[1].geometry_available is False
+    assert line.atoms[1].source == "ocr:test"
+    assert line.atoms[1].granularity == "char"
+    assert line.atoms[1].token_text == "b"
 
 
 def test_query_hides_historical_proof_after_layout_changes() -> None:
@@ -398,6 +432,9 @@ def test_query_does_not_reuse_old_line_or_atom_when_active_observation_changes()
                 text="x",
                 bbox=(10, 10, 30, 30),
                 confidence=0.8,
+                source="test",
+                granularity="char",
+                token_text="x",
             )
         ),
         ocr.append_atom(
@@ -411,6 +448,9 @@ def test_query_does_not_reuse_old_line_or_atom_when_active_observation_changes()
                 text="y",
                 bbox=(30, 10, 50, 30),
                 confidence=0.8,
+                source="test",
+                granularity="char",
+                token_text="y",
             )
         ),
     )
