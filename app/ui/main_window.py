@@ -44,8 +44,12 @@ class _ShellProgress(QWidget):
         self._active = False
         self._title = QLabel("进度")
         self._title.setFixedWidth(58)
+        # 状态栏左侧已有运行描述（如"正在运行版面分析"），进度条只留 bar+计数
+        self._title.setVisible(False)
         self._detail = QLabel("")
         self._detail.setMinimumWidth(96)
+        # 阶段描述不进界面：进度条只表达"在进行/走到哪"，细节收进悬浮提示
+        self._detail.setVisible(False)
         self._count = QLabel("")
         self._count.setFixedWidth(62)
         self._count.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -74,6 +78,10 @@ class _ShellProgress(QWidget):
         self._detail.setText(detail)
         self._count.setText(count)
         self._bar.setValue(max(0, min(100, int(value))))
+        tip = " · ".join(part for part in (title, detail, count) if part)
+        self._bar.setToolTip(tip)
+        self._title.setToolTip(tip)
+        self._count.setToolTip(tip)
         self.show()
 
     def start_layout(self, total: int) -> None:
@@ -138,19 +146,19 @@ class _ShellProgress(QWidget):
         message = str(progress.message or "")
         lowered = message.lower()
         if "行框定位" in message:
-            return 0.08
+            return 0.10
         if "行框完成" in message:
-            return 0.16
+            return 0.18
         if "路由" in message:
-            return 0.24
+            return 0.26
         if "segimg" in lowered or "分块" in message:
-            return 0.34
+            return 0.36
         if "recog" in lowered and "准备" in message:
             return 0.44
         if progress.total > 0 and ("识别" in message or "hanwang" in lowered):
             ratio = max(0.0, min(1.0, progress.current / progress.total))
             return 0.44 + ratio * 0.52
-        return 0.03
+        return 0.05
 
     def finish(self) -> None:
         self._active = False
@@ -322,8 +330,10 @@ class MainWindow(QMainWindow):
     def _on_ocr_workspace_changed(self, workspace: object) -> None:
         if workspace is None:
             self._ocr_panel.reset()
+            self._layout_panel.set_ocr_workspace(None)
             return
         self._ocr_panel.set_workspace(workspace)
+        self._layout_panel.set_ocr_workspace(workspace)
 
     def _on_proof_workspace_changed(self, workspace: object) -> None:
         if workspace is None:
@@ -361,6 +371,7 @@ class MainWindow(QMainWindow):
 
     def _on_layout_finished(self) -> None:
         self._progress.finish()
+        self._layout_panel.finish_analysis_progress("版面分析完成")
         self._load_snapshot_into_panel()
         self._set_status_message("版面分析完成")
         self._controller.request_step(STEP_OCR)

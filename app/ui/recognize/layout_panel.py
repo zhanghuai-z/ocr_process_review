@@ -25,9 +25,10 @@ from app.application.contracts import (
 from app.core.paddle_labels import normalize_paddle_label
 from app.models.enums import BlockType, OcrPolicy
 from app.models.geometry import BBox
-from app.ui.widgets.image_viewer import ImageViewer
+from app.ui.widgets.image_viewer import ImageViewer, OcrAtomBox
 from app.ui.widgets.confidence_badge import ConfidenceBadge
 from app.ui.widgets.effects import apply_soft_shadow
+from app.ui.widgets.page_thumbnail import PAGE_ROW_H, PageDirectoryRow
 from app.utils.image_io import read_cv_image
 
 STATUS_LABEL_MAX_CHARS = 96
@@ -260,11 +261,16 @@ class _PageViewDirectory(QListWidget):
             self._page_uids = tuple(page.page_uid for page in values)
             for page in values:
                 source = page.source_path or page.image_path
-                filename = Path(source).name if source else ""
-                item = QListWidgetItem(f"{page.page_number:02d}  {filename}")
+                item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, page.page_uid)
-                item.setSizeHint(QSize(0, 44))
+                item.setSizeHint(QSize(0, PAGE_ROW_H))
                 self.addItem(item)
+                row = PageDirectoryRow(
+                    page.page_number,
+                    source,
+                    page.thumbnail_path or page.image_path,
+                )
+                self.setItemWidget(item, row)
         finally:
             self._suppress_signal = False
 
@@ -306,6 +312,7 @@ class LayoutPanel(QWidget):
         self._pages: list[PageView] = []
         self._current_page_idx: int = 0
         self._selected_block_uid: str | None = None
+        self._atom_boxes_by_page: dict[str, tuple[OcrAtomBox, ...]] = {}
         self._page_gate_states: dict[str, tuple[str, bool, str, str]] = {}
         self._primary_actions: dict[str, tuple[str, str, bool]] = {}
         self._ink_mask_cache: dict[str, tuple[object, int, int, list[tuple[int, int, int, int, int]]]] = {}
@@ -784,6 +791,7 @@ class LayoutPanel(QWidget):
         self._pages = []
         self._current_page_idx = 0
         self._selected_block_uid = None
+        self._atom_boxes_by_page = {}
         self._page_gate_states.clear()
         self._primary_actions.clear()
         self._ink_mask_cache.clear()
@@ -803,22 +811,15 @@ class LayoutPanel(QWidget):
         self._update_page_nav()
 
     def start_analysis_progress(self, total_pages: int) -> None:
+        # 进度统一由主窗口状态栏进度条展示（版面/OCR 共用），本面板只维护状态文案
         self._analysis_running = True
-        self._progress_bar.setRange(0, max(1, total_pages))
-        self._progress_bar.setValue(0)
-        self._progress_bar.setFormat("%p%")
-        self._progress_bar.show()
+        self._progress_bar.hide()
         self._btn_cancel.setText("停止分析")
         self._btn_cancel.setEnabled(True)
         self._set_status_text("版面分析中…")
 
     def update_analysis_progress(self, current: int, total: int) -> None:
-        current_done = max(0, min(current + 1, total))
-        self._progress_bar.setRange(0, max(1, total))
-        self._progress_bar.setValue(current_done)
-        self._progress_bar.setFormat("%p%")
-        self._progress_bar.show()
-        self._set_status_text("版面分析中…")
+        self._set_status_text(f"版面分析中… {max(0, min(current + 1, total))}/{max(1, total)} 页")
 
     def update_analysis_stage(self, message: str) -> None:
         if self._analysis_running:
@@ -1560,11 +1561,46 @@ class LayoutPanel(QWidget):
         if page.layout_revision is None:
             self._viewer.clear_overlays()
             return
-        self._viewer.show_layout_blocks(page.blocks, atom_boxes=())
+        atom_boxes = self._atom_boxes_by_page.get(page.uid, ())
+        self._viewer.show_layout_blocks(page.blocks, atom_boxes=atom_boxes)
         self._viewer.show_readonly_overlays([])
-        self._viewer.set_block_frame_occlusions(())
-        if self._btn_atom_boxes.isChecked():
-            self._viewer.show_atom_boxes((), editable=False)
+        self._viewer.set_block_frame_occlusions(atom_boxes)
+        self._viewer.show_atom_boxes(
+            atom_boxes if self._btn_atom_boxes.isChecked() else (),
+            editable=False,
+        )
+
+    def set_ocr_workspace(self, workspace) -> None:
+        """Receive immutable OCR observations used by the atom-box overlay."""
+        from app.application.ocr_workspace import OcrWorkspaceView
+
+        if workspace is not None and not isinstance(workspace, OcrWorkspaceView):
+            raise TypeError("layout panel OCR overlay requires OcrWorkspaceView or None")
+        boxes: dict[str, tuple[OcrAtomBox, ...]] = {}
+        if workspace is not None:
+            for page in workspace.pages:
+                page_boxes: list[OcrAtomBox] = []
+                for region in page.regions:
+                    for line in region.lines:
+                        for atom in line.atoms:
+                            confidence = float(atom.confidence)
+                            if confidence > 1.0:
+                                confidence = confidence / 100.0
+                            confidence = max(0.0, min(1.0, confidence))
+                            page_boxes.append(
+                                OcrAtomBox(
+                                    uid=atom.atom_uid,
+                                    bbox=atom.bbox,
+                                    text=atom.text,
+                                    confidence=confidence,
+                                    line_uid=line.line_uid,
+                                    block_uid=region.block_uid or "",
+                                )
+                            )
+                boxes[page.page_uid] = tuple(page_boxes)
+        self._atom_boxes_by_page = boxes
+        if self._pages:
+            self._refresh_current_page_layers()
 
     def _select_block_uid_for_edit(self, block_uid: str) -> None:
         self._viewer.select_block_uid(block_uid)
