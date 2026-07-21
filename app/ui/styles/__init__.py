@@ -1099,9 +1099,62 @@ QPlainTextEdit#proofLineEditor {{
     font-size: 17px;
     font-weight: 600;
 }}
+QWidget#proofSlotEditor {{
+    background: {bg_card};
+    border: none;
+    border-radius: 0;
+    padding: 2px 4px;
+}}
+QFrame#linePair[active="true"] QWidget#proofSlotEditor {{
+    background: {bg_panel};
+}}
+QFrame#proofProgressPopup {{
+    background: {bg_panel};
+    border: 1px solid {border};
+    border-radius: {radius_lg};
+}}
+QFrame#formulaSourcePopup {{
+    background: {bg_panel};
+    border: 1px solid {border};
+    border-radius: {radius_lg};
+}}
+QLabel#formulaSourceLabel {{
+    color: {text_secondary};
+    font-size: {font_size_xs};
+    font-weight: 600;
+}}
+QPlainTextEdit#formulaSourceEdit {{
+    background: {bg_input};
+    border: 1px solid {border_input};
+    border-radius: {radius_md};
+    padding: 6px;
+    font-family: {font_family_mono};
+    font-size: {font_size_sm};
+    color: {text_primary};
+}}
+QPushButton#proofConfirmBtn {{
+    background: {brand};
+    color: {text_on_brand};
+    border: none;
+    border-radius: {radius_md};
+    font-size: {font_size_xs};
+    font-weight: 600;
+}}
+QPushButton#proofConfirmBtn:hover {{
+    background: {brand_hover};
+}}
+QPushButton#proofConfirmBtn:pressed {{
+    background: {brand_pressed};
+}}
 QWidget#proofRowActiveBar {{
     background: {brand};
     border: none;
+}}
+QFrame#linePair[focusDepth="near"] QLabel {{
+    color: {text_secondary};
+}}
+QFrame#linePair[focusDepth="far"] QLabel {{
+    color: {text_muted};
 }}
 QFrame#vproofEditBubble {{
     background: {bg_card};
@@ -1122,6 +1175,14 @@ QLabel#proofEmpty {{
     color: {text_disabled};
     font-size: {font_size_lg};
     qproperty-alignment: 'AlignCenter';
+}}
+QLabel#hproofModeBanner {{
+    background: {pill_warn_bg};
+    color: {pill_warn_text};
+    border: 1px solid {border};
+    border-radius: {radius_md};
+    padding: 4px 10px;
+    font-size: {font_size_xs};
 }}
 
 /* ═══ 页面分隔条 ═══ */

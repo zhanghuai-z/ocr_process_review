@@ -674,7 +674,15 @@ class ImageViewer(QGraphicsView):
             selected = selected or should_select
         return selected
 
-    def highlight_bbox(self, bbox: BBox, *, zoom: bool = False) -> None:
+    def highlight_bbox(
+        self,
+        bbox: BBox,
+        *,
+        zoom: bool = False,
+        pen_width: float | None = None,
+        fill_alpha: int | None = None,
+        padding: int = 0,
+    ) -> None:
         """高亮某个 BBox（橙色边框），并将其滚动到视野中心。用于纵校定位字符。"""
         # 清除旧的高亮
         if hasattr(self, "_highlight_item") and self._highlight_item is not None:
@@ -683,10 +691,12 @@ class ImageViewer(QGraphicsView):
             self._highlight_item = None
         from PySide6.QtCore import QRectF
         from PySide6.QtGui import QPen, QColor
-        rect = QGraphicsRectItem(QRectF(bbox.x, bbox.y, bbox.w, bbox.h))
-        pen = QPen(QColor("#FF8C00"), 4 if zoom else 2)
+        rect = QGraphicsRectItem(
+            QRectF(bbox.x - padding, bbox.y - padding, bbox.w + padding * 2, bbox.h + padding * 2)
+        )
+        pen = QPen(QColor("#FF8C00"), pen_width if pen_width is not None else (4 if zoom else 2))
         rect.setPen(pen)
-        rect.setBrush(QColor(255, 140, 0, 80 if zoom else 40))
+        rect.setBrush(QColor(255, 140, 0, fill_alpha if fill_alpha is not None else (80 if zoom else 40)))
         rect.setZValue(80 if zoom else 10)
         self._scene.addItem(rect)
         self._highlight_item = rect

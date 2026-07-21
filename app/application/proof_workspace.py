@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from app.core.char_index import CharIndexEntry
 from app.core.ocr_currentness import CurrentOcrObservation, current_ocr_observation
+from app.core.paddle_labels import normalize_paddle_label
 from app.models.ocr_records import OcrAtom, OcrBatch, OcrLine, OcrRegion
 from app.models.proof_records import ProofState, ProofTextUnit
 from app.models.project_session import PageRecord, ProjectSession
@@ -398,11 +399,28 @@ def _atom_char_span(
     return start, end
 
 
+_FORMULA_REGION_KINDS = frozenset({
+    "display_equation",
+    "display_formula",
+    "equation",
+    "equation_block",
+    "formula",
+    "inline_formula",
+    "isolated_formula",
+})
+_TABLE_REGION_KINDS = frozenset({
+    "table",
+    "table_block",
+    "table_body",
+    "table_region",
+})
+
+
 def _render_kind(*, region_kind: str, atom_source: str = "") -> str:
-    normalized = region_kind.strip().lower()
-    if normalized in {"equation", "formula", "inline_formula", "display_formula", "display_equation"}:
+    normalized = normalize_paddle_label(region_kind)
+    if normalized in _FORMULA_REGION_KINDS:
         return "formula"
-    if normalized == "table":
+    if normalized in _TABLE_REGION_KINDS:
         return "table"
     if atom_source == "paddle_inline_formula":
         return "formula"
@@ -436,6 +454,16 @@ def _atom_view(
         char_span=char_span,
         geometry_available=char_span is not None,
     )
+
+
+def _bbox_union(boxes: Iterable[BBox]) -> BBox:
+    values = tuple(boxes)
+    return (
+        min(box[0] for box in values),
+        min(box[1] for box in values),
+        max(box[2] for box in values),
+        max(box[3] for box in values),
+    )  # type: ignore[return-value]
 
 
 def _line_view(
@@ -486,7 +514,15 @@ def _line_view(
         confidence = sum(item.confidence for item in mapped_lines) / len(mapped_lines)
     else:
         confidence = None
-    bbox = mapped_lines[0].bbox if len(mapped_lines) == 1 else None
+    bbox: BBox | None
+    line_boxes = [item.bbox for item in mapped_lines if item.bbox is not None]
+    if line_boxes:
+        # 映射多条 OCR 行时取并集（公式/表格行常见），而不是丢弃几何
+        bbox = _bbox_union(line_boxes)
+    else:
+        # 行级缺失时回落版面 region 真值（layout 几何是唯一权威来源）
+        region_boxes = [regions_by_uid[uid].bbox for uid in region_uids]
+        bbox = _bbox_union(region_boxes) if region_boxes else None
     return ProofLineView(
         proof_uid=state.uid,
         batch_uid=batch.uid,

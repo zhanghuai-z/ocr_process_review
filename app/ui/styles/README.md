@@ -45,6 +45,9 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize；旧 dark/dark_teal 会
 - `toolbar` — 面板内工具条（白底，下边框）
 - `card` — 浮起卡片（白底 + radius_lg + border）；属性 `selected="true"` 切换高亮
 - `linePair` — 横校原文/校对行对容器；属性 `active="true"` 切换高亮
+- `proofSlotEditor` — 横校逐字槽位编辑器（自绘，仅接管背景/边框）
+- `proofProgressPopup` — 横校进度环点击弹出的统计浮层
+- `formulaSourcePopup` / `formulaSourceLabel` / `formulaSourceEdit` — 横校公式源码编辑浮层（右键唤起）
 
 ### 标签
 - `sectionTitle` — 卡片标题（品牌色 14px bold）
@@ -55,6 +58,17 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize；旧 dark/dark_teal 会
 - `stepInfo` — 步骤提示（品牌色 12px）
 - `pageSep` — 页分隔条
 - `proofEmpty` — 校对空状态居中文字
+- `hproofModeBanner` — 横校调试视图模式横幅（公式/表格过滤提示）
+- `proofProgressRing` — 横校状态栏进度环（自绘，无 QSS 规则，仅登记）
+
+### 纵校面板（v_proof）
+- `proofCard` — 纵校 gallery / OCR 上下文卡片（白底 + radius_lg + border）
+- `charIndexList` — 纵校字符索引列表（item 圆角 hover/选中态）
+- `proofGallery` — 纵校相同字缩略图 gallery（IconMode；item 选中描边）
+- `candidatePanel` — 纵校候选字面板容器（panel 底 + 圆角边框）
+- `candidateButton` — 纵校候选字按钮（非首候选；首候选用 `primaryBtn`）
+- `vproofOcrContext` — 纵校 OCR 文本上下文（只读 QPlainTextEdit，走默认控件样式）
+- `vproofEditBubble` / `vproofEditBubbleInput` — 纵校右键改字气泡及输入框
 
 ### 按钮
 - `primaryBtn` — 主操作（品牌底白字）
@@ -63,6 +77,7 @@ apply_theme(app, cfg.get("theme"))   # 自动 normalize；旧 dark/dark_teal 会
 - `runBtn` — 圆形启动按钮（绿色）
 - `workflowStepBtn` — 顶部流程步骤按钮；支持 `:checked` / `:disabled`
 - `toolToggle` — 切换型工具按钮（如 `⊞ 字框`）；支持 `:checked`
+- `proofConfirmBtn` — 横校行末确认按钮（品牌底白字，紧凑）
 
 ### 默认控件
 `QLineEdit / QComboBox / QSpinBox / QPlainTextEdit / QTextEdit / QListWidget / QTreeWidget / QTableWidget / QProgressBar / QScrollBar / QSplitter / QTabWidget / QGraphicsView / QToolTip` 已统一样式，无需 objectName。
