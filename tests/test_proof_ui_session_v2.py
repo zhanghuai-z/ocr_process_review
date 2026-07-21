@@ -8,6 +8,9 @@ import pytest
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
+from app.application.proof_workspace import build_proof_workspace_view
+from app.application.contracts import ProofEditCommand
+from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.ocr_records import (
     OcrActivePointer,
@@ -32,9 +35,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OWNED = (
     ROOT / "app/ui/proof/h_proof.py",
     ROOT / "app/ui/proof/v_proof.py",
-    ROOT / "app/ui/proof/confidence_utils.py",
+    ROOT / "app/ui/proof/confidence_view.py",
     ROOT / "app/ui/proof/char_verdict.py",
-    ROOT / "app/ui/widgets/quality_stats_dialog.py",
+    ROOT / "app/ui/proof/quality_stats_dialog.py",
 )
 
 
@@ -69,25 +72,25 @@ def _session(tmp_path: Path) -> tuple[ProjectSession, ProofSessionService]:
         ),
         expected_revision=0,
     )
-    session.layout_repository.put(
-        LayoutSnapshot(
+    layout = LayoutSnapshot(
             page_uid="page-1",
             revision=1,
             artifact_uid="layout-1",
             source_engine="test",
             source_run_id="layout-run-1",
             blocks=(),
-        ),
-        expected_revision=0,
     )
+    session.layout_repository.put(layout, expected_revision=0)
+    page = session.page_repository.get("page-1")
     ocr = session.ocr_observation_repository
     run = ocr.append_run(
         OcrRun(
             project_uid=project_uid,
             uid="run-1",
             engine="test",
-            layout_fingerprint="layout-1",
+            layout_fingerprint=layout_snapshot_fingerprint(layout),
             input_fingerprint="input-1",
+            metadata=(("page_fingerprint", page.fingerprint),),
         )
     )
     region = ocr.append_region(
@@ -215,7 +218,7 @@ def _session(tmp_path: Path) -> tuple[ProjectSession, ProofSessionService]:
     return session, service
 
 
-def test_owned_proof_ui_has_no_legacy_model_or_bus_dependencies() -> None:
+def test_owned_proof_ui_accepts_only_workspace_and_has_no_legacy_dependencies() -> None:
     forbidden_modules = {
         "app.core.proof_projection",
         "app.core.proof_state_bus",
@@ -224,26 +227,40 @@ def test_owned_proof_ui_has_no_legacy_model_or_bus_dependencies() -> None:
         "app.services.proof_occurrence_session",
         "app.services.proof_probe_text_service",
     }
-    forbidden_names = {"OcrProject", "ProofStateBus"}
+    forbidden_names = {
+        "OcrProject",
+        "ProofStateBus",
+        "ProjectSession",
+        "ProofSessionService",
+        "set_session",
+    }
     for path in OWNED:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        assert "set_session" not in source
+        tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 assert module not in forbidden_modules
                 assert not {alias.name for alias in node.names} & forbidden_names
+                assert not module.startswith("app.models")
+                assert not module.startswith("app.services")
+                assert not module.startswith("app.core")
             if isinstance(node, ast.Name):
                 assert node.id not in forbidden_names
 
 
-def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
+def test_hproof_emits_replace_many_with_workspace_cas_without_writing_source(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     from app.ui.proof.h_proof import HProofPanel
 
-    session, service = _session(tmp_path)
-    panel = HProofPanel(session=session, proof_service=service)
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    panel = HProofPanel(workspace)
+    commands: list[ProofEditCommand] = []
+    panel.proof_edit_requested.connect(commands.append)
     assert panel.objectName() == "proofRoot"
     assert panel._splitter.objectName() == "hproofSplitter"
     assert panel._page_directory.objectName() == "pageDirectoryList"
@@ -254,6 +271,7 @@ def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
     row_widget = panel._row_widgets[("proof-1", "unit-1")]
     assert row_widget.property("active") is True
     assert row_widget._focus_depth == "active"
+
     editor = row_widget.editor
     cursor = editor.textCursor()
     cursor.setPosition(1)
@@ -265,42 +283,53 @@ def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
     assert editor.isHidden() is False
     editor.setPlainText("ax")
     assert panel.save() is True
-    assert service.get_state("proof-1").text_units[0].text == "ax"
+    assert len(commands) == 1
+    command = commands[0]
+    assert isinstance(command, ProofEditCommand)
+    assert command.op == "replace_many"
+    assert command.proof_uid == "proof-1"
+    assert command.expected_revision == workspace.proof_states[0].revision
+    assert command.expected_fingerprint == workspace.proof_states[0].fingerprint
+    assert command.replacements == (("unit-1", "ax"),)
+    assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
     assert session.ocr_observation_repository.get_line("line-1").text == "ab"
+    assert not hasattr(panel, "set_session")
     panel.close()
 
 
-def test_hproof_does_not_overwrite_an_external_cas_update(
+def test_hproof_status_and_history_are_commands(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     from app.ui.proof.h_proof import HProofPanel
 
-    session, service = _session(tmp_path)
-    panel = HProofPanel(session=session, proof_service=service)
-    editor = panel._row_widgets[("proof-1", "unit-1")].editor
-    current = service.get_state("proof-1")
-    service.replace_text(
-        "proof-1",
-        "unit-1",
-        "external",
-        expected_revision=current.revision,
-        expected_fingerprint=current.fingerprint,
-    )
-    editor.setPlainText("local")
-    assert panel.save() is False
-    assert service.get_state("proof-1").text_units[0].text == "external"
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    panel = HProofPanel(workspace)
+    commands: list[ProofEditCommand] = []
+    panel.proof_edit_requested.connect(commands.append)
+    row = panel._rows[0]
+    widget = panel._row_widgets[row.key]
+    panel._confirm_row(row, widget)
+    panel._apply_history(row, -1)
+    panel._apply_history(row, 1)
+    assert [command.op for command in commands] == ["set_status", "undo", "redo"]
+    assert commands[0].status == "checked"
+    assert commands[0].expected_unit_revision == row.unit.revision
     panel.close()
 
 
-def test_vproof_index_edit_uses_stable_entry_ids_and_service_cas(
+def test_vproof_index_edit_uses_stable_entry_ids_and_emits_command(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     from app.ui.proof.v_proof import VProofPanel
 
-    session, service = _session(tmp_path)
-    panel = VProofPanel(session=session, proof_service=service)
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    panel = VProofPanel(workspace)
+    commands: list[ProofEditCommand] = []
+    panel.proof_edit_requested.connect(commands.append)
     assert panel.objectName() == "proofRoot"
     assert panel._content_splitter.objectName() == "proofContentSplitter"
     assert panel._char_list.objectName() == "charIndexList"
@@ -316,20 +345,25 @@ def test_vproof_index_edit_uses_stable_entry_ids_and_service_cas(
         panel._selected_entry.atom_uid,
     )
     assert panel._gallery_direct_overwrite("x") is True
-    assert service.get_state("proof-1").text_units[0].text == "xb"
+    assert len(commands) == 1
+    assert commands[0].op == "replace_many"
+    assert commands[0].replacements == (("unit-1", "xb"),)
     assert selected_key[0:2] == ("proof-1", "unit-1")
+    assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
     assert session.ocr_observation_repository.get_atom("atom-1").text == "a"
     panel.close()
 
 
-def test_vproof_edit_bubble_commits_selected_occurrence(
+def test_vproof_edit_bubble_and_history_emit_only_commands(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
     from app.ui.proof.v_proof import VProofPanel
 
-    session, service = _session(tmp_path)
-    panel = VProofPanel(session=session, proof_service=service)
+    session, _service = _session(tmp_path)
+    panel = VProofPanel(build_proof_workspace_view(session))
+    commands: list[ProofEditCommand] = []
+    panel.proof_edit_requested.connect(commands.append)
     panel.show()
     qapp.processEvents()
     item = panel._gallery.currentItem()
@@ -339,27 +373,27 @@ def test_vproof_edit_bubble_commits_selected_occurrence(
     assert panel._edit_bubble.isVisible() is True
     panel._edit_bubble_input.setText("z")
     panel._apply_edit_bubble()
-    assert service.get_state("proof-1").text_units[0].text == "zb"
     assert panel._edit_bubble.isVisible() is False
-    panel._gallery.setFocus()
     panel._apply_history(-1)
-    assert service.get_state("proof-1").text_units[0].text == "ab"
     panel._apply_history(1)
-    assert service.get_state("proof-1").text_units[0].text == "zb"
+    assert [command.op for command in commands] == ["replace_many", "undo", "redo"]
+    assert session.proof_repository.get_state("proof-1").text_units[0].text == "ab"
     panel.close()
 
 
-def test_quality_stats_reads_proof_states_only(
+def test_quality_stats_reads_only_workspace_snapshot(
     qapp: QApplication,
     tmp_path: Path,
 ) -> None:
-    from app.ui.widgets.quality_stats_dialog import QualityStatsDialog
+    from app.ui.proof.quality_stats_dialog import QualityStatsDialog
 
     session, service = _session(tmp_path)
-    dialog = QualityStatsDialog(session_provider=lambda: session)
+    workspace = build_proof_workspace_view(session)
+    dialog = QualityStatsDialog(workspace)
     assert dialog.stats.character_count == 2
     assert dialog.stats.checked_character_count == 0
     assert dialog.detail_table().rowCount() == 1
+
     current = service.get_state("proof-1")
     service.set_status(
         "proof-1",
@@ -368,7 +402,8 @@ def test_quality_stats_reads_proof_states_only(
         expected_revision=current.revision,
         expected_fingerprint=current.fingerprint,
     )
-    dialog._on_manual_refresh()
+    assert dialog.stats.checked_character_count == 0
+    dialog.set_workspace(build_proof_workspace_view(session))
     assert dialog.stats.checked_character_count == 2
     assert dialog.stats.checked_ratio == 1.0
     dialog.close()

@@ -1,12 +1,22 @@
 """Session-scoped application orchestration for the OCR workbench."""
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from pathlib import Path
 import tempfile
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from app.application import (
+    ImportCompletionView,
+    ImportFailureView,
+    LayoutEditCommand,
+    LayoutEditResult,
+    PageView,
+    ProofEditCommand,
+    ProofEditResult,
+    WorkbenchApplication,
+)
 from app.core.app_config import get_config
 from app.core.workflow_state import (
     STEP_HPROOF,
@@ -16,16 +26,12 @@ from app.core.workflow_state import (
     STEP_VPROOF,
     WorkflowProgressState,
     WorkflowViewState,
-    active_line_count,
-    compute_max_step,
-    page_gate_info,
-    pending_ocr_page_uids,
 )
 from app.models.entity_id import new_ulid
 from app.models.export_snapshot import ExportProjectSnapshot
-from app.models.project_session import PageRecord, ProjectRecord, ProjectSession, RecordNotFoundError
 from app.services import (
     ImportResult,
+    ImportJobRequest,
     ImportService,
     LayoutAnalysisCommit,
     LayoutAnalysisService,
@@ -36,7 +42,6 @@ from app.services import (
     OcrPageJobRequest,
     OcrPageJobResult,
     ProjectFileService,
-    capture_export_snapshot,
 )
 
 
@@ -45,7 +50,7 @@ class _TaskCancelled(RuntimeError):
 
 
 class _ImportServiceWorker(QThread):
-    """Run exactly one ImportService call outside the UI thread."""
+    """Decode immutable import input without access to ProjectSession."""
 
     completed = Signal(str, object)
     failed = Signal(str)
@@ -53,22 +58,20 @@ class _ImportServiceWorker(QThread):
     def __init__(
         self,
         service: ImportService,
-        session: ProjectSession,
-        paths: tuple[str, ...],
+        request: ImportJobRequest,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self._session = session
-        self._paths = paths
+        self._request = request
 
     def run(self) -> None:
         try:
-            result = self._service.import_paths(self._session, self._paths)
+            result = self._service.execute(self._request)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.completed.emit(self._session.project_uid, result)
+        self.completed.emit(self._request.project_uid, result)
 
 
 class _LayoutServiceWorker(QThread):
@@ -195,21 +198,23 @@ class _OcrServiceWorker(QThread):
 
 
 class WorkflowController(QObject):
-    """Own the active ProjectSession and coordinate application services."""
+    """Qt orchestration facade over the single workbench application boundary."""
 
     session_identity_changed = Signal(str, str)  # project UID, display name
-    page_records_changed = Signal(object)  # tuple[PageRecord, ...]
+    layout_workspace_changed = Signal(object)
+    ocr_workspace_changed = Signal(object)
+    proof_workspace_changed = Signal(object)
     step_enabled_changed = Signal(int)
     step_requested = Signal(int)
-    layout_finished = Signal(object)  # tuple[LayoutAnalysisCommit, ...]
+    layout_finished = Signal()
     layout_progress = Signal(int, int)
     layout_stage = Signal(str, int, int, str)  # page UID, current, total, message
-    ocr_finished = Signal(object)  # tuple[OcrPageCommit, ...]
+    ocr_finished = Signal()
     ocr_progress = Signal(object)  # WorkflowProgressState
     worker_error = Signal(str)
     layout_cancelled = Signal()
     ocr_cancelled = Signal()
-    import_finished = Signal(object)  # ImportResult
+    import_finished = Signal(object)  # ImportCompletionView
     status_message = Signal(str)
     current_step_changed = Signal(int)
     current_page_uid_changed = Signal(str)
@@ -224,16 +229,15 @@ class WorkflowController(QObject):
         self,
         parent: QObject | None = None,
         *,
-        session: ProjectSession | None = None,
+        application: WorkbenchApplication | None = None,
         import_service: ImportService | None = None,
         layout_analysis_service: LayoutAnalysisService | None = None,
         ocr_job_service: OcrJobService | None = None,
         project_file_service: ProjectFileService | None = None,
     ) -> None:
         super().__init__(parent)
-        if session is not None and not isinstance(session, ProjectSession):
-            raise TypeError("WorkflowController session must be ProjectSession")
-        self._session: ProjectSession | None = session
+        if application is not None and not isinstance(application, WorkbenchApplication):
+            raise TypeError("application must be WorkbenchApplication or None")
         self._session_dir = Path(tempfile.mkdtemp(prefix="ocr-process-session-"))
         self._import_service = import_service or ImportService(
             cache_dir=self._session_dir / "imports"
@@ -241,66 +245,71 @@ class WorkflowController(QObject):
         self._layout_analysis_service = layout_analysis_service
         self._ocr_job_service = ocr_job_service
         self._project_file_service = project_file_service or ProjectFileService()
-        self._dirty = False
-        self._max_step = compute_max_step(session)
+        self._application = application or WorkbenchApplication(
+            import_service=self._import_service,
+            project_file_service=self._project_file_service,
+            layout_service=layout_analysis_service,
+            ocr_service=ocr_job_service,
+        )
+        self._max_step = self._application.max_step()
         self._current_step = STEP_IMPORT
         self._current_page_uid = ""
-        self._layout_run_enabled = bool(session and session.page_repository.all())
+        self._layout_run_enabled = bool(self._application.pages())
         self._import_worker: _ImportServiceWorker | None = None
         self._layout_worker: _LayoutServiceWorker | None = None
         self._ocr_worker: _OcrServiceWorker | None = None
         self._closed = False
 
-        if session is not None and session.page_repository.all():
-            self._current_page_uid = session.page_repository.all()[0].uid
+        if self._application.pages():
+            self._current_page_uid = self._application.pages()[0].uid
 
     # ------------------------------------------------------------------ session state
 
     @property
-    def session(self) -> ProjectSession | None:
-        return self._session
+    def has_project(self) -> bool:
+        return self._application.has_project
 
     @property
     def project_uid(self) -> str:
-        return self._session.project_uid if self._session is not None else ""
+        return self._application.project_uid
 
     @property
     def project_name(self) -> str:
-        return self._session.project_record.name if self._session is not None else ""
+        return self._application.project_name
 
     @property
-    def page_records(self) -> tuple[PageRecord, ...]:
-        return self._session.page_repository.all() if self._session is not None else ()
+    def pages(self) -> tuple[PageView, ...]:
+        return self._application.pages()
 
     @property
     def has_pages(self) -> bool:
-        return bool(self.page_records)
+        return bool(self.pages)
 
     @property
     def total_line_count(self) -> int:
-        return active_line_count(self._session) if self._session is not None else 0
+        return self._application.active_line_count()
 
     @property
     def is_fully_analyzed(self) -> bool:
-        pages = self.page_records
+        pages = self.pages
         return bool(pages) and all(self._has_layout(page.uid) for page in pages)
 
     @property
     def has_any_ocr_result(self) -> bool:
-        return any(self._has_ocr(page.uid) for page in self.page_records)
+        return any(self._has_ocr(page.uid) for page in self.pages)
 
     @property
     def all_pages_ocr_done(self) -> bool:
-        pages = self.page_records
+        pages = self.pages
         return bool(pages) and all(self._has_ocr(page.uid) for page in pages)
 
     @property
     def is_dirty(self) -> bool:
-        return self._dirty
+        return self._application.is_dirty
 
     @property
     def is_bound_project(self) -> bool:
-        return bool(self._session and self._session.save_path)
+        return self._application.is_bound_project
 
     @property
     def import_dir(self) -> Path:
@@ -324,14 +333,10 @@ class WorkflowController(QObject):
     def layout_run_enabled(self) -> bool:
         return self._layout_run_enabled
 
-    def ensure_session(self, name: str = "未命名项目") -> ProjectSession:
-        if self._session is None:
-            self._session = ProjectSession(
-                ProjectRecord(f"project_{new_ulid()}", name=name)
-            )
-            self._dirty = False
+    def ensure_session(self, name: str = "未命名项目") -> None:
+        if not self._application.has_project:
+            self._application.ensure_project(f"project_{new_ulid()}", name)
             self._emit_session_state()
-        return self._session
 
     def workflow_view_state(self) -> WorkflowViewState:
         return WorkflowViewState(
@@ -339,8 +344,8 @@ class WorkflowController(QObject):
             current_step=self._current_step,
             current_page_uid=self._current_page_uid,
             layout_run_enabled=self._layout_run_enabled,
-            has_project=self._session is not None,
-            total_pages=len(self.page_records),
+            has_project=self._application.has_project,
+            total_pages=len(self.pages),
             total_lines=self.total_line_count,
         )
 
@@ -349,22 +354,42 @@ class WorkflowController(QObject):
         self._emit_session_state()
 
     def _emit_session_state(self) -> None:
-        self._max_step = compute_max_step(self._session)
+        self._max_step = self._application.max_step()
         self.step_enabled_changed.emit(self._max_step)
         self.session_identity_changed.emit(self.project_uid, self.project_name)
-        self.page_records_changed.emit(self.page_records)
+        if self._application.has_project:
+            self.layout_workspace_changed.emit(self._application.layout_workspace())
+            self.ocr_workspace_changed.emit(self._application.ocr_workspace())
+            if self.has_any_ocr_result:
+                self.proof_workspace_changed.emit(self._application.proof_workspace())
+            else:
+                self.proof_workspace_changed.emit(None)
+        else:
+            self.layout_workspace_changed.emit(None)
+            self.ocr_workspace_changed.emit(None)
+            self.proof_workspace_changed.emit(None)
         self.view_state_changed.emit(self.workflow_view_state())
 
     def _emit_view_state(self) -> None:
-        self._max_step = compute_max_step(self._session)
+        self._max_step = self._application.max_step()
         self.step_enabled_changed.emit(self._max_step)
         self.view_state_changed.emit(self.workflow_view_state())
 
-    def mark_dirty(self) -> None:
-        if self._session is None:
-            raise RuntimeError("cannot mark a missing ProjectSession dirty")
-        self._dirty = True
+    def apply_layout_edit(self, command: LayoutEditCommand) -> LayoutEditResult:
+        """Commit one layout intent and publish the resulting immutable view."""
+
+        result = self._application.apply_layout_edit(command)
+        self.refresh_page_gate_states()
+        self._emit_session_state()
+        return result
+
+    def apply_proof_edit(self, command: ProofEditCommand) -> ProofEditResult:
+        """Commit one proof intent and publish the resulting immutable view."""
+
+        result = self._application.apply_proof_edit(command)
+        self.proof_workspace_changed.emit(self._application.proof_workspace())
         self._emit_view_state()
+        return result
 
     # ------------------------------------------------------------------ navigation
 
@@ -380,12 +405,12 @@ class WorkflowController(QObject):
     def can_enter_step(self, step: int) -> bool:
         if step == STEP_IMPORT:
             return True
-        if self._session is None or not self.has_pages:
+        if not self._application.has_project or not self.has_pages:
             return False
         if step == STEP_LAYOUT:
             return True
         if step == STEP_OCR:
-            return any(self._has_layout(page.uid) for page in self.page_records)
+            return any(self._has_layout(page.uid) for page in self.pages)
         if step in (STEP_HPROOF, STEP_VPROOF):
             return self.has_any_ocr_result
         return False
@@ -410,11 +435,11 @@ class WorkflowController(QObject):
         self._emit_view_state()
 
     def set_current_page_uid(self, page_uid: str) -> None:
-        if self._session is None:
+        if not self._application.has_project:
             if page_uid:
-                raise RuntimeError("cannot select a page without a ProjectSession")
+                raise RuntimeError("cannot select a page without an active project")
             return
-        self._session.page_repository.get(page_uid)
+        self._application.require_page(page_uid)
         if self._current_page_uid == page_uid:
             return
         self._current_page_uid = page_uid
@@ -422,22 +447,17 @@ class WorkflowController(QObject):
         self.focus_page.emit(page_uid)
         self._emit_view_state()
 
-    def page_record(self, page_uid: str) -> PageRecord:
-        if self._session is None:
-            raise RuntimeError("no active ProjectSession")
-        return self._session.page_repository.get(page_uid)
-
     def page_uid_at(self, index: int) -> str | None:
-        records = self.page_records
-        if index < 0 or index >= len(records):
+        pages = self.pages
+        if index < 0 or index >= len(pages):
             return None
-        return records[index].uid
+        return pages[index].uid
 
     def refresh_page_gate_states(self) -> None:
-        if self._session is None:
+        if not self._application.has_project:
             return
-        for page in self.page_records:
-            gate = page_gate_info(self._session, page.uid)
+        for page in self.pages:
+            gate = self._application.page_gate(page.uid)
             self.page_gate_state.emit(
                 page.uid,
                 gate.page_state,
@@ -457,13 +477,14 @@ class WorkflowController(QObject):
     def start_import(self, paths: Iterable[str | Path], *, name: str = "未命名项目") -> bool:
         if self.has_running_workers():
             raise RuntimeError("cannot import while another application task is running")
-        if self._session is not None and self.has_pages:
-            raise RuntimeError("import requires an empty ProjectSession")
-        session = self.ensure_session(name)
+        if self._application.has_project and self.has_pages:
+            raise RuntimeError("import requires an empty project")
+        self.ensure_session(name)
         normalized = tuple(str(path) for path in paths)
         if not normalized:
             raise ValueError("import requires at least one source path")
-        worker = _ImportServiceWorker(self._import_service, session, normalized, self)
+        request = self._application.prepare_import(normalized)
+        worker = _ImportServiceWorker(self._import_service, request, self)
         self._import_worker = worker
         worker.completed.connect(self._on_import_completed)
         worker.failed.connect(self._on_import_failed)
@@ -471,19 +492,24 @@ class WorkflowController(QObject):
         worker.start()
         return True
 
-    def import_paths(self, paths: Iterable[str | Path], *, name: str = "未命名项目") -> ImportResult:
+    def import_paths(
+        self,
+        paths: Iterable[str | Path],
+        *,
+        name: str = "未命名项目",
+    ) -> ImportCompletionView:
         """Synchronous service entry point used by focused tests and scripts."""
         if self.has_running_workers():
             raise RuntimeError("cannot import while another application task is running")
-        if self._session is not None and self.has_pages:
-            raise RuntimeError("import requires an empty ProjectSession")
-        session = self.ensure_session(name)
+        if self._application.has_project and self.has_pages:
+            raise RuntimeError("import requires an empty project")
+        self.ensure_session(name)
         normalized = tuple(str(path) for path in paths)
         if not normalized:
             raise ValueError("import requires at least one source path")
-        result = self._import_service.import_paths(session, normalized)
-        self._adopt_import_result(session.project_uid, result)
-        return result
+        result = self._application.execute_import(self._application.prepare_import(normalized))
+        self._adopt_import_result(self.project_uid, result)
+        return self._import_completion(result)
 
     def _on_import_completed(self, project_uid: str, result: ImportResult) -> None:
         try:
@@ -492,17 +518,17 @@ class WorkflowController(QObject):
             self.worker_error.emit(str(exc))
 
     def _adopt_import_result(self, project_uid: str, result: ImportResult) -> None:
-        if self._session is None or self._session.project_uid != project_uid:
-            raise RuntimeError("import result belongs to an inactive ProjectSession")
+        if not self._application.has_project or self.project_uid != project_uid:
+            raise RuntimeError("import result belongs to an inactive project")
         if not isinstance(result, ImportResult):
             raise TypeError("ImportService must return ImportResult")
+        self._application.commit_import(result)
         if result.pages:
-            self._dirty = True
             if not self._current_page_uid:
                 self._current_page_uid = result.pages[0].uid
             self._set_layout_run_enabled(True)
         self._emit_session_state()
-        self.import_finished.emit(result)
+        self.import_finished.emit(self._import_completion(result))
 
     def _on_import_failed(self, message: str) -> None:
         self.worker_error.emit(message)
@@ -510,23 +536,20 @@ class WorkflowController(QObject):
     # ------------------------------------------------------------------ layout
 
     def start_layout_analysis(self, page_uids: Iterable[str] | None = None) -> bool:
-        if self._session is None:
-            raise RuntimeError("layout analysis requires a ProjectSession")
+        if not self._application.has_project:
+            raise RuntimeError("layout analysis requires an active project")
         if self.has_running_workers():
             return False
         selected = tuple(page_uids) if page_uids is not None else tuple(
-            page.uid for page in self.page_records
+            page.uid for page in self.pages
         )
         if not selected:
             raise ValueError("layout analysis requires at least one page UID")
         service = self._layout_analysis_service or self._build_default_layout_analysis_service()
         self._layout_analysis_service = service
+        self._application.configure_layout_service(service)
         requests = tuple(
-            service.prepare_page(
-                self._session,
-                page_uid,
-                expected_revision=self._layout_revision(page_uid),
-            )
+            self._application.prepare_layout_page(page_uid)
             for page_uid in selected
         )
         worker = _LayoutServiceWorker(
@@ -592,22 +615,23 @@ class WorkflowController(QObject):
         ):
             self._on_worker_failed("LayoutAnalysisService returned invalid job results")
             return
-        if self._session is None or self._layout_analysis_service is None:
+        if not self._application.has_project or self._layout_analysis_service is None:
             self._on_worker_failed("layout results have no active application context")
             return
-        try:
-            commits = tuple(
-                self._layout_analysis_service.commit_page(self._session, result)
-                for result in results
-            )
-        except Exception as exc:
-            self._on_worker_failed(str(exc))
+        commits: list[LayoutAnalysisCommit] = []
+        for result in results:
+            try:
+                commits.append(self._application.commit_layout_page(result))
+            except Exception as exc:
+                self.worker_error.emit(f"page {result.request.page.uid}: {exc}")
+        if not commits:
+            self._set_layout_run_enabled(True)
+            self._emit_view_state()
             return
-        self._dirty = True
         self._set_layout_run_enabled(True)
-        self.layout_finished.emit(commits)
+        self.layout_finished.emit()
         self.refresh_page_gate_states()
-        self._emit_view_state()
+        self._emit_session_state()
 
     def _on_layout_cancelled(self) -> None:
         self._set_layout_run_enabled(True)
@@ -617,23 +641,24 @@ class WorkflowController(QObject):
     # ------------------------------------------------------------------ OCR
 
     def start_ocr(self, page_uids: Iterable[str] | None = None) -> bool:
-        if self._session is None:
-            raise RuntimeError("OCR requires a ProjectSession")
+        if not self._application.has_project:
+            raise RuntimeError("OCR requires an active project")
         if self.has_running_workers():
             return False
-        selected = tuple(page_uids) if page_uids is not None else pending_ocr_page_uids(self._session)
+        selected = tuple(page_uids) if page_uids is not None else self._application.pending_ocr_page_uids()
         if not selected:
             raise ValueError("OCR has no pending page UIDs")
         for page_uid in selected:
-            self._session.page_repository.get(page_uid)
+            self._application.require_page(page_uid)
             if not self._has_layout(page_uid):
                 raise ValueError(f"OCR requires an adopted layout for page {page_uid!r}")
         service = self._ocr_job_service or self._build_default_ocr_job_service()
         self._ocr_job_service = service
+        self._application.configure_ocr_service(service)
         requests: list[OcrPageJobRequest] = []
         for page_uid in selected:
             try:
-                requests.append(service.prepare_page(self._session, page_uid))
+                requests.append(self._application.prepare_ocr_page(page_uid))
             except Exception as exc:
                 self.worker_error.emit(f"page {page_uid}: {exc}")
         if not requests:
@@ -665,22 +690,21 @@ class WorkflowController(QObject):
         ):
             self._on_worker_failed("OcrJobService returned invalid job results")
             return
-        if self._session is None or self._ocr_job_service is None:
+        if not self._application.has_project or self._ocr_job_service is None:
             self._on_worker_failed("OCR results have no active application context")
             return
         commits: list[OcrPageCommit] = []
         for result in results:
             try:
-                commits.append(self._ocr_job_service.commit_page(self._session, result))
+                commits.append(self._application.commit_ocr_page(result))
             except Exception as exc:
                 self.worker_error.emit(f"page {result.request.page.uid}: {exc}")
         if not commits:
             self._emit_view_state()
             return
-        self._dirty = True
-        self.ocr_finished.emit(tuple(commits))
+        self.ocr_finished.emit()
         self.refresh_page_gate_states()
-        self._emit_view_state()
+        self._emit_session_state()
 
     def _on_ocr_cancelled(self) -> None:
         self.ocr_cancelled.emit()
@@ -691,7 +715,7 @@ class WorkflowController(QObject):
         mode = str(config.get("mode", "") or "").strip().lower()
         if mode != "hanwang":
             raise RuntimeError(
-                "the configured OCR mode has no ProjectSession OcrJobService adapter; "
+                "the configured OCR mode has no OcrJobService adapter; "
                 "select hanwang explicitly"
             )
         from app.core.api_profiles import FIXED_LAYOUT_PROFILE, resolve_api_endpoint_for_role
@@ -720,53 +744,54 @@ class WorkflowController(QObject):
             engine=HanwangMicroRecBlockEngine(),
         )
 
+    @staticmethod
+    def _import_completion(result: ImportResult) -> ImportCompletionView:
+        return ImportCompletionView(
+            page_uids=tuple(page.uid for page in result.pages),
+            failures=tuple(
+                ImportFailureView(source_path=item.source_path, error=item.error)
+                for item in result.failures
+            ),
+        )
+
     # ------------------------------------------------------------------ files and export
 
     def open_project(self, file_path: str | Path) -> bool:
         if self.has_running_workers():
             raise RuntimeError("cannot open a project while an application task is running")
-        bound = self._project_file_service.open_project(file_path)
-        if not isinstance(bound.session, ProjectSession):
-            raise TypeError("project file service returned an invalid ProjectSession")
-        self._session = bound.session
-        self._dirty = False
+        self._application.open_project(file_path)
         self._current_step = STEP_IMPORT
-        self._current_page_uid = self.page_records[0].uid if self.page_records else ""
-        self._set_layout_run_enabled(bool(self.page_records))
+        self._current_page_uid = self.pages[0].uid if self.pages else ""
+        self._set_layout_run_enabled(bool(self.pages))
         self._emit_session_state()
         self.refresh_page_gate_states()
         return True
 
     def save_project_as(self, file_path: str | Path) -> bool:
-        if self._session is None:
-            raise RuntimeError("cannot save without a ProjectSession")
-        bound = self._project_file_service.save_as(self._session, file_path)
-        self._session = bound.session
-        self._dirty = False
+        if not self._application.has_project:
+            raise RuntimeError("cannot save without an active project")
+        self._application.save_as(file_path)
         self._emit_session_state()
         return True
 
     def save_project(self) -> bool:
-        if self._session is None:
-            raise RuntimeError("cannot save without a ProjectSession")
-        if not self._session.save_path:
-            raise RuntimeError("ProjectSession has no save path")
-        bound = self._project_file_service.save_session(self._session)
-        self._session = bound.session
-        self._dirty = False
+        if not self._application.has_project:
+            raise RuntimeError("cannot save without an active project")
+        if not self._application.is_bound_project:
+            raise RuntimeError("active project has no save path")
+        self._application.save()
         self._emit_session_state()
         return True
 
     def capture_export_snapshot(self) -> ExportProjectSnapshot:
-        if self._session is None:
-            raise RuntimeError("cannot export without a ProjectSession")
-        return capture_export_snapshot(self._session)
+        if not self._application.has_project:
+            raise RuntimeError("cannot export without an active project")
+        return self._application.export_snapshot()
 
     def close_project(self) -> bool:
         if self.has_running_workers() and not self.cancel_running_workers():
             return False
-        self._session = None
-        self._dirty = False
+        self._application.close_project()
         self._current_step = STEP_IMPORT
         self._current_page_uid = ""
         self._set_layout_run_enabled(False)
@@ -801,33 +826,18 @@ class WorkflowController(QObject):
 
     def ocr_engine_description(self) -> str:
         mode = str(get_config().get("mode", "") or "").strip() or "未配置"
-        return f"ProjectSession OCR service：{mode}"
+        return f"OCR service：{mode}"
 
     def _has_layout(self, page_uid: str) -> bool:
-        if self._session is None:
-            return False
-        try:
-            self._session.layout_repository.get(page_uid)
-        except RecordNotFoundError:
-            return False
-        return True
+        return self._application.has_project and self._application.has_layout(page_uid)
 
     def _has_ocr(self, page_uid: str) -> bool:
-        if self._session is None:
-            return False
-        try:
-            self._session.ocr_observation_repository.get_active_pointer(page_uid)
-        except RecordNotFoundError:
-            return False
-        return True
+        return self._application.has_project and self._application.has_ocr(page_uid)
 
     def _layout_revision(self, page_uid: str) -> int:
-        if self._session is None:
-            raise RuntimeError("no active ProjectSession")
-        try:
-            return self._session.layout_repository.get(page_uid).revision
-        except RecordNotFoundError:
-            return 0
+        if not self._application.has_project:
+            raise RuntimeError("no active project")
+        return self._application.layout_revision(page_uid)
 
     def _clear_worker(self, attr_name: str, worker: QThread) -> None:
         if getattr(self, attr_name, None) is worker:
@@ -841,7 +851,7 @@ class WorkflowController(QObject):
         self.layout_run_enabled_changed.emit(value)
 
     def _on_worker_failed(self, message: str) -> None:
-        self._set_layout_run_enabled(bool(self.page_records))
+        self._set_layout_run_enabled(bool(self.pages))
         self.worker_error.emit(message)
         self._emit_view_state()
 

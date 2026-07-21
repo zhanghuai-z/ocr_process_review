@@ -21,7 +21,7 @@ from app.models.project_session import (
     RecordNotFoundError,
     RevisionConflictError,
 )
-from app.services.import_service import ImportService
+from app.services.import_service import ImportJobRequest, ImportService
 from app.services.layout_analysis_service import LayoutAnalysisService
 
 
@@ -94,7 +94,9 @@ def test_import_writes_only_page_records_to_the_project_session(tmp_path: Path):
     Image.new("RGB", (32, 48), "white").save(source)
     session = ProjectSession(ProjectRecord("project-import"))
 
-    result = ImportService(tmp_path / "assets").import_paths(session, [source])
+    service = ImportService(tmp_path / "assets")
+    result = service.execute(ImportJobRequest(session.project_uid, (str(source),)))
+    service.commit(session, result)
 
     assert result.failure_count == 0
     assert len(result.pages) == 1

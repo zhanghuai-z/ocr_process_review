@@ -7,6 +7,7 @@ from PIL import Image
 from PySide6.QtWidgets import QApplication
 
 from app.controllers.workflow_controller import WorkflowController
+from app.application import OcrWorkspaceView, PageView, WorkbenchApplication
 from app.core.workflow_state import (
     STEP_LAYOUT,
     STEP_OCR,
@@ -17,6 +18,7 @@ from app.core.workflow_state import (
 )
 from app.models.layout_snapshot import LayoutSnapshot
 from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
+from app.services import ImportService
 from app.ui.main_window import MainWindow, _ShellProgress
 
 
@@ -67,40 +69,25 @@ def test_workflow_state_uses_adopted_session_facts() -> None:
     assert page_gate_info(session, page.uid).action_enabled is True
 
 
-def test_controller_import_emits_immutable_records_and_captures_snapshot(tmp_path: Path) -> None:
+def test_controller_import_emits_immutable_records(tmp_path: Path) -> None:
     source = tmp_path / "page.png"
     Image.new("RGB", (24, 16), "white").save(source)
 
     controller = WorkflowController()
-    page_events: list[object] = []
-    controller.page_records_changed.connect(page_events.append)
+    workspace_events: list[object] = []
+    controller.ocr_workspace_changed.connect(workspace_events.append)
 
     result = controller.import_paths([source], name="Imported book")
 
     assert result.success_count == 1
-    assert controller.session is not None
+    assert controller.has_project is True
     assert controller.project_name == "Imported book"
-    assert controller.page_records == result.pages
-    assert isinstance(controller.page_records, tuple)
-    assert isinstance(page_events[-1], tuple)
-    assert all(isinstance(page, PageRecord) for page in page_events[-1])
+    assert tuple(page.uid for page in controller.pages) == result.page_uids
+    assert isinstance(controller.pages, tuple)
+    assert isinstance(workspace_events[-1], OcrWorkspaceView)
+    assert all(isinstance(page.page, PageView) for page in workspace_events[-1].pages)
     assert not hasattr(controller, "_project")
 
-    page = controller.page_records[0]
-    controller.session.layout_repository.put(
-        LayoutSnapshot(
-            page_uid=page.uid,
-            revision=1,
-            artifact_uid="",
-            source_engine="test",
-            source_run_id="layout-run",
-            blocks=(),
-        ),
-        expected_revision=0,
-    )
-    snapshot = controller.capture_export_snapshot()
-    assert snapshot.project.project_uid == controller.project_uid
-    assert snapshot.pages[0].page == page
     controller.close()
 
 
@@ -109,21 +96,21 @@ def test_import_publishes_pages_before_current_page_and_completion(tmp_path: Pat
     Image.new("RGB", (24, 16), "white").save(source)
     controller = WorkflowController()
     events: list[tuple[str, object]] = []
-    controller.page_records_changed.connect(
-        lambda records: events.append(("pages", tuple(page.uid for page in records)))
+    controller.ocr_workspace_changed.connect(
+        lambda workspace: events.append(("ocr", workspace.page_uids))
     )
     controller.view_state_changed.connect(
         lambda state: events.append(("view", state.current_page_uid))
     )
     controller.import_finished.connect(
-        lambda result: events.append(("finished", result.pages[0].uid))
+        lambda result: events.append(("finished", result.page_uids[0]))
     )
 
     result = controller.import_paths([source])
 
-    page_uid = result.pages[0].uid
+    page_uid = result.page_uids[0]
     assert events[-3:] == [
-        ("pages", (page_uid,)),
+        ("ocr", (page_uid,)),
         ("view", page_uid),
         ("finished", page_uid),
     ]
@@ -139,8 +126,9 @@ def test_main_window_binds_ocr_pages_before_selecting_imported_uid(tmp_path: Pat
 
     result = controller.import_paths([source])
 
-    page_uid = result.pages[0].uid
-    assert window._ocr_panel._pages_by_uid == {page_uid: result.pages[0]}
+    page_uid = result.page_uids[0]
+    assert tuple(window._ocr_panel._pages_by_uid) == (page_uid,)
+    assert isinstance(window._ocr_panel._pages_by_uid[page_uid], PageView)
     assert window._ocr_panel._current_page_uid == page_uid
     controller.close()
     window.deleteLater()
@@ -149,14 +137,9 @@ def test_main_window_binds_ocr_pages_before_selecting_imported_uid(tmp_path: Pat
 
 def test_main_window_keeps_ocr_stage_on_layout_workbench(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
-    source = tmp_path / "page.png"
-    Image.new("RGB", (24, 16), "white").save(source)
-    controller = WorkflowController()
-    window = MainWindow(controller)
-    result = controller.import_paths([source])
-    page = result.pages[0]
-    assert controller.session is not None
-    controller.session.layout_repository.put(
+    session = ProjectSession(ProjectRecord("project-1", "Book"))
+    page = _page(session)
+    session.layout_repository.put(
         LayoutSnapshot(
             page_uid=page.uid,
             revision=1,
@@ -167,6 +150,10 @@ def test_main_window_keeps_ocr_stage_on_layout_workbench(tmp_path: Path) -> None
         ),
         expected_revision=0,
     )
+    controller = WorkflowController(
+        application=WorkbenchApplication(session=session, import_service=ImportService())
+    )
+    window = MainWindow(controller)
 
     window._go_to_step(STEP_OCR)
 
@@ -271,27 +258,16 @@ def test_controller_save_and_open_rebinds_only_the_session(tmp_path: Path) -> No
 
     controller = WorkflowController()
     controller.import_paths([source], name="Saved book")
-    page = controller.page_records[0]
-    controller.session.layout_repository.put(
-        LayoutSnapshot(
-            page_uid=page.uid,
-            revision=1,
-            artifact_uid="",
-            source_engine="test",
-            source_run_id="layout-run",
-            blocks=(),
-        ),
-        expected_revision=0,
-    )
+    page = controller.pages[0]
     controller.save_project_as(target)
 
     assert controller.is_bound_project is True
-    assert controller.session is not None
+    assert controller.has_project is True
     assert not hasattr(controller, "_store")
     saved_uid = controller.project_uid
     controller.open_project(target)
     assert controller.project_uid == saved_uid
-    assert controller.page_records[0].uid == page.uid
+    assert controller.pages[0].uid == page.uid
     controller.close()
 
 
@@ -300,7 +276,6 @@ def test_owned_application_boundaries_contain_no_retired_runtime_flow() -> None:
         Path("app/controllers/workflow_controller.py"),
         Path("app/ui/main_window.py"),
         Path("app/ui/recognize/ocr_panel.py"),
-        Path("app/ui/widgets/page_directory.py"),
         Path("app/ui/export/export_dialog.py"),
         Path("app/core/workflow_state.py"),
         Path("app/services/__init__.py"),

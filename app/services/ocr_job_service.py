@@ -221,6 +221,7 @@ class OcrJobService:
         batch_records = _observation_records(
             project_uid=job.project_uid,
             page_uid=page.uid,
+            page_fingerprint=page.fingerprint,
             engine_id=self._engine.engine_id,
             layout_fingerprint=layout_snapshot_fingerprint(layout),
             result=result,
@@ -382,6 +383,7 @@ def _observation_records(
     *,
     project_uid: str,
     page_uid: str,
+    page_fingerprint: str,
     engine_id: str,
     layout_fingerprint: str,
     result: CharOcrPageResult,
@@ -466,7 +468,10 @@ def _observation_records(
         engine=engine_id,
         layout_fingerprint=layout_fingerprint,
         input_fingerprint=result.input_fingerprint,
-        metadata=result.metrics,
+        metadata=(
+            *tuple(item for item in result.metrics if item[0] != "page_fingerprint"),
+            ("page_fingerprint", page_fingerprint),
+        ),
     )
     batch = OcrBatch(
         project_uid=project_uid,

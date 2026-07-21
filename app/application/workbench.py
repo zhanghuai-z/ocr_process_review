@@ -8,10 +8,12 @@ from app.application.contracts import (
     LayoutEditCommand,
     LayoutEditResult,
     LayoutWorkspaceView,
+    PageView,
     ProofEditCommand,
     ProofEditResult,
 )
 from app.application.layout_workspace import build_layout_workspace_view
+from app.application.ocr_workspace import OcrWorkspaceView, build_ocr_workspace_view
 from app.application.proof_workspace import ProofWorkspaceView, build_proof_workspace_view
 from app.core.workflow_state import (
     PageGateInfo,
@@ -20,15 +22,15 @@ from app.core.workflow_state import (
     page_gate_info,
     pending_ocr_page_uids,
 )
+from app.core.ocr_currentness import current_ocr_observation
 from app.models.export_snapshot import ExportProjectSnapshot
 from app.models.project_session import (
-    PageRecord,
     ProjectRecord,
     ProjectSession,
     RecordNotFoundError,
 )
 from app.services.export_service import capture_export_snapshot
-from app.services.import_service import ImportResult, ImportService
+from app.services.import_service import ImportJobRequest, ImportResult, ImportService
 from app.services.layout_analysis_service import (
     LayoutAnalysisCommit,
     LayoutAnalysisService,
@@ -97,11 +99,16 @@ class WorkbenchApplication:
             return
         self._replace_session(ProjectSession(ProjectRecord(project_uid, name=name)))
 
-    def page_records(self) -> tuple[PageRecord, ...]:
-        return self._session.page_repository.all() if self._session is not None else ()
+    def pages(self) -> tuple[PageView, ...]:
+        if self._session is None:
+            return ()
+        return self.layout_workspace().pages
 
-    def page_record(self, page_uid: str) -> PageRecord:
-        return self._require_session().page_repository.get(page_uid)
+    def require_page(self, page_uid: str) -> PageView:
+        for page in self.pages():
+            if page.page_uid == page_uid:
+                return page
+        raise RecordNotFoundError(f"page not found: {page_uid!r}")
 
     def max_step(self) -> int:
         return compute_max_step(self._session)
@@ -129,23 +136,34 @@ class WorkbenchApplication:
             return 0
 
     def has_ocr(self, page_uid: str) -> bool:
-        try:
-            self._require_session().ocr_observation_repository.get_active_pointer(page_uid)
-        except RecordNotFoundError:
-            return False
-        return True
+        return current_ocr_observation(self._require_session(), page_uid) is not None
 
     def layout_workspace(self) -> LayoutWorkspaceView:
         return build_layout_workspace_view(self._require_session())
 
+    def ocr_workspace(self) -> OcrWorkspaceView:
+        return build_ocr_workspace_view(self._require_session())
+
     def proof_workspace(self, *, proof_uid: str | None = None) -> ProofWorkspaceView:
         return build_proof_workspace_view(self._require_session(), proof_uid=proof_uid)
 
-    def import_paths(self, paths: Iterable[str | Path]) -> ImportResult:
-        result = self._import_service.import_paths(self._require_session(), paths)
-        if result.pages:
+    def prepare_import(self, paths: Iterable[str | Path]) -> ImportJobRequest:
+        session = self._require_session()
+        return ImportJobRequest(
+            project_uid=session.project_uid,
+            paths=tuple(str(path) for path in paths),
+            first_page_number=len(session.page_repository.all()) + 1,
+            expected_page_uids=tuple(page.uid for page in session.page_repository.all()),
+        )
+
+    def execute_import(self, request: ImportJobRequest) -> ImportResult:
+        return self._import_service.execute(request)
+
+    def commit_import(self, result: ImportResult) -> ImportResult:
+        committed = self._import_service.commit(self._require_session(), result)
+        if committed.pages:
             self._dirty = True
-        return result
+        return committed
 
     def configure_layout_service(self, service: LayoutAnalysisService) -> None:
         self._layout_service = service

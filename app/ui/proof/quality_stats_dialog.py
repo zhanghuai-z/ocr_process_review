@@ -1,8 +1,7 @@
-"""Proof-state quality statistics dialog."""
+"""Read-only proof quality statistics over an immutable workspace view."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
@@ -20,8 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.models.proof_records import ProofState
-from app.models.project_session import ProjectSession
+from app.application.proof_workspace import ProofWorkspaceView
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,10 +38,10 @@ class _QualityStats:
         return self.checked_character_count / self.character_count
 
 
-def _stats_for(session: ProjectSession | None) -> _QualityStats:
-    if session is None:
+def _stats_for(workspace: ProofWorkspaceView | None) -> _QualityStats:
+    if workspace is None:
         return _QualityStats(0, 0, 0, 0, 0, 0)
-    states = tuple(session.proof_repository.all_states())
+    states = tuple(workspace.proof_states)
     units = tuple(unit for state in states for unit in state.text_units)
     checked = sum(
         len(unit.text)
@@ -114,18 +112,26 @@ class _RatioRing(QWidget):
         font.setPointSize(20)
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(rect.adjusted(0, 0, 0, -int(rect.height() * 0.25)), Qt.AlignmentFlag.AlignCenter, self._main_text)
+        painter.drawText(
+            rect.adjusted(0, 0, 0, -int(rect.height() * 0.25)),
+            Qt.AlignmentFlag.AlignCenter,
+            self._main_text,
+        )
         if self._sub_text:
             font.setPointSize(9)
             font.setBold(False)
             painter.setFont(font)
             painter.setPen(QColor("#6B6B6B"))
-            painter.drawText(rect.adjusted(0, int(rect.height() * 0.30), 0, 0), Qt.AlignmentFlag.AlignCenter, self._sub_text)
+            painter.drawText(
+                rect.adjusted(0, int(rect.height() * 0.30), 0, 0),
+                Qt.AlignmentFlag.AlignCenter,
+                self._sub_text,
+            )
         painter.end()
 
 
 class QualityStatsDetailDialog(QDialog):
-    """Detailed read-only rows derived from proof states."""
+    """Detailed rows derived from proof state DTOs."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -153,20 +159,15 @@ class QualityStatsDetailDialog(QDialog):
         buttons.accepted.connect(self.accept)
         root.addWidget(buttons)
 
-    def populate(self, session: ProjectSession | None) -> None:
-        if session is None:
+    def populate(self, workspace: ProofWorkspaceView | None) -> None:
+        if workspace is None:
             self._table.setRowCount(0)
-            self._summary.setText("No project session")
+            self._summary.setText("No proof workspace")
             return
-        page_numbers = {
-            page.uid: page.page_number for page in session.page_repository.all()
-        }
+        page_numbers = {page.page_uid: page.page_number for page in workspace.pages}
         rows = [
-            (page_numbers.get(state.anchor_snapshot.scope_uid, "-"), state, unit)
-            for state in sorted(
-                session.proof_repository.all_states(),
-                key=lambda item: (item.anchor_snapshot.scope_uid, item.uid),
-            )
+            (page_numbers.get(state.page_uid, "-"), state, unit)
+            for state in sorted(workspace.proof_states, key=lambda item: (item.page_uid, item.proof_uid))
             for unit in state.text_units
         ]
         self._summary.setText(f"{len(rows)} text units")
@@ -174,8 +175,8 @@ class QualityStatsDetailDialog(QDialog):
         for row, (page_number, state, unit) in enumerate(rows):
             values = (
                 str(page_number),
-                state.uid,
-                unit.uid,
+                state.proof_uid,
+                unit.text_unit_uid,
                 str(unit.order),
                 unit.status,
                 unit.text,
@@ -188,30 +189,21 @@ class QualityStatsDetailDialog(QDialog):
 
 
 class QualityStatsDialog(QDialog):
-    """Read-only proof quality summary backed by one project session."""
+    """Read-only proof quality summary backed by one workspace snapshot."""
 
     def __init__(
         self,
-        session_provider: Callable[[], ProjectSession | None] | None = None,
-        refresh_panels_cb: Callable[[], None] | None = None,
-        proof_changed_cb: Callable[[object], None] | None = None,
+        workspace: ProofWorkspaceView | None = None,
         parent=None,
-        *,
-        project_provider: Callable[[], ProjectSession | None] | None = None,
     ) -> None:
         super().__init__(parent)
-        if session_provider is not None and project_provider is not None:
-            raise TypeError("provide session_provider or project_provider, not both")
-        provider = session_provider or project_provider
-        if provider is None:
-            raise TypeError("QualityStatsDialog requires a ProjectSession provider")
+        if workspace is not None and not isinstance(workspace, ProofWorkspaceView):
+            raise TypeError("QualityStatsDialog requires ProofWorkspaceView or None")
         self.setObjectName("qualityStatsDialog")
         self.setWindowTitle("Proof quality statistics")
         self.setModal(True)
         self.resize(420, 360)
-        self._session_provider = provider
-        self._refresh_panels_cb = refresh_panels_cb
-        self._proof_changed_cb = proof_changed_cb
+        self._workspace = workspace
         self._detail_dialog: QualityStatsDetailDialog | None = None
         self._stats = _QualityStats(0, 0, 0, 0, 0, 0)
 
@@ -241,15 +233,14 @@ class QualityStatsDialog(QDialog):
         root.addWidget(buttons)
         self._refresh_view()
 
-    def _session(self) -> ProjectSession | None:
-        session = self._session_provider()
-        if session is not None and not isinstance(session, ProjectSession):
-            raise TypeError("session provider must return ProjectSession or None")
-        return session
+    def set_workspace(self, workspace: ProofWorkspaceView | None) -> None:
+        if workspace is not None and not isinstance(workspace, ProofWorkspaceView):
+            raise TypeError("QualityStatsDialog requires ProofWorkspaceView or None")
+        self._workspace = workspace
+        self._refresh_view()
 
     def _refresh_view(self) -> None:
-        session = self._session()
-        self._stats = _stats_for(session)
+        self._stats = _stats_for(self._workspace)
         ratio = self._stats.checked_ratio
         main = "-" if ratio is None else f"{ratio * 100:.0f}%"
         sub = (
@@ -268,13 +259,11 @@ class QualityStatsDialog(QDialog):
 
     def _on_manual_refresh(self) -> None:
         self._refresh_view()
-        if self._refresh_panels_cb is not None:
-            self._refresh_panels_cb()
 
     def _show_details(self) -> None:
         if self._detail_dialog is None:
             self._detail_dialog = QualityStatsDetailDialog(self)
-        self._detail_dialog.populate(self._session())
+        self._detail_dialog.populate(self._workspace)
         self._detail_dialog.show()
         self._detail_dialog.raise_()
         self._detail_dialog.activateWindow()
@@ -282,7 +271,7 @@ class QualityStatsDialog(QDialog):
     def detail_table(self) -> QTableWidget:
         if self._detail_dialog is None:
             self._detail_dialog = QualityStatsDetailDialog(self)
-        self._detail_dialog.populate(self._session())
+        self._detail_dialog.populate(self._workspace)
         return self._detail_dialog.table()
 
     @property

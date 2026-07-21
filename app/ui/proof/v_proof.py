@@ -1,9 +1,9 @@
-"""Session-backed vertical proof and same-text index view."""
+"""Vertical proof and same-text index view over an immutable workspace."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -20,32 +20,29 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
-    QApplication,
 )
 
-from app.core.char_index import CharIndex, CharIndexEntry
-from app.core.proof_session import ProofSessionResult
-from app.models.ocr_records import OcrAtom, OcrLine
-from app.models.proof_records import ProofState, ProofTextUnit
-from app.models.project_session import PageRecord, ProjectSession, RevisionConflictError
-from app.services.proof_session_service import ProofSessionError, ProofSessionService
-from app.ui.proof.char_verdict import classify_char
-from app.ui.proof.confidence_utils import (
-    ProofContext,
-    build_proof_contexts,
-    char_confidence,
+from app.application.contracts import ProofEditCommand
+from app.application.proof_workspace import (
+    ProofLineView,
+    ProofPageView,
+    ProofStateView,
+    ProofTextUnitView,
+    ProofWorkspaceView,
 )
+from app.ui.proof.char_verdict import classify_char
+from app.ui.proof.confidence_view import ProofCharView, build_char_views, char_confidence
 
 
 IMAGE_SIZE = QSize(620, 420)
 
 
-def _entry_key(entry: CharIndexEntry) -> tuple[str, str, int, str | None]:
+def _entry_key(entry: ProofCharView) -> tuple[str, str, int, str | None]:
     return (entry.proof_uid, entry.text_unit_uid, entry.char_index, entry.atom_uid)
 
 
 def _page_pixmap(
-    page: PageRecord,
+    page: ProofPageView,
     bbox: tuple[int, int, int, int] | None,
     target_size: QSize | None = None,
 ) -> QPixmap:
@@ -79,28 +76,26 @@ def _page_pixmap(
 
 
 class VProofPanel(QWidget):
-    """Vertical proof view over the active OCR observations and proof states."""
+    """Vertical proof view that emits application proof edit commands."""
 
-    proof_changed = Signal(object)
+    proof_edit_requested = Signal(object)
 
     def __init__(
         self,
-        session: ProjectSession | None = None,
-        proof_service: ProofSessionService | None = None,
+        workspace: ProofWorkspaceView | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._session: ProjectSession | None = None
-        self._proof_service: ProofSessionService | None = None
-        self._contexts: tuple[ProofContext, ...] = ()
-        self._pages: dict[str, PageRecord] = {}
-        self._states: dict[str, ProofState] = {}
-        self._indexes: dict[str, CharIndex] = {}
-        self._entries: tuple[CharIndexEntry, ...] = ()
-        self._entries_by_text: dict[str, tuple[CharIndexEntry, ...]] = {}
+        self._workspace: ProofWorkspaceView | None = None
+        self._pages: dict[str, ProofPageView] = {}
+        self._states: dict[str, ProofStateView] = {}
+        self._lines: dict[tuple[str, str], ProofLineView] = {}
+        self._units: dict[tuple[str, str], ProofTextUnitView] = {}
+        self._entries: tuple[ProofCharView, ...] = ()
+        self._entries_by_text: dict[str, tuple[ProofCharView, ...]] = {}
         self._selected_page_uid: str | None = None
         self._selected_char = ""
-        self._selected_entry: CharIndexEntry | None = None
+        self._selected_entry: ProofCharView | None = None
         self._build_ui()
         self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
         self._redo_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
@@ -110,16 +105,12 @@ class VProofPanel(QWidget):
         self._undo_shortcut.activated.connect(lambda: self._apply_history(-1))
         self._redo_shortcut.activated.connect(lambda: self._apply_history(1))
         self._redo_y_shortcut.activated.connect(lambda: self._apply_history(1))
-        if session is not None:
-            self.load_session(session, proof_service)
+        if workspace is not None:
+            self.set_workspace(workspace)
 
     @property
-    def session(self) -> ProjectSession | None:
-        return self._session
-
-    @property
-    def proof_service(self) -> ProofSessionService | None:
-        return self._proof_service
+    def workspace(self) -> ProofWorkspaceView | None:
+        return self._workspace
 
     def _build_ui(self) -> None:
         self.setObjectName("proofRoot")
@@ -171,7 +162,6 @@ class VProofPanel(QWidget):
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(10, 10, 10, 10)
         center_layout.setSpacing(10)
-
         gallery_card = QFrame()
         gallery_card.setObjectName("proofCard")
         gallery_layout = QVBoxLayout(gallery_card)
@@ -183,7 +173,7 @@ class VProofPanel(QWidget):
         gallery_header.addStretch(1)
         self._btn_refresh = QPushButton("刷新")
         self._btn_refresh.setObjectName("ghostBtn")
-        self._btn_refresh.clicked.connect(self.refresh_from_session)
+        self._btn_refresh.clicked.connect(self.refresh_view)
         gallery_header.addWidget(self._btn_refresh)
         self._page_select = QComboBox()
         self._page_select.currentIndexChanged.connect(self._on_page_changed)
@@ -198,9 +188,7 @@ class VProofPanel(QWidget):
         self._gallery.setMovement(QListWidget.Movement.Static)
         self._gallery.setIconSize(QSize(62, 62))
         self._gallery.setSpacing(6)
-        self._gallery.setSelectionMode(
-            QAbstractItemView.SelectionMode.ExtendedSelection
-        )
+        self._gallery.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._gallery.currentItemChanged.connect(self._on_gallery_changed)
         gallery_layout.addWidget(self._gallery, 1)
         center_layout.addWidget(gallery_card, 2)
@@ -236,14 +224,10 @@ class VProofPanel(QWidget):
         viewer_title = QLabel("原稿上下文")
         viewer_title.setObjectName("sectionTitle")
         viewer_layout.addWidget(viewer_title)
-
         self._image = QLabel("无可用原稿图像")
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._image.setMinimumHeight(180)
-        self._image.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
+        self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         viewer_layout.addWidget(self._image, 1)
 
         center.setMinimumWidth(480)
@@ -279,309 +263,189 @@ class VProofPanel(QWidget):
         self._edit_bubble.resize(156, 42)
         self._edit_bubble.hide()
 
-    def _set_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None,
-    ) -> None:
-        if not isinstance(session, ProjectSession):
-            raise TypeError("VProofPanel requires ProjectSession")
-        service = proof_service or ProofSessionService(session)
-        if service.project_uid != session.project_uid:
-            raise ValueError("proof service and project session must share a project UID")
-        self._session = session
-        self._proof_service = service
+    def set_workspace(self, workspace: ProofWorkspaceView | None) -> None:
+        """Replace the displayed immutable snapshot."""
 
-    def load_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None = None,
-        *,
-        selected_page_uid: str | None = None,
-    ) -> None:
-        self._set_session(session, proof_service)
-        self._selected_page_uid = selected_page_uid
-        self._populate_page_selector()
-        self.refresh_from_session()
-
-    def set_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None = None,
-    ) -> None:
-        """Bind the view to an existing project session and proof service."""
-
-        self.load_session(session, proof_service)
-
-    def load_pages(self, session: ProjectSession) -> None:
-        """Load a migrated session; legacy page collections are not accepted."""
-
-        self.load_session(session)
-
-    def merge_pages(self, session: ProjectSession) -> None:
+        if workspace is not None and not isinstance(workspace, ProofWorkspaceView):
+            raise TypeError("VProofPanel requires ProofWorkspaceView or None")
         selected = self._selected_page_uid
-        self.load_session(session, selected_page_uid=selected)
-
-    def clear_session(self) -> None:
-        self._session = None
-        self._proof_service = None
-        self._contexts = ()
-        self._pages.clear()
-        self._states.clear()
-        self._indexes.clear()
-        self._entries = ()
-        self._entries_by_text.clear()
-        self._selected_page_uid = None
+        self._workspace = workspace
+        self._pages = {page.page_uid: page for page in workspace.pages} if workspace else {}
+        self._states = {state.proof_uid: state for state in workspace.proof_states} if workspace else {}
+        self._lines.clear()
+        self._units.clear()
+        entries: list[ProofCharView] = []
+        if workspace is not None:
+            for state in workspace.proof_states:
+                units = {unit.text_unit_uid: unit for unit in state.text_units}
+                page = self._pages.get(state.page_uid)
+                if page is None:
+                    raise ValueError(f"proof state {state.proof_uid!r} has no page view")
+                for line in state.lines:
+                    unit = units.get(line.text_unit_uid)
+                    if unit is None:
+                        raise ValueError(f"proof line {line.text_unit_uid!r} has no text unit view")
+                    self._lines[(state.proof_uid, unit.text_unit_uid)] = line
+                    self._units[(state.proof_uid, unit.text_unit_uid)] = unit
+                    entries.extend(build_char_views(line, page))
+        self._entries = tuple(
+            sorted(entries, key=lambda item: (item.page_number, item.proof_uid, item.text_unit_uid, item.char_index))
+        )
+        grouped: dict[str, list[ProofCharView]] = defaultdict(list)
+        for entry in self._entries:
+            grouped[entry.text].append(entry)
+        self._entries_by_text = {text: tuple(values) for text, values in grouped.items()}
+        page_uids = set(self._pages)
+        self._selected_page_uid = selected if selected in page_uids else None
         self._selected_char = ""
         self._selected_entry = None
         self._populate_page_selector()
         self._rebuild_char_list()
         self._render_entry(None)
-        self._status.setText("暂无可校对字符")
+        self._status.setText(
+            "暂无可校对字符" if not self._entries else f"{len(self._entries)} 个字符"
+        )
+
+    def clear_workspace(self) -> None:
+        self.set_workspace(None)
+
+    def refresh_view(self) -> None:
+        """Rebuild local index structures from the existing immutable view."""
+
+        self.set_workspace(self._workspace)
 
     def _populate_page_selector(self) -> None:
         self._page_select.blockSignals(True)
         self._page_select.clear()
         self._page_select.addItem("全部页面", "")
         selected_index = 0
-        if self._session is not None:
-            pages = sorted(
-                self._session.page_repository.all(),
-                key=lambda item: (item.page_number, item.uid),
-            )
-            for page in pages:
-                self._page_select.addItem(f"第 {page.page_number} 页", page.uid)
-                if page.uid == self._selected_page_uid:
-                    selected_index = self._page_select.count() - 1
+        for page in sorted(self._pages.values(), key=lambda item: (item.page_number, item.page_uid)):
+            self._page_select.addItem(f"第 {page.page_number} 页", page.page_uid)
+            if page.page_uid == self._selected_page_uid:
+                selected_index = self._page_select.count() - 1
         self._page_select.setCurrentIndex(selected_index)
         self._page_select.blockSignals(False)
 
     def _on_page_changed(self, index: int) -> None:
         value = self._page_select.itemData(index)
-        self._selected_page_uid = str(value) if value else None
+        self._selected_page_uid = value or None
         self._rebuild_char_list()
 
-    def _filtered_entries(self) -> tuple[CharIndexEntry, ...]:
+    def _filtered_entries(self) -> tuple[ProofCharView, ...]:
         if self._selected_page_uid is None:
             return self._entries
-        return tuple(
-            entry for entry in self._entries if entry.page_uid == self._selected_page_uid
-        )
-
-    def refresh_from_session(self) -> None:
-        if self._session is None or self._proof_service is None:
-            self.clear_session()
-            return
-        try:
-            contexts = build_proof_contexts(self._session, self._proof_service)
-        except (KeyError, ValueError, RuntimeError) as exc:
-            self._contexts = ()
-            self._entries = ()
-            self._indexes.clear()
-            self._rebuild_char_list()
-            self._status.setText(f"无法加载校对内容：{exc}")
-            return
-        self._contexts = contexts
-        self._pages = {context.page.uid: context.page for context in contexts}
-        self._states = {context.state.uid: context.state for context in contexts}
-        self._indexes = {context.state.uid: context.index for context in contexts}
-        self._entries = tuple(
-            entry
-            for context in contexts
-            for entry in context.index.entries
-        )
-        grouped: dict[str, list[CharIndexEntry]] = defaultdict(list)
-        for entry in self._filtered_entries():
-            grouped[entry.text].append(entry)
-        self._entries_by_text = {
-            text: tuple(items) for text, items in grouped.items()
-        }
-        self._rebuild_char_list()
-        self._status.setText(
-            f"{len(self._entries)} 个索引字符 · "
-            f"{len(self._states)} 个校对页"
-        )
+        return tuple(entry for entry in self._entries if entry.page_uid == self._selected_page_uid)
 
     def _rebuild_char_list(self) -> None:
-        entries = self._filtered_entries()
-        counts = Counter(entry.text for entry in entries)
-        query = self._char_search.text().strip().casefold()
-        if query:
-            counts = Counter({
-                text: count for text, count in counts.items()
-                if query in text.casefold()
-            })
-        self._char_count.setText(f"{len(counts)} 项")
-        selected = self._selected_char
+        query = self._char_search.text()
+        available = self._filtered_entries()
+        counts = Counter(entry.text for entry in available if not query or query in entry.text)
         self._char_list.blockSignals(True)
         self._char_list.clear()
         for text, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
-            item = QListWidgetItem(f"{text}  ({count})")
+            item = QListWidgetItem(f"{text}  {count}")
             item.setData(Qt.ItemDataRole.UserRole, text)
             self._char_list.addItem(item)
         self._char_list.blockSignals(False)
-        target_row = next(
-            (
-                row
-                for row in range(self._char_list.count())
-                if self._char_list.item(row).data(Qt.ItemDataRole.UserRole) == selected
-            ),
-            0,
-        )
+        self._char_count.setText(f"{len(available)} 项")
         if self._char_list.count():
-            self._char_list.setCurrentRow(target_row)
+            self._char_list.setCurrentRow(0)
         else:
             self._selected_char = ""
-            self._gallery.clear()
-            self._gallery_header.setText("相同字索引")
-            self._render_entry(None)
+            self._set_gallery(())
 
     def _on_char_changed(self, current: QListWidgetItem | None, _previous) -> None:
-        if current is None:
-            self._selected_char = ""
-            self._gallery.clear()
-            self._render_entry(None)
-            return
-        value = current.data(Qt.ItemDataRole.UserRole)
-        self._selected_char = str(value)
+        self._selected_char = current.data(Qt.ItemDataRole.UserRole) if current else ""
         self._set_gallery(self._entries_for_text(self._selected_char))
 
-    def _entries_for_text(self, text: str) -> tuple[CharIndexEntry, ...]:
-        return tuple(entry for entry in self._filtered_entries() if entry.text == text)
+    def _entries_for_text(self, text: str) -> tuple[ProofCharView, ...]:
+        entries = self._entries_by_text.get(text, ())
+        if self._selected_page_uid is None:
+            return entries
+        return tuple(entry for entry in entries if entry.page_uid == self._selected_page_uid)
 
-    def _set_gallery(self, entries: tuple[CharIndexEntry, ...]) -> None:
-        previous_key = _entry_key(self._selected_entry) if self._selected_entry else None
-        self._gallery.blockSignals(True)
+    def _set_gallery(self, entries: tuple[ProofCharView, ...]) -> None:
         self._gallery.clear()
-        for entry in entries:
-            geometry = "有字框" if entry.available else "无字框"
-            item = QListWidgetItem(
-                f"第 {entry.page_number} 页\n{geometry}"
-            )
-            icon = self._entry_icon(entry)
-            if not icon.isNull():
-                item.setIcon(icon)
-            item.setSizeHint(QSize(84, 92))
-            item.setToolTip(
-                f"第 {entry.page_number} 页 · 行 {entry.line_uid or '-'} · "
-                f"文本 {entry.text_unit_uid} · {geometry}"
-            )
-            item.setData(Qt.ItemDataRole.UserRole, entry)
-            self._gallery.addItem(item)
-        self._gallery.blockSignals(False)
-        selected_row = next(
-            (
-                row
-                for row in range(self._gallery.count())
-                if _entry_key(self._gallery.item(row).data(Qt.ItemDataRole.UserRole)) == previous_key
-            ),
-            0,
+        self._gallery_header.setText(
+            "相同字索引" if not self._selected_char else f"相同字索引 · {self._selected_char}"
         )
+        for entry in entries:
+            item = QListWidgetItem(self._entry_icon(entry), f"第 {entry.page_number} 页")
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            item.setToolTip(
+                f"{entry.proof_uid}/{entry.text_unit_uid} · {entry.char_index}"
+            )
+            self._gallery.addItem(item)
         if self._gallery.count():
-            self._gallery.setCurrentRow(selected_row)
+            self._gallery.setCurrentRow(0)
         else:
             self._selected_entry = None
             self._render_entry(None)
-        self._gallery_header.setText(
-            f"{self._selected_char!r} · {self._gallery.count()} 处"
-        )
 
-    def _entry_icon(self, entry: CharIndexEntry) -> QIcon:
+    def _entry_icon(self, entry: ProofCharView) -> QIcon:
         page = self._pages.get(entry.page_uid)
-        if page is None or entry.bbox is None:
+        if page is None:
             return QIcon()
-        pixmap = QPixmap(page.image_path)
-        if pixmap.isNull():
-            return QIcon()
-        left, top, right, bottom = entry.bbox
-        rect = QRect(left, top, max(1, right - left), max(1, bottom - top))
-        rect = rect.intersected(pixmap.rect())
-        if rect.isEmpty():
-            return QIcon()
-        crop = pixmap.copy(rect).scaled(
-            62,
-            62,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        return QIcon(crop)
+        pixmap = _page_pixmap(page, entry.bbox, QSize(62, 62))
+        return QIcon(pixmap) if not pixmap.isNull() else QIcon()
 
-    def _on_gallery_changed(self, current: QListWidgetItem | None, _previous) -> None:
-        if current is None:
-            self._selected_entry = None
-            self._render_entry(None)
-            return
-        entry = current.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(entry, CharIndexEntry):
-            return
-        self._selected_entry = entry
-        self._render_entry(entry)
+    def _on_gallery_changed(
+        self,
+        current: QListWidgetItem | None,
+        _previous,
+    ) -> None:
+        entry = current.data(Qt.ItemDataRole.UserRole) if current else None
+        self._selected_entry = entry if isinstance(entry, ProofCharView) else None
+        self._render_entry(self._selected_entry)
 
-    def _selected_entries(self) -> tuple[CharIndexEntry, ...]:
-        entries = tuple(
-            item.data(Qt.ItemDataRole.UserRole) for item in self._gallery.selectedItems()
-        )
-        valid = tuple(entry for entry in entries if isinstance(entry, CharIndexEntry))
-        if valid:
-            return valid
-        return (self._selected_entry,) if self._selected_entry is not None else ()
+    def _selected_entries(self) -> tuple[ProofCharView, ...]:
+        values: list[ProofCharView] = []
+        for item in self._gallery.selectedItems():
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, ProofCharView):
+                values.append(entry)
+        if not values and self._selected_entry is not None:
+            values.append(self._selected_entry)
+        return tuple(values)
+
+    def _emit(self, command: ProofEditCommand) -> None:
+        self.proof_edit_requested.emit(command)
 
     def _apply_replacement_to_selected(self, text: str) -> int:
-        if self._proof_service is None:
-            return 0
         selected = self._selected_entries()
-        if not selected:
-            return 0
-        grouped: dict[str, list[CharIndexEntry]] = defaultdict(list)
+        grouped: dict[str, dict[tuple[str, str], dict[int, str]]] = defaultdict(dict)
         for entry in selected:
-            grouped[entry.proof_uid].append(entry)
-        changed_count = 0
-        for proof_uid, entries in grouped.items():
-            try:
-                state = self._proof_service.get_state(proof_uid)
-                units = {unit.uid: unit for unit in state.text_units}
-                replacements = {unit.uid: unit.text for unit in state.text_units}
-                by_unit: dict[str, list[CharIndexEntry]] = defaultdict(list)
-                for entry in entries:
-                    by_unit[entry.text_unit_uid].append(entry)
-                for unit_uid, unit_entries in by_unit.items():
-                    if unit_uid not in units:
-                        raise ValueError(f"text unit is not present: {unit_uid}")
-                    updated = replacements[unit_uid]
-                    for entry in sorted(
-                        unit_entries,
-                        key=lambda item: item.char_index,
-                        reverse=True,
-                    ):
-                        if not 0 <= entry.char_index < len(updated):
-                            raise ValueError("indexed character is stale")
-                        updated = (
-                            updated[: entry.char_index]
-                            + text
-                            + updated[entry.char_index + 1 :]
-                        )
-                    replacements[unit_uid] = updated
-                result = self._proof_service.replace_text_units(
-                    proof_uid,
-                    {uid: value for uid, value in replacements.items() if value != units[uid].text},
+            key = (entry.proof_uid, entry.text_unit_uid)
+            unit = self._units.get(key)
+            if unit is None or entry.char_index >= len(unit.text):
+                continue
+            changes = grouped[entry.proof_uid].setdefault(key, {})
+            changes[entry.char_index] = text
+        emitted = 0
+        for proof_uid, unit_changes in grouped.items():
+            state = self._states[proof_uid]
+            replacements: list[tuple[str, str]] = []
+            for key, changes in sorted(unit_changes.items(), key=lambda item: (self._units[item[0]].order, item[0][1])):
+                unit = self._units[key]
+                chars = list(unit.text)
+                for char_index, replacement in changes.items():
+                    chars[char_index] = replacement
+                updated = "".join(chars)
+                if updated != unit.text:
+                    replacements.append((unit.text_unit_uid, updated))
+            if not replacements:
+                continue
+            self._emit(
+                ProofEditCommand(
+                    proof_uid=proof_uid,
+                    op="replace_many",
                     expected_revision=state.revision,
                     expected_fingerprint=state.fingerprint,
-                    expected_unit_revisions={
-                        uid: units[uid].revision for uid in by_unit
-                    },
-                    expected_unit_fingerprints={
-                        uid: units[uid].fingerprint for uid in by_unit
-                    },
+                    replacements=tuple(replacements),
                 )
-            except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-                self._status.setText(f"编辑冲突：{exc}")
-                return changed_count
-            if result.changed:
-                changed_count += len(entries)
-                self.proof_changed.emit(result)
-        if changed_count:
-            self.refresh_from_session()
-        return changed_count
+            )
+            emitted += len(replacements)
+        return emitted
 
     def _gallery_direct_overwrite(self, text: str) -> bool:
         return self._apply_replacement_to_selected(text) > 0
@@ -590,87 +454,51 @@ class VProofPanel(QWidget):
         return self._apply_replacement_to_selected("") > 0
 
     def _apply_history(self, direction: int) -> None:
-        focus = QApplication.focusWidget()
-        if isinstance(focus, QLineEdit):
-            available = focus.isUndoAvailable() if direction < 0 else focus.isRedoAvailable()
-            if available:
-                focus.undo() if direction < 0 else focus.redo()
-                return
-        if isinstance(focus, QPlainTextEdit):
-            available = (
-                focus.document().isUndoAvailable()
-                if direction < 0
-                else focus.document().isRedoAvailable()
-            )
-            if available and not focus.isReadOnly():
-                focus.undo() if direction < 0 else focus.redo()
-                return
-        service = self._proof_service
-        proof_uid = self._selected_entry.proof_uid if self._selected_entry is not None else None
-        if service is None or proof_uid is None:
+        if direction not in {-1, 1}:
+            raise ValueError("history direction must be -1 or 1")
+        entry = self._selected_entry
+        if entry is None:
             return
-        try:
-            state = service.get_state(proof_uid)
-            operation = service.undo if direction < 0 else service.redo
-            result = operation(
-                proof_uid,
+        state = self._states.get(entry.proof_uid)
+        if state is None:
+            return
+        self._emit(
+            ProofEditCommand(
+                proof_uid=state.proof_uid,
+                op="undo" if direction < 0 else "redo",
                 expected_revision=state.revision,
                 expected_fingerprint=state.fingerprint,
             )
-        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"撤销冲突：{exc}")
-            return
-        if not result.changed:
-            self._status.setText("没有可撤销的校对操作" if direction < 0 else "没有可重做的校对操作")
-            return
-        self.proof_changed.emit(result)
-        self.refresh_from_session()
+        )
 
     def _show_edit_bubble_at(self, position: QPoint) -> None:
         item = self._gallery.itemAt(position)
         if item is None:
             return
-        if not item.isSelected():
-            self._gallery.clearSelection()
-            item.setSelected(True)
         self._gallery.setCurrentItem(item)
-        entry = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(entry, CharIndexEntry):
-            return
-        selected = self._selected_entries()
-        initial_text = entry.text if len(selected) == 1 else ""
-        self._edit_bubble_input.setText(initial_text)
-        self._edit_bubble_input.selectAll()
-        self._edit_bubble_input.setPlaceholderText(f"替换 {len(selected)} 处")
-        panel_position = self._gallery.mapTo(self, position)
-        x = max(8, min(panel_position.x() + 8, self.width() - self._edit_bubble.width() - 8))
-        y = max(8, min(panel_position.y() + 8, self.height() - self._edit_bubble.height() - 8))
-        self._edit_bubble.move(x, y)
+        self._edit_bubble_input.setText(self._selected_entry.text if self._selected_entry else "")
+        global_position = self._gallery.viewport().mapToGlobal(position)
+        local_position = self.mapFromGlobal(global_position)
+        self._edit_bubble.move(local_position.x(), local_position.y())
         self._edit_bubble.show()
         self._edit_bubble.raise_()
         self._edit_bubble_input.setFocus()
+        self._edit_bubble_input.selectAll()
 
     def _apply_edit_bubble(self) -> None:
         text = self._edit_bubble_input.text()
-        changed = self._apply_replacement_to_selected(text)
-        if not changed:
-            self._status.setText("没有可提交的纵校改动")
-            return
+        self._apply_replacement_to_selected(text)
         self._edit_bubble.hide()
-        self._gallery.setFocus()
-        self._status.setText(f"已修改 {changed} 处")
 
     def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
-        if watched is self._edit_bubble_input:
-            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+        if watched is self._edit_bubble_input and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
                 self._edit_bubble.hide()
                 return True
-            if event.type() == QEvent.Type.FocusOut:
-                QTimer.singleShot(0, self._edit_bubble.hide)
         return super().eventFilter(watched, event)
 
-    def _render_entry(self, entry: CharIndexEntry | None) -> None:
-        if entry is None or self._session is None:
+    def _render_entry(self, entry: ProofCharView | None) -> None:
+        if entry is None:
             self._ocr_context.clear()
             self._proof_context.clear()
             self._image.setText("无可用原稿图像")
@@ -678,45 +506,25 @@ class VProofPanel(QWidget):
             self._evidence.clear()
             return
         page = self._pages.get(entry.page_uid)
-        service = self._proof_service
-        if page is None or service is None:
+        unit = self._units.get((entry.proof_uid, entry.text_unit_uid))
+        line = self._lines.get((entry.proof_uid, entry.text_unit_uid))
+        if page is None or unit is None or line is None:
+            self._render_entry(None)
             return
-        try:
-            state = service.get_state(entry.proof_uid)
-            unit = next(item for item in state.text_units if item.uid == entry.text_unit_uid)
-        except (KeyError, ValueError, ProofSessionError) as exc:
-            self._status.setText(f"无法读取选中的校对文本：{exc}")
-            return
-        observations = self._session.ocr_observation_repository
-        observation_line: OcrLine | None = None
-        atom: OcrAtom | None = None
-        if entry.line_uid:
-            try:
-                observation_line = observations.get_line(entry.line_uid)
-            except KeyError:
-                observation_line = None
-        if entry.atom_uid:
-            try:
-                atom = observations.get_atom(entry.atom_uid)
-            except KeyError:
-                atom = None
-        ocr_char = (
-            observation_line.text[entry.char_index]
-            if observation_line is not None and entry.char_index < len(observation_line.text)
-            else None
-        )
         verdict = classify_char(
-            confidence=char_confidence(atom, observation_line),
+            confidence=char_confidence(entry),
             text_char=entry.text,
-            ocr_char=ocr_char,
+            ocr_char=entry.ocr_char,
         )
         self._ocr_context.setPlainText(
-            f"OCR 行 {entry.line_uid or '-'}：{observation_line.text if observation_line else '-'}"
+            f"OCR 行 {entry.line_uid or '-'}：{line.ocr_text or '-'}"
         )
-        self._proof_context.setPlainText(f"校对文本 {unit.uid}：{unit.text}")
+        self._proof_context.setPlainText(
+            f"校对文本 {entry.text_unit_uid}：{unit.text}"
+        )
         self._evidence.setText(
             f"{verdict.severity}: {verdict.evidence} · "
-            f"区域 {atom.region_uid if atom else '-'} · 字符 {entry.atom_uid or '-'}"
+            f"区域 {entry.region_uid or '-'} · 字符 {entry.atom_uid or '-'}"
         )
         self._evidence.setStyleSheet(f"color: {verdict.color};")
         pixmap = _page_pixmap(page, entry.bbox, self._image.size())
@@ -730,9 +538,6 @@ class VProofPanel(QWidget):
             if page is not None:
                 pixmap = _page_pixmap(page, self._selected_entry.bbox, self._image.size())
                 self._image.setPixmap(pixmap)
-
-    def closeEvent(self, event: QEvent) -> None:  # type: ignore[override]
-        super().closeEvent(event)
 
 
 __all__ = ["VProofPanel"]

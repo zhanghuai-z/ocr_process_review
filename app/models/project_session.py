@@ -417,6 +417,24 @@ class PageRepository:
         self._pages[next_page.uid] = next_page
         return next_page
 
+    def put_many(self, pages: tuple[PageRecord, ...]) -> tuple[PageRecord, ...]:
+        """Insert one new-page batch atomically after validating every record."""
+
+        records = tuple(pages)
+        staged = dict(self._pages)
+        for page in records:
+            if not isinstance(page, PageRecord):
+                raise TypeError("page repository requires PageRecord values")
+            if page.project_uid != self.project_uid:
+                raise ProjectScopeError("page batch belongs to another project")
+            if page.uid in staged:
+                raise DuplicateUidError(f"page UID already exists: {page.uid!r}")
+            if page.image_revision != 1:
+                raise RevisionConflictError("new page batch records require image_revision 1")
+            staged[page.uid] = page
+        self._pages = staged
+        return records
+
     def get(
         self,
         uid: str,
@@ -1226,6 +1244,15 @@ class ProjectSession:
     @property
     def table_text_repository(self) -> TableTextRepository:
         return self._table_text_repository
+
+    def adopt_import_pages(self, pages: tuple[PageRecord, ...]) -> None:
+        """Adopt one decoded import result as a rollback-safe mutation."""
+        records = tuple(pages)
+        if any(page.project_uid != self.project_uid for page in records):
+            raise ProjectScopeError("import result belongs to another project")
+        if len({page.uid for page in records}) != len(records):
+            raise DuplicateUidError("import result contains duplicate page UIDs")
+        self.page_repository.put_many(records)
 
     def adopt_layout_analysis(
         self,

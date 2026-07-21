@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.core.char_index import CharIndexEntry
+from app.core.ocr_currentness import CurrentOcrObservation, current_ocr_observation
 from app.models.ocr_records import OcrAtom, OcrBatch, OcrLine
 from app.models.proof_records import ProofState, ProofTextUnit
 from app.models.project_session import PageRecord, ProjectSession
@@ -407,6 +408,7 @@ def _state_view(
     session: ProjectSession,
     state: ProofState,
     pages_by_uid: dict[str, PageRecord],
+    observation: CurrentOcrObservation,
 ) -> ProofStateView:
     scope_uid = state.anchor_snapshot.scope_uid
     page = pages_by_uid.get(scope_uid)
@@ -416,8 +418,8 @@ def _state_view(
         raise ValueError(f"proof state {state.uid!r} belongs to another project")
 
     ocr = session.ocr_observation_repository
-    pointer = ocr.get_active_pointer(scope_uid)
-    batch = ocr.get_batch(pointer.batch_uid, fingerprint=pointer.batch_fingerprint)
+    pointer = observation.pointer
+    batch = observation.batch
     if pointer.project_uid != session.project_uid:
         raise ValueError("active OCR pointer belongs to another project")
     if batch.scope_uid != scope_uid:
@@ -504,7 +506,11 @@ def build_proof_workspace_view(
         )
     )
     state_views = tuple(
-        _state_view(session, state, pages_by_uid) for state in ordered_states
+        _state_view(session, state, pages_by_uid, observation)
+        for state in ordered_states
+        if (observation := current_ocr_observation(
+            session, state.anchor_snapshot.scope_uid
+        )) is not None
     )
     lines = tuple(line for state in state_views for line in state.lines)
     return ProofWorkspaceView(

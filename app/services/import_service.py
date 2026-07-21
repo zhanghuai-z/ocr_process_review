@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-from typing import Iterable
 
 from app.models.entity_id import new_entity_uid
 from app.models.project_session import PageRecord, ProjectSession
@@ -22,6 +21,8 @@ class ImportFailure:
 
 @dataclass(frozen=True, slots=True)
 class ImportResult:
+    project_uid: str
+    expected_page_uids: tuple[str, ...]
     pages: tuple[PageRecord, ...]
     failures: tuple[ImportFailure, ...]
 
@@ -34,23 +35,27 @@ class ImportResult:
         return len(self.failures)
 
 
+@dataclass(frozen=True, slots=True)
+class ImportJobRequest:
+    project_uid: str
+    paths: tuple[str, ...]
+    first_page_number: int = 1
+    expected_page_uids: tuple[str, ...] = ()
+
+
 class ImportService:
-    """Decode images/PDF pages and append their metadata to ``PageRepository``."""
+    """Decode immutable import requests and commit validated page batches."""
 
     def __init__(self, cache_dir: str | Path | None = None) -> None:
         self._cache_dir = Path(cache_dir) if cache_dir is not None else None
 
-    def import_paths(
-        self,
-        session: ProjectSession,
-        paths: Iterable[str | Path],
-    ) -> ImportResult:
-        if not isinstance(session, ProjectSession):
-            raise TypeError("import requires a ProjectSession")
-
+    def execute(self, request: ImportJobRequest) -> ImportResult:
+        """Decode import sources without mutating a project session."""
+        if not isinstance(request, ImportJobRequest):
+            raise TypeError("import execution requires ImportJobRequest")
         pages: list[PageRecord] = []
         failures: list[ImportFailure] = []
-        for raw_path in paths:
+        for raw_path in request.paths:
             path = Path(raw_path)
             if not path.is_file():
                 failures.append(ImportFailure(str(raw_path), "source file does not exist"))
@@ -59,9 +64,9 @@ class ImportService:
             if suffix in IMAGE_EXTENSIONS:
                 try:
                     page = self._import_image(
-                        session,
+                        request.project_uid,
                         path,
-                        page_number=len(pages) + 1,
+                        page_number=request.first_page_number + len(pages),
                         source_page_index=0,
                     )
                 except Exception as exc:
@@ -71,7 +76,11 @@ class ImportService:
                 continue
             if suffix == PDF_EXTENSION:
                 try:
-                    imported = self._import_pdf(session, path, first_page_number=len(pages) + 1)
+                    imported = self._import_pdf(
+                        request.project_uid,
+                        path,
+                        first_page_number=request.first_page_number + len(pages),
+                    )
                 except Exception as exc:
                     failures.append(ImportFailure(str(path), str(exc)))
                 else:
@@ -80,11 +89,32 @@ class ImportService:
                 continue
             failures.append(ImportFailure(str(path), f"unsupported source format: {suffix}"))
 
-        return ImportResult(pages=tuple(pages), failures=tuple(failures))
+        return ImportResult(
+            project_uid=request.project_uid,
+            expected_page_uids=request.expected_page_uids,
+            pages=tuple(pages),
+            failures=tuple(failures),
+        )
+
+    @staticmethod
+    def commit(session: ProjectSession, result: ImportResult) -> ImportResult:
+        """Adopt decoded page records through the page repository boundary."""
+        if not isinstance(result, ImportResult):
+            raise TypeError("import commit requires ImportResult")
+        if result.project_uid != session.project_uid:
+            raise ValueError("import result belongs to another project")
+        current_page_uids = tuple(page.uid for page in session.page_repository.all())
+        if current_page_uids != result.expected_page_uids:
+            raise RuntimeError("import result belongs to a stale page collection")
+        for page in result.pages:
+            if page.project_uid != session.project_uid:
+                raise ValueError("import result belongs to another project")
+        session.adopt_import_pages(result.pages)
+        return result
 
     def _import_image(
         self,
-        session: ProjectSession,
+        project_uid: str,
         source_path: Path,
         *,
         page_number: int,
@@ -95,7 +125,7 @@ class ImportService:
         width, height = self._image_size(image_path)
         thumbnail_path = self._materialize_thumbnail(image_path, page_uid)
         page = PageRecord(
-            project_uid=session.project_uid,
+            project_uid=project_uid,
             uid=page_uid,
             image_path=str(image_path),
             source_path=str(source_path),
@@ -110,12 +140,11 @@ class ImportService:
             image_hash=_sha256_file(image_path),
             image_revision=1,
         )
-        session.page_repository.put(page, expected_revision=0)
         return page
 
     def _import_pdf(
         self,
-        session: ProjectSession,
+        project_uid: str,
         source_path: Path,
         *,
         first_page_number: int,
@@ -142,7 +171,7 @@ class ImportService:
                     width, height = self._image_size(image_path)
                     thumbnail_path = self._materialize_thumbnail(image_path, page_uid)
                     page = PageRecord(
-                        project_uid=session.project_uid,
+                        project_uid=project_uid,
                         uid=page_uid,
                         image_path=str(image_path),
                         source_path=str(source_path),
@@ -157,7 +186,6 @@ class ImportService:
                         image_hash=_sha256_file(image_path),
                         image_revision=1,
                     )
-                    session.page_repository.put(page, expected_revision=0)
                 except Exception as exc:
                     failures.append(
                         ImportFailure(
@@ -169,7 +197,12 @@ class ImportService:
                     pages.append(page)
         finally:
             document.close()
-        return ImportResult(pages=tuple(pages), failures=tuple(failures))
+        return ImportResult(
+            project_uid=project_uid,
+            expected_page_uids=(),
+            pages=tuple(pages),
+            failures=tuple(failures),
+        )
 
     def _materialize_image(self, source_path: Path, page_uid: str) -> Path:
         if self._cache_dir is None:

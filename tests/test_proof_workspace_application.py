@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError, fields, is_dataclass
 
 import pytest
 
+from app.core.layout_scope import layout_snapshot_fingerprint
 from app.application.proof_workspace import (
     ProofAtomView,
     ProofLineView,
@@ -22,6 +23,12 @@ from app.models.ocr_records import (
     OcrRegion,
     OcrRun,
 )
+from app.models.layout_snapshot import LayoutSnapshot
+from app.models.enums import BlockSource, BlockType, OcrPolicy
+from app.models.geometry import BBox
+from app.models.layout_origin import BlockOrigin
+from app.models.layout_snapshot import LayoutBlockSnapshot
+from app.models.paddle_artifact import PaddleArtifact
 from app.models.proof_records import (
     ProofAlignmentSegment,
     ProofAlignmentSlice,
@@ -58,6 +65,27 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
     session = ProjectSession(PROJECT_UID)
     session.page_repository.put(_page("page-1", 1), expected_revision=0)
     session.page_repository.put(_page("page-2", 2), expected_revision=0)
+    page = session.page_repository.get("page-1")
+    artifact = PaddleArtifact(
+        project_uid=PROJECT_UID,
+        uid="artifact-1",
+        page_uid=page.uid,
+        source_engine="test",
+        source_run_id="layout-run-1",
+        image_hash=page.image_hash,
+        payload_json="{}",
+    )
+    session.paddle_artifact_repository.append(artifact)
+    layout = LayoutSnapshot(
+        page_uid=page.uid,
+        revision=1,
+        artifact_uid=artifact.uid,
+        source_engine="test",
+        source_run_id="layout-run-1",
+        blocks=(),
+    )
+    session.layout_repository.put(layout, expected_revision=0)
+    layout_fingerprint = layout_snapshot_fingerprint(layout)
 
     ocr = session.ocr_observation_repository
     run = ocr.append_run(
@@ -65,8 +93,9 @@ def _session() -> tuple[ProjectSession, ProofState, OcrBatch, OcrActivePointer]:
             project_uid=PROJECT_UID,
             uid="run-1",
             engine="test-engine",
-            layout_fingerprint="layout-1",
+            layout_fingerprint=layout_fingerprint,
             input_fingerprint="input-1",
+            metadata=(("page_fingerprint", page.fingerprint),),
         )
     )
     region = ocr.append_region(
@@ -260,6 +289,39 @@ def test_query_projects_active_ocr_and_proof_state_into_stable_read_views() -> N
     _assert_dto_graph_is_value_only(view)
 
 
+def test_query_hides_historical_proof_after_layout_changes() -> None:
+    session, state, _batch, _pointer = _session()
+    current = session.layout_repository.get("page-1")
+    session.layout_repository.put(
+        LayoutSnapshot(
+            page_uid=current.page_uid,
+            revision=2,
+            artifact_uid=current.artifact_uid,
+            source_engine=current.source_engine,
+            source_run_id=current.source_run_id,
+            blocks=(
+                LayoutBlockSnapshot(
+                    block_type=BlockType.TEXT,
+                    bbox=BBox(1, 1, 50, 30),
+                    order=0,
+                    source_label="text",
+                    origin=BlockOrigin(created_by="manual_edit"),
+                    ocr_policy=OcrPolicy.TEXT_OCR,
+                    authorship=BlockSource.USER_EDITED,
+                    uid="changed-block",
+                ),
+            ),
+        ),
+        expected_revision=1,
+    )
+
+    view = build_proof_workspace_view(session)
+
+    assert session.proof_repository.get_state(state.uid) == state
+    assert view.proof_states == ()
+    assert view.lines == ()
+
+
 def test_query_is_read_only_and_exposes_cas_tokens_without_repository_handles() -> None:
     session, state, _batch, _pointer = _session()
     before_state = session.proof_repository.get_state(state.uid)
@@ -291,8 +353,14 @@ def test_query_does_not_reuse_old_line_or_atom_when_active_observation_changes()
             project_uid=PROJECT_UID,
             uid="run-2",
             engine="test-engine",
-            layout_fingerprint="layout-1",
+            layout_fingerprint=layout_snapshot_fingerprint(
+                session.layout_repository.get("page-1")
+            ),
             input_fingerprint="input-2",
+            metadata=((
+                "page_fingerprint",
+                session.page_repository.get("page-1").fingerprint,
+            ),),
         )
     )
     region = ocr.append_region(

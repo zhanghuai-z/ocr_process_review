@@ -25,8 +25,8 @@ from app.controllers.workflow_controller import (
     STEP_VPROOF,
     WorkflowController,
 )
+from app.application import ImportCompletionView
 from app.core.workflow_state import WorkflowProgressState, WorkflowViewState
-from app.services.import_service import ImportResult
 from app.ui.export.export_dialog import ExportDialog
 from app.ui.recognize.import_panel import ImportPanel
 from app.ui.recognize.layout_panel import LayoutPanel
@@ -215,13 +215,7 @@ class MainWindow(QMainWindow):
         self._import_panel.images_ready.connect(self._start_import)
         self._import_panel.open_project_requested.connect(self._open_project)
         self._layout_panel.page_selected.connect(self._select_page)
-        self._layout_panel.geometry_changed.connect(self._controller.mark_dirty)
-        self._layout_panel.block_contract_changed.connect(
-            lambda _page_uid, _change_kind: self._controller.mark_dirty()
-        )
-        self._layout_panel.layout_edit_applied.connect(
-            lambda _result: self._controller.mark_dirty()
-        )
+        self._layout_panel.layout_edit_requested.connect(self._apply_layout_edit)
         self._layout_panel.ocr_entry_requested.connect(self._on_ocr_entry_requested)
         self._layout_panel.analysis_cancel_requested.connect(
             self._controller.cancel_layout_analysis
@@ -231,15 +225,12 @@ class MainWindow(QMainWindow):
         self._ocr_panel.go_to_proof_requested.connect(
             lambda: self._controller.request_step(STEP_HPROOF)
         )
-        self._hproof_panel.proof_changed.connect(
-            lambda _result: self._controller.mark_dirty()
-        )
-        self._vproof_panel.proof_changed.connect(
-            lambda _result: self._controller.mark_dirty()
-        )
-
+        self._hproof_panel.proof_edit_requested.connect(self._apply_proof_edit)
+        self._vproof_panel.proof_edit_requested.connect(self._apply_proof_edit)
         self._controller.session_identity_changed.connect(self._on_identity_changed)
-        self._controller.page_records_changed.connect(self._on_page_records_changed)
+        self._controller.layout_workspace_changed.connect(self._on_layout_workspace_changed)
+        self._controller.ocr_workspace_changed.connect(self._on_ocr_workspace_changed)
+        self._controller.proof_workspace_changed.connect(self._on_proof_workspace_changed)
         self._controller.import_finished.connect(self._on_import_finished)
         self._controller.layout_finished.connect(self._on_layout_finished)
         self._controller.layout_progress.connect(self._on_layout_progress)
@@ -322,29 +313,29 @@ class MainWindow(QMainWindow):
     def _on_identity_changed(self, _project_uid: str, name: str) -> None:
         self._top_bar.set_project_name(name)
 
-    def _on_page_records_changed(self, _records: tuple) -> None:
-        self._bind_session_views()
-
-    def _bind_session_views(self) -> None:
-        session = self._controller.session
-        if session is None:
+    def _on_layout_workspace_changed(self, workspace: object) -> None:
+        if workspace is None:
             self._layout_panel.reset()
-            self._ocr_panel.reset()
-            self._hproof_panel.clear_session()
-            self._vproof_panel.clear_session()
             return
-        self._layout_panel.set_session(session)
-        self._hproof_panel.set_session(session)
-        self._vproof_panel.set_session(session)
-        if self._controller.is_fully_analyzed:
-            self._load_snapshot_into_panel()
-        else:
-            self._ocr_panel.set_pages(self._controller.page_records)
-        self._controller.refresh_page_gate_states()
+        self._layout_panel.set_workspace(workspace)
 
-    def _on_import_finished(self, result: ImportResult) -> None:
+    def _on_ocr_workspace_changed(self, workspace: object) -> None:
+        if workspace is None:
+            self._ocr_panel.reset()
+            return
+        self._ocr_panel.set_workspace(workspace)
+
+    def _on_proof_workspace_changed(self, workspace: object) -> None:
+        if workspace is None:
+            self._hproof_panel.clear_workspace()
+            self._vproof_panel.clear_workspace()
+            return
+        self._hproof_panel.set_workspace(workspace)
+        self._vproof_panel.set_workspace(workspace)
+
+    def _on_import_finished(self, result: ImportCompletionView) -> None:
         self._import_panel.setEnabled(True)
-        if not result.pages:
+        if not result.page_uids:
             failures = "\n".join(
                 f"• {failure.source_path}: {failure.error}"
                 for failure in result.failures[:5]
@@ -368,9 +359,9 @@ class MainWindow(QMainWindow):
         self._layout_panel.update_analysis_stage(message)
         self._set_status_message(f"{message}：{page_uid}")
 
-    def _on_layout_finished(self, _commits: tuple) -> None:
+    def _on_layout_finished(self) -> None:
         self._progress.finish()
-        self._bind_session_views()
+        self._load_snapshot_into_panel()
         self._set_status_message("版面分析完成")
         self._controller.request_step(STEP_OCR)
 
@@ -383,10 +374,10 @@ class MainWindow(QMainWindow):
         self._progress.update_ocr(progress)
         self._ocr_panel.on_progress(progress)
 
-    def _on_ocr_finished(self, _commits: tuple) -> None:
+    def _on_ocr_finished(self) -> None:
         self._progress.finish()
         self._ocr_panel.finish_progress("OCR 完成")
-        self._bind_session_views()
+        self._load_snapshot_into_panel()
         self._set_status_message("文字识别完成")
 
     def _on_ocr_cancelled(self) -> None:
@@ -394,10 +385,7 @@ class MainWindow(QMainWindow):
         self._ocr_panel.finish_progress("OCR 已取消")
 
     def _load_snapshot_into_panel(self) -> None:
-        try:
-            self._ocr_panel.set_snapshot(self._controller.capture_export_snapshot())
-        except Exception as exc:
-            self._on_worker_error(f"无法构建会话快照：{exc}")
+        self._controller.publish_state()
 
     def _on_worker_error(self, message: str) -> None:
         self._progress.finish()
@@ -424,10 +412,22 @@ class MainWindow(QMainWindow):
         if not self._controller.has_pages:
             return
         try:
-            self._progress.start_layout(len(self._controller.page_records))
-            self._layout_panel.start_analysis_progress(len(self._controller.page_records))
+            self._progress.start_layout(len(self._controller.pages))
+            self._layout_panel.start_analysis_progress(len(self._controller.pages))
             self._controller.start_layout_analysis()
             self._set_status_message("正在运行版面分析…")
+        except Exception as exc:
+            self._on_worker_error(str(exc))
+
+    def _apply_layout_edit(self, command: object) -> None:
+        try:
+            self._controller.apply_layout_edit(command)
+        except Exception as exc:
+            self._on_worker_error(str(exc))
+
+    def _apply_proof_edit(self, command: object) -> None:
+        try:
+            self._controller.apply_proof_edit(command)
         except Exception as exc:
             self._on_worker_error(str(exc))
 
@@ -463,7 +463,7 @@ class MainWindow(QMainWindow):
             self._on_worker_error(str(exc))
 
     def _save_project(self) -> bool:
-        if self._controller.session is None:
+        if not self._controller.has_project:
             QMessageBox.information(self, "提示", "当前无项目")
             return False
         try:
@@ -478,7 +478,7 @@ class MainWindow(QMainWindow):
         return True
 
     def _save_project_as_dialog(self) -> bool:
-        if self._controller.session is None:
+        if not self._controller.has_project:
             return False
         default_name = f"{self._controller.project_name or '未命名项目'}.ocrproj"
         path, _ = QFileDialog.getSaveFileName(
@@ -516,7 +516,7 @@ class MainWindow(QMainWindow):
             self._set_status_message("OCR 设置已更新", 3000)
 
     def _confirm_save_before_discard(self, title: str) -> bool:
-        if self._controller.session is None or not self._controller.is_dirty:
+        if not self._controller.has_project or not self._controller.is_dirty:
             return True
         reply = QMessageBox.question(
             self,
@@ -544,8 +544,8 @@ class MainWindow(QMainWindow):
         self._import_panel.reset()
         self._layout_panel.reset()
         self._ocr_panel.reset()
-        self._hproof_panel.clear_session()
-        self._vproof_panel.clear_session()
+        self._hproof_panel.clear_workspace()
+        self._vproof_panel.clear_workspace()
         self._top_bar.set_project_name("")
         self._go_to_step(STEP_IMPORT)
         self._set_status_message("项目已关闭")

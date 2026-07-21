@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
+from app.application.contracts import (
+    LayoutEditCommand,
+    LayoutWorkspaceView,
+    PageView,
+)
+from app.application.ocr_workspace import OcrPageView, OcrWorkspaceView
 from app.core.block_attributes import block_attributes
 from app.core.paddle_artifact_index import BINDING_GEOMETRY_HIT, PaddleArtifactIndex
 from app.models.enums import BlockSource, BlockType, OcrPolicy
@@ -14,11 +21,11 @@ from app.models.geometry import BBox
 from app.models.layout_origin import BlockOrigin
 from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.paddle_artifact import PaddleArtifact
-from app.models.project_session import PageRecord, ProjectRecord, ProjectSession
+from app.models.project_session import PageRecord
 from app.services.inline_formula_layout_service import InlineFormulaLayoutService
-from app.services.layout_edit_service import LayoutEditCommand
 from app.services.layout_overlay_service import LayoutOverlayService
-from app.ui.recognize.layout_panel import LayoutPanel, PageLayoutInput
+from app.ui.recognize.layout_panel import LayoutPanel
+from app.ui.recognize.ocr_panel import OcrPanel
 from app.ui.widgets.image_viewer import ImageViewer, OcrAtomBox
 
 
@@ -26,28 +33,25 @@ def _qt_app() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-def _page(session: ProjectSession, path: Path) -> PageRecord:
+def _page(path: Path) -> PageRecord:
     from PIL import Image
 
     Image.new("RGB", (160, 100), "white").save(path)
-    return session.page_repository.put(
-        PageRecord(
-            project_uid=session.project_uid,
-            uid="page-1",
-            image_path=str(path),
-            source_path=str(path),
-            cache_image_path=str(path),
-            thumbnail_path=str(path),
-            width=160,
-            height=100,
-            page_number=1,
-            source_page_index=0,
-            status="imported",
-            error="",
-            image_hash="image-hash",
-            image_revision=1,
-        ),
-        expected_revision=0,
+    return PageRecord(
+        project_uid="project-1",
+        uid="page-1",
+        image_path=str(path),
+        source_path=str(path),
+        cache_image_path=str(path),
+        thumbnail_path=str(path),
+        width=160,
+        height=100,
+        page_number=1,
+        source_page_index=0,
+        status="imported",
+        error="",
+        image_hash="image-hash",
+        image_revision=1,
     )
 
 
@@ -116,85 +120,99 @@ def _snapshot(artifact: PaddleArtifact) -> LayoutSnapshot:
     )
 
 
-def test_panel_session_edits_snapshot_with_cas_and_stable_uid(tmp_path: Path) -> None:
+def test_panel_emits_draw_intent_from_workspace_view(tmp_path: Path) -> None:
     _qt_app()
-    session = ProjectSession(ProjectRecord("project-1"))
-    page = _page(session, tmp_path / "page.png")
+    page = _page(tmp_path / "page.png")
     artifact = _artifact()
-    session.paddle_artifact_repository.append(artifact)
     snapshot = _snapshot(artifact)
-    session.layout_repository.put(snapshot, expected_revision=0)
+    page_view = PageView.from_records(page, snapshot)
+    workspace = LayoutWorkspaceView("project-1", "Book", (page_view,))
 
-    panel = LayoutPanel(session)
-    applied = []
-    contracts = []
-    panel.layout_edit_applied.connect(applied.append)
-    panel.block_contract_changed.connect(lambda page_uid, reason: contracts.append((page_uid, reason)))
+    panel = LayoutPanel(workspace)
+    requested = []
+    panel.layout_edit_requested.connect(requested.append)
 
     panel._on_block_created(BBox.from_xyxy(130, 10, 155, 35))
 
-    current = session.layout_repository.get(page.uid)
-    assert current.revision == 2
-    assert len(current.blocks) == 2
-    assert current.blocks[0].uid == "block-1"
-    assert current.blocks[1].bbox.x == 130
-    assert current.blocks[1].bbox.y == 10
-    assert current.blocks[1].bbox.w > 0 and current.blocks[1].bbox.h > 0
-    assert session.page_repository.get(page.uid) == page
-    assert applied and applied[-1].snapshot is current
-    assert contracts == [("page-1", "layout_block_created")]
-    assert all(not hasattr(block, "chars") for block in current.blocks)
+    assert len(requested) == 1
+    command = requested[0]
+    assert isinstance(command, LayoutEditCommand)
+    assert command.op == "draw"
+    assert command.page_uid == page.uid
+    assert command.expected_revision == snapshot.revision
+    assert command.bbox == BBox.from_xyxy(130, 10, 160, 35)
+    assert command.new_block_uid.startswith("block-")
+    assert page_view.layout_revision == 1
+    assert page_view.block_uids == ("block-1",)
 
 
-def test_panel_input_mode_emits_edit_intent_without_mutating_input() -> None:
+def test_panel_emits_geometry_intent_without_mutating_workspace_view(tmp_path: Path) -> None:
     _qt_app()
     artifact = _artifact()
     snapshot = _snapshot(artifact)
-    page = PageRecord(
-        project_uid="project-1",
-        uid="page-1",
-        image_path="page.png",
-        source_path="source.pdf",
-        cache_image_path="",
-        thumbnail_path="",
-        width=160,
-        height=100,
-        page_number=1,
-        source_page_index=0,
-        status="layout_done",
-        error="",
-        image_hash="image-hash",
-        image_revision=1,
-    )
-    panel = LayoutPanel()
-    panel.set_page_layout_inputs([PageLayoutInput(page, snapshot, artifact)])
+    page = _page(tmp_path / "page.png")
+    page_view = PageView.from_records(page, snapshot)
+    panel = LayoutPanel(LayoutWorkspaceView("project-1", "Book", (page_view,)))
     requested = []
-    applied = []
     panel.layout_edit_requested.connect(requested.append)
-    panel.layout_edit_applied.connect(applied.append)
 
-    command = LayoutEditCommand.create_block(
-        page.uid,
-        snapshot.revision,
-        BBox.from_xyxy(130, 10, 155, 35),
-        BlockType.TEXT,
-        "text",
-        new_block_uid="input-only-block",
+    panel._on_block_geometry_change_requested(
+        "block-1",
+        BBox.from_xyxy(10, 20, 140, 80),
     )
-    result = panel._apply_layout_edit(panel._pages[0], command)
 
-    assert requested == [command]
-    assert applied and applied[0].snapshot == result.snapshot
-    assert result is not None
-    assert result.snapshot.revision == 2
-    assert snapshot.revision == 1
-    assert len(snapshot.blocks) == 1
+    assert len(requested) == 1
+    command = requested[0]
+    assert isinstance(command, LayoutEditCommand)
+    assert command.op == "resize"
+    assert command.block_uid == "block-1"
+    assert command.expected_revision == snapshot.revision
+    assert page_view.layout_revision == 1
+    assert page_view.blocks[0].bbox == snapshot.blocks[0].bbox
 
 
-def test_image_viewer_keeps_snapshot_blocks_and_atom_boxes_immutable() -> None:
+def test_panel_emits_all_layout_edit_intents_as_application_commands(tmp_path: Path) -> None:
+    _qt_app()
+    artifact = _artifact()
+    base_snapshot = _snapshot(artifact)
+    second_block = replace(
+        base_snapshot.blocks[0],
+        uid="block-2",
+        bbox=BBox.from_xyxy(0, 55, 120, 95),
+        order=1,
+    )
+    snapshot = replace(base_snapshot, blocks=(base_snapshot.blocks[0], second_block))
+    page_view = PageView.from_records(_page(tmp_path / "page.png"), snapshot)
+    panel = LayoutPanel(LayoutWorkspaceView("project-1", "Book", (page_view,)))
+    requested: list[LayoutEditCommand] = []
+    panel.layout_edit_requested.connect(requested.append)
+
+    panel._on_block_geometry_change_requested("block-1", BBox.from_xyxy(5, 5, 125, 55))
+    panel._on_block_geometry_change_requested("block-1", BBox.from_xyxy(5, 5, 130, 60))
+    panel._on_block_clicked_uid("block-1")
+    panel._on_selected_type_button_clicked(BlockType.TITLE)
+    panel._on_block_created(BBox.from_xyxy(0, 0, 120, 50))
+    panel._on_block_deleted_uid("block-1")
+    panel._on_block_created(BBox.from_xyxy(130, 10, 155, 35))
+
+    assert [command.op for command in requested] == [
+        "move",
+        "resize",
+        "change_type",
+        "merge",
+        "delete",
+        "draw",
+    ]
+    assert all(isinstance(command, LayoutEditCommand) for command in requested)
+    assert all(command.page_uid == "page-1" for command in requested)
+    assert page_view.block_uids == ("block-1", "block-2")
+
+
+def test_image_viewer_consumes_view_blocks_and_atom_boxes_immutably(tmp_path: Path) -> None:
     _qt_app()
     artifact = _artifact()
     snapshot = _snapshot(artifact)
+    page_view = PageView.from_records(_page(tmp_path / "page.png"), snapshot)
     atom = OcrAtomBox(
         uid="atom-1",
         bbox=BBox.from_xyxy(42, 14, 56, 30),
@@ -205,14 +223,38 @@ def test_image_viewer_keeps_snapshot_blocks_and_atom_boxes_immutable() -> None:
     )
     viewer = ImageViewer()
     viewer.set_image_from_qimage(QImage(160, 100, QImage.Format.Format_RGB32))
-    viewer.show_layout_snapshot(snapshot, atom_boxes=(atom,))
+    with pytest.raises(TypeError):
+        viewer.show_layout_blocks(snapshot.blocks)
+    viewer.show_layout_blocks(page_view.blocks, atom_boxes=(atom,))
     viewer.show_atom_boxes((atom,))
 
-    assert viewer._block_items[0][1] is snapshot.blocks[0]
+    assert viewer._block_items[0][1] is page_view.blocks[0]
     assert viewer._atom_items[0][1] is atom
-    assert viewer._block_items[0][0]._layout_block is snapshot.blocks[0]
+    assert viewer._block_items[0][0]._block_view is page_view.blocks[0]
     assert viewer._atom_items[0][0]._atom_box is atom
     assert viewer._atom_items[0][0].is_editable() is False
+
+
+def test_ocr_panel_consumes_ocr_workspace_without_legacy_entrypoints(tmp_path: Path) -> None:
+    _qt_app()
+    page = _page(tmp_path / "page.png")
+    page_view = PageView.from_records(page, _snapshot(_artifact()))
+    panel = OcrPanel()
+
+    workspace = OcrWorkspaceView(
+        project_uid=page_view.project_uid,
+        project_name="Book",
+        pages=(OcrPageView(page=page_view, batch_uid=None, regions=()),),
+    )
+    panel.set_workspace(workspace)
+
+    assert panel._pages == workspace.pages
+    assert panel._tree.topLevelItemCount() == 1
+    assert panel._tree.topLevelItem(0).childCount() == 1
+    with pytest.raises(TypeError):
+        panel.set_workspace(page)
+    assert not hasattr(panel, "set_pages")
+    assert not hasattr(panel, "set_snapshot")
 
 
 def test_inline_formula_service_returns_snapshot_edits_from_artifact_only() -> None:
@@ -273,6 +315,6 @@ def test_snapshot_attributes_overlay_and_artifact_index_use_new_boundaries() -> 
 def test_new_contracts_reject_legacy_layout_values() -> None:
     _qt_app()
     with pytest.raises(TypeError):
-        LayoutPanel().set_page_layout_inputs([object()])
+        LayoutPanel().set_workspace(object())
     with pytest.raises(TypeError):
         InlineFormulaLayoutService().iter_regions(object(), page_width=160, page_height=100)

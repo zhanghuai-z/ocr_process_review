@@ -1,9 +1,10 @@
-"""OCR workspace projection over immutable export snapshots."""
+"""OCR workspace projection over immutable application page views."""
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -12,22 +13,72 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QListWidget,
+    QListWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from app.application import BlockView, OcrLineView, OcrPageView, OcrWorkspaceView, PageView
 from app.core.workflow_state import WorkflowProgressState
-from app.models.export_snapshot import ExportPageSnapshot, ExportProjectSnapshot
-from app.models.layout_snapshot import LayoutBlockSnapshot
-from app.models.ocr_records import OcrLine
-from app.models.project_session import PageRecord
-from app.ui.widgets.page_directory import PageDirectoryList
 
 
 def _tree_payload(kind: str, *uids: str) -> tuple[str, ...]:
     return (kind, *uids)
+
+
+class _PageViewDirectory(QListWidget):
+    """Page directory projection that accepts only immutable page views."""
+
+    page_selected = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("pageDirectoryList")
+        self.setMaximumWidth(236)
+        self.setMinimumWidth(196)
+        self.setSpacing(10)
+        self.setUniformItemSizes(True)
+        self.setVerticalScrollMode(self.ScrollMode.ScrollPerPixel)
+        self._page_uids: tuple[str, ...] = ()
+        self._suppress_signal = False
+        self.currentRowChanged.connect(self._on_row_changed)
+
+    def set_pages(self, pages: Iterable[PageView]) -> None:
+        values = tuple(pages)
+        if any(not isinstance(page, PageView) for page in values):
+            raise TypeError("OCR page directory requires PageView values")
+        self._suppress_signal = True
+        try:
+            self.clear()
+            self._page_uids = tuple(page.page_uid for page in values)
+            for page in values:
+                source = page.source_path or page.image_path
+                filename = Path(source).name if source else ""
+                item = QListWidgetItem(f"{page.page_number:02d}  {filename}")
+                item.setData(Qt.ItemDataRole.UserRole, page.page_uid)
+                item.setSizeHint(QSize(0, 44))
+                self.addItem(item)
+        finally:
+            self._suppress_signal = False
+
+    def set_current_uid(self, page_uid: str) -> None:
+        try:
+            index = self._page_uids.index(page_uid)
+        except ValueError as exc:
+            raise ValueError(f"page UID is not present in OCR directory: {page_uid!r}") from exc
+        self._suppress_signal = True
+        try:
+            self.setCurrentRow(index)
+        finally:
+            self._suppress_signal = False
+
+    def _on_row_changed(self, index: int) -> None:
+        if self._suppress_signal or index < 0 or index >= len(self._page_uids):
+            return
+        self.page_selected.emit(self._page_uids[index])
 
 
 class _PageImage(QWidget):
@@ -42,7 +93,7 @@ class _PageImage(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.addWidget(self._image)
 
-    def set_page(self, page: PageRecord | None) -> None:
+    def set_page(self, page: PageView | None) -> None:
         if page is None:
             self._image.clear()
             self._image.setText("暂无页面图像")
@@ -59,7 +110,7 @@ class _PageImage(QWidget):
 
 
 class OcrPanel(QWidget):
-    """Browse adopted layout and OCR observations from one export snapshot."""
+    """Browse immutable page and layout views used by the OCR workflow."""
 
     page_selected = Signal(str)
     ocr_requested = Signal()
@@ -67,10 +118,9 @@ class OcrPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._pages: tuple[PageRecord, ...] = ()
-        self._snapshots: tuple[ExportPageSnapshot, ...] = ()
-        self._pages_by_uid: dict[str, PageRecord] = {}
-        self._snapshots_by_uid: dict[str, ExportPageSnapshot] = {}
+        self._workspace: OcrWorkspaceView | None = None
+        self._pages: tuple[OcrPageView, ...] = ()
+        self._pages_by_uid: dict[str, PageView] = {}
         self._current_page_uid = ""
         self._build_ui()
 
@@ -95,7 +145,7 @@ class OcrPanel(QWidget):
         layout.addLayout(top)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self._directory = PageDirectoryList()
+        self._directory = _PageViewDirectory()
         self._directory.page_selected.connect(self._on_page_selected)
         splitter.addWidget(self._directory)
 
@@ -140,42 +190,36 @@ class OcrPanel(QWidget):
 
     # ------------------------------------------------------------------ public API
 
-    def set_pages(self, pages: Iterable[PageRecord]) -> None:
-        records = tuple(pages)
-        if any(not isinstance(page, PageRecord) for page in records):
-            raise TypeError("OCR panel requires PageRecord values")
-        self._pages = records
-        self._pages_by_uid = {page.uid: page for page in records}
-        self._snapshots = ()
-        self._snapshots_by_uid = {}
-        self._directory.set_pages(records)
+    def set_workspace(self, workspace: OcrWorkspaceView) -> None:
+        if not isinstance(workspace, OcrWorkspaceView):
+            raise TypeError("OCR panel requires OcrWorkspaceView")
+        self._workspace = workspace
+        self._pages = workspace.pages
+        page_values = tuple(item.page for item in workspace.pages)
+        self._pages_by_uid = {page.page_uid: page for page in page_values}
+        self._directory.set_pages(page_values)
         self._tree.clear()
-        self._set_current_uid(records[0].uid if records else "")
-        self._start_ocr.setEnabled(False)
-        self._go_proof.setEnabled(False)
-        self._status.setText("已导入页面，等待版面分析") if records else self._status.setText("等待导入")
-
-    def set_snapshot(self, snapshot: ExportProjectSnapshot) -> None:
-        if not isinstance(snapshot, ExportProjectSnapshot):
-            raise TypeError("OCR panel requires ExportProjectSnapshot")
-        self._snapshots = tuple(snapshot.pages)
-        self._snapshots_by_uid = {
-            page.page.uid: page for page in self._snapshots
-        }
-        self._pages = tuple(page.page for page in self._snapshots)
-        self._pages_by_uid = {page.uid: page for page in self._pages}
-        self._directory.set_pages(self._pages)
         target_uid = self._current_page_uid if self._current_page_uid in self._pages_by_uid else (
-            self._pages[0].uid if self._pages else ""
+            page_values[0].page_uid if page_values else ""
         )
         self._set_current_uid(target_uid)
         self._populate_tree()
-        has_ocr = any(page.active_ocr_batch is not None for page in self._snapshots)
-        self._start_ocr.setEnabled(bool(self._pages) and not has_ocr)
+        has_ocr = any(page.has_current_ocr for page in workspace.pages)
+        has_layout = any(page.page.layout_revision is not None for page in workspace.pages)
+        self._start_ocr.setEnabled(bool(page_values) and has_layout and not all(
+            page.has_current_ocr for page in workspace.pages
+        ))
         self._go_proof.setEnabled(has_ocr)
-        self._status.setText(
-            f"已载入 {len(self._pages)} 页会话快照，{sum(len(page.ocr_lines) for page in self._snapshots)} 行 OCR 观察"
-        )
+        if not page_values:
+            self._status.setText("等待导入")
+        elif has_ocr:
+            self._status.setText(
+                f"已载入 {len(page_values)} 页，{workspace.line_count} 行 OCR 观察"
+            )
+        elif has_layout:
+            self._status.setText("已载入页面版面，等待 OCR")
+        else:
+            self._status.setText("已导入页面，等待版面分析")
 
     def on_progress(self, progress: WorkflowProgressState) -> None:
         if not isinstance(progress, WorkflowProgressState):
@@ -205,10 +249,9 @@ class OcrPanel(QWidget):
             self._status.setText(message)
 
     def reset(self) -> None:
+        self._workspace = None
         self._pages = ()
-        self._snapshots = ()
         self._pages_by_uid = {}
-        self._snapshots_by_uid = {}
         self._current_page_uid = ""
         self._directory.set_pages(())
         self._tree.clear()
@@ -232,24 +275,34 @@ class OcrPanel(QWidget):
 
     def _populate_tree(self) -> None:
         self._tree.clear()
-        for page_snapshot in self._snapshots:
-            page = page_snapshot.page
+        for page_view in self._pages:
+            page = page_view.page
             page_item = QTreeWidgetItem(self._tree, [f"第 {page.page_number} 页", "", ""])
-            page_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("page", page.uid))
-            for block in page_snapshot.layout.blocks:
-                lines = self._lines_for_block(page_snapshot, block)
+            page_item.setData(0, Qt.ItemDataRole.UserRole, _tree_payload("page", page.page_uid))
+            regions_by_block = {
+                block.block_uid: tuple(
+                    region for region in page_view.regions if region.block_uid == block.block_uid
+                )
+                for block in page.blocks
+            }
+            for block in page.blocks:
+                lines = tuple(
+                    line
+                    for region in regions_by_block[block.block_uid]
+                    for line in region.lines
+                )
                 block_item = QTreeWidgetItem(
                     page_item,
                     [
-                        f"[{block.source_label or block.block_type.value}]",
+                        f"[{self._block_label(block)}]",
                         self._average_confidence(lines),
-                        f"{len(lines)} 行",
+                        f"{len(lines)} 行" if page_view.has_current_ocr else "版面",
                     ],
                 )
                 block_item.setData(
                     0,
                     Qt.ItemDataRole.UserRole,
-                    _tree_payload("block", page.uid, block.uid),
+                    _tree_payload("block", page.page_uid, block.block_uid),
                 )
                 for line in lines:
                     line_item = QTreeWidgetItem(
@@ -259,31 +312,25 @@ class OcrPanel(QWidget):
                     line_item.setData(
                         0,
                         Qt.ItemDataRole.UserRole,
-                        _tree_payload("line", page.uid, block.uid, line.uid),
+                        _tree_payload("line", page.page_uid, block.block_uid, line.line_uid),
                     )
+            unbound_regions = tuple(region for region in page_view.regions if region.block_uid is None)
+            if unbound_regions:
+                unbound_item = QTreeWidgetItem(page_item, ["[未绑定 OCR 区域]", "--", "异常"])
+                for region in unbound_regions:
+                    for line in region.lines:
+                        QTreeWidgetItem(
+                            unbound_item,
+                            [line.text[:48], f"{line.confidence:.2f}", "观察"],
+                        )
             page_item.setExpanded(True)
 
-    def _lines_for_block(
-        self,
-        page_snapshot: ExportPageSnapshot,
-        block: LayoutBlockSnapshot,
-    ) -> tuple[OcrLine, ...]:
-        region_uids = {
-            binding.target_uid
-            for binding in page_snapshot.bindings
-            if binding.source_uid == block.uid
-        }
-        return tuple(sorted(
-            (
-                line
-                for line in page_snapshot.ocr_lines
-                if line.region_uid in region_uids
-            ),
-            key=lambda line: (line.order, line.uid),
-        ))
+    @staticmethod
+    def _block_label(block: BlockView) -> str:
+        return block.source_label or block.block_type.value
 
     @staticmethod
-    def _average_confidence(lines: tuple[OcrLine, ...]) -> str:
+    def _average_confidence(lines: tuple[OcrLineView, ...]) -> str:
         if not lines:
             return "--"
         return f"{sum(line.confidence for line in lines) / len(lines):.2f}"
@@ -297,9 +344,7 @@ class OcrPanel(QWidget):
         page_uid = payload[1]
         if page_uid in self._pages_by_uid:
             self._set_current_uid(page_uid)
-        if payload[0] == "line" and len(payload) == 4:
-            self._status.setText(f"已选中 OCR 行：{payload[3]}")
-        elif payload[0] == "block" and len(payload) == 3:
+        if payload[0] == "block" and len(payload) == 3:
             self._status.setText(f"已选中版面块：{payload[2]}")
 
 

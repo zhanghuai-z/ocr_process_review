@@ -1,9 +1,8 @@
-"""Session-backed horizontal proof view.
+"""Horizontal proof view over an immutable :class:`ProofWorkspaceView`.
 
-The panel is a projection over one ``ProjectSession``. OCR observations supply
-the image, source text, geometry, and confidence; ``ProofState`` supplies the
-editable text and status. Every write is delegated to ``ProofSessionService``
-with the editor's revision and fingerprint tokens.
+The widget owns only display state and an editor's transient text buffer.  It
+never reads a repository or applies a proof edit.  Every mutation request is
+represented by a ``ProofEditCommand`` emitted to the application boundary.
 """
 from __future__ import annotations
 
@@ -13,10 +12,11 @@ from dataclasses import dataclass
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -26,19 +26,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.char_index import CharIndexEntry
-from app.core.proof_session import ProofEditorSnapshot, ProofSessionResult
-from app.models.ocr_records import OcrAtom, OcrLine
-from app.models.proof_records import ProofState, ProofTextUnit
-from app.models.project_session import PageRecord, ProjectSession, RevisionConflictError
-from app.services.proof_session_service import ProofSessionError, ProofSessionService
-from app.ui.proof.confidence_utils import (
-    ProofContext,
-    build_proof_contexts,
-    char_confidence,
-    line_confidence,
+from app.application.contracts import ProofEditCommand
+from app.application.proof_workspace import (
+    ProofLineView,
+    ProofPageView,
+    ProofStateView,
+    ProofTextUnitView,
+    ProofWorkspaceView,
 )
-from app.ui.widgets.page_directory import PageDirectoryList
+from app.ui.proof.confidence_view import ProofCharView, build_char_views
 
 
 ROW_IMAGE_SIZE = QSize(300, 54)
@@ -49,7 +45,6 @@ STATUS_COLORS = {
     "flagged": "#C67B22",
     "unchecked": "#8090A0",
 }
-
 STATUS_LABELS = {
     "unchecked": "待校对",
     "checked": "已校对",
@@ -61,56 +56,15 @@ STATUS_LABELS = {
 @dataclass(frozen=True, slots=True)
 class _ProofRow:
     key: tuple[str, str]
-    page: PageRecord
-    state: ProofState
-    unit: ProofTextUnit
-    snapshot: ProofEditorSnapshot
-    entries: tuple[CharIndexEntry, ...]
-    line: OcrLine | None
-    atom: OcrAtom | None
-    region_uid: str
-    ocr_text: str
-    bbox: tuple[int, int, int, int] | None
-    confidence: float | None
-
-
-def _row_for_unit(context: ProofContext, unit: ProofTextUnit, service: ProofSessionService) -> _ProofRow:
-    entries = tuple(
-        entry for entry in context.index.entries if entry.text_unit_uid == unit.uid
-    )
-    lines = context.lines_by_uid
-    atoms = context.atoms_by_uid
-    line = next(
-        (lines[entry.line_uid] for entry in entries if entry.line_uid in lines),
-        None,
-    )
-    atom = next(
-        (atoms[entry.atom_uid] for entry in entries if entry.atom_uid in atoms),
-        None,
-    )
-    snapshot = service.editor_snapshot(context.state.uid, unit.uid)
-    bbox = line.bbox if line is not None else next(
-        (entry.bbox for entry in entries if entry.bbox is not None),
-        None,
-    )
-    return _ProofRow(
-        key=(context.state.uid, unit.uid),
-        page=context.page,
-        state=context.state,
-        unit=unit,
-        snapshot=snapshot,
-        entries=entries,
-        line=line,
-        atom=atom,
-        region_uid=atom.region_uid if atom is not None else (line.region_uid if line else ""),
-        ocr_text=line.text if line is not None else "",
-        bbox=bbox,
-        confidence=char_confidence(atom, line) if atom is not None else line_confidence(line, ()) if line else None,
-    )
+    page: ProofPageView
+    state: ProofStateView
+    unit: ProofTextUnitView
+    line: ProofLineView
+    entries: tuple[ProofCharView, ...]
 
 
 class _CommitTextEdit(QPlainTextEdit):
-    """Small editor with proof navigation commands owned by the view."""
+    """Editor whose proof shortcuts are routed to the parent view."""
 
     commit_requested = Signal()
     cancel_requested = Signal()
@@ -138,22 +92,11 @@ class _CommitTextEdit(QPlainTextEdit):
                 event.accept()
                 return
             if event.key() == Qt.Key.Key_Z:
-                if modifiers & Qt.KeyboardModifier.ShiftModifier:
-                    if self.document().isRedoAvailable():
-                        self.redo()
-                    else:
-                        self.history_requested.emit(1)
-                elif self.document().isUndoAvailable():
-                    self.undo()
-                else:
-                    self.history_requested.emit(-1)
+                self.history_requested.emit(1 if modifiers & Qt.KeyboardModifier.ShiftModifier else -1)
                 event.accept()
                 return
             if event.key() == Qt.Key.Key_Y:
-                if self.document().isRedoAvailable():
-                    self.redo()
-                else:
-                    self.history_requested.emit(1)
+                self.history_requested.emit(1)
                 event.accept()
                 return
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter} and not (
@@ -170,7 +113,7 @@ class _CommitTextEdit(QPlainTextEdit):
 
 
 class _ProofLineImage(QLabel):
-    """Clickable image projection; it never owns OCR or proof state."""
+    """Clickable image projection with no OCR ownership."""
 
     clicked = Signal(QPoint)
 
@@ -180,7 +123,10 @@ class _ProofLineImage(QLabel):
         super().mousePressEvent(event)
 
 
-def _image_for_row(page: PageRecord, bbox: tuple[int, int, int, int] | None) -> QPixmap:
+def _image_for_row(
+    page: ProofPageView,
+    bbox: tuple[int, int, int, int] | None,
+) -> QPixmap:
     pixmap = QPixmap(page.image_path)
     if pixmap.isNull():
         return QPixmap()
@@ -193,8 +139,7 @@ def _image_for_row(page: PageRecord, bbox: tuple[int, int, int, int] | None) -> 
             round(top * y_scale),
             max(1, round((right - left) * x_scale)),
             max(1, round((bottom - top) * y_scale)),
-        )
-        rect = rect.intersected(pixmap.rect())
+        ).intersected(pixmap.rect())
         if not rect.isEmpty():
             pixmap = pixmap.copy(rect)
     return pixmap
@@ -214,10 +159,10 @@ class _ProofRowWidget(QFrame):
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(132)
+
         root = QHBoxLayout(self)
         root.setContentsMargins(6, 4, 8, 4)
         root.setSpacing(6)
-
         self._active_bar = QWidget()
         self._active_bar.setObjectName("proofRowActiveBar")
         self._active_bar.setFixedWidth(4)
@@ -227,7 +172,6 @@ class _ProofRowWidget(QFrame):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
-
         header = QHBoxLayout()
         self._title = QLabel(f"第 {row.page.page_number} 页 · 第 {row.unit.order + 1} 行")
         self._title.setObjectName("muted")
@@ -239,15 +183,10 @@ class _ProofRowWidget(QFrame):
         self._image = _ProofLineImage()
         self._image.setObjectName("proofLineImage")
         self._image.setFixedHeight(58)
-        self._image.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._image.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed,
-        )
+        self._image.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._image.setText("无可用行图像")
-        self._line_crop = _image_for_row(row.page, row.bbox)
+        self._line_crop = _image_for_row(row.page, row.line.bbox)
         self._selected_char_index: int | None = None
         self._focus_depth = "far"
         self._displayed_pixmap_size = QSize()
@@ -315,7 +254,7 @@ class _ProofRowWidget(QFrame):
         if target.width() <= 0 or target.height() <= 0:
             return
         source = QPixmap(self._line_crop)
-        if self._selected_char_index is not None and self.row.bbox is not None:
+        if self._selected_char_index is not None and self.row.line.bbox is not None:
             entry = next(
                 (
                     item
@@ -325,21 +264,21 @@ class _ProofRowWidget(QFrame):
                 None,
             )
             if entry is not None and entry.bbox is not None:
-                line_left, line_top, _line_right, _line_bottom = self.row.bbox
+                line_left, line_top, _line_right, _line_bottom = self.row.line.bbox
                 left, top, right, bottom = entry.bbox
                 painter = QPainter(source)
                 painter.setPen(QPen(QColor("#D45555"), 2))
                 painter.setBrush(QColor(212, 85, 85, 32))
-                line_width = max(1, self.row.bbox[2] - line_left)
-                line_height = max(1, self.row.bbox[3] - line_top)
-                x_scale = source.width() / line_width
-                y_scale = source.height() / line_height
-                painter.drawRect(QRect(
-                    round((left - line_left) * x_scale),
-                    round((top - line_top) * y_scale),
-                    max(1, round((right - left) * x_scale)),
-                    max(1, round((bottom - top) * y_scale)),
-                ))
+                line_width = max(1, self.row.line.bbox[2] - line_left)
+                line_height = max(1, self.row.line.bbox[3] - line_top)
+                painter.drawRect(
+                    QRect(
+                        round((left - line_left) * source.width() / line_width),
+                        round((top - line_top) * source.height() / line_height),
+                        max(1, round((right - left) * source.width() / line_width)),
+                        max(1, round((bottom - top) * source.height() / line_height)),
+                    )
+                )
                 painter.end()
         opacity = {"active": 1.0, "near": 0.68, "far": 0.38}[self._focus_depth]
         if opacity < 1.0:
@@ -372,7 +311,7 @@ class _ProofRowWidget(QFrame):
 
     def _on_image_clicked(self, point: QPoint) -> None:
         self.activated.emit()
-        if self.row.bbox is None or self._displayed_pixmap_size.isEmpty():
+        if self.row.line.bbox is None or self._displayed_pixmap_size.isEmpty():
             self.editor.setFocus()
             return
         y_offset = max(0, (self._image.height() - self._displayed_pixmap_size.height()) // 2)
@@ -383,7 +322,7 @@ class _ProofRowWidget(QFrame):
             return
         source_x = point.x() * self._line_crop.width() / self._displayed_pixmap_size.width()
         source_y = (point.y() - y_offset) * self._line_crop.height() / self._displayed_pixmap_size.height()
-        line_left, line_top, line_right, line_bottom = self.row.bbox
+        line_left, line_top, line_right, line_bottom = self.row.line.bbox
         page_x = line_left + source_x * (line_right - line_left) / self._line_crop.width()
         page_y = line_top + source_y * (line_bottom - line_top) / self._line_crop.height()
         entries = tuple(entry for entry in self.row.entries if entry.bbox is not None)
@@ -414,38 +353,30 @@ class _ProofRowWidget(QFrame):
 
 
 class HProofPanel(QWidget):
-    """Horizontal proof editor over one session-scoped proof aggregate."""
+    """Horizontal proof editor that consumes one immutable workspace snapshot."""
 
-    proof_changed = Signal(object)
+    proof_edit_requested = Signal(object)
 
     def __init__(
         self,
-        session: ProjectSession | None = None,
-        proof_service: ProofSessionService | None = None,
+        workspace: ProofWorkspaceView | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._session: ProjectSession | None = None
-        self._proof_service: ProofSessionService | None = None
-        self._contexts: tuple[ProofContext, ...] = ()
+        self._workspace: ProofWorkspaceView | None = None
         self._rows: tuple[_ProofRow, ...] = ()
         self._visible_rows: tuple[_ProofRow, ...] = ()
         self._row_widgets: dict[tuple[str, str], _ProofRowWidget] = {}
         self._dirty_text: dict[tuple[str, str], str] = {}
         self._selected_page_uid: str | None = None
         self._active_key: tuple[str, str] | None = None
-        self._status_message = ""
         self._build_ui()
-        if session is not None:
-            self.load_session(session, proof_service)
+        if workspace is not None:
+            self.set_workspace(workspace)
 
     @property
-    def session(self) -> ProjectSession | None:
-        return self._session
-
-    @property
-    def proof_service(self) -> ProofSessionService | None:
-        return self._proof_service
+    def workspace(self) -> ProofWorkspaceView | None:
+        return self._workspace
 
     def _build_ui(self) -> None:
         self.setObjectName("proofRoot")
@@ -467,8 +398,9 @@ class HProofPanel(QWidget):
         directory_title = QLabel("页面")
         directory_title.setObjectName("sectionTitle")
         left_layout.addWidget(directory_title)
-        self._page_directory = PageDirectoryList()
-        self._page_directory.page_selected.connect(self._on_page_directory_selected)
+        self._page_directory = QListWidget()
+        self._page_directory.setObjectName("pageDirectoryList")
+        self._page_directory.currentItemChanged.connect(self._on_page_directory_selected)
         left_layout.addWidget(self._page_directory, 1)
         self._splitter.addWidget(left)
 
@@ -512,7 +444,7 @@ class HProofPanel(QWidget):
         self._btn_prev.clicked.connect(lambda: self._focus_row(-1))
         self._btn_next.clicked.connect(lambda: self._focus_row(1))
         self._btn_save.clicked.connect(self.save)
-        self._btn_refresh.clicked.connect(self.refresh_from_session)
+        self._btn_refresh.clicked.connect(self.refresh_view)
         toolbar.addWidget(self._btn_prev)
         toolbar.addWidget(self._btn_next)
         toolbar.addWidget(self._btn_save)
@@ -527,140 +459,99 @@ class HProofPanel(QWidget):
         toolbar.addWidget(self._scope)
         root.addWidget(self._status_bar)
 
-    def _set_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None,
-    ) -> None:
-        if not isinstance(session, ProjectSession):
-            raise TypeError("HProofPanel requires ProjectSession")
-        service = proof_service or ProofSessionService(session)
-        if service.project_uid != session.project_uid:
-            raise ValueError("proof service and project session must share a project UID")
-        self._session = session
-        self._proof_service = service
+    def set_workspace(self, workspace: ProofWorkspaceView | None) -> None:
+        """Replace the displayed immutable snapshot."""
 
-    def load_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None = None,
-        *,
-        selected_page_uid: str | None = None,
-        selected_page_number: int | None = None,
-    ) -> None:
-        self._set_session(session, proof_service)
-        self._selected_page_uid = selected_page_uid
-        if selected_page_number is not None:
-            self._selected_page_uid = next(
-                (
-                    page.uid
-                    for page in session.page_repository.all()
-                    if page.page_number == selected_page_number
-                ),
-                selected_page_uid,
-            )
-        self._populate_page_selector()
-        self.refresh_from_session()
-
-    def set_session(
-        self,
-        session: ProjectSession,
-        proof_service: ProofSessionService | None = None,
-    ) -> None:
-        """Bind the view to an existing project session and proof service."""
-
-        self.load_session(session, proof_service)
-
-    def load_pages(
-        self,
-        session: ProjectSession,
-        *,
-        selected_page_number: int | None = None,
-    ) -> None:
-        """Load a migrated session; legacy page collections are not accepted."""
-
-        self.load_session(
-            session,
-            selected_page_number=selected_page_number,
-        )
-
-    def merge_pages(self, session: ProjectSession) -> None:
-        """Refresh the existing session projection without importing UI state."""
-
+        if workspace is not None and not isinstance(workspace, ProofWorkspaceView):
+            raise TypeError("HProofPanel requires ProofWorkspaceView or None")
         selected = self._selected_page_uid
-        self.load_session(session, selected_page_uid=selected)
-
-    def clear_session(self) -> None:
-        self._session = None
-        self._proof_service = None
-        self._contexts = ()
-        self._rows = ()
-        self._visible_rows = ()
+        self._workspace = workspace
         self._dirty_text.clear()
-        self._selected_page_uid = None
-        self._active_key = None
+        pages = self._pages()
+        page_uids = {page.page_uid for page in pages}
+        self._selected_page_uid = selected if selected in page_uids else (pages[0].page_uid if pages else None)
         self._populate_page_selector()
+        self._build_rows()
         self._render_rows()
-        self._status.setText("暂无可校对内容")
+
+    def clear_workspace(self) -> None:
+        self.set_workspace(None)
+
+    def _pages(self) -> tuple[ProofPageView, ...]:
+        if self._workspace is None:
+            return ()
+        return tuple(sorted(self._workspace.pages, key=lambda item: (item.page_number, item.page_uid)))
 
     def _populate_page_selector(self) -> None:
-        pages = () if self._session is None else tuple(sorted(
-            self._session.page_repository.all(),
-            key=lambda item: (item.page_number, item.uid),
-        ))
-        self._page_directory.set_pages(pages)
-        if self._selected_page_uid and any(
-            page.uid == self._selected_page_uid for page in pages
-        ):
-            self._page_directory.set_current_uid(self._selected_page_uid)
+        self._page_directory.blockSignals(True)
+        self._page_directory.clear()
+        pages = self._pages()
+        for page in pages:
+            item = QListWidgetItem(f"第 {page.page_number} 页")
+            item.setData(Qt.ItemDataRole.UserRole, page.page_uid)
+            self._page_directory.addItem(item)
+        current = next(
+            (index for index, page in enumerate(pages) if page.page_uid == self._selected_page_uid),
+            -1,
+        )
+        if current >= 0:
+            self._page_directory.setCurrentRow(current)
+        self._page_directory.blockSignals(False)
+        self._scope.setText(
+            f"第 {pages[current].page_number} 页" if current >= 0 else "全部页面"
+        )
 
-    def _on_page_directory_selected(self, page_uid: str) -> None:
-        self._selected_page_uid = page_uid
+    def _on_page_directory_selected(self, current: QListWidgetItem | None, _previous) -> None:
+        self._selected_page_uid = (
+            current.data(Qt.ItemDataRole.UserRole) if current is not None else None
+        )
         page = next(
-            (item for item in self._session.page_repository.all() if item.uid == page_uid),
+            (item for item in self._pages() if item.page_uid == self._selected_page_uid),
             None,
-        ) if self._session is not None else None
-        self._scope.setText(f"第 {page.page_number} 页" if page is not None else "当前页面")
+        )
+        self._scope.setText(f"第 {page.page_number} 页" if page is not None else "全部页面")
         self._render_rows()
 
-    def refresh_from_session(self) -> None:
-        if self._session is None or self._proof_service is None:
-            self._contexts = ()
+    def _build_rows(self) -> None:
+        if self._workspace is None:
             self._rows = ()
-            self._visible_rows = ()
-            self._render_rows()
-            self._status.setText("暂无可校对内容")
             return
-        try:
-            contexts = build_proof_contexts(self._session, self._proof_service)
-        except (KeyError, ValueError, RuntimeError) as exc:
-            self._contexts = ()
-            self._rows = ()
-            self._visible_rows = ()
-            self._render_rows()
-            self._status.setText(f"无法加载校对内容：{exc}")
-            return
-        rows = [
-            _row_for_unit(context, unit, self._proof_service)
-            for context in contexts
-            for unit in context.state.text_units
-        ]
-        self._contexts = contexts
+        pages = {page.page_uid: page for page in self._workspace.pages}
+        rows: list[_ProofRow] = []
+        for state in self._workspace.proof_states:
+            page = pages.get(state.page_uid)
+            if page is None:
+                raise ValueError(f"proof state {state.proof_uid!r} has no page view")
+            units = {unit.text_unit_uid: unit for unit in state.text_units}
+            for line in state.lines:
+                unit = units.get(line.text_unit_uid)
+                if unit is None:
+                    raise ValueError(f"proof line {line.text_unit_uid!r} has no text unit view")
+                rows.append(
+                    _ProofRow(
+                        key=(state.proof_uid, unit.text_unit_uid),
+                        page=page,
+                        state=state,
+                        unit=unit,
+                        line=line,
+                        entries=build_char_views(line, page),
+                    )
+                )
         self._rows = tuple(
-            sorted(rows, key=lambda row: (row.page.page_number, row.state.uid, row.unit.order, row.unit.uid))
+            sorted(rows, key=lambda row: (row.page.page_number, row.state.proof_uid, row.unit.order, row.unit.text_unit_uid))
         )
-        self._dirty_text.clear()
+
+    def refresh_view(self) -> None:
+        """Repaint the current snapshot without querying or mutating state."""
+
+        self._build_rows()
         self._render_rows()
-        self._status.setText(
-            f"{len(self._rows)} 行 · "
-            f"{sum(len(row.unit.text) for row in self._rows)} 字符"
-        )
 
     def _render_rows(self) -> None:
         self._visible_rows = tuple(
             row
             for row in self._rows
-            if self._selected_page_uid is None or row.page.uid == self._selected_page_uid
+            if self._selected_page_uid is None or row.page.page_uid == self._selected_page_uid
         )
         self._row_widgets.clear()
         while self._rows_layout.count():
@@ -673,33 +564,47 @@ class HProofPanel(QWidget):
             widget.editor.textChanged.connect(
                 lambda row=row, widget=widget: self._on_text_changed(row, widget)
             )
-            widget.commit_requested.connect(lambda row=row, widget=widget: self._commit_row(row, widget))
-            widget.cancel_requested.connect(lambda row=row, widget=widget: self._cancel_row(row, widget))
-            widget.navigate_requested.connect(lambda delta, row=row: self._navigate_from(row, delta))
-            widget.history_requested.connect(lambda direction, row=row: self._apply_history(row, direction))
-            widget.confirm_requested.connect(lambda row=row, widget=widget: self._confirm_row(row, widget))
-            widget.activated.connect(lambda key=row.key: self._activate_row(key))
-            self._rows_layout.addWidget(widget)
+            widget.commit_requested.connect(
+                lambda row=row, widget=widget: self._commit_row(row, widget)
+            )
+            widget.cancel_requested.connect(
+                lambda row=row, widget=widget: self._cancel_row(row, widget)
+            )
+            widget.navigate_requested.connect(
+                lambda direction, row=row: self._navigate_from(row, direction)
+            )
+            widget.history_requested.connect(
+                lambda direction, row=row: self._apply_history(row, direction)
+            )
+            widget.confirm_requested.connect(
+                lambda row=row, widget=widget: self._confirm_row(row, widget)
+            )
+            widget.activated.connect(lambda row=row: self._activate_row(row.key))
+            self._rows_layout.insertWidget(self._rows_layout.count() - 1, widget)
             self._row_widgets[row.key] = widget
-        self._rows_layout.addStretch(1)
-        visible_keys = {row.key for row in self._visible_rows}
-        if self._active_key not in visible_keys:
-            self._active_key = self._visible_rows[0].key if self._visible_rows else None
-        self._activate_row(self._active_key)
+        if self._visible_rows:
+            active_key = self._active_key if self._active_key in self._row_widgets else self._visible_rows[0].key
+            self._activate_row(active_key)
+        else:
+            self._active_key = None
+        self._status.setText(
+            "暂无可校对内容"
+            if not self._visible_rows
+            else f"{len(self._visible_rows)} 行 · {sum(len(row.unit.text) for row in self._visible_rows)} 字符"
+        )
 
     def _activate_row(self, key: tuple[str, str] | None) -> None:
         self._active_key = key
-        visible_keys = [row.key for row in self._visible_rows]
-        active_index = visible_keys.index(key) if key in visible_keys else -1
-        for index, row_key in enumerate(visible_keys):
-            widget = self._row_widgets[row_key]
-            if index == active_index:
-                depth = "active"
-            elif active_index >= 0 and abs(index - active_index) == 1:
-                depth = "near"
-            else:
-                depth = "far"
-            widget.set_focus_depth(depth)
+        index = next(
+            (index for index, row in enumerate(self._visible_rows) if row.key == key),
+            -1,
+        )
+        for row_index, row in enumerate(self._visible_rows):
+            widget = self._row_widgets.get(row.key)
+            if widget is None:
+                continue
+            distance = abs(row_index - index) if index >= 0 else 99
+            widget.set_focus_depth("active" if distance == 0 else "near" if distance == 1 else "far")
 
     def _on_text_changed(self, row: _ProofRow, widget: _ProofRowWidget) -> None:
         text = widget.editor.toPlainText()
@@ -707,153 +612,138 @@ class HProofPanel(QWidget):
             self._dirty_text.pop(row.key, None)
         else:
             self._dirty_text[row.key] = text
+        self._activate_row(row.key)
+
+    def _emit(self, command: ProofEditCommand) -> None:
+        self.proof_edit_requested.emit(command)
+
+    def _replace_command(
+        self,
+        row: _ProofRow,
+        text: str,
+        *,
+        status: str = "modified",
+    ) -> ProofEditCommand:
+        return ProofEditCommand(
+            proof_uid=row.state.proof_uid,
+            op="replace_text",
+            expected_revision=row.state.revision,
+            expected_fingerprint=row.state.fingerprint,
+            text_unit_uid=row.unit.text_unit_uid,
+            text=text,
+            status=status,
+            expected_unit_revision=row.unit.revision,
+            expected_unit_fingerprint=row.unit.fingerprint,
+        )
 
     def _apply_history(self, row: _ProofRow, direction: int) -> None:
-        service = self._proof_service
-        if service is None:
-            return
-        try:
-            state = service.get_state(row.state.uid)
-            operation = service.undo if direction < 0 else service.redo
-            result = operation(
-                state.uid,
-                expected_revision=state.revision,
-                expected_fingerprint=state.fingerprint,
+        if direction not in {-1, 1}:
+            raise ValueError("history direction must be -1 or 1")
+        self._emit(
+            ProofEditCommand(
+                proof_uid=row.state.proof_uid,
+                op="undo" if direction < 0 else "redo",
+                expected_revision=row.state.revision,
+                expected_fingerprint=row.state.fingerprint,
             )
-        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"撤销冲突：{exc}")
-            return
-        if not result.changed:
-            self._status.setText("没有可撤销的校对操作" if direction < 0 else "没有可重做的校对操作")
-            return
-        self._publish_result(result)
-        self.refresh_from_session()
+        )
 
     def _commit_row(self, row: _ProofRow, widget: _ProofRowWidget) -> bool:
         text = widget.editor.toPlainText()
         if text == row.unit.text:
             self._dirty_text.pop(row.key, None)
             return False
-        service = self._proof_service
-        if service is None:
-            return False
-        try:
-            result = service.replace_text(
-                row.state.uid,
-                row.unit.uid,
-                text,
-                expected_revision=row.snapshot.state_revision,
-                expected_fingerprint=row.snapshot.state_fingerprint,
-                expected_unit_revision=row.snapshot.text_unit_revision,
-                expected_unit_fingerprint=row.snapshot.text_unit_fingerprint,
-            )
-        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"编辑冲突：{exc}")
-            return False
+        self._emit(self._replace_command(row, text))
         self._dirty_text.pop(row.key, None)
-        self._publish_result(result)
-        self.refresh_from_session()
-        return result.changed
+        widget.set_status("modified")
+        return True
 
     def _save_all(self) -> bool:
-        if not self._dirty_text or self._proof_service is None:
-            return True
-        rows_by_key = {row.key: row for row in self._visible_rows}
-        grouped: dict[str, list[_ProofRow]] = defaultdict(list)
-        for key in self._dirty_text:
-            row = rows_by_key.get(key)
-            if row is not None:
-                grouped[row.state.uid].append(row)
-        changed = False
-        for state_uid, rows in grouped.items():
-            state = rows[0].state
-            replacements = {
-                row.unit.uid: self._dirty_text[row.key] for row in rows
-            }
-            try:
-                result = self._proof_service.replace_text_units(
-                    state_uid,
-                    replacements,
+        grouped: dict[str, list[tuple[_ProofRow, str]]] = defaultdict(list)
+        rows = {row.key: row for row in self._rows}
+        for key, text in tuple(self._dirty_text.items()):
+            row = rows.get(key)
+            if row is not None and text != row.unit.text:
+                grouped[row.state.proof_uid].append((row, text))
+        emitted = False
+        for proof_uid, values in grouped.items():
+            state = values[0][0].state
+            replacements = tuple(
+                (row.unit.text_unit_uid, text)
+                for row, text in sorted(values, key=lambda item: (item[0].unit.order, item[0].unit.text_unit_uid))
+            )
+            self._emit(
+                ProofEditCommand(
+                    proof_uid=proof_uid,
+                    op="replace_many",
                     expected_revision=state.revision,
                     expected_fingerprint=state.fingerprint,
-                    expected_unit_revisions={
-                        row.unit.uid: row.snapshot.text_unit_revision for row in rows
-                    },
-                    expected_unit_fingerprints={
-                        row.unit.uid: row.snapshot.text_unit_fingerprint for row in rows
-                    },
+                    replacements=replacements,
                 )
-            except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-                self._status.setText(f"保存冲突：{exc}")
-                return False
-            changed = changed or result.changed
-            self._publish_result(result)
-        self._dirty_text.clear()
-        if changed:
-            self.refresh_from_session()
-        return True
+            )
+            emitted = True
+        if emitted:
+            self._dirty_text.clear()
+        return emitted
 
     def save(self) -> bool:
         return self._save_all()
-
-    def _publish_result(self, result: ProofSessionResult) -> None:
-        if result.changed:
-            self.proof_changed.emit(result)
 
     def _find_row(self, key: tuple[str, str]) -> _ProofRow | None:
         return next((row for row in self._rows if row.key == key), None)
 
     def _confirm_row(self, row: _ProofRow, widget: _ProofRowWidget) -> None:
-        self._commit_row(row, widget)
-        current = self._find_row(row.key)
-        if current is None or self._proof_service is None:
-            return
-        try:
-            result = self._proof_service.set_status(
-                current.state.uid,
-                current.unit.uid,
-                "checked",
-                expected_revision=current.snapshot.state_revision,
-                expected_fingerprint=current.snapshot.state_fingerprint,
-                expected_unit_revision=current.snapshot.text_unit_revision,
-                expected_unit_fingerprint=current.snapshot.text_unit_fingerprint,
+        text = widget.editor.toPlainText()
+        if text != row.unit.text:
+            self._emit(self._replace_command(row, text, status="checked"))
+            self._dirty_text.pop(row.key, None)
+        else:
+            self._emit(
+                ProofEditCommand(
+                    proof_uid=row.state.proof_uid,
+                    op="set_status",
+                    expected_revision=row.state.revision,
+                    expected_fingerprint=row.state.fingerprint,
+                    text_unit_uid=row.unit.text_unit_uid,
+                    status="checked",
+                    expected_unit_revision=row.unit.revision,
+                    expected_unit_fingerprint=row.unit.fingerprint,
+                )
             )
-        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
-            self._status.setText(f"状态冲突：{exc}")
-            return
-        self._publish_result(result)
-        self.refresh_from_session()
+        widget.set_status("checked")
 
     def _cancel_row(self, row: _ProofRow, widget: _ProofRowWidget) -> None:
         self._dirty_text.pop(row.key, None)
         widget.editor.blockSignals(True)
         widget.editor.setPlainText(row.unit.text)
         widget.editor.blockSignals(False)
+        widget.set_status(row.unit.status)
 
     def _navigate_from(self, row: _ProofRow, delta: int) -> None:
-        self._commit_row(row, self._row_widgets[row.key])
+        widget = self._row_widgets.get(row.key)
+        if widget is not None:
+            self._commit_row(row, widget)
         self._focus_row(delta, current_key=row.key)
 
-    def _focus_row(self, delta: int, *, current_key: tuple[str, str] | None = None) -> None:
+    def _focus_row(
+        self,
+        delta: int,
+        *,
+        current_key: tuple[str, str] | None = None,
+    ) -> None:
         if not self._visible_rows:
             return
-        key = current_key
-        if key is None:
-            focused = next(
-                (item.row.key for item in self._row_widgets.values() if item.editor.hasFocus()),
-                self._visible_rows[0].key,
-            )
-            key = focused
-        current_index = next(
+        key = current_key or self._active_key or self._visible_rows[0].key
+        current = next(
             (index for index, row in enumerate(self._visible_rows) if row.key == key),
             0,
         )
-        target = max(0, min(len(self._visible_rows) - 1, current_index + delta))
-        widget = self._row_widgets.get(self._visible_rows[target].key)
+        target = max(0, min(len(self._visible_rows) - 1, current + delta))
+        target_key = self._visible_rows[target].key
+        self._activate_row(target_key)
+        widget = self._row_widgets.get(target_key)
         if widget is not None:
-            self._activate_row(self._visible_rows[target].key)
-            widget.editor.setFocus(Qt.FocusReason.OtherFocusReason)
-            widget.editor.selectAll()
+            widget.editor.setFocus()
 
     def closeEvent(self, event: QEvent) -> None:  # type: ignore[override]
         self._save_all()

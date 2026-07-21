@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .export_service import capture_export_snapshot
-from .import_service import ImportFailure, ImportResult, ImportService
+from .import_service import ImportFailure, ImportJobRequest, ImportResult, ImportService
 from .layout_analysis_service import (
     LayoutAnalysisCommit,
     LayoutPageJobRequest,
@@ -24,6 +24,7 @@ __all__ = [
     "BoundProject",
     "CharOcrEngine",
     "ImportFailure",
+    "ImportJobRequest",
     "ImportResult",
     "ImportService",
     "LayoutAnalysisCommit",

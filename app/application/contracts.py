@@ -16,6 +16,26 @@ from app.models.layout_snapshot import LayoutBlockSnapshot, LayoutSnapshot
 from app.models.project_session import PageRecord
 
 
+@dataclass(frozen=True, slots=True)
+class ImportFailureView:
+    source_path: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImportCompletionView:
+    page_uids: tuple[str, ...]
+    failures: tuple[ImportFailureView, ...]
+
+    @property
+    def success_count(self) -> int:
+        return len(self.page_uids)
+
+    @property
+    def failure_count(self) -> int:
+        return len(self.failures)
+
+
 def _stable_uid(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError(f"{field_name} must be a non-empty stable UID")

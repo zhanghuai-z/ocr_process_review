@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.ocr_currentness import current_ocr_observation
 from app.models.project_session import PageRecord, ProjectSession, RecordNotFoundError
 
 
@@ -72,21 +73,17 @@ def _has_layout(session: ProjectSession, page_uid: str) -> bool:
 
 
 def _has_ocr(session: ProjectSession, page_uid: str) -> bool:
-    try:
-        session.ocr_observation_repository.get_active_pointer(page_uid)
-    except RecordNotFoundError:
-        return False
-    return True
+    return current_ocr_observation(session, page_uid) is not None
 
 
 def active_line_count(session: ProjectSession) -> int:
     """Count lines in the active OCR batches without projecting runtime objects."""
     _require_session(session)
-    ocr = session.ocr_observation_repository
     total = 0
-    for pointer in ocr.all_active_pointers():
-        batch = ocr.get_batch(pointer.batch_uid, fingerprint=pointer.batch_fingerprint)
-        total += len(batch.line_uids)
+    for page in session.page_repository.all():
+        observation = current_ocr_observation(session, page.uid)
+        if observation is not None:
+            total += len(observation.batch.line_uids)
     return total
 
 

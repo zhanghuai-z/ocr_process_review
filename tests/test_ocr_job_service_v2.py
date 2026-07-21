@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import app.services.ocr_job_service as module
+from app.application.ocr_workspace import build_ocr_workspace_view
 from app.core.layout_scope import layout_snapshot_fingerprint
 from app.models.charocr_execution import (
     CharOcrAtomObservation,
@@ -119,6 +120,12 @@ def test_page_job_appends_batch_switches_pointer_and_preserves_proof(monkeypatch
     binding = session.binding_repository.get("ocrbind_block-1")
     assert binding.source_uid == "block-1"
     assert binding.target_uid == session.ocr_observation_repository.all_regions()[0].uid
+    workspace = build_ocr_workspace_view(session)
+    assert workspace.line_count == 1
+    assert workspace.pages[0].batch_uid == commit.batch_uid
+    assert workspace.pages[0].regions[0].block_uid == "block-1"
+    assert workspace.pages[0].regions[0].lines[0].text == "machine"
+    assert workspace.pages[0].regions[0].lines[0].atoms[0].text == "machine"
 
 
 def test_first_page_ocr_creates_editable_proof_state_with_exact_alignment(monkeypatch) -> None:
@@ -163,6 +170,7 @@ def test_first_page_ocr_creates_editable_proof_state_with_exact_alignment(monkey
 def test_first_page_ocr_is_visible_in_both_proof_panels(monkeypatch) -> None:
     from PySide6.QtWidgets import QApplication
 
+    from app.application.proof_workspace import build_proof_workspace_view
     from app.ui.proof.h_proof import HProofPanel
     from app.ui.proof.v_proof import VProofPanel
 
@@ -181,8 +189,9 @@ def test_first_page_ocr_is_visible_in_both_proof_panels(monkeypatch) -> None:
     service = OcrJobService(prepass_client=_Prepass(), vl_client=object(), engine=_Engine())
 
     service.run_page(session, "page-1", np.zeros((80, 100, 3), dtype=np.uint8))
-    horizontal = HProofPanel(session=session)
-    vertical = VProofPanel(session=session)
+    workspace = build_proof_workspace_view(session)
+    horizontal = HProofPanel(workspace=workspace)
+    vertical = VProofPanel(workspace=workspace)
 
     assert [row.unit.text for row in horizontal._rows] == ["machine"]
     assert vertical._entries
@@ -203,7 +212,7 @@ def test_observation_batch_validation_is_all_or_nothing() -> None:
     )
     records = module._observation_records(
         project_uid="project-1", page_uid="page-1", engine_id="test",
-        layout_fingerprint="layout", result=result,
+            layout_fingerprint="layout", page_fingerprint="page", result=result,
     )
     bad_batch = records.batch
     invalid_batch = type(bad_batch)(
@@ -235,7 +244,7 @@ def test_page_adoption_rolls_back_observation_pointer_and_binding_on_proof_failu
     )
     records = module._observation_records(
         project_uid="project-1", page_uid="page-1", engine_id="test",
-        layout_fingerprint="layout", result=result,
+        layout_fingerprint="layout", page_fingerprint="page", result=result,
     )
     pointer = OcrActivePointer(
         project_uid="project-1", uid="ocrptr_page-1", scope_uid="page-1",
