@@ -137,7 +137,7 @@ def test_layout_analysis_is_page_scoped_and_keeps_raw_vendor_json_append_only(tm
     assert fake.calls[1][2] == "page-2"
 
 
-def test_error_response_is_recorded_as_vendor_fact_but_cannot_be_adopted(tmp_path: Path):
+def test_error_response_does_not_partially_persist_vendor_fact(tmp_path: Path):
     session = ProjectSession(ProjectRecord("project-error"))
     page = _page(session, tmp_path / "page.bin", uid="page-1", page_number=1)
     response = {
@@ -150,9 +150,7 @@ def test_error_response_is_recorded_as_vendor_fact_but_cannot_be_adopted(tmp_pat
     with pytest.raises(LayoutAnalysisError, match="invalid image"):
         service.analyze_page(session, page.uid, source_run_id="failed-run")
 
-    artifacts = session.paddle_artifact_repository.all()
-    assert len(artifacts) == 1
-    assert json.loads(artifacts[0].payload_json) == response
+    assert session.paddle_artifact_repository.all() == ()
     with pytest.raises(RecordNotFoundError):
         session.layout_repository.get(page.uid)
 

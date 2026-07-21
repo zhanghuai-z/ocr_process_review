@@ -46,6 +46,32 @@ class LayoutAnalysisCommit:
         return self.snapshot.revision
 
 
+@dataclass(frozen=True, slots=True)
+class LayoutPageJobRequest:
+    """Immutable input captured before a layout worker starts."""
+
+    project_uid: str
+    page_uid: str
+    page_fingerprint: str
+    image_hash: str
+    page_width: int
+    page_height: int
+    filename: str
+    image_bytes: bytes
+    expected_revision: int
+    expected_fingerprint: str | None
+    source_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class LayoutPageJobResult:
+    """Uncommitted vendor fact and normalized layout produced by a worker."""
+
+    request: LayoutPageJobRequest
+    artifact: PaddleArtifact
+    snapshot: LayoutSnapshot
+
+
 class LayoutAnalysisService:
     """Acquire Paddle facts and adopt them through the session repositories."""
 
@@ -72,6 +98,25 @@ class LayoutAnalysisService:
         source_run_id: str | None = None,
     ) -> LayoutAnalysisCommit:
         """Run Paddle for one page and adopt the next layout revision via CAS."""
+        request = self.prepare_page(
+            session,
+            page_uid,
+            expected_revision=expected_revision,
+            expected_fingerprint=expected_fingerprint,
+            source_run_id=source_run_id,
+        )
+        return self.commit_page(session, self.execute_page(request))
+
+    def prepare_page(
+        self,
+        session: ProjectSession,
+        page_uid: str,
+        *,
+        expected_revision: int = 0,
+        expected_fingerprint: str | None = None,
+        source_run_id: str | None = None,
+    ) -> LayoutPageJobRequest:
+        """Capture the exact page and CAS state required by a worker."""
         page = session.page_repository.get(page_uid)
         self._check_layout_cas(
             session,
@@ -86,41 +131,81 @@ class LayoutAnalysisService:
         if not image_bytes:
             raise ValueError(f"page image is empty: {image_path}")
 
-        run_id = source_run_id or f"layout_{new_ulid()}"
-        response = self._client.analyze_image_bytes(
-            image_bytes,
-            filename=image_path.name or "page.png",
+        return LayoutPageJobRequest(
+            project_uid=session.project_uid,
             page_uid=page.uid,
-            source_run_id=run_id,
+            page_fingerprint=page.fingerprint,
+            image_hash=page.image_hash,
+            page_width=page.width,
+            page_height=page.height,
+            filename=image_path.name or "page.png",
+            image_bytes=image_bytes,
+            expected_revision=expected_revision,
+            expected_fingerprint=expected_fingerprint,
+            source_run_id=source_run_id or f"layout_{new_ulid()}",
+        )
+
+    def execute_page(self, request: LayoutPageJobRequest) -> LayoutPageJobResult:
+        """Call Paddle and normalize its response without mutating a session."""
+        if not isinstance(request, LayoutPageJobRequest):
+            raise TypeError("layout execution requires LayoutPageJobRequest")
+        response = self._client.analyze_image_bytes(
+            request.image_bytes,
+            filename=request.filename,
+            page_uid=request.page_uid,
+            source_run_id=request.source_run_id,
         )
         if not isinstance(response, Mapping):
             raise TypeError("Paddle layout client must return a response object")
 
-        artifact = self._append_artifact(
-            session,
-            page_uid=page.uid,
-            image_hash=page.image_hash,
-            source_run_id=run_id,
+        artifact = self._build_artifact(
+            project_uid=request.project_uid,
+            page_uid=request.page_uid,
+            image_hash=request.image_hash,
+            source_run_id=request.source_run_id,
             source_engine=self._source_engine,
             response=response,
         )
         snapshot = self._analyzer.analyze(
             response,
-            page_uid=page.uid,
-            page_width=page.width,
-            page_height=page.height,
+            page_uid=request.page_uid,
+            page_width=request.page_width,
+            page_height=request.page_height,
             artifact_uid=artifact.uid,
             source_run_id=artifact.source_run_id,
             source_engine=artifact.source_engine,
-            revision=expected_revision + 1,
+            revision=request.expected_revision + 1,
         )
-        adopted = self.adopt_snapshot(
-            session,
-            snapshot,
-            expected_revision=expected_revision,
-            expected_fingerprint=expected_fingerprint,
+        return LayoutPageJobResult(request=request, artifact=artifact, snapshot=snapshot)
+
+    def commit_page(
+        self,
+        session: ProjectSession,
+        result: LayoutPageJobResult,
+    ) -> LayoutAnalysisCommit:
+        """CAS-adopt one completed worker result on the application thread."""
+        if not isinstance(result, LayoutPageJobResult):
+            raise TypeError("layout commit requires LayoutPageJobResult")
+        request = result.request
+        if session.project_uid != request.project_uid:
+            raise RuntimeError("layout result belongs to another project session")
+        page = session.page_repository.get(
+            request.page_uid,
+            fingerprint=request.page_fingerprint,
         )
-        return LayoutAnalysisCommit(page_uid=page.uid, artifact=artifact, snapshot=adopted)
+        if page.image_hash != request.image_hash:
+            raise RevisionConflictError("layout result belongs to a stale page image")
+        session.adopt_layout_analysis(
+            artifact=result.artifact,
+            snapshot=result.snapshot,
+            expected_revision=request.expected_revision,
+            expected_fingerprint=request.expected_fingerprint,
+        )
+        return LayoutAnalysisCommit(
+            page_uid=page.uid,
+            artifact=result.artifact,
+            snapshot=result.snapshot,
+        )
 
     def adopt_snapshot(
         self,
@@ -250,9 +335,9 @@ class LayoutAnalysisService:
             )
 
     @staticmethod
-    def _append_artifact(
-        session: ProjectSession,
+    def _build_artifact(
         *,
+        project_uid: str,
         page_uid: str,
         image_hash: str,
         source_run_id: str,
@@ -270,7 +355,7 @@ class LayoutAnalysisService:
         except (TypeError, ValueError) as exc:
             raise ValueError("Paddle response cannot be persisted as JSON") from exc
         artifact = PaddleArtifact(
-            project_uid=session.project_uid,
+            project_uid=project_uid,
             uid=f"paddle_artifact_{new_ulid()}",
             page_uid=page_uid,
             source_engine=source_engine,
@@ -278,11 +363,13 @@ class LayoutAnalysisService:
             image_hash=image_hash,
             payload_json=payload_json,
         )
-        return session.paddle_artifact_repository.append(artifact)
+        return artifact
 
 
 __all__ = [
     "LayoutAnalysisCommit",
+    "LayoutPageJobRequest",
+    "LayoutPageJobResult",
     "LayoutAnalysisService",
     "PaddleLayoutClient",
 ]

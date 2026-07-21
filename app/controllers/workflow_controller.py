@@ -29,8 +29,12 @@ from app.services import (
     ImportService,
     LayoutAnalysisCommit,
     LayoutAnalysisService,
+    LayoutPageJobRequest,
+    LayoutPageJobResult,
     OcrJobService,
     OcrPageCommit,
+    OcrPageJobRequest,
+    OcrPageJobResult,
     ProjectFileService,
     capture_export_snapshot,
 )
@@ -68,7 +72,7 @@ class _ImportServiceWorker(QThread):
 
 
 class _LayoutServiceWorker(QThread):
-    """Run LayoutAnalysisService and emit only immutable layout commits."""
+    """Execute immutable layout requests without access to ProjectSession."""
 
     committed = Signal(object)
     progress = Signal(int, int)
@@ -79,31 +83,24 @@ class _LayoutServiceWorker(QThread):
     def __init__(
         self,
         service: LayoutAnalysisService,
-        session: ProjectSession,
-        page_uids: tuple[str, ...],
-        expected_revisions: Mapping[str, int],
+        requests: tuple[LayoutPageJobRequest, ...],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self._session = session
-        self._page_uids = page_uids
-        self._expected_revisions = dict(expected_revisions)
+        self._requests = requests
 
     def run(self) -> None:
         try:
-            def on_progress(current: int, total: int, page_uid: str) -> None:
+            results: list[LayoutPageJobResult] = []
+            total = len(self._requests)
+            for index, request in enumerate(self._requests):
                 if self.isInterruptionRequested():
                     raise _TaskCancelled
-                self.progress.emit(current, total)
-                self.stage.emit(page_uid, current, total, "版面分析")
-
-            commits = self._service.analyze_pages(
-                self._session,
-                self._page_uids,
-                expected_revisions=self._expected_revisions,
-                progress_callback=on_progress,
-            )
+                self.stage.emit(request.page_uid, index, total, "版面分析")
+                results.append(self._service.execute_page(request))
+                self.progress.emit(index + 1, total)
+                self.stage.emit(request.page_uid, index + 1, total, "版面分析")
             if self.isInterruptionRequested():
                 self.cancelled.emit()
                 return
@@ -113,36 +110,36 @@ class _LayoutServiceWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.committed.emit(tuple(commits))
+        self.committed.emit(tuple(results))
 
 
 class _OcrServiceWorker(QThread):
-    """Load page pixels and invoke OcrJobService for each stable page UID."""
+    """Execute immutable OCR requests without access to ProjectSession."""
 
     committed = Signal(object)
     progress = Signal(object)
     cancelled = Signal()
     failed = Signal(str)
+    page_failed = Signal(str, str)
 
     def __init__(
         self,
         service: OcrJobService,
-        session: ProjectSession,
-        page_uids: tuple[str, ...],
+        requests: tuple[OcrPageJobRequest, ...],
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self._session = session
-        self._page_uids = page_uids
+        self._requests = requests
 
     def run(self) -> None:
-        commits: list[OcrPageCommit] = []
-        total = len(self._page_uids)
+        results: list[OcrPageJobResult] = []
+        total = len(self._requests)
         try:
-            for index, page_uid in enumerate(self._page_uids):
+            for index, request in enumerate(self._requests):
                 if self.isInterruptionRequested():
                     raise _TaskCancelled
+                page_uid = request.page.uid
                 self.progress.emit(WorkflowProgressState(
                     phase="ocr",
                     current=0,
@@ -152,9 +149,6 @@ class _OcrServiceWorker(QThread):
                     message="准备识别",
                     page_uid=page_uid,
                 ))
-                page = self._session.page_repository.get(page_uid)
-                image = _read_page_image(page)
-
                 def on_progress(current: int, block_total: int, message: str) -> None:
                     if self.isInterruptionRequested():
                         raise _TaskCancelled
@@ -168,15 +162,20 @@ class _OcrServiceWorker(QThread):
                         page_uid=page_uid,
                     ))
 
-                commit = self._service.run_page(
-                    self._session,
-                    page_uid,
-                    image,
-                    progress_callback=on_progress,
-                )
-                if not isinstance(commit, OcrPageCommit):
-                    raise TypeError("OcrJobService must return OcrPageCommit")
-                commits.append(commit)
+                try:
+                    result = self._service.execute_page(
+                        request,
+                        progress_callback=on_progress,
+                    )
+                except _TaskCancelled:
+                    raise
+                except Exception as exc:
+                    self.page_failed.emit(page_uid, str(exc))
+                    continue
+                if not isinstance(result, OcrPageJobResult):
+                    self.page_failed.emit(page_uid, "OcrJobService returned an invalid result")
+                    continue
+                results.append(result)
                 self.progress.emit(WorkflowProgressState(
                     phase="ocr",
                     current=1,
@@ -192,20 +191,7 @@ class _OcrServiceWorker(QThread):
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.committed.emit(tuple(commits))
-
-
-def _read_page_image(page: PageRecord):
-    """Read one immutable page record into the service's pixel contract."""
-    import cv2
-
-    path = Path(page.cache_image_path or page.image_path)
-    if not path.is_file():
-        raise FileNotFoundError(f"page image is missing: {path}")
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    if image is None or image.size == 0:
-        raise ValueError(f"page image cannot be decoded: {path}")
-    return image
+        self.committed.emit(tuple(results))
 
 
 class WorkflowController(QObject):
@@ -533,16 +519,19 @@ class WorkflowController(QObject):
         )
         if not selected:
             raise ValueError("layout analysis requires at least one page UID")
-        expected = {
-            page_uid: self._layout_revision(page_uid)
-            for page_uid in selected
-        }
         service = self._layout_analysis_service or self._build_default_layout_analysis_service()
+        self._layout_analysis_service = service
+        requests = tuple(
+            service.prepare_page(
+                self._session,
+                page_uid,
+                expected_revision=self._layout_revision(page_uid),
+            )
+            for page_uid in selected
+        )
         worker = _LayoutServiceWorker(
             service,
-            self._session,
-            selected,
-            expected,
+            requests,
             self,
         )
         self._layout_worker = worker
@@ -597,11 +586,22 @@ class WorkflowController(QObject):
     def _on_layout_stage(self, page_uid: str, current: int, total: int, message: str) -> None:
         self.layout_stage.emit(page_uid, current, total, message)
 
-    def _on_layout_committed(self, commits: object) -> None:
-        if not isinstance(commits, tuple) or any(
-            not isinstance(item, LayoutAnalysisCommit) for item in commits
+    def _on_layout_committed(self, results: object) -> None:
+        if not isinstance(results, tuple) or any(
+            not isinstance(item, LayoutPageJobResult) for item in results
         ):
-            self._on_worker_failed("LayoutAnalysisService returned invalid commits")
+            self._on_worker_failed("LayoutAnalysisService returned invalid job results")
+            return
+        if self._session is None or self._layout_analysis_service is None:
+            self._on_worker_failed("layout results have no active application context")
+            return
+        try:
+            commits = tuple(
+                self._layout_analysis_service.commit_page(self._session, result)
+                for result in results
+            )
+        except Exception as exc:
+            self._on_worker_failed(str(exc))
             return
         self._dirty = True
         self._set_layout_run_enabled(True)
@@ -629,12 +629,24 @@ class WorkflowController(QObject):
             if not self._has_layout(page_uid):
                 raise ValueError(f"OCR requires an adopted layout for page {page_uid!r}")
         service = self._ocr_job_service or self._build_default_ocr_job_service()
-        worker = _OcrServiceWorker(service, self._session, selected, self)
+        self._ocr_job_service = service
+        requests: list[OcrPageJobRequest] = []
+        for page_uid in selected:
+            try:
+                requests.append(service.prepare_page(self._session, page_uid))
+            except Exception as exc:
+                self.worker_error.emit(f"page {page_uid}: {exc}")
+        if not requests:
+            raise RuntimeError("OCR has no page that can be prepared")
+        worker = _OcrServiceWorker(service, tuple(requests), self)
         self._ocr_worker = worker
         worker.progress.connect(self._on_ocr_progress)
         worker.committed.connect(self._on_ocr_committed)
         worker.cancelled.connect(self._on_ocr_cancelled)
         worker.failed.connect(self._on_worker_failed)
+        worker.page_failed.connect(
+            lambda page_uid, message: self.worker_error.emit(f"page {page_uid}: {message}")
+        )
         worker.finished.connect(lambda: self._clear_worker("_ocr_worker", worker))
         self._emit_view_state()
         worker.start()
@@ -647,14 +659,26 @@ class WorkflowController(QObject):
         self.ocr_progress.emit(progress)
         self.progress_state_changed.emit(progress)
 
-    def _on_ocr_committed(self, commits: object) -> None:
-        if not isinstance(commits, tuple) or any(
-            not isinstance(item, OcrPageCommit) for item in commits
+    def _on_ocr_committed(self, results: object) -> None:
+        if not isinstance(results, tuple) or any(
+            not isinstance(item, OcrPageJobResult) for item in results
         ):
-            self._on_worker_failed("OcrJobService returned invalid commits")
+            self._on_worker_failed("OcrJobService returned invalid job results")
+            return
+        if self._session is None or self._ocr_job_service is None:
+            self._on_worker_failed("OCR results have no active application context")
+            return
+        commits: list[OcrPageCommit] = []
+        for result in results:
+            try:
+                commits.append(self._ocr_job_service.commit_page(self._session, result))
+            except Exception as exc:
+                self.worker_error.emit(f"page {result.request.page.uid}: {exc}")
+        if not commits:
+            self._emit_view_state()
             return
         self._dirty = True
-        self.ocr_finished.emit(commits)
+        self.ocr_finished.emit(tuple(commits))
         self.refresh_page_gate_states()
         self._emit_view_state()
 

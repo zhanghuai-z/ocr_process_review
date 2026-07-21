@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
@@ -11,6 +12,7 @@ from app.core.ppocr_route_compiler import compile_page_routing_plan
 from app.models.charocr_execution import CharOcrPageRequest, CharOcrPageResult
 from app.models.entity_id import new_ulid
 from app.models.layout_snapshot import LayoutSnapshot
+from app.models.paddle_artifact import PaddleArtifact
 from app.models.ocr_records import (
     OcrActivePointer,
     OcrAtom,
@@ -27,7 +29,7 @@ from app.models.proof_records import (
     ProofState,
     ProofTextUnit,
 )
-from app.models.project_session import BindingRecord, ProjectSession, RecordNotFoundError
+from app.models.project_session import BindingRecord, PageRecord, ProjectSession, RecordNotFoundError
 from app.services.charocr_input_service import compile_charocr_page_request
 from app.services.ocr_routing_observation_service import acquire_routing_observation_bundle
 
@@ -54,7 +56,20 @@ class OcrPageCommit:
 
 
 @dataclass(frozen=True, slots=True)
-class _ObservationUnit:
+class OcrPageJobRequest:
+    """Immutable OCR input captured before a worker starts."""
+
+    project_uid: str
+    page: PageRecord
+    layout: LayoutSnapshot
+    artifact: PaddleArtifact
+    image_bytes: bytes
+    expected_pointer_revision: int
+    expected_pointer_fingerprint: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class OcrObservationUnit:
     run: OcrRun
     regions: tuple[OcrRegion, ...]
     lines: tuple[OcrLine, ...]
@@ -62,6 +77,14 @@ class _ObservationUnit:
     candidates: tuple[OcrCandidate, ...]
     batch: OcrBatch
     block_region_uids: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OcrPageJobResult:
+    """Uncommitted OCR observations produced by a worker."""
+
+    request: OcrPageJobRequest
+    records: OcrObservationUnit
 
 
 def _uid(prefix: str) -> str:
@@ -83,11 +106,74 @@ class OcrJobService:
         image_bgr: np.ndarray,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> OcrPageCommit:
+        request = self.prepare_page(session, page_uid, image_bgr=image_bgr)
+        result = self.execute_page(request, progress_callback=progress_callback)
+        return self.commit_page(session, result)
+
+    def prepare_page(
+        self,
+        session: ProjectSession,
+        page_uid: str,
+        *,
+        image_bgr: np.ndarray | None = None,
+    ) -> OcrPageJobRequest:
+        """Capture all authoritative OCR inputs and pointer CAS state."""
+        import cv2
+
         page = session.page_repository.get(page_uid)
         layout = session.layout_repository.get(page_uid)
         if not layout.artifact_uid:
             raise RuntimeError("OCR requires an adopted Paddle layout artifact")
         artifact = session.paddle_artifact_repository.get(layout.artifact_uid)
+        if image_bgr is None:
+            image_path = Path(page.cache_image_path or page.image_path)
+            if not image_path.is_file():
+                raise FileNotFoundError(f"page image is missing: {image_path}")
+            image_bytes = image_path.read_bytes()
+        else:
+            ok, encoded = cv2.imencode(".png", image_bgr)
+            if not ok:
+                raise ValueError("page image cannot be encoded for immutable OCR request")
+            image_bytes = encoded.tobytes()
+        if not image_bytes:
+            raise ValueError("page image is empty")
+        try:
+            current_pointer = session.ocr_observation_repository.get_active_pointer(page.uid)
+        except RecordNotFoundError:
+            expected_pointer_revision = 0
+            expected_pointer_fingerprint = None
+        else:
+            expected_pointer_revision = current_pointer.revision
+            expected_pointer_fingerprint = current_pointer.fingerprint
+        return OcrPageJobRequest(
+            project_uid=session.project_uid,
+            page=page,
+            layout=layout,
+            artifact=artifact,
+            image_bytes=image_bytes,
+            expected_pointer_revision=expected_pointer_revision,
+            expected_pointer_fingerprint=expected_pointer_fingerprint,
+        )
+
+    def execute_page(
+        self,
+        job: OcrPageJobRequest,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> OcrPageJobResult:
+        """Run routing and CharOCR without mutating ProjectSession."""
+        import cv2
+
+        if not isinstance(job, OcrPageJobRequest):
+            raise TypeError("OCR execution requires OcrPageJobRequest")
+        page = job.page
+        layout = job.layout
+        artifact = job.artifact
+        image_bgr = cv2.imdecode(
+            np.frombuffer(job.image_bytes, dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+        if image_bgr is None or image_bgr.size == 0:
+            raise ValueError("immutable OCR request image cannot be decoded")
         if progress_callback is not None:
             progress_callback(0, 0, "PP-OCRv6 行框定位")
         prepass = self._prepass_client.analyze_page(image_bgr, page_uid=page.uid)
@@ -115,8 +201,8 @@ class OcrJobService:
                 for item in routing_plan.validation_issues[:5]
             )
             raise RuntimeError(f"page OCR routing is not dispatchable: {details}")
-        request = compile_charocr_page_request(
-            project_uid=session.project_uid,
+        charocr_request = compile_charocr_page_request(
+            project_uid=job.project_uid,
             page=page,
             layout=layout,
             artifact=artifact,
@@ -124,32 +210,56 @@ class OcrJobService:
         )
         result = self._engine.recognize_page(
             image_bgr,
-            request,
+            charocr_request,
             progress_callback=progress_callback,
         )
-        if result.page_uid != page.uid or result.input_fingerprint != request.input_fingerprint:
+        if (
+            result.page_uid != page.uid
+            or result.input_fingerprint != charocr_request.input_fingerprint
+        ):
             raise RuntimeError("CharOCR result does not match its immutable request")
         batch_records = _observation_records(
-            project_uid=session.project_uid,
+            project_uid=job.project_uid,
             page_uid=page.uid,
             engine_id=self._engine.engine_id,
             layout_fingerprint=layout_snapshot_fingerprint(layout),
             result=result,
         )
+        return OcrPageJobResult(request=job, records=batch_records)
+
+    def commit_page(
+        self,
+        session: ProjectSession,
+        result: OcrPageJobResult,
+    ) -> OcrPageCommit:
+        """CAS-adopt a completed OCR result on the application thread."""
+        if not isinstance(result, OcrPageJobResult):
+            raise TypeError("OCR commit requires OcrPageJobResult")
+        job = result.request
+        if session.project_uid != job.project_uid:
+            raise RuntimeError("OCR result belongs to another project session")
+        page = session.page_repository.get(job.page.uid, fingerprint=job.page.fingerprint)
+        layout = session.layout_repository.get(page.uid, revision=job.layout.revision)
+        if layout_snapshot_fingerprint(layout) != layout_snapshot_fingerprint(job.layout):
+            raise RuntimeError("OCR result belongs to a stale layout snapshot")
+        session.paddle_artifact_repository.get(
+            job.artifact.uid,
+            fingerprint=job.artifact.fingerprint,
+        )
+        batch_records = result.records
         ocr = session.ocr_observation_repository
         batch = batch_records.batch
         run = batch_records.run
-        try:
-            current_pointer = ocr.get_active_pointer(page.uid)
-        except RecordNotFoundError:
+        if job.expected_pointer_revision == 0:
             pointer_uid = f"ocrptr_{page.uid}"
-            expected_revision = 0
-            expected_fingerprint = None
             next_revision = 1
         else:
+            current_pointer = ocr.get_active_pointer(
+                page.uid,
+                revision=job.expected_pointer_revision,
+                fingerprint=job.expected_pointer_fingerprint,
+            )
             pointer_uid = current_pointer.uid
-            expected_revision = current_pointer.revision
-            expected_fingerprint = current_pointer.fingerprint
             next_revision = current_pointer.revision + 1
         pointer = OcrActivePointer(
             project_uid=session.project_uid,
@@ -186,8 +296,8 @@ class OcrJobService:
             run=run, regions=batch_records.regions, lines=batch_records.lines,
             atoms=batch_records.atoms, candidates=batch_records.candidates,
             batch=batch, pointer=pointer,
-            expected_pointer_revision=expected_revision,
-            expected_pointer_fingerprint=expected_fingerprint,
+            expected_pointer_revision=job.expected_pointer_revision,
+            expected_pointer_fingerprint=job.expected_pointer_fingerprint,
             bindings=bindings,
             proof_states=proof_states,
             new_proof_states=new_proof_states,
@@ -275,7 +385,7 @@ def _observation_records(
     engine_id: str,
     layout_fingerprint: str,
     result: CharOcrPageResult,
-) -> _ObservationUnit:
+) -> OcrObservationUnit:
     run_uid = _uid("ocrrun")
     batch_uid = _uid("ocrbatch")
     regions: list[OcrRegion] = []
@@ -370,7 +480,7 @@ def _observation_records(
         atom_uids=tuple(item.uid for item in atoms),
         candidate_uids=tuple(item.uid for item in candidates),
     )
-    return _ObservationUnit(
+    return OcrObservationUnit(
         run=run, regions=tuple(regions), lines=tuple(lines), atoms=tuple(atoms),
         candidates=tuple(candidates), batch=batch,
         block_region_uids=tuple(block_region_uids),
@@ -444,4 +554,11 @@ def _initial_proof_state(
     )
 
 
-__all__ = ["CharOcrEngine", "OcrJobService", "OcrPageCommit"]
+__all__ = [
+    "CharOcrEngine",
+    "OcrJobService",
+    "OcrObservationUnit",
+    "OcrPageCommit",
+    "OcrPageJobRequest",
+    "OcrPageJobResult",
+]

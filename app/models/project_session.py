@@ -1227,6 +1227,40 @@ class ProjectSession:
     def table_text_repository(self) -> TableTextRepository:
         return self._table_text_repository
 
+    def adopt_layout_analysis(
+        self,
+        *,
+        artifact: PaddleArtifact,
+        snapshot: LayoutSnapshot,
+        expected_revision: int,
+        expected_fingerprint: str | None,
+    ) -> None:
+        """Adopt one Paddle fact and its layout snapshot as one mutation."""
+        page = self.page_repository.get(snapshot.page_uid)
+        if artifact.project_uid != self.project_uid or snapshot.page_uid != artifact.page_uid:
+            raise ProjectScopeError("layout analysis result belongs to another project or page")
+        if artifact.image_hash != page.image_hash:
+            raise FingerprintConflictError("layout analysis result belongs to a stale page image")
+        if snapshot.artifact_uid != artifact.uid:
+            raise InvalidRecordError("layout snapshot does not reference its Paddle artifact")
+        try:
+            self.layout_repository.get(
+                page.uid,
+                revision=expected_revision,
+                fingerprint=expected_fingerprint,
+            )
+        except RecordNotFoundError:
+            if expected_revision != 0 or expected_fingerprint is not None:
+                raise RevisionConflictError(
+                    "layout CAS expected an existing snapshot at the supplied revision"
+                )
+        self.paddle_artifact_repository.append(artifact)
+        try:
+            self.layout_repository.put(snapshot, expected_revision=expected_revision)
+        except Exception:
+            self.paddle_artifact_repository._records.pop(artifact.uid, None)
+            raise
+
     def adopt_ocr_page_observation(
         self,
         *,

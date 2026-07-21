@@ -5,10 +5,19 @@ from .export_service import capture_export_snapshot
 from .import_service import ImportFailure, ImportResult, ImportService
 from .layout_analysis_service import (
     LayoutAnalysisCommit,
+    LayoutPageJobRequest,
+    LayoutPageJobResult,
     LayoutAnalysisService,
     PaddleLayoutClient,
 )
-from .ocr_job_service import CharOcrEngine, OcrJobService, OcrPageCommit
+from .ocr_job_service import (
+    CharOcrEngine,
+    OcrJobService,
+    OcrObservationUnit,
+    OcrPageCommit,
+    OcrPageJobRequest,
+    OcrPageJobResult,
+)
 from .project_file_service import BoundProject, ProjectFileService
 
 __all__ = [
@@ -19,8 +28,13 @@ __all__ = [
     "ImportService",
     "LayoutAnalysisCommit",
     "LayoutAnalysisService",
+    "LayoutPageJobRequest",
+    "LayoutPageJobResult",
     "OcrJobService",
+    "OcrObservationUnit",
     "OcrPageCommit",
+    "OcrPageJobRequest",
+    "OcrPageJobResult",
     "PaddleLayoutClient",
     "ProjectFileService",
     "capture_export_snapshot",
