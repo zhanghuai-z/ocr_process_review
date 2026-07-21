@@ -1083,6 +1083,19 @@ QWidget#proofRowActiveBar {{
     background: {brand};
     border: none;
 }}
+QFrame#vproofEditBubble {{
+    background: {bg_card};
+    border: 1px solid {border};
+    border-radius: {radius_lg};
+}}
+QLineEdit#vproofEditBubbleInput {{
+    background: transparent;
+    border: none;
+    padding: 6px 10px;
+    font-size: 18px;
+    color: {text_primary};
+    selection-background-color: {bg_selected};
+}}
 
 /* ═══ Proof 空状态 ═══ */
 QLabel#proofEmpty {{

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QVBoxLayout,
     QWidget,
+    QApplication,
 )
 
 from app.core.char_index import CharIndex, CharIndexEntry
@@ -98,6 +99,14 @@ class VProofPanel(QWidget):
         self._selected_char = ""
         self._selected_entry: CharIndexEntry | None = None
         self._build_ui()
+        self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._redo_shortcut = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        self._redo_y_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        for shortcut in (self._undo_shortcut, self._redo_shortcut, self._redo_y_shortcut):
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._undo_shortcut.activated.connect(lambda: self._apply_history(-1))
+        self._redo_shortcut.activated.connect(lambda: self._apply_history(1))
+        self._redo_y_shortcut.activated.connect(lambda: self._apply_history(1))
         if session is not None:
             self.load_session(session, proof_service)
 
@@ -209,19 +218,6 @@ class VProofPanel(QWidget):
         context_layout.addWidget(self._proof_context, 1)
         center_layout.addWidget(context_card, 2)
 
-        candidate = QFrame()
-        candidate.setObjectName("candidatePanel")
-        candidate_layout = QHBoxLayout(candidate)
-        candidate_layout.setContentsMargins(10, 8, 10, 8)
-        self._edit_input = QLineEdit()
-        self._edit_input.setPlaceholderText("替换选中的字符")
-        self._edit_input.returnPressed.connect(self._on_apply)
-        self._btn_apply = QPushButton("应用")
-        self._btn_apply.setObjectName("primaryBtn")
-        self._btn_apply.clicked.connect(self._on_apply)
-        candidate_layout.addWidget(self._edit_input, 1)
-        candidate_layout.addWidget(self._btn_apply)
-        center_layout.addWidget(candidate)
         self._status = QLabel("暂无可校对字符")
         self._status.setObjectName("muted")
         center_layout.addWidget(self._status)
@@ -259,6 +255,25 @@ class VProofPanel(QWidget):
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setSizes([210, 1100])
         root.addWidget(main_splitter, 1)
+        self._gallery.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._gallery.customContextMenuRequested.connect(self._show_edit_bubble_at)
+        self._build_edit_bubble()
+
+    def _build_edit_bubble(self) -> None:
+        self._edit_bubble = QFrame(self)
+        self._edit_bubble.setObjectName("vproofEditBubble")
+        layout = QHBoxLayout(self._edit_bubble)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(0)
+        self._edit_bubble_input = QLineEdit()
+        self._edit_bubble_input.setObjectName("vproofEditBubbleInput")
+        self._edit_bubble_input.setFrame(False)
+        self._edit_bubble_input.setMaxLength(32)
+        self._edit_bubble_input.returnPressed.connect(self._apply_edit_bubble)
+        self._edit_bubble_input.installEventFilter(self)
+        layout.addWidget(self._edit_bubble_input)
+        self._edit_bubble.resize(156, 42)
+        self._edit_bubble.hide()
 
     def _set_session(
         self,
@@ -496,7 +511,6 @@ class VProofPanel(QWidget):
         if not isinstance(entry, CharIndexEntry):
             return
         self._selected_entry = entry
-        self._edit_input.setText(entry.text)
         self._render_entry(entry)
 
     def _selected_entries(self) -> tuple[CharIndexEntry, ...]:
@@ -507,12 +521,6 @@ class VProofPanel(QWidget):
         if valid:
             return valid
         return (self._selected_entry,) if self._selected_entry is not None else ()
-
-    def _on_apply(self) -> None:
-        text = self._edit_input.text()
-        changed = self._apply_replacement_to_selected(text)
-        if changed:
-            self._status.setText(f"已修改 {changed} 处")
 
     def _apply_replacement_to_selected(self, text: str) -> int:
         if self._proof_service is None:
@@ -576,6 +584,86 @@ class VProofPanel(QWidget):
 
     def _gallery_direct_blank(self) -> bool:
         return self._apply_replacement_to_selected("") > 0
+
+    def _apply_history(self, direction: int) -> None:
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit):
+            available = focus.isUndoAvailable() if direction < 0 else focus.isRedoAvailable()
+            if available:
+                focus.undo() if direction < 0 else focus.redo()
+                return
+        if isinstance(focus, QPlainTextEdit):
+            available = (
+                focus.document().isUndoAvailable()
+                if direction < 0
+                else focus.document().isRedoAvailable()
+            )
+            if available and not focus.isReadOnly():
+                focus.undo() if direction < 0 else focus.redo()
+                return
+        service = self._proof_service
+        proof_uid = self._selected_entry.proof_uid if self._selected_entry is not None else None
+        if service is None or proof_uid is None:
+            return
+        try:
+            state = service.get_state(proof_uid)
+            operation = service.undo if direction < 0 else service.redo
+            result = operation(
+                proof_uid,
+                expected_revision=state.revision,
+                expected_fingerprint=state.fingerprint,
+            )
+        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
+            self._status.setText(f"撤销冲突：{exc}")
+            return
+        if not result.changed:
+            self._status.setText("没有可撤销的校对操作" if direction < 0 else "没有可重做的校对操作")
+            return
+        self.proof_changed.emit(result)
+        self.refresh_from_session()
+
+    def _show_edit_bubble_at(self, position: QPoint) -> None:
+        item = self._gallery.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            self._gallery.clearSelection()
+            item.setSelected(True)
+        self._gallery.setCurrentItem(item)
+        entry = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(entry, CharIndexEntry):
+            return
+        selected = self._selected_entries()
+        initial_text = entry.text if len(selected) == 1 else ""
+        self._edit_bubble_input.setText(initial_text)
+        self._edit_bubble_input.selectAll()
+        self._edit_bubble_input.setPlaceholderText(f"替换 {len(selected)} 处")
+        panel_position = self._gallery.mapTo(self, position)
+        x = max(8, min(panel_position.x() + 8, self.width() - self._edit_bubble.width() - 8))
+        y = max(8, min(panel_position.y() + 8, self.height() - self._edit_bubble.height() - 8))
+        self._edit_bubble.move(x, y)
+        self._edit_bubble.show()
+        self._edit_bubble.raise_()
+        self._edit_bubble_input.setFocus()
+
+    def _apply_edit_bubble(self) -> None:
+        text = self._edit_bubble_input.text()
+        changed = self._apply_replacement_to_selected(text)
+        if not changed:
+            self._status.setText("没有可提交的纵校改动")
+            return
+        self._edit_bubble.hide()
+        self._gallery.setFocus()
+        self._status.setText(f"已修改 {changed} 处")
+
+    def eventFilter(self, watched, event) -> bool:  # type: ignore[override]
+        if watched is self._edit_bubble_input:
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._edit_bubble.hide()
+                return True
+            if event.type() == QEvent.Type.FocusOut:
+                QTimer.singleShot(0, self._edit_bubble.hide)
+        return super().eventFilter(watched, event)
 
     def _render_entry(self, entry: CharIndexEntry | None) -> None:
         if entry is None or self._session is None:

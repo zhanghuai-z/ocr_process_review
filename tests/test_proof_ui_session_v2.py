@@ -251,8 +251,18 @@ def test_hproof_commits_text_with_service_cas_and_preserves_ocr(
     assert panel._scroll.objectName() == "proofScroll"
     assert panel._rows_root.objectName() == "proofLineList"
     assert len(panel._rows) == 1
-    assert panel._row_widgets[("proof-1", "unit-1")].property("active") is True
-    editor = panel._row_widgets[("proof-1", "unit-1")].editor
+    row_widget = panel._row_widgets[("proof-1", "unit-1")]
+    assert row_widget.property("active") is True
+    assert row_widget._focus_depth == "active"
+    editor = row_widget.editor
+    cursor = editor.textCursor()
+    cursor.setPosition(1)
+    editor.setTextCursor(cursor)
+    assert row_widget._selected_char_index == 1
+    row_widget.set_focus_depth("near")
+    assert editor.isHidden() is True
+    row_widget.set_focus_depth("active")
+    assert editor.isHidden() is False
     editor.setPlainText("ax")
     assert panel.save() is True
     assert service.get_state("proof-1").text_units[0].text == "ax"
@@ -309,6 +319,33 @@ def test_vproof_index_edit_uses_stable_entry_ids_and_service_cas(
     assert service.get_state("proof-1").text_units[0].text == "xb"
     assert selected_key[0:2] == ("proof-1", "unit-1")
     assert session.ocr_observation_repository.get_atom("atom-1").text == "a"
+    panel.close()
+
+
+def test_vproof_edit_bubble_commits_selected_occurrence(
+    qapp: QApplication,
+    tmp_path: Path,
+) -> None:
+    from app.ui.proof.v_proof import VProofPanel
+
+    session, service = _session(tmp_path)
+    panel = VProofPanel(session=session, proof_service=service)
+    panel.show()
+    qapp.processEvents()
+    item = panel._gallery.currentItem()
+    assert item is not None
+    position = panel._gallery.visualItemRect(item).center()
+    panel._show_edit_bubble_at(position)
+    assert panel._edit_bubble.isVisible() is True
+    panel._edit_bubble_input.setText("z")
+    panel._apply_edit_bubble()
+    assert service.get_state("proof-1").text_units[0].text == "zb"
+    assert panel._edit_bubble.isVisible() is False
+    panel._gallery.setFocus()
+    panel._apply_history(-1)
+    assert service.get_state("proof-1").text_units[0].text == "ab"
+    panel._apply_history(1)
+    assert service.get_state("proof-1").text_units[0].text == "zb"
     panel.close()
 
 

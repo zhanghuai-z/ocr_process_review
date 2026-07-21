@@ -10,8 +10,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
-from PySide6.QtGui import QKeyEvent, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QKeyEvent, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -115,6 +115,7 @@ class _CommitTextEdit(QPlainTextEdit):
     commit_requested = Signal()
     cancel_requested = Signal()
     navigate_requested = Signal(int)
+    history_requested = Signal(int)
     focused = Signal()
 
     def focusInEvent(self, event) -> None:  # type: ignore[override]
@@ -136,6 +137,25 @@ class _CommitTextEdit(QPlainTextEdit):
                 self.navigate_requested.emit(1)
                 event.accept()
                 return
+            if event.key() == Qt.Key.Key_Z:
+                if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                    if self.document().isRedoAvailable():
+                        self.redo()
+                    else:
+                        self.history_requested.emit(1)
+                elif self.document().isUndoAvailable():
+                    self.undo()
+                else:
+                    self.history_requested.emit(-1)
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Y:
+                if self.document().isRedoAvailable():
+                    self.redo()
+                else:
+                    self.history_requested.emit(1)
+                event.accept()
+                return
         if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter} and not (
             modifiers & Qt.KeyboardModifier.ShiftModifier
         ):
@@ -149,13 +169,31 @@ class _CommitTextEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+class _ProofLineImage(QLabel):
+    """Clickable image projection; it never owns OCR or proof state."""
+
+    clicked = Signal(QPoint)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(event.position().toPoint())
+        super().mousePressEvent(event)
+
+
 def _image_for_row(page: PageRecord, bbox: tuple[int, int, int, int] | None) -> QPixmap:
     pixmap = QPixmap(page.image_path)
     if pixmap.isNull():
         return QPixmap()
     if bbox is not None:
         left, top, right, bottom = bbox
-        rect = QRect(left, top, max(1, right - left), max(1, bottom - top))
+        x_scale = pixmap.width() / page.width if page.width > 0 else 1.0
+        y_scale = pixmap.height() / page.height if page.height > 0 else 1.0
+        rect = QRect(
+            round(left * x_scale),
+            round(top * y_scale),
+            max(1, round((right - left) * x_scale)),
+            max(1, round((bottom - top) * y_scale)),
+        )
         rect = rect.intersected(pixmap.rect())
         if not rect.isEmpty():
             pixmap = pixmap.copy(rect)
@@ -166,6 +204,7 @@ class _ProofRowWidget(QFrame):
     commit_requested = Signal()
     cancel_requested = Signal()
     navigate_requested = Signal(int)
+    history_requested = Signal(int)
     confirm_requested = Signal()
     activated = Signal()
 
@@ -197,7 +236,7 @@ class _ProofRowWidget(QFrame):
         header.addWidget(self._status)
         content_layout.addLayout(header)
 
-        self._image = QLabel()
+        self._image = _ProofLineImage()
         self._image.setObjectName("proofLineImage")
         self._image.setFixedHeight(58)
         self._image.setAlignment(
@@ -209,6 +248,10 @@ class _ProofRowWidget(QFrame):
         )
         self._image.setText("无可用行图像")
         self._line_crop = _image_for_row(row.page, row.bbox)
+        self._selected_char_index: int | None = None
+        self._focus_depth = "far"
+        self._displayed_pixmap_size = QSize()
+        self._image.clicked.connect(self._on_image_clicked)
         content_layout.addWidget(self._image)
 
         self.editor = _CommitTextEdit()
@@ -223,7 +266,9 @@ class _ProofRowWidget(QFrame):
         self.editor.commit_requested.connect(self.commit_requested)
         self.editor.cancel_requested.connect(self.cancel_requested)
         self.editor.navigate_requested.connect(self.navigate_requested)
+        self.editor.history_requested.connect(self.history_requested)
         self.editor.focused.connect(self.activated)
+        self.editor.cursorPositionChanged.connect(self._on_cursor_position_changed)
         content_layout.addWidget(self.editor)
         root.addWidget(content, 1)
 
@@ -242,6 +287,21 @@ class _ProofRowWidget(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
 
+    def set_focus_depth(self, depth: str) -> None:
+        if depth not in {"active", "near", "far"}:
+            raise ValueError(f"unsupported proof row focus depth: {depth!r}")
+        self._focus_depth = depth
+        active = depth == "active"
+        self.set_active(active)
+        self.editor.setVisible(active)
+        self.confirm_button.setVisible(active)
+        self.setMinimumHeight(132 if active else 82)
+        self.setMaximumHeight(148 if active else 92)
+        self.setProperty("focusDepth", depth)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self._refresh_image()
+
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._refresh_image()
@@ -254,12 +314,98 @@ class _ProofRowWidget(QFrame):
         target = self._image.size()
         if target.width() <= 0 or target.height() <= 0:
             return
-        self._image.setPixmap(self._line_crop.scaled(
+        source = QPixmap(self._line_crop)
+        if self._selected_char_index is not None and self.row.bbox is not None:
+            entry = next(
+                (
+                    item
+                    for item in self.row.entries
+                    if item.char_index == self._selected_char_index and item.bbox is not None
+                ),
+                None,
+            )
+            if entry is not None and entry.bbox is not None:
+                line_left, line_top, _line_right, _line_bottom = self.row.bbox
+                left, top, right, bottom = entry.bbox
+                painter = QPainter(source)
+                painter.setPen(QPen(QColor("#D45555"), 2))
+                painter.setBrush(QColor(212, 85, 85, 32))
+                line_width = max(1, self.row.bbox[2] - line_left)
+                line_height = max(1, self.row.bbox[3] - line_top)
+                x_scale = source.width() / line_width
+                y_scale = source.height() / line_height
+                painter.drawRect(QRect(
+                    round((left - line_left) * x_scale),
+                    round((top - line_top) * y_scale),
+                    max(1, round((right - left) * x_scale)),
+                    max(1, round((bottom - top) * y_scale)),
+                ))
+                painter.end()
+        opacity = {"active": 1.0, "near": 0.68, "far": 0.38}[self._focus_depth]
+        if opacity < 1.0:
+            faded = QPixmap(source.size())
+            faded.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(faded)
+            painter.setOpacity(opacity)
+            painter.drawPixmap(0, 0, source)
+            painter.end()
+            source = faded
+        scaled = source.scaled(
             target,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
-        ))
+        )
+        self._displayed_pixmap_size = scaled.size()
+        self._image.setPixmap(scaled)
         self._image.setText("")
+
+    def _on_cursor_position_changed(self) -> None:
+        if not self.row.entries:
+            return
+        cursor = self.editor.textCursor()
+        position = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+        if position >= len(self.editor.toPlainText()) and position > 0:
+            position -= 1
+        available = {entry.char_index for entry in self.row.entries if entry.bbox is not None}
+        self._selected_char_index = position if position in available else None
+        self._refresh_image()
+
+    def _on_image_clicked(self, point: QPoint) -> None:
+        self.activated.emit()
+        if self.row.bbox is None or self._displayed_pixmap_size.isEmpty():
+            self.editor.setFocus()
+            return
+        y_offset = max(0, (self._image.height() - self._displayed_pixmap_size.height()) // 2)
+        if not (
+            0 <= point.x() < self._displayed_pixmap_size.width()
+            and y_offset <= point.y() < y_offset + self._displayed_pixmap_size.height()
+        ):
+            return
+        source_x = point.x() * self._line_crop.width() / self._displayed_pixmap_size.width()
+        source_y = (point.y() - y_offset) * self._line_crop.height() / self._displayed_pixmap_size.height()
+        line_left, line_top, line_right, line_bottom = self.row.bbox
+        page_x = line_left + source_x * (line_right - line_left) / self._line_crop.width()
+        page_y = line_top + source_y * (line_bottom - line_top) / self._line_crop.height()
+        entries = tuple(entry for entry in self.row.entries if entry.bbox is not None)
+        if not entries:
+            self.editor.setFocus()
+            return
+        entry = min(
+            entries,
+            key=lambda item: (
+                0
+                if item.bbox is not None
+                and item.bbox[0] <= page_x <= item.bbox[2]
+                and item.bbox[1] <= page_y <= item.bbox[3]
+                else 1,
+                abs(((item.bbox[0] + item.bbox[2]) / 2) - page_x) if item.bbox else float("inf"),
+            ),
+        )
+        cursor = self.editor.textCursor()
+        cursor.setPosition(min(entry.char_index, len(self.editor.toPlainText())))
+        cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+        self.editor.setTextCursor(cursor)
+        self.editor.setFocus()
 
     def set_status(self, status: str) -> None:
         color = STATUS_COLORS.get(status, STATUS_COLORS["unchecked"])
@@ -530,6 +676,7 @@ class HProofPanel(QWidget):
             widget.commit_requested.connect(lambda row=row, widget=widget: self._commit_row(row, widget))
             widget.cancel_requested.connect(lambda row=row, widget=widget: self._cancel_row(row, widget))
             widget.navigate_requested.connect(lambda delta, row=row: self._navigate_from(row, delta))
+            widget.history_requested.connect(lambda direction, row=row: self._apply_history(row, direction))
             widget.confirm_requested.connect(lambda row=row, widget=widget: self._confirm_row(row, widget))
             widget.activated.connect(lambda key=row.key: self._activate_row(key))
             self._rows_layout.addWidget(widget)
@@ -542,8 +689,17 @@ class HProofPanel(QWidget):
 
     def _activate_row(self, key: tuple[str, str] | None) -> None:
         self._active_key = key
-        for row_key, widget in self._row_widgets.items():
-            widget.set_active(row_key == key)
+        visible_keys = [row.key for row in self._visible_rows]
+        active_index = visible_keys.index(key) if key in visible_keys else -1
+        for index, row_key in enumerate(visible_keys):
+            widget = self._row_widgets[row_key]
+            if index == active_index:
+                depth = "active"
+            elif active_index >= 0 and abs(index - active_index) == 1:
+                depth = "near"
+            else:
+                depth = "far"
+            widget.set_focus_depth(depth)
 
     def _on_text_changed(self, row: _ProofRow, widget: _ProofRowWidget) -> None:
         text = widget.editor.toPlainText()
@@ -551,6 +707,27 @@ class HProofPanel(QWidget):
             self._dirty_text.pop(row.key, None)
         else:
             self._dirty_text[row.key] = text
+
+    def _apply_history(self, row: _ProofRow, direction: int) -> None:
+        service = self._proof_service
+        if service is None:
+            return
+        try:
+            state = service.get_state(row.state.uid)
+            operation = service.undo if direction < 0 else service.redo
+            result = operation(
+                state.uid,
+                expected_revision=state.revision,
+                expected_fingerprint=state.fingerprint,
+            )
+        except (RevisionConflictError, ProofSessionError, ValueError) as exc:
+            self._status.setText(f"撤销冲突：{exc}")
+            return
+        if not result.changed:
+            self._status.setText("没有可撤销的校对操作" if direction < 0 else "没有可重做的校对操作")
+            return
+        self._publish_result(result)
+        self.refresh_from_session()
 
     def _commit_row(self, row: _ProofRow, widget: _ProofRowWidget) -> bool:
         text = widget.editor.toPlainText()
