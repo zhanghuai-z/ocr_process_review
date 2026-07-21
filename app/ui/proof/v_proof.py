@@ -37,7 +37,7 @@ from app.ui.proof.confidence_utils import (
 )
 
 
-IMAGE_SIZE = (620, 420)
+IMAGE_SIZE = QSize(620, 420)
 
 
 def _entry_key(entry: CharIndexEntry) -> tuple[str, str, int, str | None]:
@@ -47,14 +47,22 @@ def _entry_key(entry: CharIndexEntry) -> tuple[str, str, int, str | None]:
 def _page_pixmap(
     page: PageRecord,
     bbox: tuple[int, int, int, int] | None,
+    target_size: QSize | None = None,
 ) -> QPixmap:
     pixmap = QPixmap(page.image_path)
     if pixmap.isNull():
         return QPixmap()
+    target = target_size if target_size is not None and not target_size.isEmpty() else IMAGE_SIZE
+    pixmap = pixmap.scaled(
+        max(1, target.width()),
+        max(1, target.height()),
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
     if bbox is not None and page.width > 0 and page.height > 0:
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(QPen(QColor("#D43D3D"), 3))
+        painter.setPen(QPen(QColor("#D43D3D"), 2))
         left, top, right, bottom = bbox
         x_scale = pixmap.width() / page.width
         y_scale = pixmap.height() / page.height
@@ -67,12 +75,7 @@ def _page_pixmap(
             )
         )
         painter.end()
-    return pixmap.scaled(
-        IMAGE_SIZE[0],
-        IMAGE_SIZE[1],
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    return pixmap
 
 
 class VProofPanel(QWidget):
@@ -187,6 +190,7 @@ class VProofPanel(QWidget):
         gallery_header.addWidget(self._page_select)
         gallery_layout.addLayout(gallery_header)
         self._gallery = QListWidget()
+        self._gallery.setObjectName("proofGallery")
         self._gallery.setViewMode(QListWidget.ViewMode.IconMode)
         self._gallery.setFlow(QListWidget.Flow.LeftToRight)
         self._gallery.setWrapping(True)
@@ -715,9 +719,17 @@ class VProofPanel(QWidget):
             f"区域 {atom.region_uid if atom else '-'} · 字符 {entry.atom_uid or '-'}"
         )
         self._evidence.setStyleSheet(f"color: {verdict.color};")
-        pixmap = _page_pixmap(page, entry.bbox)
+        pixmap = _page_pixmap(page, entry.bbox, self._image.size())
         self._image.setPixmap(pixmap)
         self._image.setText("" if not pixmap.isNull() else "无可用原稿图像")
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._selected_entry is not None:
+            page = self._pages.get(self._selected_entry.page_uid)
+            if page is not None:
+                pixmap = _page_pixmap(page, self._selected_entry.bbox, self._image.size())
+                self._image.setPixmap(pixmap)
 
     def closeEvent(self, event: QEvent) -> None:  # type: ignore[override]
         super().closeEvent(event)

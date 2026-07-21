@@ -387,6 +387,26 @@ QListWidget::item {{
 }}
 QListWidget::item:selected {{
     background: transparent;
+    color: {text_primary};
+}}
+
+QListWidget#charIndexList::item {{
+    padding: 7px 8px;
+    border-radius: {radius_md};
+}}
+QListWidget#charIndexList::item:selected {{
+    background: {bg_hover};
+    color: {text_primary};
+}}
+QListWidget#proofGallery::item {{
+    border: 1px solid transparent;
+    border-radius: {radius_md};
+    padding: 4px;
+}}
+QListWidget#proofGallery::item:selected {{
+    background: {bg_hover};
+    border: 1px solid {brand};
+    color: {text_primary};
 }}
 
 QListWidget#pageDirectoryList {{
