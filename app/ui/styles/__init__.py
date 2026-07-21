@@ -1066,6 +1066,23 @@ QFrame#linePair[active="true"] {{
     border: 1px solid {brand};
     border-radius: {radius_lg};
 }}
+QLabel#proofLineImage {{
+    background: {bg_card};
+    border: none;
+    border-bottom: 1px solid {border};
+}}
+QPlainTextEdit#proofLineEditor {{
+    background: {bg_card};
+    border: none;
+    border-radius: 0;
+    padding: 2px 4px;
+    font-size: 17px;
+    font-weight: 600;
+}}
+QWidget#proofRowActiveBar {{
+    background: {brand};
+    border: none;
+}}
 
 /* ═══ Proof 空状态 ═══ */
 QLabel#proofEmpty {{

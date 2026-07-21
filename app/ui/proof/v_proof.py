@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
-from PySide6.QtCore import QEvent, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -112,37 +112,32 @@ class VProofPanel(QWidget):
     def _build_ui(self) -> None:
         self.setObjectName("proofRoot")
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 12)
-        root.setSpacing(8)
-
-        self._toolbar = QFrame()
-        self._toolbar.setObjectName("proofToolbar")
-        toolbar = QHBoxLayout(self._toolbar)
-        toolbar.setContentsMargins(8, 4, 8, 4)
-        toolbar.setSpacing(6)
-        self._btn_refresh = QPushButton("刷新索引")
-        self._btn_refresh.setObjectName("ghostBtn")
-        self._btn_refresh.clicked.connect(self.refresh_from_session)
-        toolbar.addWidget(self._btn_refresh)
-        self._page_select = QComboBox()
-        self._page_select.currentIndexChanged.connect(self._on_page_changed)
-        toolbar.addWidget(self._page_select, 1)
-        root.addWidget(self._toolbar)
-
-        self._status = QLabel("暂无可校对字符")
-        self._status.setObjectName("proofStatusBar")
-        root.addWidget(self._status)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.setObjectName("proofSplitter")
+        main_splitter.setHandleWidth(10)
         main_splitter.setChildrenCollapsible(False)
         left = QFrame()
         left.setObjectName("proofLeftPane")
+        left.setMinimumWidth(180)
+        left.setMaximumWidth(240)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(12, 12, 12, 12)
+        left_header = QHBoxLayout()
         left_title = QLabel("字符索引")
         left_title.setObjectName("sectionTitle")
-        left_layout.addWidget(left_title)
+        left_header.addWidget(left_title)
+        left_header.addStretch(1)
+        self._char_count = QLabel("0 项")
+        self._char_count.setObjectName("muted")
+        left_header.addWidget(self._char_count)
+        left_layout.addLayout(left_header)
+        self._char_search = QLineEdit()
+        self._char_search.setPlaceholderText("搜索字符…")
+        self._char_search.textChanged.connect(self._rebuild_char_list)
+        left_layout.addWidget(self._char_search)
         self._char_list = QListWidget()
         self._char_list.setObjectName("charIndexList")
         self._char_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -150,30 +145,97 @@ class VProofPanel(QWidget):
         left_layout.addWidget(self._char_list, 1)
         main_splitter.addWidget(left)
 
-        right = QFrame()
-        right.setObjectName("proofRightPane")
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(12, 12, 12, 12)
+        content = QWidget()
+        content.setObjectName("proofContentPane")
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(10)
+        self._content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._content_splitter.setObjectName("proofContentSplitter")
+        self._content_splitter.setHandleWidth(10)
+
+        center = QFrame()
+        center.setObjectName("proofCenterPane")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(10, 10, 10, 10)
+        center_layout.setSpacing(10)
+
+        gallery_card = QFrame()
+        gallery_card.setObjectName("proofCard")
+        gallery_layout = QVBoxLayout(gallery_card)
+        gallery_layout.setContentsMargins(10, 8, 10, 10)
+        gallery_header = QHBoxLayout()
         self._gallery_header = QLabel("相同字索引")
         self._gallery_header.setObjectName("sectionTitle")
-        right_layout.addWidget(self._gallery_header)
+        gallery_header.addWidget(self._gallery_header)
+        gallery_header.addStretch(1)
+        self._btn_refresh = QPushButton("刷新")
+        self._btn_refresh.setObjectName("ghostBtn")
+        self._btn_refresh.clicked.connect(self.refresh_from_session)
+        gallery_header.addWidget(self._btn_refresh)
+        self._page_select = QComboBox()
+        self._page_select.currentIndexChanged.connect(self._on_page_changed)
+        gallery_header.addWidget(self._page_select)
+        gallery_layout.addLayout(gallery_header)
         self._gallery = QListWidget()
+        self._gallery.setViewMode(QListWidget.ViewMode.IconMode)
+        self._gallery.setFlow(QListWidget.Flow.LeftToRight)
+        self._gallery.setWrapping(True)
+        self._gallery.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self._gallery.setMovement(QListWidget.Movement.Static)
+        self._gallery.setIconSize(QSize(62, 62))
+        self._gallery.setSpacing(6)
         self._gallery.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self._gallery.currentItemChanged.connect(self._on_gallery_changed)
-        right_layout.addWidget(self._gallery, 1)
+        gallery_layout.addWidget(self._gallery, 1)
+        center_layout.addWidget(gallery_card, 2)
 
+        context_card = QFrame()
+        context_card.setObjectName("proofCard")
+        context_layout = QVBoxLayout(context_card)
+        context_layout.setContentsMargins(10, 8, 10, 10)
+        context_title = QLabel("文本上下文")
+        context_title.setObjectName("sectionTitle")
+        context_layout.addWidget(context_title)
         self._ocr_context = QPlainTextEdit()
         self._ocr_context.setReadOnly(True)
-        self._ocr_context.setMaximumHeight(58)
         self._ocr_context.setPlaceholderText("OCR 文本上下文")
-        right_layout.addWidget(self._ocr_context)
+        context_layout.addWidget(self._ocr_context, 1)
         self._proof_context = QPlainTextEdit()
         self._proof_context.setReadOnly(True)
-        self._proof_context.setMaximumHeight(58)
         self._proof_context.setPlaceholderText("校对文本上下文")
-        right_layout.addWidget(self._proof_context)
+        context_layout.addWidget(self._proof_context, 1)
+        center_layout.addWidget(context_card, 2)
+
+        candidate = QFrame()
+        candidate.setObjectName("candidatePanel")
+        candidate_layout = QHBoxLayout(candidate)
+        candidate_layout.setContentsMargins(10, 8, 10, 8)
+        self._edit_input = QLineEdit()
+        self._edit_input.setPlaceholderText("替换选中的字符")
+        self._edit_input.returnPressed.connect(self._on_apply)
+        self._btn_apply = QPushButton("应用")
+        self._btn_apply.setObjectName("primaryBtn")
+        self._btn_apply.clicked.connect(self._on_apply)
+        candidate_layout.addWidget(self._edit_input, 1)
+        candidate_layout.addWidget(self._btn_apply)
+        center_layout.addWidget(candidate)
+        self._status = QLabel("暂无可校对字符")
+        self._status.setObjectName("muted")
+        center_layout.addWidget(self._status)
+        self._evidence = QLabel()
+        self._evidence.setWordWrap(True)
+        center_layout.addWidget(self._evidence)
+
+        viewer = QFrame()
+        viewer.setObjectName("proofRightPane")
+        viewer_layout = QVBoxLayout(viewer)
+        viewer_layout.setContentsMargins(12, 12, 12, 12)
+        viewer_title = QLabel("原稿上下文")
+        viewer_title.setObjectName("sectionTitle")
+        viewer_layout.addWidget(viewer_title)
 
         self._image = QLabel("无可用原稿图像")
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -182,24 +244,20 @@ class VProofPanel(QWidget):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
         )
-        right_layout.addWidget(self._image, 2)
+        viewer_layout.addWidget(self._image, 1)
 
-        edit_row = QHBoxLayout()
-        self._edit_input = QLineEdit()
-        self._edit_input.setPlaceholderText("替换选中的字符")
-        self._edit_input.returnPressed.connect(self._on_apply)
-        self._btn_apply = QPushButton("应用")
-        self._btn_apply.setObjectName("primaryBtn")
-        self._btn_apply.clicked.connect(self._on_apply)
-        edit_row.addWidget(self._edit_input, 1)
-        edit_row.addWidget(self._btn_apply)
-        right_layout.addLayout(edit_row)
-        self._evidence = QLabel()
-        self._evidence.setWordWrap(True)
-        right_layout.addWidget(self._evidence)
-        main_splitter.addWidget(right)
+        center.setMinimumWidth(480)
+        viewer.setMinimumWidth(300)
+        self._content_splitter.addWidget(center)
+        self._content_splitter.addWidget(viewer)
+        self._content_splitter.setStretchFactor(0, 1)
+        self._content_splitter.setStretchFactor(1, 1)
+        self._content_splitter.setSizes([620, 540])
+        content_layout.addWidget(self._content_splitter)
+        main_splitter.addWidget(content)
         main_splitter.setStretchFactor(0, 0)
         main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([210, 1100])
         root.addWidget(main_splitter, 1)
 
     def _set_session(
@@ -328,6 +386,13 @@ class VProofPanel(QWidget):
     def _rebuild_char_list(self) -> None:
         entries = self._filtered_entries()
         counts = Counter(entry.text for entry in entries)
+        query = self._char_search.text().strip().casefold()
+        if query:
+            counts = Counter({
+                text: count for text, count in counts.items()
+                if query in text.casefold()
+            })
+        self._char_count.setText(f"{len(counts)} 项")
         selected = self._selected_char
         self._char_list.blockSignals(True)
         self._char_list.clear()
@@ -372,6 +437,13 @@ class VProofPanel(QWidget):
         for entry in entries:
             geometry = "有字框" if entry.available else "无字框"
             item = QListWidgetItem(
+                f"第 {entry.page_number} 页\n{geometry}"
+            )
+            icon = self._entry_icon(entry)
+            if not icon.isNull():
+                item.setIcon(icon)
+            item.setSizeHint(QSize(84, 92))
+            item.setToolTip(
                 f"第 {entry.page_number} 页 · 行 {entry.line_uid or '-'} · "
                 f"文本 {entry.text_unit_uid} · {geometry}"
             )
@@ -394,6 +466,26 @@ class VProofPanel(QWidget):
         self._gallery_header.setText(
             f"{self._selected_char!r} · {self._gallery.count()} 处"
         )
+
+    def _entry_icon(self, entry: CharIndexEntry) -> QIcon:
+        page = self._pages.get(entry.page_uid)
+        if page is None or entry.bbox is None:
+            return QIcon()
+        pixmap = QPixmap(page.image_path)
+        if pixmap.isNull():
+            return QIcon()
+        left, top, right, bottom = entry.bbox
+        rect = QRect(left, top, max(1, right - left), max(1, bottom - top))
+        rect = rect.intersected(pixmap.rect())
+        if rect.isEmpty():
+            return QIcon()
+        crop = pixmap.copy(rect).scaled(
+            62,
+            62,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        return QIcon(crop)
 
     def _on_gallery_changed(self, current: QListWidgetItem | None, _previous) -> None:
         if current is None:

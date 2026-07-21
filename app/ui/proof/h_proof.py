@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +38,7 @@ from app.ui.proof.confidence_utils import (
     char_confidence,
     line_confidence,
 )
+from app.ui.widgets.page_directory import PageDirectoryList
 
 
 ROW_IMAGE_SIZE = QSize(300, 54)
@@ -152,11 +154,7 @@ def _image_for_row(page: PageRecord, bbox: tuple[int, int, int, int] | None) -> 
         rect = rect.intersected(pixmap.rect())
         if not rect.isEmpty():
             pixmap = pixmap.copy(rect)
-    return pixmap.scaled(
-        ROW_IMAGE_SIZE,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
+    return pixmap
 
 
 class _ProofRowWidget(QFrame):
@@ -170,51 +168,84 @@ class _ProofRowWidget(QFrame):
         self.row = row
         self.setObjectName("linePair")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 6, 8, 6)
-        root.setSpacing(4)
+        self.setMinimumHeight(132)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(6, 4, 8, 4)
+        root.setSpacing(6)
+
+        self._active_bar = QWidget()
+        self._active_bar.setObjectName("proofRowActiveBar")
+        self._active_bar.setFixedWidth(4)
+        root.addWidget(self._active_bar)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
         header = QHBoxLayout()
         self._title = QLabel(f"第 {row.page.page_number} 页 · 第 {row.unit.order + 1} 行")
-        self._title.setObjectName("sectionTitle")
+        self._title.setObjectName("muted")
         header.addWidget(self._title, 1)
         self._status = QLabel()
         header.addWidget(self._status)
-        self.confirm_button = QPushButton("确认")
-        self.confirm_button.setObjectName("secondaryBtn")
-        self.confirm_button.setFixedHeight(24)
-        self.confirm_button.clicked.connect(self.confirm_requested)
-        header.addWidget(self.confirm_button)
-        root.addLayout(header)
+        content_layout.addLayout(header)
 
-        body = QHBoxLayout()
         self._image = QLabel()
-        self._image.setFixedSize(ROW_IMAGE_SIZE)
-        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setObjectName("proofLineImage")
+        self._image.setFixedHeight(58)
+        self._image.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._image.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
         self._image.setText("无可用行图像")
-        pixmap = _image_for_row(row.page, row.bbox)
-        if not pixmap.isNull():
-            self._image.setPixmap(pixmap)
-            self._image.setText("")
-        body.addWidget(self._image)
+        self._line_crop = _image_for_row(row.page, row.bbox)
+        content_layout.addWidget(self._image)
 
-        text_column = QVBoxLayout()
-        self._observation = QLabel(f"OCR 原文：{row.ocr_text or '无有效识别行'}")
-        self._observation.setObjectName("muted")
-        self._observation.setWordWrap(True)
-        text_column.addWidget(self._observation)
         self.editor = _CommitTextEdit()
+        self.editor.setObjectName("proofLineEditor")
         self.editor.setPlainText(row.unit.text)
-        self.editor.setMinimumHeight(42)
-        self.editor.setMaximumHeight(74)
+        self.editor.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+        self.editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.editor.setFixedHeight(46)
+        self.editor.document().setDocumentMargin(0)
         self.editor.setPlaceholderText("校对文本")
         self.editor.commit_requested.connect(self.commit_requested)
         self.editor.cancel_requested.connect(self.cancel_requested)
         self.editor.navigate_requested.connect(self.navigate_requested)
-        text_column.addWidget(self.editor, 1)
-        body.addLayout(text_column, 1)
-        root.addLayout(body)
+        content_layout.addWidget(self.editor)
+        root.addWidget(content, 1)
+
+        self.confirm_button = QPushButton("确认")
+        self.confirm_button.setObjectName("secondaryBtn")
+        self.confirm_button.setFixedSize(64, 28)
+        self.confirm_button.clicked.connect(self.confirm_requested)
+        root.addWidget(self.confirm_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.set_status(row.unit.status)
+        self._refresh_image()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh_image()
+
+    def _refresh_image(self) -> None:
+        if self._line_crop.isNull():
+            self._image.setPixmap(QPixmap())
+            self._image.setText("无可用行图像")
+            return
+        target = self._image.size()
+        if target.width() <= 0 or target.height() <= 0:
+            return
+        self._image.setPixmap(self._line_crop.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
+        self._image.setText("")
 
     def set_status(self, status: str) -> None:
         color = STATUS_COLORS.get(status, STATUS_COLORS["unchecked"])
@@ -258,14 +289,57 @@ class HProofPanel(QWidget):
     def _build_ui(self) -> None:
         self.setObjectName("proofRoot")
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        self._toolbar = QFrame()
-        self._toolbar.setObjectName("proofToolbar")
-        toolbar = QHBoxLayout(self._toolbar)
-        toolbar.setContentsMargins(8, 4, 8, 4)
-        toolbar.setSpacing(6)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setObjectName("hproofSplitter")
+        self._splitter.setChildrenCollapsible(False)
+
+        left = QFrame()
+        left.setObjectName("proofLeftPane")
+        left.setMinimumWidth(210)
+        left.setMaximumWidth(270)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(8)
+        directory_title = QLabel("页面")
+        directory_title.setObjectName("sectionTitle")
+        left_layout.addWidget(directory_title)
+        self._page_directory = PageDirectoryList()
+        self._page_directory.page_selected.connect(self._on_page_directory_selected)
+        left_layout.addWidget(self._page_directory, 1)
+        self._splitter.addWidget(left)
+
+        center = QWidget()
+        center.setObjectName("proofCenterPane")
+        center_layout = QVBoxLayout(center)
+        center_layout.setContentsMargins(10, 10, 10, 10)
+        center_layout.setSpacing(0)
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("proofScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._rows_root = QWidget()
+        self._rows_root.setObjectName("proofLineList")
+        self._rows_layout = QVBoxLayout(self._rows_root)
+        self._rows_layout.setContentsMargins(6, 4, 6, 6)
+        self._rows_layout.setSpacing(3)
+        self._rows_layout.addStretch(1)
+        self._scroll.setWidget(self._rows_root)
+        center_layout.addWidget(self._scroll, 1)
+        self._splitter.addWidget(center)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setSizes([236, 1000])
+        root.addWidget(self._splitter, 1)
+
+        self._status_bar = QWidget()
+        self._status_bar.setObjectName("proofStatusBar")
+        self._status_bar.setFixedHeight(44)
+        toolbar = QHBoxLayout(self._status_bar)
+        toolbar.setContentsMargins(12, 3, 12, 3)
+        toolbar.setSpacing(8)
         self._btn_prev = QPushButton("上一行")
         self._btn_next = QPushButton("下一行")
         self._btn_save = QPushButton("保存")
@@ -282,26 +356,15 @@ class HProofPanel(QWidget):
         toolbar.addWidget(self._btn_next)
         toolbar.addWidget(self._btn_save)
         toolbar.addWidget(self._btn_refresh)
-        self._page_select = QComboBox()
-        self._page_select.currentIndexChanged.connect(self._on_page_changed)
-        toolbar.addWidget(self._page_select, 1)
-        root.addWidget(self._toolbar)
-
         self._status = QLabel("暂无可校对内容")
-        self._status.setObjectName("proofStatusBar")
-        root.addWidget(self._status)
-
-        self._scroll = QScrollArea()
-        self._scroll.setObjectName("proofScroll")
-        self._scroll.setWidgetResizable(True)
-        self._rows_root = QWidget()
-        self._rows_root.setObjectName("proofLineList")
-        self._rows_layout = QVBoxLayout(self._rows_root)
-        self._rows_layout.setContentsMargins(6, 4, 6, 6)
-        self._rows_layout.setSpacing(6)
-        self._rows_layout.addStretch(1)
-        self._scroll.setWidget(self._rows_root)
-        root.addWidget(self._scroll, 1)
+        self._status.setObjectName("muted")
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self._status)
+        toolbar.addStretch(1)
+        self._scope = QLabel("全部页面")
+        self._scope.setObjectName("proofStatusStrong")
+        toolbar.addWidget(self._scope)
+        root.addWidget(self._status_bar)
 
     def _set_session(
         self,
@@ -379,24 +442,23 @@ class HProofPanel(QWidget):
         self._status.setText("暂无可校对内容")
 
     def _populate_page_selector(self) -> None:
-        self._page_select.blockSignals(True)
-        self._page_select.clear()
-        self._page_select.addItem("全部页面", "")
-        selected_index = 0
-        if self._session is not None:
-            for page in sorted(
-                self._session.page_repository.all(),
-                key=lambda item: (item.page_number, item.uid),
-            ):
-                self._page_select.addItem(f"第 {page.page_number} 页", page.uid)
-                if page.uid == self._selected_page_uid:
-                    selected_index = self._page_select.count() - 1
-        self._page_select.setCurrentIndex(selected_index)
-        self._page_select.blockSignals(False)
+        pages = () if self._session is None else tuple(sorted(
+            self._session.page_repository.all(),
+            key=lambda item: (item.page_number, item.uid),
+        ))
+        self._page_directory.set_pages(pages)
+        if self._selected_page_uid and any(
+            page.uid == self._selected_page_uid for page in pages
+        ):
+            self._page_directory.set_current_uid(self._selected_page_uid)
 
-    def _on_page_changed(self, index: int) -> None:
-        value = self._page_select.itemData(index)
-        self._selected_page_uid = str(value) if value else None
+    def _on_page_directory_selected(self, page_uid: str) -> None:
+        self._selected_page_uid = page_uid
+        page = next(
+            (item for item in self._session.page_repository.all() if item.uid == page_uid),
+            None,
+        ) if self._session is not None else None
+        self._scope.setText(f"第 {page.page_number} 页" if page is not None else "当前页面")
         self._render_rows()
 
     def refresh_from_session(self) -> None:
