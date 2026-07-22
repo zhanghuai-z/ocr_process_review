@@ -725,6 +725,7 @@ class VProofPanel(QWidget):
         for entry in entries:
             # 图标懒加载：先占位，仅可视范围 ±1 屏的条目真正解码切图
             item = QListWidgetItem("")
+            item.setSizeHint(QSize(GALLERY_CELL, GALLERY_CELL))
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setData(_ICON_PENDING_ROLE, True)
             geometry_note = "" if entry.available else " · 无精确字符框"

@@ -128,9 +128,8 @@ FAR_LINE_PAIR_MIN_H = 48
 FAR_LINE_PAIR_MAX_H = 54
 FOCUS_OPACITY = {"active": 1.0, "near": 0.45, "far": 0.30}
 
-FORMULA_SCALE = 3.00
-FORMULA_IMAGE_ROW_H = round(IMAGE_ROW_H * FORMULA_SCALE)
-FORMULA_RENDER_TARGET_H = round(40 * FORMULA_SCALE)
+FORMULA_IMAGE_ROW_H = 96
+FORMULA_RENDER_TARGET_H = 72
 FORMULA_RENDER_AREA_H = FORMULA_RENDER_TARGET_H + 8
 FORMULA_SOURCE_PANEL_H = 82
 FORMULA_VISUAL_HEIGHT_RATIO = 0.98
@@ -2352,7 +2351,7 @@ class _ProofRowWidget(QFrame):
             TABLE_ROW_IMAGE_H
             if (self._focus_depth == "active" and self._large_image)
             else (
-                IMAGE_ROW_H
+                (FORMULA_IMAGE_ROW_H if self.row.kind == "formula" else IMAGE_ROW_H)
                 if self._focus_depth == "active"
                 else (NEAR_IMAGE_ROW_H if self._focus_depth == "near" else FAR_IMAGE_ROW_H)
             )

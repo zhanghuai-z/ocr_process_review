@@ -491,11 +491,9 @@ def test_hproof_multiple_inline_formulas_render_independently(qapp, tmp_path) ->
 
 def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> None:
     from app.ui.proof.h_proof import (
-        FORMULA_SCALE,
         FORMULA_IMAGE_ROW_H,
         FORMULA_RENDER_AREA_H,
         FORMULA_RENDER_TARGET_H,
-        IMAGE_ROW_H,
         NEAR_LINE_PAIR_MAX_H,
         NEAR_LINE_PAIR_MIN_H,
         HProofPanel,
@@ -516,9 +514,9 @@ def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> N
     assert widget.editor.isHidden()
     assert widget._formula_source_panel is None
     assert not widget._formula_render_area.isHidden()
-    assert FORMULA_SCALE == 3.0
-    assert FORMULA_IMAGE_ROW_H == IMAGE_ROW_H * 3
-    assert FORMULA_RENDER_TARGET_H == 120
+    assert FORMULA_IMAGE_ROW_H == 96
+    assert FORMULA_RENDER_TARGET_H == 72
+    assert FORMULA_IMAGE_ROW_H > FORMULA_RENDER_TARGET_H
     assert widget._image.height() == FORMULA_IMAGE_ROW_H
     assert widget._formula_render_area.height() == FORMULA_RENDER_AREA_H
     has_render = (

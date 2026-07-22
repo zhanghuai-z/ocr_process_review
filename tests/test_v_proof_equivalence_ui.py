@@ -178,6 +178,9 @@ def test_vproof_uses_character_crops_and_highlights_one_ocr_occurrence(
     panel._set_gallery((entry_a,))
     qapp.processEvents()
     assert panel._selected_entry == entry_a
+    gallery_rect = panel._gallery.visualItemRect(panel._gallery.item(0))
+    assert gallery_rect.width() >= 56
+    assert gallery_rect.height() >= 56
     assert panel._ocr_context.objectName() == "vproofOcrContext"
     assert panel._ocr_context.isReadOnly()
     assert not hasattr(panel, "_proof_context")
