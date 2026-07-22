@@ -109,6 +109,26 @@ def _gallery_crop_pad(entry: ProofCharView) -> int:
     return adaptive
 
 
+def _gallery_crop_bbox(entry: ProofCharView) -> tuple[int, int, int, int] | None:
+    """Normalize gallery crops to the owning OCR line's vertical extent.
+
+    The character bbox remains the horizontal geometry fact.  Reusing the
+    line's vertical band prevents short punctuation boxes from being enlarged
+    into featureless blobs while keeping every occurrence at one visual scale.
+    """
+
+    if entry.bbox is None:
+        return None
+    left, top, right, bottom = entry.bbox
+    line_bbox = entry.line_bbox
+    if line_bbox is None:
+        return entry.bbox
+    _line_left, line_top, _line_right, line_bottom = line_bbox
+    if line_bottom <= line_top:
+        return entry.bbox
+    return left, min(top, line_top), right, max(bottom, line_bottom)
+
+
 def _page_pixmap(
     page: ProofPageView,
     bbox: tuple[int, int, int, int] | None,
@@ -800,7 +820,7 @@ class VProofPanel(QWidget):
         crop = _crop_page_pixmap(
             page,
             self._page_source_pixmap(page),
-            entry.bbox,
+            _gallery_crop_bbox(entry),
             QSize(cell - 16, cell - 16),
             pad=_gallery_crop_pad(entry),
         )

@@ -48,6 +48,7 @@ class ProofCharView:
     confidence: float | None
     ocr_char: str | None
     available: bool
+    line_bbox: tuple[int, int, int, int] | None = None
 
     @property
     def proof_state_uid(self) -> str:
@@ -119,6 +120,7 @@ def build_char_views(
                 confidence=normalize_confidence(atom.confidence) if atom is not None else None,
                 ocr_char=ocr_char,
                 available=exact_geometry,
+                line_bbox=line.bbox,
             )
         )
 

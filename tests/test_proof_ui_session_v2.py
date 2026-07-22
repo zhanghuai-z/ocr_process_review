@@ -504,9 +504,9 @@ def test_hproof_display_formula_uses_three_row_presentation(qapp, tmp_path) -> N
     assert widget.editor.isHidden()
     assert widget._formula_source_panel is None
     assert not widget._formula_render_area.isHidden()
-    assert FORMULA_SCALE == 2.0
-    assert FORMULA_IMAGE_ROW_H == IMAGE_ROW_H * 2
-    assert FORMULA_RENDER_TARGET_H == 80
+    assert FORMULA_SCALE == 3.0
+    assert FORMULA_IMAGE_ROW_H == IMAGE_ROW_H * 3
+    assert FORMULA_RENDER_TARGET_H == 120
     assert widget._image.height() == FORMULA_IMAGE_ROW_H
     assert widget._formula_render_area.height() == FORMULA_RENDER_AREA_H
     has_render = (
@@ -909,6 +909,37 @@ def test_char_views_use_explicit_char_span_without_sequential_guessing(qapp, tmp
     assert entries[0].available is False
     assert entries[1].atom_uid == "atom-2"
     assert entries[1].bbox == (30, 10, 50, 30)
+    assert entries[1].line_bbox == next_line.bbox
+
+
+def test_vproof_gallery_crop_uses_line_height_without_widening_char_bbox(
+    qapp,
+    tmp_path,
+) -> None:
+    from app.ui.proof.confidence_view import build_char_views
+    from app.ui.proof.v_proof import _gallery_crop_bbox
+
+    session, _service = _session(tmp_path)
+    workspace = build_proof_workspace_view(session)
+    line = workspace.proof_states[0].lines[0]
+    punctuation_atom = replace(
+        line.atoms[0],
+        text="，",
+        token_text="，",
+        bbox=(18, 24, 24, 29),
+        char_span=(0, 1),
+        geometry_available=True,
+    )
+    punctuation_line = replace(
+        line,
+        proof_text="，b",
+        bbox=(10, 8, 50, 32),
+        atoms=(punctuation_atom, line.atoms[1]),
+    )
+    entry = build_char_views(punctuation_line, workspace.pages[0])[0]
+
+    assert entry.bbox == (18, 24, 24, 29)
+    assert _gallery_crop_bbox(entry) == (18, 8, 24, 32)
 
 
 def test_char_views_do_not_reuse_one_word_bbox_as_multiple_character_crops(
