@@ -91,42 +91,13 @@ def _entry_key(entry: ProofCharView) -> tuple[str, str, int, str | None]:
 
 
 def _gallery_crop_pad(entry: ProofCharView) -> int:
-    """Crop padding in page coordinates for one gallery thumbnail.
-
-    CJK glyphs keep a small adaptive margin so strokes never touch the cell
-    edge; latin/digit boxes are tight by construction and only get a 1px
-    safety margin; half-width punctuation needs 2px of context to stay
-    legible.
-    """
-
-    char = entry.text or ""
-    if entry.bbox is not None:
-        adaptive = max(2, round(min(entry.bbox[2] - entry.bbox[0], entry.bbox[3] - entry.bbox[1]) * 0.12))
-    else:
-        adaptive = 2
-    if len(char) == 1 and char.isascii() and not char.isspace():
-        return 1 if char.isalnum() else 2
-    return adaptive
-
-
-def _gallery_crop_bbox(entry: ProofCharView) -> tuple[int, int, int, int] | None:
-    """Normalize gallery crops to the owning OCR line's vertical extent.
-
-    The character bbox remains the horizontal geometry fact.  Reusing the
-    line's vertical band prevents short punctuation boxes from being enlarged
-    into featureless blobs while keeping every occurrence at one visual scale.
-    """
+    """Return geometry-only safety padding for a character thumbnail."""
 
     if entry.bbox is None:
-        return None
+        return 0
     left, top, right, bottom = entry.bbox
-    line_bbox = entry.line_bbox
-    if line_bbox is None:
-        return entry.bbox
-    _line_left, line_top, _line_right, line_bottom = line_bbox
-    if line_bottom <= line_top:
-        return entry.bbox
-    return left, min(top, line_top), right, max(bottom, line_bottom)
+    longest_edge = max(1, right - left, bottom - top)
+    return max(2, round(longest_edge * 0.12))
 
 
 def _page_pixmap(
@@ -820,7 +791,7 @@ class VProofPanel(QWidget):
         crop = _crop_page_pixmap(
             page,
             self._page_source_pixmap(page),
-            _gallery_crop_bbox(entry),
+            entry.bbox,
             QSize(cell - 16, cell - 16),
             pad=_gallery_crop_pad(entry),
         )

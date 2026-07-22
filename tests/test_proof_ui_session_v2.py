@@ -909,15 +909,14 @@ def test_char_views_use_explicit_char_span_without_sequential_guessing(qapp, tmp
     assert entries[0].available is False
     assert entries[1].atom_uid == "atom-2"
     assert entries[1].bbox == (30, 10, 50, 30)
-    assert entries[1].line_bbox == next_line.bbox
 
 
-def test_vproof_gallery_crop_uses_line_height_without_widening_char_bbox(
+def test_vproof_gallery_crop_padding_depends_only_on_character_geometry(
     qapp,
     tmp_path,
 ) -> None:
     from app.ui.proof.confidence_view import build_char_views
-    from app.ui.proof.v_proof import _gallery_crop_bbox
+    from app.ui.proof.v_proof import _gallery_crop_pad
 
     session, _service = _session(tmp_path)
     workspace = build_proof_workspace_view(session)
@@ -939,7 +938,7 @@ def test_vproof_gallery_crop_uses_line_height_without_widening_char_bbox(
     entry = build_char_views(punctuation_line, workspace.pages[0])[0]
 
     assert entry.bbox == (18, 24, 24, 29)
-    assert _gallery_crop_bbox(entry) == (18, 8, 24, 32)
+    assert _gallery_crop_pad(entry) == 2
 
 
 def test_char_views_do_not_reuse_one_word_bbox_as_multiple_character_crops(
