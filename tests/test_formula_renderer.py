@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
 
@@ -150,3 +151,35 @@ def test_formula_rendering_mathjax_supports_aligned_environment(monkeypatch):
     assert b"data-mjx-error" not in svg
     assert b"Unknown environment" not in svg
     assert b"data-background" not in svg
+    process = formula_renderer._MATHJAX_PROCESS._process
+    assert process is not None
+    worker_pid = process.pid
+
+    formula_renderer._render_mathjax_svg(r"x^2+y^2=z^2", "#2C2C2C")
+
+    assert formula_renderer._MATHJAX_PROCESS._process is not None
+    assert formula_renderer._MATHJAX_PROCESS._process.pid == worker_pid
+
+
+def test_formula_resource_roots_include_repository_resources() -> None:
+    from app.ui.proof.formula_renderer import _formula_resource_roots
+
+    repository_root = Path(__file__).resolve().parents[1]
+
+    assert repository_root / "resources" in _formula_resource_roots()
+
+
+def test_mathjax_node_path_finds_bundled_modules(monkeypatch) -> None:
+    from app.ui.proof.formula_renderer import _mathjax_node_path
+
+    monkeypatch.delenv("OCR_MATHJAX_NODE_MODULES", raising=False)
+    node_paths = tuple(
+        Path(value) for value in _mathjax_node_path().split(os.pathsep) if value
+    )
+
+    assert any(
+        path.name == "node_modules"
+        and path.parent.name == "mathjax"
+        and path.exists()
+        for path in node_paths
+    )

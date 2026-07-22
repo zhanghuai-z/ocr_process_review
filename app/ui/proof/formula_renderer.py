@@ -13,13 +13,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import atexit
 import os
 from pathlib import Path
+from queue import Empty, Queue
 import re
 import shutil
 import subprocess
 import tempfile
 import json
+from threading import Lock, Thread
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPixmap
@@ -33,6 +36,106 @@ ENV_MATHJAX_NODE_BIN = "OCR_MATHJAX_NODE_BIN"
 ENV_MATHJAX_TIMEOUT = "OCR_MATHJAX_TIMEOUT"
 DEFAULT_ENGINE = "mathjax_svg"
 DEFAULT_MATHJAX_TIMEOUT_SECONDS = 60
+
+
+class _MathJaxRenderProcess:
+    """One serialized MathJax worker reused across formula renders."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._process: subprocess.Popen[bytes] | None = None
+        self._responses: Queue[bytes | None] = Queue()
+
+    def render(self, latex_body: str) -> bytes:
+        with self._lock:
+            process = self._ensure_process()
+            if process.stdin is None:
+                raise RuntimeError("mathjax worker stdin is unavailable")
+            payload = json.dumps({"latex": latex_body}, ensure_ascii=False).encode("utf-8")
+            try:
+                process.stdin.write(payload + b"\n")
+                process.stdin.flush()
+                response = self._responses.get(timeout=_mathjax_timeout_seconds())
+            except (BrokenPipeError, OSError, Empty) as exc:
+                self._stop_locked()
+                raise RuntimeError("mathjax worker did not return a response") from exc
+            if response is None:
+                self._stop_locked()
+                raise RuntimeError("mathjax worker stopped unexpectedly")
+            result = json.loads(response.decode("utf-8"))
+            error = str(result.get("error", ""))
+            if error:
+                raise RuntimeError(error)
+            svg = _extract_svg_bytes(str(result.get("svg", "")))
+            if not svg:
+                raise RuntimeError("mathjax returned empty svg")
+            return svg
+
+    def close(self) -> None:
+        with self._lock:
+            self._stop_locked()
+
+    def _ensure_process(self) -> subprocess.Popen[bytes]:
+        if self._process is not None and self._process.poll() is None:
+            return self._process
+        node_exe = _mathjax_node_executable()
+        if node_exe is None:
+            raise RuntimeError("node unavailable")
+        env = os.environ.copy()
+        node_path = _mathjax_node_path()
+        if node_path:
+            env["NODE_PATH"] = node_path
+        responses: Queue[bytes | None] = Queue()
+        self._responses = responses
+        process = subprocess.Popen(
+            [node_exe, "-e", _mathjax_worker_script()],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        self._process = process
+        Thread(
+            target=self._read_responses,
+            args=(process, responses),
+            daemon=True,
+            name="mathjax-render-reader",
+        ).start()
+        return process
+
+    @staticmethod
+    def _read_responses(
+        process: subprocess.Popen[bytes],
+        responses: Queue[bytes | None],
+    ) -> None:
+        if process.stdout is None:
+            responses.put(None)
+            return
+        for line in iter(process.stdout.readline, b""):
+            responses.put(line)
+        responses.put(None)
+
+    def _stop_locked(self) -> None:
+        process = self._process
+        self._process = None
+        if process is None:
+            return
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
+_MATHJAX_PROCESS = _MathJaxRenderProcess()
+atexit.register(_MATHJAX_PROCESS.close)
 
 
 @dataclass(frozen=True)
@@ -284,28 +387,7 @@ def _svg_viewbox_aspect_ratio(svg: bytes) -> float:
 
 @lru_cache(maxsize=256)
 def _render_mathjax_svg(latex_body: str, color: str) -> bytes:
-    node_exe = _mathjax_node_executable()
-    if node_exe is None:
-        raise RuntimeError("node unavailable")
-    script = _mathjax_renderer_script()
-    payload = json.dumps({"latex": latex_body}, ensure_ascii=False).encode("utf-8")
-    env = os.environ.copy()
-    node_path = _mathjax_node_path()
-    if node_path:
-        env["NODE_PATH"] = node_path
-    proc = subprocess.run(
-        [node_exe, "-e", script],
-        input=payload,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=_mathjax_timeout_seconds(),
-        check=True,
-        env=env,
-    )
-    result = json.loads(proc.stdout.decode("utf-8"))
-    svg = _extract_svg_bytes(str(result.get("svg", "")))
-    if not svg:
-        raise RuntimeError("mathjax returned empty svg")
+    svg = _MATHJAX_PROCESS.render(latex_body)
     color_text = str(color or "#2C2C2C")
     svg = svg.replace(b"currentColor", color_text.encode("ascii", errors="ignore") or b"#2C2C2C")
     return svg
@@ -326,12 +408,10 @@ def _mathjax_node_executable() -> str | None:
     explicit = os.environ.get(ENV_MATHJAX_NODE_BIN, "").strip()
     if explicit and Path(explicit).exists():
         return explicit
-    root = Path(__file__).resolve().parents[2]
     candidates = [
-        root / "app" / "resources" / "formula" / "node" / "node.exe",
-        root / "app" / "resources" / "formula" / "node" / "bin" / "node",
-        root / "resources" / "formula" / "node" / "node.exe",
-        root / "resources" / "formula" / "node" / "bin" / "node",
+        root / "formula" / "node" / executable
+        for root in _formula_resource_roots()
+        for executable in ("node.exe", "bin/node")
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -344,9 +424,10 @@ def _mathjax_node_path() -> str:
     explicit = os.environ.get(ENV_MATHJAX_NODE_MODULES, "").strip()
     if explicit:
         candidates.append(explicit)
-    root = Path(__file__).resolve().parents[2]
-    candidates.append(str(root / "app" / "resources" / "formula" / "mathjax" / "node_modules"))
-    candidates.append(str(root / "resources" / "formula" / "mathjax" / "node_modules"))
+    candidates.extend(
+        str(root / "formula" / "mathjax" / "node_modules")
+        for root in _formula_resource_roots()
+    )
     # Development-only scratch install used by local renderer experiments. It is
     # ignored in packaged builds unless the directory exists.
     candidates.append(str(Path(tempfile.gettempdir()) / "ocr_formula_node" / "node_modules"))
@@ -357,10 +438,22 @@ def _mathjax_node_path() -> str:
     return os.pathsep.join(existing)
 
 
-def _mathjax_renderer_script() -> str:
+def _formula_resource_roots() -> tuple[Path, ...]:
+    """Return source and packaged resource roots without assuming one layout."""
+
+    module_path = Path(__file__).resolve()
+    app_root = module_path.parents[2]
+    package_root = module_path.parents[3]
+    return tuple(dict.fromkeys((
+        package_root / "resources",
+        package_root / "app" / "resources",
+        app_root / "resources",
+    )))
+
+
+def _mathjax_worker_script() -> str:
     return r"""
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const readline = require('readline');
 require('mathjax-full/js/input/tex/ams/AmsConfiguration.js');
 require('mathjax-full/js/input/tex/boldsymbol/BoldsymbolConfiguration.js');
 require('mathjax-full/js/input/tex/newcommand/NewcommandConfiguration.js');
@@ -375,13 +468,20 @@ RegisterHTMLHandler(adaptor);
 const tex = new TeX({packages: ['base', 'ams', 'boldsymbol', 'newcommand', 'configmacros']});
 const svg = new SVG({fontCache: 'none'});
 const html = mathjax.document('', {InputJax: tex, OutputJax: svg});
-const node = html.convert(String(input.latex || ''), {display: true});
-const markup = adaptor.outerHTML(node);
-if (markup.indexOf('data-mjx-error=') !== -1) {
-  process.stderr.write(markup);
-  process.exit(2);
-}
-process.stdout.write(JSON.stringify({svg: markup}));
+const input = readline.createInterface({input: process.stdin, crlfDelay: Infinity});
+input.on('line', (line) => {
+  try {
+    const request = JSON.parse(line);
+    const node = html.convert(String(request.latex || ''), {display: true});
+    const markup = adaptor.outerHTML(node);
+    if (markup.indexOf('data-mjx-error=') !== -1) {
+      throw new Error(markup);
+    }
+    process.stdout.write(JSON.stringify({svg: markup}) + '\n');
+  } catch (error) {
+    process.stdout.write(JSON.stringify({error: String(error)}) + '\n');
+  }
+});
 """
 
 
